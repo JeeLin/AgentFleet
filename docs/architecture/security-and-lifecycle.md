@@ -250,6 +250,118 @@ Hub 发现缺件 → 回一条 hint { kind, version, blob_hash }
 
 ---
 
+## 7.1 发布与分发：CI 出产物 → 烤进 Hub 镜像 → 节点从 Hub 拉
+
+上一节说「谁提供代码 = 我们的发布产物」。**产物怎么来、怎么进 Hub**，定在这里。
+**参考实现：REX**（`/root/workspace/REX`，同构项目：supervisor/worker、心跳版本比对、
+多 arch 二进制），本节沿用其已被验证的完整链路，并标注一处必须偏离。
+
+### 7.1.1 CI：多平台矩阵构建 → 全产物喂给两个消费者
+
+**关键设计：构建一次，三个消费者。**
+
+```text
+                    ┌─→ Docker Hub 镜像（内嵌全部 arch 的 afcli）
+build-binaries ─────┼─→ Docker agent 镜像（仅本 arch）
+  5 平台矩阵        └─→ GitHub Release + SHA256SUMS
+```
+
+| 平台 | runner | 说明 |
+|---|---|---|
+| linux-amd64 | ubuntu-latest | x86_64 原生 |
+| linux-arm64 | ubuntu-24.04-arm | aarch64 **原生**（不用交叉编译——REX 的教训：交叉编 zlib/openssl 会出现架构错配） |
+| mac-amd64 / mac-arm64 | macos-latest | 后续 |
+| windows-amd64 | windows-latest | 后续 |
+
+**原生编译优于交叉编译**：Rust 静态链 OpenSSL 时，交叉编译的 sysroot 与目标机 glibc
+容易错配。GitHub 已有 aarch64 runner，直接用它原生编。
+
+**必须静态链 OpenSSL + zlib**（`OPENSSL_STATIC=1` / `ZLIB_STATIC=1`）：
+产出**自包含二进制**，目标机无需装 OpenSSL。树莓派上装 libssl 是真实痛点。
+REX 甚至加了 Windows 侧的 `dumpbin /dependents` 断言——exe 里不得出现 `libssl|libcrypto`，
+否则说明没链进去。这个断言值得照抄。
+
+前端产物在 CI 里单独 build（`bun install --frozen-lockfile` → `type-check` → `lint` → `test` → `build`），
+Rust 侧通过 `include_dir!` / `rust-embed` **编译期嵌入**，运行时不需要 dist 目录。
+
+### 7.1.2 Hub 镜像内置全部 arch 的 afcli（这一节采纳你的提议）
+
+```dockerfile
+# Dockerfile.hub
+COPY dist/rex-hub        /app/agentfleet          # Hub 自身（已内嵌前端）
+COPY dist/agents/        /app/agent-binaries/     # 全部 arch 的 afcli
+ENV  AGENTFLEET_BINARIES_DIR=/app/agent-binaries
+```
+
+- **一个镜像烤全部 arch**（不是每 arch 一个镜像）：`linux/amd64/afcli` + `linux/arm64/afcli` +
+  `linux/armv7/afcli`。Rust 单二进制每个 5–15MB，三个合计 15–45MB，**完全可接受**。
+- 目录按 `{os}-{arch}` 或 `{os}/{arch}` 组织，REX 两种都兼容（它连 Rust target triple 也认）——
+  这个"多格式通吃"的查找函数值得抄，因为它同时兼容手工放置与 CI 放置两种布局。
+- **版本耦合自动成立**：Hub vX 只会发 CLI vX，不会出现 Hub 升级了但 CAS 里还是旧二进制的错配。
+- **离线/内网友善**：`docker load` 一个 tar，Hub 与 CLI 全有了，全程不碰 GitHub。
+
+### 7.1.3 节点侧：心跳报版本 → Hub 比对 → 推送下载指令 → 经 WS 拉 blob
+
+**REX 的完整链路，AgentFleet 照搬**（这一段已验证可用）：
+
+```text
+afcli 心跳上报 node_version
+   ↓ Hub 比对自身 version
+不一致 → 经 WS 推送 update 指令 { version, download_url, sha256 }
+   ↓ afcli 用 reqwest 下载（HTTPS，走 resolve_download_url 拼 Hub 基地址）
+   ↓ SHA-256 校验
+   ↓ 写 update-state.json { phase: Requested }
+   ↓ 优雅退出 exit(10)
+supervisor 收到 exit(10) → 读 update-state.json → 原子替换二进制 → 启动新 worker
+   ↓ 健康检查通过 → phase: Committed
+   ↓ 健康检查失败 → 自动回滚到旧版（phase: RolledBack）
+```
+
+`UpdatePhase` 状态机直接沿用（REX 的 13 个阶段）：`Idle → Downloading → Verifying →
+Requested → StartingNew → Committed`，失败分支 `RollingBack → RolledBack`，
+连续 3 次启动失败 → `Failed`。
+
+**关键：worker 下载、supervisor 替换**。worker 拿到新版二进制后**只写状态文件就退出**，
+不自己替换自己——替换由 supervisor 做。这正是约束 12「升级只换 worker、身份不变」的落点。
+
+### 7.1.4 必须偏离 REX 的一处：节点不能直连 GitHub
+
+REX 的 `download_agent_binary` 在本地找不到二进制时，**回退到 GitHub Releases 下载**
+（`https://github.com/JeeLin/REX/releases/download/v{version}/rex-agent-{os}-{arch}`）。
+
+**AgentFleet 不做这个回退。** 理由：
+1. **约束 1**：Hub 无入站端口是产品承诺；反过来，让节点去 GitHub 等于给每台设备
+   开了条出网依赖，墙内网/离线环境的设备直接卡死在更新上。
+2. REX 的 `fallback_url` 与 `sha256` 在指令里**都是空的**——等于跳过校验下载。
+   对第三方二进制这不够；对我们的二进制也该走 CAS 的内容寻址校验。
+
+**AgentFleet 的做法**：节点只从 Hub 拉（Hub 镜像内置的二进制就是 CAS 的 seed）。
+Hub 侧本地找不到对应 arch 的二进制时，**明确返回 404 + `err{code:"arch_not_supported"}`，
+不静默降级到 GitHub**。用户需要给 Hub 补这个 arch 的二进制（放进 `agent-binaries/{os}-{arch}/`）。
+
+### 7.1.5 GitHub Release 的定位：规范产物，不是部署路径
+
+Release 仍然保留（CI 自动打 tag 构建 + 软发布 + `SHA256SUMS` + 从 CHANGELOG 抽 body），
+但定位是**对外发布的规范产物与构建 provenance**，**不再是节点部署路径上的一环**。
+节点升级路径只有一条：`Hub 镜像内置 → CAS → 节点经 WS 拉`。
+
+### 7.1.6 回滚
+
+- 版本在路径里（`agent-binaries/{os}-{arch}/afcli-{version}`），回滚 = 换指针，
+  不是删文件。
+- Hub 侧回滚：把 manifest 指回旧版本。
+- 节点侧回滚：supervisor 的健康检查失败自动触发（§7.1.3 的 `RolledBack`）。
+
+### 7.1.7 仍然待定
+
+- **agent（opencode 等第三方）的安装**是否也走「Hub 镜像内置 + CAS」——
+  第三方版本发布节奏与我们不同，镜像体积也会涨。**当前仍按 M5 的 TODO 处理**
+  （见 `workspace-and-sync.md` §4.4），先不做。
+- **armv7（树莓派一代 32 位）**是否需要：取决于是否要支持 32 位老 Pi。GitHub 无原生
+  armv7 runner，需要交叉编译或 QEMU。**当前不做**，等真有需求再加。
+
+---
+
 ## 8. 不可协商的边界
 
 1. **Hub 永不持有设备私钥。**
