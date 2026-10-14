@@ -41,6 +41,12 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 
 ### 3.1 第一版（必做）/ First release (must)
 
+> **本表只定范围。** 哪项能力由哪个里程碑承接，以 `docs/DEVELOPMENT.md` §4
+> 的范围映射表为准（那张表是对齐的唯一真相源，改范围或排期都要走它）。
+> This table defines scope only. Which milestone delivers which capability is
+> defined by the mapping table in `docs/DEVELOPMENT.md` §4 — the single source of
+> truth. Change scope or schedule through it.
+
 | 能力 | 用户可见行为 |
 |------|------------|
 | 设备接入 | `node enroll <hub-url>` 一条命令，节点生成密钥对、主动建立 WebSocket 外联；无需 Hub 入站端口 |
