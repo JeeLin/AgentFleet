@@ -11,6 +11,11 @@ Entries follow Keep a Changelog; each entry is bilingual (中文 / English).
 - 新增里程碑 **M2 工作区供料与同步**，排在 ACP 与 Git 之前 / New milestone **M2: workspace feeding & sync**, placed before ACP and Git
 
 ### Changed
+- **修正进程模型图**：浏览器从不直连 node，只有「浏览器 ↔ Hub」与「node → Hub」两条链路；此前图示画成浏览器直连节点，与零入站承诺冲突 / **Fixed the process-model diagram**: the browser never connects to a node directly; only "browser ↔ Hub" and "node → Hub" exist. The previous diagram implied browser→node connections, contradicting the zero-inbound promise
+- 补齐轨迹事件表（类型 / 输入 / 输出 / 耗时 / 归属节点落成列），修复指向任务连贯性文档的断链 / Added the trajectory event table (type, input, output, duration, owning node as real columns); fixed the broken cross-reference
+- 澄清「节点级可恢复」边界：同节点可经 ACP `session/load` 恢复，换设备则标记需重建；补断线重连与通道重建规则 / Clarified the "node-level recoverable" boundary and added reconnect / channel-rebuild rules
+- 明确**不做设备间 P2P 直传**，跨节点取文件一律经 Hub 内容寻址仓库 / Made it explicit: no device-to-device P2P transfer; cross-node file access always goes through the Hub CAS
+- 统一「第一版」口径 = 里程碑 M0–M4（子 agent 从「后续」移入第一版）；补齐 PRODUCT §3.1 的工作区供料 / 统一配置 / 产物归档三行 / Aligned the "first release" definition to M0–M4 (sub-agent system moved into the first release); completed the PRODUCT §3.1 scope table
 - 终端 / 文件 / git 改为**会话内面板**，绑定会话工作区 `(node_id, path)`，生命周期随会话；去掉「对标 Xshell / Xftp」的设计基调 / Terminal, files, and git are now **session-scoped panels** bound to the session workspace `(node_id, path)` with session lifetime; dropped the "benchmark Xshell / Xftp" design stance
 - 首个演示（M1）改为「在树莓派上开会话，会话内 shell 与文件浏览可用」 / First demo (M1) is now "open a session on the Raspberry Pi and use the shell and file browser inside it"
 - 前端定选 **Vue 3 + Bun + Vite**（`packages/web`），补齐 `bun run` 质量门禁 / Frontend settled on **Vue 3 + Bun + Vite** (`packages/web`) with `bun run` quality gates

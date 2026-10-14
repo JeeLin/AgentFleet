@@ -46,10 +46,13 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 | 设备接入 | `node enroll <hub-url>` 一条命令，节点生成密钥对、主动建立 WebSocket 外联；无需 Hub 入站端口 |
 | 节点身份与状态 | 注册时 Hub 签发 `node_id`；心跳即能力上报（os / arch / hostname / 版本 / 支持的 connector）；在线/离线状态 |
 | AI agent 管理与对话 | 接入各类 agent 软件（不同厂商/协议），在 Web 一个界面里统一配置、启动、对话 |
-| 对话与动作流 | 会话有 Trajectory 视图，逐条展示 User/Assistant/Tool/子agent/压缩记录；会话结束列出本次改动文件与 diff |
+| 对话与动作流 | 会话有 Trajectory 视图，逐条展示 User/Assistant/Tool/子agent/压缩记录；**随时可看**本次改动文件与 diff |
 | 文件浏览 | 会话工作区内浏览/读写节点本地目录，写操作限制在工作区根内 |
 | Git 操作界面 | 会话工作区的 git 状态 / diff / 提交视图 |
 | Bash / PTY | 会话工作区内的本地 shell；不装 openssh-server，Hub 不拨入 |
+| 工作区供料 | Hub 把项目文件喂进设备：git 项目只传 commit 引用（节点自己去 origin 拉），非 git 项目按 manifest 差分；不传依赖目录（见 `architecture/workspace-and-sync.md`） |
+| 统一配置 agent | 在 Hub 统一管理各设备的子 agent 定义与技能；托管文件在节点上只读，本地改动标记为「漂移」，可 push / pull |
+| 产物归档 | 任务产出的制品归档到 Hub，设备关机后仍可下载 |
 
 > **终端 / 文件 / git 是会话内的面板**，绑定该会话的工作区（设备上的一个 `(node_id, path)`），
 > 进入会话才建立、退出即释放。**不做设备级的多资源管理台。**
@@ -58,9 +61,11 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 
 ### 3.2 后续（非第一版）/ Later (not first release)
 
+> 「第一版」指**首个可用版本（里程碑 M0–M4）**。M5 起为第二阶段。
+> "First release" = the first usable version (milestones M0–M4). M5 onward is the next stage.
+
 - **任务系统**：完整任务的定义、状态、进度与续跑（见 §5 设计问题一）
 - **自动化**：定时 / 事件触发的任务编排
-- **子 agent 体系**：可配置、开箱即用的子 agent，主 agent 把单个完整任务分发到设备上执行（借鉴 oh-my-opencode）
 - **connector 插件化**：把 SSH / SFTP / MySQL / PostgreSQL / Redis / SQLite / S3 等协议做成插件按需加载；额外提供**网络抓包插件**与**端口转发插件**
 - **社交软件接入**：各 IM 作为 agent 的输入输出通道
 - **原生客户端**：客户端本身也是一个操作本机/服务器的 agent，可包裹开源软件实现
@@ -77,8 +82,9 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 
 1. **接入一台设备**：在设备上跑 `node enroll <hub-url>` → Hub 显示新节点（真实 os/arch/hostname）→ 在线。
 2. **在某个设备上开 agent 对话**：选节点 → 选工作区路径（项目文件由 Hub 喂进去）→ 选/配 agent →
-   会话建立，terminal / files / git 三个面板同时挂到这个工作区上 → 在面板里对话 → Trajectory 逐条可查。
-3. **看它改了什么**：会话结束（或随时）→ 改动文件列表 → 点开看 diff。
+   会话建立，terminal / files 面板挂到这个工作区上（git 面板在 M4 加入）→
+   在面板里对话 → Trajectory 逐条可查。
+3. **看它改了什么**：会话进行中随时可看 → 改动文件列表 → 点开看 diff（基线在会话开始时建立，持续 diff）。
 4. **操作文件 / git / bash**：在**该会话内**用对应面板，直接作用于该会话的工作区。
 5. **统一配置 agent**：在 Hub 改一份子 agent / 技能定义 → 下发到所有节点 → 节点上只读生效，
    被本地改过的文件标记为「漂移」，可 push 或 pull。

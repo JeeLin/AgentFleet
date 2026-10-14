@@ -76,5 +76,31 @@
 
 ## 6. 存储与保留
 
-- Hub 存 device / 会话元数据 / 任务状态 / **轨迹事件引用**。
-- 轨迹事件与工作区产物的存储位置（Hub 本地 vs 对象存储）与保留策略见任务连贯性文档。
+- Hub 存 device / 会话元数据 / 任务状态 / **轨迹事件**（事件本身，不是引用）。
+- 轨迹事件的表结构见 §7；工作区产物与 blob 的存储位置与保留策略见
+  `workspace-and-sync.md`。
+
+---
+
+## 7. 轨迹事件表（初版）
+
+§3.2 的五个硬要求（类型 / 输入 / 输出 / 耗时 / 归属节点）必须落成列，否则无法审查：
+
+```sql
+trajectory_event(
+  id              INTEGER PK,   -- 单调递增，回放顺序 = 物理顺序
+  session_id      TEXT,
+  node_id         TEXT,          -- 归属节点（硬要求：回放要能定位到哪台设备）
+  seq             INTEGER,       -- 会话内序号
+  kind            TEXT,          -- user / assistant / tool / subagent / compaction
+  payload         TEXT,          -- JSON：输入 + 输出（含附件/图片摘要）
+  duration_ms     INTEGER,       -- 耗时（硬要求）
+  tokens_in, tokens_out INTEGER, -- Assistant / 压缩记录用
+  parent_event_id INTEGER,       -- 子 agent 事件挂到父事件下（嵌套）
+  created_at      TEXT
+)
+```
+
+- SQLite：建库必须 `journal_mode=WAL` + `busy_timeout`。
+- **只追加**：不 UPDATE、不 DELETE；修正以新事件表达。
+- 保留策略与产物同档（临时 / 归档 / 永久），见 `workspace-and-sync.md`。

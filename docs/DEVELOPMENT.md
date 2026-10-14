@@ -50,8 +50,8 @@ packages/
 | M0 | 设备接入 | `node enroll` 一条命令；密钥对认证；单条 WS 主动外联；心跳即能力上报；三台设备同时在线且各自身份不串（防第二台抢走第一台身份） |
 | M1 | 会话工作区与首个演示 | 工作区 `(node_id, path)` 落库；会话创建即挂载工作区；**在树莓派上开一个 agent 会话，会话内的 terminal / files 面板可用，零入站端口、不装 openssh-server** |
 | M2 | 工作区供料与同步 | Hub 内容寻址仓库（CAS）；manifest 差分物化到 `(node_id, path)`；排除依赖目录；技能/配置走托管覆盖层（只读 + 漂移检测）；产物归档（见 `architecture/workspace-and-sync.md`） |
-| M3 | ACP 会话 | 接入 ACP；Trajectory 逐条可查 + 会话结束列出改动文件与 diff |
-| M4 | Git 界面 | 会话工作区的 git 状态 / diff / 提交视图 |
+| M3 | ACP 会话与轨迹 | 接入 ACP；Trajectory 逐条可查（事件表含类型/输入/输出/耗时/归属节点）；会话开始建基线，**随时可看**改动文件与 diff |
+| M4 | Git 界面 | 会话工作区的 git 状态 / diff / 提交视图；**此时会话面板补齐第三个 git 面板** |
 | M5 | 子 agent 与任务分发 | oh-my-opencode 式子 agent 体系；按设备能力/性能自动调度，把完整任务分发到节点执行 |
 | M6 | 推理网关 | 一个 OpenAI 兼容端点，背后是 N 台设备各自的全量副本（阶段 1，请求级路由） |
 | M7 | connector 插件化 | 把协议族做成插件按需加载 + 抓包插件 + 端口转发插件 |
@@ -63,6 +63,9 @@ packages/
 
 > M2 排在 ACP 与 Git 之前：会话要在目标设备上正确跑起来，工作区必须先能被喂进去。
 > git 项目走「Hub 只发 commit 引用、节点自己去 origin 拉」的主路径；非 git 项目走 CAS 差分。
+
+> 第一版 = M0–M4（首个可用版本）。M5 起为第二阶段。
+> The first usable version is M0–M4; M5 onward is the next stage.
 
 ---
 
