@@ -52,7 +52,7 @@ packages/
 | M2 | 工作区供料与同步 | Hub 内容寻址仓库（CAS）；manifest 差分物化到 `(node_id, path)`；排除依赖目录；技能/配置走托管覆盖层（只读 + 漂移检测 + **全局/会话两层权限规则**）；产物归档（见 `architecture/workspace-and-sync.md`） | 工作区供料、统一配置 agent、产物归档、模型配置一处切换 |
 | M3 | ACP 会话与轨迹 | 接入 ACP；Trajectory 逐条可查（事件表含类型/输入/输出/耗时/归属节点）；会话开始建基线，**随时可看**改动文件与 diff | 对话与动作流、AI agent 管理与对话 |
 | M4 | Git 界面 | 会话工作区的 git 状态 / diff / 提交视图；**此时会话面板补齐第三个 git 面板** | Git 操作界面 |
-| M5 | 子 agent、任务分发与 agent 安装 | oh-my-opencode 式子 agent 体系；**按节点能力/负载自动路由**（硬过滤 → 有序打分 → 可钉死，见 `architecture/scheduling.md`）；子任务工作区来源分发时确认；**Hub 一键把 agent 装到设备**并套用托管配置（升级策略未决，见 `architecture/workspace-and-sync.md` §4.4） | Hub 一键安装 agent |
+| M5 | 任务分发与 agent 安装 | **Hub 新建任务 → 按节点能力/负载自动路由到某台 node 执行**（硬过滤 → 有序打分 → 可钉死，见 `architecture/scheduling.md`）；任务工作区来源分发时确认；节点上 agent 运行时的父子 agent 由运行时自身决定，Hub 不编排（约束 8）；预置的专家 agent 定义走托管覆盖层（约束 8）；**Hub 一键把 agent 装到设备**并套用托管配置（升级策略未决，见 `architecture/workspace-and-sync.md` §4.4） | Hub 一键安装 agent |
 | M6 | 推理网关 | 一个 OpenAI 兼容端点，背后是 N 台设备各自的全量副本（阶段 1，请求级路由） | —（新增能力） |
 | M7 | connector 插件化 | 把协议族做成插件按需加载 + 抓包插件 + 端口转发插件 | —（§3.2 后续项） |
 | M8 | 任务系统 | 完整任务定义 / 状态 / 进度 / 断点续跑（跨节点任务连贯性，见 `architecture/task-continuity.md`） | —（§3.2 后续项） |
@@ -114,14 +114,14 @@ packages/
 | §3.2 后续 | 自动化 / 社交软件 / 原生客户端 | **无排期**（开工前单独排期，见 §3 下方说明） |
 
 > 「后续」不是编号里程碑，不在 M0–M8 范围内，需在开工前单独排期与编号。
-> 第二阶段从 M5（子 agent 与任务分发）开始。
+> 第二阶段从 M5（任务分发与 agent 安装）开始。
 > "Later" is not a numbered milestone; schedule and number it separately before starting.
 
 ---
 
 ## 5. 架构文档索引
 
-- `architecture/README.md` — 进程模型 / 连接与通道 / 数据模型 / connector / 会话 / 子 agent
+- `architecture/README.md` — 进程模型 / 连接与通道 / 数据模型 / connector / 会话 / 任务分发
 - `architecture/session-and-trajectory.md` — ACP 会话恢复 + dsh 式轨迹 + 改动文件/diff
 - `architecture/task-continuity.md` — 跨设备任务连贯性模型
 - `architecture/workspace-and-sync.md` — Hub 内容寻址仓库、项目文件供料、配置铺设、产物归档

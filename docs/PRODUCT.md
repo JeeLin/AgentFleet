@@ -58,7 +58,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 | Git 操作界面 | 会话工作区的 git 状态 / diff / 提交视图 |
 | Bash / PTY | 会话工作区内的本地 shell；不装 openssh-server，Hub 不拨入 |
 | 工作区供料 | Hub 把项目文件喂进设备：git 项目只传 commit 引用（节点自己去 origin 拉），非 git 项目按 manifest 差分；不传依赖目录（见 `architecture/workspace-and-sync.md`） |
-| 统一配置 agent | 在 Hub 统一管理各设备的子 agent 定义与技能；托管文件在节点上只读，本地改动标记为「漂移」，可 push / pull |
+| 统一配置 agent | 在 Hub 统一管理各设备的 agent 配置（专家 agent 定义、技能）；托管文件在节点上只读，本地改动标记为「漂移」，可 push / pull |
 | 产物归档 | 任务产出的制品归档到 Hub，设备关机后仍可下载 |
 | 模型配置一处切换 | 在 Hub 一处配置模型与 API key，各节点上的 agent 复用同一套配置（一处改、处处生效，对标 ccswitch 的交互） |
 
@@ -81,10 +81,11 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 
 ### 3.2.1 原「推后」项，现纳入第一版 / Now in the first release
 
-- **Hub 一键配置 agent**：在 Hub 统一管理所有设备上的 agent 配置（子 agent 定义、技能、
+- **Hub 统一配置 agent**：在 Hub 统一管理所有设备上的 agent 配置（专家 agent 定义、技能、
   `opencode.json`）。实现为**托管覆盖层**：Hub 记录托管清单，文件在节点上只读，
   心跳顺带检测漂移并给出 push / pull。**节点密钥（`auth.json`）永不上传。**
-  见 `docs/architecture/workspace-and-sync.md`。
+  任务的跨设备分发（新建任务 → 路由到某台 node）是 Hub 层的事（M5），与 agent 运行时
+  内部的父子 agent 无关。见 `docs/architecture/workspace-and-sync.md`。
 
 ### 3.3 用户可见流程（第一版）/ Key flows (first release)
 
@@ -94,11 +95,11 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
    在面板里对话 → Trajectory 逐条可查。
 3. **看它改了什么**：会话进行中随时可看 → 改动文件列表 → 点开看 diff（基线在会话开始时建立，持续 diff）。
 4. **操作文件 / git / bash**：在**该会话内**用对应面板，直接作用于该会话的工作区。
-5. **统一配置 agent**：在 Hub 改一份子 agent / 技能定义 → 下发到所有节点 → 节点上只读生效，
+5. **统一配置 agent**：在 Hub 改一份 agent 配置（专家 agent 定义 / 技能）→ 下发到所有节点 → 节点上只读生效，
    被本地改过的文件标记为「漂移」，可 push 或 pull。
 6. **取回产物**：任务结束 → 产物归档到 Hub → 设备关机后仍可下载。
 7. **设备掉线**：WS 断开 → 节点自动指数退避重连（1s/2s/4s…上限 30s），UI 显示「重连中」与已重试时长；
-   连续失败超过约 5 分钟转为「离线」；离线期间工作区与 agent 会话在设备上仍存活，
+   连续失败超过约 3 分钟转为「离线」；离线期间工作区与 agent 会话在设备上仍存活，
    面板转为只读并显示最后已知状态，禁止发起新操作；用户可手动点「立即重连」。
 8. **在新设备上装 agent**：Hub 选设备 + 选 agent 模板 → 下发安装指令 → 节点本地安装 →
    自动套用托管配置 → 心跳回报就绪 → 即可开会话。
@@ -111,7 +112,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 |------|------|
 | 终端 / 文件 / git | **不对标**——会话内面板，易用即可 |
 | 对话与动作流 | **dsh**：Trajectory（逐条事件）+ 会话改动文件/diff 视图 |
-| 子 agent 编排 | **oh-my-opencode**：可配置、开箱即用的专家 agent 体系 |
+| 专家 agent 模板 | **oh-my-opencode**：可配置、开箱即用的专家 agent 定义库（Hub 预置、节点只读生效）；agent 运行时内部的父子关系不由我们编排 |
 | 管理页（设备/agent/设置） | 自有设计系统 |
 
 **基调**：深色优先、等宽字体、高信息密度、键盘优先、一致交互范式贯穿全站。易用优先。
@@ -176,7 +177,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 | agent | **仅指 AI agent**；绝不指设备进程 |
 | Hub | 自托管的服务端，用户自己跑 |
 | connector | 节点上提供的一类**有类型**的能力（terminal / files / git / exec / ssh / db / …），可插件化 |
-| task | 一个完整任务；sub-task 由子 agent 在节点上执行 |
+| task | 一个完整任务；sub-task 是任务下可独立执行/续跑的单元，在某台 node 上由 agent 会话执行 |
 | trajectory | dsh 式的会话动作事件流，Web 逐条回放 |
 | workspace | 工作区：设备上的一个 `(node_id, path)`，归属于某个 agent 会话，终端 / 文件 / git 面板绑在其上。Workspace: a `(node_id, path)` on a device, owned by one agent session; terminal / files / git panels bind to it |
 | artifact | 产物：任务产出的最终制品，按 id 归档到 Hub，设备关机后仍可取回。Artifact: a task's final output, archived on the Hub by id and retrievable after the device powers off |

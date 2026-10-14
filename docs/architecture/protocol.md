@@ -37,7 +37,8 @@ JSON 文本帧（WS 层已有），信封统一：
 }
 ```
 
-- **`v` 协商**：握手时双方交换，取 min。破坏性变更才 +1；新增可选消息类型**不 +1**。
+- **`v` 协商**：握手时**双方各自声明 `v`，取较小者**作为本连接协议版本。
+  只有破坏性变更（删了必需字段、改了语义）才 +1；新增可选消息类型 / 字段**不 bump 版本**。
 - **未知 `t` 必须忽略而非断连**（前向兼容，见约束「版本≠功能」）。
 
 ---
@@ -85,6 +86,7 @@ Hub 验签 + 比对该 node_id 的指纹 → 一致则 auth_ok
 | `open_channel` | Hub→node | `{ channel_id, connector, params }` |
 | `channel_ready` | node→Hub | `{ channel_id, capabilities }` 或 `channel_error` |
 | `channel_data` | 双向 | 通道内数据（PTY 字节、文件读写结果等） |
+| `channel_credit` | Hub→node | 信用补充 `{ channel_id, delta }`（**独立于 `channel_data`**，见 §6） |
 | `close_channel` | 双向 | `{ channel_id, reason }` |
 | `exec_request` / `exec_result` | Hub→node→Hub | 一次性命令（无 PTY） |
 | `err` | 双向 | 通用错误 `{ code, message }` |
@@ -133,7 +135,7 @@ Hub 每收到 N 帧或定时 → 补 credit（如 +32），信用只增不减
 
 ## 8. 兼容与能力协商
 
-- **功能由能力协商决定，不由版本号猜**（约束：版本≠功能）：
+- **功能由能力协商决定，不靠版本号猜**（约束 14：版本 ≠ 功能）：
   - `hello` / 心跳里带节点支持的 feature 列表，Hub 按能力下发，不按 `v` 猜测。
 - 协议保持向后兼容：新增消息类型可选，**老节点忽略未知 `t`**。
 - 不兼容（节点太旧、必需的 feature 缺失）→ **明确 `auth_fail` 并提示升级，不静默失败**。
