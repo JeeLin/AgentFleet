@@ -47,9 +47,14 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 | 节点身份与状态 | 注册时 Hub 签发 `node_id`；心跳即能力上报（os / arch / hostname / 版本 / 支持的 connector）；在线/离线状态 |
 | AI agent 管理与对话 | 接入各类 agent 软件（不同厂商/协议），在 Web 一个界面里统一配置、启动、对话 |
 | 对话与动作流 | 会话有 Trajectory 视图，逐条展示 User/Assistant/Tool/子agent/压缩记录；会话结束列出本次改动文件与 diff |
-| 文件浏览 | 浏览/读写节点本地目录，写操作限制在工作区根内 |
-| Git 操作界面 | 节点工作区的 git 状态 / diff / 提交视图 |
-| Bash / PTY | 节点进程直接提供本地 shell；不装 openssh-server，Hub 不拨入 |
+| 文件浏览 | 会话工作区内浏览/读写节点本地目录，写操作限制在工作区根内 |
+| Git 操作界面 | 会话工作区的 git 状态 / diff / 提交视图 |
+| Bash / PTY | 会话工作区内的本地 shell；不装 openssh-server，Hub 不拨入 |
+
+> **终端 / 文件 / git 是会话内的面板**，绑定该会话的工作区（设备上的一个 `(node_id, path)`），
+> 进入会话才建立、退出即释放。**不做设备级的多资源管理台。**
+> Terminal / files / git are **panels inside a session**, bound to that session's workspace;
+> they attach on entry and release on exit. No device-level multi-resource console.
 
 ### 3.2 后续（非第一版）/ Later (not first release)
 
@@ -65,9 +70,10 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 ### 3.3 用户可见流程（第一版）/ Key flows (first release)
 
 1. **接入一台设备**：在设备上跑 `node enroll <hub-url>` → Hub 显示新节点（真实 os/arch/hostname）→ 在线。
-2. **在某个设备上开 agent 对话**：选节点 → 选/配 agent → 在面板里对话 → Trajectory 逐条可查。
+2. **在某个设备上开 agent 对话**：选节点 → 选工作区路径 → 选/配 agent → 会话建立，
+   terminal / files / git 三个面板同时挂到这个工作区上 → 在面板里对话 → Trajectory 逐条可查。
 3. **看它改了什么**：会话结束（或随时）→ 改动文件列表 → 点开看 diff。
-4. **操作文件 / git / bash**：对应面板直接作用于该节点。
+4. **操作文件 / git / bash**：在**该会话内**用对应面板，直接作用于该会话的工作区。
 
 ---
 
@@ -75,7 +81,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 
 | 模块 | 对标 |
 |------|------|
-| 终端 / 文件管理 | Xshell / Xftp 的操作逻辑 |
+| 终端 / 文件 / git | **不对标**——会话内面板，易用即可 |
 | 对话与动作流 | **dsh**：Trajectory（逐条事件）+ 会话改动文件/diff 视图 |
 | 子 agent 编排 | **oh-my-opencode**：可配置、开箱即用的专家 agent 体系 |
 | 管理页（设备/agent/设置） | 自有设计系统 |

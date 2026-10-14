@@ -10,7 +10,7 @@
 | 层 | 选型 | 理由 |
 |----|------|------|
 | Hub + node | **Rust**（单二进制） | 跑在树莓派 / 小内存机器，无运行时，交叉编译 amd64+arm64 |
-| Web | 待定（倾向 Vue 3 + Bun） | 独立选择，不构成阻塞 |
+| Web | **Vue 3 + Bun**（+ Vite） | 已定；Bun 跑构建与测试，Vue 3 生态成熟（xterm.js / diff 视图现成） |
 | 存储 | SQLite（WAL + busy_timeout） | 单用户自托管，零运维 |
 | 会话 | ACP | 不自建 agent 会话协议 |
 | 轨迹 | append-only 事件流（dsh 式） | Web 逐条回放 + 续跑审计 |
@@ -31,10 +31,13 @@ crates/
   node-core/    node 核心：连接、connector（terminal/files/git/exec）、能力上报
   node-cli/     node 二进制（enroll / run）
   protocol/     共享：消息定义、(node_id, channel_id) 通道、事件类型
+packages/
+  web/          Vue 3 + Bun + Vite 前端；构建产物由 hub-server 托管
 ```
 
 - 依赖方向：`node-*` → `protocol`；`hub-*` → `protocol`。**不反向依赖**。
 - connector 是有类型的 trait，各自独立实现，不共用多态 Resource 分支。
+- 前端**只在 `packages/web` 内**依赖后端类型，不反向进 Rust 侧。
 
 ---
 
@@ -45,16 +48,17 @@ crates/
 | # | 里程碑 | 目标 |
 |---|--------|------|
 | M0 | 设备接入 | `node enroll` 一条命令；密钥对认证；单条 WS 主动外联；心跳即能力上报；三台设备同时在线且各自身份不串（防第二台抢走第一台身份） |
-| M1 | 首个演示 | 本地 PTY + 本地文件浏览：从浏览器在树莓派本机开终端并浏览 `~/`，零入站端口、不装 openssh-server |
-| M2 | Git 界面 | 面向节点工作区的 git 状态 / diff / 提交视图 |
-| M3 | ACP 会话 | 接入 ACP；在某台**指定**设备上开一个 agent 会话并对话，Trajectory 逐条可查 + 改动文件/diff 视图 |
+| M1 | 会话工作区与首个演示 | 工作区 `(node_id, path)` 落库；会话创建即挂载工作区；**在树莓派上开一个 agent 会话，会话内的 terminal / files 面板可用，零入站端口、不装 openssh-server** |
+| M2 | ACP 会话 | 接入 ACP；Trajectory 逐条可查 + 会话结束列出改动文件与 diff |
+| M3 | Git 界面 | 会话工作区的 git 状态 / diff / 提交视图 |
 | M4 | 子 agent 与任务分发 | oh-my-opencode 式子 agent 体系；按设备能力/性能自动调度，把完整任务分发到节点执行 |
 | M5 | 推理网关 | 一个 OpenAI 兼容端点，背后是 N 台设备各自的全量副本（阶段 1，请求级路由） |
 | M6 | connector 插件化 | 把协议族做成插件按需加载 + 抓包插件 + 端口转发插件 |
 | M7 | 任务系统 | 完整任务定义 / 状态 / 进度 / 断点续跑（跨节点任务连贯性，见 `architecture/task-continuity.md`） |
 | 后续 | 后续能力 | 自动化、社交软件接入、原生客户端、分布式推理进阶（RPC 层切分 / MoE 分片） |
 
-> 首个演示是 M1，不是 M3。「树莓派在浏览器里有 shell 和文件浏览、零入站端口」是产品本身。
+> 首个演示是 M1：在树莓派上开一个会话，会话里的 shell 与文件浏览就能用，且零入站端口。
+> 终端 / 文件 / git 都在会话内，因此演示必须经由会话，不能脱离 agent 直接开终端。
 
 ---
 

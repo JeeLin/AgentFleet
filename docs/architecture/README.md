@@ -45,12 +45,29 @@ device(
 - **没有** environment 表；**没有** resource 表（connector 是有类型的，不是多态实体）。
 - SQLite：建库必须 `journal_mode=WAL` + `busy_timeout`。
 
-## 4. connector：有类型、可插件化
+## 4. connector：有类型、可插件化、绑定会话
 
 - 第一版内置：**terminal**（本地 PTY）、**files**（工作区根内读写）、**git**（状态/diff/提交）、**exec**。
 - 后续插件：SSH / SFTP / MySQL / PostgreSQL / Redis / SQLite / S3。
 - 额外插件：**网络抓包**（pcap）、**端口转发**。
 - 插件是独立、有类型的能力，各自独立演进；**不引入多态 Resource 抽象**。
+
+### 4.1 工作区（workspace）是一等概念
+
+- 工作区 = 设备上的一个 `(node_id, path)`，**归属于某个 agent 会话**。
+- terminal / files / git 三个面板都绑在会话的工作区上：**进入会话才建立通道，退出即释放**。
+- 不做设备级的长驻多资源管理台（不是「一个设备下面挂 N 个资源 tab」那种形态）。
+- 由此，「写操作限制在工作区根内」是天然约束，不是额外加的沙箱补丁。
+
+### 4.2 生命周期
+
+```text
+会话创建 → 选定 (node_id, path) 建工作区 → 建立 terminal/files/git 通道
+        → agent 与用户在会话内交互
+会话结束 → 关闭通道、释放工作区句柄 → 轨迹与改动文件清单留存
+```
+
+断线重连时按 `(node_id, path)` 重新建立通道，工作区不随连接丢失而失效（见 `task-continuity.md`）。
 
 ## 5. 会话与轨迹
 

@@ -45,13 +45,18 @@ node, run AI agent sessions, and route tasks to the node best suited to run them
 | 节点身份 / Node identity | 注册时由 Hub 签发 `node_id`；设备密钥对认证，不用静态共享 token |
 | AI agent 管理与对话 / Agent management & chat | 接入各类 agent 软件（不同厂商、不同协议），一个界面里统一管理与对话 |
 | 对话与动作流 / Transcript & action stream | 任务与子任务的对话记录和动作在 Web 里直接查看（dsh 式 Trajectory），逐条可查，并列出本次改动的文行与 diff |
-| 文件浏览 / File browser | 浏览 / 读写节点本地目录，写操作限制在工作区根内 |
-| Git 操作界面 / Git UI | 面向节点工作区的 git 状态 / diff / 提交视图 |
-| Bash / PTY | 节点进程直接提供本地 shell，不需要装 `openssh-server`，也不需要 Hub 拨入 |
+| 文件浏览 / File browser | 会话工作区内浏览 / 读写节点本地目录，写操作限制在工作区根内 |
+| Git 操作界面 / Git UI | 会话工作区的 git 状态 / diff / 提交视图 |
+| Bash / PTY | 会话工作区内的本地 shell，不需要装 `openssh-server`，也不需要 Hub 拨入 |
 
-> 首个演示是 **「我的树莓派在浏览器里有 shell 和文件浏览，且零入站端口」**——
+> **终端 / 文件 / git 是会话内的面板**，绑定该会话的工作区（设备上的一个 `(node_id, path)`），
+> 进入会话才建立、退出即释放。**不做设备级的多资源管理台。**
+> Terminal / files / git are **panels inside a session**, bound to that session's workspace;
+> they attach on entry and release on exit. No device-level multi-resource console.
+
+> 首个演示是 **「我在树莓派上开一个 agent 会话，会话里的 shell 和文件浏览就能用，且零入站端口」**——
 > 这是产品本身；agent 面板是一项功能。
-> The first demo is "my Raspberry Pi has a shell and file browser in the browser, zero inbound ports"—that is the product; the agent panel is a feature.
+> The first demo is "I open an agent session on my Raspberry Pi and get a shell plus file browser inside it, zero inbound ports"—that is the product; the agent panel is a feature.
 
 ---
 
@@ -86,7 +91,7 @@ borrows operational logic from pro desktop tools; transcript & action stream bor
 - **ACP（Agent Client Protocol）**：会话层不自建。
 - **轨迹**：append-only 事件流，Web 逐条回放。
 - **推理**：基于 llama.cpp / mesh-llm / prima.cpp 等现成开源实现，不自研内核。
-- Web：待定（倾向 Vue 3 + Bun，独立选择，可换）。
+- Web：**Vue 3 + Bun**（+ Vite）。前端命令一律 `bun run`，禁用 `npm run`。
 
 ---
 

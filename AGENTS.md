@@ -27,6 +27,8 @@ AgentFleet 是**个人自托管的设备 / Agent 平台**：把自己拥有的�
 3. **connector 是有类型的、可插件化的能力。** 第一版内置 terminal / files / git / exec；
    后续 SSH / DB / S3 等协议作为**插件**按需加载，额外有抓包插件与端口转发插件。
    **不引入多态 Resource 抽象**（加一个协议要改 N 处即违规）。
+   **terminal / files / git 绑定会话的工作区**，生命周期随会话（`node_id, path`），
+   不做设备级的长驻多资源管理台。
 4. **每设备一条 WebSocket**，承载控制 + 数据通道。通道键为 `(node_id, channel_id)`，
    不是全局 channel_id；每通道独立流控/信用。
 5. **认证用设备密钥对**（注册时生成，Hub 记指纹），不用静态共享 token。
@@ -45,7 +47,7 @@ AgentFleet 是**个人自托管的设备 / Agent 平台**：把自己拥有的�
 | 层 | 选型 | 理由 |
 |---|---|---|
 | Hub + 节点进程 | **Rust**（单二进制） | 节点要跑在树莓派 / 小内存机器上，无运行时、交叉编译 amd64+arm64 是硬需求 |
-| Web | 待定（倾向 Vue 3 + Bun） | 独立选择，不构成阻塞 |
+| Web | **Vue 3 + Bun** + Vite | 已定；Bun 跑构建与测试，Vue 3 生态成熟，xterm.js / diff 视图等组件现成 |
 | 存储 | SQLite | 建库**必须**设 `journal_mode=WAL` 与 `busy_timeout` |
 | 会话层 | ACP（Agent Client Protocol） | 不自建 agent 会话协议 |
 | 轨迹 | append-only 事件流（dsh 式 Trajectory） | Web 逐条可查对话与动作 |
@@ -61,7 +63,9 @@ AgentFleet 是**个人自托管的设备 / Agent 平台**：把自己拥有的�
 ## 设计基调（UIUX）
 
 - **深色优先、等宽字体、高信息密度、键盘优先**，贯穿全站的一致交互范式。
-- 终端 / 文件管理对标专业桌面工具（Xshell / Xftp）的**操作逻辑**。
+- **终端 / 文件 / git 是会话内的面板，不是设备级的管理面。** 它们绑定在某个会话的
+  工作区上（设备上的一个 `(node_id, path)`），进入会话才建立、退出即释放。
+  不做设备级的多资源管理台。**易用即可，不刻意对标 Xshell / Xftp。**
 - **对话与动作流对标 dsh**：每个会话有 Trajectory 视图——逐条展示 User / Assistant / Tool /
   子 agent / 压缩记录，点开看 token、耗时、输入/输出、附件；
   会话结束后列出**本次改动的所有文件**，点开直接看 diff（借鉴 dsh 的改动视图）。
@@ -101,12 +105,14 @@ cargo clippy --workspace --all-targets
 cargo test --workspace
 ```
 
-Web（选定前端后补齐）：
+Web（`packages/web`，Vue 3 + Bun + Vite）：
 
 ```bash
-bun run type-check
-bun run lint
-bun run build
+bun install
+bun run type-check     # vue-tsc --noEmit
+bun run lint           # eslint
+bun run test           # vitest
+bun run build          # vite build
 ```
 
 测试与覆盖率项若确实无法本地自证，如实记录「不可执行 + 根因」，
@@ -125,6 +131,8 @@ docs/
   DEVELOPMENT.md          开发索引（技术栈、crate 结构、里程碑总览）
   BUGS.md                 缺陷池（待处理 bug 的汇总地）
   architecture/           架构文档（连接模型、会话与轨迹、推理、插件、任务连贯性）
+crates/                   Rust workspace（hub / node / protocol）
+packages/web/             Vue 3 + Bun + Vite 前端
 CHANGELOG.md               Keep a Changelog（中英双语）
 .mdflow/                   dev-flow 产出物（本地产物，不入库）
   milestones/
