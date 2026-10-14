@@ -1,0 +1,23 @@
+[package]
+name = "hub-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+protocol.workspace = true
+hub-storage.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rand.workspace = true
+uuid.workspace = true
+ed25519-dalek.workspace = true
+base64ct.workspace = true
+argon2.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "macros"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

@@ -410,6 +410,15 @@ Requested → StartingNew → Committed`，失败分支 `RollingBack → RolledB
 **关键：worker 下载、supervisor 替换**。worker 拿到新版二进制后**只写状态文件就退出**，
 不自己替换自己——替换由 supervisor 做。这正是约束 12「升级只换 worker、身份不变」的落点。
 
+> **这条链路只适用于 afcli 自身，且是自动的。**
+> Hub 比对自己与节点的 `node_version`，不一致就推——**不需要用户在页面上确认**，
+> 因为二进制是我们自己的、版本错配会直接破坏协议兼容性（老 node 收不到新 Hub 的必需消息）。
+>
+> **agent 安装到设备不走这条自动链路**：那必须在页面上由用户显式选择设备 + agent 模板后才下发，
+> 且不自动重试、不自动回滚。两条通路的完整对照见 `workspace-and-sync.md` §4.5。
+> 把两者混成一条（「发现缺 agent 就自动装」）是**越权修改用户机器的软件构成**，
+> 属于产品边界违规，不是实现简化。
+
 ### 7.1.4 必须偏离 REX 的一处：节点不能直连 GitHub
 
 REX 的 `download_agent_binary` 在本地找不到二进制时，**回退到 GitHub Releases 下载**

@@ -52,7 +52,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 | 设备接入 | `afcli enroll <hub-url>` 一条命令，节点生成密钥对、主动建立 WebSocket 外联；无需 Hub 入站端口 |
 | 节点身份与状态 | 注册时 Hub 签发 `node_id`；心跳即能力上报（os / arch / hostname / 版本 / 支持的 connector）；在线/离线状态 |
 | AI agent 管理与对话 | 接入各类 agent 软件（不同厂商/协议），在 Web 一个界面里统一配置、启动、对话。**agent 运行时装在节点上**，接入方式与安装来源见 `docs/PRODUCT.md` §5 |
-| Hub 一键安装 agent | 在 Hub 选设备 + 选 agent 模板 → 节点本地安装 → 自动套用托管配置 → 心跳回报就绪。**agent 版本升级策略未决** |
+| Hub 一键安装 agent | 在 Hub 选设备 + 选 agent 模板 → 节点本地安装 → 自动套用托管配置 → 心跳回报就绪。**必须由用户在页面上手动选择后才执行，不自动安装**；agent 版本升级策略未决。节点进程 afcli 自身的升级是另一条通路：心跳报版本 → Hub 比对 → 自动静默升级（无需用户确认），两者触发方式对照见 `architecture/workspace-and-sync.md` §4.5 |
 | 对话与动作流 | 会话有 Trajectory 视图，逐条展示 User/Assistant/Tool/子agent/压缩记录；**随时可看**本次改动文件与 diff |
 | 文件浏览 | 会话工作区内浏览/读写节点本地目录，写操作限制在工作区根内（**仅约束页面用户**；agent 用自己装的能力，不走这条路径） |
 | Git 操作界面 | 会话工作区的 git 状态 / diff / 提交视图 |

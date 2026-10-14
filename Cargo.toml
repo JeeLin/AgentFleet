@@ -1,0 +1,68 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/hub-storage",
+    "crates/hub-core",
+    "crates/hub-server",
+    "crates/afnode-core",
+    "crates/afnode-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/JeeLin/AgentFleet"
+
+[workspace.dependencies]
+# 内部
+protocol = { path = "crates/protocol" }
+hub-storage = { path = "crates/hub-storage" }
+hub-core = { path = "crates/hub-core" }
+afnode-core = { path = "crates/afnode-core" }
+
+# 序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 异步运行时
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+
+# WebSocket
+tokio-tungstenite = "0.24"
+
+# HTTP / WS 服务端
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+
+# SQLite（rusqlite 同步驱动，配 r2d2 连接池；不引 sqlx 的异步宏）
+rusqlite = { version = "0.32", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
+
+# 密码学
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+argon2 = { version = "0.5", features = ["std"] }
+base64ct = "1"
+sha2 = "0.10"
+subtle = "2"
+
+# 错误与日志
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 工具
+bytes = "1"
+uuid = { version = "1", features = ["v4"] }
+dirs = "5"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
