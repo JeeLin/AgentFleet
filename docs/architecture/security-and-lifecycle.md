@@ -262,7 +262,7 @@ Hub 发现缺件 → 回一条 hint { kind, version, blob_hash }
 
 ```text
                     ┌─→ Docker Hub 镜像（内嵌全部 arch 的 afcli）
-build-binaries ─────┼─→ Docker agent 镜像（仅本 arch）
+build-binaries ─────┼─→ Docker node 镜像（仅本 arch）
   5 平台矩阵        └─→ GitHub Release + SHA256SUMS
 ```
 
@@ -289,8 +289,8 @@ Rust 侧通过 `include_dir!` / `rust-embed` **编译期嵌入**，运行时不�
 ```dockerfile
 # Dockerfile.hub
 COPY dist/rex-hub        /app/agentfleet          # Hub 自身（已内嵌前端）
-COPY dist/agents/        /app/agent-binaries/     # 全部 arch 的 afcli
-ENV  AGENTFLEET_BINARIES_DIR=/app/agent-binaries
+COPY dist/nodes/         /app/node-binaries/      # 全部 arch 的 afcli
+ENV  AGENTFLEET_BINARIES_DIR=/app/node-binaries
 ```
 
 - **一个镜像烤全部 arch**（不是每 arch 一个镜像）：`linux/amd64/afcli` + `linux/arm64/afcli` +
@@ -327,7 +327,7 @@ Requested → StartingNew → Committed`，失败分支 `RollingBack → RolledB
 ### 7.1.4 必须偏离 REX 的一处：节点不能直连 GitHub
 
 REX 的 `download_agent_binary` 在本地找不到二进制时，**回退到 GitHub Releases 下载**
-（`https://github.com/JeeLin/REX/releases/download/v{version}/rex-agent-{os}-{arch}`）。
+（REX 的做法是 `.../releases/download/v{version}/rex-agent-{os}-{arch}`——设备二进制被它叫做 agent）。
 
 **AgentFleet 不做这个回退。** 理由：
 1. **约束 1**：Hub 无入站端口是产品承诺；反过来，让节点去 GitHub 等于给每台设备
@@ -337,7 +337,7 @@ REX 的 `download_agent_binary` 在本地找不到二进制时，**回退到 Git
 
 **AgentFleet 的做法**：节点只从 Hub 拉（Hub 镜像内置的二进制就是 CAS 的 seed）。
 Hub 侧本地找不到对应 arch 的二进制时，**明确返回 404 + `err{code:"arch_not_supported"}`，
-不静默降级到 GitHub**。用户需要给 Hub 补这个 arch 的二进制（放进 `agent-binaries/{os}-{arch}/`）。
+不静默降级到 GitHub**。用户需要给 Hub 补这个 arch 的二进制（放进 `node-binaries/{os}-{arch}/`）。
 
 ### 7.1.5 GitHub Release 的定位：规范产物，不是部署路径
 
@@ -347,7 +347,7 @@ Release 仍然保留（CI 自动打 tag 构建 + 软发布 + `SHA256SUMS` + 从 
 
 ### 7.1.6 回滚
 
-- 版本在路径里（`agent-binaries/{os}-{arch}/afcli-{version}`），回滚 = 换指针，
+- 版本在路径里（`node-binaries/{os}-{arch}/afcli-{version}`），回滚 = 换指针，
   不是删文件。
 - Hub 侧回滚：把 manifest 指回旧版本。
 - 节点侧回滚：supervisor 的健康检查失败自动触发（§7.1.3 的 `RolledBack`）。

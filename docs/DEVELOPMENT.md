@@ -45,8 +45,8 @@ packages/
 
 ```text
 build-binaries（5 平台矩阵，原生编译）
-    ├─→ docker-hub：Hub 镜像，内嵌全部 arch 的 afcli 到 /app/agent-binaries/
-    ├─→ docker-agent：afcli 镜像（linux/amd64 + linux/arm64，按 TARGETARCH 选二进制）
+    ├─→ docker-hub：Hub 镜像，内嵌全部 arch 的 afcli 到 /app/node-binaries/
+    ├─→ docker-node：afcli 镜像（linux/amd64 + linux/arm64，按 TARGETARCH 选二进制）
     └─→ release：GitHub Release + SHA256SUMS + 从 CHANGELOG 抽 body
 build-frontend（bun install --frozen-lockfile → type-check → lint → test → build）
     └─→ Rust 侧 include_dir! 编译期嵌入，运行时不需要 dist 目录
@@ -55,8 +55,8 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
 | 文件 | 作用 |
 |---|---|
 | `.github/workflows/ci.yml` | 上述全流程 |
-| `Dockerfile.hub` | Hub 镜像；`COPY dist/agents/ /app/agent-binaries/` |
-| `Dockerfile.agent` | afcli 镜像；`COPY dist/rex-${TARGETARCH}`（REX 同名） |
+| `Dockerfile.hub` | Hub 镜像；`COPY dist/nodes/ /app/node-binaries/` |
+| `Dockerfile.node` | afcli 镜像；`COPY dist/afcli-${TARGETARCH}` |
 | `docker-compose.hub.yaml` / `.agent.yaml` | 自托管部署 |
 
 - **原生编译优先于交叉编译**：GitHub 有 `ubuntu-24.04-arm` runner，aarch64 直接原生编
@@ -65,7 +65,7 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
   断言 exe 不依赖 `libssl|libcrypto` DLL，**这个断言照抄**。
 - **节点只从 Hub 拉二进制，不直连 GitHub**（REX 有 GitHub 回退，我们刻意不做，
   见 `architecture/security-and-lifecycle.md` §7.1.4）。
-- 镜像推到 `ghcr.io/<owner>/agentfleet-hub` 与 `agentfleet-agent`。
+- 镜像推到 `ghcr.io/<owner>/agentfleet-hub` 与 `agentfleet-node`。
 
 ---
 
