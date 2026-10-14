@@ -45,8 +45,22 @@ device(
   capabilities    TEXT,      -- JSON：支持的 connector 及参数（心跳更新，见 scheduling §2）
   resources       TEXT       -- JSON：CPU/内存/GPU/当前负载（调度用）
 )
+
+secret(          -- M0 建：Hub 自身的秘密（登录密码哈希、session HMAC 密钥、模型 key）
+  kind            TEXT,      -- 'hub' / 'connector' / 'model'
+  name            TEXT,      -- 如 'password' / 'session_hmac' / 'sk-...'
+  value           TEXT,      -- 明文（约束 13 的取舍，配套 0600/0700/umask 077）
+  created_at      TEXT,
+  UNIQUE(kind, name)
+)
 ```
 
+- **M0 只建 `device` + `secret` 两张表。**
+  **不建 `session` 表**：M0 的 session 是**签名 cookie**（HMAC 密钥取自
+  `secret(kind='hub',name='session_hmac')`，见 `security-and-lifecycle.md` §2.4.2），
+  无服务端 session 存储需求。若要支持「服务端强制注销 / 踢下线 / 查看活跃会话」，
+  随 M1 加表（`session(id, created_at, last_seen_at, user_agent)`），
+  并把签发改为「库里存一条 + 签名 cookie 带 id」的混合形态。
 - **没有** environment 表；**没有** resource 表（connector 是有类型的，不是多态实体）。
 - **`capabilities` 必须落库**：它是路由的硬过滤输入，不能只在内存里——Hub 重启后
   设备还没连上时要能回答「有没有这台设备」，见 `scheduling.md` §2.1。

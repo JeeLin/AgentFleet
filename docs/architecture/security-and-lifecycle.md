@@ -128,6 +128,10 @@ Hub 首次启动  → secret 表无 hub.password → 进入「初始化模式」
     该密钥无法计算，Hub 在 `POST /setup` 之前就签发不出 session；
     而指纹又是公开值（`node_id` 由它唯一决定，见 §4.0），
     **公开值当签名密钥 = 无认证**，任意知道 node_id 的人可离线伪造任意用户的 session。
+- **M0 用纯签名 cookie，不建服务端 `session` 表**（表清单见 `architecture/README.md` §3）。
+  签名 cookie 天生无法被服务端撤销——这是已知取舍：改密码**不会**让已签发的 cookie 失效
+  （只有轮换 `session_hmac` 才会）。单用户自托管场景下可接受（能读到 cookie 的人
+  已经能访问这台机器了）。若要「强制注销 / 踢下线 / 查看活跃会话」，随 M1 加表。
 - **CSRF**：所有状态变更走 `POST/PUT/DELETE` + `SameSite=Strict` + 自定义 header 双重提交。
 - 登录失败有速率限制（IP + 尝试次数），防局域网内暴力破解。
 

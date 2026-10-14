@@ -119,9 +119,11 @@ Hub 未初始化（`secret` 表无 `hub.password`）时，**拒绝所有 enroll*
 
 | 类型 | 方向 | 载荷要点 |
 |------|------|---------|
-| `hello` / `challenge` / `auth` / `auth_ok` / `auth_fail` | 双向 | 见 §3 |
+| `hello` / `challenge` / `auth` | 双向 | 见 §3（`hello` 带 `client_version`/`arch`/`os`/`features`） |
+| `auth_ok` | Hub→node | `{ node_id, protocol_version, gen, heartbeat_interval_ms }`——`gen` 见 §7.1（顶替兜底），`heartbeat_interval_ms` 是本连接的心跳周期 |
+| `auth_fail` | Hub→node | `{ reason, gen? }`——`reason` 含 `hub not initialized`/`fingerprint already registered`/`fingerprint race, retry`/`identity mismatch`/`superseded`（见 §3、§3.1） |
 | `hub_hello` | Hub→node | `{ features, heartbeat_interval_ms, protocol_version }`——Hub 侧能力声明（约束 14 的对称性：协商是双向的，不只节点声明） |
-| `heartbeat` | node→Hub | 能力+负载上报（字段见 `scheduling.md` §2），周期 15s |
+| `heartbeat` | node→Hub | 能力+负载上报（字段见 `scheduling.md` §2），**周期由 `auth_ok` 的 `heartbeat_interval_ms` 下发**（默认 15000，节点不硬编码） |
 | `heartbeat_ack` | Hub→node | 可选，快速确认 |
 | `disconnect` | Hub→node | 令节点下线 `{ reason }`（`superseded` 被新连接顶替 / `admin` Hub 手动下线该节点），见 §7.1 |
 | `open_channel` | Hub→node | `{ channel_id, connector, params }` |
