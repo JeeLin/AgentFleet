@@ -49,7 +49,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 
 | 能力 | 用户可见行为 |
 |------|------------|
-| 设备接入 | `node enroll <hub-url>` 一条命令，节点生成密钥对、主动建立 WebSocket 外联；无需 Hub 入站端口 |
+| 设备接入 | `afcli enroll <hub-url>` 一条命令，节点生成密钥对、主动建立 WebSocket 外联；无需 Hub 入站端口 |
 | 节点身份与状态 | 注册时 Hub 签发 `node_id`；心跳即能力上报（os / arch / hostname / 版本 / 支持的 connector）；在线/离线状态 |
 | AI agent 管理与对话 | 接入各类 agent 软件（不同厂商/协议），在 Web 一个界面里统一配置、启动、对话。**agent 运行时装在节点上**，接入方式与安装来源见 `docs/PRODUCT.md` §5 |
 | Hub 一键安装 agent | 在 Hub 选设备 + 选 agent 模板 → 节点本地安装 → 自动套用托管配置 → 心跳回报就绪。**agent 版本升级策略未决** |
@@ -89,7 +89,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 
 ### 3.3 用户可见流程（第一版）/ Key flows (first release)
 
-1. **接入一台设备**：在设备上跑 `node enroll <hub-url>` → Hub 显示新节点（真实 os/arch/hostname）→ 在线。
+1. **接入一台设备**：在设备上跑 `afcli enroll <hub-url>` → Hub 显示新节点（真实 os/arch/hostname）→ 在线。
 2. **在某个设备上开 agent 对话**：选节点 → 选工作区路径（项目文件由 Hub 喂进去）→ 选/配 agent →
    会话建立，terminal / files 面板挂到这个工作区上（git 面板在 M4 加入）→
    在面板里对话 → Trajectory 逐条可查。

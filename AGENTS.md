@@ -23,7 +23,8 @@ AgentFleet 是**个人自托管的设备 / Agent 平台**：把自己拥有的�
 1. **节点主动外联，Hub 不需要任何到设备的入站访问。** 设备装一次、跑一条命令即接入，
    Hub 无入站端口是产品承诺，不是部署偏好。
 2. **`agent` 一词只指 AI agent。** 绝不用来指设备进程。设备侧进程一律叫
-   `node` / 节点进程 / connector。
+   `node` / 节点进程 / connector。**设备二进制的命令名固定为 `afcli`**
+   （不叫 `node`——会与 Node.js 运行时撞名；crate 名用 `afnode-*`）。
 3. **connector 是有类型的、可插件化的能力。** 第一版内置 terminal / files / git / exec；
    后续 SSH / DB / S3 等协议作为**插件**按需加载，额外有抓包插件与端口转发插件。
    **不引入多态 Resource 抽象**（加一个协议要改 N 处即违规）。

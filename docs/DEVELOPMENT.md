@@ -28,8 +28,8 @@
 crates/
   hub-core/     Hub 核心：注册表、连接注册表、会话/任务编排、推理网关
   hub-server/   Hub HTTP/WS 服务 + 前端托管
-  node-core/    node 核心：连接、connector（terminal/files/git/exec，**仅面向页面用户**）、能力上报
-  node-cli/     node 二进制（enroll / run）
+  afnode-core/  node 核心：连接、connector（terminal/files/git/exec，**仅面向页面用户**）、能力上报
+  afnode-cli/   node 二进制（enroll / run），**对外命令名 `afcli`**（避免与 Node.js 运行时 `node` 撞名）
   protocol/     共享：消息定义、(node_id, channel_id) 通道、事件类型
 packages/
   web/          Vue 3 + Bun + Vite 前端；构建产物由 hub-server 托管
@@ -47,7 +47,7 @@ packages/
 
 | # | 里程碑 | 目标 | 承接 §3.1 能力 |
 |---|--------|------|--------------|
-| M0 🔄 当前 | 设备接入 | `node enroll` 一条命令；**密钥对在 node 本地生成、Hub 只存指纹**；supervisor/worker 两层（身份随 supervisor，升级只换 worker）；单条 WS 主动外联；心跳即能力上报；掉线指数退避重连；防重复注册（同一指纹不得新建设备）；**WS 协议层与 enroll 时序一并设计**（见 `architecture/protocol.md`） | 设备接入、节点身份与状态 |
+| M0 🔄 当前 | 设备接入 | `afcli enroll` 一条命令；**密钥对在 node 本地生成、Hub 只存指纹**；supervisor/worker 两层（身份随 supervisor，升级只换 worker）；单条 WS 主动外联；心跳即能力上报；掉线指数退避重连；防重复注册（同一指纹不得新建设备）；**WS 协议层与 enroll 时序一并设计**（见 `architecture/protocol.md`） | 设备接入、节点身份与状态 |
 | M1 | 会话工作区与首个演示 | 工作区 `(node_id, path)` 落库；会话创建即挂载工作区；**在树莓派上开一个 agent 会话，会话内的 terminal / files 面板可用，零入站端口、不装 openssh-server**；exec connector（一次性命令、无 PTY，供页面与 Hub 侧系统调用）随此里程碑落地。**connector 只面向页面用户，不向 agent 暴露** | Bash/PTY、文件浏览 |
 | M2 | 工作区供料与同步 | Hub 内容寻址仓库（CAS）；manifest 差分物化到 `(node_id, path)`；排除依赖目录；技能/配置走托管覆盖层（只读 + 漂移检测 + **全局/会话两层权限规则**）；产物归档（见 `architecture/workspace-and-sync.md`） | 工作区供料、统一配置 agent、产物归档、模型配置一处切换 |
 | M3 | ACP 会话与轨迹 | 接入 ACP；Trajectory 逐条可查（事件表含类型/输入/输出/耗时/归属节点）；会话开始建基线，**随时可看**改动文件与 diff | 对话与动作流、AI agent 管理与对话 |
