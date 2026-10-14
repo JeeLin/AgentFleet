@@ -45,7 +45,8 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 |------|------------|
 | 设备接入 | `node enroll <hub-url>` 一条命令，节点生成密钥对、主动建立 WebSocket 外联；无需 Hub 入站端口 |
 | 节点身份与状态 | 注册时 Hub 签发 `node_id`；心跳即能力上报（os / arch / hostname / 版本 / 支持的 connector）；在线/离线状态 |
-| AI agent 管理与对话 | 接入各类 agent 软件（不同厂商/协议），在 Web 一个界面里统一配置、启动、对话 |
+| AI agent 管理与对话 | 接入各类 agent 软件（不同厂商/协议），在 Web 一个界面里统一配置、启动、对话。**agent 运行时装在节点上**，接入方式与安装来源见 `docs/PRODUCT.md` §5 |
+| Hub 一键安装 agent | 在 Hub 选设备 + 选 agent 模板 → 节点本地安装 → 自动套用托管配置 → 心跳回报就绪。**agent 版本升级策略未决** |
 | 对话与动作流 | 会话有 Trajectory 视图，逐条展示 User/Assistant/Tool/子agent/压缩记录；**随时可看**本次改动文件与 diff |
 | 文件浏览 | 会话工作区内浏览/读写节点本地目录，写操作限制在工作区根内（**仅约束页面用户**；agent 用自己装的能力，不走这条路径） |
 | Git 操作界面 | 会话工作区的 git 状态 / diff / 提交视图 |
@@ -93,6 +94,8 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 7. **设备掉线**：WS 断开 → 节点自动指数退避重连（1s/2s/4s…上限 30s），UI 显示「重连中」与已重试时长；
    连续失败超过约 5 分钟转为「离线」；离线期间工作区与 agent 会话在设备上仍存活，
    面板转为只读并显示最后已知状态，禁止发起新操作；用户可手动点「立即重连」。
+8. **在新设备上装 agent**：Hub 选设备 + 选 agent 模板 → 下发安装指令 → 节点本地安装 →
+   自动套用托管配置 → 心跳回报就绪 → 即可开会话。
 
 ---
 

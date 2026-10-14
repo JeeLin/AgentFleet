@@ -6,6 +6,8 @@ Entries follow Keep a Changelog; each entry is bilingual (中文 / English).
 ## [Unreleased]
 
 ### Added
+- 架构决策：任务分发调度——心跳上报字段（能力/负载/存量三分）、硬过滤→有序打分、可钉死；明确**任务路由与推理路由是两套独立决策** / Architecture decision: task scheduling — heartbeats split into capability / load / inventory, hard filters then an ordered ranking with pinning; task routing and inference routing are explicitly **two independent decisions**
+- Hub 一键把 agent 装到设备（安装清单复用 CAS，升级策略记为 TODO）/ One-click agent install from the Hub (install artifacts reuse the CAS; the upgrade strategy is tracked as a TODO)
 - 产品与技术文档基线：定位、硬性约束、架构决策（会话与轨迹、任务连贯性、分布式推理）、里程碑规划 / Initial product & architecture docs: positioning, hard constraints, architecture decisions (session & trajectory, task continuity, distributed inference), milestone plan
 - 架构决策：安全与生命周期——凭据三类分层（设备密钥对 node 本地生成 / connector 凭据与模型 key 由 Hub 明文存储）、supervisor/worker 两层设备模型、掉线指数退避重连 / Architecture decision: security & lifecycle — three credential classes, a two-tier supervisor/worker device model, and exponential-backoff reconnect
 - 许可定为 **Apache-2.0** / License settled as **Apache-2.0**

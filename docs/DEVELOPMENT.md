@@ -52,7 +52,7 @@ packages/
 | M2 | 工作区供料与同步 | Hub 内容寻址仓库（CAS）；manifest 差分物化到 `(node_id, path)`；排除依赖目录；技能/配置走托管覆盖层（只读 + 漂移检测 + **全局/会话两层权限规则**）；产物归档（见 `architecture/workspace-and-sync.md`） |
 | M3 | ACP 会话与轨迹 | 接入 ACP；Trajectory 逐条可查（事件表含类型/输入/输出/耗时/归属节点）；会话开始建基线，**随时可看**改动文件与 diff |
 | M4 | Git 界面 | 会话工作区的 git 状态 / diff / 提交视图；**此时会话面板补齐第三个 git 面板** |
-| M5 | 子 agent 与任务分发 | oh-my-opencode 式子 agent 体系；按设备能力/性能自动调度，把完整任务分发到节点执行 |
+| M5 | 子 agent、任务分发与 agent 安装 | oh-my-opencode 式子 agent 体系；**按节点能力/负载自动路由**（硬过滤 → 有序打分 → 可钉死，见 `architecture/scheduling.md`）；子任务工作区来源分发时确认；**Hub 一键把 agent 装到设备**并套用托管配置（升级策略未决，见 `architecture/workspace-and-sync.md` §4.4） |
 | M6 | 推理网关 | 一个 OpenAI 兼容端点，背后是 N 台设备各自的全量副本（阶段 1，请求级路由） |
 | M7 | connector 插件化 | 把协议族做成插件按需加载 + 抓包插件 + 端口转发插件 |
 | M8 | 任务系统 | 完整任务定义 / 状态 / 进度 / 断点续跑（跨节点任务连贯性，见 `architecture/task-continuity.md`） |
@@ -79,6 +79,7 @@ packages/
 - `architecture/session-and-trajectory.md` — ACP 会话恢复 + dsh 式轨迹 + 改动文件/diff
 - `architecture/task-continuity.md` — 跨设备任务连贯性模型
 - `architecture/workspace-and-sync.md` — Hub 内容寻址仓库、项目文件供料、配置铺设、产物归档
+- `architecture/scheduling.md` — 任务路由：心跳上报字段、硬过滤、有序打分、任务状态机
 - `architecture/security-and-lifecycle.md` — 凭据模型（明文存储的取舍与强制防护）、supervisor/worker、设备升级与掉线重连
 - `architecture/inference.md` — 分布式推理完整评估与分阶段路径
 

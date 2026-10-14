@@ -1,9 +1,10 @@
 # 架构总览 / Architecture Overview
 
 > 决策细节见：`inference.md`（分布式推理）、`session-and-trajectory.md`（会话与轨迹）、
-> `task-continuity.md`（任务连贯性）、`workspace-and-sync.md`（工作区供料与同步）。
+> `task-continuity.md`（任务连贯性）、`workspace-and-sync.md`（工作区供料与同步）、
+> `scheduling.md`（任务分发调度）、`security-and-lifecycle.md`（安全与生命周期）。
 > Detail lives in: inference.md, session-and-trajectory.md, task-continuity.md,
-> workspace-and-sync.md.
+> workspace-and-sync.md, scheduling.md, security-and-lifecycle.md.
 
 ---
 
@@ -26,7 +27,7 @@ node（设备 C）══主动外联══WSS══> Hub
 
 - 每设备一条 WebSocket，控制 + 数据复用。
 - 通道键 `(node_id, channel_id)`；每通道独立流控/信用。一个跑飞的传输不拖死该设备全部通道。
-- 心跳即能力上报：os / arch / hostname / node 版本 / 支持的 connector / 资源余量（供调度）。
+- 心跳即能力上报：os / arch / hostname / node 版本 / 支持的 connector / agent / 资源余量（供调度）。**字段清单见 `scheduling.md` §2**。
 - 认证：设备密钥对（注册时生成，Hub 记指纹）。不用静态共享 token。
 
 ## 3. 数据模型（初版）
@@ -104,7 +105,8 @@ git 项目走主路径：Hub 只发 commit 引用，节点自己去 origin 拉�
 
 - 子 agent 体系借鉴 **oh-my-opencode**：可配置、开箱即用的专家 agent（主 agent / 规划 / 审查 / 检索…）。
 - 主 agent 把单个完整任务分发给子 agent，在**设备上**执行。
-- 调度按节点能力/性能自动路由（读心跳的 resources 上报）。
+- 调度按节点能力/性能自动路由：读心跳的 `resources` 上报，
+  **硬过滤（能力）→ 有序打分（负载/亲和）**，可由用户钉死。详见 `scheduling.md`。
 
 ## 7. 推理
 
