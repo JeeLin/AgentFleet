@@ -101,7 +101,32 @@ node_modules/  .venv/  venv/  target/  dist/  build/  .cache/
 3. **漂移检测**：心跳顺带报托管文件的实际哈希，对不上就在 Hub 上显示
    「N 个文件漂移」，给 push / pull。**不自动覆盖**——用户可能是故意改的。
 
-### 4.2 目录划分
+### 4.2 权限配置：全局层 + 会话层
+
+agent 用它自带的权限机制（Claude Code / OpenCode 的 allow/ask/deny）。
+**我们不实现权限引擎，只负责下发配置**——而配置由我们托管，因此可统一管理。
+
+两层，后者覆盖前者：
+
+```text
+全局层（Hub 统一管，所有节点所有会话生效）
+  permissions = {
+    "rm -rf /*":   "deny",
+    "git push --force": "ask",
+    "sudo *":      "ask",
+    "curl *":      "ask"
+  }
+
+会话层（创建会话时可临时加严，不可放松全局的 deny）
+  permissions += { "npm publish *": "ask", "rm -rf /tmp/*": "deny" }
+```
+
+- **会话层只能加严，不能放松全局 deny**——避免「开个会话就绕过全局禁令」。
+- 规则**在派发子任务时随任务一起下发**，子 agent 继承并可再加严。
+- **这是自律，不是强制**：真正的强制边界是操作系统权限（agent 以什么用户跑、能碰哪些目录）。
+  我们控制工作区目录与运行用户，不做额外沙箱（见 `architecture/README.md` §4.2）。
+
+### 4.3 目录划分
 
 ```text
 节点上 ~/.config/opencode/：
@@ -112,7 +137,18 @@ node_modules/  .venv/  venv/  target/  dist/  build/  .cache/
   其他             ← 节点所有：Hub 不碰
 ```
 
-**密钥永不上传**是一条硬边界，不只是约定。
+模型 API key（LLM 用）在 Hub 的托管配置里统一定义，下发给各节点复用。
+凭据的存储取舍见 `security-and-lifecycle.md`。
+
+### 4.4 agent 软件本体：Hub 不负责安装
+
+本项目的分发**只覆盖配置**（skills / agents / 权限 / 模型 key），**不覆盖 agent 软件本体**。
+
+不提供「在 Hub 点一下就把 agent 装到新机器并配好」的一键部署。
+
+理由：agent 怎么装、装哪个版本，是设备环境的一部分，与项目文件同步是两件事；
+而「配置同步」已经由上面的托管覆盖层解决。用户在设备上自行安装 agent，
+Hub 侧只管理它的配置。
 
 ---
 

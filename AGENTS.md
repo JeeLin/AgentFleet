@@ -27,6 +27,8 @@ AgentFleet 是**个人自托管的设备 / Agent 平台**：把自己拥有的�
 3. **connector 是有类型的、可插件化的能力。** 第一版内置 terminal / files / git / exec；
    后续 SSH / DB / S3 等协议作为**插件**按需加载，额外有抓包插件与端口转发插件。
    **不引入多态 Resource 抽象**（加一个协议要改 N 处即违规）。
+   **connector 只面向 Web 页面用户，不向 agent 暴露**——本地 agent 完全依赖设备上安装的
+   agent 自带能力与它自己的权限系统。
    **terminal / files / git 绑定会话的工作区**，生命周期随会话（`node_id, path`），
    不做设备级的长驻多资源管理台。
 4. **每设备一条 WebSocket**，承载控制 + 数据通道。通道键为 `(node_id, channel_id)`，
@@ -44,6 +46,16 @@ AgentFleet 是**个人自托管的设备 / Agent 平台**：把自己拥有的�
     大文件不进 WebSocket（git 项目只传 commit 引用，节点自己去 origin 拉）；
     **不引入设备间 P2P 直传，不用 Syncthing 当主同步通道，不同步 `node_modules` 等依赖**。
     节点密钥**永不上传**。详见 `docs/architecture/workspace-and-sync.md`。
+11. **设备密钥对在 node 本地生成，Hub 只存指纹。** 若 Hub 生成设备私钥，
+    则 Hub 等于持有全部设备私钥，密钥对的意义归零。
+12. **node 分 supervisor / worker 两层，身份由 supervisor 持有。**
+    supervisor 持设备私钥、维持 WebSocket、拉起与监控 worker；
+    **升级只换 worker，身份不变**，因此不需要任何身份抢占逻辑。
+13. **connector 凭据与模型 API key 由 Hub 明文存储，不做应用层加密**
+    （单用户自托管的取舍）。**但明文 ≠ 可以放松其他防护**：
+    SQLite 0600 / 数据目录 0700 / `umask 077`；secret 值**永不进日志、永不回显、
+    永不进轨迹**；前端只拿 `fingerprint`（前 3 + `***` + 后 3）。
+    详见 `docs/architecture/security-and-lifecycle.md`。
 
 ---
 
@@ -90,6 +102,8 @@ AgentFleet 是**个人自托管的设备 / Agent 平台**：把自己拥有的�
 6. SQLite 是否漏设 WAL / busy_timeout
 7. 轨迹事件是否丢失「可回放」所需的字段（类型 / 输入 / 输出 / 耗时 / 归属节点）
 8. 是否绕开内容寻址仓库做了「整目录同步 / 设备间 P2P 直传」，或把依赖目录、密钥传上了行
+9. secret 值是否出现在日志 / API 响应 / 轨迹事件里（哪怕「只是本地自用」）
+10. 是否出现了让 **Hub 持有设备私钥** 的路径，或让升级导致 `node_id` 变化的机制
 
 ---
 

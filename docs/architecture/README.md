@@ -47,9 +47,13 @@ device(
 - **没有** environment 表；**没有** resource 表（connector 是有类型的，不是多态实体）。
 - SQLite：建库必须 `journal_mode=WAL` + `busy_timeout`。
 
-## 4. connector：有类型、可插件化、绑定会话
+## 4. connector：有类型、可插件化、绑定会话、**面向用户**
 
-- 第一版内置：**terminal**（本地 PTY）、**files**（工作区根内读写）、**git**（状态/diff/提交）、**exec**。
+> **connector 是给 Web 页面用的，不是给 agent 用的。**
+> 本地 agent 完全依赖设备上安装的 agent 自带能力（MCP / 内建工具 / 它自己的权限系统），
+> 我们**不向 agent 暴露 connector**。
+
+- 第一版内置：**terminal**（本地 PTY）、**files**（工作区根内读写）、**git**（状态/diff/提交）、**exec**（一次性命令，无 PTY；供页面与 Hub 侧系统调用）。
 - 后续插件：SSH / SFTP / MySQL / PostgreSQL / Redis / SQLite / S3。
 - 额外插件：**网络抓包**（pcap）、**端口转发**。
 - 插件是独立、有类型的能力，各自独立演进；**不引入多态 Resource 抽象**。
@@ -59,7 +63,17 @@ device(
 - 工作区 = 设备上的一个 `(node_id, path)`，**归属于某个 agent 会话**。
 - terminal / files / git 三个面板都绑在会话的工作区上：**进入会话才建立通道，退出即释放**。
 - 不做设备级的长驻多资源管理台（不是「一个设备下面挂 N 个资源 tab」那种形态）。
-- 由此，「写操作限制在工作区根内」是天然约束，不是额外加的沙箱补丁。
+- 由此，「写操作限制在工作区根内」对**页面用户**是天然约束，不是额外加的沙箱补丁。
+
+### 4.2 agent 的文件访问与我们的约束无关
+
+agent 在节点上用自己的工具读写文件，**不经过我们的 files connector**，
+因此页面侧的「工作区根内」限制**约束不到 agent**。对 agent 的约束只有两层：
+
+1. **它自己的权限机制**（我们通过 M2 的托管覆盖层统一下发配置，见 `workspace-and-sync.md` §4）
+2. **它自己装在什么目录**——我们控制工作区目录与设备上的执行权限，不做额外沙箱
+
+> **不要**因为「connector 限制在工作区内」就认为 agent 也被限制了。这是两套独立的路径。
 
 ### 4.2 生命周期
 

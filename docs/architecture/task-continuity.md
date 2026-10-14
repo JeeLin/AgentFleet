@@ -92,7 +92,15 @@ PTY 缓冲区与 git 状态在重连后**不复位**：它们在节点进程里�
   └─ 合并 → 主 agent 在主工作区合并 task/* 分支，不是文件同步器
 ```
 
+**子任务拿什么内容？** 分发时在 UI 上让用户确认，三选一：
+
+| 模式 | 内容 | 何时用 |
+|---|---|---|
+| **`HEAD`** | 主工作区当前 commit | 默认；最轻，节点自己去 origin 拉 |
+| **`HEAD` + 工作区** | 当前 commit + 主工作区的未提交改动 | 需要带上正在改的东西 |
+| **`snapshot`** | CAS 里的完整树快照 | 项目不是 git，或明确要一个干净副本 |
+
 - git 项目：用 worktree 共享 object store，不复制目录。
-- **非 git 项目**：CAS 快照 + 每个子任务一个独立目录（无 object store 可共享），
+- **非 git 项目**：只有 `snapshot` 可用，每个子任务一个独立目录（无 object store 可共享），
   冲突交给主 agent 按轨迹人工/agent 裁决，不做自动三方合并。
 - 产物按 `task_id` 归档（见 `workspace-and-sync.md`），跨设备续跑时从 Hub 取。

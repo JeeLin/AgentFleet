@@ -47,12 +47,13 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 | 节点身份与状态 | 注册时 Hub 签发 `node_id`；心跳即能力上报（os / arch / hostname / 版本 / 支持的 connector）；在线/离线状态 |
 | AI agent 管理与对话 | 接入各类 agent 软件（不同厂商/协议），在 Web 一个界面里统一配置、启动、对话 |
 | 对话与动作流 | 会话有 Trajectory 视图，逐条展示 User/Assistant/Tool/子agent/压缩记录；**随时可看**本次改动文件与 diff |
-| 文件浏览 | 会话工作区内浏览/读写节点本地目录，写操作限制在工作区根内 |
+| 文件浏览 | 会话工作区内浏览/读写节点本地目录，写操作限制在工作区根内（**仅约束页面用户**；agent 用自己装的能力，不走这条路径） |
 | Git 操作界面 | 会话工作区的 git 状态 / diff / 提交视图 |
 | Bash / PTY | 会话工作区内的本地 shell；不装 openssh-server，Hub 不拨入 |
 | 工作区供料 | Hub 把项目文件喂进设备：git 项目只传 commit 引用（节点自己去 origin 拉），非 git 项目按 manifest 差分；不传依赖目录（见 `architecture/workspace-and-sync.md`） |
 | 统一配置 agent | 在 Hub 统一管理各设备的子 agent 定义与技能；托管文件在节点上只读，本地改动标记为「漂移」，可 push / pull |
 | 产物归档 | 任务产出的制品归档到 Hub，设备关机后仍可下载 |
+| 模型配置一处切换 | 在 Hub 一处配置模型与 API key，各节点上的 agent 复用同一套配置（一处改、处处生效，对标 ccswitch 的交互） |
 
 > **终端 / 文件 / git 是会话内的面板**，绑定该会话的工作区（设备上的一个 `(node_id, path)`），
 > 进入会话才建立、退出即释放。**不做设备级的多资源管理台。**
@@ -89,6 +90,9 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 5. **统一配置 agent**：在 Hub 改一份子 agent / 技能定义 → 下发到所有节点 → 节点上只读生效，
    被本地改过的文件标记为「漂移」，可 push 或 pull。
 6. **取回产物**：任务结束 → 产物归档到 Hub → 设备关机后仍可下载。
+7. **设备掉线**：WS 断开 → 节点自动指数退避重连（1s/2s/4s…上限 30s），UI 显示「重连中」与已重试时长；
+   连续失败超过约 5 分钟转为「离线」；离线期间工作区与 agent 会话在设备上仍存活，
+   面板转为只读并显示最后已知状态，禁止发起新操作；用户可手动点「立即重连」。
 
 ---
 
@@ -117,8 +121,8 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
   工作区快照引用都存 Hub，节点只持有「当前执行所需的上下文切片」。节点掉线，任务状态不丢。
 - **断点可恢复**：任务 = 持久化的状态机 + 事件日志；节点执行带「检查点（checkpoint）」，
   重连后从最后一个成功检查点续跑，不重做。
-- **工作区/产物定位用内容寻址或稳定引用**：跨节点续跑时，需要的文件/产物通过 Hub 侧
-  的存储或节点间受控传输取得，不依赖「上一台机器还在」。
+- **工作区/产物定位用内容寻址或稳定引用**：跨节点续跑时，需要的文件/产物一律经
+  **Hub 的内容寻址仓库**按内容哈希取得，不依赖「上一台机器还在」，**不做设备间 P2P 直传**。
 - **ACP 的 `session/load` 作为对话恢复机制**：agent 会话恢复走 ACP，而非自建。
 - **轨迹 append-only**：所有动作写入 dsh 式事件流，既是 UI 回放源，也是断点续跑的审计源。
 
@@ -128,7 +132,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 
 > 多个设备协同运行一个大模型（模型切分 / 分布式推理 / 异构组网），可行性、约束与路径？
 
-**结论（完整评估见 `docs/architecture/inference.md`）：**
+**调研结论（完整评估见 `docs/architecture/inference.md`）：**
 
 - **异构消费级设备做真实张量并行不可行**：张量并行每层多次跨设备归约，受互联带宽/延迟限制；
   llama.cpp 的 RPC 后端只做「逐算子转发 + 层切分（流水线并行）」，没有集合通信原语，
@@ -143,6 +147,16 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 - **对外表述**：「一个由你 N 台设备支撑的 OpenAI 兼容端点」，不是「N 台设备合成一台大模型机」。
   正确预期是「能跑更大的模型」，不是「跑得更快」。
 
+**结论：暂不确定，记为 TODO。**
+
+上面是**调研结论**，不是已定决策：已评估的几条可行路径都不直接匹配本项目的
+「自托管 + 个人设备」场景（详见 `docs/architecture/inference.md`）。本期不做决定，
+需要时重新评估再定。
+
+> The analysis above is research output, not a decision. None of the evaluated paths maps
+> directly onto this project's self-hosted personal-device scenario. **Undecided — tracked as
+> TODO**; no call is made in this release, revisit when it actually matters.
+
 ---
 
 ## 6. 术语 / Glossary
@@ -155,6 +169,15 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 | connector | 节点上提供的一类**有类型**的能力（terminal / files / git / exec / ssh / db / …），可插件化 |
 | task | 一个完整任务；sub-task 由子 agent 在节点上执行 |
 | trajectory | dsh 式的会话动作事件流，Web 逐条回放 |
+| workspace | 工作区：设备上的一个 `(node_id, path)`，归属于某个 agent 会话，终端 / 文件 / git 面板绑在其上。Workspace: a `(node_id, path)` on a device, owned by one agent session; terminal / files / git panels bind to it |
+| artifact | 产物：任务产出的最终制品，按 id 归档到 Hub，设备关机后仍可取回。Artifact: a task's final output, archived on the Hub by id and retrievable after the device powers off |
+| channel_id | 通道号：一条设备 WebSocket 上的子通道，通道键为 `(node_id, channel_id)`，每通道独立流控。Channel id: a sub-channel on one node WebSocket, keyed `(node_id, channel_id)`, with per-channel flow control |
+| baseline | 基线：会话开始时记录的工作区初始状态，用于随时计算改动文件与 diff。Baseline: the workspace state captured at session start, used to compute changed files and diffs on demand |
+| CAS | 内容寻址仓库：Hub 侧以内容哈希存储 blob 的仓库，统一供料项目文件、配置与产物。CAS: the Hub's content-addressed blob store, feeding project files, config and artifacts alike |
+| supervisor | 守护进程：持有设备身份与 WebSocket 的稳定进程，负责拉起与监控 worker。Supervisor: the stable process holding device identity and the WebSocket, responsible for starting and supervising workers |
+| worker | 工作进程：实际执行 connector 与 agent 的可替换进程，升级时更换，身份不变。Worker: the replaceable process that actually runs connectors and agents; swapped on upgrade, identity unchanged |
+| worktree | Git 工作树：同一仓库的多个独立工作目录，用于隔离并行任务，共享 object store。Worktree: independent working directories of one repository, isolating parallel tasks while sharing the object store |
+| Workbench | 会话工作台：Web 端承载会话的界面外壳，终端 / 文件 / git / 轨迹都渲染在其面板里。Workbench: the web UI shell that hosts a session; terminal / files / git / trajectory all render as its panels |
 
 ---
 

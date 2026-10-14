@@ -10,3 +10,6 @@
 
 | 状态 | 优先级 | 标题 | 来源 | 描述 |
 |------|--------|------|------|------|
+| 待处理 | 🟡 | `secret` 表明文存储的加固项 | 本项目决定（`architecture/security-and-lifecycle.md` §2.2） | 本期不做应用层加密，需未来补：AES-256-GCM 静态加密 + 独立主密钥；secret 值 mlock 不进 core dump；密钥轮换与失效 |
+| 待处理 | 🟡 | 分布式推理路线选型 | PRODUCT §5.2 | 已评估的可行路径（RPC 层切分 / MoE 分片 / 投机解码）都不直接匹配自托管个人设备场景，结论记为 TODO，需时重新评估 |
+| 待处理 | 🟢 | 工作区同步的 B 档 / D 档兜底 | `architecture/workspace-and-sync.md` §3 | Hub bare mirror 兜底（节点连不上 origin）与二进制 delta + 断点续传，当前无里程碑归属，等实测证明需要再排期 |
