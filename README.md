@@ -48,6 +48,12 @@ node, run AI agent sessions, and route tasks to the node best suited to run them
 | 文件浏览 / File browser | 会话工作区内浏览 / 读写节点本地目录，写操作限制在工作区根内 |
 | Git 操作界面 / Git UI | 会话工作区的 git 状态 / diff / 提交视图 |
 | Bash / PTY | 会话工作区内的本地 shell，不需要装 `openssh-server`，也不需要 Hub 拨入 |
+| 工作区供料 / Workspace feeding | Hub 用内容寻址仓库把项目文件喂进设备：git 项目只传 commit 引用（节点自己去 origin 拉），非 git 项目按 manifest 差分；不传依赖目录 |
+| 统一配置 agent / Unified agent config | 在 Hub 统一管理各设备的子 agent 定义与技能；托管文件在节点上只读，本地改动标记为「漂移」，可 push / pull。**密钥永不上传** |
+| 产物归档 / Artifact archive | 任务产出的制品归档到 Hub，设备关机后仍可下载 |
+
+> **不同步文件夹，同步内容。** Hub 是唯一真相源；不做设备间 P2P 直传，不用文件夹同步工具当主通道。
+> We sync **content, not folders**. Hub is the single source of truth; no device-to-device P2P transfer.
 
 > **终端 / 文件 / git 是会话内的面板**，绑定该会话的工作区（设备上的一个 `(node_id, path)`），
 > 进入会话才建立、退出即释放。**不做设备级的多资源管理台。**
@@ -69,7 +75,6 @@ node, run AI agent sessions, and route tasks to the node best suited to run them
 - **社交软件接入 / Social channels**：各 IM 作为 agent 的输入输出通道
 - **客户端 / Native client**：原生客户端本身也是一个能操作本机 / 服务器的 agent，可包裹开源软件实现，不一定要自研 agent 逻辑
 - **分布式推理 / Distributed inference**：把接入设备作为协同的大模型运行节点（评估见 `docs/architecture/inference.md`）
-- **Hub 一键配置 agent（推后 / deferred）**：在 Hub 统一管理所有设备上的 agent 配置（如统一 opencode 配置）。该能力**跨设备下发 + 安全回滚**设计较复杂，本期不做，列为后续。
 
 ---
 

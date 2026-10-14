@@ -39,6 +39,11 @@ AgentFleet 是**个人自托管的设备 / Agent 平台**：把自己拥有的�
 8. **子任务分发借鉴 oh-my-opencode 的子 agent 体系**：可配置、开箱即用的子 agent，
    主 agent 把单个完整任务分发给子 agent 在设备上执行。
 9. **任务分发按设备能力/性能自动调度**：路由时读取节点的心跳能力上报（CPU/内存/GPU/模型/负载）。
+10. **不同步文件夹，同步内容。** Hub 是唯一真相源，用一个内容寻址仓库供三样东西：
+    项目文件（物化到 `(node_id, path)`）、技能与 agent 配置（托管覆盖层）、产物归档。
+    大文件不进 WebSocket（git 项目只传 commit 引用，节点自己去 origin 拉）；
+    **不引入设备间 P2P 直传，不用 Syncthing 当主同步通道，不同步 `node_modules` 等依赖**。
+    节点密钥**永不上传**。详见 `docs/architecture/workspace-and-sync.md`。
 
 ---
 
@@ -84,6 +89,7 @@ AgentFleet 是**个人自托管的设备 / Agent 平台**：把自己拥有的�
 5. 是否新增多态资源分支（加一个协议要改 N 处即违规）
 6. SQLite 是否漏设 WAL / busy_timeout
 7. 轨迹事件是否丢失「可回放」所需的字段（类型 / 输入 / 输出 / 耗时 / 归属节点）
+8. 是否绕开内容寻址仓库做了「整目录同步 / 设备间 P2P 直传」，或把依赖目录、密钥传上了行
 
 ---
 
@@ -130,7 +136,7 @@ docs/
   PRODUCT.md              产品功能边界、架构决策、用户可见流程
   DEVELOPMENT.md          开发索引（技术栈、crate 结构、里程碑总览）
   BUGS.md                 缺陷池（待处理 bug 的汇总地）
-  architecture/           架构文档（连接模型、会话与轨迹、推理、插件、任务连贯性）
+  architecture/           架构文档（连接模型、会话与轨迹、推理、插件、任务连贯性、工作区供料）
 crates/                   Rust workspace（hub / node / protocol）
 packages/web/             Vue 3 + Bun + Vite 前端
 CHANGELOG.md               Keep a Changelog（中英双语）

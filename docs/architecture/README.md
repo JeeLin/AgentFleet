@@ -1,8 +1,9 @@
 # 架构总览 / Architecture Overview
 
 > 决策细节见：`inference.md`（分布式推理）、`session-and-trajectory.md`（会话与轨迹）、
-> `task-continuity.md`（任务连贯性）。
-> Detail lives in: inference.md, session-and-trajectory.md, task-continuity.md.
+> `task-continuity.md`（任务连贯性）、`workspace-and-sync.md`（工作区供料与同步）。
+> Detail lives in: inference.md, session-and-trajectory.md, task-continuity.md,
+> workspace-and-sync.md.
 
 ---
 
@@ -69,6 +70,15 @@ device(
 
 断线重连时按 `(node_id, path)` 重新建立通道，工作区不随连接丢失而失效（见 `task-continuity.md`）。
 
+### 4.3 工作区怎么被喂进去
+
+**不同步文件夹，同步内容。** Hub 是唯一真相源，一个内容寻址仓库（CAS）供三样东西：
+项目文件（按 `(node_id, path)` 物化）、技能/配置（按 `(kind, version)` 铺成托管覆盖层）、
+产物（按 `artifact_id` 归档）。
+
+git 项目走主路径：Hub 只发 commit 引用，节点自己去 origin 拉，**大文件不进 WebSocket**。
+非 git 项目走 manifest 差分 + 内容哈希跳过。详见 `workspace-and-sync.md`。
+
 ## 5. 会话与轨迹
 
 - 会话层用 **ACP**（Agent Client Protocol），不自建。恢复走 ACP `session/load`。
@@ -89,3 +99,4 @@ device(
 
 SQLite（WAL + busy_timeout）存 device / 会话元数据 / 任务状态 / 轨迹事件引用。
 轨迹事件与工作区产物的存储位置与保留策略见 `session-and-trajectory.md`。
+内容寻址仓库（blob / snapshot / artifact / managed_file）见 `workspace-and-sync.md`。

@@ -65,15 +65,24 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 - **社交软件接入**：各 IM 作为 agent 的输入输出通道
 - **原生客户端**：客户端本身也是一个操作本机/服务器的 agent，可包裹开源软件实现
 - **分布式推理**：把接入设备作为协同的大模型运行节点（见 §5 设计问题二 与 `docs/architecture/inference.md`）
-- **Hub 一键配置 agent（推后/deferred）**：在 Hub 统一管理所有设备上的 agent 配置（如统一 opencode 配置）。因「跨设备下发 + 安全回滚」较复杂，本期不做
+
+### 3.2.1 原「推后」项，现纳入第一版 / Now in the first release
+
+- **Hub 一键配置 agent**：在 Hub 统一管理所有设备上的 agent 配置（子 agent 定义、技能、
+  `opencode.json`）。实现为**托管覆盖层**：Hub 记录托管清单，文件在节点上只读，
+  心跳顺带检测漂移并给出 push / pull。**节点密钥（`auth.json`）永不上传。**
+  见 `docs/architecture/workspace-and-sync.md`。
 
 ### 3.3 用户可见流程（第一版）/ Key flows (first release)
 
 1. **接入一台设备**：在设备上跑 `node enroll <hub-url>` → Hub 显示新节点（真实 os/arch/hostname）→ 在线。
-2. **在某个设备上开 agent 对话**：选节点 → 选工作区路径 → 选/配 agent → 会话建立，
-   terminal / files / git 三个面板同时挂到这个工作区上 → 在面板里对话 → Trajectory 逐条可查。
+2. **在某个设备上开 agent 对话**：选节点 → 选工作区路径（项目文件由 Hub 喂进去）→ 选/配 agent →
+   会话建立，terminal / files / git 三个面板同时挂到这个工作区上 → 在面板里对话 → Trajectory 逐条可查。
 3. **看它改了什么**：会话结束（或随时）→ 改动文件列表 → 点开看 diff。
 4. **操作文件 / git / bash**：在**该会话内**用对应面板，直接作用于该会话的工作区。
+5. **统一配置 agent**：在 Hub 改一份子 agent / 技能定义 → 下发到所有节点 → 节点上只读生效，
+   被本地改过的文件标记为「漂移」，可 push 或 pull。
+6. **取回产物**：任务结束 → 产物归档到 Hub → 设备关机后仍可下载。
 
 ---
 

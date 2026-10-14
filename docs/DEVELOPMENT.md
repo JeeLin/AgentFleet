@@ -49,16 +49,20 @@ packages/
 |---|--------|------|
 | M0 | 设备接入 | `node enroll` 一条命令；密钥对认证；单条 WS 主动外联；心跳即能力上报；三台设备同时在线且各自身份不串（防第二台抢走第一台身份） |
 | M1 | 会话工作区与首个演示 | 工作区 `(node_id, path)` 落库；会话创建即挂载工作区；**在树莓派上开一个 agent 会话，会话内的 terminal / files 面板可用，零入站端口、不装 openssh-server** |
-| M2 | ACP 会话 | 接入 ACP；Trajectory 逐条可查 + 会话结束列出改动文件与 diff |
-| M3 | Git 界面 | 会话工作区的 git 状态 / diff / 提交视图 |
-| M4 | 子 agent 与任务分发 | oh-my-opencode 式子 agent 体系；按设备能力/性能自动调度，把完整任务分发到节点执行 |
-| M5 | 推理网关 | 一个 OpenAI 兼容端点，背后是 N 台设备各自的全量副本（阶段 1，请求级路由） |
-| M6 | connector 插件化 | 把协议族做成插件按需加载 + 抓包插件 + 端口转发插件 |
-| M7 | 任务系统 | 完整任务定义 / 状态 / 进度 / 断点续跑（跨节点任务连贯性，见 `architecture/task-continuity.md`） |
+| M2 | 工作区供料与同步 | Hub 内容寻址仓库（CAS）；manifest 差分物化到 `(node_id, path)`；排除依赖目录；技能/配置走托管覆盖层（只读 + 漂移检测）；产物归档（见 `architecture/workspace-and-sync.md`） |
+| M3 | ACP 会话 | 接入 ACP；Trajectory 逐条可查 + 会话结束列出改动文件与 diff |
+| M4 | Git 界面 | 会话工作区的 git 状态 / diff / 提交视图 |
+| M5 | 子 agent 与任务分发 | oh-my-opencode 式子 agent 体系；按设备能力/性能自动调度，把完整任务分发到节点执行 |
+| M6 | 推理网关 | 一个 OpenAI 兼容端点，背后是 N 台设备各自的全量副本（阶段 1，请求级路由） |
+| M7 | connector 插件化 | 把协议族做成插件按需加载 + 抓包插件 + 端口转发插件 |
+| M8 | 任务系统 | 完整任务定义 / 状态 / 进度 / 断点续跑（跨节点任务连贯性，见 `architecture/task-continuity.md`） |
 | 后续 | 后续能力 | 自动化、社交软件接入、原生客户端、分布式推理进阶（RPC 层切分 / MoE 分片） |
 
 > 首个演示是 M1：在树莓派上开一个会话，会话里的 shell 与文件浏览就能用，且零入站端口。
 > 终端 / 文件 / git 都在会话内，因此演示必须经由会话，不能脱离 agent 直接开终端。
+
+> M2 排在 ACP 与 Git 之前：会话要在目标设备上正确跑起来，工作区必须先能被喂进去。
+> git 项目走「Hub 只发 commit 引用、节点自己去 origin 拉」的主路径；非 git 项目走 CAS 差分。
 
 ---
 
@@ -67,6 +71,7 @@ packages/
 - `architecture/README.md` — 进程模型 / 连接与通道 / 数据模型 / connector / 会话 / 子 agent
 - `architecture/session-and-trajectory.md` — ACP 会话恢复 + dsh 式轨迹 + 改动文件/diff
 - `architecture/task-continuity.md` — 跨设备任务连贯性模型
+- `architecture/workspace-and-sync.md` — Hub 内容寻址仓库、项目文件供料、配置铺设、产物归档
 - `architecture/inference.md` — 分布式推理完整评估与分阶段路径
 
 ---
