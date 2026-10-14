@@ -27,15 +27,17 @@
 ```text
 crates/
   hub-core/     Hub 核心：注册表、连接注册表、会话/任务编排、推理网关
-  hub-server/   Hub HTTP/WS 服务 + 前端托管
+  hub-server/   Hub HTTP/WS 服务 + 前端托管（进程入口 `main.rs` 在此）
+  hub-storage/  Hub 存储：SQLite 连接（WAL + busy_timeout）、schema.sql、版本化迁移、数据目录解析与权限
   afnode-core/  node 核心：连接、connector（terminal/files/git/exec，**仅面向页面用户**）、能力上报
-  afnode-cli/   node 二进制（enroll / run），**对外命令名 `afcli`**（避免与 Node.js 运行时 `node` 撞名）
+  afnode-cli/   node 二进制（enroll / run / worker），**对外命令名 `afcli`**（避免与 Node.js 运行时 `node` 撞名）
   protocol/     共享：消息定义、(node_id, channel_id) 通道、事件类型
 packages/
   web/          Vue 3 + Bun + Vite 前端；构建产物由 hub-server 托管
 ```
 
-- 依赖方向：`node-*` → `protocol`；`hub-*` → `protocol`。**不反向依赖**。
+- 依赖方向：`node-*` → `protocol`；`hub-*` → `protocol`；`hub-core` → `hub-storage`。**不反向依赖**。
+- `hub-storage` 是唯一直接摸 SQLite 的 crate——`hub-core` 与 `hub-server` 不写裸 SQL。
 - connector 是有类型的 trait，各自独立实现，不共用多态 Resource 分支。
 - 前端**只在 `packages/web` 内**依赖后端类型，不反向进 Rust 侧。
 
@@ -75,7 +77,7 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
 
 | # | 里程碑 | 目标 | 承接 §3.1 能力 |
 |---|--------|------|--------------|
-| M0 🔄 当前 | 设备接入 | `afcli enroll` 一条命令；**密钥对在 node 本地生成、Hub 只存指纹**；supervisor/worker 两层（身份随 supervisor，升级只换 worker）；单条 WS 主动外联；心跳即能力上报；掉线指数退避重连；防重复注册（同一指纹不得新建设备）；**WS 协议层与 enroll 时序一并设计**（见 `architecture/protocol.md`） | 设备接入、节点身份与状态 |
+| M0 🔄 当前 | 设备接入 | `afcli enroll` 一条命令；**密钥对在 node 本地生成、Hub 只存指纹**；supervisor/worker 两层（身份随 supervisor，升级只换 worker）；单条 WS 主动外联；心跳即能力上报；掉线指数退避重连；防重复注册（同一指纹不得新建设备）；**WS 协议层与 enroll 时序一并设计**（见 `architecture/protocol.md`） | 设备接入、节点身份与状态、存储与启动基座 |
 | M1 | 会话工作区与首个演示 | 工作区 `(node_id, path)` 落库；会话创建即挂载工作区；**在树莓派上开一个 agent 会话，会话内的 terminal / files 面板可用，零入站端口、不装 openssh-server**；exec connector（一次性命令、无 PTY，供页面与 Hub 侧系统调用）随此里程碑落地。**connector 只面向页面用户，不向 agent 暴露** | Bash/PTY、文件浏览 |
 | M2 | 工作区供料与同步 | Hub 内容寻址仓库（CAS）；manifest 差分物化到 `(node_id, path)`；排除依赖目录；技能/配置走托管覆盖层（只读 + 漂移检测 + **全局/会话两层权限规则**）；产物归档（见 `architecture/workspace-and-sync.md`） | 工作区供料、统一配置 agent、产物归档、模型配置一处切换 |
 | M3 | ACP 会话与轨迹 | 接入 ACP；Trajectory 逐条可查（事件表含类型/输入/输出/耗时/归属节点）；会话开始建基线，**随时可看**改动文件与 diff | 对话与动作流、AI agent 管理与对话 |
@@ -110,6 +112,9 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
 2. **每个里程碑都有对应架构依据**，或明确标注「新增能力 / 无对应设计」
 3. **第一版口径三处一致**：PRODUCT §3.2 的标注、DEVELOPMENT §3 的标注、README 的标注
 4. **不产生「承诺了但没排期」或「排了期但没承诺」的项**
+5. **每个里程碑必须有存储/进程入口基座**——子任务里若出现写 `device` 表、
+   用 `secret` 表、起 `main.rs`，就必须有一个前置子任务产出 schema + 迁移 + 进程入口。
+   M0 第 1 轮设计审查即漏此条（9 个子任务无人建表）。
 
 > 这份文档已三次出现漂移（Xshell 对标基调、「Hub 一键配置 agent」推后与否、
 > git 面板在哪个里程碑），全部源于两份文档各写各的、靠人工对齐。
@@ -121,6 +126,7 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
 |------------------|-----------|---------|
 | 设备接入 | M0 | `security-and-lifecycle.md` §4（supervisor/worker、身份） |
 | 节点身份与状态 | M0 | `security-and-lifecycle.md` §4.0/§5；`scheduling.md` §2 |
+| 存储与启动基座 | M0（新增，非 §3.1 能力） | `architecture/README.md` §3/§8；`security-and-lifecycle.md` §2.1（强制防护） |
 | Bash / PTY | M1 | `architecture/README.md` §4.1（工作区绑定） |
 | 文件浏览 | M1 | 同上 |
 | AI agent 管理与对话 | M3 | `session-and-trajectory.md`（ACP 会话） |

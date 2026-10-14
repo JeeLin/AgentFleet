@@ -173,11 +173,10 @@ pending ──派发──> dispatched ──节点确认──> running ──>
 ## 6. 数据表
 
 ```text
-node_report(       -- 不落库全量，只保留最近一次摘要，供调试与冷启动
-  node_id, seen_at,
-  capabilities TEXT,   -- JSON
-  resources    TEXT    -- JSON
-)
+-- M0 不建 node_report 表：全量心跳摘要只落 device.capabilities / device.resources
+-- （见 README.md §3）。历史负载无消费方，建表即负担。
+-- 若将来需要冷启动时「离线设备的最后一份能力」，从 device 表读即可，
+-- 不必引入第二份存储。
 
 task(
   id              TEXT PK,
