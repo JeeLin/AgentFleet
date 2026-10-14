@@ -1,2 +1,31 @@
-# mdflow 本地产物（不入库）
+# mdflow milestones (local only)
 .mdflow/
+
+# Rust
+/target
+**/*.rs.bk
+
+# Node
+node_modules/
+dist/
+.bun/
+.vite/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Database
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Build artifacts
+*.o
+*.so
+*.dylib
+*.tsbuildinfo
