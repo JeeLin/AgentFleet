@@ -133,7 +133,7 @@ agent 用它自带的权限机制（Claude Code / OpenCode 的 allow/ask/deny）
   agents/*.md      ← Hub 托管（只读）：子 agent 定义
   skills/*.md      ← Hub 托管（只读）
   opencode.json    ← Hub 托管（只读）：模型 / 权限 / MCP server 配置
-  auth.json        ← 节点所有：Hub 永不读、永不上传
+  identity.json    ← 节点所有：Hub 永不读、永不上传
   其他             ← 节点所有：Hub 不碰
 ```
 

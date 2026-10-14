@@ -38,14 +38,18 @@ device(
   name            TEXT,
   key_fingerprint TEXT,      -- 设备公钥指纹
   enrolled_at, last_seen_at TEXT,
-  status          TEXT,      -- online / offline
+  status          TEXT,      -- online / offline（仅两值；「重连中」只在内存，见 security §5）
+  last_seen_gen   INTEGER,   -- 最近一次连接的 gen，用于 auth_fail{superseded} 兜底
+  superseded_at   TEXT,      -- 被顶替的时间戳；重启后仍生效
   os, arch, hostname, node_version,
-  capabilities    TEXT,      -- JSON：支持的 connector 及参数
+  capabilities    TEXT,      -- JSON：支持的 connector 及参数（心跳更新，见 scheduling §2）
   resources       TEXT       -- JSON：CPU/内存/GPU/当前负载（调度用）
 )
 ```
 
 - **没有** environment 表；**没有** resource 表（connector 是有类型的，不是多态实体）。
+- **`capabilities` 必须落库**：它是路由的硬过滤输入，不能只在内存里——Hub 重启后
+  设备还没连上时要能回答「有没有这台设备」，见 `scheduling.md` §2.1。
 - SQLite：建库必须 `journal_mode=WAL` + `busy_timeout`。
 
 ## 4. connector：有类型、可插件化、绑定会话、**面向用户**

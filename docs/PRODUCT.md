@@ -83,7 +83,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 
 - **Hub 统一配置 agent**：在 Hub 统一管理所有设备上的 agent 配置（专家 agent 定义、技能、
   `opencode.json`）。实现为**托管覆盖层**：Hub 记录托管清单，文件在节点上只读，
-  心跳顺带检测漂移并给出 push / pull。**节点密钥（`auth.json`）永不上传。**
+  心跳顺带检测漂移并给出 push / pull。**节点密钥（`identity.json`）永不上传。**
   任务的跨设备分发（新建任务 → 路由到某台 node）是 Hub 层的事（M5），与 agent 运行时
   内部的父子 agent 无关。见 `docs/architecture/workspace-and-sync.md`。
 

@@ -93,27 +93,59 @@
 
 ```text
 Hub 首次启动  → secret 表无 hub.password → 进入「初始化模式」
-                仅暴露 /setup 路由：设置用户名 + 密码
-                设置完成 → 写入 secret(kind='hub', name='password') 后进入正常模式
+                生成 16 字节 setup_token，只写 stderr 与 <data>/setup-token.txt（0600）
+                仅暴露 /setup：设置用户名 + 密码
+                设置完成 → 写 password 后进入正常模式，setup_token 失效并删除
 此后每次启动  → 已有密码 → 正常模式，/setup 返回 409
 ```
 
 - **没有默认密码**，不存在「忘了默认密码」这回事。
-- **初始化模式只暴露 `/setup`**，其余路由一律 403——设置密码前不能读设备、不能开会话。
+- **`POST /setup` 必须带 `X-Setup-Token`**，否则 403。
+  **没有 token，任何人可抢先初始化你的 Hub**：Hub 常起在 `0.0.0.0:8080`
+  （树莓派 + 端口转发 / Tailscale 同网段 / Docker bridge 邻居），
+  用户还没打开浏览器，同网段另一台机器
+  `curl -X POST /setup -d '{"username":"me","password":"me"}'` 就拿到了 admin。
+  token 只落 stderr 与数据目录文件，攻击者拿不到。
+- **setup_token 失败 10 次即失效**，需 `afhub reset-setup` 重出（防爆破）。
+- **初始化模式除 `/setup` 外一律 403**——设置密码前不能读设备、不能开会话。
 - **密码哈希用 Argon2id**（不是 SHA-256：快哈希能被 GPU 暴力破解）。
   存 `argon2id$m=65536,t=3,p=4$<salt>$<hash>`，**salt 每用户随机 16 字节**。
   这是**唯一**不可逆存储的凭据（A/C 两类见 §1，A 只存指纹、C 明文）。
+- **Argon2id 校验必须走 `tokio::task::spawn_blocking`**，禁止在 tokio worker 上同步阻塞：
+  `m=65536,t=3,p=4` 单次 50–200ms，在 4 核树莓派上会阻塞 worker，
+  叠加每 15s × N 设备的心跳落库与 `/ws` 读循环，一次登录尝试就能让心跳延迟到超时边缘。
+  而 `/login` 是未认证端点，攻击者反复触发即可放大。
+  参数抽成常量并允许按 `nproc` 下调；`/login` 加全局信号量（=2）+ 排队超时 429。
 
 ### 2.4.2 会话：cookie，不是 token
 
 - 登录成功签发 **httpOnly + SameSite=Strict** 的 session cookie，
   **不放在 localStorage**（防 XSS 读取）。
-- 服务端存 session 表或签名 cookie（HMAC，密钥取自设备指纹派生——
-  不用明文密码当签名密钥）。
+- **session 的 HMAC 密钥 = Hub 首次初始化时生成的 32 字节随机值**，
+  存 `secret(kind='hub', name='session_hmac')`（0600，随数据库一起备份）。
+  - **不用明文密码当签名密钥**：改一次密码会使全部会话失效。
+  - **不用设备指纹派生**：这是**首次部署死锁**——`device` 表为空（未注册任何设备）时
+    该密钥无法计算，Hub 在 `POST /setup` 之前就签发不出 session；
+    而指纹又是公开值（`node_id` 由它唯一决定，见 §4.0），
+    **公开值当签名密钥 = 无认证**，任意知道 node_id 的人可离线伪造任意用户的 session。
 - **CSRF**：所有状态变更走 `POST/PUT/DELETE` + `SameSite=Strict` + 自定义 header 双重提交。
 - 登录失败有速率限制（IP + 尝试次数），防局域网内暴力破解。
 
-### 2.4.3 与单用户范围的关系
+### 2.4.3 路由豁免表（node 不是浏览器）
+
+`/ws` **在初始化模式与正常模式下均豁免 session 认证**——
+node 不是浏览器、没有 session cookie，它走 §3 的 challenge/签名认证。
+没有这张表，「除 `/setup` 外全部要求 session」会把**所有设备挡在门外**。
+
+| 路由 | 初始化模式 | 正常模式（无 cookie） | 正常模式（有 cookie） |
+|---|---|---|---|
+| `/setup` | 需 `X-Setup-Token` | 409 | 409 |
+| `/login` | 403 | 可用 | — |
+| `/ws` | **豁免**（走 §3 认证） | **豁免** | **豁免** |
+| `/healthz` | 豁免（无敏感信息） | 豁免 | 豁免 |
+| 其余 API | 403 | 401 | 需 cookie |
+
+### 2.4.4 与单用户范围的关系
 
 - **不做**：多用户、RBAC、团队协作、注册邀请（约束 8：范围选择，不引入）。
 - **不做**：OAuth / 第三方登录（自托管工具多一个外部依赖就多一个失效点）。
@@ -147,6 +179,11 @@ Hub 首次启动  → secret 表无 hub.password → 进入「初始化模式」
 
 ### 4.0 身份 = `node_id` + 密钥对，二者绑定
 
+**`node_id` 不是秘密、不得作为授权依据**：它是 128 位随机串，
+但明文出现在每个心跳帧里（Hub 日志、前端都可能留下）。
+授权只看「能否用库内指纹对应的私钥签出合法签名」——
+**重连时绝不接受请求里带来的任何公钥**（详见 `protocol.md` §3）。
+
 **设备身份的唯一性由密钥对保证，`node_id` 只是 Hub 侧的索引。**
 
 - 密钥对在 node 本地生成 → 上传公钥 + 指纹 → Hub 签发 `node_id` 并绑定该指纹。
@@ -178,8 +215,10 @@ supervisor（稳定，不随升级重启）
 | 场景 | 处理 |
 |---|---|
 | 同一 `node_id` + 同一指纹，正常重连 | ✅ 正常，按 §5 重连处理 |
-| 同一 `node_id` + 同一指纹，**第二个 WS 要抢占** | ✅ **不拒绝——新的直接顶掉旧的**：Hub 用新连接接管，向旧连接发 `disconnect{reason:"superseded"}`，旧连接退出且**不再重连**（见 `protocol.md` §7.1） |
-| 新 `node_id` + **已存在的指纹** | ❌ 拒绝，提示「该设备已注册」——这才是「另一台机器」 |
+| 同一 `node_id` + 同一指纹，**第二个 WS 要抢占** | ✅ **不拒绝——新的直接顶掉旧的**：Hub 用新连接接管，向旧连接发 `disconnect{reason:"superseded", gen}`，旧连接退出且**不再重连**。**但「不再重连」不能只依赖帧送达**——帧丢失时靠 `auth` 带 `last_seen_gen` 让 Hub 回 `auth_fail{superseded}` 兜底（见 `protocol.md` §7.1） |
+| 新 `node_id` + **已存在的指纹** | ❌ 拒绝，`auth_fail{reason:"fingerprint already registered"}`——这才是「另一台机器」 |
+| **并发 enroll**（两台同时首次注册） | ❌ 走显式事务 + `UNIQUE(key_fingerprint)`；唯一约束失败回 `auth_fail{reason:"fingerprint race, retry"}`，**绝不 upsert**（见 `protocol.md` §3） |
+| **正确 `node_id` + 错误公钥 + 合法签名** | ❌ `auth_fail{reason:"identity mismatch"}`，**绝不更新库内指纹**——否则「持有 node_id + 任意密钥对 = 完整控制该设备」 |
 | 同名设备重复 enroll | 提示已有记录，问用户是复用还是新建设备 |
 
 **为什么「顶替」而不是「拒绝」**：同一台设备重连（换网络 / 网络抖动恢复 / supervisor 重启）
@@ -192,18 +231,61 @@ supervisor（稳定，不随升级重启）
 
 ---
 
+### 4.4 identity.json：格式、权限、原子写（M0 验收项）
+
+私钥文件是**整个安全模型的根**——它决定了「你是不是你」。
+格式与写入方式必须钉死，否则会出现「节点永久无法重新接入」的故障。
+
+```text
+<data_dir>/identity.json   （0600）
+{
+  "version": 1,
+  "node_id": "n_<128-bit random>",          // 首次 enroll 后由 Hub 签发回填
+  "public_key": "<Ed25519 public, base64>",
+  "private_key_pkcs8_b64": "<Ed25519 PKCS#8, base64>",
+  "created_at": "<RFC3339>"
+}
+```
+
+- **算法：Ed25519**（不是 RSA/ECDSA——密钥短、签名快、实现简单，适合树莓派）。
+- **写入必须原子**：`临时文件 → fsync → rename`。**绝不用 `File::create` 直接写**：
+  进程在写到一半时崩溃 → 身份文件损坏 → 节点重启生成**新密钥对** →
+  重新 enroll 撞上 §4.3「指纹已存在则拒绝」→ **设备永久无法接入，只能手工删库**。
+  这是最可能实际发生的故障。
+- **权限在创建时就用 `OpenOptionsExt::mode(0o600)` 落**，**不依赖 umask**：
+  systemd 单元的 umask 常是 0022，靠 umask 会得到 0644，
+  写入期间私钥以世界可读存在（同机任意用户 / 容器挂载可读）。
+- **读取时若权限宽于 0600，先收紧并告警**（不要静默继续用）。
+- **私钥永不出现在**：任何 WS 载荷、日志、错误信息、trajectory 事件
+  （约束 13）。对 `Debug` 实现加断言，防止 `#[derive(Debug)]` 把它打进日志。
+- 文件名统一为 `identity.json`（`PRODUCT.md` / `workspace-and-sync.md` 中的旧称 `auth.json` 已同步修正）。
+- **`<data_dir>` 按平台解析**：Linux `$XDG_DATA_HOME/agentfleet` 或 `~/.local/share/agentfleet`；
+  macOS `~/Library/Application Support/agentfleet`；目录 0700。
+
+---
+
 ## 5. 掉线与重连
 
 ```text
-WS 断开 → 节点指数退避重连：1s / 2s / 4s … 上限 30s
+WS 断开 → 节点指数退避重连：1s / 2s / 4s … 上限 30s（带抖动，见 protocol §7.0）
         → Hub 侧 node 标记「重连中」
-连续失败 > ~3 分钟 → 转为「离线」状态
+连续心跳丢失 > 45s（= 3 个心跳周期）→ device.status = 'offline'
 ```
 
-> **为什么是 3 分钟**：退避上限 30s，几次重试覆盖到分钟级。
-> 3 分钟足以把绝大多数网络抖动 / 短暂休眠过滤掉，又不会让「设备明明掉线」
-> 在面板上长时间显示成还在线。**这是启发式阈值，不是协议保证**——
-> 判定离线只看「有没有按时收到心跳」，不依赖某次重连是否成功。
+> **为什么是 45s 而不是 3 分钟**：**判定只看心跳，不看重连次数。**
+> 「连续失败 3 分钟」是另一套时钟——设备可能**心跳超时但重连成功**，
+> 此时连接是通的，`UPDATE status='offline'` 会把活着的设备标成离线，
+> 而调度硬过滤第一步就是「online？否→排除」，活着的设备被排除了。
+> 45s = 3 个周期，足以过滤绝大多数网络抖动 / 短暂休眠 / 一次 GC 停顿。
+>
+> **这是启发式阈值，不是协议保证**，已知取舍：**Hub 自身重启会误判所有设备离线**。
+> M0 接受（重启后设备会在下个心跳周期内自行恢复）。
+> 若要消除，实现 Hub 侧持久化的 `grace_until`（与 DB 同事务写），不得改协议层。
+>
+> **「重连中」只存在于内存，不落库**：`device.status` 只有 `online` / `offline`，
+> 但内存里的连接状态有第三种 `reconnecting`。调度硬过滤把 `reconnecting`
+> **视为可用**——PTY 活着、工作区活着、会话活着，与 `PRODUCT.md` §3.3 流程 7
+> 「离线期间工作区与 agent 会话在设备上仍存活」一致。
 
 ### 5.1 离线期间发生了什么
 
@@ -365,6 +447,6 @@ Release 仍然保留（CI 自动打 tag 构建 + 软发布 + `SHA256SUMS` + 从 
 ## 8. 不可协商的边界
 
 1. **Hub 永不持有设备私钥。**
-2. **节点密钥（`auth.json`）与 agent 凭据永不上传。**
+2. **节点密钥（`identity.json`）与 agent 凭据永不上传。**
 3. **secret 值永不进日志、永不回显、永不进轨迹。**
 4. **不加密是本期决定，不是「安全」的声明**——写代码时不要因为「明文安全」而放松其他防护。
