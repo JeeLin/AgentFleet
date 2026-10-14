@@ -47,7 +47,7 @@ packages/
 
 | # | 里程碑 | 目标 | 承接 §3.1 能力 |
 |---|--------|------|--------------|
-| M0 | 设备接入 | `node enroll` 一条命令；**密钥对在 node 本地生成、Hub 只存指纹**；supervisor/worker 两层（身份随 supervisor，升级只换 worker）；单条 WS 主动外联；心跳即能力上报；掉线指数退避重连；防重复注册（同一指纹不得新建设备） | 设备接入、节点身份与状态 |
+| M0 🔄 当前 | 设备接入 | `node enroll` 一条命令；**密钥对在 node 本地生成、Hub 只存指纹**；supervisor/worker 两层（身份随 supervisor，升级只换 worker）；单条 WS 主动外联；心跳即能力上报；掉线指数退避重连；防重复注册（同一指纹不得新建设备）；**WS 协议层与 enroll 时序一并设计**（见 `architecture/protocol.md`） | 设备接入、节点身份与状态 |
 | M1 | 会话工作区与首个演示 | 工作区 `(node_id, path)` 落库；会话创建即挂载工作区；**在树莓派上开一个 agent 会话，会话内的 terminal / files 面板可用，零入站端口、不装 openssh-server**；exec connector（一次性命令、无 PTY，供页面与 Hub 侧系统调用）随此里程碑落地。**connector 只面向页面用户，不向 agent 暴露** | Bash/PTY、文件浏览 |
 | M2 | 工作区供料与同步 | Hub 内容寻址仓库（CAS）；manifest 差分物化到 `(node_id, path)`；排除依赖目录；技能/配置走托管覆盖层（只读 + 漂移检测 + **全局/会话两层权限规则**）；产物归档（见 `architecture/workspace-and-sync.md`） | 工作区供料、统一配置 agent、产物归档、模型配置一处切换 |
 | M3 | ACP 会话与轨迹 | 接入 ACP；Trajectory 逐条可查（事件表含类型/输入/输出/耗时/归属节点）；会话开始建基线，**随时可看**改动文件与 diff | 对话与动作流、AI agent 管理与对话 |
@@ -127,11 +127,8 @@ packages/
 - `architecture/workspace-and-sync.md` — Hub 内容寻址仓库、项目文件供料、配置铺设、产物归档
 - `architecture/scheduling.md` — 任务路由：心跳上报字段、硬过滤、有序打分、任务状态机
 - `architecture/security-and-lifecycle.md` — 凭据模型（明文存储的取舍与强制防护）、supervisor/worker、设备升级与掉线重连
+- `architecture/protocol.md` — WS 帧格式、enroll/challenge 握手、通道复用与流控/信用、重连序列号
 - `architecture/inference.md` — 分布式推理完整评估与分阶段路径
-
-> **未落文档的空白**（记此以免遗漏，非承诺排期）：
-> WS 协议层（握手时序、帧格式、流控/信用模型、序列号重传）与 `enroll` 首次注册时序
-> 尚无设计文档，**M0 开工前需补**。
 
 ---
 
