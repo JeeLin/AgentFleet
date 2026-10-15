@@ -1,5 +1,11 @@
 //! 身份：密钥对、指纹、node_id 签发。
 //!
+//! **这个 crate 由 node 与 Hub 双方共用**（约束 11 的主体），所以它是独立的：
+//! node 侧生成密钥对、写 `identity.json`；Hub 侧只存指纹并验签。
+//! 不让 node 依赖 `hub-core`——那会把 hub-storage / r2d2_sqlite / argon2 / uuid
+//! 整套 Hub 存储层拉进 afcli 二进制。也不放进 `protocol`——protocol 只放
+//! 帧信封 / 消息类型 / 载荷 / 错误码这类**协议定义**，不含密钥管理。
+//!
 //! 设计要点（`protocol.md` §3、`security-and-lifecycle.md` §4.0/§4.3）：
 //! - **算法 Ed25519**，密钥对在 node 本地生成，Hub 只存指纹（约束 11）。
 //! - **`node_id` 用 128 位随机串**，不是秘密，**不得作为授权依据**。
@@ -174,7 +180,8 @@ pub fn issue_nonce() -> String {
 
 /// base64url 无填充编码。
 ///
-/// 与 [`crate::identity`] 侧的实现在写法上保持一致：不裸索引、不裸切片。
+/// node 侧写 `identity.json` 与 Hub 侧解析用的是**同一份**实现——
+/// 这就是本 crate 存在的意义：不裸索引、不裸切片。
 /// `T.get(idx)` 恒命中（`idx` 被 `& 63` 夹在 0..64），用 `get` + 兜底
 /// 把「不可能失败」写成结构上不可能失败。
 pub fn base64url(bytes: &[u8]) -> String {

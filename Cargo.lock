@@ -535,6 +535,7 @@ dependencies = [
  "ed25519-dalek",
  "hmac",
  "hub-storage",
+ "identity",
  "parking_lot",
  "protocol",
  "r2d2",
@@ -561,6 +562,7 @@ dependencies = [
  "http-body-util",
  "hub-core",
  "hub-storage",
+ "identity",
  "libc",
  "parking_lot",
  "protocol",
@@ -625,6 +627,20 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tower-service",
+]
+
+[[package]]
+name = "identity"
+version = "0.1.0"
+dependencies = [
+ "base64ct",
+ "ed25519-dalek",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "tracing",
 ]
 
 [[package]]
@@ -886,7 +902,7 @@ name = "protocol"
 version = "0.1.0"
 dependencies = [
  "base64ct",
- "hub-core",
+ "identity",
  "rand 0.8.8",
  "serde",
  "serde_json",

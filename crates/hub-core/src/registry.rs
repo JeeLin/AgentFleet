@@ -16,8 +16,8 @@ use hub_storage::Db;
 use r2d2_sqlite::rusqlite as sqlite;
 use r2d2_sqlite::rusqlite::{params, OptionalExtension};
 
-use crate::identity::{self, Fingerprint, KeyPair};
 use crate::CoreError;
+use identity::{self, Fingerprint, KeyPair};
 
 pub mod error;
 pub use error::RegistryError;
@@ -239,8 +239,8 @@ mod tests {
         clippy::indexing_slicing
     )]
     use super::*;
-    use crate::identity::issue_node_id;
     use hub_storage::db::open;
+    use identity::issue_node_id;
 
     fn setup() -> (tempfile::TempDir, Registry) {
         let d = tempfile::tempdir().unwrap();

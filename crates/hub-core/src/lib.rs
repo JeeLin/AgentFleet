@@ -6,7 +6,6 @@
 pub mod auth;
 pub mod connections;
 pub mod error;
-pub mod identity;
 pub mod limits;
 pub mod registry;
 pub mod session;

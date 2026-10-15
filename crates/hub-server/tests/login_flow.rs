@@ -756,7 +756,7 @@ async fn standard_11_first_deploy_with_empty_device_table_can_setup_and_login() 
         .get("hub", "session_hmac")
         .unwrap()
         .expect("session_hmac must be persisted at setup time");
-    let decoded = hub_core::identity::base64url_decode(&stored).unwrap();
+    let decoded = identity::base64url_decode(&stored).unwrap();
     assert_eq!(decoded.len(), 32, "session 密钥必须是 32 字节随机值");
 
     // 拿到的 cookie 立刻可用（登录闭环不依赖设备表有任何行）

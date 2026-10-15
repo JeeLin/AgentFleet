@@ -6,7 +6,7 @@ pub enum CoreError {
     Storage(#[from] hub_storage::StorageError),
 
     #[error("identity: {0}")]
-    Identity(#[from] crate::identity::error::IdentityError),
+    Identity(#[from] identity::error::IdentityError),
 
     #[error("auth: {0}")]
     Auth(#[from] crate::auth::error::AuthError),

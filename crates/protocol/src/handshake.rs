@@ -6,7 +6,7 @@
 //! - **签名覆盖 `v + node_id + seq + t + nonce` 的规范编码**，不只是 nonce——
 //!   只签 nonce 的话，一个被重放的 `auth` 签名能在任意新连接上复用。
 //!   **规范编码与验签不在本 crate**：由 [`Authenticator`] 的实现方调用
-//!   `hub_core::identity::signature_message` + `KeyPair::verify` 完成，
+//!   `identity::signature_message` + `KeyPair::verify` 完成，
 //!   本 crate **不重复实现那份编码**（重复实现 = 两份会漂移的真相源）。
 //! - **nonce 用完即弃**：取出来验签就不再还回去；验签失败直接进 `Rejected` 终态，
 //!   不给第二次 challenge 的机会（challenge 每连接一次）。
@@ -179,7 +179,7 @@ pub struct AuthAttempt<'a> {
 
 /// 验签能力由上层注入——本 crate **不含密码学依赖**。
 ///
-/// 实现**必须**用 `hub_core::identity::signature_message(v, node_id, seq, t, nonce)`
+/// 实现**必须**用 `identity::signature_message(v, node_id, seq, t, nonce)`
 /// 构造待签字节、`KeyPair::verify` 验签。规范编码只有那一份，
 /// 不在这里重写一份（两份编码迟早漂移，而漂移的后果是「双方都以为验过了」）。
 pub trait Authenticator {
@@ -609,10 +609,10 @@ mod tests {
     )]
     use super::*;
     use crate::message::{reason, AuthFail, AuthOk, ErrPayload};
-    use hub_core::identity::{signature_message, KeyPair};
+    use identity::{signature_message, KeyPair};
     use serde_json::json;
 
-    /// **真**验签器：用 hub-core 的规范编码 + Ed25519 验签。
+    /// **真**验签器：用 identity crate 的规范编码 + Ed25519 验签。
     ///
     /// 这里绝不用「恒返回 true」的假验签器：重放类测试只有在真验签下
     /// 才说明得了问题——假验签器能让重放测试「通过」，而线上照样被重放。

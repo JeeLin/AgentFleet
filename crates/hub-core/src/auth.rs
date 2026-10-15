@@ -20,7 +20,7 @@ use hub_storage::SecretRepo;
 use parking_lot::Mutex;
 use rand::RngCore;
 
-use crate::identity::base64url;
+use identity::base64url;
 
 /// Argon2id 参数。可按 `nproc` 下调（见 [`AuthParams::for_cpu_count`]）。
 pub const DEFAULT_M_COST: u32 = 65536; // KiB
@@ -225,8 +225,7 @@ impl HubAuth {
     /// 后者在 `device` 表为空时算不出来（首次部署死锁）且指纹是公开值。
     pub fn session_hmac_key(&self) -> Result<[u8; 32], AuthError> {
         if let Some(b64) = self.repo.get("hub", "session_hmac")? {
-            let raw =
-                crate::identity::base64url_decode(&b64).map_err(|_| AuthError::MalformedHmacKey)?;
+            let raw = identity::base64url_decode(&b64).map_err(|_| AuthError::MalformedHmacKey)?;
             let mut out = [0u8; 32];
             if raw.len() != 32 {
                 return Err(AuthError::MalformedHmacKey);

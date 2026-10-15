@@ -134,11 +134,11 @@ fn now_unix() -> i64 {
 
 /// base64url 无填充编码。
 ///
-/// 直接复用 [`crate::identity::base64url`]：这里曾经有一份逐字重复的
+/// 直接复用 [`identity::base64url`]：这里曾经有一份逐字重复的
 /// 实现，两份代码会各自漂移，且都带裸索引。留一层转发只为让本模块的
 /// 调用点保持简短。
 pub fn b64url(bytes: &[u8]) -> String {
-    crate::identity::base64url(bytes)
+    identity::base64url(bytes)
 }
 
 /// base64url 无填充解码。

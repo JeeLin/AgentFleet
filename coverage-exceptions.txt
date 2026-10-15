@@ -17,8 +17,8 @@
 #
 # 当前全部例外均为**防御性兜底分支**，不是业务逻辑。
 
-crates/hub-core/src/identity.rs:87:ed25519-dalek 的 from_bytes 对几乎所有 32 字节输入均解压成功，构造不出确定性非法曲线点
-crates/hub-core/src/identity.rs:119:SHA-256 digest 恒为 32 字节，first_chunk::<16> 结构上永不返回 None
+crates/identity/src/lib.rs:93:ed25519-dalek 的 from_bytes 对几乎所有 32 字节输入均解压成功，构造不出确定性非法曲线点
+crates/identity/src/lib.rs:125:SHA-256 digest 恒为 32 字节，first_chunk::<16> 结构上永不返回 None
 crates/hub-core/src/registry.rs:134:活跃事务的 SQLite ROLLBACK 必然成功，该分支仅防御连接级故障
 crates/hub-server/src/main.rs:43:建不出 OS 线程（fd/内存耗尽）在测试环境无可控构造手段
 crates/hub-server/src/routes/setup.rs:167:spawn_blocking 的 JoinError 只在任务 panic（workspace lint panic=deny 禁止）或运行时关闭时产生，测试造不出

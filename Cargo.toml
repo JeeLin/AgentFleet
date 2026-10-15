@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/protocol",
+    "crates/identity",
     "crates/hub-storage",
     "crates/hub-core",
     "crates/hub-server",
@@ -18,6 +19,7 @@ repository = "https://github.com/JeeLin/AgentFleet"
 [workspace.dependencies]
 # 内部
 protocol = { path = "crates/protocol" }
+identity = { path = "crates/identity" }
 hub-storage = { path = "crates/hub-storage" }
 hub-core = { path = "crates/hub-core" }
 node-core = { path = "crates/node-core" }
