@@ -49,10 +49,10 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 
 | 能力 | 用户可见行为 |
 |------|------------|
-| 设备接入 | `afcli enroll <hub-url>` 一条命令，节点生成密钥对、主动建立 WebSocket 外联；无需 Hub 入站端口 |
+| 设备接入 | `afcli run <hub-url>` 一条命令，节点生成密钥对、主动建立 WebSocket 外联；**首次启动自动 enroll**，用户无需单独跑 enroll；无需 Hub 入站端口 |
 | 节点身份与状态 | 注册时 Hub 签发 `node_id`；心跳即能力上报（os / arch / hostname / 版本 / 支持的 connector）；在线/离线状态 |
 | AI agent 管理与对话 | 接入各类 agent 软件（不同厂商/协议），在 Web 一个界面里统一配置、启动、对话。**agent 运行时装在节点上**，接入方式与安装来源见 `docs/PRODUCT.md` §5 |
-| Hub 一键安装 agent | 在 Hub 选设备 + 选 agent 模板 → 节点本地安装 → 自动套用托管配置 → 心跳回报就绪。**必须由用户在页面上手动选择后才执行，不自动安装**；agent 版本升级策略未决。节点进程 afcli 自身的升级是另一条通路：心跳报版本 → Hub 比对 → 自动静默升级（无需用户确认），两者触发方式对照见 `architecture/workspace-and-sync.md` §4.5 |
+| Hub 一键安装 agent | 在 Hub 选设备 + 选 agent 模板 → 节点本地安装 → 自动套用托管配置 → 心跳回报就绪。**必须由用户在页面上手动选择后才执行，不自动安装**；agent 版本升级策略未决。节点进程 afcli 自身的升级是另一条通路：页面显示各设备 afcli 版本号 → **可手动触发升级** → 另有「自动升级」开关可开可关（关时只在页面手动触发）；版本号由 Hub 下发，升级失败自动回滚并回报。两者触发方式对照见 `architecture/workspace-and-sync.md` §4.5 |
 | 对话与动作流 | 会话有 Trajectory 视图，逐条展示 User/Assistant/Tool/子agent/压缩记录；**随时可看**本次改动文件与 diff |
 | 文件浏览 | 会话工作区内浏览/读写节点本地目录，写操作限制在工作区根内（**仅约束页面用户**；agent 用自己装的能力，不走这条路径） |
 | Git 操作界面 | 会话工作区的 git 状态 / diff / 提交视图 |
@@ -89,7 +89,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 
 ### 3.3 用户可见流程（第一版）/ Key flows (first release)
 
-1. **接入一台设备**：在设备上跑 `afcli enroll <hub-url>` → Hub 显示新节点（真实 os/arch/hostname）→ 在线。
+1. **接入一台设备**：在设备上跑 `afcli run <hub-url>` → 首次自动 enroll、生成密钥对并外联 → Hub 显示新节点（真实 os/arch/hostname）→ 在线。之后排障用 `afcli log` 看最近日志。
 2. **在某个设备上开 agent 对话**：选节点 → 选工作区路径（项目文件由 Hub 喂进去）→ 选/配 agent →
    会话建立，terminal / files 面板挂到这个工作区上（git 面板在 M4 加入）→
    在面板里对话 → Trajectory 逐条可查。
@@ -188,8 +188,8 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 | channel_id | 通道号：一条设备 WebSocket 上的子通道，通道键为 `(node_id, channel_id)`，每通道独立流控。Channel id: a sub-channel on one node WebSocket, keyed `(node_id, channel_id)`, with per-channel flow control |
 | baseline | 基线：会话开始时记录的工作区初始状态，用于随时计算改动文件与 diff。Baseline: the workspace state captured at session start, used to compute changed files and diffs on demand |
 | CAS | 内容寻址仓库：Hub 侧以内容哈希存储 blob 的仓库，统一供料项目文件、配置与产物。CAS: the Hub's content-addressed blob store, feeding project files, config and artifacts alike |
-| supervisor | 守护进程：持有设备身份与 WebSocket 的稳定进程，负责拉起与监控 worker。Supervisor: the stable process holding device identity and the WebSocket, responsible for starting and supervising workers |
-| worker | 工作进程：实际执行 connector 与 agent 的可替换进程，升级时更换，身份不变。Worker: the replaceable process that actually runs connectors and agents; swapped on upgrade, identity unchanged |
+| supervisor | 守护进程的父进程：不碰业务与 WebSocket，只负责拉起 / 监控 / 替换 / 回滚 worker——**执行回滚的代码不参与被回滚**。Supervisor: the parent process that touches neither business logic nor the WebSocket, only starting, monitoring, swapping and rolling back the worker — the code performing a rollback is never itself replaced |
+| worker | 工作进程：持有设备身份与 WebSocket，实际执行 connector 与 agent；升级时更换，`node_id` 不变。Worker: the process holding device identity and the WebSocket that actually runs connectors and agents; swapped on upgrade, `node_id` unchanged |
 | worktree | Git 工作树：同一仓库的多个独立工作目录，用于隔离并行任务，共享 object store。Worktree: independent working directories of one repository, isolating parallel tasks while sharing the object store |
 | Workbench | 会话工作台：Web 端承载会话的界面外壳，终端 / 文件 / git / 轨迹都渲染在其面板里。Workbench: the web UI shell that hosts a session; terminal / files / git / trajectory all render as its panels |
 

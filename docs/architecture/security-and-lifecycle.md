@@ -8,8 +8,8 @@
 1. 设备密钥对**在 node 本地生成**，Hub **只存指纹**。
 2. connector 凭据与模型 API key **由 Hub 明文存储，不做应用层加密**——
    靠文件系统权限收紧，**且永不打日志、永不回显**。
-3. node 分 **supervisor / worker** 两层，身份由 supervisor 持有，
-   **升级不换身份**。
+3. node 分 **supervisor / worker** 两层（同二进制，角色由 `run --worker` 区分），
+   **升级只换 worker，身份不变**——执行回滚的 supervisor 不参与被回滚。
 
 ---
 
@@ -209,18 +209,37 @@ node 不是浏览器、没有 session cookie，它走 §3 的 challenge/签名�
 ### 4.1 两层分工
 
 ```text
-supervisor（稳定，不随升级重启）
-  ├── 持有设备密钥对        ← 身份的不变量
-  ├── 维持与 Hub 的 WebSocket
-  └── 拉起 / 监控 worker
-        └── 实际执行 connector 与 agent；升级时换二进制 + 重启
+supervisor（极小，不碰业务；文件被替换但进程继续跑旧映像）
+  ├── 拉起 / 监控 worker（看退出码）
+  ├── 替换二进制 / 回滚          ← 关键：执行回滚的代码不参与被回滚
+  └── 写 update-state.json
+        │
+        └── worker（afcli run --worker，同一二进制）
+              ├── 持有设备密钥对        ← 身份的不变量
+              ├── 维持与 Hub 的 WebSocket
+              └── 实际执行 connector 与 agent；升级时换二进制 + 重启
 ```
+
+**为什么密钥在 worker 而不在 supervisor**：两层都要存在，但**职责完全不同**——
+supervisor 唯一要做的是「保证有一个能用的 worker」，它不需要理解业务，
+因此没有 bug 面；而这恰恰是最需要永远可靠的那个进程。
+让 supervisor 也持有密钥与 WS，等于让它重新变成一个可能出错的业务进程。
+
+**回滚为什么可靠**：supervisor 替换二进制时，**它自己没有被替换**——
+文件换新了，进程继续跑旧映像（下次被 systemd/docker 拉起才更新新代码），
+所以新版本再坏，也坏不到执行回滚的那份代码里。
+
+> supervisor 的职责被显式约束为一个**极小的稳定 ABI**：`spawn` + 退出码协议 +
+> `update-state.json`。它必须向后兼容——这是上面「懒生效」能成立的前提。
 
 ### 4.2 为什么必须两层
 
 若只有一个进程：升级 = 重启 = **WS 断开 + 身份需重新协商**。
-有了 supervisor：升级时 **WS 短暂断开 → supervisor 用同一密钥重连 → 同一个 `node_id`**。
+有了 worker：升级时 **WS 短暂断开 → worker 用同一密钥重连 → 同一个 `node_id`**。
 **不需要任何身份抢占逻辑。**
+
+⚠️ 换 worker 期间（约 2–5s）Hub 会短暂看到设备重连，但**不是** supervisor 断开——
+supervisor 根本不持有连接，所以它不会因升级而抖动。
 
 ### 4.3 重复注册的防护（M0 验收项）
 
@@ -339,8 +358,8 @@ Hub 发现缺件 → 回一条 hint { kind, version, blob_hash }
 | | node 自身升级 | agent 安装 |
 |---|---|---|
 | 谁提供代码 | 我们的发布产物 | agent 安装包（同为 CAS blob） |
-| 版本策略 | **已定**：supervisor 不动，只换 worker（§4.2） | **未决**，见 `workspace-and-sync.md` §4.4 |
-| 身份影响 | 无（身份在 supervisor） | 无（agent 不是设备身份） |
+| 版本策略 | **已定**：立即换 worker，supervisor 懒生效（§4.2） | **未决**，见 `workspace-and-sync.md` §4.4 |
+| 身份影响 | 无（身份在 worker，`node_id` 不变） | 无（agent 不是设备身份） |
 
 **共同性质**：零入站（节点主动拉）、失败隔离、可回滚（版本在路径里）。
 差异只在「升级策略」——node 是我们的软件可以拍板，agent 是第三方软件必须谨慎。
