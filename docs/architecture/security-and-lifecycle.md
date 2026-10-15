@@ -108,6 +108,8 @@ Hub 首次启动  → secret 表无 hub.password → 进入「初始化模式」
   token 只落 stderr 与数据目录文件，攻击者拿不到。
 - **setup_token 失败 10 次即失效**，需 `afhub reset-setup` 重出（防爆破）。
 - **初始化模式除 `/setup` 外一律 403**——设置密码前不能读设备、不能开会话。
+- 请求体里的 `username` 字段**收下但不落库**：M0 只有一个操作者，
+  `username` 无处可存（多用户是 M1 的范围选择，见 §2.4.4）。
 - **密码哈希用 Argon2id**（不是 SHA-256：快哈希能被 GPU 暴力破解）。
   存 `argon2id$m=65536,t=3,p=4$<salt>$<hash>`，**salt 每用户随机 16 字节**。
   这是**唯一**不可逆存储的凭据（A/C 两类见 §1，A 只存指纹、C 明文）。
@@ -122,7 +124,9 @@ Hub 首次启动  → secret 表无 hub.password → 进入「初始化模式」
 - 登录成功签发 **httpOnly + SameSite=Strict** 的 session cookie，
   **不放在 localStorage**（防 XSS 读取）。
 - **session 的 HMAC 密钥 = Hub 首次初始化时生成的 32 字节随机值**，
-  存 `secret(kind='hub', name='session_hmac')`（0600，随数据库一起备份）。
+  存 `secret(kind='hub', name='session_hmac')`（**随数据库一起备份**；
+  「0600」指数据库文件本身的 owner-only 权限——`secret` 表没有按行的
+  权限机制）。
   - **不用明文密码当签名密钥**：改一次密码会使全部会话失效。
   - **不用设备指纹派生**：这是**首次部署死锁**——`device` 表为空（未注册任何设备）时
     该密钥无法计算，Hub 在 `POST /setup` 之前就签发不出 session；
@@ -134,6 +138,13 @@ Hub 首次启动  → secret 表无 hub.password → 进入「初始化模式」
   已经能访问这台机器了）。若要「强制注销 / 踢下线 / 查看活跃会话」，随 M1 加表。
 - **CSRF**：所有状态变更走 `POST/PUT/DELETE` + `SameSite=Strict` + 自定义 header 双重提交。
 - 登录失败有速率限制（IP + 尝试次数），防局域网内暴力破解。
+
+**CSRF 只对「已带 session 的状态变更」强制**（实现见 `hub-server/src/middleware_auth.rs`）：
+`/setup` 与 `/login` 是 pre-auth 端点，请求时还没有可被「骑乘」的登录态，
+所以不要求 `X-CSRF-Token`——防它们靠的是 setup token 与密码本身，
+`SameSite=Strict` 拦不住的是「同源 XSS 发起的请求」，而这靠 HttpOnly
+（`/setup` 与 `/login` 都不下发可写的 session cookie）兜底。
+session 一旦签发，**所有**状态变更都要双重提交。
 
 ### 2.4.3 路由豁免表（node 不是浏览器）
 
