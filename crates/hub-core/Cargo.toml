@@ -17,7 +17,15 @@ ed25519-dalek.workspace = true
 base64ct.workspace = true
 argon2.workspace = true
 sha2.workspace = true
+hmac.workspace = true
+parking_lot.workspace = true
+r2d2.workspace = true
+r2d2_sqlite.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "macros"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

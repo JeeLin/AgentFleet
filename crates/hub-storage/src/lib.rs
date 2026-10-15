@@ -7,6 +7,8 @@
 pub mod db;
 pub mod error;
 pub mod migrate;
+pub mod repo;
 
-pub use db::{open, Db, Pool};
+pub use db::{data_dir, open, open_in, set_umask_077, Db};
 pub use error::StorageError;
+pub use repo::{base64url_of, Device, DeviceRepo, DeviceStatus, NewDevice, SecretRepo};

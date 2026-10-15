@@ -24,7 +24,7 @@ AgentFleet 是**个人自托管的设备 / Agent 平台**：把自己拥有的�
    Hub 无入站端口是产品承诺，不是部署偏好。
 2. **`agent` 一词只指 AI agent。** 绝不用来指设备进程。设备侧进程一律叫
    `node` / 节点进程 / connector。**设备二进制的命令名固定为 `afcli`**
-   （不叫 `node`——会与 Node.js 运行时撞名；crate 名用 `afnode-*`）。
+   （不叫 `node`——会与 Node.js 运行时撞名；**crate 名用 `node-*`，二进制名用 `afcli`**）。
 3. **connector 是有类型的、可插件化的能力。** 第一版内置 terminal / files / git / exec；
    后续 SSH / DB / S3 等协议作为**插件**按需加载，额外有抓包插件与端口转发插件。
    **不引入多态 Resource 抽象**（加一个协议要改 N 处即违规）。
@@ -88,6 +88,64 @@ AgentFleet 是**个人自托管的设备 / Agent 平台**：把自己拥有的�
 建库时必须 `PRAGMA journal_mode=WAL` + `PRAGMA busy_timeout`。
 多设备高频心跳/状态写入下，零 PRAGMA 必现 `SQLITE_BUSY`。
 
+### 生产代码禁 panic 铁律
+
+**`crates/**/src/**` 的非测试代码禁止 `unwrap()` / `expect()` / `panic!()` /
+裸索引切片 / `let _ =` 丢错误。** 由 workspace lints 强制（见下）。
+
+```rust
+// ❌ 假设失败即进程退出：Hub 是常驻服务，node 是无人值守守护进程，
+//    一处「不可能失败」的 unwrap 就能把整台设备带下去。
+let seed = &der[der.len() - 32..];          // 裸切片：len < 32 时 panic
+let mac = HmacSha256::new_from_slice(k).unwrap();
+Params::new(m, t, p, None).expect("valid");
+
+// ✅ 让失败变成可传播的错误，或写成结构上不可能失败
+seed.copy_from_slice(der.get(16..48).ok_or(IdentityError::MalformedKey)?);
+let idx = ((n >> shift) & 63) as usize;     // 恒 < 64
+match T.get(idx) { Some(&c) => out.push(c as char), None => break }
+```
+
+`Cargo.toml` 的 `[workspace.lints.clippy]`：
+
+| lint | 级别 | 管什么 |
+|---|---|---|
+| `unwrap_used` / `expect_used` / `panic` | deny | 进程级退出 |
+| `indexing_slicing` | deny | 越界 panic |
+| `let_underscore_must_use` | deny | 静默吞错（回滚失败等必须记日志） |
+| `unwrap_or_default` | deny | 把「取不到」静默变成空值 |
+| `arithmetic_side_effects` | **不开** | 连 `i += 1` / `len() * 2` 都命中，开只会得到满屏 allow；溢出靠 `overflow-checks` + 测试 |
+
+`clippy --all-targets` 必须**零 warning**，所以上面每条都是 deny 而非 warn。
+
+**测试代码豁免**：`mod tests` 内允许 `unwrap`/`panic`——测试失败就该炸，
+panic 消息比 `match` 分支更能说明哪一行、哪个值不对。豁免头由
+`scripts/exempt-tests.sh` 统一插入，不要手抄（会漏 lint）。
+
+**真不可达的兜底**（如 `match T.get(idx) { None => break }`）要能跑到或标
+`// coverage: excluded — <理由>`，与覆盖率门禁同规则。
+
+### 依赖版本收敛铁律
+
+**所有依赖版本号只出现在根 `Cargo.toml` 的 `[workspace.dependencies]` 与
+`[workspace.dev-dependencies]`**，子 crate 一律写 `xxx.workspace = true`。
+
+```toml
+# ❌ 子 crate 里手写版本号
+[dependencies]
+serde = "1"              # 会与其它 crate 的 "1.0.210" 解析成不同版本
+
+# ✅
+[dependencies]
+serde.workspace = true
+```
+
+理由：同一依赖出现多个版本 → **重复编译、二进制体积翻倍、`--locked` 无法复现**；
+更麻烦的是 trait 实现在两个版本间不互通（`impl From<A::Error> for B::Error` 编不过），
+报错信息指向的类型名一模一样，极难定位。
+
+由 `scripts/check.sh` C1 以 grep 强制，新增依赖时同步补进根 `[workspace.dependencies]`。
+
 ---
 
 ## 设计基调（UIUX）
@@ -140,9 +198,11 @@ AgentFleet 是**个人自托管的设备 / Agent 平台**：把自己拥有的�
 Rust：
 
 ```bash
+scripts/check.sh                                  # grep 门禁（依赖收敛/命名/锚点）
 cargo fmt --check
 cargo clippy --workspace --all-targets
 cargo test --workspace
+cargo llvm-cov --workspace --all-targets          # 覆盖率，见下
 ```
 
 Web（`packages/web`，Vue 3 + Bun + Vite）：
@@ -159,7 +219,41 @@ bun run build          # vite build
 不得记为通过；也不要把「环境因素导致失败」写成「环境限制」——
 磁盘、工具链这类**可修复因素**应先排除再下结论。
 
-本项目暂不设**阻塞性**覆盖率门禁；`cargo llvm-cov --workspace` 作为报告项。
+### 覆盖率门禁：100%（阻塞）
+
+**行覆盖率 100% 是硬性门禁**，不是报告项：
+
+```bash
+cargo llvm-cov --workspace --all-targets --summary-only   # 汇总
+cargo llvm-cov --workspace --all-targets                  # 明细（找未覆盖行）
+```
+
+- **阈值 100%**：`TOTAL` 行的 `Lines` 必须为 `100.00%`。
+  少一行即不通过，步骤 3 不得进入 MARK。
+- 未覆盖的代码只有两种合法出路：**补测试**，或**删掉**（死代码不该存在）。
+  **禁止**用 `#[cfg(test)]` 之外的 `#[allow]`、`--ignore-tests`、
+  排除文件等手段"做"出 100%——那是伪造。
+- **不可覆盖的例外必须显式标注并说明理由**：确实无法触达的分支
+  （如 `unreachable!()` 兜底、平台专属路径）用
+  `// coverage: excluded — <理由>` 注明，并在 step6 报告中逐条列出。
+  例外是少数，不是常规手段。
+- **例外登记在 `coverage-exceptions.txt`，由 `scripts/check-coverage.sh` 强制核对。**
+  该脚本比对 `cargo llvm-cov --show-missing-lines`：每条未覆盖行都必须在
+  清单里登记，且清单里的行必须**确实仍未覆盖**——双向核对，
+  防止例外清单退化成永久豁免。
+
+  > 为什么不直接让工具跳过：`cargo-llvm-cov` 没有行级排除能力
+  > （`#[coverage(off)]` 在 rustc 1.99 仍是实验特性），而唯一可用的
+  > `--ignore-filename-regex` 是整文件排除，正是上面禁止的伪造手段。
+  > 所以例外只能**显式登记 + 脚本强制比对**，而不是让工具静默跳过。
+
+  ```bash
+  scripts/check-coverage.sh   # 覆盖率门禁（含例外双向核对）
+  ```
+
+  当前全部例外都是**防御性兜底分支**（无法创建 OS 线程、ROLLBACK 必然成功、
+  `?` 的 Err 传播 region 等），**不含任何业务逻辑**。
+- **每轮审查都重跑**：步骤 5（代码审查）后新写的代码同样要满足 100%。
 
 ---
 

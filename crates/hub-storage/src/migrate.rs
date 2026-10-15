@@ -27,25 +27,32 @@ const MIGRATIONS: &[Migration] = &[Migration {
 ///
 /// 幂等：已应用的迁移跳过（`schema.sql` 内所有 DDL 均为 `IF NOT EXISTS`）。
 pub fn run(conn: &mut Connection) -> Result<()> {
+    apply(conn, MIGRATIONS, SCHEMA_VERSION)
+}
+
+/// 按给定清单迁移到 `target`。抽出来是为了能注入一条会失败的迁移，
+/// 验证「失败即回滚、`user_version` 不前进」（子任务 0 测试标准 ④）。
+fn apply(conn: &mut Connection, migrations: &[Migration], target: i64) -> Result<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
 
-    if current > SCHEMA_VERSION {
+    if current > target {
         return Err(StorageError::SchemaTooNew {
             found: current,
-            supported: SCHEMA_VERSION,
+            supported: target,
         });
     }
 
-    if current == SCHEMA_VERSION {
+    if current == target {
         return Ok(());
     }
 
-    for m in MIGRATIONS.iter().filter(|m| m.version > current) {
+    for m in migrations.iter().filter(|m| m.version > current) {
         let tx = conn.transaction()?;
-        tx.execute_batch(m.sql).map_err(|source| StorageError::Migration {
-            version: m.version,
-            source,
-        })?;
+        tx.execute_batch(m.sql)
+            .map_err(|source| StorageError::Migration {
+                version: m.version,
+                source,
+            })?;
         tx.pragma_update(None, "user_version", m.version)?;
         tx.commit()?;
         info!(version = m.version, "applied migration");
@@ -56,6 +63,17 @@ pub fn run(conn: &mut Connection) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    // 测试代码豁免生产级 panic 禁令：测试里 unwrap 失败就是要立刻炸，
+    // 而 panic 消息比 match 分支更能说明是哪一行、哪个值不对。
+    // let_underscore_must_use / indexing_slicing 同理：测试里故意 `let _ =`
+    // 丢弃一个错误来验证「失败不影响状态」，按索引取值也是常规写法。
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::let_underscore_must_use,
+        clippy::indexing_slicing
+    )]
     use super::*;
 
     fn memory() -> Connection {
@@ -66,12 +84,16 @@ mod tests {
     fn migration_is_idempotent() {
         let mut c = memory();
         run(&mut c).unwrap();
-        let v1: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let v1: i64 = c
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(v1, SCHEMA_VERSION);
 
         // 第二次执行不得报错、不得倒退
         run(&mut c).unwrap();
-        let v2: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let v2: i64 = c
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(v2, SCHEMA_VERSION);
     }
 
@@ -138,19 +160,20 @@ mod tests {
             )
             .unwrap_err();
         // 「重连中」只存在于内存，不落库（security §5）
-        assert!(matches!(e, rusqlite::Error::SqliteFailure(_, _)), "got {e:?}");
+        assert!(
+            matches!(e, rusqlite::Error::SqliteFailure(_, _)),
+            "got {e:?}"
+        );
     }
 
     #[test]
     fn schema_too_new_is_refused() {
         let mut c = memory();
         run(&mut c).unwrap();
-        c.pragma_update(None, "user_version", SCHEMA_VERSION + 1).unwrap();
+        c.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
         let e = run(&mut c).unwrap_err();
-        assert!(
-            matches!(e, StorageError::SchemaTooNew { .. }),
-            "got {e:?}"
-        );
+        assert!(matches!(e, StorageError::SchemaTooNew { .. }), "got {e:?}");
     }
 
     #[test]
@@ -158,13 +181,17 @@ mod tests {
         // 注入一个会失败的迁移，验证回滚后 user_version 与表都不变
         let mut c = memory();
         run(&mut c).unwrap();
-        let before: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let before: i64 = c
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
 
         let tx = c.transaction().unwrap();
         let _ = tx.execute_batch("CREATE TABLE boom (x); THIS IS NOT SQL;");
         drop(tx); // 未 commit，事务回滚
 
-        let after: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let after: i64 = c
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(before, after, "user_version changed on failed migration");
         let n: i64 = c
             .query_row(
@@ -176,5 +203,37 @@ mod tests {
         assert_eq!(n, 0, "failed migration left a table behind");
         // 库仍可用
         c.query_row("SELECT 1", [], |r| r.get::<_, i64>(0)).unwrap();
+    }
+
+    #[test]
+    fn apply_reports_failing_migration_and_leaves_version_intact() {
+        // 子任务 0 测试标准 ④：注入一条会 Err 的迁移 →
+        // run 返回 Err（带上版本号），user_version 不前进，
+        // 该迁移里已执行的语句不留痕迹。
+        let mut c = memory();
+        let bad = Migration {
+            version: 1,
+            // 第一条成功、第二条语法错：验证**整条迁移**回滚，
+            // 而不只是失败的那一句
+            sql: "CREATE TABLE ok_tbl (x); THIS IS NOT SQL;",
+        };
+        let e = apply(&mut c, &[bad], 1).unwrap_err();
+        assert!(
+            matches!(e, StorageError::Migration { version: 1, .. }),
+            "expected Migration error, got {e:?}"
+        );
+
+        let v: i64 = c
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 0, "user_version must not advance on failed migration");
+        let n: i64 = c
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='ok_tbl'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "partial migration must roll back entirely");
     }
 }

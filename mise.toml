@@ -1,0 +1,54 @@
+# mise 项目配置：工具链与任务
+#
+# 原则：**工具链版本钉死**，不用 `latest`——否则换一次 stable 就重编译全树，
+# 且 `cargo llvm-cov` 的覆盖率数值跨工具链不可比（覆盖率门禁要求可复现）。
+
+[tools]
+# 与 CI 保持一致；升级时同步改 .github/workflows/ci.yml 与 README
+rust = "1.99.0"
+bun = "1.4.3"
+
+# ---------------------------------------------------------------------------
+# 任务：把 AGENTS.md 的质量门禁固化成可执行命令，避免每次手打一串
+# ---------------------------------------------------------------------------
+
+[tasks.check]
+description = "grep 门禁：依赖收敛 / 命名合规 / 文档锚点"
+run = "scripts/check.sh"
+
+[tasks.fmt]
+description = "格式检查"
+run = "cargo fmt --check"
+
+[tasks.lint]
+description = "clippy，零 warning"
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks.test]
+description = "全部测试"
+run = "cargo test --workspace"
+
+[tasks.cov]
+description = "覆盖率汇总（阈值 100%，见 AGENTS.md 覆盖率门禁）"
+run = "cargo llvm-cov --workspace --all-targets --summary-only"
+
+[tasks.cov-detail]
+description = "覆盖率明细：找出未覆盖的行"
+run = "cargo llvm-cov --workspace --all-targets"
+
+[tasks.ci]
+description = "本地全量门禁 = check + fmt + lint + test + cov"
+depends = ["check", "fmt", "lint", "test", "cov"]
+
+[tasks.build]
+description = "release 构建（lto + strip）"
+run = "cargo build --release --workspace"
+
+# 交叉编译：树莓派一类设备（M0 子任务 0 测试⑦）
+[tasks.check-arm64]
+description = "aarch64 交叉编译检查"
+run = "cargo check --target aarch64-unknown-linux-gnu --workspace"
+
+[tasks.add-target]
+description = "安装 aarch64 目标（一次性）"
+run = "rustup target add aarch64-unknown-linux-gnu"

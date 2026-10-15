@@ -1,5 +1,5 @@
 [package]
-name = "afnode-core"
+name = "node-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -20,4 +20,7 @@ tokio-tungstenite.workspace = true
 futures-util.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,24 @@
+# 覆盖率例外清单
+#
+# 本文件是「覆盖率 100%（阻塞）」门禁的**机器可读例外登记**。
+#
+# 规则：
+#   - 每行格式：<相对路径>:<行号>:<一句话理由>
+#   - 源码中对应位置必须有 `// coverage: excluded — <同义理由>` 注释，
+#     让人读代码时就能看到这是有意为之的例外。
+#   - `scripts/check-coverage.sh` 会比对 `cargo llvm-cov --show-missing-lines`
+#     的输出：未覆盖行必须**全部**在本文件里登记，否则门禁失败。
+#   - 例外只能是「结构上不可达」或「防御性兜底」，**不允许**用例外掩盖
+#     本该写测试的业务代码。
+#
+# 为什么需要这个文件：llvm-cov 没有行级排除机制（`#[coverage(off)]` 在
+# rustc 1.99 仍是实验特性），`--ignore-filename-regex` 是整文件排除，
+# AGENTS.md 明确禁止用它做数。所以例外只能显式登记 + 脚本核对。
+#
+# 当前全部例外均为**防御性兜底分支**，不是业务逻辑。
+
+crates/hub-core/src/identity.rs:87:ed25519-dalek 的 from_bytes 对几乎所有 32 字节输入均解压成功，构造不出确定性非法曲线点
+crates/hub-core/src/identity.rs:119:SHA-256 digest 恒为 32 字节，first_chunk::<16> 结构上永不返回 None
+crates/hub-core/src/registry.rs:134:活跃事务的 SQLite ROLLBACK 必然成功，该分支仅防御连接级故障
+crates/hub-server/src/main.rs:43:建不出 OS 线程（fd/内存耗尽）在测试环境无可控构造手段
+crates/hub-storage/src/repo.rs:235:execute(...)? 隐含的 Err 传播 region，需破坏底层连接才能触达

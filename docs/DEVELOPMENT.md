@@ -29,8 +29,8 @@ crates/
   hub-core/     Hub 核心：注册表、连接注册表、会话/任务编排、推理网关
   hub-server/   Hub HTTP/WS 服务 + 前端托管（进程入口 `main.rs` 在此）
   hub-storage/  Hub 存储：SQLite 连接（WAL + busy_timeout）、schema.sql、版本化迁移、数据目录解析与权限
-  afnode-core/  node 核心：连接、connector（terminal/files/git/exec，**仅面向页面用户**）、能力上报
-  afnode-cli/   node 二进制（enroll / run / worker），**对外命令名 `afcli`**（避免与 Node.js 运行时 `node` 撞名）
+  node-core/    node 核心：连接、connector（terminal/files/git/exec，**仅面向页面用户**）、能力上报
+  node-cli/     node 二进制（enroll / run / worker），**对外命令名 `afcli`**（避免与 Node.js 运行时 `node` 撞名）
   protocol/     共享：消息定义、(node_id, channel_id) 通道、事件类型
 packages/
   web/          Vue 3 + Bun + Vite 前端；构建产物由 hub-server 托管

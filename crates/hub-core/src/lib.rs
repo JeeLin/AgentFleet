@@ -1,0 +1,20 @@
+//! hub-core：Hub 的业务核心。
+//!
+//! 持有注册表、连接注册表、认证与会话。**不直接写 SQL**——全部经
+//! `hub-storage` 的 repo；**不做 HTTP**——路由装配在 `hub-server`。
+
+pub mod auth;
+pub mod connections;
+pub mod error;
+pub mod identity;
+pub mod limits;
+pub mod registry;
+pub mod session;
+
+pub use auth::{HubAuth, SetupToken};
+pub use connections::ConnectionRegistry;
+pub use error::CoreError;
+pub use identity::{Fingerprint, KeyPair};
+pub use limits::{ReadLimiter, WriteQueue};
+pub use registry::Registry;
+pub use session::{Session, SessionStore};

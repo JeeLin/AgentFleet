@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "hub_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "afhub"
 path = "src/main.rs"
@@ -28,4 +32,9 @@ bytes.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
-http-body-util = "0.1"
+http-body-util.workspace = true
+tempfile.workspace = true
+libc.workspace = true
+
+[lints]
+workspace = true
