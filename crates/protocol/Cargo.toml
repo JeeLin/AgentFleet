@@ -8,6 +8,15 @@ license.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+rand.workspace = true
+base64ct.workspace = true
+
+# 仅测试用：握手状态机的重放类测试必须跑**真** Ed25519 + **唯一一份**规范编码，
+# 所以借用 hub-core 的 `identity::signature_message` / `KeyPair::verify`，
+# 而不在 protocol 测试里重写一份编码（重复实现 = 两份会漂移的真相源）。
+# Cargo 允许 dev-dependency 成环；生产依赖方向仍是 protocol ← hub-core。
+[dev-dependencies]
+hub-core.workspace = true
 
 [lints]
 workspace = true

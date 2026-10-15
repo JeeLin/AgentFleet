@@ -562,11 +562,13 @@ dependencies = [
  "hub-core",
  "hub-storage",
  "libc",
+ "parking_lot",
  "protocol",
  "rand 0.8.8",
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "tower",
@@ -883,6 +885,9 @@ dependencies = [
 name = "protocol"
 version = "0.1.0"
 dependencies = [
+ "base64ct",
+ "hub-core",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
