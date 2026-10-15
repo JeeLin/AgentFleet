@@ -6,6 +6,7 @@
 //!   否则已关闭的连接会把 status 改回 offline，覆盖新连接的 online。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -23,7 +24,7 @@ pub struct ConnHandle {
 #[derive(Debug, Default)]
 pub struct ConnectionRegistry {
     inner: Arc<RwLock<HashMap<String, ConnHandle>>>,
-    gen_counter: u64,
+    gen_counter: Arc<AtomicU64>,
 }
 
 impl ConnectionRegistry {
@@ -32,13 +33,17 @@ impl ConnectionRegistry {
     }
 
     /// 分配下一个 `gen`。
-    pub fn next_gen(&mut self) -> u64 {
-        self.gen_counter += 1;
-        self.gen_counter
+    ///
+    /// `&self` 而不是 `&mut self`：注册表由 `AppState` 以 `Arc` 共享，
+    /// 而每条新连接都要取号。要求 `&mut` 会让共享注册表变成不可能
+    /// （或者逼着调用方在 `RwLock` 外面再套一层 `Mutex`，多一把锁多一个死锁面）。
+    /// `gen` 单调递增由 `fetch_add` 保证；初始为 0 所以第一个连接拿到 1。
+    pub fn next_gen(&self) -> u64 {
+        self.gen_counter.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     pub fn current_gen(&self) -> u64 {
-        self.gen_counter
+        self.gen_counter.load(Ordering::Relaxed)
     }
 
     pub fn insert(&self, node_id: String, handle: ConnHandle) -> Option<ConnHandle> {
@@ -121,10 +126,26 @@ mod tests {
 
     #[test]
     fn gen_is_monotonic() {
-        let mut r = ConnectionRegistry::new();
+        let r = ConnectionRegistry::new();
         assert_eq!(r.next_gen(), 1);
         assert_eq!(r.next_gen(), 2);
-        assert_eq!(r.current_gen(), 2);
+        assert_eq!(r.next_gen(), 3);
+        assert_eq!(r.current_gen(), 3);
+    }
+
+    #[test]
+    fn gen_is_unique_across_concurrent_takers() {
+        // `next_gen` 走 `&self` 正是为了「注册表被 Arc 共享时仍能取号」。
+        // 多个线程同时取号，拿到的值必须两两不同（fetch_add 的保证）。
+        let r = Arc::new(ConnectionRegistry::new());
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let r = Arc::clone(&r);
+            handles.push(std::thread::spawn(move || r.next_gen()));
+        }
+        let mut got: Vec<u64> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        got.sort_unstable();
+        assert_eq!(got, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]

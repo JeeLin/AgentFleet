@@ -11,7 +11,7 @@ pub mod registry;
 pub mod session;
 
 pub use auth::{HubAuth, SetupToken};
-pub use connections::ConnectionRegistry;
+pub use connections::{ConnHandle, ConnectionRegistry};
 pub use error::CoreError;
 pub use identity::{Fingerprint, KeyPair};
 pub use limits::{ReadLimiter, WriteQueue};

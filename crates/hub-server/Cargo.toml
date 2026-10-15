@@ -42,6 +42,13 @@ tokio = { workspace = true, features = ["full"] }
 http-body-util.workspace = true
 tempfile.workspace = true
 libc.workspace = true
+# 子任务 3 的 WS 集成测试：用产品自己的 node 侧客户端连 Hub，
+# 而不是裸手搓一个——那样漏掉「两端字段对不上」这类问题。
+node-core.workspace = true
+identity.workspace = true
+protocol.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
 
 [lints]
 workspace = true

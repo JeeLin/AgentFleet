@@ -21,6 +21,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use hub_core::auth::{AuthError, AuthParams, HubAuth, LoginRateLimiter, SetupToken};
+use hub_core::registry::Registry;
+use hub_core::ConnectionRegistry;
 use hub_storage::db::Db;
 use parking_lot::Mutex;
 use serde_json::json;
@@ -37,6 +39,16 @@ pub const SETUP_TOKEN_HEADER: &str = "x-setup-token";
 
 /// `/login` 排队超时（秒→Duration 常量）。拿不到信号量即 429。
 pub const DEFAULT_LOGIN_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `/ws` 的握手超时。取 `protocol::HANDSHAKE_TIMEOUT`，不在这里另立一个值。
+pub use protocol::handshake::HANDSHAKE_TIMEOUT;
+
+/// 默认心跳周期（毫秒）。**由 Hub 在 `auth_ok` 下发给节点**（§2）——
+/// 节点不硬编码，所以这个常量只是 Hub 侧的默认配置值。
+pub const DEFAULT_HEARTBEAT_INTERVAL_MS: u64 = 15_000;
+
+/// 帧大小上限。与 `protocol::MAX_FRAME_BYTES` 一致（§2）：超限即断开。
+pub const WS_MAX_MESSAGE_BYTES: usize = protocol::MAX_FRAME_BYTES;
 
 /// 启动期错误：数据目录写不了 / 数据库读不了，Hub 起不来。
 ///
@@ -136,6 +148,17 @@ struct Inner {
     login_queue_timeout: Duration,
     limiter: LoginRateLimiter,
     data_dir: PathBuf,
+    /// 设备注册表（持久）。
+    registry: Registry,
+    /// 连接注册表：`node_id → 连接句柄`，**仅内存**（子任务 3）。
+    ///
+    /// 这里不存 socket：socket 活在 `tokio::task` 的栈上，
+    /// 注册表只回答「这个 node 现在该把消息送到哪条连接」。
+    /// 存 socket 会让注册表变成**不可序列化、不可测试、不可迁移**的东西，
+    /// 而且跨重启后必然指向一个已关闭的连接。
+    connections: Arc<ConnectionRegistry>,
+    /// 本进程上的心跳周期。`auth_ok` 下发给节点（§2）。
+    heartbeat_interval_ms: u64,
 }
 
 impl AppState {
@@ -164,7 +187,7 @@ impl AppState {
         login_queue_timeout: Duration,
         limiter: LoginRateLimiter,
     ) -> Result<Self, BootstrapError> {
-        let auth = HubAuth::new(pool, params);
+        let auth = HubAuth::new(pool.clone(), params);
         let state = Self(Arc::new(Inner {
             auth,
             setup: Mutex::new(None),
@@ -172,6 +195,9 @@ impl AppState {
             login_queue_timeout,
             limiter,
             data_dir: data_dir.to_path_buf(),
+            registry: Registry::new(pool),
+            connections: Arc::new(ConnectionRegistry::new()),
+            heartbeat_interval_ms: DEFAULT_HEARTBEAT_INTERVAL_MS,
         }));
 
         if state.is_initialized()? {
@@ -229,6 +255,26 @@ impl AppState {
         &self.0.limiter
     }
 
+    /// 设备注册表（enroll / 重连验签）。
+    pub fn registry(&self) -> &Registry {
+        &self.0.registry
+    }
+
+    /// 连接注册表（`node_id → 句柄`，仅内存）。
+    pub fn connections(&self) -> &Arc<ConnectionRegistry> {
+        &self.0.connections
+    }
+
+    /// 本进程的心跳周期，`auth_ok` 下发给节点（§2）。
+    pub fn heartbeat_interval_ms(&self) -> u64 {
+        self.0.heartbeat_interval_ms
+    }
+
+    /// 数据目录（测试用：读 schema / 直接查库）。
+    pub fn data_dir(&self) -> &Path {
+        &self.0.data_dir
+    }
+
     /// 校验 setup token（失败计数 +1，达上限即失效）。
     pub fn check_setup_token(&self, candidate: &str) -> Result<(), AuthError> {
         let mut guard = self.0.setup.lock();
@@ -272,6 +318,7 @@ pub fn build_app(state: AppState) -> Router {
             get(routes::setup::get_setup).post(routes::setup::post_setup),
         )
         .route("/login", post(routes::setup::post_login))
+        .route("/ws", get(routes::ws::upgrade))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware_auth::require_auth,
