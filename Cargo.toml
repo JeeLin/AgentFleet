@@ -50,7 +50,7 @@ r2d2_sqlite = "0.25"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 argon2 = { version = "0.5", features = ["std"] }
-base64ct = "1"
+base64ct = { version = "1", features = ["alloc", "std"] }
 sha2 = "0.10"
 hmac = "0.12"
 subtle = "2"
