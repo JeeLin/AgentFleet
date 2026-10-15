@@ -22,7 +22,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 - 多用户 / RBAC / 团队 / SaaS 计费
 - 通用文件同步引擎（跨设备自动同步目录）
 - 带 DAG 的重型调度器、消息中间件
-- 异构设备张量并行推理作为第一版卖点
+- 异构设备张量并行推理作为第一版卖点（本地推理后置，主线是 AI Gateway，见 §5.2 与 `docs/architecture/ai-gateway.md`）
 - 多态 Resource 抽象（connector 是有类型的、独立演进的能力）
 
 ---
@@ -77,7 +77,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 - **connector 插件化**：把 SSH / SFTP / MySQL / PostgreSQL / Redis / SQLite / S3 等协议做成插件按需加载；额外提供**网络抓包插件**与**端口转发插件**
 - **社交软件接入**：各 IM 作为 agent 的输入输出通道
 - **原生客户端**：客户端本身也是一个操作本机/服务器的 agent，可包裹开源软件实现
-- **分布式推理**：把接入设备作为协同的大模型运行节点（见 §5 设计问题二 与 `docs/architecture/inference.md`）
+- **AI Gateway**：把各平台（免费 + 付费）的模型 API 收敛成统一网关（见 §5.2 与 `docs/architecture/ai-gateway.md`）；本地模型推理**后置**，触发条件见该文 §4.6
 
 ### 3.2.1 原「推后」项，现纳入第一版 / Now in the first release
 
@@ -138,7 +138,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 
 **对外口径**：第一版只做到「会话/节点级可恢复」，完整的跨节点任务连贯性在任务系统里程碑做。
 
-### 5.2 二、把接入设备作为分布式大模型节点 / Distributed inference
+### 5.2 二、推理：AI Gateway 优先，本地推理后置 / AI gateway first, local inference deferred
 
 > 多个设备协同运行一个大模型（模型切分 / 分布式推理 / 异构组网），可行性、约束与路径？
 
@@ -147,17 +147,21 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 - **异构消费级设备做真实张量并行不可行**：张量并行每层多次跨设备归约，受互联带宽/延迟限制；
   llama.cpp 的 RPC 后端只做「逐算子转发 + 层切分（流水线并行）」，没有集合通信原语，
   跨机 TP 不可用；MoE 走 expert 分片（零跨节点流量）才是异构友好路径。
-- **必须基于现成开源，不自研内核**（你也明确无能力审核推理内核代码）：
-  - 最稳健：每台设备跑自己的全量副本 + 一个 OpenAI 兼容网关按模型/状态路由
-  - 进阶：llama.cpp RPC 层切分（2-3 台强设备跑装不下的模型）
-  - MoE 异构最优：mesh-llm 的 expert 分片（零跨节点流量）
-  - 实验：draft 分节点投机解码
-- **约束前置决策**：llama.cpp RPC 无鉴权且需入站端口，与「Hub 无入站访问」冲突——
-  采用 mesh-llm 的 QUIC/Iroh 出站隧道或 rileynz 的出站 TLS 隧道模式解决。
-- **对外表述**：「一个由你 N 台设备支撑的 OpenAI 兼容端点」，不是「N 台设备合成一台大模型机」。
-  正确预期是「能跑更大的模型」，不是「跑得更快」。
+- **原「阶段 1–4」路径与 `AGENTS.md` 约束 7 冲突**：管 `--rpc` 列表、算 `--tensor-split`、
+  强制全网同 build、MoE expert 分片属于「自研分布式推理编排」，正是约束 7 禁止的。
+- **必须基于现成开源，不自研内核**（你也明确无能力审核推理内核代码）。
 
-**结论：暂不确定，记为 TODO。**
+**结论（2026-10-15 定案）：先做 AI Gateway，本地推理后置。**
+
+- **主线改为 AI Gateway**：把各平台（免费 + 付费）的模型 API 收敛成一个统一网关——
+  统一端点 + 密钥托管 + 按 model/价格/延迟/可用性路由 + 故障转移 + 额度统计。
+  上游先用现成 API；`Provider` trait 为将来的本地推理留口。
+- **本地推理不实现**，但保留为「触发条件满足时再做」的待办（见 `ai-gateway.md` §4.6）。
+- **理由**：Gateway 不需要 GPU、不需要等设备上线，部署当天可用；而分布式推理需要多台强设备
+  在线且同 build。且 Gateway 路线下 Hub 只做「选上游并转发」，不再触碰约束 7 的红线。
+
+**需求详情与待决问题见 `docs/architecture/ai-gateway.md`（需求权威来源）。**
+`inference.md` 降级为本地推理的可行性调研存档，非主线方向。
 
 上面是**调研结论**，不是已定决策：已评估的几条可行路径都不直接匹配本项目的
 「自托管 + 个人设备」场景（详见 `docs/architecture/inference.md`）。本期不做决定，

@@ -1,5 +1,14 @@
 # 分布式推理评估 / Distributed Inference Evaluation
 
+> **⚠️ 非主线方向 / NOT the primary direction.**
+> 本文已降级为**本地推理的可行性调研存档**。推理主线已改为 **AI Gateway**
+> （收敛各平台免费/付费模型 API），决策见 `ai-gateway.md`，产品结论见 `PRODUCT.md` §5.2。
+> 本文仅在本路线需要用到其本地推理结论时才参考。
+>
+> **为何降级**：下文阶段 1–4 要 Hub 编排分布式推理（管 `--rpc` 列表、算 `--tensor-split`、
+> 强制全网同 build、MoE expert 分片），属于 `AGENTS.md` 约束 7 禁止的「自研分布式推理编排」。
+> Gateway 路线下 Hub 只做「选上游并转发」，无此矛盾。
+
 > 结论先行：异构消费级设备做**真实张量并行不可行**；可行路径由稳到险是
 > 「每设备全量副本 + 网关路由」→「llama.cpp RPC 层切分」→「MoE expert 分片」→「draft 投机」。
 > 全部**基于现成开源项目**不自研内核。对外是「一个由 N 台设备支撑的 OpenAI 兼容端点」，

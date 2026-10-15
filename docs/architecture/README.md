@@ -1,10 +1,11 @@
 # 架构总览 / Architecture Overview
 
-> 决策细节见：`inference.md`（分布式推理）、`session-and-trajectory.md`（会话与轨迹）、
+> 决策细节见：`ai-gateway.md`（**推理主线：AI Gateway**）、`session-and-trajectory.md`（会话与轨迹）、
 > `task-continuity.md`（任务连贯性）、`workspace-and-sync.md`（工作区供料与同步）、
 > `scheduling.md`（任务分发调度）、`security-and-lifecycle.md`（安全与生命周期）。
-> Detail lives in: inference.md, session-and-trajectory.md, task-continuity.md,
+> Detail lives in: ai-gateway.md, session-and-trajectory.md, task-continuity.md,
 > workspace-and-sync.md, scheduling.md, security-and-lifecycle.md.
+> `inference.md` is archived local-inference research, not the primary direction.
 
 ---
 
@@ -128,7 +129,10 @@ git 项目走主路径：Hub 只发 commit 引用，节点自己去 origin 拉�
 
 ## 7. 推理
 
-见 `inference.md`。核心约束：Hub 无入站访问 vs RPC 需入站 → 出站隧道/QUIC 方案前置决策。
+主线是 **AI Gateway**：把各平台免费/付费的模型 API 收敛成统一端点（密钥托管、
+按 model/价格/延迟/可用性路由、故障转移、额度统计），上游先用现成 API。
+本地模型推理**后置**。需求见 `ai-gateway.md`；`inference.md` 是本地推理的可行性存档。
+Gateway 复用约束 9 的调度范式（能力硬过滤 + 有序打分），且模型路由与任务路由是两套独立决策。
 
 ## 8. 存储
 
