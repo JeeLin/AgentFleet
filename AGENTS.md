@@ -10,6 +10,7 @@ AgentFleet 是**个人自托管的设备 / Agent 平台**：把自己拥有的�
 
 - 产品文档：`docs/PRODUCT.md`
 - 开发文档：`docs/DEVELOPMENT.md`（索引）
+- 决策记录：`docs/DECISIONS.md`（架构决策的**理由与否决的替代方案**）
 - 架构文档：`docs/architecture/`
 - 缺陷池：`docs/BUGS.md`
 - 里程碑文档：`.mdflow/milestones/`（本地产物，不入库）
@@ -263,6 +264,7 @@ cargo llvm-cov --workspace --all-targets                  # 明细（找未覆�
 docs/
   PRODUCT.md              产品功能边界、架构决策、用户可见流程
   DEVELOPMENT.md          开发索引（技术栈、crate 结构、里程碑总览）
+  DECISIONS.md            架构决策记录（为什么这么定 / 否决了什么方案）
   BUGS.md                 缺陷池（待处理 bug 的汇总地）
   architecture/           架构文档（连接模型、会话与轨迹、推理、插件、任务连贯性、工作区供料）
 crates/                   Rust workspace（hub / node / protocol）
