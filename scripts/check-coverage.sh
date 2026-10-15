@@ -11,7 +11,7 @@
 #
 # 这不是「把覆盖率做高」的技巧：例外必须逐条写明理由，脚本拒绝任何
 # 没登记的未覆盖行，也拒绝任何已失效的登记行。
-set -euo pipefail
+set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
@@ -19,6 +19,19 @@ EXCEPTIONS="coverage-exceptions.txt"
 
 if [ ! -f "$EXCEPTIONS" ]; then
     echo "FATAL: missing $EXCEPTIONS" >&2
+    exit 1
+fi
+
+# llvm-cov 需要一个独立的 target 目录（约 3–5G）。磁盘紧张时写满的报错
+# 是链接器崩溃（Bus error / "database or disk is full"），看起来像代码问题，
+# 实则是空间问题——所以先清掉上一轮的覆盖率产物再跑。
+echo "==> reclaiming space from previous coverage runs"
+rm -rf target/llvm-cov-target
+avail_kb=$(df -Pk . | awk 'NR==2 {print $4}')
+# 6G 是实测下限：workspace 全量插桩 + 链接峰值需要这个量
+if [ "$avail_kb" -lt 6291456 ]; then
+    echo "FATAL: only $((avail_kb / 1024))MiB free; llvm-cov needs >= 6144MiB." >&2
+    echo "       Free some space (other projects' target/ dirs are the usual culprit)" >&2
     exit 1
 fi
 

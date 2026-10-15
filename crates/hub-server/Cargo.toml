@@ -29,6 +29,12 @@ tracing-subscriber.workspace = true
 argon2.workspace = true
 rand.workspace = true
 bytes.workspace = true
+# 启动期错误类型（BootstrapError）；Hub 启动失败必须中止进程而不是半初始化
+thiserror.workspace = true
+# 共享状态里的 Mutex（setup token 计数、登录闸门参数）。
+# 用 parking_lot 而不是 std::sync::Mutex：后者有 poisoning，
+# 而这里的状态只是计数器，poison 后 panic 一次就会把 Hub 带下去。
+parking_lot.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

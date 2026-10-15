@@ -21,4 +21,8 @@ crates/hub-core/src/identity.rs:87:ed25519-dalek 的 from_bytes 对几乎所有 
 crates/hub-core/src/identity.rs:119:SHA-256 digest 恒为 32 字节，first_chunk::<16> 结构上永不返回 None
 crates/hub-core/src/registry.rs:134:活跃事务的 SQLite ROLLBACK 必然成功，该分支仅防御连接级故障
 crates/hub-server/src/main.rs:43:建不出 OS 线程（fd/内存耗尽）在测试环境无可控构造手段
+crates/hub-server/src/routes/setup.rs:167:spawn_blocking 的 JoinError 只在任务 panic（workspace lint panic=deny 禁止）或运行时关闭时产生，测试造不出
+crates/hub-server/src/routes/setup.rs:221:Semaphore::close() 是 pub 但本 workspace 零调用点（已 grep），闸门与 AppState 同生命周期，AcquireError 属约定性不可达
+crates/hub-server/src/routes/setup.rs:222:同 221：tracing::error! 的参数行被 llvm-cov 记为 miss（多行宏已知现象）
+crates/hub-server/src/routes/setup.rs:223:同 221：闭锁返回 500 的分支体，与 221 同一不可达臂
 crates/hub-storage/src/repo.rs:235:execute(...)? 隐含的 Err 传播 region，需破坏底层连接才能触达

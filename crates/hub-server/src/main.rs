@@ -57,12 +57,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(dir = %dir.display(), db = %db_path.display(), "hub storage ready");
 
     // 持有连接池到进程结束：drop 掉会让运行中的查询拿到 "closed pool"
-    let _pool = pool;
+    let _pool = pool.clone();
+
+    // 认证状态：未设密码则生成 setup token 落 stderr + <data>/setup-token.txt（§2.4.1）。
+    // 写不了就**启动失败**——绝不在「没有 token 的半初始化状态」上继续服务。
+    let state = hub_server::AppState::bootstrap(pool, &dir)?;
 
     // SIGINT（Ctrl-C）与 SIGTERM（systemd / docker stop 默认）都要能优雅关闭
     let mut sigterm = sigterm_listener()?;
 
-    let app = hub_server::build_app();
+    let app = hub_server::build_app(state);
     let listener =
         tokio::net::TcpListener::bind(addr)
             .await
@@ -74,15 +78,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             })?;
     tracing::info!(addr = %addr, "afhub listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => tracing::info!("afhub: SIGINT, shutting down"),
-                _ = sigterm.recv() => tracing::info!("afhub: SIGTERM, shutting down"),
-            }
-        })
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    // `into_make_service_with_connect_info` 是登录限流的必要条件：
+    // 拿不到对端地址时所有流量会落进同一个 IP 桶（见 middleware_auth::client_ip）。
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => tracing::info!("afhub: SIGINT, shutting down"),
+            _ = sigterm.recv() => tracing::info!("afhub: SIGTERM, shutting down"),
+        }
+    })
+    .await
+    .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
     tracing::info!("afhub stopped");
     Ok(())
 }

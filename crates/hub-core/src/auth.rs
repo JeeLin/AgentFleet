@@ -11,9 +11,13 @@
 pub mod error;
 pub use error::AuthError;
 
+use std::collections::HashMap;
+use std::net::IpAddr;
+
 use argon2::password_hash::SaltString;
 use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier};
 use hub_storage::SecretRepo;
+use parking_lot::Mutex;
 use rand::RngCore;
 
 use crate::identity::base64url;
@@ -31,6 +35,12 @@ pub const SETUP_TOKEN_MAX_FAILURES: u32 = 10;
 
 /// `/login` 全局并发信号量大小。
 pub const LOGIN_SEMAPHORE_PERMITS: usize = 2;
+
+/// 单 IP 连续失败上限，超过即锁定（§2.4.2「IP + 尝试次数」）。
+pub const LOGIN_MAX_FAILURES: u32 = 10;
+
+/// 锁定时长（秒）。
+pub const LOGIN_LOCKOUT_SECS: i64 = 300;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AuthParams {
@@ -245,11 +255,104 @@ impl HubAuth {
     }
 }
 
-pub(crate) fn now() -> String {
+/// 单 IP 的失败计数。
+#[derive(Debug, Clone, Copy, Default)]
+struct Attempt {
+    failures: u32,
+    /// 锁定截止的 unix 秒；0 = 未锁定。
+    locked_until: i64,
+}
+
+impl Attempt {
+    /// 当前是否处于锁定期内。
+    ///
+    /// `locked_until == 0` 表示「还没锁过」——它和「锁期已过」是**两件事**：
+    /// 计数中的 IP 永远没锁，必须放它过去，否则第一次失败之后就锁死。
+    fn is_locked(&self, at: i64) -> bool {
+        self.locked_until != 0 && self.locked_until > at
+    }
+
+    /// 锁期是否已过（过期的条目要被剪掉，计数从头开始）。
+    fn is_expired(&self, at: i64) -> bool {
+        self.locked_until != 0 && self.locked_until <= at
+    }
+}
+
+/// 登录速率限制：**IP + 尝试次数**（§2.4.2 末条）。
+///
+/// 单用户不等于「可以随便试」——Hub 暴露在 Web 端口上，
+/// 局域网里任何人都能打 `/login` 穷举密码。连续失败到上限即锁该 IP。
+///
+/// 无状态性：**纯内存**。Hub 重启即清零，这是有意的——锁定是防在线爆破的，
+/// 持久化它只会让一次误触发把用户锁在自己的 Hub 外面。
+pub struct LoginRateLimiter {
+    attempts: Mutex<HashMap<IpAddr, Attempt>>,
+    max_failures: u32,
+    lockout_secs: i64,
+}
+
+impl LoginRateLimiter {
+    pub fn new(max_failures: u32, lockout_secs: i64) -> Self {
+        Self {
+            attempts: Mutex::new(HashMap::new()),
+            max_failures,
+            lockout_secs,
+        }
+    }
+
+    /// 该 IP 当前是否已被锁定。
+    pub fn is_blocked(&self, ip: &IpAddr) -> bool {
+        let now = unix_secs();
+        let attempts = self.attempts.lock();
+        attempts.get(ip).is_some_and(|a| a.is_locked(now))
+    }
+
+    /// 记录一次失败。达到上限即锁定 `lockout_secs`。
+    pub fn record_failure(&self, ip: &IpAddr) {
+        let now = unix_secs();
+        let mut attempts = self.attempts.lock();
+        // 顺带剪掉已过期的条目：这张表只由「失败」触发，
+        // 不剪的话攻击者轮换来源 IP 能把内存吃光。
+        // 剪掉的效果就是「锁定过期后重新计数」——留着过期条目再叠加
+        // 失败数，会让一次锁定变成永久锁定。
+        attempts.retain(|_, a| !a.is_expired(now));
+        let entry = attempts.entry(*ip).or_default();
+        entry.failures = entry.failures.saturating_add(1);
+        if entry.failures >= self.max_failures {
+            entry.locked_until = now.saturating_add(self.lockout_secs);
+        }
+    }
+
+    /// 登录成功 → 清空该 IP 的计数。
+    pub fn record_success(&self, ip: &IpAddr) {
+        self.attempts.lock().remove(ip);
+    }
+
+    /// 当前计数（诊断用；Web 端只应看到「被限流」，不该看到别人的具体计数）。
+    pub fn failures(&self, ip: &IpAddr) -> u32 {
+        self.attempts
+            .lock()
+            .get(ip)
+            .map(|a| a.failures)
+            .unwrap_or(0)
+    }
+}
+
+impl Default for LoginRateLimiter {
+    fn default() -> Self {
+        Self::new(LOGIN_MAX_FAILURES, LOGIN_LOCKOUT_SECS)
+    }
+}
+
+pub(crate) fn unix_secs() -> i64 {
     let d = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    format!("unix:{}", d.as_secs())
+    i64::try_from(d.as_secs()).unwrap_or(i64::MAX)
+}
+
+pub(crate) fn now() -> String {
+    format!("unix:{}", unix_secs())
 }
 
 #[cfg(test)]
@@ -484,5 +587,70 @@ mod tests {
             a.login("anything at all"),
             Err(AuthError::NotInitialized)
         ));
+    }
+
+    fn ip(n: u8) -> IpAddr {
+        IpAddr::from([n, 0, 0, 1])
+    }
+
+    #[test]
+    fn login_limiter_blocks_after_max_failures_and_unlocks_on_success() {
+        let l = LoginRateLimiter::new(3, 60);
+        let a = ip(1);
+        assert!(!l.is_blocked(&a));
+        for i in 1..=3 {
+            l.record_failure(&a);
+            assert_eq!(l.failures(&a), i);
+        }
+        assert!(l.is_blocked(&a), "达到上限必须锁定");
+        l.record_success(&a);
+        assert!(!l.is_blocked(&a));
+        assert_eq!(l.failures(&a), 0, "成功后必须清零");
+    }
+
+    #[test]
+    fn login_limiter_is_per_ip() {
+        let l = LoginRateLimiter::new(1, 60);
+        l.record_failure(&ip(1));
+        assert!(l.is_blocked(&ip(1)));
+        assert!(!l.is_blocked(&ip(2)), "A 的爆破不该锁住 B");
+        assert_eq!(l.failures(&ip(3)), 0, "没失败过的 IP 没有计数");
+    }
+
+    #[test]
+    fn counting_but_not_locked_ip_is_still_allowed() {
+        // 「有失败计数」≠「被锁定」：上限是 3 时，前两次失败后还能继续试。
+        // 把这两者搞混会让 Hub 在**第一次**输错密码后就锁死该 IP。
+        let l = LoginRateLimiter::new(3, 60);
+        let a = ip(4);
+        assert!(!l.is_blocked(&a));
+        l.record_failure(&a);
+        assert!(!l.is_blocked(&a), "还没到上限");
+        l.record_failure(&a);
+        assert!(!l.is_blocked(&a));
+        l.record_failure(&a);
+        assert!(l.is_blocked(&a), "到上限才锁");
+    }
+
+    #[test]
+    fn login_limiter_expired_lockout_is_pruned_and_no_longer_blocks() {
+        // 锁定 0 秒 → 下一次检查时该条目必然已过期
+        let l = LoginRateLimiter::new(1, 0);
+        let a = ip(7);
+        l.record_failure(&a);
+        assert_eq!(l.failures(&a), 1);
+        assert!(!l.is_blocked(&a), "过期的锁定必须失效");
+        l.record_failure(&ip(8)); // 触发剪枝
+        assert_eq!(l.failures(&a), 0, "过期条目必须被剪掉，计数从头开始");
+    }
+
+    #[test]
+    fn login_limiter_defaults_are_documented_values() {
+        let l = LoginRateLimiter::default();
+        let a = ip(9);
+        for _ in 0..LOGIN_MAX_FAILURES {
+            l.record_failure(&a);
+        }
+        assert!(l.is_blocked(&a));
     }
 }
