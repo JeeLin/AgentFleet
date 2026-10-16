@@ -263,6 +263,10 @@ async fn read_frame(
 }
 
 /// 读一个指定类型的帧；类型不符即失败。
+///
+/// **只认第一帧，不跳着找**：握手期的帧序是 `hello → challenge → auth`，
+/// 收到别的必需集帧说明两端对协议的理解已经分叉（§2、§3）——把它当成
+/// 「再多读一帧总能找到 challenge」只会把一次实现 bug 拖成一次超时。
 async fn read_frame_of(
     socket: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -292,17 +296,6 @@ pub fn handshake_error_phrase(e: &HandshakeError) -> String {
 
 #[cfg(test)]
 mod tests {
-    // 测试代码豁免生产级 panic 禁令：测试里 unwrap 失败就是要立刻炸，
-    // 而 panic 消息比 match 分支更能说明哪一行、哪个值不对。
-    // let_underscore_must_use / indexing_slicing 同理：测试里故意 `let _ =`
-    // 丢弃一个错误来验证「失败不影响状态」，按索引取值也是常规写法。
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::let_underscore_must_use,
-        clippy::indexing_slicing
-    )]
     use super::*;
     use protocol::message::reason;
 

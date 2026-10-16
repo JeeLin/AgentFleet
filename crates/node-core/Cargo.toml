@@ -22,6 +22,17 @@ futures-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# 硬断连接（SO_LINGER(0) → RST）需要直接操作 socket：`Tail::Abrupt` 那条
+# 「对端进程没了」的路径没有 RST 就构造不出来，只有「发了半个关闭握手」的近似。
+libc.workspace = true
+# 传输错误路径的集成测试需要一个可控的 WS 对端（连上后按脚本发坏帧 /
+# Close / ping / 二进制）。tokio-tungstenite 的 `accept_async` 已在
+# 普通依赖里，这里只是让测试用它当服务端。
+tokio = { workspace = true, features = ["full"] }
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+identity.workspace = true
+protocol.workspace = true
 
 [lints]
 workspace = true

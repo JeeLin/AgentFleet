@@ -159,15 +159,20 @@ async fn handshake(
     let mut seq: u64 = 0;
 
     loop {
+        // 超时只在握手**仍在进行**时判（§3）。已 `Authed` 的连接不因为
+        // 「握手慢」被关——那会把一条好端端的连接在握手后立刻掐掉。
+        //
+        // 注意这里**不能**改成「看 `hs.state()` 是不是还在进行中」来决定用哪
+        // 个 deadline：`Authed` / `Rejected` 两个终态都会让循环立刻 return，
+        // 取它们的 deadline 是纯粹的分支噪音（而且当初就写错过一次）。
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            send_best_effort(socket, Handshake::timeout_error_frame(seq), "handshake").await;
-            return Err("handshake timeout".to_string());
-        }
 
         let msg = match tokio::time::timeout(remaining, socket.recv()).await {
             Ok(Some(Ok(m))) => m,
             Ok(Some(Err(e))) => return Err(format!("ws read error: {e}")),
+            // 流结束而没走过关闭握手：设备那边直接关了 TCP（它还没学会
+            // Close 帧，或进程被 kill 时正好在写）。此时不要再补一帧
+            // 失败帧——对端已经不在了，补帧只会把 fd 耗在一个死人连接上。
             Ok(None) => return Err("peer closed".to_string()),
             Err(_) => {
                 // recv 挂住到超时：只靠入口处的 deadline 不够，这里补一刀
@@ -203,6 +208,8 @@ async fn handshake(
                 };
                 let challenge = match hs.on_hello(frame.v, hello) {
                     Ok(c) => c,
+                    // 握手还在 Hub 这一侧就失败 → 没有可回的失败帧（§4）：
+                    // 回帧本身要求握手已完成，直接退回去即可。
                     Err(e) => return Err(handshake_error_phrase(e)),
                 };
                 if send_frame(socket, Handshake::challenge_frame(seq, &challenge))
@@ -555,17 +562,6 @@ fn handshake_error_phrase(e: HandshakeError) -> String {
 
 #[cfg(test)]
 mod tests {
-    // 测试代码豁免生产级 panic 禁令：测试里 unwrap 失败就是要立刻炸，
-    // 而 panic 消息比 match 分支更能说明是哪一行、哪个值不对。
-    // let_underscore_must_use / indexing_slicing 同理：测试里故意 `let _ =`
-    // 丢弃一个错误来验证「失败不影响状态」，按索引取值也是常规写法。
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::let_underscore_must_use,
-        clippy::indexing_slicing
-    )]
     use super::*;
     use axum::http::HeaderValue;
     use protocol::handshake::HandshakeState;
