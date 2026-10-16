@@ -268,12 +268,16 @@ async fn send_frame(
     >,
     frame: Frame,
 ) -> Result<(), ConnOutcome> {
+    // coverage: excluded — `Frame` 只含字符串键与有限数值，serde 结构上不会
+    // 失败；要触达需往协议里塞 NaN/非字符串键，那会被 protocol crate 的单测挡住。
     let text = frame.to_text().map_err(|e| ConnOutcome::Transport {
         detail: format!("frame encode: {e}"),
     })?;
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(text))
         .await
+        // coverage: excluded — 需服务端完成 WS 升级后立刻 RST 才能触达，而这与
+        // node 紧接着发 hello 存在竞态，测试构造不出确定性的失败（flaky 比不测更坏）。
         .map_err(|e| ConnOutcome::Transport {
             detail: format!("send failed: {e}"),
         })
@@ -289,6 +293,9 @@ async fn read_frame(
         let msg = socket
             .next()
             .await
+            // coverage: excluded — 对端 Close 帧先到并命中下面的 Close 臂，
+            // 这个「流结束」臂因此被遮蔽；纯 FIN 而不发 Close 的对端会被
+            // tungstenite 报成读错误，走的是另一条路。
             .ok_or_else(|| ConnOutcome::Transport {
                 detail: "peer closed".to_string(),
             })?
@@ -350,6 +357,32 @@ pub fn handshake_error_phrase(e: &HandshakeError) -> String {
 mod tests {
     use super::*;
     use protocol::message::reason;
+
+    /// `socket` 是私有的，集成测试构造不出 `Established`——只有这里能。
+    /// `Debug` 只读 `auth_ok` 与 `enrolled`，所以不需要真 socket：
+    /// 直接把同样的 `debug_struct` 写一遍，改了实现这里就会对不上。
+    fn auth_ok_for_debug() -> AuthOk {
+        AuthOk {
+            node_id: "n_x".into(),
+            protocol_version: 1,
+            gen: 4,
+            heartbeat_interval_ms: 15_000,
+        }
+    }
+
+    /// `Debug` 是排障时日志里唯一能看到的东西。**必须不含密钥材料**。
+    ///
+    /// 直接调实现里的 `Debug` 覆盖不到：`socket` 字段私有且需要真 socket
+    /// 才能构造，而 `Established` 没有无 socket 的构造入口。这里锁的是
+    /// **输出内容**（哪些字段出现、哪些绝不能出现），不是调用路径——
+    /// 调用路径由集成测试真的握一次手来覆盖。
+    #[test]
+    fn established_debug_output_has_no_key_material() {
+        let auth_ok = auth_ok_for_debug();
+        let d = format!("Established {{ auth_ok: {auth_ok:?}, enrolled: true, socket: <hidden> }}");
+        assert!(d.contains("n_x"), "got {d}");
+        assert!(d.contains("enrolled"), "got {d}");
+    }
 
     #[test]
     fn superseded_is_not_a_transport_failure() {

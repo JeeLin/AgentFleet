@@ -68,3 +68,112 @@ pub fn retry_after(outcome: &ConnOutcome, attempt: u32, jitter_factor: f64) -> O
         | ConnOutcome::Authed { .. } => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn transport() -> ConnOutcome {
+        ConnOutcome::Transport {
+            detail: "connection refused".into(),
+        }
+    }
+
+    fn authed() -> ConnOutcome {
+        ConnOutcome::Authed {
+            node_id: "n_1".into(),
+            protocol_version: 1,
+            gen: 1,
+            heartbeat_interval_ms: 15_000,
+            enrolled: true,
+        }
+    }
+
+    /// `min(30s, 2^attempt)`：逐步加倍，封在 30s 不再涨。
+    #[test]
+    fn backoff_doubles_then_saturates() {
+        assert_eq!(backoff(0).as_secs(), 1);
+        assert_eq!(backoff(1).as_secs(), 2);
+        assert_eq!(backoff(2).as_secs(), 4);
+        assert_eq!(backoff(3).as_secs(), 8);
+        assert_eq!(backoff(4).as_secs(), 16);
+        assert_eq!(backoff(5).as_secs(), 30, "2^5=32 越过上限，截到 30");
+        for a in [6u32, 10, 31, 64] {
+            assert_eq!(backoff(a).as_secs(), 30);
+        }
+    }
+
+    /// 一次连续失败不该把守护进程算进溢出陷阱。
+    #[test]
+    fn backoff_does_not_overflow_on_a_huge_attempt_count() {
+        assert_eq!(backoff(u32::MAX).as_secs(), MAX_BACKOFF_SECS);
+    }
+
+    /// 抖动是**多退少补**，不是单向放大——只放大会让两台设备错开后又对齐。
+    #[test]
+    fn jitter_stays_inside_the_declared_band() {
+        for _ in 0..200 {
+            let j = jitter();
+            assert!(
+                (JITTER_MIN..JITTER_MAX).contains(&j),
+                "jitter {j} escaped [{JITTER_MIN}, {JITTER_MAX})"
+            );
+        }
+    }
+
+    /// 抖动**必须**能被断言（标准①），所以它是入参：这里锁死「乘上去」而不是乘 1。
+    #[test]
+    fn backoff_with_jitter_scales_the_base_delay() {
+        assert_eq!(backoff_with_jitter(0, 1.0).as_secs_f64(), 1.0);
+        assert_eq!(backoff_with_jitter(3, 1.3).as_secs_f64(), 10.4);
+        assert_eq!(backoff_with_jitter(3, 0.7).as_secs_f64(), 5.6);
+    }
+
+    /// 同机两个进程同相重连会稳定活锁，所以随机抖动的极差必须够宽。
+    #[test]
+    fn repeated_samples_spread_out_in_time() {
+        let spread = (0..10).fold((f64::MAX, f64::MIN), |(lo, hi), _| {
+            let d = backoff_with_jitter(2, jitter()).as_secs_f64();
+            (lo.min(d), hi.max(d))
+        });
+        assert!(spread.1 - spread.0 >= 0.2, "spread was {:?}", spread);
+    }
+
+    /// 越界的抖动系数不能让无人值守的守护进程 panic（`from_secs_f64` 会）。
+    #[test]
+    fn a_bogus_jitter_factor_degrades_to_zero_delay() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            assert_eq!(backoff_with_jitter(2, bad), Duration::ZERO, "{bad}");
+        }
+    }
+
+    /// 只有传输层失败才退避重连。
+    #[test]
+    fn transport_failures_are_retried() {
+        let d = retry_after(&transport(), 1, 1.0).expect("must retry");
+        assert_eq!(d.as_secs(), 2);
+    }
+
+    /// §7.1：`superseded` 是终态。再连一次就是和新连接互抢。
+    #[test]
+    fn superseded_is_terminal() {
+        let s = ConnOutcome::Superseded { gen: 9 };
+        assert!(retry_after(&s, 1, 1.0).is_none());
+    }
+
+    /// `Rejected` 是 Hub 的明确裁决，重试一万次结果一样。
+    #[test]
+    fn a_rejected_identity_is_terminal() {
+        let r = ConnOutcome::Rejected {
+            reason: "identity mismatch".into(),
+        };
+        assert!(retry_after(&r, 1, 1.0).is_none());
+    }
+
+    /// 握手成功不进这里，但变体必须显式列出：否则将来加新变体时
+    /// 编译器不再逼人想一遍「它该不该重连」。
+    #[test]
+    fn an_authed_outcome_has_nothing_to_retry() {
+        assert!(retry_after(&authed(), 1, 1.0).is_none());
+    }
+}

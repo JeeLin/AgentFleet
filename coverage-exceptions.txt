@@ -21,7 +21,6 @@
 
 crates/identity/src/lib.rs:93:ed25519-dalek 的 from_bytes 对几乎所有 32 字节输入均解压成功，构造不出确定性非法曲线点
 crates/identity/src/lib.rs:125:SHA-256 digest 恒为 32 字节，first_chunk::<16> 结构上永不返回 None
-crates/node-core/src/identity.rs:235:目录 fsync 的 if let Ok 兜底：父目录打不开才能进 else，测试无法在不弄坏 tempdir 夹具的前提下构造
 crates/hub-core/src/registry.rs:134:活跃事务的 SQLite ROLLBACK 必然成功，该分支仅防御连接级故障
 crates/hub-server/src/main.rs:43:建不出 OS 线程（fd/内存耗尽）在测试环境无可控构造手段
 crates/hub-server/src/routes/setup.rs:167:spawn_blocking 的 JoinError 只在任务 panic（workspace lint panic=deny 禁止）或运行时关闭时产生，测试造不出
@@ -33,6 +32,16 @@ crates/hub-storage/src/repo.rs:235:execute(...)? 隐含的 Err 传播 region，�
 crates/node-cli/src/lib.rs:91:data_dir 取不到属防御性兜底：dirs::data_dir 在 HOME 存在即返回 Some，root 下权限错误又不可构造，本环境下该 Err 不可达
 crates/node-cli/src/lib.rs:92:同 91：Err 臂的写 stderr 行，与 91 同一不可达臂
 crates/node-cli/src/lib.rs:93:同 91：Err 臂的返回 FAILURE 行，与 91 同一不可达臂
+crates/hub-core/src/reports.rs:120:同 102：锁中毒分支
+crates/hub-core/src/reports.rs:161:同 102：锁中毒分支
 crates/node-core/src/log.rs:55:轮转删最旧文件：目录可写、文件存在即可删，正常文件系统构造不出确定性失败，属防御性兜底
 crates/node-core/src/log.rs:62:轮转后移文件：源存在、目标在同目录，正常文件系统构造不出确定性失败，属防御性兜底
 crates/node-core/src/log.rs:85:收紧日志目录权限：目录已存在（create_dir_all 成功）即 set_permissions 必成功，正常文件系统构造不出失败，属防御性兜底
+crates/hub-core/src/reports.rs:102:锁中毒只在别的持锁者 panic 时出现，而 workspace lint 把 panic 禁成 deny，无法构造
+crates/node-core/src/identity.rs:235:目录 fsync 的 if let Ok 兜底：父目录打不开才能进 else，测试无法在不弄坏 tempdir 夹具的前提下构造
+crates/node-core/src/conn.rs:274:frame encode 的 Err 臂：Frame 只含字符串键与有限数值，serde 结构上不会失败
+crates/node-core/src/conn.rs:275:同 274：Err 臂的 format! 行，与 274 同一不可达臂
+crates/node-core/src/conn.rs:282:send failed：需服务端完成 WS 升级后立刻 RST 才能触达，而这与 node 紧接着发 hello 存在竞态，测试构造不出确定性失败
+crates/node-core/src/conn.rs:283:同 282：Err 臂的 format! 行，与 282 同一不可达臂
+crates/node-core/src/conn.rs:300:read_frame 的 ok_or_else：对端 Close 帧先到并命中 307 行的 Close 臂，这个「流结束」臂因此被遮蔽
+crates/node-core/src/conn.rs:301:同 300：Ok(None) 臂的 format! 行，与 300 同一不可达臂

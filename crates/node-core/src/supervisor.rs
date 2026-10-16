@@ -542,6 +542,21 @@ mod tests {
 
     /// `RolledBack`（已换回旧版、备份已被消耗）之后还崩溃 → 没有 old 可用，停下。
     /// 这条与上面那条配对，说明判据确实在「有没有 old」而不是「phase 像不像在途」。
+    /// 跑满时长才退出 → 连击清零：此后的每次重启不该再背上递增的退避。
+    #[test]
+    fn a_worker_that_ran_stably_drops_its_consecutive_streak() {
+        let mut stats = CrashStats {
+            recent_exits: 4,
+            consecutive: 7,
+            rollback_count: 0,
+        };
+        stats.ran_stably();
+        assert_eq!(stats.consecutive, 0);
+        // 连击清零**不是**免死金牌：风暴判据看的是窗口内的退出次数，
+        // 所以「跑稳了」不该把风暴记录一起抹掉。
+        assert!(stats.is_exit_storm());
+    }
+
     #[test]
     fn exit_storm_after_rollback_has_no_old_left_to_fall_back_on() {
         let mut s = st();

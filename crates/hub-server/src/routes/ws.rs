@@ -117,21 +117,12 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
             let removed = state
                 .connections()
                 .remove_if_current(&auth.node_id, &conn_id);
-            tracing::info!(
-                conn_id = %conn_id,
-                node_id = %auth.node_id,
-                removed = removed,
-                elapsed_ms = started.elapsed().as_millis(),
-                "ws disconnected"
-            );
+            let elapsed_ms = started.elapsed().as_millis();
+            tracing::info!(conn_id = %conn_id, node_id = %auth.node_id, removed = removed, elapsed_ms = elapsed_ms, "ws disconnected");
         }
         Err(reason) => {
-            tracing::info!(
-                conn_id = %conn_id,
-                reason = %reason,
-                elapsed_ms = started.elapsed().as_millis(),
-                "ws disconnected"
-            );
+            let elapsed_ms = started.elapsed().as_millis();
+            tracing::info!(conn_id = %conn_id, reason = %reason, elapsed_ms = elapsed_ms, "ws disconnected");
         }
     }
 }

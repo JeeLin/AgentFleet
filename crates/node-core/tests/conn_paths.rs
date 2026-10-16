@@ -92,7 +92,20 @@ fn frame(t: &str, c: &str) -> TsMessage {
 ///
 /// 脚本在**读完 node 的 `hello`** 之后才开始发——与真实 Hub 的时序一致
 /// （`challenge` 只有在 `hello` 之后才会发）。
+fn auth_ok_frame() -> TsMessage {
+    frame(
+        "auth_ok",
+        r#"{"node_id":"n_x","protocol_version":1,"gen":1,"heartbeat_interval_ms":15000}"#,
+    )
+}
+
 async fn serve(acts: Vec<Act>, tail: Tail) -> SocketAddr {
+    serve_with_drain(acts, tail, true).await
+}
+
+/// `drain = false`：握手之后不再替 node 读帧，帧留在内核缓冲里给
+/// `Established::next_text` 自己取。见 [`serve`]。
+async fn serve_with_drain(acts: Vec<Act>, tail: Tail, drain: bool) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -101,6 +114,7 @@ async fn serve(acts: Vec<Act>, tail: Tail) -> SocketAddr {
         // 等 node 的 hello（不校验内容：hello 的形状由 protocol crate 的单测负责）
         let _ = ws.next().await;
         for act in acts {
+            let is_challenge = matches!(act, Act::Challenge);
             let msg = match act {
                 Act::Text(t) => TsMessage::Text(t.into()),
                 Act::Frame(m) => m,
@@ -109,14 +123,19 @@ async fn serve(acts: Vec<Act>, tail: Tail) -> SocketAddr {
                 Act::Ping => TsMessage::Ping(Vec::new()),
             };
             let _ = ws.send(msg).await;
-            // 读掉 node 可能已回的话（pong / 关错误帧）。**必须读干净**：
-            // 留在内核缓冲里的未读数据会让随后的 close() 触发 RST，
-            // 于是「正常关闭」被悄悄变成 abrupt —— 两条分支会被测反。
-            while let Ok(Some(Ok(m))) =
-                tokio::time::timeout(Duration::from_millis(20), ws.next()).await
-            {
-                if matches!(m, TsMessage::Close(_)) {
-                    break;
+            // challenge 之后必须排空（node 会回 `auth`，留着会让后面的
+            // close() 落成 RST）；握手之后的帧则由 `drain` 决定——
+            // `next_text` 的用例要自己读那一帧，服务端抢先读走就永远等不到。
+            if drain || is_challenge {
+                // 读掉 node 可能已回的话（pong / 关错误帧）。**必须读干净**：
+                // 留在内核缓冲里的未读数据会让随后的 close() 触发 RST，
+                // 于是「正常关闭」被悄悄变成 abrupt —— 两条分支会被测反。
+                while let Ok(Some(Ok(m))) =
+                    tokio::time::timeout(Duration::from_millis(20), ws.next()).await
+                {
+                    if matches!(m, TsMessage::Close(_)) {
+                        break;
+                    }
                 }
             }
         }
@@ -426,6 +445,158 @@ async fn dropping_the_connection_right_after_auth_ok_is_clean() {
     // 断开后没有任何后台任务在偷偷重连：退避重连是调用方（子任务 6）的职责，
     // conn.rs 只回答「连一次会发生什么」。
     drop(est);
+}
+
+/// 握手成功后 Hub 发来的文本帧 → `next_text` 原样交出。
+///
+/// 约束 14 说「未知帧类型原样交给调用方」——原样指的是**不解析**，不是**不返回**，
+/// 所以这里断言的是文本一字不差地过来。
+#[tokio::test]
+async fn next_text_hands_back_the_raw_payload() {
+    let addr = serve_with_drain(
+        vec![
+            Act::Challenge,
+            Act::Frame(auth_ok_frame()),
+            Act::Frame(frame("heartbeat", r#"{"node_version":"0.1.0"}"#)),
+        ],
+        Tail::Hang,
+        false,
+    )
+    .await;
+    let mut est = enroll(addr).await.expect("handshake completes");
+    let text = est
+        .next_text()
+        .await
+        .expect("no transport error")
+        .expect("a frame");
+    assert!(text.contains(r#""t":"heartbeat""#), "got {text:?}");
+}
+
+/// 二进制帧 → Transport（协议只用 JSON 文本，§2）。
+#[tokio::test]
+async fn next_text_rejects_a_binary_frame_after_auth() {
+    let addr = serve_with_drain(
+        vec![Act::Challenge, Act::Frame(auth_ok_frame()), Act::Binary],
+        Tail::Hang,
+        false,
+    )
+    .await;
+    let mut est = enroll(addr).await.expect("handshake completes");
+    match est.next_text().await {
+        Err(ConnOutcome::Transport { detail }) => {
+            assert_eq!(detail, "unexpected frame kind");
+        }
+        other => panic!("a binary frame must not be handed back as text: {other:?}"),
+    }
+}
+
+/// ping 不该打断会话：tungstenite 自动应答，node 侧看不到它。
+#[tokio::test]
+async fn next_text_skips_a_ping() {
+    let addr = serve_with_drain(
+        vec![
+            Act::Challenge,
+            Act::Frame(auth_ok_frame()),
+            Act::Ping,
+            Act::Frame(frame("heartbeat", r#"{"node_version":"0.1.0"}"#)),
+        ],
+        Tail::Hang,
+        false,
+    )
+    .await;
+    let mut est = enroll(addr).await.expect("handshake completes");
+    let text = est
+        .next_text()
+        .await
+        .expect("no transport error")
+        .expect("a frame");
+    assert!(
+        text.contains(r#""t":"heartbeat""#),
+        "ping must not surface: {text:?}"
+    );
+}
+
+/// Close 帧 → `Ok(None)`（对端正常下线），不是 Transport。
+#[tokio::test]
+async fn next_text_reports_a_close_frame_as_end_of_stream() {
+    let addr = serve_with_drain(
+        vec![Act::Challenge, Act::Frame(auth_ok_frame())],
+        Tail::Close,
+        false,
+    )
+    .await;
+    let mut est = enroll(addr).await.expect("handshake completes");
+    assert_eq!(
+        est.next_text()
+            .await
+            .expect("close is not a transport error"),
+        None
+    );
+}
+
+/// RST → Transport，且前缀是「读帧出错」——与 Close 的「流结束」是两条臂。
+#[tokio::test]
+async fn next_text_reports_an_abrupt_reset_as_a_read_failure() {
+    let addr = serve_with_drain(
+        vec![Act::Challenge, Act::Frame(auth_ok_frame())],
+        Tail::Abrupt,
+        false,
+    )
+    .await;
+    let mut est = enroll(addr).await.expect("handshake completes");
+    match est.next_text().await {
+        Err(ConnOutcome::Transport { detail }) => assert!(
+            detail.starts_with("read failed:"),
+            "want a read failure, got {detail:?}"
+        ),
+        other => panic!("want Transport, got {other:?}"),
+    }
+}
+
+/// Close 之后再读一次：tungstenite 把已走完的关闭握手记成「流结束」，
+/// 于是第二次读到的是 `None` 而不是又一次 Close。
+///
+/// 两次都要断言成 `None`：把它们混为一谈会让「对端走了」和「协议层关闭」
+/// 在排障日志里长得一样，而它们的处理方式不同（前者不重连，后者要重连）。
+#[tokio::test]
+async fn next_text_reports_the_stream_end_only_after_the_close_frame() {
+    let addr = serve(
+        vec![Act::Challenge, Act::Frame(auth_ok_frame())],
+        Tail::Close,
+    )
+    .await;
+    let mut est = enroll(addr).await.expect("handshake completes");
+    assert_eq!(
+        est.next_text()
+            .await
+            .expect("close is not a transport error"),
+        None,
+        "first read must surface the Close frame"
+    );
+    assert_eq!(
+        est.next_text()
+            .await
+            .expect("stream end is not a transport error"),
+        None,
+        "second read must surface the stream end"
+    );
+}
+
+/// `Debug` 是排障时日志里唯一能看到的东西，**必须不含密钥材料**。
+///
+/// `est` 是真握手拿到的，所以这条走的是真的 `Debug` 实现。
+#[tokio::test]
+async fn established_debug_shows_identity_but_no_key_material() {
+    let addr = serve(
+        vec![Act::Challenge, Act::Frame(auth_ok_frame())],
+        Tail::Close,
+    )
+    .await;
+    let est = enroll(addr).await.expect("handshake completes");
+    let d = format!("{est:?}");
+    assert!(d.contains("n_x"), "got {d}");
+    assert!(d.contains("enrolled"), "got {d}");
+    assert!(d.contains("auth_ok"), "got {d}");
 }
 
 // ---------- 重连形态 ----------

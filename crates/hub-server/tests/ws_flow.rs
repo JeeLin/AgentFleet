@@ -1789,3 +1789,83 @@ async fn a_reset_peer_after_auth_ok_is_dropped_from_the_registry() {
     )
     .await;
 }
+
+/// `relay` 正常收尾（`recv` 交出流结束而非报错）→ 走 `Ok(())` 那条路。
+///
+/// 与 `ping_and_binary_are_skipped_but_close_ends_the_session` 的区别：那条
+/// 发 Close 帧，`recv` 交出 `Message::Close` 走 `Err` 臂；本条半关闭，
+/// `recv` 返回 `None`、循环自然结束。两条都要有回归锁。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_that_drops_the_stream_after_auth_ok_is_cleaned_up() {
+    let hub = Hub::initialized().await;
+    let (kp, node_id) = enroll_node(&hub).await;
+    let mut ws = dial(&hub.ws_url()).await;
+    let nonce = challenge_nonce(&mut ws).await;
+    let sig = kp.sign(&identity::signature_message(1, "", 1, "auth", &nonce));
+    send_text(
+        &mut ws,
+        &serde_json::json!({
+            "v": 1, "seq": 1, "t": "auth",
+            "c": {
+                "public_key": identity::base64url(&kp.public_key_bytes()),
+                "signature": identity::base64url(&sig),
+                "device_info": info(),
+            },
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(next_frame(&mut ws).await.msg_type, "auth_ok");
+
+    // 半关闭：不发 Close 帧，Hub 的 `recv` 只能读到流结束。
+    {
+        let stream: &mut tokio::net::TcpStream = match ws.get_mut() {
+            tokio_tungstenite::MaybeTlsStream::Plain(s) => s,
+            other => panic!("the url is plain ws://, got {other:?}"),
+        };
+        assert_eq!(
+            unsafe { libc::shutdown(std::os::fd::AsRawFd::as_raw_fd(stream), libc::SHUT_WR) },
+            0
+        );
+    }
+    wait_dropped(
+        &hub,
+        &node_id,
+        "a peer that only drops the stream must still be removed",
+    )
+    .await;
+}
+
+/// `auth_ok` 发不出去（发送缓冲被压满）→ Hub 不能 panic，连接干净结束。
+///
+/// 覆盖的是 `finish_ok` 里 `send_frame(...).is_err()` 那条臂：认证全部通过、
+/// 只差最后一步回帧时对端已走。squeeze 必须发生在发 `auth` **之前**——
+/// `auth_ok` 一旦发出去（哪怕 Hub 随后才失败）测试就失去确定性。
+#[tokio::test]
+async fn an_auth_ok_that_cannot_be_sent_ends_the_connection() {
+    let hub = Hub::initialized().await;
+    let mut ws = dial(&hub.ws_url()).await;
+    send_text(&mut ws, HELLO).await;
+    // 先把 challenge 拿到（它很小，压缓冲前发出），再占满缓冲。
+    assert_eq!(next_frame(&mut ws).await.msg_type, "challenge");
+    hub.squeeze_send_buffer(&mut ws).await;
+    send_text(&mut ws, "this frame cannot possibly reach hub").await;
+    wait_closed(&mut ws).await;
+}
+
+/// 握手失败帧也发不出去 → Hub 不能 panic，且不能尝试补救第二次。
+///
+/// 覆盖 `send_best_effort` 的 `Err` 臂。与上面那条的差别是失败帧走
+/// `send_best_effort`（尽力而为、失败只记日志），而 `auth_ok` 走
+/// `send_frame`（失败即断开）——两条路的错误处理不同，都要有锁。
+#[tokio::test]
+async fn a_failure_frame_that_cannot_be_sent_does_not_panic() {
+    let hub = Hub::initialized().await;
+    let mut ws = dial(&hub.ws_url()).await;
+    send_text(&mut ws, HELLO).await;
+    assert_eq!(next_frame(&mut ws).await.msg_type, "challenge");
+    hub.squeeze_send_buffer(&mut ws).await;
+    // 坏签名 → Hub 要回 auth_fail，而回程已经堵死。
+    send_enroll_auth(&mut ws, [0u8; 64]).await;
+    wait_closed(&mut ws).await;
+}
