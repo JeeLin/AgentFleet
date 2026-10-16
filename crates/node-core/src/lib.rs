@@ -5,5 +5,8 @@
 
 pub mod conn;
 pub mod identity;
+pub mod log;
+pub mod supervisor;
+pub mod update;
 
 pub use identity::{data_dir, Identity, IdentityError, IdentityFile};
