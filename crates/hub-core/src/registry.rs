@@ -204,7 +204,8 @@ fn pubkey_from_fingerprint(device: &Device) -> Result<[u8; 32], CoreError> {
     Ok(out)
 }
 
-pub(crate) fn now_rfc3339() -> String {
+/// 当前时刻的 RFC3339 串（本仓不用 chrono，只需稳定可比）。
+pub fn now_rfc3339() -> String {
     // 不引 chrono：只需要一个稳定可比的 RFC3339 串
     let d = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

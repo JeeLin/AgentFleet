@@ -22,7 +22,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use hub_core::auth::{AuthError, AuthParams, HubAuth, LoginRateLimiter, SetupToken};
 use hub_core::registry::Registry;
-use hub_core::ConnectionRegistry;
+use hub_core::{ConnectionRegistry, Reports};
 use hub_storage::db::Db;
 use parking_lot::Mutex;
 use serde_json::json;
@@ -159,6 +159,11 @@ struct Inner {
     connections: Arc<ConnectionRegistry>,
     /// 本进程上的心跳周期。`auth_ok` 下发给节点（§2）。
     heartbeat_interval_ms: u64,
+    /// `node_id → 最近一次心跳上报`。**只在心跳时写**，路由读内存不读库
+    /// （`scheduling.md` §2.2）。
+    reports: Reports,
+    /// 设备仓储（心跳落库用）。
+    devices: hub_storage::repo::DeviceRepo,
 }
 
 impl AppState {
@@ -198,6 +203,9 @@ impl AppState {
                 0
             }
         };
+        // 设备仓储在 bootstrap 时就建好：心跳是**热路径**，每次收到都建一个
+        // repo 只是白拿一次池里的连接。
+        let devices = hub_storage::repo::DeviceRepo::new(pool.clone());
         let state = Self(Arc::new(Inner {
             auth,
             setup: Mutex::new(None),
@@ -208,6 +216,8 @@ impl AppState {
             registry: Registry::new(pool),
             connections: Arc::new(ConnectionRegistry::with_boot_gen(boot_gen)),
             heartbeat_interval_ms: DEFAULT_HEARTBEAT_INTERVAL_MS,
+            reports: Reports::new(),
+            devices,
         }));
 
         if state.is_initialized()? {
@@ -278,6 +288,16 @@ impl AppState {
     /// 本进程的心跳周期，`auth_ok` 下发给节点（§2）。
     pub fn heartbeat_interval_ms(&self) -> u64 {
         self.0.heartbeat_interval_ms
+    }
+
+    /// 心跳上报缓存（路由读它，不读库）。
+    pub fn reports(&self) -> &Reports {
+        &self.0.reports
+    }
+
+    /// 设备仓储（心跳落库 / 超时判离线）。
+    pub fn devices(&self) -> &hub_storage::repo::DeviceRepo {
+        &self.0.devices
     }
 
     /// 数据目录（测试用：读 schema / 直接查库）。

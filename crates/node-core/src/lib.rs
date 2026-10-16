@@ -4,6 +4,7 @@
 //! 对外命令名 `afcli`（crate 名 `node-*`）。
 
 pub mod conn;
+pub mod heartbeat;
 pub mod identity;
 pub mod log;
 pub mod reconnect;

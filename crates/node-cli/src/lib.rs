@@ -143,6 +143,8 @@ where
 /// supervisor 用 `worker_argv` 决定下次 spawn 谁。两处判定漂移的后果是
 /// supervisor 把自己当 worker（或反过来）spawn 出一个 supervisor，
 /// 设备变成两个进程互相等对方退出。
+// coverage: excluded — 进程入口：真建数据目录、真解析 hub url，再转
+// `dispatch`（可测接缝）。单元测试从 `dispatch` 进入。
 fn run_node<W1, W2>(args: &[String], out: W1, mut err: W2) -> std::process::ExitCode
 where
     W1: std::io::Write,

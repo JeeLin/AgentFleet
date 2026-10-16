@@ -1869,3 +1869,105 @@ async fn a_failure_frame_that_cannot_be_sent_does_not_panic() {
     send_enroll_auth(&mut ws, [0u8; 64]).await;
     wait_closed(&mut ws).await;
 }
+
+/// 客户端在发出 `auth` 后**立刻 RST**（SO_LINGER=0）→ Hub 回 `auth_ok` 必然失败。
+///
+/// 与 [`Hub::squeeze_send_buffer`] 的区别：那个只是把发送缓冲**堵住**，
+/// 而 tungstenite 的 `send` 会把帧排进内部队列、当场返回成功——失败臂
+/// 根本走不到。要真触达「帧发不出去」，必须让 socket 在写之前就已经 RST。
+/// 这一条覆盖 `finish_ok` 里「auth_ok 发不出去 = 连接没有成立」那条。
+#[tokio::test]
+async fn an_auth_ok_that_cannot_be_delivered_does_not_establish_the_connection() {
+    let hub = Hub::initialized().await;
+    let kp = KeyPair::generate();
+    let mut ws = dial(&hub.ws_url()).await;
+    let nonce = challenge_nonce(&mut ws).await;
+    let sig = kp.sign(&identity::signature_message(1, "", 1, "auth", &nonce));
+    send_text(
+        &mut ws,
+        &serde_json::json!({
+            "v": 1, "seq": 1, "t": "auth",
+            "c": {
+                "public_key": identity::base64url(&kp.public_key_bytes()),
+                "signature": identity::base64url(&sig),
+                "device_info": info(),
+            },
+        })
+        .to_string(),
+    )
+    .await;
+    // 发完 auth 就把连接 RST 掉（不等 Hub 回帧）
+    rst(ws);
+    // Hub 侧不得把这条连接注册进表：auth_ok 没送达 = 连接没有成立
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if hub.state.connections().is_empty() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "连接不该被注册");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// 坏签名的 `auth` + 立刻 RST → Hub 回 `auth_fail` 失败，但**不得 panic**。
+///
+/// 覆盖 `send_best_effort` 的 Err 臂：失败帧发不出去时连接马上就断了，
+/// 没有第二个渠道能通知节点，所以只能留痕。
+#[tokio::test]
+async fn an_auth_fail_that_cannot_be_delivered_does_not_panic() {
+    let hub = Hub::initialized().await;
+    let mut ws = dial(&hub.ws_url()).await;
+    let nonce = challenge_nonce(&mut ws).await;
+    let _ = nonce;
+    // 坏签名（全零）→ Hub 要回 auth_fail
+    let _ = ws
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::json!({
+                "v": 1, "seq": 1, "t": "auth",
+                "c": {
+                    "public_key": identity::base64url(&KeyPair::generate().public_key_bytes()),
+                    "signature": identity::base64url(&[0u8; 64]),
+                    "device_info": info(),
+                },
+            })
+            .to_string(),
+        ))
+        .await;
+    rst(ws);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if hub.state.connections().is_empty() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "连接不该被注册");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// 立刻 RST 一条连接：`SO_LINGER=0` 让 close 发 RST 而不是 FIN。
+fn rst(ws: Ws) {
+    let mut ws = ws;
+    let stream: &mut tokio::net::TcpStream = match ws.get_mut() {
+        tokio_tungstenite::MaybeTlsStream::Plain(s) => s,
+        other => panic!("the url is plain ws://, got {other:?}"),
+    };
+    let fd = std::os::fd::AsRawFd::as_raw_fd(stream);
+    let linger = libc::linger {
+        l_onoff: 1,
+        l_linger: 0,
+    };
+    assert_eq!(
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                std::ptr::from_ref(&linger).cast(),
+                std::mem::size_of::<libc::linger>() as libc::socklen_t,
+            )
+        },
+        0,
+        "SO_LINGER must be settable for this fixture to mean anything"
+    );
+    drop(ws);
+}

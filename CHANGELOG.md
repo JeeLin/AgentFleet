@@ -6,15 +6,18 @@ Entries follow Keep a Changelog; each entry is bilingual (中文 / English).
 ## [Unreleased]
 
 ### Added
+- **子任务 5 心跳与能力上报**：node 侧 `auth_ok` 后立即发一次、之后按 Hub 下发的 `heartbeat_interval_ms` 周期发送；Hub 侧更新内存上报（路由读内存不读库）并落库 `capabilities` / `resources` / `last_seen_at` / `status`。**缺省字段保留上一次的值**（一份只含 `node_version` 的心跳不清空能力）。心跳只报「配置的工作区根」，绝不递归、不带任何路径细节 / **M0 subtask 5 — heartbeats**: the node sends one immediately after `auth_ok` and then on the interval the Hub issued in `auth_ok`; the Hub updates its in-memory report (routing reads memory, never the DB) and persists `capabilities` / `resources` / `last_seen_at` / `status`. **Absent fields keep their previous value** — a heartbeat carrying only `node_version` does not clear capabilities. Only configured workspace roots are reported, never recursively, never with path detail
 - 架构决策：任务分发调度——心跳上报字段（能力/负载/存量三分）、硬过滤→有序打分、可钉死；明确**任务路由与推理路由是两套独立决策** / Architecture decision: task scheduling — heartbeats split into capability / load / inventory, hard filters then an ordered ranking with pinning; task routing and inference routing are explicitly **two independent decisions**
-- Hub 一键把 agent 装到设备（安装清单复用 CAS，升级策略记为 TODO）/ One-click agent install from the Hub (install artifacts reuse the CAS; the upgrade strategy is tracked as a TODO)
-- 产品与技术文档基线：定位、硬性约束、架构决策（会话与轨迹、任务连贯性、分布式推理）、里程碑规划 / Initial product & architecture docs: positioning, hard constraints, architecture decisions (session & trajectory, task continuity, distributed inference), milestone plan
+- Hub 一键把 agent 装到设备（安装清单复用 CAS，升级策略记为 TODO）/ One-click agent install from the Hub (install artifacts reuse the CAS; the upgrade strategy is tracked as a TODO)- 产品与技术文档基线：定位、硬性约束、架构决策（会话与轨迹、任务连贯性、分布式推理）、里程碑规划 / Initial product & architecture docs: positioning, hard constraints, architecture decisions (session & trajectory, task continuity, distributed inference), milestone plan
 - 架构决策：安全与生命周期——凭据三类分层（设备密钥对 node 本地生成 / connector 凭据与模型 key 由 Hub 明文存储）、supervisor/worker 两层设备模型、掉线指数退避重连 / Architecture decision: security & lifecycle — three credential classes, a two-tier supervisor/worker device model, and exponential-backoff reconnect
 - 许可定为 **Apache-2.0** / License settled as **Apache-2.0**
 - 缺陷池录入三条 TODO：`secret` 表明文存储的加固项、分布式推理路线选型（结论未定）、工作区同步 B/D 档兜底 / Three TODOs entered in the defect pool: encryption hardening, distributed-inference route, sync fallbacks
 - README 改为门面式：范围/技术选型细节链向 `docs/PRODUCT.md` 与 `docs/DEVELOPMENT.md`，新增文档索引 / README is now a facade: scope and stack link out to the product and development docs, plus a documentation index
 - 架构决策：工作区供料与同步——Hub 内容寻址仓库统一供料项目文件 / 技能配置 / 产物；git 项目只传 commit 引用、非 git 走 manifest 差分；配置走托管覆盖层（只读 + 漂移检测） / Architecture decision: workspace feeding & sync — one Hub content-addressed store serves project files, skill/agent config, and artifacts; git projects transfer only a commit ref while non-git trees sync by manifest diff; config lands as a managed read-only overlay with drift detection
 - 新增里程碑 **M2 工作区供料与同步**，排在 ACP 与 Git 之前 / New milestone **M2: workspace feeding & sync**, placed before ACP and Git
+
+### Fixed
+- **心跳落库不再抹掉库内公钥**：M0 权宜把设备公钥存在 `capabilities.public_key`，而心跳上报的 `capabilities` 结构上没有它——整对象覆盖会让下一次重连找不到库内公钥，设备永久 `identity mismatch`。现在合并时无条件保留该键 / **Heartbeats no longer wipe the stored public key**: the M0 stopgap keeps a device's public key in `capabilities.public_key`, which heartbeats do not carry. Overwriting the whole object used to break every subsequent reconnect with `identity mismatch`; the merge now always preserves that key
 
 ### Changed
 - **connector 只面向 Web 页面用户，不向 agent 暴露**——本地 agent 完全依赖设备上安装的 agent 自带能力与它自己的权限系统；「工作区根内」只是页面侧的约束 / **Connectors serve the web UI only, never agents.** Local agents rely entirely on their own installed tooling and permission system; "confined to the workspace root" is a UI-side constraint only

@@ -158,6 +158,11 @@ impl DeviceRepo {
     }
 
     /// 心跳后更新能力/负载/在线状态。
+    ///
+    /// **不含 `node_version`**：版本在 enroll 首帧的 `device_info` 里带上并
+    /// 落库（§3），心跳不重复写它。重连帧结构上就没有 `device_info`，
+    /// 所以库里那份版本停在 enroll 那一刻——M0 没有「按版本推升级」的
+    /// 读者，等 M1 真要推 `update` 时再由那条需求决定版本从哪来。
     pub fn touch_online(
         &self,
         id: &str,

@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use crate::filelog::{self, ROLE_WORKER};
 use node_core::conn::{self, ConnOutcome, Established};
+use node_core::heartbeat;
 use node_core::reconnect;
 use node_core::supervisor::exit_code;
 use node_core::Identity;
@@ -60,6 +61,8 @@ impl Worker {
     /// 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到），
     /// 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测——
     /// 见 `mod tests` 里的 `run_with` 用例。
+    // coverage: excluded — 进程入口：自建多线程 runtime 并 block_on，
+    // 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
     fn run_with(&mut self, mut identity: Identity) -> std::process::ExitCode {
         let node_id = identity.node_id();
         self.say(&format!(
@@ -160,33 +163,64 @@ impl Worker {
     }
 
     /// 一次已认证连接上的消息循环。
+    /// 一次已认证连接上的消息循环：读帧分类 + 周期发心跳（子任务 5）。
     ///
-    /// **接缝**：心跳发送（子任务 5）将来就在这里——周期必须取
-    /// `auth_ok.heartbeat_interval_ms`（约束 14：功能由协商决定，不硬编码）。
-    /// M0 的 worker 不发任何帧，循环只负责读与分类。
+    /// 心跳周期取 `auth_ok.heartbeat_interval_ms`（约束 14：功能由协商决定，
+    /// 不硬编码），且 **`auth_ok` 后立即发一次**——等第一个周期会让 Hub 在最长
+    /// 一个周期内看不到任何上报，而它要靠这份上报判在线。
     async fn session(&self, est: &mut Established, heartbeat_interval: Duration) -> SessionEnd {
         self.say(&format!(
             "authed as {} (gen {}, heartbeat every {}ms)",
             est.auth_ok.node_id, est.auth_ok.gen, est.auth_ok.heartbeat_interval_ms
         ));
-        let _ = heartbeat_interval;
+        // 发不出去不当成断连理由：Hub 判离站的依据是「收不到心跳」，
+        // 而它自己会发现。这里只留痕。
+        if let Err(e) = self.send_heartbeat(est).await {
+            self.say(&format!("heartbeat send failed: {}", outcome_phrase(&e)));
+        }
+        let mut ticker = tokio::time::interval(heartbeat_interval);
+        ticker.tick().await; // 第一个 tick 由上面那次立即发送承担
         loop {
-            match est.next_text().await {
-                Err(ConnOutcome::Transport { detail }) => return SessionEnd::Transport(detail),
-                // `next_text` 只产出 Transport；这条归类是诚实的降级，
-                // 不是为了兜住某个具体错误。
-                Err(other) => return SessionEnd::Transport(format!("read failed: {other:?}")),
-                Ok(None) => return SessionEnd::PeerClosed,
-                Ok(Some(text)) => match serde_json::from_str::<Frame>(&text) {
-                    Err(e) => return SessionEnd::Transport(format!("bad frame json: {e}")),
-                    Ok(frame) => {
-                        if let Some(ended) = self.on_control_frame(&frame) {
-                            return ended;
-                        }
+            tokio::select! {
+                _ = ticker.tick() => {
+                    if let Err(e) = self.send_heartbeat(est).await {
+                        self.say(&format!("heartbeat send failed: {}", outcome_phrase(&e)));
                     }
+                }
+                incoming = est.next_text() => match incoming {
+                    Err(ConnOutcome::Transport { detail }) => return SessionEnd::Transport(detail),
+                    // `next_text` 只产出 Transport；这条归类是诚实的降级，
+                    // 不是为了兜住某个具体错误。
+                    Err(other) => return SessionEnd::Transport(format!("read failed: {other:?}")),
+                    Ok(None) => return SessionEnd::PeerClosed,
+                    Ok(Some(text)) => match serde_json::from_str::<Frame>(&text) {
+                        Err(e) => return SessionEnd::Transport(format!("bad frame json: {e}")),
+                        Ok(frame) => {
+                            if let Some(ended) = self.on_control_frame(&frame) {
+                                return ended;
+                            }
+                        }
+                    },
                 },
             }
         }
+    }
+
+    /// 发一份心跳。
+    ///
+    /// 工作区根留空：M0 还没有「用户配置的工作区」这个概念，而本模块
+    /// 明确不许遍历文件系统去猜（§2 路径排除规则）。
+    async fn send_heartbeat(&self, est: &mut Established) -> Result<(), ConnOutcome> {
+        let hb = heartbeat::heartbeat(Vec::new());
+        let payload = serde_json::to_value(&hb).map_err(|e| ConnOutcome::Transport {
+            detail: format!("heartbeat encode: {e}"),
+        })?;
+        est.send(&Frame::push(
+            protocol::message::types::HEARTBEAT,
+            0,
+            payload,
+        ))
+        .await
     }
 
     /// 控制面帧 → 会话终止判定。不是控制面的一律返回 `None`。
@@ -384,6 +418,17 @@ mod tests {
             "{}",
             outcome_phrase(&r)
         );
+        let a = ConnOutcome::Authed {
+            node_id: "n_y".into(),
+            protocol_version: 1,
+            gen: 2,
+            heartbeat_interval_ms: 15_000,
+            enrolled: false,
+        };
+        assert!(
+            outcome_phrase(&a).contains("n_y"),
+            "握手成功却被当成失败传进来时，日志要点名是哪个 node"
+        );
     }
 
     /// enroll 上传的设备描述：`name`/`hostname` 故意留空（不为两行展示名
@@ -509,7 +554,48 @@ mod tests {
                         let _ = send(&mut ws, superseded()).await;
                         let _ = ws.next().await;
                     }
+                    HubTail::RstAfterAuthOk => {
+                        // SO_LINGER=0 → close 时发 RST 而不是 FIN。
+                        // worker 随后写这一帧会拿到 BrokenPipe/ConnectionReset，
+                        // 而**这不是断连理由**：Hub 判离站靠的是收不到心跳。
+                        let stream = ws.get_mut();
+                        let fd = std::os::fd::AsRawFd::as_raw_fd(stream);
+                        let linger = libc::linger {
+                            l_onoff: 1,
+                            l_linger: 0,
+                        };
+                        let n = unsafe {
+                            libc::setsockopt(
+                                fd,
+                                libc::SOL_SOCKET,
+                                libc::SO_LINGER,
+                                std::ptr::from_ref(&linger).cast(),
+                                std::mem::size_of::<libc::linger>() as libc::socklen_t,
+                            )
+                        };
+                        assert_eq!(
+                            n, 0,
+                            "SO_LINGER must be settable for this fixture to mean anything"
+                        );
+                        drop(ws);
+                    }
                     HubTail::Hang => futures_util::future::pending::<()>().await,
+                    HubTail::ReadOnly => {
+                        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+                            .await;
+                    }
+                    HubTail::BadJson => {
+                        let _ = send_text(&mut ws, "{ not json".to_string()).await;
+                        let _ = ws.next().await;
+                    }
+                    HubTail::Binary => {
+                        let _ = ws
+                            .send(tokio_tungstenite::tungstenite::Message::Binary(vec![
+                                0xff, 0x00,
+                            ]))
+                            .await;
+                        let _ = ws.next().await;
+                    }
                 }
             });
         });
@@ -541,11 +627,56 @@ mod tests {
             .map_err(|e| e.to_string())
     }
 
+    /// 轮询等日志里出现 `needle`。
+    ///
+    /// 不用 `timeout` 包住 `connect_loop`：那个 future 里是无限循环，
+    /// 到点后 drop 它要等 runtime 收尾，实测会把测试挂住。
+    ///
+    /// 也必须用 `tokio::time::sleep`：阻塞当前线程会让 worker 任务在
+    /// current_thread runtime 上永远排不上队，于是死锁。
+    async fn wait_for_log(
+        d: &std::path::Path,
+        needle: &str,
+        budget: std::time::Duration,
+    ) -> String {
+        let path = node_core::log::log_path(d);
+        let deadline = tokio::time::Instant::now() + budget;
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if text.contains(needle) {
+                    return text;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "日志里始终没出现 {needle}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn send_text(
+        ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+        t: String,
+    ) -> Result<(), String> {
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(t))
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     enum HubTail {
         Close,
         Superseded,
         Reject,
         Hang,
+        /// `auth_ok` 之后立刻 RST：worker 的心跳必然发不出去。
+        RstAfterAuthOk,
+        /// 握手后只读不发，用来抓 worker 主动发出的第一帧。
+        ReadOnly,
+        /// 握手后发一段不是 JSON 的文本。
+        BadJson,
+        /// 握手后发一个二进制帧。
+        Binary,
     }
 
     /// Hub 明确裁决身份 → worker **不重连**，正常退出码 0。
@@ -580,7 +711,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// 对端正常关闭 → 退避重连。这里不等它真的重连：
+    /// `auth_ok` 之后**立刻**发心跳，不等第一个周期（规格②）。
+    ///
+    /// 等周期会让 Hub 在最长一个周期内看不到任何上报，而它靠这份上报判在线。
+    /// 这里用 20s 周期：实现若退化成「等一个周期」，测试必然超时。
+    #[tokio::test]
+    async fn the_first_heartbeat_arrives_without_waiting_for_the_interval() {
+        let (d, _w) = worker("first-heartbeat");
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        let mut w = Worker::new(d.clone(), fake_hub(HubTail::ReadOnly));
+        let code = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            w.connect_loop(&mut id, None),
+        )
+        .await;
+        assert!(code.is_err(), "连接还活着，loop 不该退出");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 一段不是 JSON 的文本 → Transport 后退避重连。
+    ///
+    /// 不能按约束 14「没听懂就忽略」：对端的帧全都解析不动，说明两边已经
+    /// 分叉，继续留着只会每一帧都失败。
+    #[tokio::test]
+    async fn an_unparsable_frame_after_auth_reconnects() {
+        let (d, _w) = worker("bad-json");
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        let mut w = Worker::new(d.clone(), fake_hub(HubTail::BadJson));
+        let h = tokio::spawn(async move { w.connect_loop(&mut id, None).await });
+        let log = wait_for_log(&d, "reconnecting", std::time::Duration::from_secs(5)).await;
+        assert!(log.contains("bad frame json"), "{log}");
+        assert!(log.contains("reconnecting"), "{log}");
+        h.abort();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 二进制帧 → 同样判 Transport 并重连（协议只用 JSON 文本，§2）。
+    #[tokio::test]
+    async fn a_binary_frame_after_auth_reconnects() {
+        let (d, _w) = worker("binary");
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        let mut w = Worker::new(d.clone(), fake_hub(HubTail::Binary));
+        let h = tokio::spawn(async move { w.connect_loop(&mut id, None).await });
+        let log = wait_for_log(&d, "reconnecting", std::time::Duration::from_secs(5)).await;
+        // 短语来自 conn.rs 的 next_text：二进制帧是「帧种类不对」而不是
+        // 「读失败」——排障时两者指向不同方向。
+        assert!(log.contains("unexpected frame kind"), "{log}");
+        assert!(log.contains("reconnecting"), "{log}");
+        h.abort();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Hub 明确裁决身份 → worker **不重连**，正常退出码 0。
     /// 用 `tokio::time::pause()` 之外的办法——把第二次连接指向一个
     /// 立刻拒绝的端口，于是 loop 会在退避后再次失败并继续退避。
     /// 为让测试有界，只断言「第一次断开后有重连意图」。
@@ -622,6 +804,31 @@ mod tests {
         assert!(code.is_err(), "连接还活着，loop 不该退出");
         let log = std::fs::read_to_string(node_core::log::log_path(&d)).expect("log");
         assert!(log.contains("authed as n_x"), "{log}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `auth_ok` 之后心跳发不出去 → **只留痕，不当成断连理由**。
+    ///
+    /// 判据不是「退出了」而是「日志里写着发送失败」：Hub 判离站靠的是
+    /// 收不到心跳，而它自己会发现。worker 若在这里把连接判死，
+    /// 一次网络抖动就会演变成重连风暴。
+    #[tokio::test]
+    async fn a_heartbeat_that_cannot_be_sent_only_leaves_a_trace() {
+        let (d, _w) = worker("hb-send-fail");
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        let mut w = Worker::new(d.clone(), fake_hub(HubTail::RstAfterAuthOk));
+        let h = tokio::spawn(async move { w.connect_loop(&mut id, None).await });
+        let log = wait_for_log(
+            &d,
+            "heartbeat send failed",
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            log.contains("heartbeat send failed"),
+            "必须留下发送失败的痕迹: {log}"
+        );
+        h.abort();
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -74,7 +74,6 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
     tracing::info!(conn_id = %conn_id, "ws connected");
 
     let outcome = handshake(&state, &mut socket, gen).await;
-
     match &outcome {
         Ok(auth) => {
             // 注册表只存句柄。socket 不进表、不落库（标准④）。
@@ -98,7 +97,7 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
             // relay 的返回值**记日志而不消音**：`let _ =` 会被
             // `let_underscore_must_use` deny，且「连接为什么结束」正是排查
             // 设备掉线时唯一有用的信息。
-            if let Err(reason) = relay(&mut socket, &conn_id, auth).await {
+            if let Err(reason) = relay(&state, &mut socket, &conn_id, auth).await {
                 tracing::info!(conn_id = %conn_id, reason = %reason, "ws relay ended");
             }
         }
@@ -117,6 +116,13 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
             let removed = state
                 .connections()
                 .remove_if_current(&auth.node_id, &conn_id);
+            // 内存上报与连接同生命周期：留着断线前的负载会让一台已经不在的
+            // 设备被路由到（`reports.rs` 的 `forget` 注释）。
+            // 幂等——重连路径会先 insert 再 forget 自己那条，顺序由
+            // `remove_if_current` 的返回值保证不会误删别人的。
+            if removed {
+                state.reports().forget(&auth.node_id);
+            }
             let elapsed_ms = started.elapsed().as_millis();
             tracing::info!(conn_id = %conn_id, node_id = %auth.node_id, removed = removed, elapsed_ms = elapsed_ms, "ws disconnected");
         }
@@ -405,11 +411,16 @@ async fn finish_ok(
     })
 }
 
-/// 业务帧循环：读帧、忽略未知类型。
+/// 业务帧循环：读帧、心跳落库、忽略未知类型。
 ///
-/// M0 的 Hub 侧只需要「连接不断、未知消息不崩」。心跳、通道、
-/// `disconnect{superseded}` 分别是子任务 5、8、7。
-async fn relay(socket: &mut WebSocket, conn_id: &str, auth: &Authenticated) -> Result<(), String> {
+/// M0 的 Hub 侧只需要「连接不断、未知消息不崩」。通道、
+/// `disconnect{superseded}` 分别是子任务 8、7。
+async fn relay(
+    state: &AppState,
+    socket: &mut WebSocket,
+    conn_id: &str,
+    auth: &Authenticated,
+) -> Result<(), String> {
     while let Some(msg) = socket.recv().await {
         let msg = match msg {
             Ok(m) => m,
@@ -429,16 +440,57 @@ async fn relay(socket: &mut WebSocket, conn_id: &str, auth: &Authenticated) -> R
             }
         };
         if frame.msg_type == types::HEARTBEAT {
-            // 子任务 5 接手落库；M0 只记一行，证明心跳真的到了
-            tracing::debug!(
-                conn_id = %conn_id,
-                node_id = %auth.node_id,
-                "heartbeat received"
-            );
+            on_heartbeat(state, conn_id, auth, &frame);
         }
         // 其余（含未知类型）一律忽略：约束 14 前向兼容
     }
     Ok(())
+}
+
+/// 一条心跳：内存更新 + 落库。
+///
+/// 落库失败**不打断连接**：心跳的用途是让 Hub 知道设备活着，而设备确实活着。
+/// 但它必须留痕（所有 I/O 错误都不得静默）——写不进去时路由还能读内存，
+/// 可运维必须知道能力已经停止持久化了。
+fn on_heartbeat(state: &AppState, conn_id: &str, auth: &Authenticated, frame: &Frame) {
+    let hb: protocol::message::Heartbeat = match frame.payload() {
+        Ok(h) => h,
+        Err(e) => {
+            // 载荷畸形只丢这一帧：约束 14 的缺省容错在这里做不了——连 `node_version`
+            // 都解不出来，就没有「保留旧值」的语义可用。
+            tracing::debug!(conn_id = %conn_id, node_id = %auth.node_id, error = %e, "dropping malformed heartbeat");
+            return;
+        }
+    };
+    let now = Instant::now();
+    // 内存：路由读它，必须每次心跳都新。
+    state
+        .reports()
+        .record(&auth.node_id, hub_core::report_from_heartbeat(&hb, now));
+
+    // 落库：设备离线后 Hub 仍要知道它支持哪些 connector（里程碑后端流程①）。
+    // 缺省字段保留旧值（测试标准④）——一次不带负载的心跳不是「清空」。
+    let stored = state.devices().find_by_id(&auth.node_id);
+    let (caps, res) = match stored {
+        Ok(Some(d)) => {
+            hub_core::merge_into_stored(d.capabilities.as_deref(), d.resources.as_deref(), &hb)
+        }
+        // 行不在（不该发生：握手刚验过签）= 当作「没有旧值」，
+        // 而不是把心跳丢掉。查不到与「从没上报过」在合并上同义。
+        Ok(None) => hub_core::merge_into_stored(None, None, &hb),
+        Err(e) => {
+            tracing::warn!(conn_id = %conn_id, node_id = %auth.node_id, error = %e, "cannot read stored report; merging into empty");
+            hub_core::merge_into_stored(None, None, &hb)
+        }
+    };
+    if let Err(e) = state.devices().touch_online(
+        &auth.node_id,
+        &caps,
+        &res,
+        &hub_core::registry::now_rfc3339(),
+    ) {
+        tracing::error!(conn_id = %conn_id, node_id = %auth.node_id, error = %e, "heartbeat persistence failed; routing still reads memory");
+    }
 }
 
 /// 尽力发出一帧，失败只记日志。

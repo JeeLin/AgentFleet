@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use protocol::message::Heartbeat;
+
 /// 连续心跳丢失超过这个时长 → 判离线（= 3 个 15s 周期）。
 ///
 /// ⚠️ 三个实现必须用同一个常量：Hub 判离线、心跳间隔默认值、文档里「45s」。
@@ -144,6 +146,92 @@ pub fn presence(reports: &Reports, node_id: &str, connected: bool, now: Instant)
     } else {
         Presence::Reconnecting
     }
+}
+
+/// 心跳载荷 → 内存上报（`scheduling.md` §2）。
+///
+/// `capabilities` / `resources` / `workspace_roots` 三项允许缺省（约束 14），
+/// 而**缺省不是「写 null」，而是「保留上一次的值」**（里程碑测试标准④）：
+/// 一次不带负载的心跳不得把设备的能力清空。
+pub fn report_from_heartbeat(hb: &Heartbeat, at: Instant) -> Report {
+    Report {
+        node_version: hb.node_version.clone(),
+        capabilities: hb.capabilities.clone(),
+        resources: hb.resources.clone(),
+        workspace_roots: hb.workspace_roots.clone(),
+        at,
+    }
+}
+
+/// 把一次心跳合并进**已落库**的能力/负载里（标准④的落库侧）。
+///
+/// 三项都可缺省；缺省时用旧值，`null` 与「字段不存在」在这里**同义**：
+/// 载荷里显式写 `null` 与不写这个字段，对 Hub 都是「这次没报」。
+/// 只有真报了新值才会覆盖——所以「只含 node_version 的心跳」是一次
+/// 纯粹的在线确认，不动库里任何东西。
+///
+/// ⚠️ `capabilities` 合并时**必须保住了 `public_key`**：M0 权宜把公钥存在
+/// `capabilities.public_key`（见 `repo::set_public_key` 与 `BUGS.md`），
+/// 而心跳报的 capabilities 里没有它。整对象覆盖会把它抹掉，于是下一次
+/// 重连找不到库内公钥 → `identity mismatch`，设备永久接不上。
+pub fn merge_into_stored(
+    stored_caps: Option<&str>,
+    stored_resources: Option<&str>,
+    hb: &Heartbeat,
+) -> (String, String) {
+    let caps = match non_null(&hb.capabilities) {
+        Some(v) => preserve_public_key(&v, stored_caps),
+        None => stored_json(stored_caps),
+    };
+    let res = match non_null(&hb.resources) {
+        Some(v) => v,
+        None => stored_json(stored_resources),
+    };
+    // 序列化失败只有「Value 里有 NaN 之类」这一种可能，而那进不来
+    // （载荷是 JSON 解出来的）。真失败了也别让心跳断——退回旧值。
+    (
+        serde_json::to_string(&caps).unwrap_or_else(|_| stored_json(stored_caps).to_string()),
+        serde_json::to_string(&res).unwrap_or_else(|_| stored_json(stored_resources).to_string()),
+    )
+}
+
+/// `null` 视作缺省。其余值（含 `{}`、`[]`、字符串）都算「这次报了」。
+fn non_null(v: &serde_json::Value) -> Option<serde_json::Value> {
+    if v.is_null() {
+        None
+    } else {
+        Some(v.clone())
+    }
+}
+
+/// 把 `public_key` 从旧 capabilities 搬进新的那份。
+///
+/// 心跳载荷结构上没有这个键（它不属于能力上报），而库内那一份是 enroll 时
+/// 写下的、重连验签的唯一来源。所以它**不是心跳字段，无条件保留**——
+/// 与「缺省保留」是两回事：那条规则说的是「这次没报就不动」，而这里连报的
+/// 时候也不许动。
+///
+/// 两边都取不到就什么都不加：那台设备本来就没存过公钥（老数据），
+/// 编一个空串进去只会让重连走进同一条 `identity mismatch`，还更难查。
+fn preserve_public_key(incoming: &serde_json::Value, stored: Option<&str>) -> serde_json::Value {
+    let Some(key) = stored
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.get("public_key").cloned())
+    else {
+        return incoming.clone();
+    };
+    let mut out = incoming.clone();
+    if let Some(o) = out.as_object_mut() {
+        o.insert("public_key".to_string(), key);
+    }
+    out
+}
+
+/// 库里读出来的 JSON 串。**解不动就丢**：旧值是坏的，而 Hub 没有更好的
+/// 来源可用（「猜一个」比「留着坏的」更危险，路由会照着假的做硬过滤）。
+fn stored_json(s: Option<&str>) -> serde_json::Value {
+    s.and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or(serde_json::Value::Object(Default::default()))
 }
 
 /// 心跳超时 → 需要落库成 offline 的 node。
@@ -306,5 +394,166 @@ mod tests {
         let load = r.resources.get("load").expect("resources");
         assert!(caps.is_array(), "capabilities 是硬过滤输入");
         assert!(load.is_object(), "load 是打分输入");
+    }
+
+    fn heartbeat(caps: serde_json::Value, res: serde_json::Value) -> Heartbeat {
+        Heartbeat {
+            node_version: "0.1.0".into(),
+            capabilities: caps,
+            resources: res,
+            workspace_roots: vec!["/w".into()],
+        }
+    }
+
+    #[test]
+    fn report_from_heartbeat_carries_every_field() {
+        let hb = heartbeat(
+            serde_json::json!({"connectors": ["git"]}),
+            serde_json::json!({"load": {"load1": 1.0}}),
+        );
+        let now = Instant::now();
+        let r = report_from_heartbeat(&hb, now);
+        assert_eq!(r.node_version, "0.1.0");
+        assert_eq!(r.capabilities["connectors"][0], "git");
+        assert_eq!(r.resources["load"]["load1"], 1.0);
+        assert_eq!(r.workspace_roots, vec!["/w".to_string()]);
+        assert_eq!(r.age(now), Duration::ZERO);
+    }
+
+    /// 标准④：**只含 `node_version`** 的心跳不得清空库里已有的能力/负载。
+    ///
+    /// 这是「缺省即保留」的落地处：null 与字段不在载荷里同义，
+    /// 两种都走「用旧值」。
+    #[test]
+    fn a_minimal_heartbeat_keeps_the_stored_capabilities_and_resources() {
+        let hb = Heartbeat {
+            node_version: "0.1.0".into(),
+            capabilities: serde_json::Value::Null,
+            resources: serde_json::Value::Null,
+            workspace_roots: Vec::new(),
+        };
+        let (caps, res) = merge_into_stored(
+            Some(r#"{"connectors":["terminal"]}"#),
+            Some(r#"{"load":{"load1":2.5}}"#),
+            &hb,
+        );
+        let caps: serde_json::Value = serde_json::from_str(&caps).expect("caps json");
+        let res: serde_json::Value = serde_json::from_str(&res).expect("res json");
+        assert_eq!(caps["connectors"][0], "terminal", "能力必须保留");
+        assert_eq!(res["load"]["load1"], 2.5, "负载必须保留");
+    }
+
+    /// 真报了新值才覆盖：显式写 null 与不写字段都是「这次没报」。
+    #[test]
+    fn a_real_report_overrides_the_stored_values() {
+        let hb = heartbeat(
+            serde_json::json!({"connectors": ["files", "git"]}),
+            serde_json::json!({"load": {"load1": 0.1}}),
+        );
+        let (caps, res) = merge_into_stored(
+            Some(r#"{"connectors":["terminal"]}"#),
+            Some(r#"{"load":{"load1":9.9}}"#),
+            &hb,
+        );
+        assert!(caps.contains("files"), "{caps}");
+        assert!(!caps.contains("terminal"), "旧能力应被替换: {caps}");
+        assert!(res.contains("0.1"), "{res}");
+    }
+
+    /// 只报一半：能力更新、负载保留。两项缺省互不影响。
+    #[test]
+    fn each_optional_field_merges_independently() {
+        let hb = Heartbeat {
+            node_version: "0.1.0".into(),
+            capabilities: serde_json::json!({"connectors": ["git"]}),
+            resources: serde_json::Value::Null,
+            workspace_roots: Vec::new(),
+        };
+        let (caps, res) = merge_into_stored(
+            Some(r#"{"connectors":["terminal"]}"#),
+            Some(r#"{"load":{"load1":7.0}}"#),
+            &hb,
+        );
+        assert!(caps.contains("git"), "{caps}");
+        assert!(res.contains("7.0"), "没报负载就得留旧的: {res}");
+    }
+
+    /// 心跳覆盖 capabilities 时**必须保住 `public_key`**。
+    ///
+    /// M0 权宜把公钥存在 `capabilities.public_key`（`BUGS.md`），而心跳报的
+    /// 能力里结构上没有它。整对象覆盖会把它抹掉 → 下次重连找不到库内公钥
+    /// → `identity mismatch`，设备永久接不上。这条曾是真 bug。
+    #[test]
+    fn merging_capabilities_never_drops_the_stored_public_key() {
+        let hb = Heartbeat {
+            node_version: "0.1.0".into(),
+            capabilities: serde_json::json!({"connectors": ["git"]}),
+            resources: serde_json::Value::Null,
+            workspace_roots: Vec::new(),
+        };
+        let (caps, _) = merge_into_stored(
+            Some(r#"{"connectors":["terminal"],"public_key":"AAAAB3NzaC1yc2E"}"#),
+            None,
+            &hb,
+        );
+        let v: serde_json::Value = serde_json::from_str(&caps).unwrap();
+        assert_eq!(v["public_key"], "AAAAB3NzaC1yc2E", "公钥必须活过心跳覆盖");
+        assert_eq!(v["connectors"][0], "git", "能力仍然要更新");
+    }
+
+    /// 库里没有公钥（老数据）→ 不编一个假的进去。
+    #[test]
+    fn no_stored_public_key_means_none_is_invented() {
+        let hb = Heartbeat {
+            node_version: "0.1.0".into(),
+            capabilities: serde_json::json!({"connectors": ["git"]}),
+            resources: serde_json::Value::Null,
+            workspace_roots: Vec::new(),
+        };
+        let (caps, _) = merge_into_stored(Some(r#"{"connectors":["terminal"]}"#), None, &hb);
+        let v: serde_json::Value = serde_json::from_str(&caps).unwrap();
+        assert!(v.get("public_key").is_none(), "{caps}");
+    }
+
+    /// 库里存的是坏 JSON 时也照样保住新报的能力（旧值读不出来就只当没有）。
+    #[test]
+    fn an_unparsable_stored_capabilities_still_keeps_the_new_ones() {
+        let hb = Heartbeat {
+            node_version: "0.1.0".into(),
+            capabilities: serde_json::json!({"connectors": ["git"]}),
+            resources: serde_json::Value::Null,
+            workspace_roots: Vec::new(),
+        };
+        let (caps, _) = merge_into_stored(Some("not json"), None, &hb);
+        assert!(caps.contains("git"), "{caps}");
+    }
+
+    /// 库里是 NULL（从没上报过）且这次也没报 → 空对象，不是 null、不是字符串 "null"。
+    #[test]
+    fn nothing_stored_and_nothing_reported_yields_empty_objects() {
+        let hb = Heartbeat {
+            node_version: "0.1.0".into(),
+            capabilities: serde_json::Value::Null,
+            resources: serde_json::Value::Null,
+            workspace_roots: Vec::new(),
+        };
+        let (caps, res) = merge_into_stored(None, None, &hb);
+        assert_eq!(caps, "{}");
+        assert_eq!(res, "{}");
+    }
+
+    /// 库里存的是坏 JSON（历史数据 / 手工改过）→ 丢掉而不是 panic，
+    /// 更不会把坏串原样写回去。
+    #[test]
+    fn unparsable_stored_values_are_dropped_not_propagated() {
+        let hb = Heartbeat {
+            node_version: "0.1.0".into(),
+            capabilities: serde_json::Value::Null,
+            resources: serde_json::Value::Null,
+            workspace_roots: Vec::new(),
+        };
+        let (caps, res) = merge_into_stored(Some("not json"), Some(""), &hb);
+        assert_eq!(caps, "{}");
+        assert_eq!(res, "{}");
     }
 }

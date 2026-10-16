@@ -80,6 +80,15 @@ impl std::fmt::Debug for Established {
 }
 
 impl Established {
+    /// 发一帧（JSON 文本）。
+    ///
+    /// 心跳（子任务 5）是 M0 唯一的出向帧，所以这里没有泛化成一整套
+    /// 「请求/响应/push」抽象——等真的需要时再加，届时它该长什么样
+    /// 由第一批用例决定，而不是由猜决定。
+    pub async fn send(&mut self, frame: &Frame) -> Result<(), ConnOutcome> {
+        send_frame(&mut self.socket, frame.clone()).await
+    }
+
     /// 读下一帧文本。`Ok(None)` = 对端关闭（正常下线）。
     ///
     /// 握手之后 node 侧唯一的读入口：**未知帧类型一律原样交给调用方**，

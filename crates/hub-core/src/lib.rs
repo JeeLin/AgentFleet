@@ -19,5 +19,7 @@ pub use error::CoreError;
 pub use identity::{Fingerprint, KeyPair};
 pub use limits::{ReadLimiter, WriteQueue};
 pub use registry::Registry;
-pub use reports::{Presence, Report, Reports};
+pub use reports::{
+    merge_into_stored, report_from_heartbeat, Presence, Report, Reports, OFFLINE_AFTER,
+};
 pub use session::{Session, SessionStore};
