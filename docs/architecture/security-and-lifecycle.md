@@ -332,6 +332,24 @@ WS 断开 → 节点指数退避重连：1s / 2s / 4s … 上限 30s（带抖动
 见 `task-continuity.md` §4.2：按 `(node_id, path)` 重建 terminal/files/git 通道，
 PTY 缓冲区与 git 状态在重连后**不复位**（它们在节点进程里活着）。
 
+### 5.3 落地情况（M0 子任务 6）
+
+- **扫瞄器**：`hub-server/src/presence.rs`，周期 15s（`SCAN_INTERVAL`），
+  每轮把 `timed_out` 列出的设备 `mark_offline`。判定只查心跳年龄。
+- **`Reconnecting` 靠「断开时不删上报」生效**：内存上报活过重连窗口，
+  `presence()` 才有「WS 断了但心跳新鲜 → 调度仍算可用」这一档。
+  断开即删会让这档永远走不到，`PRODUCT.md` §3.3「离线期间会话仍存活」
+  的承诺随之落空。
+- **回 online 不靠扫瞄器**：靠下一次心跳的 `touch_online`。扫瞄器只会
+  往 offline 改，所以恢复后不需要任何额外动作。
+
+> ⚠️ **规格内部冲突（待裁决）**：里程碑 M0 子任务 6 的测试标准④ 要求
+> 「心跳超时但 WS 仍通 → `device.status` 仍为 `online`」，与本文档 §5、
+> `protocol.md`「连续 45s 无心跳 → 判 offline」、`scheduling.md` §2 三处
+> 一致的表述相反。实现按文档侧（标 offline），因为 §5 明确把「心跳超时但
+> 重连成功」列为**反面例子**：按连接状态判会把活着的设备标成离线，而调度
+> 硬过滤第一步就排除 offline。标准④ 剩下的一半（「连接仍可收发」）成立。
+
 ---
 
 ## 6. 凭据的下发与节点侧落盘

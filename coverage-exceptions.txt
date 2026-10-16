@@ -21,16 +21,60 @@
 
 crates/identity/src/lib.rs:93:ed25519-dalek 的 from_bytes 对几乎所有 32 字节输入均解压成功，构造不出确定性非法曲线点
 crates/identity/src/lib.rs:125:SHA-256 digest 恒为 32 字节，first_chunk::<16> 结构上永不返回 None
+crates/hub-server/src/routes/ws.rs:102:同 452：handle_socket 里 match &outcome 的收尾行，同样因连接 task 在 runtime 关闭时被取消而不可达
+crates/hub-server/src/routes/ws.rs:178:handshake 的 recv 返回 None 臂：axum 的 WebSocket::recv 在流结束时返回 Err 而不是 None（RST、纯 FIN、Close 三种收尾实测都走 Ok(Some(Err))）
+crates/hub-server/src/routes/ws.rs:221:challenge 帧发送失败臂：tungstenite 的 send 把帧排进内部队列当场返回 Ok，TCP 错误只在后续 flush 暴露，而那时连接已结束——RST 夹具实测打不到
+crates/hub-server/src/routes/ws.rs:319:EnrollOutcome::Race 结构上不可达：BEGIN IMMEDIATE 已持写锁，事务内 SELECT 后无并发者能提交同指纹行，INSERT 撞不上 UNIQUE
+crates/hub-server/src/routes/ws.rs:409:auth_ok 帧发送失败臂：同 221，异步发送模型下不可观测（用 SO_LINGER=0 立刻 RST 的夹具实测仍返回 Ok）
+crates/hub-server/src/routes/ws.rs:452:relay 的 Ok(()) 出口不可达：while let Some(msg) 退出即 recv 返回 None，而实测所有连接都在测试 runtime 关闭时被取消（task 从不走到返回），故 107 与 452 同时不覆盖
+crates/hub-server/src/routes/ws.rs:512:send_best_effort 的 Err 臂：同 221，失败帧发不出去在 tungstenite 下不可达
 crates/hub-core/src/registry.rs:134:活跃事务的 SQLite ROLLBACK 必然成功，该分支仅防御连接级故障
 crates/hub-server/src/main.rs:43:建不出 OS 线程（fd/内存耗尽）在测试环境无可控构造手段
 crates/hub-server/src/routes/setup.rs:167:spawn_blocking 的 JoinError 只在任务 panic（workspace lint panic=deny 禁止）或运行时关闭时产生，测试造不出
 crates/hub-server/src/routes/setup.rs:221:Semaphore::close() 是 pub 但本 workspace 零调用点（已 grep），闸门与 AppState 同生命周期，AcquireError 属约定性不可达
 crates/hub-server/src/routes/setup.rs:222:同 221：tracing::error! 的参数行被 llvm-cov 记为 miss（多行宏已知现象）
 crates/hub-server/src/routes/setup.rs:223:同 221：闭锁返回 500 的分支体，与 221 同一不可达臂
-crates/hub-server/src/routes/ws.rs:314:EnrollOutcome::Race 结构上不可达：BEGIN IMMEDIATE 已持写锁，事务内 SELECT 后无并发者能提交同指纹行，INSERT 撞不上 UNIQUE
-crates/hub-server/src/routes/ws.rs:447:relay 的 Ok(()) 出口不可达：while let Some(msg) 退出即 recv 返回 None，而实测所有连接都在测试 runtime 关闭时被取消（task 从不走到返回），故 102 与 447 同时不覆盖
 crates/hub-core/src/reports.rs:122:同 104：锁中毒分支
 crates/hub-core/src/reports.rs:249:同 104：锁中毒分支
+crates/node-cli/src/worker.rs:48:work 的 Identity::load 成功臂后段：需真 data_dir，与 run_with 同一不可达形状
+crates/node-cli/src/worker.rs:56:work 转调 run_with：run_with 自建多线程 runtime，嵌在 tokio::test 里会 panic
+crates/node-cli/src/worker.rs:66:run_with 本体：进程入口，建 runtime 并 block_on（只能由真进程触达）
+crates/node-cli/src/worker.rs:67:同 66：取 node_id
+crates/node-cli/src/worker.rs:68:同 66：启动日志的 format! 行
+crates/node-cli/src/worker.rs:69:同 66：日志模板行
+crates/node-cli/src/worker.rs:70:同 66：node_id 取值表达式
+crates/node-cli/src/worker.rs:71:同 66：hub_url 参数行
+crates/node-cli/src/worker.rs:72:同 66：format! 收尾
+crates/node-cli/src/worker.rs:74:同 66：runtime 构造
+crates/node-cli/src/worker.rs:75:同 66：enable_all
+crates/node-cli/src/worker.rs:76:同 66：build() 调用点
+crates/node-cli/src/worker.rs:78:同 66：Ok 臂
+crates/node-cli/src/worker.rs:81:同 66：Err 臂（runtime 建不起来，需 fd 耗尽）
+crates/node-cli/src/worker.rs:82:同 66：Err 臂写日志
+crates/node-cli/src/worker.rs:83:同 66：Err 臂返回 FAILURE
+crates/node-cli/src/worker.rs:86:同 66：block_on connect_loop
+crates/node-cli/src/worker.rs:89:同 66：let _ = code 兜底行
+crates/node-cli/src/worker.rs:90:同 66：返回 SUCCESS
+crates/node-cli/src/worker.rs:91:同 66：run_with 收尾
+crates/node-cli/src/worker.rs:110:backfill_node_id 的写失败 say 行：需 identity.json 所在目录变只读，与 tempdir 夹具互斥
+crates/node-cli/src/worker.rs:111:同 110：写失败即返回 CRASH
+crates/node-cli/src/worker.rs:128:connect_loop 里「身份已被裁决则不再重连」之后的 continue：需同一循环内连过两次且都被拒
+crates/node-cli/src/worker.rs:186:session 循环体 tick 臂的 send_heartbeat：RST 之后 select! 的读分支先完成（next_text 立刻返回 Err），tick 臂抢不到执行权
+crates/node-cli/src/worker.rs:187:同 186：失败日志行
+crates/node-cli/src/worker.rs:188:同 186：if let 收尾
+crates/node-cli/src/worker.rs:194:session 读分支的 Err(other) 降级臂：next_text 只产出 Transport 一种 Err，Rejected/Authed/Superseded 各有专属处理路径
+crates/node-cli/src/worker.rs:201:session 读分支解析成功臂的收尾行（on_control_frame 返回 None 时）
+crates/node-cli/src/worker.rs:216:send_heartbeat 的序列化 Err 臂：Heartbeat 只含字符串与 Vec<String>，serde 结构上不会失败
+crates/node-cli/src/worker.rs:217:同 216：? 收尾行
+crates/node-cli/src/worker.rs:252:rotate_log 的失败 say 行：正常文件系统构造不出确定性失败，属防御性兜底
+crates/node-cli/src/worker.rs:339:测试夹具 want_superseded 的 panic 臂（期望之外的分支）
+crates/node-cli/src/worker.rs:382:测试夹具 want_transport 的 panic 臂（期望之外的分支）
+crates/node-cli/src/worker.rs:411:测试夹具 outcome_phrase(&s) 的 Superseded 变体断言行
+crates/node-cli/src/worker.rs:419:测试夹具 outcome_phrase(&r) 的断言行
+crates/node-cli/src/worker.rs:533:fake_hub 夹具的分支收尾 return（防御性）
+crates/node-cli/src/worker.rs:536:同 533：另一条防御性 return
+crates/node-cli/src/worker.rs:548:同 533：unreachable! 兜底
+crates/node-cli/src/worker.rs:648:同 533：fake_hub match 收尾
 crates/node-core/src/log.rs:55:轮转删最旧文件：目录可写、文件存在即可删，正常文件系统构造不出确定性失败，属防御性兜底
 crates/node-core/src/log.rs:62:轮转后移文件：源存在、目标在同目录，正常文件系统构造不出确定性失败，属防御性兜底
 crates/node-core/src/log.rs:85:收紧日志目录权限：目录已存在（create_dir_all 成功）即 set_permissions 必成功，正常文件系统构造不出失败，属防御性兜底
@@ -40,115 +84,71 @@ crates/node-core/src/conn.rs:284:同 283：Err 臂的 ? 收尾行
 crates/node-core/src/conn.rs:309:read_frame 的 ok_or_else：对端 Close 帧先到并命中下面的 Close 臂，这个「流结束」臂被遮蔽；纯 FIN 不发 Close 的对端会被 tungstenite 报成读错误，走的是另一条路
 crates/node-core/src/conn.rs:310:同 309：Ok(None) 臂的 detail 行
 crates/node-core/src/identity.rs:235:目录 fsync 的 if let Ok 兜底：父目录打不开才能进 else，测试无法在不弄坏 tempdir 夹具的前提下构造
-crates/node-cli/src/supervisor.rs:110:executor 入口：Supervisor::new 只在 main 的 run 路径上构造，而 main 是另一编译单元、覆盖率不计
-crates/node-cli/src/supervisor.rs:111:同 110：current_exe 失败的兜底臂，进程路径取不到时退成 BIN_NAME
-crates/node-cli/src/supervisor.rs:112:同 110：转调 with_exe（测试入口）那一行
-crates/node-cli/src/supervisor.rs:143:supervise 循环体的「worker 正常退出」臂：决策已由 node_core::supervisor::decide 100% 覆盖，此处仅执行副作用（记录退出时刻）
-crates/node-cli/src/supervisor.rs:144:同 143：record_exit + 时间戳赋值
-crates/node-cli/src/supervisor.rs:145:同 143：把 Decision 归一成 Reconcile::Nothing 的匹配臂
-crates/node-cli/src/supervisor.rs:148:同 143：循环体收尾的 pending 赋值
-crates/node-cli/src/supervisor.rs:163:supervise 循环体的退避臂：sleep(backoff_secs) 要真等一个指数增长的间隔，跑一次 supervise 用例要几分钟且无终止条件
-crates/node-cli/src/supervisor.rs:164:同 163：匹配臂的字段绑定行
-crates/node-cli/src/supervisor.rs:165:同 163：退避分支的匹配臂入口
-crates/node-cli/src/supervisor.rs:166:同 163：say 日志行
-crates/node-cli/src/supervisor.rs:167:同 163：std::thread::sleep 本体
-crates/node-cli/src/supervisor.rs:169:supervise 循环体的替换臂：replace 会真的 rename 运行中的二进制，破坏测试进程自身
-crates/node-cli/src/supervisor.rs:170:同 169：say 日志行
-crates/node-cli/src/supervisor.rs:171:同 169：replace 失败即停的分支
-crates/node-cli/src/supervisor.rs:174:同 169：失败路径的 say 行
-crates/node-cli/src/supervisor.rs:175:同 169：failed_state 落库行
-crates/node-cli/src/supervisor.rs:176:同 169：return stopped()
-crates/node-cli/src/supervisor.rs:179:supervise 循环体的回滚臂：rollback 同样要动二进制文件本身
-crates/node-cli/src/supervisor.rs:180:同 179：say 行
-crates/node-cli/src/supervisor.rs:181:同 179：rollback 失败即停的分支
-crates/node-cli/src/supervisor.rs:182:同 179：失败路径的 say 行
-crates/node-cli/src/supervisor.rs:183:同 179：return stopped()
-crates/node-cli/src/supervisor.rs:195:supervise 循环体末尾：spawn_and_wait 会真拉一个子进程并阻塞等它退出
-crates/node-cli/src/supervisor.rs:203:spawn_and_wait：真 spawn 二进制并 wait，在单元测试里等于递归起自己
-crates/node-cli/src/supervisor.rs:204:同 203：started 时间戳
-crates/node-cli/src/supervisor.rs:205:同 203：Command::new(&self.exe)
-crates/node-cli/src/supervisor.rs:206:同 203：.args(worker_argv(...))
-crates/node-cli/src/supervisor.rs:207:同 203：.spawn() 调用点
-crates/node-cli/src/supervisor.rs:209:同 203：spawn 成功臂
-crates/node-cli/src/supervisor.rs:210:同 203：spawn 失败臂（Err(e) 匹配）
-crates/node-cli/src/supervisor.rs:214:同 203：失败路径的 say 行
-crates/node-cli/src/supervisor.rs:215:同 203：失败路径返回 CRASH
-crates/node-cli/src/supervisor.rs:218:同 203：child.wait() 调用点
-crates/node-cli/src/supervisor.rs:219:同 203：wait 成功臂 → exit_code_of
-crates/node-cli/src/supervisor.rs:220:同 203：wait 失败臂
-crates/node-cli/src/supervisor.rs:221:同 203：失败路径的 say 行
-crates/node-cli/src/supervisor.rs:222:同 203：失败路径按 CRASH 记
-crates/node-cli/src/supervisor.rs:225:同 203：组装 ExitInfo（存活时长）
-crates/node-cli/src/supervisor.rs:226:同 203：ExitInfo::new 收尾
-crates/node-cli/src/supervisor.rs:370:rotate_log 的失败 say 行：正常文件系统构造不出确定性失败，属防御性兜底
-crates/node-cli/src/lib.rs:126:run 的 data_dir 取不到的 Err 臂：dirs::data_dir 在 HOME 存在即返回 Some，root 下权限错误不可构造（同 91-93）
+crates/node-cli/src/lib.rs:126:run 的「data_dir 取不到」Err 臂：dirs::data_dir 在 HOME 存在即返回 Some，root 下权限错误不可构造（防御性兜底）
 crates/node-cli/src/lib.rs:127:同 126：写 stderr 行
 crates/node-cli/src/lib.rs:128:同 126：返回 FAILURE 行
-crates/node-cli/src/lib.rs:136:ParseResult::Run 转调 run_node：run_node 建真 runtime 并起子进程，只能由进程级测试触达（afcli_process.rs 之外不覆盖）
-crates/node-cli/src/lib.rs:146:run_node 本体：进程入口，真建数据目录与 hub url 后转 dispatch
-crates/node-cli/src/lib.rs:147:同 146：where 子句
-crates/node-cli/src/lib.rs:148:同 146：W1 约束行
-crates/node-cli/src/lib.rs:149:同 146：W2 约束行
-crates/node-cli/src/lib.rs:151:同 146：data_dir 解析调用点
-crates/node-cli/src/lib.rs:152:同 146：Ok 臂
-crates/node-cli/src/lib.rs:155:同 146：Err 臂（data_dir 取不到）
-crates/node-cli/src/lib.rs:156:同 146：Err 臂写 stderr
-crates/node-cli/src/lib.rs:157:同 146：Err 臂返回 FAILURE
-crates/node-cli/src/lib.rs:160:同 146：hub url 解析
-crates/node-cli/src/lib.rs:161:同 146：转调 dispatch（可测接缝）
-crates/node-cli/src/lib.rs:162:同 146：run_node 收尾
-crates/node-cli/src/lib.rs:185:dispatch 的 supervisor 臂：Supervisor::new 会真 spawn 子进程并阻塞等它退出
-crates/node-cli/src/lib.rs:186:同 185：argv 组装行
-crates/node-cli/src/lib.rs:189:同 185：打印 supervisor 启动信息的 writeln!
-crates/node-cli/src/lib.rs:190:同 185：out 参数行
-crates/node-cli/src/lib.rs:193:同 185：data_dir 显示行
-crates/node-cli/src/lib.rs:195:同 185：supervise() 调用点（无限循环，跑一次不会返回）
-crates/node-cli/src/lib.rs:330:测试夹具的 String::from_utf8_lossy：非 UTF-8 输出分支在现有断言下不可达
-crates/node-cli/src/supervisor.rs:113:同 110：Self::with_exe 构造行
-crates/node-cli/src/supervisor.rs:168:同 163：退避分支的收尾（Continue 归一）
-crates/node-cli/src/supervisor.rs:177:同 169：替换分支的收尾
-crates/node-cli/src/supervisor.rs:184:同 179：回滚分支的收尾
-crates/node-cli/src/worker.rs:48:work 的 identity 加载 Err 臂：需 data_dir 写不了，与 91-93 同一不可达形状
-crates/node-cli/src/worker.rs:56:work 转调 run_with：run_with 自建多线程 runtime，嵌在 tokio::test 里会 panic
-crates/node-cli/src/worker.rs:64:run_with 本体：进程入口，建 runtime 并 block_on（只能由真进程触达）
-crates/node-cli/src/worker.rs:65:同 64：取 node_id
-crates/node-cli/src/worker.rs:66:同 64：启动日志的 format! 行
-crates/node-cli/src/worker.rs:67:同 64：日志模板行
-crates/node-cli/src/worker.rs:68:同 64：node_id 取值表达式
-crates/node-cli/src/worker.rs:69:同 64：hub_url 参数行
-crates/node-cli/src/worker.rs:70:同 64：format! 收尾
-crates/node-cli/src/worker.rs:72:同 64：runtime 构造
-crates/node-cli/src/worker.rs:73:同 64：enable_all
-crates/node-cli/src/worker.rs:74:同 64：build() 调用点
-crates/node-cli/src/worker.rs:76:同 64：Ok 臂
-crates/node-cli/src/worker.rs:79:同 64：Err 臂（runtime 建不起来，需 fd 耗尽）
-crates/node-cli/src/worker.rs:80:同 64：Err 臂写日志
-crates/node-cli/src/worker.rs:81:同 64：Err 臂返回 FAILURE
-crates/node-cli/src/worker.rs:84:同 64：block_on connect_loop
-crates/node-cli/src/worker.rs:87:同 64：let _ = code 兜底行
-crates/node-cli/src/worker.rs:88:同 64：返回 SUCCESS
-crates/node-cli/src/worker.rs:89:同 64：run_with 收尾
-crates/node-cli/src/worker.rs:108:backfill_node_id 的写失败 say 行：需 identity.json 所在目录变只读，与 tempdir 夹具互斥
-crates/node-cli/src/worker.rs:109:同 108：写失败即返回 CRASH
-crates/node-cli/src/worker.rs:126:connect_loop 里「身份已被裁决则不再重连」之后的 continue：需同一循环内连过两次且都被拒
-crates/node-cli/src/worker.rs:250:rotate_log 的失败 say 行：正常文件系统构造不出确定性失败，属防御性兜底
-crates/node-cli/src/worker.rs:337:测试夹具 want_superseded 的 panic 臂（期望之外的分支）
-crates/node-cli/src/worker.rs:380:测试夹具 want_transport 的 panic 臂（期望之外的分支）
-crates/node-cli/src/worker.rs:409:测试夹具 outcome_phrase(&s) 的 Superseded 变体断言行（本次运行未走到）
-crates/node-cli/src/worker.rs:417:测试夹具 outcome_phrase(&r) 的断言行（本次运行未走到）
-crates/node-cli/src/worker.rs:531:测试夹具 fake_hub 的分支收尾 return（defensive）
-crates/node-cli/src/worker.rs:534:同 531：另一条防御性 return
-crates/node-cli/src/worker.rs:546:同 531：unreachable! 兜底
-crates/node-cli/src/worker.rs:184:session 循环体 tick 臂的 send_heartbeat：RST 之后 select! 的读分支先完成（next_text 立刻返回 Err），tick 臂抢不到执行权
-crates/node-cli/src/worker.rs:185:同 184：失败日志行
-crates/node-cli/src/worker.rs:186:同 184：if let 收尾
-crates/node-cli/src/worker.rs:192:session 读分支的 Err(other) 降级臂：next_text 只产出 Transport 一种 Err，Rejected/Authed/Superseded 各有专属处理路径
-crates/node-cli/src/worker.rs:199:session 读分支解析成功臂的收尾行（on_control_frame 返回 None 时）
-crates/node-cli/src/worker.rs:214:send_heartbeat 的序列化 Err 臂：Heartbeat 只含字符串与 Vec<String>，serde 结构上不会失败
-crates/node-cli/src/worker.rs:215:同 214：? 收尾行
-crates/node-cli/src/worker.rs:646:fake_hub 夹具 HubTail match 的收尾行（防御性）
-crates/hub-server/src/routes/ws.rs:102:同 447：relay 返回 Err 后的 tracing::info! 行，同样因连接 task 在 runtime 关闭时被取消而不可达
-crates/hub-server/src/routes/ws.rs:173:handshake 的 recv 返回 None 臂：axum 的 WebSocket::recv 在流结束时返回 Err 而不是 None（RST、纯 FIN、Close 三种收尾实测都走 Ok(Some(Err))）
-crates/hub-server/src/routes/ws.rs:216:challenge 帧发送失败臂：tungstenite 的 send 把帧排进内部队列当场返回 Ok，TCP 错误只在后续 flush 暴露，而那时连接已结束——RST 夹具实测打不到
-crates/hub-server/src/routes/ws.rs:404:auth_ok 帧发送失败臂：同 216，异步发送模型下不可观测（用 SO_LINGER=0 立刻 RST 的夹具实测仍返回 Ok）
-crates/hub-server/src/routes/ws.rs:507:send_best_effort 的 Err 臂：同 216，失败帧发不出去在 tungstenite 下不可达
+crates/node-cli/src/lib.rs:136:ParseResult::Run 转调 run_node：run_node 建真 runtime 并起子进程，只能由进程级测试触达
+crates/node-cli/src/lib.rs:148:run_node 本体：进程入口，真建数据目录与 hub url 后转 dispatch（单测从 dispatch 进入）
+crates/node-cli/src/lib.rs:149:同 148：where 子句
+crates/node-cli/src/lib.rs:150:同 148：W1 约束行
+crates/node-cli/src/lib.rs:151:同 148：W2 约束行
+crates/node-cli/src/lib.rs:153:同 148：data_dir 解析调用点
+crates/node-cli/src/lib.rs:154:同 148：Ok 臂
+crates/node-cli/src/lib.rs:157:同 148：Err 臂入口（data_dir 取不到）
+crates/node-cli/src/lib.rs:158:同 148：Err 臂写 stderr
+crates/node-cli/src/lib.rs:159:同 148：Err 臂返回 FAILURE
+crates/node-cli/src/lib.rs:162:hub url 解析：只在真进程入口上跑（data_dir 取的是平台真实目录，无法注入）
+crates/node-cli/src/lib.rs:163:同 162：转调 dispatch（可测接缝）
+crates/node-cli/src/lib.rs:164:同 148：run_node 收尾
+crates/node-cli/src/lib.rs:187:dispatch 的 supervisor 臂：Supervisor::new 会真 spawn 子进程并阻塞等它退出
+crates/node-cli/src/lib.rs:188:同 187：argv 组装行
+crates/node-cli/src/lib.rs:191:同 187：写 data dir 提示的 writeln!
+crates/node-cli/src/lib.rs:192:同 187：out 参数行
+crates/node-cli/src/lib.rs:195:同 187：data_dir.display() 参数行
+crates/node-cli/src/lib.rs:197:同 187：supervise() 调用点（无限循环，跑一次不会返回）
+crates/node-cli/src/lib.rs:332:测试夹具的 String::from_utf8_lossy：非 UTF-8 输出分支在现有断言下不可达
+crates/node-cli/src/supervisor.rs:112:Supervisor::new：只在 main 的 run 路径上构造，而 main 是另一编译单元、覆盖率不计；单测入口是 with_exe
+crates/node-cli/src/supervisor.rs:113:同 112：current_exe 失败的兜底臂，进程路径取不到时退成 BIN_NAME
+crates/node-cli/src/supervisor.rs:114:同 112：转调 with_exe（测试入口）
+crates/node-cli/src/supervisor.rs:115:同 112：构造收尾
+crates/node-cli/src/supervisor.rs:145:supervise 循环体「worker 正常退出」臂：决策已由 node_core::supervisor::decide 100% 覆盖，此处仅执行副作用
+crates/node-cli/src/supervisor.rs:146:同 145：record_exit + 存活时长
+crates/node-cli/src/supervisor.rs:147:同 145：记录退出时刻
+crates/node-cli/src/supervisor.rs:150:同 145：把 Decision 归一成 Reconcile::Nothing 的匹配臂
+crates/node-cli/src/supervisor.rs:165:supervise 循环体的退避臂：sleep(backoff_secs) 要真等指数增长的间隔，跑一次要几分钟且无终止条件
+crates/node-cli/src/supervisor.rs:166:同 165：匹配臂的字段绑定行
+crates/node-cli/src/supervisor.rs:167:同 165：退避分支的匹配臂入口
+crates/node-cli/src/supervisor.rs:168:同 165：say 日志行
+crates/node-cli/src/supervisor.rs:169:同 165：std::thread::sleep 本体
+crates/node-cli/src/supervisor.rs:170:同 165：退避分支收尾（Continue 归一）
+crates/node-cli/src/supervisor.rs:171:supervise 循环体的替换臂：replace 会真的 rename 运行中的二进制，破坏测试进程自身
+crates/node-cli/src/supervisor.rs:172:同 171：say 日志行
+crates/node-cli/src/supervisor.rs:173:同 171：replace 失败即停的分支
+crates/node-cli/src/supervisor.rs:176:同 171：失败路径的 say 行
+crates/node-cli/src/supervisor.rs:177:同 171：failed_state 落库行
+crates/node-cli/src/supervisor.rs:178:同 171：失败路径返回 stopped()
+crates/node-cli/src/supervisor.rs:179:同 171：替换分支收尾
+crates/node-cli/src/supervisor.rs:181:supervise 循环体的回滚臂：rollback 同样要动二进制文件本身
+crates/node-cli/src/supervisor.rs:182:同 181：say 行
+crates/node-cli/src/supervisor.rs:183:同 181：rollback 失败即停的分支
+crates/node-cli/src/supervisor.rs:184:同 181：失败路径的 say 行
+crates/node-cli/src/supervisor.rs:185:同 181：失败路径返回 stopped()
+crates/node-cli/src/supervisor.rs:186:同 181：回滚分支收尾
+crates/node-cli/src/supervisor.rs:197:supervise 循环体末尾：spawn_and_wait 会真拉一个子进程并阻塞等它退出
+crates/node-cli/src/supervisor.rs:207:spawn_and_wait：真 spawn 二进制并 wait，在单元测试里等于递归起自己
+crates/node-cli/src/supervisor.rs:208:同 207：started 时间戳
+crates/node-cli/src/supervisor.rs:209:同 207：Command::new(&self.exe)
+crates/node-cli/src/supervisor.rs:210:同 207：.args(worker_argv(...))
+crates/node-cli/src/supervisor.rs:211:同 207：.spawn() 调用点
+crates/node-cli/src/supervisor.rs:213:同 207：spawn 成功臂
+crates/node-cli/src/supervisor.rs:214:同 207：spawn 失败臂（Err(e) 匹配）
+crates/node-cli/src/supervisor.rs:218:同 207：失败路径的 say 行
+crates/node-cli/src/supervisor.rs:219:同 207：失败路径返回 CRASH
+crates/node-cli/src/supervisor.rs:222:同 207：child.wait() 调用点
+crates/node-cli/src/supervisor.rs:223:同 207：wait 成功臂 → exit_code_of
+crates/node-cli/src/supervisor.rs:224:同 207：wait 失败臂
+crates/node-cli/src/supervisor.rs:225:同 207：失败路径的 say 行
+crates/node-cli/src/supervisor.rs:226:同 207：失败路径按 CRASH 记
+crates/node-cli/src/supervisor.rs:229:同 207：组装 ExitInfo（存活时长）
+crates/node-cli/src/supervisor.rs:230:同 207：spawn_and_wait 收尾
+crates/node-cli/src/supervisor.rs:374:rotate_log 的失败 say 行：正常文件系统构造不出确定性失败，属防御性兜底

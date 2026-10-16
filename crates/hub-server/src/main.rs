@@ -66,7 +66,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // SIGINT（Ctrl-C）与 SIGTERM（systemd / docker stop 默认）都要能优雅关闭
     let mut sigterm = sigterm_listener()?;
 
-    let app = hub_server::build_app(state);
+    let app = hub_server::build_app(state.clone());
     let listener =
         tokio::net::TcpListener::bind(addr)
             .await
@@ -77,6 +77,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 ))
             })?;
     tracing::info!(addr = %addr, "afhub listening");
+
+    // 离线判定扫瞄器（子任务 6）：判据只有「连续心跳丢失 > 45s」。
+    // 与 serve 同生命周期——持有这个 sender，进程活着它就活着。
+    let stop_scanner = state.spawn_presence_scanner();
 
     // `into_make_service_with_connect_info` 是登录限流的必要条件：
     // 拿不到对端地址时所有流量会落进同一个 IP 桶（见 middleware_auth::client_ip）。
@@ -92,6 +96,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     })
     .await
     .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    // 扫瞄器随进程走：serve 结束就停。send 失败说明它已经自己退了
+    // （后台任务 panic 过），那也要继续关机而不是卡在这里。
+    let _ = stop_scanner.send(());
     tracing::info!("afhub stopped");
     Ok(())
 }

@@ -10,6 +10,7 @@
 //! （§2.4.3），`/setup` 与 `/login` 在 [`routes::setup`]。
 
 pub mod middleware_auth;
+pub mod presence;
 pub mod routes;
 
 use std::path::{Path, PathBuf};
@@ -298,6 +299,23 @@ impl AppState {
     /// 设备仓储（心跳落库 / 超时判离线）。
     pub fn devices(&self) -> &hub_storage::repo::DeviceRepo {
         &self.0.devices
+    }
+
+    /// 起离线判定扫瞄器，返回「关掉它的把手」。
+    ///
+    /// 由进程入口显式调用并持有返回值：drop 或 send 都会让扫瞄器停下。
+    /// 不放进 `bootstrap` 里 fire-and-forget——那样测试一起 AppState 就会
+    /// 多出一个写库的后台任务，而 Hub 重启后「所有设备被误判离线」这条
+    /// 已知取舍正是靠「扫瞄器随进程生命周期」来收敛的。
+    pub fn spawn_presence_scanner(&self) -> tokio::sync::oneshot::Sender<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(presence::run(
+            self.0.reports.clone(),
+            self.0.devices.clone(),
+            presence::SCAN_INTERVAL,
+            rx,
+        ));
+        tx
     }
 
     /// 数据目录（测试用：读 schema / 直接查库）。

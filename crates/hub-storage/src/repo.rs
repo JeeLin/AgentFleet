@@ -104,6 +104,10 @@ pub struct NewDevice {
 }
 
 /// 设备仓储。
+///
+/// `Clone` 只复制连接池句柄（`r2d2` 的 `Pool` 本身就是 `Arc`），
+/// 不是复制连接——离线扫瞄器要拿一份进后台任务。
+#[derive(Clone)]
 pub struct DeviceRepo {
     pool: Db,
 }

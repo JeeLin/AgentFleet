@@ -265,14 +265,18 @@ async fn wait_for_report(hub: &Hub, node_id: &str, budget: Duration) {
     }
 }
 
-/// 等内存上报被清掉（断开后）。
+/// 等连接从注册表摘掉（断开后）。
+///
+/// ⚠️ **不是**等内存上报消失：上报要活过重连窗口，才有「WS 断了但心跳新鲜
+/// → `Reconnecting`，调度仍算可用」这回事（子任务 6）。断开时清掉它，
+/// `PRODUCT.md`「离线期间会话仍存活」的承诺就落空了。
 async fn wait_for_no_report(hub: &Hub, node_id: &str, budget: Duration) {
     let deadline = Instant::now() + budget;
     loop {
-        if hub.state.reports().get(node_id).is_none() {
+        if hub.state.connections().get(node_id).is_none() {
             return;
         }
-        assert!(Instant::now() < deadline, "内存上报始终没被清掉");
+        assert!(Instant::now() < deadline, "连接始终没被摘掉");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
@@ -433,6 +437,19 @@ async fn capabilities_survive_the_device_going_offline() {
 
     disconnect(est).await;
     wait_for_no_report(&hub, &node_id, Duration::from_secs(3)).await;
+
+    // 让内存里那份过期（> OFFLINE_AFTER）：这样断言命中的必然是**库里的值**，
+    // 而不是「内存还留着」。断开后上报要活过重连窗口（子任务 6 的
+    // `Reconnecting`），所以光断连不能保证内存不可信。
+    if let Some(mut r) = hub.state.reports().get(&node_id) {
+        r.at = Instant::now() - hub_core::OFFLINE_AFTER - Duration::from_secs(1);
+        hub.state.reports().record(&node_id, r);
+    }
+    assert!(
+        hub_core::presence(hub.state.reports(), &node_id, false, Instant::now())
+            == hub_core::Presence::Offline,
+        "内存里这份已经过期，读到的值只能来自库"
+    );
 
     let caps = hub
         .device_row(&node_id, "capabilities")

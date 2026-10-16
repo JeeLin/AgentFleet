@@ -116,13 +116,18 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
             let removed = state
                 .connections()
                 .remove_if_current(&auth.node_id, &conn_id);
-            // 内存上报与连接同生命周期：留着断线前的负载会让一台已经不在的
-            // 设备被路由到（`reports.rs` 的 `forget` 注释）。
-            // 幂等——重连路径会先 insert 再 forget 自己那条，顺序由
-            // `remove_if_current` 的返回值保证不会误删别人的。
-            if removed {
-                state.reports().forget(&auth.node_id);
-            }
+            // 上报**不清**：它要活过这段窗口，才有 `Reconnecting` 这回事
+            // （`reports.rs::presence`——WS 断了但心跳没超时 → 调度仍算可用）。
+            // 清掉它等于让「重连中的设备被过滤」这条 `PRODUCT.md` 承诺落空。
+            //
+            // 不清也不怕僵尸：判离线的依据是心跳年龄（`OFFLINE_AFTER`），
+            // 45s 后扫瞄器自然把它标 offline，不需要断开时主动删。
+            // 若这里连着删，重连成功的那一瞬间反而会闪一次 offline。
+            //
+            // 标准⑥ 的落点在 `remove_if_current` 的返回值上：被顶替的旧连接
+            // 摘不到表（`removed == false`），而断开处理器**根本不碰 status**
+            // ——改 status 的只有 `on_heartbeat`，且只往 online 改。所以
+            // 「旧连接把 status 改回 offline、盖掉新连接的 online」不可能发生。
             let elapsed_ms = started.elapsed().as_millis();
             tracing::info!(conn_id = %conn_id, node_id = %auth.node_id, removed = removed, elapsed_ms = elapsed_ms, "ws disconnected");
         }

@@ -139,6 +139,40 @@ mod tests {
         assert!(spread.1 - spread.0 >= 0.2, "spread was {:?}", spread);
     }
 
+    /// 同机两个进程同相重连 → 稳定活锁（标准⑤ 的机制侧）。
+    ///
+    /// 模拟两个进程各跑 10 轮：无抖动时两者的尝试时刻**完全同相**
+    /// （极差为 0，A 顶掉 B、B 顶掉 A，永远交替胜出）；有抖动时相位必须错开。
+    /// 不测「谁赢」——那是子任务 7 的顶替逻辑，这里只测「不会一直同相」。
+    #[test]
+    fn two_processes_do_not_stay_in_phase() {
+        // 无抖动：两条序列一模一样 → 这就是活锁的成因
+        let flat: Vec<f64> = (0..10)
+            .map(|a| backoff_with_jitter(a, 1.0).as_secs_f64())
+            .collect();
+        let no_jitter_spread = flat.iter().cloned().fold(0.0, f64::max)
+            - flat.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(no_jitter_spread > 0.0, "退避本身要递增，否则断言没有意义");
+
+        // 有抖动：两条独立序列的同一轮时刻必须错开
+        let a: Vec<f64> = (0..10)
+            .map(|i| backoff_with_jitter(i, jitter()).as_secs_f64())
+            .collect();
+        let b: Vec<f64> = (0..10)
+            .map(|i| backoff_with_jitter(i, jitter()).as_secs_f64())
+            .collect();
+        let drift: f64 = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .sum::<f64>()
+            / 10.0;
+        assert!(
+            drift > 0.0,
+            "同一轮上两个进程的等待必须不同，否则它们会同相重连"
+        );
+    }
+
     /// 越界的抖动系数不能让无人值守的守护进程 panic（`from_secs_f64` 会）。
     #[test]
     fn a_bogus_jitter_factor_degrades_to_zero_delay() {
