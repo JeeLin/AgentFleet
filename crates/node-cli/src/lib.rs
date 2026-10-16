@@ -102,17 +102,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    // 测试代码豁免生产级 panic 禁令：测试里 unwrap 失败就是要立刻炸，
-    // 而 panic 消息比 match 分支更能说明是哪一行、哪个值不对。
-    // let_underscore_must_use / indexing_slicing 同理：测试里故意 `let _ =`
-    // 丢弃一个错误来验证「失败不影响状态」，按索引取值也是常规写法。
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::let_underscore_must_use,
-        clippy::indexing_slicing
-    )]
     use super::*;
 
     fn run_capture(args: &[&str]) -> (std::process::ExitCode, String, String) {
@@ -167,5 +156,37 @@ mod tests {
         assert!(code != std::process::ExitCode::SUCCESS);
         assert!(out.is_empty());
         assert!(err.contains("用法"));
+    }
+
+    #[test]
+    fn log_subcommand_dispatches_with_the_remaining_args() {
+        let a: Vec<String> = ["log", "-n", "5"].iter().map(|s| s.to_string()).collect();
+        assert!(matches!(parse_args(a), ParseResult::Log(ref r) if r == &["-n", "5"]));
+    }
+
+    #[test]
+    fn log_without_extra_args_dispatches_empty() {
+        let a: Vec<String> = vec!["log".to_string()];
+        assert!(matches!(parse_args(a), ParseResult::Log(r) if r.is_empty()));
+    }
+
+    /// `afcli log` 的参数错误必须失败退出并给出 `log` 自己的用法，
+    /// 而不是掉进顶层用法——用户敲了子命令，提示就应当对着子命令说。
+    #[test]
+    fn log_with_bad_args_reports_the_log_usage() {
+        let (code, out, err) = run_capture(&["log", "--follow"]);
+        assert!(code != std::process::ExitCode::SUCCESS);
+        assert!(out.is_empty());
+        assert!(err.contains("afcli log [-n N]"), "{err}");
+    }
+
+    /// 子任务 4 之后 `run` 才是主命令；在它落地前，`run` 必须落到
+    /// 「未知参数」而不是被静默接受。
+    #[test]
+    fn run_is_not_yet_a_command() {
+        let (code, out, err) = run_capture(&["run"]);
+        assert!(code != std::process::ExitCode::SUCCESS);
+        assert!(out.is_empty());
+        assert!(err.contains("用法"), "{err}");
     }
 }

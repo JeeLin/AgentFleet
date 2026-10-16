@@ -222,55 +222,55 @@ pub fn decide(i: Inputs<'_>) -> Decision {
         };
     }
 
-    // ---- 有升级在途：新版本不健康 → 回滚，**绝不 exit**（D2-①） ----
-    if let Some(s) = state {
-        if s.phase.in_flight() {
-            // 三条同时成立才敢回滚：没回滚过、世代号对得上、**且备份文件此刻真在**。
-            if s.rollback_count > 0 || !s.backup_usable_for() || !backup_available {
-                return Decision::Stop {
-                    reason: format!(
-                        "update to {} failed and backup is no longer usable; old version is \
-                         broken too, manual intervention required",
-                        s.version
-                    ),
-                };
-            }
-            return Decision::Rollback {
-                reason: format!(
-                    "update to {} in phase {} did not produce a healthy worker; rolling back",
-                    s.version, s.phase
-                ),
-            };
-        }
-    }
+    // ---- 「这一版 worker 不健康」的信号，且盘上还有 old → 回滚 ----
+    //
+    // 判据是**有没有 old**，不是 `phase.in_flight()`。用 phase 会漏掉最该
+    // 回滚的一种情况：升级已经 `Committed`（终态、不是 in_flight）之后，
+    // 新版本才开始反复崩溃——这时备份明明还在盘上，按 phase 判就会白白把
+    // 设备留在坏版本上。
+    //
+    // 回滚过一次之后 `rollback_count >= 1` 使 `backup_usable_for()` 为假，
+    // 于是「回滚也失败」自然落到 Stop，不需要额外的死循环防护（D2-⑤）。
+    let rollback_possible = matches!(state, Some(s) if s.backup_usable_for()) && backup_available;
 
-    // ---- 反复退出（任何退出码）：不可恢复 → 回滚或停止 ----
-    if stats.is_exit_storm() {
-        return match state {
-            Some(s) if s.phase.in_flight() => Decision::Rollback {
-                reason: format!(
-                    "worker exited {} times within {}s during update to {}; rolling back",
-                    EXIT_STORM_THRESHOLD, EXIT_STORM_WINDOW_SECS, s.version
-                ),
-            },
-            _ => Decision::Stop {
-                reason: format!(
-                    "worker exited {} times within {}s (last code {}, ran {}s); not restarting \
-                     in a loop",
-                    EXIT_STORM_THRESHOLD, EXIT_STORM_WINDOW_SECS, exit.code, exit.ran_for_secs
-                ),
-            },
-        };
-    }
+    let bad_version = stats.is_exit_storm()
+        || exit.is_fast_crash()
+        || exit.code == exit_code::HEALTH_FAILURE
+        || matches!(state, Some(s) if s.phase.in_flight());
 
-    // ---- 启动即崩且没有升级在途：配置错误，重试无意义 ----
-    if exit.is_fast_crash() {
-        return Decision::Stop {
-            reason: format!(
-                "worker exited with code {} after {}s and no update is in flight; treating as a \
-                 configuration error rather than restarting forever",
+    if bad_version {
+        let version_hint = state.map_or_else(|| "unknown".to_string(), |s| s.version.clone());
+        let why = if stats.is_exit_storm() {
+            format!(
+                "worker exited {} times within {}s (last code {}, ran {}s)",
+                EXIT_STORM_THRESHOLD, EXIT_STORM_WINDOW_SECS, exit.code, exit.ran_for_secs
+            )
+        } else if exit.is_fast_crash() {
+            format!(
+                "worker exited with code {} after {}s",
                 exit.code, exit.ran_for_secs
-            ),
+            )
+        } else {
+            format!(
+                "worker exited (code {}) while update to {version_hint} was unfinished",
+                exit.code
+            )
+        };
+        return if rollback_possible {
+            Decision::Rollback {
+                reason: format!("{why}; old version is still on disk, rolling back to it"),
+            }
+        } else {
+            Decision::Stop {
+                reason: if exit.is_fast_crash() && !stats.is_exit_storm() {
+                    format!(
+                        "{why}; treating as a configuration error rather than restarting \
+                         forever, and no usable old version is left to fall back to"
+                    )
+                } else {
+                    format!("{why}; no usable old version left, manual intervention required")
+                },
+            }
         };
     }
 
@@ -521,6 +521,132 @@ mod tests {
         assert!(matches!(d, Decision::Rollback { .. }), "{d:?}");
     }
 
+    /// 升级**已经 `Committed`**（终态、`in_flight()` 为假）之后新版本才开始
+    /// 反复崩溃——备份明明还在盘上，必须回滚。
+    ///
+    /// 这条是判据从「`in_flight()`」换成「有没有 old」的直接理由：
+    /// `Committed` 是终态，按旧判据这里会返回 `Stop`，把设备永久留在
+    /// 反复崩溃的坏版本上，而可用的旧版本就在旁边躺着。
+    #[test]
+    fn exit_storm_after_the_update_committed_still_rolls_back() {
+        let mut s = st();
+        s.phase = UpdatePhase::Committed;
+        assert!(!s.phase.in_flight(), "Committed 不是在途状态");
+        let stats = CrashStats {
+            recent_exits: 3,
+            consecutive: 3,
+            rollback_count: 0,
+        };
+        let d = call(ExitInfo::new(12, 30), Some(&s), stats, Reconcile::Nothing);
+        assert!(
+            matches!(d, Decision::Rollback { .. }),
+            "committed 之后崩溃也该回滚，判据是有没有 old，不是 phase：{d:?}"
+        );
+    }
+
+    /// `RolledBack`（已换回旧版、备份已被消耗）之后还崩溃 → 没有 old 可用，停下。
+    /// 这条与上面那条配对，说明判据确实在「有没有 old」而不是「phase 像不像在途」。
+    #[test]
+    fn exit_storm_after_rollback_has_no_old_left_to_fall_back_on() {
+        let mut s = st();
+        s.phase = UpdatePhase::RolledBack;
+        s.rollback_count = 1;
+        let stats = CrashStats {
+            recent_exits: 3,
+            consecutive: 3,
+            rollback_count: 1,
+        };
+        let d = call(ExitInfo::new(12, 30), Some(&s), stats, Reconcile::Nothing);
+        assert!(matches!(d, Decision::Stop { .. }), "{d:?}");
+    }
+
+    /// `Committed` 阶段**秒崩**，而备份文件已被 rename 消耗 → 状态说能用、
+    /// 文件系统说不存在，按事实停。
+    ///
+    /// 这里必须用 fast crash：跑满时长才崩的普通崩溃不是「这一版不健康」
+    /// 的信号，正常重启即可——判据收窄到信号本身，否则会误停。
+    #[test]
+    fn committed_fast_crash_without_the_backup_file_stops() {
+        let mut s = st();
+        s.phase = UpdatePhase::Committed;
+        let d = call_with_backup(
+            ExitInfo::new(12, 1),
+            Some(&s),
+            CrashStats::default(),
+            Reconcile::Nothing,
+            false,
+        );
+        assert!(matches!(d, Decision::Stop { .. }), "{d:?}");
+    }
+
+    /// 与上一条对照：`Committed` 之后一次**普通时长的崩溃**不是不健康信号，
+    /// 没有 old 可退也不该停——停了设备就永远起不来了。
+    #[test]
+    fn committed_slow_crash_restarts_even_without_a_backup() {
+        let mut s = st();
+        s.phase = UpdatePhase::Committed;
+        let d = call_with_backup(
+            ExitInfo::new(12, 30),
+            Some(&s),
+            CrashStats::default(),
+            Reconcile::Nothing,
+            false,
+        );
+        assert!(matches!(d, Decision::Spawn { .. }), "{d:?}");
+    }
+
+    /// worker 自认不健康（`exit(11)`）也算「这一版不健康」，不是普通崩溃。
+    /// 没有 old 可退时停下，而不是无限重拉同一个坏版本。
+    #[test]
+    fn health_failure_without_old_stops_instead_of_respawning() {
+        let d = call(
+            ExitInfo::new(exit_code::HEALTH_FAILURE, 30),
+            None,
+            CrashStats::default(),
+            Reconcile::Nothing,
+        );
+        assert!(matches!(d, Decision::Stop { .. }), "{d:?}");
+    }
+
+    /// `exit(11)` 但备份还在 → 同样回滚，不因退出码不同就区别对待。
+    #[test]
+    fn health_failure_with_old_rolls_back() {
+        let s = st();
+        let d = call(
+            ExitInfo::new(exit_code::HEALTH_FAILURE, 30),
+            Some(&s),
+            CrashStats::default(),
+            Reconcile::Nothing,
+        );
+        assert!(matches!(d, Decision::Rollback { .. }), "{d:?}");
+    }
+
+    /// 「反复退出」在**有** old 时优先回滚——回滚是一次性动作，
+    /// 换回旧版比直接停下更有机会把设备救回来。
+    #[test]
+    fn exit_storm_prefers_rollback_over_stop_when_old_exists() {
+        let s = st();
+        let stats = CrashStats {
+            recent_exits: 5,
+            consecutive: 5,
+            rollback_count: 0,
+        };
+        let d = call(ExitInfo::new(0, 1), Some(&s), stats, Reconcile::Nothing);
+        match d {
+            Decision::Rollback { reason } => {
+                assert!(
+                    reason.contains(&format!("{EXIT_STORM_THRESHOLD} times")),
+                    "理由要说清反复退出的次数：{reason}"
+                );
+                assert!(
+                    reason.contains("old version"),
+                    "理由要说清在退到哪：{reason}"
+                );
+            }
+            other => panic!("expected Rollback, got {other:?}"),
+        }
+    }
+
     #[test]
     fn below_threshold_storm_is_not_a_storm() {
         let stats = CrashStats {
@@ -727,6 +853,38 @@ mod tests {
         let n = next_state(Some(&s), &d).unwrap();
         assert_eq!(n.phase, UpdatePhase::StartingNew);
         assert_eq!(n.version, "3.0.0");
+    }
+
+    /// 替换决策但**没有既有状态文件**（如状态文件被人工删掉后仍收到
+    /// `exit(10)`）——必须凭空造出一条可用状态，世代号从 1 起。
+    ///
+    /// 路径字段留空是刻意的：决策层不猜路径，真实路径由 executor 在执行
+    /// 替换时算出来填。
+    #[test]
+    fn next_state_after_replace_without_prior_state_starts_a_fresh_record() {
+        let d = Decision::ReplaceAndSpawn {
+            version: "4.0.0".into(),
+            reason: String::new(),
+        };
+        let n = next_state(None, &d).unwrap();
+        assert_eq!(n.phase, UpdatePhase::StartingNew);
+        assert_eq!(n.version, "4.0.0");
+        assert_eq!(n.generation, 1, "first generation starts at 1");
+        assert_eq!(n.rollback_count, 0);
+        assert!(n.staged_path.is_empty(), "决策层不猜路径");
+        assert!(n.backup_path.is_empty());
+    }
+
+    #[test]
+    fn next_state_after_replace_keeps_the_generation_of_the_existing_record() {
+        let mut s = st();
+        s.generation = 42;
+        let d = Decision::ReplaceAndSpawn {
+            version: "5.0.0".into(),
+            reason: String::new(),
+        };
+        let n = next_state(Some(&s), &d).unwrap();
+        assert_eq!(n.generation, 42, "世代号必须延续，不能被重置成 1");
     }
 
     #[test]

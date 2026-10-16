@@ -128,14 +128,6 @@ impl UpdateState {
         !self.backup_path.is_empty() && self.generation > 0 && self.rollback_count == 0
     }
 
-    /// 该不该进入回滚流程。
-    ///
-    /// - 有升级在途 → 回滚（D2-①：新版本秒崩也必须回滚，不能 exit）
-    /// - 已回滚过一次 → 不再回滚，`Failed`，避免「回滚 → 失败 → 回滚」死循环
-    pub fn should_rollback(&self) -> bool {
-        self.phase.in_flight() && self.backup_usable_for()
-    }
-
     /// 是否必须停下等人介入。
     pub fn needs_human(&self) -> bool {
         self.phase == UpdatePhase::Failed
@@ -312,7 +304,6 @@ mod tests {
         let s = st(d.path());
         assert!(s.phase.in_flight());
         assert!(s.backup_usable_for());
-        assert!(s.should_rollback());
         assert!(!s.needs_human());
         assert_eq!(s.generation, 7);
         assert_eq!(s.rollback_count, 0);
@@ -326,7 +317,6 @@ mod tests {
         let mut s = st(d.path());
         s.generation = 0;
         assert!(!s.backup_usable_for());
-        assert!(!s.should_rollback());
 
         let mut s2 = st(d.path());
         s2.backup_path = String::new();
@@ -340,7 +330,6 @@ mod tests {
         let mut s = st(d.path());
         s.rollback_count = 1;
         assert!(!s.backup_usable_for());
-        assert!(!s.should_rollback());
         assert!(s.needs_human(), "old version broken too: needs a human");
     }
 
