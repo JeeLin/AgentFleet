@@ -9,6 +9,7 @@
 //! 认证闭环在 [`middleware_auth`]：豁免表之外一律要 session cookie
 //! （§2.4.3），`/setup` 与 `/login` 在 [`routes::setup`]。
 
+pub mod channels;
 pub mod conns;
 pub mod middleware_auth;
 pub mod presence;
@@ -168,6 +169,8 @@ struct Inner {
     devices: hub_storage::repo::DeviceRepo,
     /// `conn_id → 出站控制帧队列`（顶替时通知旧连接用，子任务 7）。
     outbound: conns::OutboundTable,
+    /// `node_id → 该设备的通道表`（子任务 8）。纯内存，不落库（§5）。
+    channels: Arc<parking_lot::RwLock<hub_core::channels::HubChannels>>,
 }
 
 impl AppState {
@@ -223,6 +226,9 @@ impl AppState {
             reports: Reports::new(),
             devices,
             outbound: conns::OutboundTable::new(),
+            channels: Arc::new(parking_lot::RwLock::new(
+                hub_core::channels::HubChannels::new(),
+            )),
         }));
 
         if state.is_initialized()? {
@@ -325,6 +331,15 @@ impl AppState {
     /// 出站控制帧表（顶替旧连接时寻址用）。
     pub fn outbound(&self) -> &conns::OutboundTable {
         &self.0.outbound
+    }
+
+    /// 通道路由表（子任务 8）。
+    ///
+    /// 用 `RwLock` 而不是每次 `clone`：`HubChannels` 里的信用账本是**每帧都要动**
+    /// 的状态，复制一份就意味着两条连接各记一套账——那正是 §6 末条警告的
+    /// 「重连后按 channel_id 无限累积」。
+    pub fn channels(&self) -> &parking_lot::RwLock<hub_core::channels::HubChannels> {
+        &self.0.channels
     }
 
     /// 数据目录（测试用：读 schema / 直接查库）。

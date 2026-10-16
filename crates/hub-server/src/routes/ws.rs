@@ -12,7 +12,7 @@
 //!
 //! 这里**不做**心跳、退避重连、通道流控——分别是子任务 5、6、8。
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -139,6 +139,17 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
             // ——改 status 的只有 `on_heartbeat`，且只往 online 改。所以
             // 「旧连接把 status 改回 offline、盖掉新连接的 online」不可能发生。
             state.outbound().remove(&conn_id);
+            // 通道账本**整节点丢弃**（§7.1）。这不是内存回收，而是信用重置的
+            // 唯一入口：只要旧记录还在，重连后按 channel_id 记账就会累积出
+            // 一个恒 > 0 的余额，等于没有流控（§6 末条）。
+            let dropped = state.channels().write().drop_node(&auth.node_id);
+            if dropped > 0 {
+                tracing::debug!(
+                    node_id = %auth.node_id,
+                    channels = dropped,
+                    "dropped channel records on disconnect"
+                );
+            }
             let elapsed_ms = started.elapsed().as_millis();
             tracing::info!(conn_id = %conn_id, node_id = %auth.node_id, removed = removed, elapsed_ms = elapsed_ms, "ws disconnected");
         }
@@ -505,6 +516,45 @@ async fn finish_ok(
 ///
 /// M0 的 Hub 侧只需要「连接不断、未知消息不崩」。通道、
 /// `disconnect{superseded}` 分别是子任务 8、7。
+/// 读侧超限后每轮慢读的暂停时长。
+///
+/// 50ms 而不是更长：慢读的目的是让 TCP 背压传回发送方，而不是把连接冻住。
+/// 太长的暂停会让轻微波峰之后的恢复也变慢（一次 `cat` 结束还得等）。
+const SLOW_READ_PAUSE_MS: u64 = 50;
+
+/// 读侧超限的应答：`err{code}`，随后断开（§6.1）。
+fn flood_frame(e: &hub_core::limits::LimitError) -> Frame {
+    let code = match e {
+        hub_core::limits::LimitError::FrameTooLarge => protocol::message::ErrorCode::FrameTooLarge,
+        hub_core::limits::LimitError::Flood => protocol::message::ErrorCode::Flood,
+        // 读侧限流器不会产出写队列错误；列出它是编译期要求穷尽，
+        // 真出现了按内部错误报（那是 Hub 自己的 bug，不是对端的）。
+        hub_core::limits::LimitError::WriteQueueFull => protocol::message::ErrorCode::Internal,
+    };
+    Frame::push(
+        types::ERR,
+        0,
+        serde_json::to_value(protocol::message::ErrPayload {
+            code: code.clone(),
+            message: e.to_string(),
+        })
+        .unwrap_or_else(|_| serde_json::json!({"code": code})),
+    )
+}
+
+/// 这一帧是不是通道帧（§5）。
+fn is_channel_type(msg_type: &str) -> bool {
+    matches!(
+        msg_type,
+        types::OPEN_CHANNEL
+            | types::CHANNEL_READY
+            | types::CHANNEL_DATA
+            | types::CHANNEL_CREDIT
+            | types::CHANNEL_ERROR
+            | types::CLOSE_CHANNEL
+    )
+}
+
 /// 业务帧循环：收 node 发来的帧，同时把 Hub 要推的控制帧发出去。
 ///
 /// 两个方向用 `select!` 而不是串行：控制帧（`disconnect{superseded}`）必须
@@ -517,6 +567,18 @@ async fn relay(
     auth: &Authenticated,
     outbound: &mut tokio::sync::mpsc::Receiver<Frame>,
 ) -> Result<(), String> {
+    // 每 1s 扫一次「开了但没 Ready」的通道（§5 的 5s 超时）。
+    // 1s 而不是 5s：扫描只决定「什么时候发现」，而超时判据在协议层
+    // （`ready_expired` 比的是 opened_at + READY_TIMEOUT），扫得勤只让
+    // 误差更小，不会提前拒绝。
+    let mut sweep = tokio::time::interval(Duration::from_secs(1));
+    // 每连接一个读侧令牌桶（§6.1「每连接 semaphore」）。按字节而不是按帧计：
+    // 一帧 1 MiB 与一帧 10 字节对内存的压力差五个数量级，按帧计等于
+    // 允许「少量大帧」打爆 Hub。
+    let mut limiter = hub_core::limits::ReadLimiter::new();
+    // 读侧超限的**起始时刻**。它决定「慢读多久升级成断开」——没有它，
+    // 每一次超限都无从判断是突发还是持续。
+    let mut over_since: Option<Instant> = None;
     loop {
         tokio::select! {
             incoming = socket.recv() => {
@@ -528,12 +590,60 @@ async fn relay(
                     Err(e) => return Err(format!("ws read error: {e}")),
                 };
                 let text = match msg {
-                    axum::extract::ws::Message::Text(t) => t.to_string(),
+                    axum::extract::ws::Message::Text(t) => t,
                     axum::extract::ws::Message::Close(_) => return Err("peer closed".to_string()),
                     axum::extract::ws::Message::Ping(_)
                     | axum::extract::ws::Message::Pong(_) => continue,
                     _ => continue,
                 };
+                // §6.1：credit 是**发送方的自我约束**，拦不住一个恶意或
+                // buggy 的 worker。Hub 的自我保护是自己的读侧令牌桶——
+                // 不看对端有没有信用，只看它灌了多少字节。
+                //
+                // 没有这条，一台设备持续灌数据就能让 Hub 逐帧解析 JSON 写进
+                // 内存直到 OOM，连带打垮所有其他设备与 Web 端——而那正是
+                // credit 想防的事，却只防了 node 的发送侧。
+                //
+                // 超限**先慢读，不立刻断开**（§6.1「超限 → 慢读/暂停，
+                // 持续 30s 才断开」）。立刻断是错的：`cat` 一个大文件就是
+                // 一次合法的 PTY 洪峰，误杀它等于「输出多的命令一律失败」。
+                // 慢读让 TCP 背压传回发送方，流量自然降下来。
+                loop {
+                    match limiter.try_consume(text.len()) {
+                        Ok(()) => {
+                            over_since = None;
+                            break;
+                        }
+                        // 单帧超硬上限没有「等等就好」这回事——它永远超。
+                        Err(hub_core::limits::LimitError::FrameTooLarge) => {
+                            tracing::warn!(
+                                conn_id = %conn_id,
+                                node_id = %auth.node_id,
+                                bytes = text.len(),
+                                "frame over the hard limit; dropping the connection"
+                            );
+                            let _ = send_frame(socket, flood_frame(&hub_core::limits::LimitError::FrameTooLarge)).await;
+                            return Err("frame over the hard limit".to_string());
+                        }
+                        Err(hub_core::limits::LimitError::Flood) => {
+                            let since = *over_since.get_or_insert_with(Instant::now);
+                            if since.elapsed() >= hub_core::limits::FLOOD_SUSTAINED {
+                                tracing::warn!(
+                                    conn_id = %conn_id,
+                                    node_id = %auth.node_id,
+                                    "read limit exceeded for too long; dropping the connection"
+                                );
+                                let _ = send_frame(socket, flood_frame(&hub_core::limits::LimitError::Flood)).await;
+                                return Err("sustained read limit exceeded".to_string());
+                            }
+                            // 慢读：等令牌回补再处理这一帧。**不重读**——
+                            // 已经读进来的字节丢掉就是丢数据。
+                            tokio::time::sleep(Duration::from_millis(SLOW_READ_PAUSE_MS)).await;
+                        }
+                        Err(hub_core::limits::LimitError::WriteQueueFull) => break,
+                    }
+                }
+                let text = text.to_string();
                 let frame: Frame = match serde_json::from_str(&text) {
                     Ok(f) => f,
                     Err(e) => {
@@ -543,8 +653,28 @@ async fn relay(
                 };
                 if frame.msg_type == types::HEARTBEAT {
                     on_heartbeat(state, conn_id, auth, &frame);
+                    continue;
+                }
+                if is_channel_type(&frame.msg_type) {
+                    match crate::channels::on_channel_frame(state, &auth.node_id, &frame) {
+                        crate::channels::Reply::Nothing => {}
+                        crate::channels::Reply::Frame(out) => {
+                            if let Err(e) = send_frame(socket, out).await {
+                                return Err(format!("cannot reply to a channel frame: {e}"));
+                            }
+                        }
+                    }
+                    continue;
                 }
                 // 其余（含未知类型）一律忽略：约束 14 前向兼容
+            }
+            _ = sweep.tick() => {
+                let due = crate::channels::sweep_unready(state, &auth.node_id, Instant::now());
+                for out in due {
+                    if let Err(e) = send_frame(socket, out).await {
+                        return Err(format!("cannot reject an unready channel: {e}"));
+                    }
+                }
             }
             control = outbound.recv() => {
                 let Some(frame) = control else {
