@@ -1,19 +1,12 @@
-//! supervisor 的决策逻辑——**纯函数，不碰进程、不碰文件系统**。
+//! supervisor 的决策逻辑——纯函数，不碰进程与文件系统；executor 在
+//! `node-cli/src/supervisor.rs`。
 //!
-//! 为什么要把决策从阻塞循环里拆出来（`DECISIONS.md` D2）：
-//! 参考实现 REX 把「读状态 → 判断 → spawn 子进程 → rename 文件」全部内联在
-//! `run_supervisor` 循环里。它没有覆盖率门禁所以无所谓；我们有 **100% 阻断门禁**，
-//! 而那种形状的代码**没法测**——要覆盖它的分支就得真的 spawn 子进程、真的删掉
-//! 自己正在运行的二进制。
+//! 拆开是因为参考实现 REX 把判断内联在阻塞循环里，没有覆盖率门禁所以无所谓；
+//! 本项目有 100% 阻断门禁，而那种形状的代码没法测——覆盖一个分支就得真的
+//! spawn 子进程、真的删掉正在运行的二进制（`DECISIONS.md` D2）。
 //!
-//! 于是拆成两层：
-//!
-//! ```text//! decide(ExitInfo, Option<UpdateState>, CrashStats) → Decision   ← 本文件，纯函数
-//! executor                                                             ← node-cli/src/supervisor.rs
-//! ```
-//!
-//! `Decision` 把「为什么」也带出来（`Decision::reason`），因为 supervisor 要把它
-//! 写进日志与状态文件：**下一次崩溃时只有日志能解释上一次为什么回滚了**。
+//! `Decision` 带 `reason`，因为 supervisor 要写进日志与状态文件：下一次崩溃时
+//! 只有日志能解释上一次为什么回滚了。
 
 use crate::update::{Reconcile, UpdatePhase, UpdateState};
 
@@ -222,15 +215,14 @@ pub fn decide(i: Inputs<'_>) -> Decision {
         };
     }
 
-    // ---- 「这一版 worker 不健康」的信号，且盘上还有 old → 回滚 ----
+    // ---- 这一版 worker 不健康 → 有 old 就回滚，没有才停 ----
     //
-    // 判据是**有没有 old**，不是 `phase.in_flight()`。用 phase 会漏掉最该
-    // 回滚的一种情况：升级已经 `Committed`（终态、不是 in_flight）之后，
-    // 新版本才开始反复崩溃——这时备份明明还在盘上，按 phase 判就会白白把
-    // 设备留在坏版本上。
+    // 判据是**有没有 old**，不是 `phase.in_flight()`：后者会漏掉「升级已
+    // `Committed`、新版本此时才开始反复崩溃」——`Committed` 是终态，备份却
+    // 还在盘上，按 phase 判会把设备留在坏版本里。
     //
-    // 回滚过一次之后 `rollback_count >= 1` 使 `backup_usable_for()` 为假，
-    // 于是「回滚也失败」自然落到 Stop，不需要额外的死循环防护（D2-⑤）。
+    // 回滚也失败的情况无需单列：回滚一次后 `rollback_count >= 1` 使
+    // `backup_usable_for()` 为假，同一个判断自然落到 Stop（D2-⑤）。
     let rollback_possible = matches!(state, Some(s) if s.backup_usable_for()) && backup_available;
 
     let bad_version = stats.is_exit_storm()
