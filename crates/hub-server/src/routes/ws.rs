@@ -21,7 +21,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
-use crate::{AppState, HANDSHAKE_TIMEOUT, WS_MAX_MESSAGE_BYTES};
+use crate::{conns, AppState, HANDSHAKE_TIMEOUT, WS_MAX_MESSAGE_BYTES};
 use hub_core::connections::ConnHandle;
 use protocol::frame::Frame;
 use protocol::handshake::{
@@ -76,8 +76,15 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
     let outcome = handshake(&state, &mut socket, gen).await;
     match &outcome {
         Ok(auth) => {
+            // 出站队列先登记：下面顶替旧连接要用它，而 relay 也要拿它收帧。
+            let mut outbound = state.outbound().register(&conn_id);
+
             // 注册表只存句柄。socket 不进表、不落库（标准④）。
-            state.connections().insert(
+            //
+            // **先换表、后通知**（§7.1）：`insert` 返回被顶掉的那条，
+            // 此刻表里已经是新连接了。顺序反了会让消息在换表之前短暂路由到
+            // 一个即将关闭的句柄上。
+            let displaced = state.connections().insert(
                 auth.node_id.clone(),
                 ConnHandle {
                     conn_id: conn_id.clone(),
@@ -90,6 +97,9 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
                 gen = gen,
                 "ws authenticated"
             );
+            if let Some(old) = displaced {
+                supersede(&state, &old, gen, &conn_id, &auth.node_id);
+            }
             // 业务帧循环。M0 的 Hub 侧只负责「不崩、不断开」，
             // 未知消息类型一律忽略（约束 14 前向兼容）。
             // socket 是 &mut，relay 结束后它还在——断开清理见下面。
@@ -97,7 +107,7 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
             // relay 的返回值**记日志而不消音**：`let _ =` 会被
             // `let_underscore_must_use` deny，且「连接为什么结束」正是排查
             // 设备掉线时唯一有用的信息。
-            if let Err(reason) = relay(&state, &mut socket, &conn_id, auth).await {
+            if let Err(reason) = relay(&state, &mut socket, &conn_id, auth, &mut outbound).await {
                 tracing::info!(conn_id = %conn_id, reason = %reason, "ws relay ended");
             }
         }
@@ -128,6 +138,7 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
             // 摘不到表（`removed == false`），而断开处理器**根本不碰 status**
             // ——改 status 的只有 `on_heartbeat`，且只往 online 改。所以
             // 「旧连接把 status 改回 offline、盖掉新连接的 online」不可能发生。
+            state.outbound().remove(&conn_id);
             let elapsed_ms = started.elapsed().as_millis();
             tracing::info!(conn_id = %conn_id, node_id = %auth.node_id, removed = removed, elapsed_ms = elapsed_ms, "ws disconnected");
         }
@@ -135,6 +146,48 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
             let elapsed_ms = started.elapsed().as_millis();
             tracing::info!(conn_id = %conn_id, reason = %reason, elapsed_ms = elapsed_ms, "ws disconnected");
         }
+    }
+}
+
+/// 顶替一条旧连接：推 `disconnect{superseded, gen}`，让它自己走。
+///
+/// **「不再重连」不能只依赖这一帧送达**（§7.1）——帧丢了旧连接会再来，
+/// 于是两条连接互抢。兜底是 `auth{last_seen_gen}`：旧连接下次重连时把
+/// 它见过的 gen 带回来，Hub 见 `gen <` 当前就回 `auth_fail{superseded}`
+/// 而不是接管（见 [`handshake`] 的兜底分支）。
+///
+/// 投递不成功一律记日志：这正是排查「设备反复上下线」的唯一线索。
+fn supersede(state: &AppState, old: &ConnHandle, gen: u64, new_conn_id: &str, node_id: &str) {
+    let frame = protocol::frame::Frame::push(
+        protocol::message::types::DISCONNECT,
+        0,
+        serde_json::to_value(protocol::message::Disconnect {
+            reason: protocol::message::DisconnectReason::Superseded,
+            gen: Some(gen),
+        })
+        .unwrap_or_else(|_| serde_json::json!({"reason": "superseded", "gen": gen})),
+    );
+    match state.outbound().send(&old.conn_id, frame) {
+        Ok(true) => tracing::info!(
+            old_conn_id = %old.conn_id,
+            new_conn_id = %new_conn_id,
+            node_id = %node_id,
+            gen = gen,
+            "superseding the older connection"
+        ),
+        // 表里没它：已经断开并被摘掉了，没什么要通知的
+        Ok(false) => tracing::debug!(
+            old_conn_id = %old.conn_id,
+            "the displaced connection is already gone"
+        ),
+        // 在表里却推不进去：队列满，说明那条连接还在但半死不活。
+        // gen 兜底会接住它，但这一条必须留痕——互抢环的成因就藏在这里。
+        Err(conns::PushError::QueueFull) => tracing::warn!(
+            old_conn_id = %old.conn_id,
+            node_id = %node_id,
+            gen = gen,
+            "cannot deliver the superseded frame; the gen fallback must catch it"
+        ),
     }
 }
 
@@ -370,6 +423,38 @@ async fn finish_auth(
                     return Err(String::from(reason));
                 }
             };
+            // **兜底路径（不依赖任何消息投递）**：节点把它见过的最大 gen 带回来，
+            // 落后于**当前活着的那条连接**就说明它是被顶掉的旧连接。
+            //
+            // 比的对象必须是注册表里的**活连接**，而不是「本次连接的 gen」——
+            // gen 是每条连接握手前新分配的，拿它比会让**每一次正常重连**
+            // 都被判成已被顶替（节点带着 1 来、本次拿到 2，1 < 2 恒成立），
+            // 设备就此永远接不上，且没有任何自愈路径。
+            //
+            // 用活连接则语义正好：顶替者还活着才有互抢要防；它自己也走了，
+            // 旧连接回来就无害（没有第二条连接跟它抢）。
+            //
+            // 放在验签**之后**：未经验签的重连请求不能仅凭一个数字就被拒绝，
+            // 否则任何猜到 node_id 的人都能把设备顶下线（node_id 不是秘密）。
+            //
+            // 缺省（`None`）视为「没见过 gen」而不是 0：老节点或首次重连的帧里
+            // 没有这个字段，按 0 处理会让它们**永远**被判成已被顶替，
+            // 且没有任何自愈路径（约束 14：前向兼容不许这样断）。
+            let live_gen = state.connections().get(&auth.node_id).map(|h| h.gen);
+            if let (Some(seen), Some(live)) = (auth.last_seen_gen, live_gen) {
+                if seen < live {
+                    let reason = protocol::message::reason::SUPERSEDED;
+                    tracing::info!(
+                        node_id = %auth.node_id,
+                        last_seen_gen = seen,
+                        live_gen = live,
+                        "rejecting a reconnect from a superseded connection"
+                    );
+                    send_best_effort(socket, hs.auth_fail(seq, reason, Some(live)), "handshake")
+                        .await;
+                    return Err(String::from(reason));
+                }
+            }
             if let Err(e) = state.registry().devices().set_gen(&auth.node_id, gen) {
                 tracing::warn!(error = %e, "cannot record connection gen");
             }
@@ -420,36 +505,60 @@ async fn finish_ok(
 ///
 /// M0 的 Hub 侧只需要「连接不断、未知消息不崩」。通道、
 /// `disconnect{superseded}` 分别是子任务 8、7。
+/// 业务帧循环：收 node 发来的帧，同时把 Hub 要推的控制帧发出去。
+///
+/// 两个方向用 `select!` 而不是串行：控制帧（`disconnect{superseded}`）必须
+/// **插队**——它要打断一个可能正阻塞在读上的循环。串行的写法下，一条
+/// 什么都不发的旧连接永远收不到「你被顶替了」，于是互抢。
 async fn relay(
     state: &AppState,
     socket: &mut WebSocket,
     conn_id: &str,
     auth: &Authenticated,
+    outbound: &mut tokio::sync::mpsc::Receiver<Frame>,
 ) -> Result<(), String> {
-    while let Some(msg) = socket.recv().await {
-        let msg = match msg {
-            Ok(m) => m,
-            Err(e) => return Err(format!("ws read error: {e}")),
-        };
-        let text = match msg {
-            axum::extract::ws::Message::Text(t) => t.to_string(),
-            axum::extract::ws::Message::Close(_) => return Err("peer closed".to_string()),
-            axum::extract::ws::Message::Ping(_) | axum::extract::ws::Message::Pong(_) => continue,
-            _ => continue,
-        };
-        let frame: Frame = match serde_json::from_str(&text) {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::debug!(conn_id = %conn_id, error = %e, "dropping unparsable frame");
-                continue;
+    loop {
+        tokio::select! {
+            incoming = socket.recv() => {
+                let Some(msg) = incoming else {
+                    return Err("peer closed".to_string());
+                };
+                let msg = match msg {
+                    Ok(m) => m,
+                    Err(e) => return Err(format!("ws read error: {e}")),
+                };
+                let text = match msg {
+                    axum::extract::ws::Message::Text(t) => t.to_string(),
+                    axum::extract::ws::Message::Close(_) => return Err("peer closed".to_string()),
+                    axum::extract::ws::Message::Ping(_)
+                    | axum::extract::ws::Message::Pong(_) => continue,
+                    _ => continue,
+                };
+                let frame: Frame = match serde_json::from_str(&text) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::debug!(conn_id = %conn_id, error = %e, "dropping unparsable frame");
+                        continue;
+                    }
+                };
+                if frame.msg_type == types::HEARTBEAT {
+                    on_heartbeat(state, conn_id, auth, &frame);
+                }
+                // 其余（含未知类型）一律忽略：约束 14 前向兼容
             }
-        };
-        if frame.msg_type == types::HEARTBEAT {
-            on_heartbeat(state, conn_id, auth, &frame);
+            control = outbound.recv() => {
+                let Some(frame) = control else {
+                    // 发送端全部被丢弃 = 这张表把本连接摘了。
+                    // 正常路径上 `handle_socket` 摘表时连接也该结束了，
+                    // 所以这里按「连接结束」返回而不是继续空转。
+                    return Err("outbound closed".to_string());
+                };
+                if let Err(e) = send_frame(socket, frame).await {
+                    return Err(format!("cannot deliver control frame: {e}"));
+                }
+            }
         }
-        // 其余（含未知类型）一律忽略：约束 14 前向兼容
     }
-    Ok(())
 }
 
 /// 一条心跳：内存更新 + 落库。

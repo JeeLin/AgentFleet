@@ -192,7 +192,7 @@ fn url(addr: SocketAddr) -> String {
 
 /// 跑一次 enroll 形态的连接，返回它的结果。
 async fn enroll(addr: SocketAddr) -> Result<Established, ConnOutcome> {
-    connect_once(&url(addr), &KeyPair::generate(), None, device_info()).await
+    connect_once(&url(addr), &KeyPair::generate(), None, None, device_info()).await
 }
 
 /// 把 `Transport` 的 `detail` 取出来断言——`ConnOutcome` 不派 PartialEq，
@@ -616,7 +616,17 @@ async fn superseded_read_off_the_wire_still_stops_reconnecting() {
         Tail::Close,
     )
     .await;
-    match connect_once(&url(addr), &KeyPair::generate(), Some("n_x"), device_info()).await {
+    match connect_once(
+        &url(addr),
+        &KeyPair::generate(),
+        Some("n_x"),
+        // 带一个落后于 Hub 当前代次的 gen：这正是「disconnect 帧没送达，
+        // 旧连接自己又来了」的兜底形状。
+        Some(3),
+        device_info(),
+    )
+    .await
+    {
         Err(ConnOutcome::Superseded { gen }) => assert_eq!(gen, 9),
         other => panic!("expected Superseded, got {other:?}"),
     }
@@ -634,7 +644,15 @@ async fn a_rejected_reconnect_is_not_a_transport_failure() {
         Tail::Close,
     )
     .await;
-    match connect_once(&url(addr), &KeyPair::generate(), Some("n_x"), device_info()).await {
+    match connect_once(
+        &url(addr),
+        &KeyPair::generate(),
+        Some("n_x"),
+        None,
+        device_info(),
+    )
+    .await
+    {
         Err(ConnOutcome::Rejected { reason }) => {
             assert_eq!(reason, protocol::message::reason::IDENTITY_MISMATCH);
         }
@@ -657,7 +675,7 @@ async fn an_unknown_required_message_is_rejected_not_ignored() {
         Tail::Close,
     )
     .await;
-    let out = connect_once(&url(addr), &KeyPair::generate(), None, device_info()).await;
+    let out = connect_once(&url(addr), &KeyPair::generate(), None, None, device_info()).await;
     match out {
         Err(ConnOutcome::Rejected { reason }) => {
             assert_eq!(reason, protocol::message::reason::IDENTITY_MISMATCH);

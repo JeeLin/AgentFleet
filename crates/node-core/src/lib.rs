@@ -11,4 +11,4 @@ pub mod reconnect;
 pub mod supervisor;
 pub mod update;
 
-pub use identity::{data_dir, Identity, IdentityError, IdentityFile};
+pub use identity::{data_dir, now_secs, Identity, IdentityError, IdentityFile};

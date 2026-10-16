@@ -28,7 +28,7 @@ use tokio::net::TcpListener;
 /// 一份完整的 enroll 握手（含 `auth_ok`）。
 async fn connect_enrolled(hub: &Hub) -> (Established, String, KeyPair) {
     let kp = KeyPair::generate();
-    let est = connect_once(&hub.ws_url(), &kp, None, device_info())
+    let est = connect_once(&hub.ws_url(), &kp, None, None, device_info())
         .await
         .expect("enroll must succeed");
     let node_id = est.auth_ok.node_id.clone();
@@ -37,7 +37,7 @@ async fn connect_enrolled(hub: &Hub) -> (Established, String, KeyPair) {
 
 /// 用同一把钥匙重连（重连形态：只带 node_id 与签名，不带公钥）。
 async fn connect_reconnect(hub: &Hub, kp: &KeyPair, node_id: &str) -> Established {
-    connect_once(&hub.ws_url(), kp, Some(node_id), device_info())
+    connect_once(&hub.ws_url(), kp, Some(node_id), None, device_info())
         .await
         .expect("reconnect must succeed")
 }

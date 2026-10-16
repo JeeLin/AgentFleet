@@ -9,6 +9,7 @@
 //! 认证闭环在 [`middleware_auth`]：豁免表之外一律要 session cookie
 //! （§2.4.3），`/setup` 与 `/login` 在 [`routes::setup`]。
 
+pub mod conns;
 pub mod middleware_auth;
 pub mod presence;
 pub mod routes;
@@ -165,6 +166,8 @@ struct Inner {
     reports: Reports,
     /// 设备仓储（心跳落库用）。
     devices: hub_storage::repo::DeviceRepo,
+    /// `conn_id → 出站控制帧队列`（顶替时通知旧连接用，子任务 7）。
+    outbound: conns::OutboundTable,
 }
 
 impl AppState {
@@ -219,6 +222,7 @@ impl AppState {
             heartbeat_interval_ms: DEFAULT_HEARTBEAT_INTERVAL_MS,
             reports: Reports::new(),
             devices,
+            outbound: conns::OutboundTable::new(),
         }));
 
         if state.is_initialized()? {
@@ -316,6 +320,11 @@ impl AppState {
             rx,
         ));
         tx
+    }
+
+    /// 出站控制帧表（顶替旧连接时寻址用）。
+    pub fn outbound(&self) -> &conns::OutboundTable {
+        &self.0.outbound
     }
 
     /// 数据目录（测试用：读 schema / 直接查库）。

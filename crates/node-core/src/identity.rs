@@ -47,6 +47,18 @@ pub struct IdentityFile {
     /// 首次 enroll 成功后由 Hub 签发回填。enroll 前为空。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
+    /// 本节点见过的最大连接代次（§7.1 的 `gen` 兜底）。
+    ///
+    /// 每次 `auth_ok` 都更新。**必须持久化**：进程重启后若从 0 开始，
+    /// 而 Hub 已经发到 42，这条连接就会永远被判成「已被顶替」——
+    /// 设备接不上且无自愈路径（子任务 7 测试标准⑧）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_gen: Option<u64>,
+    /// 被顶替的时刻（RFC3339）。一旦置上就**不再重连**（§7.1），
+    /// 由人工介入清除——「被顶替」意味着同 node_id 有另一条连接活着，
+    /// 再连就是互抢。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_at: Option<String>,
     pub public_key: String,
     pub private_key_pkcs8_b64: String,
     pub created_at: String,
@@ -147,9 +159,11 @@ impl Identity {
         let file = IdentityFile {
             version: IDENTITY_VERSION,
             node_id: None,
+            last_seen_gen: None,
+            superseded_at: None,
             public_key: identity::base64url(&key.public_key_bytes()),
             private_key_pkcs8_b64: identity::base64url(&key.to_pkcs8_der()),
-            created_at: now_rfc3339(),
+            created_at: now_secs(),
         };
         write_atomic(path, &serde_json::to_vec_pretty(&file)?)?;
         Ok(Self {
@@ -193,6 +207,52 @@ impl Identity {
                 reason: e.to_string(),
             })?;
         parsed.node_id = Some(node_id.to_string());
+        write_atomic(&self.path, &serde_json::to_vec_pretty(&parsed)?)
+    }
+
+    /// 本节点见过的最大连接代次。
+    pub fn last_seen_gen(&self) -> Option<u64> {
+        let raw = fs::read_to_string(&self.path).ok()?;
+        let parsed: IdentityFile = serde_json::from_str(&raw).ok()?;
+        parsed.last_seen_gen
+    }
+
+    /// 记录本次连接拿到的 `gen`（`auth_ok` 之后调用）。
+    pub fn record_gen(&mut self, gen: u64) -> Result<(), IdentityError> {
+        let raw = fs::read_to_string(&self.path)?;
+        let mut parsed: IdentityFile =
+            serde_json::from_str(&raw).map_err(|e| IdentityError::Corrupt {
+                path: self.path.display().to_string(),
+                reason: e.to_string(),
+            })?;
+        // 只前进不回退：并发的两条连接里，落后那条不得把记录拉回去。
+        if parsed.last_seen_gen.is_none_or(|seen| seen < gen) {
+            parsed.last_seen_gen = Some(gen);
+            write_atomic(&self.path, &serde_json::to_vec_pretty(&parsed)?)?;
+        }
+        Ok(())
+    }
+
+    /// 被顶替了吗（§7.1 终态）。
+    pub fn is_superseded(&self) -> bool {
+        let Some(raw) = fs::read_to_string(&self.path).ok() else {
+            return false;
+        };
+        let Ok(parsed) = serde_json::from_str::<IdentityFile>(&raw) else {
+            return false;
+        };
+        parsed.superseded_at.is_some()
+    }
+
+    /// 标记被顶替。置上之后 [`Self::is_superseded`] 恒为真，重连循环据此停下。
+    pub fn mark_superseded(&mut self, at: &str) -> Result<(), IdentityError> {
+        let raw = fs::read_to_string(&self.path)?;
+        let mut parsed: IdentityFile =
+            serde_json::from_str(&raw).map_err(|e| IdentityError::Corrupt {
+                path: self.path.display().to_string(),
+                reason: e.to_string(),
+            })?;
+        parsed.superseded_at = Some(at.to_string());
         write_atomic(&self.path, &serde_json::to_vec_pretty(&parsed)?)
     }
 }
@@ -289,7 +349,7 @@ fn set_dir_mode(dir: &Path) -> Result<(), IdentityError> {
     Ok(())
 }
 
-fn now_rfc3339() -> String {
+pub fn now_secs() -> String {
     // 秒级精度足够：created_at 只用于人工排查，不参与任何认证判定。
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -581,6 +641,61 @@ mod tests {
         std::fs::write(tmp_path(id.path()), b"garbage").unwrap();
         let again = Identity::load_or_create(d.path()).unwrap();
         assert_eq!(again.public_key_b64(), id.public_key_b64());
+    }
+
+    /// 标准⑧：gen 必须落盘，且**只前进不回退**。
+    ///
+    /// 「只前进」不是洁癖：两条连接并发时，落后那条不许把记录拉回去——
+    /// 拉回去之后下次重连带的 gen 就偏小，会被 Hub 判成已被顶替。
+    #[test]
+    fn the_connection_gen_only_moves_forward() {
+        let d = tmpdir();
+        let mut id = Identity::load_or_create(d.path()).unwrap();
+        assert_eq!(id.last_seen_gen(), None, "新身份没有 gen");
+        id.record_gen(7).unwrap();
+        assert_eq!(id.last_seen_gen(), Some(7));
+        id.record_gen(3).unwrap();
+        assert_eq!(id.last_seen_gen(), Some(7), "落后的一条不得回退记录");
+        id.record_gen(9).unwrap();
+        assert_eq!(id.last_seen_gen(), Some(9));
+    }
+
+    /// 标准⑧ 的重启那一半：重新 load 之后 gen 还在。
+    #[test]
+    fn the_connection_gen_survives_a_reload() {
+        let d = tmpdir();
+        let mut id = Identity::load_or_create(d.path()).unwrap();
+        id.record_gen(42).unwrap();
+        let path = id.path().to_path_buf();
+        let reloaded = Identity::load(&path).unwrap();
+        assert_eq!(reloaded.last_seen_gen(), Some(42));
+    }
+
+    /// 被顶替是**终态**且持久化：supervisor 重拉出的新进程什么都不记得，
+    /// 只看内存的话会老老实实再连一次。
+    #[test]
+    fn the_superseded_mark_survives_a_reload() {
+        let d = tmpdir();
+        let mut id = Identity::load_or_create(d.path()).unwrap();
+        assert!(!id.is_superseded());
+        id.mark_superseded("1700000000").unwrap();
+        assert!(id.is_superseded());
+        let path = id.path().to_path_buf();
+        let reloaded = Identity::load(&path).unwrap();
+        assert!(reloaded.is_superseded(), "必须持久化，否则重拉后照连不误");
+    }
+
+    /// 读不出来时按「未被顶替」处理，而不是「被顶替」。
+    ///
+    /// 方向很重要：身份文件损坏时判成被顶替，设备会就此永久停摆且无自愈路径。
+    #[test]
+    fn an_unreadable_identity_is_not_treated_as_superseded() {
+        let d = tmpdir();
+        let id = Identity::load_or_create(d.path()).unwrap();
+        let p = id.path().to_path_buf();
+        std::fs::write(&p, "not json at all").unwrap();
+        assert!(!id.is_superseded(), "读不出来按未被顶替处理");
+        assert_eq!(id.last_seen_gen(), None);
     }
 
     /// `set_node_id` 走原子写：中途失败不留半个文件。

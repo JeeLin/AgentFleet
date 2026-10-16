@@ -100,14 +100,30 @@ impl Worker {
     async fn connect_loop(&mut self, identity: &mut Identity, node_id: Option<&str>) -> i32 {
         let mut attempt: u32 = 0;
         loop {
-            let outcome =
-                conn::connect_once(&self.hub_url, identity.key(), node_id, device_info()).await;
+            // 带上本节点见过的最大 gen。它是 §7.1 兜底路径的输入：
+            // Hub 见它落后就回 `auth_fail{superseded}` 而不接管，
+            // 于是「disconnect 帧丢了」也能自愈，不必依赖消息送达。
+            let outcome = conn::connect_once(
+                &self.hub_url,
+                identity.key(),
+                node_id,
+                identity.last_seen_gen(),
+                device_info(),
+            )
+            .await;
             let end = match outcome {
                 Ok(mut est) => {
                     // 连上了：退避归零（§7.0「每次成功连接后 attempt 归零」）。
                     attempt = 0;
                     if let Err(e) = backfill_node_id(identity, est.enrolled, &est.auth_ok.node_id) {
                         self.say(&format!("error: cannot record the issued node_id: {e}"));
+                        return exit_code::CRASH;
+                    }
+                    // 记下本次的 gen，**必须落盘**：进程重启后若从 0 开始，
+                    // 而 Hub 已经发到 42，这条连接永远被判成「已被顶替」——
+                    // 设备接不上且无自愈路径（子任务 7 标准⑧）。
+                    if let Err(e) = identity.record_gen(est.auth_ok.gen) {
+                        self.say(&format!("error: cannot record the connection gen: {e}"));
                         return exit_code::CRASH;
                     }
                     let interval = Duration::from_millis(est.auth_ok.heartbeat_interval_ms);
@@ -146,6 +162,14 @@ impl Worker {
                     // §7.1 终态。再连一次就是和新连接互抢；supervisor 读到
                     // 正常退出码会重拉 worker，新 worker 的第一次 auth 又会被
                     // 同一条「同 node_id 顶替」规则挡住——不是无限互抢。
+                    //
+                    // 但这个终态**不能只靠内存**：supervisor 重拉出的新进程
+                    // 什么都不记得，会老老实实再连一次。所以持久化到身份文件，
+                    // 由人工介入清除（「被顶替」意味着同 node_id 另有连接活着）。
+                    if let Err(e) = identity.mark_superseded(&node_core::now_secs()) {
+                        self.say(&format!("error: cannot persist the superseded mark: {e}"));
+                        return exit_code::CRASH;
+                    }
                     self.say(&format!(
                         "disconnected (superseded, gen {gen}); stopping without reconnecting"
                     ));

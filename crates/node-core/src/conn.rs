@@ -127,10 +127,16 @@ impl Established {
 /// `node_id` 为 `Some` 时走重连形态，`None` 时走 enroll 形态（§3）。
 /// 调用方负责从 `identity.json` 读它——本函数不碰磁盘，
 /// 于是「身份怎么存」与「连接怎么建」可以分开测。
+///
+/// `last_seen_gen` 是**重连形态专用**的兜底输入（§7.1）：本节点见过的最大
+/// 连接代次。Hub 见它落后于当前 gen 就回 `auth_fail{superseded}` 而不接管——
+/// 这条不依赖 `disconnect` 帧送达，帧丢了也能自愈。
+/// enroll 形态传 `None`（新设备没有 gen 可言）。
 pub async fn connect_once(
     url: &str,
     key: &KeyPair,
     node_id: Option<&str>,
+    last_seen_gen: Option<u64>,
     device_info: DeviceInfo,
 ) -> Result<Established, ConnOutcome> {
     // 显式禁用自动解压缩/扩展：本协议只用文本 JSON 帧（§2），
@@ -187,10 +193,21 @@ pub async fn connect_once(
     );
     let sig = key.sign(&msg);
     let payload = match node_id {
-        Some(id) => serde_json::json!({
-            "node_id": id,
-            "signature": identity::base64url(&sig),
-        }),
+        Some(id) => {
+            let mut p = serde_json::json!({
+                "node_id": id,
+                "signature": identity::base64url(&sig),
+            });
+            // 缺省就不带这个键（协议层 `skip_serializing_if` 同理）：
+            // 带上一个 0 会让 Hub 把它当成「见过 gen 0」，而 0 小于任何 gen
+            // → 所有老节点被永久判成已被顶替，且无自愈路径。
+            if let Some(gen) = last_seen_gen {
+                if let Some(obj) = p.as_object_mut() {
+                    obj.insert("last_seen_gen".to_string(), serde_json::json!(gen));
+                }
+            }
+            p
+        }
         None => serde_json::json!({
             "public_key": identity::base64url(&key.public_key_bytes()),
             "signature": identity::base64url(&sig),
@@ -576,6 +593,7 @@ mod tests {
             "not a url",
             &kp,
             None,
+            None,
             DeviceInfo {
                 name: "pi".into(),
                 os: "linux".into(),
@@ -601,6 +619,7 @@ mod tests {
         let out = connect_once(
             &format!("ws://127.0.0.1:{port}/ws"),
             &kp,
+            None,
             None,
             DeviceInfo {
                 name: "pi".into(),

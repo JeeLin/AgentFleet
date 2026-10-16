@@ -456,7 +456,7 @@ async fn registry_entry_is_cleared_after_disconnect() {
     let hub = Hub::initialized().await;
     let kp = KeyPair::generate();
 
-    let est = connect_once(&hub.ws_url(), &kp, None, device_info())
+    let est = connect_once(&hub.ws_url(), &kp, None, None, device_info())
         .await
         .expect("first enroll must succeed");
     let node_id = est.auth_ok.node_id.clone();
@@ -502,14 +502,14 @@ async fn superseded_outcome_stops_reconnecting() {
     let hub = Hub::initialized().await;
     let kp = KeyPair::generate();
 
-    let first = connect_once(&hub.ws_url(), &kp, None, device_info())
+    let first = connect_once(&hub.ws_url(), &kp, None, None, device_info())
         .await
         .expect("enroll");
     let node_id = first.auth_ok.node_id.clone();
     let first_gen = first.auth_ok.gen;
 
     // 用同一个 node_id 重连（第二个连接）
-    let second = connect_once(&hub.ws_url(), &kp, Some(&node_id), device_info())
+    let second = connect_once(&hub.ws_url(), &kp, Some(&node_id), None, device_info())
         .await
         .expect("reconnect with the same identity must be allowed");
     assert_eq!(second.auth_ok.node_id, node_id, "node_id must be stable");
@@ -630,7 +630,7 @@ async fn node_id_round_trips_through_identity_json() {
     let dir = tempfile::tempdir().unwrap();
     let mut id = Identity::load_or_create(dir.path()).unwrap();
 
-    let est = connect_once(&hub.ws_url(), id.key(), None, device_info())
+    let est = connect_once(&hub.ws_url(), id.key(), None, None, device_info())
         .await
         .expect("enroll with a locally generated key must work");
     let node_id = est.auth_ok.node_id.clone();
@@ -641,9 +641,15 @@ async fn node_id_round_trips_through_identity_json() {
     assert_eq!(reloaded.node_id().as_deref(), Some(node_id.as_str()));
 
     // 用它重连：Hub 认这把钥匙
-    let again = connect_once(&hub.ws_url(), reloaded.key(), Some(&node_id), device_info())
-        .await
-        .expect("reconnect after restart must reuse the same node_id");
+    let again = connect_once(
+        &hub.ws_url(),
+        reloaded.key(),
+        Some(&node_id),
+        None,
+        device_info(),
+    )
+    .await
+    .expect("reconnect after restart must reuse the same node_id");
     assert_eq!(again.auth_ok.node_id, node_id);
     assert!(!again.enrolled, "reconnect is not a new enroll");
 }
@@ -658,7 +664,7 @@ async fn enroll_is_rejected_when_hub_is_not_initialized() {
     let hub = Hub::uninitialized().await;
     let kp = KeyPair::generate();
 
-    let out = connect_once(&hub.ws_url(), &kp, None, device_info()).await;
+    let out = connect_once(&hub.ws_url(), &kp, None, None, device_info()).await;
     match out {
         Err(ConnOutcome::Rejected { reason }) => {
             assert_eq!(

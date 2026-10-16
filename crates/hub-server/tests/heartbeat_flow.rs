@@ -209,7 +209,7 @@ fn device_info() -> DeviceInfo {
 /// 一份 enroll 成功后的连接。`node_id` 用 Hub 签发回来的那个。
 async fn connect_enrolled(hub: &Hub) -> (Established, String, KeyPair) {
     let kp = KeyPair::generate();
-    let est = connect_once(&hub.ws_url(), &kp, None, device_info())
+    let est = connect_once(&hub.ws_url(), &kp, None, None, device_info())
         .await
         .expect("enroll must succeed");
     let node_id = est.auth_ok.node_id.clone();
@@ -218,7 +218,7 @@ async fn connect_enrolled(hub: &Hub) -> (Established, String, KeyPair) {
 
 /// 用**同一把钥匙**重连（重连形态：只带 node_id 与签名，不带公钥，§3）。
 async fn connect_reconnect(hub: &Hub, kp: &KeyPair, node_id: &str) -> Established {
-    connect_once(&hub.ws_url(), kp, Some(node_id), device_info())
+    connect_once(&hub.ws_url(), kp, Some(node_id), None, device_info())
         .await
         .expect("reconnect must succeed")
 }
@@ -628,7 +628,7 @@ async fn a_failed_handshake_yields_no_connection_to_heartbeat_on() {
     let hub = Hub::boot().await;
     hub.insert_legacy_device("n_absent");
     let kp = KeyPair::generate();
-    let out = connect_once(&hub.ws_url(), &kp, Some("n_absent"), device_info()).await;
+    let out = connect_once(&hub.ws_url(), &kp, Some("n_absent"), None, device_info()).await;
     assert!(
         matches!(out, Err(ConnOutcome::Rejected { .. })),
         "got {out:?}"
