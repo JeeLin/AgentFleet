@@ -381,3 +381,456 @@ impl Supervisor {
 fn stopped() -> std::process::ExitCode {
     std::process::ExitCode::from(SUPERVISOR_STOPPED)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 每个测试一个独立目录：测试并行跑，共享目录会让「故意写坏的夹具」
+    /// 把别人的 setUp 搞崩。
+    fn tmp(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("afcli-sup-{name}"));
+        // remove_dir_all 对普通文件**返回 Err**（只删目录）。上一个用例
+        // 故意留下的「not a dir」文件必须被 remove_file 清掉，否则
+        // create_dir_all 报 EEXIST，而那个 Err 与测试要造的失败一模一样，
+        // 于是两个用例互相污染、单独跑却全绿。
+        let _ = std::fs::remove_dir_all(&p);
+        let _ = std::fs::remove_file(&p);
+        std::fs::create_dir_all(&p).expect("tempdir");
+        p
+    }
+
+    /// 把 `d` 变成一个普通文件，使它的子路径全部写不进去。
+    fn as_file(d: &Path) {
+        let _ = std::fs::remove_dir_all(d);
+        std::fs::write(d, b"not a dir").expect("blocker");
+    }
+
+    fn sup(name: &str) -> (PathBuf, Supervisor) {
+        let d = tmp(name);
+        let exe = d.join("afcli");
+        std::fs::write(&exe, b"#!/bin/true\n").expect("fake binary");
+        let sup = Supervisor::with_exe(vec!["run".to_string()], d.clone(), exe);
+        (d, sup)
+    }
+
+    fn state_at(d: &Path) -> UpdateState {
+        UpdateState::requested("9.9.9", &d.join("afcli.new"), &d.join("afcli.bak"), 1)
+    }
+
+    /// 子进程 argv = 父 argv 原样 + `--worker`（D1：用户参数全部继承）。
+    #[test]
+    fn worker_argv_appends_the_worker_flag() {
+        let got = worker_argv(&[
+            "run".to_string(),
+            "--hub".to_string(),
+            "ws://h/ws".to_string(),
+        ]);
+        assert_eq!(
+            got,
+            vec![
+                "run".to_string(),
+                "--hub".to_string(),
+                "ws://h/ws".to_string(),
+                "--worker".to_string()
+            ]
+        );
+    }
+
+    /// 幂等：父 argv 已带 `--worker`（Docker 里直接指定、人手误敲）时
+    /// 不能追加第二个，否则会出现 `run --worker --worker`。
+    #[test]
+    fn worker_argv_is_idempotent() {
+        let argv = vec!["run".to_string(), WORKER_FLAG.to_string()];
+        assert_eq!(worker_argv(&argv), argv);
+        // 在任意位置都算，不只最后一个。
+        let argv = vec![WORKER_FLAG.to_string(), "run".to_string()];
+        assert_eq!(worker_argv(&argv), argv);
+    }
+
+    /// `--worker` 之外的用户参数不能被吞：漏一个就 worker 连到另一个 Hub。
+    #[test]
+    fn worker_argv_keeps_every_user_flag() {
+        let argv: Vec<String> = ["run", "--hub", "ws://h/ws", "-v"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let got = worker_argv(&argv);
+        for a in &argv {
+            assert!(got.contains(a), "{a} dropped from {got:?}");
+        }
+        assert_eq!(got.len(), argv.len() + 1);
+    }
+
+    /// 被信号杀死时 `code()` 是 `None`——那是崩溃（标准②），
+    /// 不能让 supervisor 自己 panic（`-9` 不是合法 i32）。
+    #[test]
+    fn a_killed_worker_counts_as_a_crash() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "kill -9 $$"])
+            .spawn()
+            .expect("spawn sh");
+        let status = child.wait().expect("wait");
+        assert!(status.code().is_none(), "sh 应被 -9 杀死");
+        assert_eq!(exit_code_of(&status), exit_code::CRASH);
+    }
+
+    /// 正常退出码必须原样穿过：`exit(10)`（请求更新）与 `exit(11)`（健康失败）
+    /// 是 supervisor 决策的全部依据，压缩成「非零」就什么也判不出来。
+    #[test]
+    fn a_clean_exit_code_passes_through() {
+        let ok = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .status()
+            .expect("run sh");
+        assert_eq!(exit_code_of(&ok), 0);
+        let ten = std::process::Command::new("sh")
+            .args(["-c", "exit 10"])
+            .status()
+            .expect("run sh");
+        assert_eq!(exit_code_of(&ten), exit_code::UPDATE_REQUEST);
+    }
+
+    /// 首轮没有「上一次退出」可观测，造一个正常退出即可：
+    /// 此刻还没崩过，不该背任何退避。
+    #[test]
+    fn the_first_loop_sees_a_normal_exit() {
+        let e = initial_exit();
+        assert_eq!(e.code, exit_code::NORMAL);
+        assert_eq!(e.ran_for_secs, 0);
+    }
+
+    /// 启动对账判定「上次替换没做完」→ 喂 `exit(10)`。
+    /// 喂别的码会走到「有更新在途 → 这一版不健康 → 回滚」，
+    /// 把一次没做完的升级误判成失败。
+    #[test]
+    fn an_unfinished_replacement_reuses_the_update_request_exit() {
+        assert_eq!(
+            startup_exit(update::Reconcile::ContinueReplace).code,
+            exit_code::UPDATE_REQUEST
+        );
+    }
+
+    /// 其余三种对账结果都不是「上次没做完」，一律按首轮处理。
+    #[test]
+    fn the_other_reconcile_outcomes_start_clean() {
+        for r in [
+            update::Reconcile::Nothing,
+            update::Reconcile::AlreadyReplaced,
+            update::Reconcile::Inconsistent,
+        ] {
+            assert_eq!(startup_exit(r).code, exit_code::NORMAL, "{r:?}");
+        }
+    }
+
+    /// `decide` 要的是**磁盘事实**：状态文件里记着路径不等于文件在（D2-⑥）。
+    #[test]
+    fn backup_available_checks_the_disk_not_the_state_string() {
+        let d = tmp("bak");
+        let s = state_at(&d);
+        assert!(!backup_available(Some(&s), &d.join("afcli.bak")));
+        std::fs::write(d.join("afcli.bak"), b"old").expect("write bak");
+        assert!(backup_available(Some(&s), &d.join("afcli.bak")));
+    }
+
+    /// 没有状态文件 → 一律判「不可用」，哪怕 `.bak` 就在盘上。
+    ///
+    /// 这不是保守而是正确：没有状态就没有「备份属于哪一版、回滚过几次」的
+    /// 记账，把来路不明的 `.bak` rename 上去等于用未知版本覆盖已知版本。
+    #[test]
+    fn backup_available_without_state_is_false_even_if_the_file_exists() {
+        let d = tmp("bak2");
+        std::fs::write(d.join("afcli.bak"), b"old").expect("write");
+        assert!(!backup_available(None, &d.join("afcli.bak")));
+    }
+
+    /// 跑满 10s 才退出 → 连击清零：一次偶发崩溃不该让此后每次重启都背 30s。
+    #[test]
+    fn a_long_running_exit_resets_the_streak() {
+        let mut stats = CrashStats {
+            recent_exits: 1,
+            consecutive: 5,
+            rollback_count: 0,
+        };
+        record_exit(&mut stats, &ExitInfo::new(exit_code::NORMAL, 30), None);
+        assert_eq!(stats.consecutive, 0);
+    }
+
+    /// 秒崩不清零：那正是「这一版不健康」的信号，退避要继续涨。
+    #[test]
+    fn a_fast_crash_keeps_the_streak_growing() {
+        let mut stats = CrashStats::default();
+        for _ in 0..2 {
+            record_exit(&mut stats, &ExitInfo::new(exit_code::CRASH, 0), None);
+        }
+        assert_eq!(stats.consecutive, 2);
+        assert_eq!(
+            node_core::supervisor::backoff_secs(stats.consecutive),
+            4,
+            "连续退出的退避必须继续涨"
+        );
+    }
+
+    /// 相邻两次退出间隔 ≥ 10s → 滑窗：凌晨 3 点的崩溃不该留着白天的计数。
+    #[test]
+    fn a_long_gap_between_exits_slides_the_window() {
+        let mut stats = CrashStats {
+            recent_exits: 3,
+            consecutive: 3,
+            rollback_count: 0,
+        };
+        record_exit(
+            &mut stats,
+            &ExitInfo::new(exit_code::CRASH, 0),
+            Some(Duration::from_secs(30)),
+        );
+        assert_eq!(stats.recent_exits, 1, "窗口应先清零再记这一次");
+    }
+
+    /// 间隔不足 10s → 窗口不清：连续退出正是要捕捉的形态。
+    #[test]
+    fn a_short_gap_keeps_the_window_counting() {
+        let mut stats = CrashStats {
+            recent_exits: 3,
+            consecutive: 3,
+            rollback_count: 0,
+        };
+        record_exit(
+            &mut stats,
+            &ExitInfo::new(exit_code::CRASH, 0),
+            Some(Duration::from_secs(2)),
+        );
+        assert_eq!(stats.recent_exits, 4);
+    }
+
+    // ---- executor：真的动文件系统，但目标都是临时目录里的假二进制 ----
+
+    /// 备份先行且必须成功（D2-③）：备份失败后若还去 rename，一旦新版起不来，
+    /// 回滚会拿到上一轮遗留的 `.bak`，把设备降级到几个月前的陈旧版本。
+    #[test]
+    fn replace_backs_up_before_swapping_and_records_the_state() {
+        let (d, s) = sup("replace");
+        let staged = d.join("afcli.new");
+        let backup = d.join("afcli.bak");
+        std::fs::write(&staged, b"new binary").expect("staged");
+        std::fs::write(&s.exe, b"old binary").expect("exe");
+
+        let st = state_at(&d);
+        s.replace(Some(&st), "9.9.9").expect("replace");
+
+        assert_eq!(std::fs::read(&backup).expect("bak"), b"old binary");
+        assert_eq!(std::fs::read(&s.exe).expect("exe"), b"new binary");
+        assert!(!staged.exists(), "staged 应被 rename 消耗掉");
+        let (after, _) = update::read_state(&s.state_path());
+        let after = after.expect("state written");
+        assert_eq!(after.phase, UpdatePhase::StartingNew);
+        assert_eq!(after.version, "9.9.9");
+    }
+
+    /// staged 不在 → 放弃更新而不是换一个不存在的文件上去。
+    #[test]
+    fn replace_refuses_when_the_staged_binary_is_missing() {
+        let (d, s) = sup("replace-missing");
+        let st = state_at(&d);
+        let err = s.replace(Some(&st), "9.9.9").expect_err("must refuse");
+        assert!(err.contains("staged binary missing"), "{err}");
+        assert!(!d.join("afcli.bak").exists(), "不该留下备份");
+        assert_eq!(std::fs::read(&s.exe).expect("exe"), b"#!/bin/true\n");
+    }
+
+    /// 备份写不进去（目录不存在）→ 报错且**不动**正在运行的二进制。
+    #[test]
+    fn replace_aborts_before_touching_the_exe_when_backup_fails() {
+        let (d, s) = sup("replace-bakfail");
+        let staged = d.join("afcli.new");
+        std::fs::write(&staged, b"new").expect("staged");
+        // 让备份路径指向一个不可写的位置：用一个普通文件当父目录。
+        let mut bad = state_at(&d);
+        bad.backup_path = d.join("not-a-dir").join("afcli.bak").display().to_string();
+        std::fs::write(d.join("not-a-dir"), b"blocker").expect("blocker");
+        let err = s.replace(Some(&bad), "9.9.9").expect_err("must fail");
+        assert!(err.contains("backup to"), "{err}");
+        // staged 必须留在盘上：备份写不进去就放弃更新，但下载好的新二进制
+        // 不能跟着消失——否则下次升级得重新下载一遍。
+        assert!(staged.exists(), "staged 必须留着，否则更新凭空消失");
+    }
+
+    /// 没有既有状态文件时也能替换：`blank_state` 补一条可用记录。
+    #[test]
+    fn replace_without_a_state_file_still_books_its_work() {
+        let (d, s) = sup("replace-nostate");
+        std::fs::write(d.join("afcli.new"), b"new").expect("staged");
+        s.replace(None, "1.0.1").expect("replace");
+        let (after, _) = update::read_state(&s.state_path());
+        let after = after.expect("state written");
+        assert_eq!(after.version, "1.0.1");
+        assert!(after.backup_usable_for(), "刚做好的备份必须可用于回滚");
+    }
+
+    /// 回滚把 `.bak` 换回原位，并把它从账本上划掉——留着路径会让下一次
+    /// 启动的对账以为「备份还在」。
+    #[test]
+    fn rollback_restores_the_backup_and_clears_its_path() {
+        let (d, s) = sup("rollback");
+        std::fs::write(d.join("afcli.bak"), b"old").expect("bak");
+        std::fs::write(&s.exe, b"new").expect("exe");
+        let st = state_at(&d);
+
+        s.rollback(Some(&st)).expect("rollback");
+
+        assert_eq!(std::fs::read(&s.exe).expect("exe"), b"old");
+        assert!(!d.join("afcli.bak").exists(), "备份应被 rename 消耗");
+        let (after, _) = update::read_state(&s.state_path());
+        let after = after.expect("state written");
+        assert_eq!(after.phase, UpdatePhase::RolledBack);
+        assert_eq!(after.rollback_count, 1);
+        assert!(after.backup_path.is_empty());
+        assert!(!after.backup_usable_for(), "回滚过一次就不许再回滚（D2-⑤）");
+    }
+
+    /// 没有备份可回滚 → 报错，不能把不存在的文件 rename 上去。
+    #[test]
+    fn rollback_without_a_backup_reports_it() {
+        let (d, s) = sup("rollback-missing");
+        let st = state_at(&d);
+        let err = s.rollback(Some(&st)).expect_err("must fail");
+        assert!(err.contains("no backup"), "{err}");
+    }
+
+    /// 世代号从 1 起：0 会让 `backup_usable_for()` 为假，刚做好的备份
+    /// 立刻被判「不可用于回滚」。
+    #[test]
+    fn a_blank_state_is_immediately_usable_for_rollback() {
+        let (_d, s) = sup("blank");
+        let st = s.blank_state("2.0.0");
+        assert_eq!(st.generation, 1);
+        assert!(st.backup_usable_for());
+        assert_eq!(st.version, "2.0.0");
+        assert_eq!(st.staged_path, s.staged_path(None).display().to_string());
+        assert_eq!(st.backup_path, s.backup_path(None).display().to_string());
+    }
+
+    /// `failed_state` 保留既有记录、只改阶段；没有既有记录时给一条兜底的。
+    #[test]
+    fn a_failed_state_keeps_the_old_record_when_there_is_one() {
+        let (d, s) = sup("failed");
+        let st = state_at(&d);
+        let f = s.failed_state(Some(&st), "");
+        assert_eq!(f.phase, UpdatePhase::Failed);
+        assert_eq!(f.version, "9.9.9", "既有版本号必须留着");
+        let _ = d;
+    }
+
+    #[test]
+    fn a_failed_state_without_a_prior_record_still_writes_something() {
+        let (_d, s) = sup("failed-none");
+        let f = s.failed_state(None, "3.0.0");
+        assert_eq!(f.phase, UpdatePhase::Failed);
+        assert_eq!(f.version, "3.0.0");
+    }
+
+    /// 状态文件里记的路径优先；没记时用 `<exe>.new` / `<exe>.bak` 约定名。
+    #[test]
+    fn paths_prefer_the_state_file_and_fall_back_to_conventions() {
+        let (d, s) = sup("paths");
+        let st = state_at(&d);
+        assert_eq!(s.staged_path(Some(&st)), d.join("afcli.new"));
+        assert_eq!(s.backup_path(Some(&st)), d.join("afcli.bak"));
+
+        // 空串视作没记：按非空判会驱动一次指向空路径的操作。
+        let mut blank = state_at(&d);
+        blank.staged_path = String::new();
+        blank.backup_path = String::new();
+        assert_eq!(s.staged_path(Some(&blank)), s.exe.with_extension("new"));
+        assert_eq!(s.backup_path(Some(&blank)), update::backup_path_for(&s.exe));
+        assert_eq!(s.staged_path(None), s.exe.with_extension("new"));
+    }
+
+    /// 状态文件读不出来不致命，但必须留痕：静默降级成「没有升级在进行」
+    /// 会让更新流程做出错误判断。
+    #[test]
+    fn a_corrupt_state_file_is_logged_and_treated_as_absent() {
+        let (d, s) = sup("corrupt");
+        std::fs::write(s.state_path(), b"{ not json").expect("corrupt state");
+        let (state, reconciled) = s.read_state();
+        assert!(state.is_none(), "坏状态文件不能当成有效状态");
+        assert_eq!(reconciled, update::Reconcile::Nothing);
+        // 留痕落在 data_dir 的日志里。
+        let log = std::fs::read_to_string(log::log_path(&d)).expect("log");
+        assert!(
+            log.contains("update state unreadable"),
+            "坏状态文件必须留痕: {log}"
+        );
+    }
+
+    /// `persist_state` 写失败不能让 supervisor 崩：账本是账本，设备该跑还是要跑。
+    #[test]
+    fn a_failed_state_write_is_survived_and_logged() {
+        let (d, s) = sup("persist-fail");
+        // 用一个普通文件当 data_dir，让日志与状态都写不进去。
+        as_file(&d);
+        s.persist_state(&s.blank_state("1.0.0"));
+        // 不 panic 即通过；副作用是 stderr 上那行「无法写入日志」。
+    }
+
+    /// 日志轮转失败只记一行：轮转不成功不该拦住启动。
+    #[test]
+    fn a_failed_rotation_does_not_block_startup() {
+        let (d, s) = sup("rotate-fail");
+        as_file(&d);
+        s.rotate_log();
+    }
+
+    /// `say` 走的是文件日志：supervisor 与 worker 两边混写同一份文件，
+    /// 角色名必须能让人一眼分清这行是谁写的。
+    #[test]
+    fn say_writes_a_line_tagged_with_the_role() {
+        let (d, s) = sup("say");
+        s.say("hello from the supervisor");
+        let log = std::fs::read_to_string(log::log_path(&d)).expect("log");
+        assert!(log.contains("[supervisor]"), "{log}");
+        assert!(log.contains("hello from the supervisor"), "{log}");
+        let _ = d;
+    }
+
+    /// 停下来的 supervisor 要有一个可辨识的退出码（不是被 kill 的那种）。
+    #[test]
+    fn the_stopped_exit_code_is_distinct_from_the_worker_protocol() {
+        assert_eq!(stopped(), std::process::ExitCode::from(SUPERVISOR_STOPPED));
+        assert_eq!(SUPERVISOR_STOPPED, 20);
+        for c in [
+            exit_code::NORMAL,
+            exit_code::UPDATE_REQUEST,
+            exit_code::HEALTH_FAILURE,
+            exit_code::CRASH,
+        ] {
+            assert_ne!(c, SUPERVISOR_STOPPED as i32, "与 worker 退出码协议撞了");
+        }
+    }
+
+    // ---- supervise：只走「立即停下」这条确定会终止的路 ----
+
+    /// 对账判为 Inconsistent（staged 没了、备份还在）→ `decide` 直接 Stop，
+    /// supervise 于是走「停下来等人介入」并返回退出码 20。
+    ///
+    /// 这是唯一一条**不需要 spawn 真二进制**就能走完 supervise 全程的路径：
+    /// 替换/回滚成功之后循环会继续 spawn，测试就得真的删掉正在跑的二进制。
+    #[test]
+    fn an_inconsistent_update_state_stops_the_supervisor() {
+        let (d, s) = sup("inconsistent");
+        // 状态在途 + staged 不存在 + 备份存在 → Inconsistent。
+        let mut st = state_at(&d);
+        st.phase = UpdatePhase::StartingNew;
+        std::fs::write(d.join("afcli.bak"), b"old").expect("bak");
+        s.persist_state(&st);
+
+        let code = s.supervise();
+        assert_eq!(code, std::process::ExitCode::from(SUPERVISOR_STOPPED));
+
+        let log = std::fs::read_to_string(log::log_path(&d)).expect("log");
+        assert!(log.contains("human intervention required"), "{log}");
+        assert!(log.contains("unreachable"), "{log}");
+        let (after, _) = update::read_state(&s.state_path());
+        assert_eq!(after.expect("state").phase, UpdatePhase::Failed);
+    }
+}

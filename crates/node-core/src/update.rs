@@ -271,13 +271,6 @@ pub fn reconcile(state: Option<&UpdateState>, staged: &Path, backup: &Path) -> R
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::let_underscore_must_use,
-    clippy::indexing_slicing
-)]
 mod tests {
     use super::*;
 

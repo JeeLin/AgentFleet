@@ -19,6 +19,7 @@ use protocol::frame::Frame;
 use protocol::message::{DeviceInfo, Disconnect};
 
 /// 一次已认证连接上的循环被什么终止了。
+#[derive(Debug)]
 enum SessionEnd {
     /// 对端关闭了 WS（`Close` 帧走完，或读到流结束）。
     PeerClosed,
@@ -42,7 +43,7 @@ impl Worker {
     /// 阻塞运行，返回进程退出码。正常情况下不返回。
     pub fn work(&mut self) -> std::process::ExitCode {
         self.rotate_log();
-        let mut identity = match Identity::load_or_create(&self.data_dir) {
+        let identity = match Identity::load_or_create(&self.data_dir) {
             Ok(id) => id,
             // 身份文件坏了/读不了时**不能**重新生成：那等于换了一台设备，
             // 会撞上「指纹已存在则拒绝」，设备永久无法接入。所以停下来。
@@ -51,6 +52,15 @@ impl Worker {
                 return std::process::ExitCode::FAILURE;
             }
         };
+        self.run_with(identity)
+    }
+
+    /// 身份已备好之后的全部流程。
+    ///
+    /// 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到），
+    /// 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测——
+    /// 见 `mod tests` 里的 `run_with` 用例。
+    fn run_with(&mut self, mut identity: Identity) -> std::process::ExitCode {
         let node_id = identity.node_id();
         self.say(&format!(
             "worker starting, node_id={}, hub={}",
@@ -93,7 +103,7 @@ impl Worker {
                 Ok(mut est) => {
                     // 连上了：退避归零（§7.0「每次成功连接后 attempt 归零」）。
                     attempt = 0;
-                    if let Err(e) = backfill_node_id(identity, &est) {
+                    if let Err(e) = backfill_node_id(identity, est.enrolled, &est.auth_ok.node_id) {
                         self.say(&format!("error: cannot record the issued node_id: {e}"));
                         return exit_code::CRASH;
                     }
@@ -220,12 +230,19 @@ impl Worker {
 /// 内存值只是把「写成功了」这件事又记了一遍，还多出一个「写成功但值没换」
 /// 的中间态。这里失败会让设备停在「enroll 了但没记住 node_id」——重启后
 /// 重新 enroll 会撞「指纹已存在」，所以必须停下、留下 error 级痕迹。
-fn backfill_node_id(identity: &mut Identity, est: &Established) -> Result<(), String> {
-    if !est.enrolled {
+///
+/// 参数是 `enrolled` 与 `node_id` 两个值而不是整个 [`Established`]：
+/// 后者的 `socket` 字段私有，收下它就等于把「能测」这件事关在门外。
+fn backfill_node_id(
+    identity: &mut Identity,
+    enrolled: bool,
+    issued_node_id: &str,
+) -> Result<(), String> {
+    if !enrolled {
         return Ok(());
     }
     identity
-        .set_node_id(&est.auth_ok.node_id)
+        .set_node_id(issued_node_id)
         .map_err(|e| e.to_string())
 }
 
@@ -254,5 +271,357 @@ fn device_info() -> DeviceInfo {
         arch: std::env::consts::ARCH.to_string(),
         hostname: String::new(),
         node_version: env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use node_core::Identity;
+
+    fn frame_of(t: &str, c: serde_json::Value) -> Frame {
+        serde_json::from_value(serde_json::json!({"v":1,"seq":1,"t":t,"c":c})).expect("frame")
+    }
+
+    fn worker(name: &str) -> (PathBuf, Worker) {
+        let d = std::env::temp_dir().join(format!("afcli-worker-{name}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("tempdir");
+        let w = Worker::new(d.clone(), "ws://hub/ws".to_string());
+        (d, w)
+    }
+
+    /// `disconnect{superseded}` → 终态，不重连（§7.1）。
+    #[test]
+    fn a_superseded_disconnect_ends_the_session_without_reconnecting() {
+        let (d, w) = worker("superseded");
+        let f = frame_of(
+            "disconnect",
+            serde_json::json!({"reason":"superseded","gen":7}),
+        );
+        match w.on_control_frame(&f) {
+            Some(SessionEnd::Superseded { gen }) => assert_eq!(gen, 7),
+            other => panic!("want Superseded, got {other:?}"),
+        }
+        let _ = d;
+    }
+
+    /// `disconnect{admin}`（用户手动下线）→ 设备没坏，照常退避重连。
+    #[test]
+    fn an_admin_disconnect_keeps_reconnecting() {
+        let (d, w) = worker("admin");
+        let f = frame_of("disconnect", serde_json::json!({"reason":"admin"}));
+        assert!(
+            matches!(w.on_control_frame(&f), Some(SessionEnd::PeerClosed)),
+            "manual offline must not stop the device"
+        );
+        let _ = d;
+    }
+
+    /// 约束 14：未知类型一律忽略，不因「没听说过」而断连。
+    #[test]
+    fn an_unknown_frame_type_is_ignored() {
+        let (d, w) = worker("unknown");
+        for t in ["heartbeat", "channel_open", "some_future_type", ""] {
+            let f = frame_of(t, serde_json::json!({"anything":1}));
+            assert!(
+                w.on_control_frame(&f).is_none(),
+                "{t} 必须被忽略，否则 Hub 加一种帧就会把设备踢下线"
+            );
+        }
+        let _ = d;
+    }
+
+    /// `disconnect` 载荷不是合法 JSON → 传输类失败。
+    ///
+    /// 这是**协议分叉**而不是「这条消息没听懂」：继续留着这条连接
+    /// 只会让后续每一帧都解析失败，所以按 Transport 退避重连。
+    #[test]
+    fn a_malformed_disconnect_payload_is_a_transport_failure() {
+        let (d, w) = worker("bad-disconnect");
+        let f = frame_of("disconnect", serde_json::json!({"reason":12345}));
+        match w.on_control_frame(&f) {
+            Some(SessionEnd::Transport(detail)) => {
+                assert!(detail.starts_with("bad disconnect:"), "{detail}")
+            }
+            other => panic!("want Transport, got {other:?}"),
+        }
+        let _ = d;
+    }
+
+    /// `gen` 缺省时记 0：老 Hub 不带这个字段，不能因此崩。
+    #[test]
+    fn a_disconnect_without_gen_is_still_terminal() {
+        let (d, w) = worker("no-gen");
+        let f = frame_of("disconnect", serde_json::json!({"reason":"superseded"}));
+        assert!(matches!(
+            w.on_control_frame(&f),
+            Some(SessionEnd::Superseded { gen: 0 })
+        ));
+        let _ = d;
+    }
+
+    /// `outcome_phrase` 给日志用：不能直接打 `Debug`，那会把枚举名和
+    /// 花括号一起搬上来，淹没了真正的错误。
+    #[test]
+    fn every_outcome_has_a_human_phrase() {
+        let t = ConnOutcome::Transport {
+            detail: "connection refused".into(),
+        };
+        assert_eq!(outcome_phrase(&t), "connection refused");
+        let s = ConnOutcome::Superseded { gen: 3 };
+        assert!(
+            outcome_phrase(&s).contains("gen 3"),
+            "{}",
+            outcome_phrase(&s)
+        );
+        let r = ConnOutcome::Rejected {
+            reason: "identity mismatch".into(),
+        };
+        assert!(
+            outcome_phrase(&r).contains("identity mismatch"),
+            "{}",
+            outcome_phrase(&r)
+        );
+    }
+
+    /// enroll 上传的设备描述：`name`/`hostname` 故意留空（不为两行展示名
+    /// 在树莓派上加依赖），os/arch/version 必须是真的。
+    #[test]
+    fn device_info_reports_the_real_platform() {
+        let i = device_info();
+        assert_eq!(i.os, std::env::consts::OS);
+        assert_eq!(i.arch, std::env::consts::ARCH);
+        assert_eq!(i.node_version, env!("CARGO_PKG_VERSION"));
+        assert!(i.name.is_empty(), "name 不该引入新依赖");
+        assert!(i.hostname.is_empty());
+    }
+
+    /// 没有新 enroll 时**不动**身份文件：每次重连都写一次盘
+    /// 会让 SD 卡（树莓派的盘）白挨无数次写入。
+    #[test]
+    fn backfill_is_a_noop_when_nothing_was_enrolled() {
+        let d = std::env::temp_dir().join("afcli-worker-backfill-noop");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("dir");
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        let before = std::fs::read(id.path()).expect("read identity");
+        let before_mtime = std::fs::metadata(id.path())
+            .expect("meta")
+            .modified()
+            .expect("mtime");
+
+        backfill_node_id(&mut id, false, "n_issued").expect("noop");
+
+        assert_eq!(
+            std::fs::read(id.path()).expect("read again"),
+            before,
+            "文件内容不该变"
+        );
+        assert_eq!(
+            std::fs::metadata(id.path())
+                .expect("meta")
+                .modified()
+                .expect("mtime"),
+            before_mtime,
+            "连 mtime 都不该动——SD 卡上白写是要折寿的"
+        );
+        assert_eq!(id.node_id(), None, "node_id 仍应是 None");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 新 enroll 成功 → 把 Hub 签发的 `node_id` 落到盘上（约束 12：
+    /// 升级只换 worker，`node_id` 不能变）。
+    #[test]
+    fn backfill_records_the_issued_node_id() {
+        let d = std::env::temp_dir().join("afcli-worker-backfill-write");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("dir");
+        let mut id = Identity::load_or_create(&d).expect("identity");
+
+        backfill_node_id(&mut id, true, "n_issued").expect("write");
+
+        assert_eq!(id.node_id().as_deref(), Some("n_issued"));
+        // 落盘：重启后的 worker 必须用同一个 node_id 重连。
+        let reread = Identity::load_or_create(&d).expect("reread");
+        assert_eq!(reread.node_id().as_deref(), Some("n_issued"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 写不进去时必须报错（不是静默 Ok）：调用方据此停下并留 error 痕迹，
+    /// 否则设备停在「enroll 了但没记住 node_id」，重启后重新 enroll 会撞
+    /// 「指纹已存在」而永久无法接入。
+    #[test]
+    fn backfill_reports_a_failed_write_instead_of_succeeding_quietly() {
+        let d = std::env::temp_dir().join("afcli-worker-backfill-fail");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("dir");
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        // 把身份文件换成不可解析的内容：set_node_id 走「读-改-写」，
+        // 读不了就报错，不会偷偷造一台新设备。
+        std::fs::write(id.path(), b"{ not json").expect("corrupt");
+        assert!(
+            backfill_node_id(&mut id, true, "n_issued").is_err(),
+            "写失败必须报错"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ---- connect_loop：真的连一次，只走「终态」那条会返回的路 ----
+
+    /// 起一个假 Hub：`Reject` 在握手阶段就拒绝，其余三种先让握手成功再收尾。
+    fn fake_hub(tail: HubTail) -> String {
+        // std 的 bind：`fake_hub` 有时在 #[tokio::test] 里被调，
+        // 那里不能再 block_on 一个嵌套运行时。
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        std_listener.set_nonblocking(true).expect("nonblocking");
+        let addr = std_listener.local_addr().expect("addr");
+        let listener = tokio::net::TcpListener::from_std(std_listener).expect("listener");
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            rt.block_on(async move {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                    return;
+                };
+                let _ = ws.next().await;
+                let _ = send(&mut ws, challenge()).await;
+                let _ = ws.next().await;
+                if matches!(tail, HubTail::Reject) {
+                    let _ = send(&mut ws, auth_fail()).await;
+                    let _ = ws.next().await;
+                    return;
+                }
+                let _ = send(&mut ws, auth_ok()).await;
+                match tail {
+                    HubTail::Reject => unreachable!("上面已返回"),
+                    HubTail::Close => {
+                        let _ = ws.close(None).await;
+                        let _ = ws.next().await;
+                    }
+                    HubTail::Superseded => {
+                        let _ = send(&mut ws, superseded()).await;
+                        let _ = ws.next().await;
+                    }
+                    HubTail::Hang => futures_util::future::pending::<()>().await,
+                }
+            });
+        });
+        format!("ws://{addr}/ws")
+    }
+
+    fn challenge() -> serde_json::Value {
+        serde_json::json!({"v":1,"seq":1,"t":"challenge","c":{"nonce":"n"}})
+    }
+
+    fn auth_ok() -> serde_json::Value {
+        serde_json::json!({"v":1,"seq":2,"t":"auth_ok","c":{"node_id":"n_x","protocol_version":1,"gen":1,"heartbeat_interval_ms":15000}})
+    }
+
+    fn auth_fail() -> serde_json::Value {
+        serde_json::json!({"v":1,"seq":2,"t":"auth_fail","c":{"reason":"identity mismatch"}})
+    }
+
+    fn superseded() -> serde_json::Value {
+        serde_json::json!({"v":1,"seq":3,"t":"disconnect","c":{"reason":"superseded","gen":2}})
+    }
+
+    async fn send(
+        ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+        v: serde_json::Value,
+    ) -> Result<(), String> {
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(v.to_string()))
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    enum HubTail {
+        Close,
+        Superseded,
+        Reject,
+        Hang,
+    }
+
+    /// Hub 明确裁决身份 → worker **不重连**，正常退出码 0。
+    ///
+    /// 若这里改成重连，设备会在「指纹已存在」上无限撞墙，
+    /// 每次都打一条日志，SD 卡慢慢写满。
+    #[tokio::test]
+    async fn a_rejected_identity_stops_the_loop() {
+        let (d, _w) = worker("reject");
+        let url = fake_hub(HubTail::Reject);
+        let mut w = Worker::new(d.clone(), url);
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        let code = w.connect_loop(&mut id, None).await;
+        assert_eq!(code, 0, "被拒绝是终态，但退出码是「正常退出」");
+        let log = std::fs::read_to_string(node_core::log::log_path(&d)).expect("log");
+        assert!(log.contains("hub refused"), "{log}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 被顶替 → 终态，**不重连**（§7.1）：再连一次就是和新连接互抢。
+    #[tokio::test]
+    async fn a_superseded_session_stops_the_loop() {
+        let (d, _w) = worker("superseded-loop");
+        let url = fake_hub(HubTail::Superseded);
+        let mut w = Worker::new(d.clone(), url);
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        let code = w.connect_loop(&mut id, None).await;
+        assert_eq!(code, 0);
+        let log = std::fs::read_to_string(node_core::log::log_path(&d)).expect("log");
+        assert!(log.contains("superseded"), "{log}");
+        assert!(log.contains("stopping without reconnecting"), "{log}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 对端正常关闭 → 退避重连。这里不等它真的重连：
+    /// 用 `tokio::time::pause()` 之外的办法——把第二次连接指向一个
+    /// 立刻拒绝的端口，于是 loop 会在退避后再次失败并继续退避。
+    /// 为让测试有界，只断言「第一次断开后有重连意图」。
+    #[tokio::test]
+    async fn a_peer_close_reconnects_rather_than_stopping() {
+        let (d, _w) = worker("reconnect");
+        let url = fake_hub(HubTail::Close);
+        let mut w = Worker::new(d.clone(), url);
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        // 不暂停时间：第一次退避是 2s×[0.7,1.3)=1.4–2.6s，
+        // 3s 足够让它重连一次并被记进日志。超时到点 = 它还在重连。
+        let code = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            w.connect_loop(&mut id, None),
+        )
+        .await;
+        // 第二次连的是同一个已关闭的端口 → 传输失败 → 继续退避，
+        // 所以这个 timeout 一定到点；到点说明它确实在重连而不是退出。
+        assert!(code.is_err(), "peer close 后必须重连，不该退出");
+        let log = std::fs::read_to_string(node_core::log::log_path(&d)).expect("log");
+        assert!(log.contains("peer closed"), "{log}");
+        assert!(log.contains("reconnecting"), "{log}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 连上一个「挂着不关」的 Hub → loop 一直等，不会自己退出。
+    /// 这条锁的是「传输层没坏就不该乱退」。
+    #[tokio::test]
+    async fn a_live_connection_is_waited_on_not_dropped() {
+        let (d, _w) = worker("hang");
+        let url = fake_hub(HubTail::Hang);
+        let mut w = Worker::new(d.clone(), url);
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        let code = tokio::time::timeout(
+            std::time::Duration::from_millis(400),
+            w.connect_loop(&mut id, None),
+        )
+        .await;
+        assert!(code.is_err(), "连接还活着，loop 不该退出");
+        let log = std::fs::read_to_string(node_core::log::log_path(&d)).expect("log");
+        assert!(log.contains("authed as n_x"), "{log}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

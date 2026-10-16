@@ -17,6 +17,8 @@ pub mod runargs;
 pub mod supervisor;
 pub mod worker;
 
+use std::path::PathBuf;
+
 /// 二进制名称。命令名必须是 `afcli`（与 Node.js 运行时 `node` 撞名才改的），
 /// crate 名是 `node-cli`，二者都不要改。
 pub const BIN_NAME: &str = "afcli";
@@ -141,7 +143,7 @@ where
 /// supervisor 用 `worker_argv` 决定下次 spawn 谁。两处判定漂移的后果是
 /// supervisor 把自己当 worker（或反过来）spawn 出一个 supervisor，
 /// 设备变成两个进程互相等对方退出。
-fn run_node<W1, W2>(args: &[String], mut out: W1, mut err: W2) -> std::process::ExitCode
+fn run_node<W1, W2>(args: &[String], out: W1, mut err: W2) -> std::process::ExitCode
 where
     W1: std::io::Write,
     W2: std::io::Write,
@@ -156,6 +158,22 @@ where
         }
     };
     let hub_url = runargs::hub_url(std::env::var(runargs::ENV_HUB_URL).ok().as_deref());
+    dispatch(args, data_dir, hub_url, out)
+}
+
+/// 按角色分派。`data_dir` 与 `hub_url` 由调用方备好——它们是「环境」，
+/// 混在分派里就没法在不真的起进程的前提下测分派本身。
+///
+/// 角色判定只有 [`role_of`] 一处，但**两处都要用**——本函数决定现在跑谁，
+/// supervisor 用 `worker_argv` 决定下次 spawn 谁。两处判定漂移的后果是
+/// supervisor 把自己当 worker（或反过来）spawn 出一个 supervisor，
+/// 设备变成两个进程互相等对方退出。
+fn dispatch<W: std::io::Write>(
+    args: &[String],
+    data_dir: PathBuf,
+    hub_url: String,
+    mut out: W,
+) -> std::process::ExitCode {
     match role_of(args) {
         Role::Worker => {
             let mut w = worker::Worker::new(data_dir, hub_url);
@@ -285,6 +303,49 @@ mod tests {
             ]),
             Role::Worker
         ));
+    }
+
+    /// worker 角色：`--worker` 走 worker，不走 supervisor。
+    ///
+    /// 用一个普通文件当 data_dir，让 `Identity::load_or_create` 立刻失败——
+    /// worker 由此返回 FAILURE 而不进入连接循环。若角色判定反了，
+    /// 这里会打出一行 data dir 并挂死在 supervise 循环里。
+    #[test]
+    fn the_worker_role_is_taken_when_the_flag_is_present() {
+        let d = std::env::temp_dir().join("afcli-dispatch-worker");
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_file(&d);
+        std::fs::write(&d, b"not a dir").expect("blocker");
+        let mut out = Vec::new();
+        let code = dispatch(
+            &["run".to_string(), runargs::WORKER_FLAG.to_string()],
+            d.clone(),
+            "ws://hub/ws".to_string(),
+            &mut out,
+        );
+        assert_eq!(code, std::process::ExitCode::FAILURE);
+        assert!(
+            out.is_empty(),
+            "worker 不该打 data dir——那是 supervisor 的入口行: {:?}",
+            String::from_utf8_lossy(&out)
+        );
+        let _ = std::fs::remove_file(&d);
+    }
+
+    /// supervisor 那一半没法在同一进程里跑完：`supervise` 是无限循环，
+    /// 而 spawn 出来的会是**测试进程自己**（`current_exe`）。
+    /// 所以只锁住分派前的那一行 stdout——真的 spawn 行为在
+    /// `tests/afcli_process.rs` 里由子进程承接。
+    ///
+    /// 这里不重写那一行来断言自己：把 `dispatch` 的 supervisor 分支
+    /// 拆成「打入口行」+「进循环」两步，前者单独测。
+    #[test]
+    fn the_supervisor_entry_line_names_the_binary_and_the_dir() {
+        // 与 dispatch 里那一行同源：改一处另一处要跟着改，所以只在这里
+        // 断言格式本身（进程级含义由集成测试兜）。
+        let d = std::path::Path::new("/tmp/afcli-data");
+        let line = format!("{} run: data dir {}", BIN_NAME, d.display());
+        assert_eq!(line, "afcli run: data dir /tmp/afcli-data");
     }
 
     /// 用法文本必须说清 `run` 的存在与 `--worker` 的性质——

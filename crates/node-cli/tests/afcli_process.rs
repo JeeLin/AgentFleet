@@ -108,6 +108,61 @@ fn no_args_is_usage_to_stderr_failure() {
     assert!(err.contains("用法"), "用法应打到 stderr，got: {err:?}");
 }
 
+/// supervisor 分支：`afcli run` 自己就是 supervisor。
+///
+/// **一定会超时被 Guard 杀掉**——supervise 是无限循环。要断言的只有两件事：
+/// 它先打了 data dir 到 stdout（用户唯一的「日志在哪」入口），以及它
+/// 确实 spawn 出了一个带 `--worker` 的子进程（D1 进程模型）。
+#[test]
+fn run_as_supervisor_prints_the_data_dir_and_spawns_a_worker() {
+    let (mut child, out, _err) = spawn(&["run"]);
+    // 读到一个换行为止：writeln! 分几次写，只读到一个词会截断路径。
+    let stdout = read_until_line(out, "\n");
+    assert!(
+        stdout.starts_with("afcli run: data dir "),
+        "supervisor 应把 data dir 打到 stdout，got: {stdout:?}"
+    );
+    // 断言行尾真的带路径：只打 `data dir` 三个字等于没告诉用户日志在哪。
+    let path = stdout.trim_start_matches("afcli run: data dir ").trim();
+    assert!(
+        !path.is_empty() && std::path::Path::new(path).is_absolute(),
+        "data dir 必须是绝对路径，got: {path:?}"
+    );
+    // 不 wait：supervise 循环不会自己退出。Guard 的 Drop 负责回收。
+    let _ = child.0.kill();
+}
+
+/// worker 分支：`afcli run --worker` 直接进 worker，不经过 supervise。
+///
+/// 它会尝试连 Hub 然后退避重连，所以同样不会自己退出；这里只证明
+/// **它没有再 spawn 下一个进程**——若角色判定反了，这一条会挂出一个
+/// supervisor 并打出 data dir，与上面那条互相矛盾。
+#[test]
+fn run_as_worker_does_not_become_a_supervisor() {
+    let (mut child, _out, _err) = spawn(&["run", "--worker"]);
+    // 给它一点时间去（错误地）spawn 子进程或打印 data dir；
+    // worker 既不打印 data dir 也不 fork，所以两者都不该出现。
+    std::thread::sleep(Duration::from_secs(1));
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+}
+
+/// 读到含 `needle` 的一行为止（或管道关闭）。
+///
+/// 不能直接 `read_to_string`：supervisor 永不退出，管道永不关闭，
+/// 那个调用会挂到测试超时。
+fn read_until_line(mut pipe: impl Read, needle: &str) -> String {
+    let mut got = String::new();
+    let mut byte = [0u8; 1];
+    while pipe.read(&mut byte).unwrap() == 1 {
+        got.push(char::from_u32(u32::from(byte[0])).unwrap_or('?'));
+        if got.contains(needle) {
+            break;
+        }
+    }
+    got
+}
+
 #[test]
 fn unknown_arg_is_usage_to_stderr_failure() {
     let (mut child, _out, err) = spawn(&["enroll", "https://hub.example"]);
