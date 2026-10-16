@@ -188,6 +188,16 @@ impl AppState {
         limiter: LoginRateLimiter,
     ) -> Result<Self, BootstrapError> {
         let auth = HubAuth::new(pool.clone(), params);
+        // 计数器起点取库里的历史最大值：内存计数每次重启归零，
+        // 而设备带着 `last_seen_gen` 重连，Hub 发出的 gen 必须单调越过它
+        // （§7.1 的顶替兜底）。查不到就退化成 0 —— 记日志，不静默。
+        let boot_gen = match hub_storage::repo::DeviceRepo::new(pool.clone()).max_gen() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot read max gen; connections may be rejected as superseded");
+                0
+            }
+        };
         let state = Self(Arc::new(Inner {
             auth,
             setup: Mutex::new(None),
@@ -196,7 +206,7 @@ impl AppState {
             limiter,
             data_dir: data_dir.to_path_buf(),
             registry: Registry::new(pool),
-            connections: Arc::new(ConnectionRegistry::new()),
+            connections: Arc::new(ConnectionRegistry::with_boot_gen(boot_gen)),
             heartbeat_interval_ms: DEFAULT_HEARTBEAT_INTERVAL_MS,
         }));
 

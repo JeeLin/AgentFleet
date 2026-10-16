@@ -245,6 +245,18 @@ impl DeviceRepo {
         )?;
         Ok(())
     }
+
+    /// 库里所有设备见过的最大 `gen`，用作进程内计数器的起点（0 = 空库）。
+    ///
+    /// 必须查库而不是靠内存计数器：Hub 重启后内存归零，而设备重连时会带上
+    /// 上一进程的 `last_seen_gen`。Hub 发出的 `gen` 比它小就会被判成
+    /// 「已被顶替」（§7.1）→ 设备永久接不上。
+    pub fn max_gen(&self) -> Result<u64> {
+        let conn = self.pool.get()?;
+        let max: Option<i64> =
+            conn.query_row("SELECT MAX(last_seen_gen) FROM device", [], |r| r.get(0))?;
+        Ok(max.unwrap_or(0).max(0) as u64)
+    }
 }
 
 fn row_to_device(
@@ -335,6 +347,35 @@ mod tests {
             rusqlite::params![id, fp],
         )
         .unwrap();
+    }
+
+    /// 空库时起点必须是 0，否则第一台设备会拿到 `gen = 0`——而 `0` 正是
+    /// 「还没连过」的哨兵值，`last_seen_gen` 兜底会把两者混同。
+    #[test]
+    fn max_gen_on_an_empty_library_is_zero() {
+        let (_d, dr, _s) = repo();
+        assert_eq!(dr.max_gen().unwrap(), 0);
+    }
+
+    #[test]
+    fn max_gen_returns_the_largest_gen_not_the_latest_row() {
+        // 目标设备先连（gen 低），另一台后连（gen 高）：查询不能依赖行序。
+        let (_d, dr, _s) = repo();
+        insert_device(&dr, "n_a", "fp_a");
+        insert_device(&dr, "n_b", "fp_b");
+        dr.set_gen("n_a", 3).unwrap();
+        dr.set_gen("n_b", 41).unwrap();
+        assert_eq!(dr.max_gen().unwrap(), 41);
+    }
+
+    /// gen 只会单调推进，设备撤销后残留的行也不能把起点拉回去。
+    #[test]
+    fn max_gen_ignores_devices_that_never_set_a_gen() {
+        let (_d, dr, _s) = repo();
+        insert_device(&dr, "n_a", "fp_a");
+        dr.set_gen("n_a", 7).unwrap();
+        insert_device(&dr, "n_b", "fp_b");
+        assert_eq!(dr.max_gen().unwrap(), 7);
     }
 
     #[test]
