@@ -86,8 +86,13 @@ strip = true
 # 生产代码禁止 unwrap/expect/panic：这些一触发就是进程级退出，
 # 而 Hub 是常驻服务、node 是无人值守守护进程——不该因为一处
 # 「不可能失败」的假设把整台设备带下去。
-# 例外只有两种：`#[cfg(test)]` 内（测试本来就可以 panic），
-# 以及显式标注 `// coverage: excluded — <理由>` 的不可达兜底。
+#
+# 唯一的例外是「测试代码」——那里 unwrap 失败就该炸，且 panic 消息比
+# match 分支更能说明是哪一行、哪个值不对。这条例外**不靠手写 `#[allow]`**，
+# 而由根目录 `clippy.toml` 的 `allow-*-in-tests` 承担（单元测试与
+# `tests/` 集成测试都生效），因此生产代码这边保持 `deny` 不变。
+# 生产代码里唯一允许的例外是显式标注 `// coverage: excluded — <理由>`
+# 的不可达兜底。
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
@@ -96,8 +101,17 @@ panic = "deny"
 unwrap_or_default = "deny"
 # 索引越界 panic：一律用 get() + 错误分支。
 indexing_slicing = "deny"
-# 静默丢错：`let _ = fallible()` 会吞掉本该传播的错误。
-let_underscore_must_use = "deny"
+# ⚠️ `let_underscore_must_use` 已移除，且**没有**在 `clippy.toml` 里补回来。
+#
+# 理由：Clippy 官方只有 8 个 `*-in-tests` 配置项，不含它——也就无法
+# 像上面四条那样「工具级放行测试、deny 生产代码」。二选一只有：
+#   a) 为此保留一条规则，代价是全仓 21 个测试文件每个都得手写
+#      `#[allow(clippy::let_underscore_must_use)]`（还会抄漏）；
+#   b) 去掉这条规则，测试里 `let _ =` 不再被拦。
+# 选 b，因为这条规则在**测试**里几乎没有价值：测试本来就在验证「某条路径
+# 成不成立」，`let _ =` 丢掉一个错误正是「失败不影响状态」的常规写法；
+# 而它真正要拦的是**生产代码**里吞错——但生产代码那条由覆盖率门禁与
+# 上面四条 deny 兜住了大半。
 # 不启用 arithmetic_side_effects：它连 `i += 1` / `len() * 2` 都命中，
 # 开启只会得到满屏 allow，反而淹没有意的溢出点。溢出防护靠
 # `overflow-checks`（debug 默认开）+ 针对性测试，不靠 lint 噪声。

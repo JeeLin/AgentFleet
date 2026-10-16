@@ -1,0 +1,10 @@
+# 测试代码里允许 unwrap/panic；生产代码仍由 workspace lint 表 deny。
+# 用 Clippy 配置而非手写 `#![allow]`：16 个 `mod tests` 各抄一遍，抄漏就静默失效。
+#
+# 边界（rust-clippy#13981）：只覆盖 `#[test]` 函数体与 `#[cfg(test)] mod` 内的
+# 代码。`crates/*/tests/*.rs` 顶层的 helper 函数不在范围内，需该文件自己写一行
+# `#![allow]`；Clippy 1.100 合并 #16786 后会自动覆盖，届时可删掉那些行。
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true

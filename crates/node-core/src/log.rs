@@ -62,8 +62,7 @@ pub fn rotate_if_needed(path: &Path) -> Result<bool, String> {
             std::fs::rename(&from, &to).map_err(|e| format!("rotate {n}: {e}"))?;
         }
     }
-    std::fs::rename(path, rotated_path(path, 1))
-        .map_err(|e| format!("rotate current log: {e}"))?;
+    std::fs::rename(path, rotated_path(path, 1)).map_err(|e| format!("rotate current log: {e}"))?;
     Ok(true)
 }
 

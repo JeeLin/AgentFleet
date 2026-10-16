@@ -321,13 +321,6 @@ pub fn data_dir_from(xdg: Option<&str>) -> Result<PathBuf, IdentityError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::let_underscore_must_use,
-        clippy::indexing_slicing
-    )]
     use super::*;
 
     fn tmpdir() -> tempfile::TempDir {

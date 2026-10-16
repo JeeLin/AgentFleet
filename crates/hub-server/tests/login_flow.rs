@@ -10,18 +10,18 @@
 //!    没被 Argon2id 堵死，单线程 runtime + 真并发才有说服力），
 //!    其余全部走 oneshot。
 
-// 测试代码豁免生产级 panic 禁令：测试里 unwrap 失败就是要立刻炸，
-// 而 panic 消息比 match 分支更能说明是哪一行、哪个值不对。
-// let_underscore_must_use / indexing_slicing 同理：测试里故意 `let _ =`
-// 丢弃一个错误来验证「失败不影响状态」，按索引取值也是常规写法。
+// Clippy 的 allow-*-in-tests 覆盖不到本文件的顶层 helper（见 clippy.toml 与 AGENTS.md）。
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::let_underscore_must_use,
     clippy::indexing_slicing
 )]
 
+// 测试代码豁免生产级 panic 禁令：测试里 unwrap 失败就是要立刻炸，
+// 而 panic 消息比 match 分支更能说明是哪一行、哪个值不对。
+// let_underscore_must_use / indexing_slicing 同理：测试里故意 `let _ =`
+// 丢弃一个错误来验证「失败不影响状态」，按索引取值也是常规写法。
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

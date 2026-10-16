@@ -113,15 +113,24 @@ match T.get(idx) { Some(&c) => out.push(c as char), None => break }
 |---|---|---|
 | `unwrap_used` / `expect_used` / `panic` | deny | 进程级退出 |
 | `indexing_slicing` | deny | 越界 panic |
-| `let_underscore_must_use` | deny | 静默吞错（回滚失败等必须记日志） |
 | `unwrap_or_default` | deny | 把「取不到」静默变成空值 |
 | `arithmetic_side_effects` | **不开** | 连 `i += 1` / `len() * 2` 都命中，开只会得到满屏 allow；溢出靠 `overflow-checks` + 测试 |
 
 `clippy --all-targets` 必须**零 warning**，所以上面每条都是 deny 而非 warn。
 
-**测试代码豁免**：`mod tests` 内允许 `unwrap`/`panic`——测试失败就该炸，
-panic 消息比 `match` 分支更能说明哪一行、哪个值不对。豁免头由
-`scripts/exempt-tests.sh` 统一插入，不要手抄（会漏 lint）。
+**测试代码豁免由根目录 `clippy.toml` 的 `allow-*-in-tests` 承担，不要手写
+`#[allow]` 豁免头**——测试里 `unwrap` 失败就该炸，panic 消息比 `match`
+分支更能说明是哪一行、哪个值不对。手抄过 16 个 `mod tests`，抄漏一条那条
+lint 就静默失效。
+
+⚠️ 已知边界（rust-clippy#13981，Clippy 1.100 修复）：这四条只覆盖 `#[test]`
+函数体与 `#[cfg(test)] mod` 内的代码。`crates/*/tests/*.rs` **顶层的 helper
+函数**不在范围内，每个这样的文件需自己写一行 `#![allow(...)]`。
+
+`let_underscore_must_use` 已从 lint 表移除：Clippy 的 8 个 `*-in-tests`
+选项里没有它，保留它就得让每个测试文件各写一次 `#[allow]`。它在测试里
+几乎没有价值（`let _ =` 正是「失败不影响状态」的常规写法），真正要拦的
+是生产代码吞错，那部分由覆盖率门禁与上面四条兜住。
 
 **真不可达的兜底**（如 `match T.get(idx) { None => break }`）要能跑到或标
 `// coverage: excluded — <理由>`，与覆盖率门禁同规则。
