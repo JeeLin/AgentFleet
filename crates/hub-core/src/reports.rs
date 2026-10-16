@@ -1,0 +1,310 @@
+//! Hub 内存里的「最近一次心跳上报」与在线状态判定（子任务 5、6）。
+//!
+//! **路由路径不读库**：`scheduling.md` §2.2 明确「Hub 内存里维护一份
+//! `node_id → 上报`，只在心跳时更新，路由时读内存不读库」。多设备高频写
+//! 落库会撞 `SQLITE_BUSY`，而路由不该等磁盘。
+//!
+//! 落库的只有 `last_seen_at`、一份能力/负载摘要与 `status`——**连接句柄永不落库**
+//! （子任务 3 测试标准④）。
+
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
+
+/// 连续心跳丢失超过这个时长 → 判离线（= 3 个 15s 周期）。
+///
+/// ⚠️ 三个实现必须用同一个常量：Hub 判离线、心跳间隔默认值、文档里「45s」。
+/// 写成两处不同的数就会出现「刚判离线又收到心跳」的抖动。
+pub const OFFLINE_AFTER: Duration = Duration::from_secs(45);
+
+/// 一台设备当前能不能被路由到。
+///
+/// `Reconnecting` 是**只在内存的状态**（`README.md` §3）：WS 断了但心跳还没
+/// 超时——PTY 还活着、工作区还活着、会话还活着，所以调度**硬过滤必须把它算可用**
+/// （`scheduling.md` §3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    /// WS 连着，且心跳新鲜。
+    Online,
+    /// WS 断了，但心跳未超时：正在退避重连。
+    Reconnecting,
+    /// 心跳超时。
+    Offline,
+}
+
+impl Presence {
+    /// 调度硬过滤：只有 `Offline` 被排除。
+    ///
+    /// 「重连中的设备被过滤掉」与 `PRODUCT.md`「离线期间会话仍存活」直接冲突。
+    pub fn schedulable(self) -> bool {
+        !matches!(self, Self::Offline)
+    }
+
+    /// 落库的 `device.status` **只有 online / offline 两种取值**
+    /// （schema 的 CHECK 约束），`Reconnecting` 落库时按 online 记。
+    pub fn persisted(self) -> &'static str {
+        match self {
+            Self::Online | Self::Reconnecting => "online",
+            Self::Offline => "offline",
+        }
+    }
+}
+
+/// 一次心跳上报的内容（`scheduling.md` §2）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Report {
+    pub node_version: String,
+    /// connector / agents / arch 等**能力**：任务路由的硬过滤输入。
+    pub capabilities: serde_json::Value,
+    /// cpu / memory / load 等**负载**：任务路由的有序打分输入。
+    ///
+    /// ⚠️ 能力用于「排除」、负载用于「排序」，混在一起就会写出
+    /// 「内存高的优先」这种错逻辑（§2.1）。
+    pub resources: serde_json::Value,
+    /// 工作区根目录，**只报根**、绝不递归（§2 路径排除规则）。
+    pub workspace_roots: Vec<String>,
+    /// 收到这次上报的时刻。
+    pub at: Instant,
+}
+
+impl Report {
+    /// 心跳距今多久。判定离线只看这个，不看落库的 `last_seen_at`——
+    /// 那是墙钟，重启 / 改时区会跳变。
+    pub fn age(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.at)
+    }
+}
+
+/// `node_id → 最近一次上报`。`Arc` 以便与 `AppState` 共享。
+#[derive(Debug, Clone, Default)]
+pub struct Reports(Arc<RwLock<HashMap<String, Report>>>);
+
+impl Reports {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 心跳到达时更新。**只在心跳时调用**——路由路径不写这里。
+    pub fn record(&self, node_id: &str, report: Report) {
+        if let Ok(mut m) = self.0.write() {
+            m.insert(node_id.to_string(), report);
+        }
+        // coverage: excluded — 锁中毒意味着另一个持锁者 panic 了，
+        // 而 workspace lint 把 panic 禁成 deny（生产代码无 panic 路径）；
+        // 那种情况下进程的状态已不可信，静默丢弃这次上报不会更糟。
+    }
+
+    /// 读最近一次上报（路由用）。
+    pub fn get(&self, node_id: &str) -> Option<Report> {
+        match self.0.read() {
+            Ok(m) => m.get(node_id).cloned(),
+            // coverage: excluded — 同 record：锁中毒只在别的持锁者 panic 时出现。
+            Err(_) => None,
+        }
+    }
+
+    /// 连接断开时清掉：内存上报必须与「当前是否有连接」同生命周期，
+    /// 否则断线设备仍会拿着断线前的负载被路由到。
+    pub fn forget(&self, node_id: &str) {
+        if let Ok(mut m) = self.0.write() {
+            m.remove(node_id);
+        }
+        // coverage: excluded — 同 record。
+    }
+
+    /// 当前注册过的 node 数量。
+    pub fn len(&self) -> usize {
+        match self.0.read() {
+            Ok(m) => m.len(),
+            // coverage: excluded — 同 record。
+            Err(_) => 0,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// 判在线状态。`connected` 是「WS 现在是否连着」，与心跳新鲜度**分开看**。
+///
+/// 为什么不合成一个字段：设备重连期间 WS 是断的，但会话还活着；
+/// 只看心跳会在这段窗口里把它误判成离线（`PRODUCT.md`「离线期间会话仍存活」）。
+pub fn presence(reports: &Reports, node_id: &str, connected: bool, now: Instant) -> Presence {
+    let Some(report) = reports.get(node_id) else {
+        // 从没上报过心跳 = 没有可信数据，按离线处理。
+        // 刚 enroll 完还没发第一次心跳的窗口很短（子任务 5 要求 auth_ok 后立即发一次）。
+        return Presence::Offline;
+    };
+    if report.age(now) >= OFFLINE_AFTER {
+        return Presence::Offline;
+    }
+    if connected {
+        Presence::Online
+    } else {
+        Presence::Reconnecting
+    }
+}
+
+/// 心跳超时 → 需要落库成 offline 的 node。
+///
+/// 返回 `node_id` 列表而不是直接改库：hub-core **不写 SQL**（`lib.rs` 模块注释），
+/// 调用方拿列表去 `repo.mark_offline`。
+pub fn timed_out(reports: &Reports, now: Instant) -> Vec<String> {
+    let mut ids: Vec<String> = match reports.0.read() {
+        Ok(m) => m
+            .iter()
+            .filter(|(_, r)| r.age(now) >= OFFLINE_AFTER)
+            .map(|(id, _)| id.clone())
+            .collect(),
+        // coverage: excluded — 同 record：锁中毒只在别的持锁者 panic 时出现。
+        Err(_) => Vec::new(),
+    };
+    // 排序让调用方落库顺序稳定：同一批超时的设备每次以同样顺序写，
+    // 测试断言与日志比对才可复现。
+    ids.sort();
+    ids
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report(now: Instant) -> Report {
+        Report {
+            node_version: "0.1.0".into(),
+            capabilities: serde_json::json!({"connectors": ["terminal"]}),
+            resources: serde_json::json!({"load": {"load1": 1.8}}),
+            workspace_roots: vec!["/w".into()],
+            at: now,
+        }
+    }
+
+    fn at(now: Instant, secs: u64) -> Report {
+        let mut r = report(now);
+        r.at = now - Duration::from_secs(secs);
+        r
+    }
+
+    #[test]
+    fn record_then_get_round_trips() {
+        let r = Reports::new();
+        let now = Instant::now();
+        r.record("n_1", report(now));
+        let got = r.get("n_1").expect("must be present");
+        assert_eq!(got.node_version, "0.1.0");
+        assert_eq!(got.workspace_roots, vec!["/w".to_string()]);
+    }
+
+    #[test]
+    fn get_on_unknown_node_is_none() {
+        let r = Reports::new();
+        assert!(r.get("n_missing").is_none());
+    }
+
+    #[test]
+    fn record_replaces_the_previous_report() {
+        let r = Reports::new();
+        let now = Instant::now();
+        r.record("n_1", at(now, 30));
+        r.record("n_1", report(now));
+        let got = r.get("n_1").expect("must be present");
+        assert_eq!(got.age(now), Duration::ZERO, "second report must win");
+        assert_eq!(r.len(), 1);
+    }
+
+    #[test]
+    fn forget_drops_the_entry() {
+        let r = Reports::new();
+        r.record("n_1", report(Instant::now()));
+        r.forget("n_1");
+        assert!(r.get("n_1").is_none());
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn fresh_heartbeat_and_open_socket_is_online() {
+        let r = Reports::new();
+        let now = Instant::now();
+        r.record("n_1", report(now));
+        assert_eq!(presence(&r, "n_1", true, now), Presence::Online);
+    }
+
+    /// 重连窗口：WS 断了但心跳没超时 → `Reconnecting`，且**调度仍可用**。
+    #[test]
+    fn disconnected_but_fresh_is_reconnecting_and_still_schedulable() {
+        let r = Reports::new();
+        let now = Instant::now();
+        r.record("n_1", at(now, 10));
+        let p = presence(&r, "n_1", false, now);
+        assert_eq!(p, Presence::Reconnecting);
+        assert!(p.schedulable(), "重连中的设备必须可被路由");
+        assert_eq!(p.persisted(), "online", "库里只有 online/offline 两值");
+    }
+
+    #[test]
+    fn stale_heartbeat_is_offline_even_while_connected() {
+        let r = Reports::new();
+        let now = Instant::now();
+        r.record("n_1", at(now, 46));
+        let p = presence(&r, "n_1", true, now);
+        assert_eq!(p, Presence::Offline);
+        assert!(!p.schedulable());
+        assert_eq!(p.persisted(), "offline");
+    }
+
+    /// 44s 与 46s 卡在阈值两侧——阈值本身是唯一判据，不能含糊。
+    #[test]
+    fn the_offline_threshold_is_exactly_45s() {
+        let r = Reports::new();
+        let now = Instant::now();
+        r.record("n_1", at(now, 44));
+        assert_eq!(presence(&r, "n_1", true, now), Presence::Online);
+        r.record("n_1", at(now, 46));
+        assert_eq!(presence(&r, "n_1", true, now), Presence::Offline);
+    }
+
+    #[test]
+    fn never_reported_is_offline_not_a_panic() {
+        let r = Reports::new();
+        assert_eq!(
+            presence(&r, "n_ghost", true, Instant::now()),
+            Presence::Offline
+        );
+    }
+
+    #[test]
+    fn timed_out_lists_only_stale_nodes() {
+        let r = Reports::new();
+        let now = Instant::now();
+        r.record("n_fresh", at(now, 5));
+        r.record("n_stale", at(now, 100));
+        r.record("n_edge", at(now, 45));
+        let mut got = timed_out(&r, now);
+        got.sort();
+        assert_eq!(got, vec!["n_edge".to_string(), "n_stale".to_string()]);
+    }
+
+    #[test]
+    fn timed_out_is_empty_when_everything_is_fresh() {
+        let r = Reports::new();
+        let now = Instant::now();
+        r.record("n_1", at(now, 1));
+        assert!(timed_out(&r, now).is_empty());
+    }
+
+    #[test]
+    fn timed_out_on_empty_cache_is_empty() {
+        assert!(timed_out(&Reports::new(), Instant::now()).is_empty());
+    }
+
+    /// 能力与负载是**两个独立字段**，路由一个用于硬过滤、一个用于有序打分。
+    #[test]
+    fn capabilities_and_load_stay_separate_fields() {
+        let r = report(Instant::now());
+        let caps = r.capabilities.get("connectors").expect("capabilities");
+        let load = r.resources.get("load").expect("resources");
+        assert!(caps.is_array(), "capabilities 是硬过滤输入");
+        assert!(load.is_object(), "load 是打分输入");
+    }
+}

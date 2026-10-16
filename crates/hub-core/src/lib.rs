@@ -9,6 +9,7 @@ pub mod connections;
 pub mod error;
 pub mod limits;
 pub mod registry;
+pub mod reports;
 pub mod session;
 
 pub use auth::{HubAuth, SetupToken};
@@ -18,4 +19,5 @@ pub use error::CoreError;
 pub use identity::{Fingerprint, KeyPair};
 pub use limits::{ReadLimiter, WriteQueue};
 pub use registry::Registry;
+pub use reports::{Presence, Report, Reports};
 pub use session::{Session, SessionStore};
