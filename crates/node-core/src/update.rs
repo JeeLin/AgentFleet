@@ -56,6 +56,9 @@ impl UpdatePhase {
     }
 
     /// 是否已是终态（不再自动动作）。
+    ///
+    /// 与 `in_flight()` 互补：`Requested`/`StartingNew`/`RollingBack` 三态归
+    /// in_flight，其余四态归终态，两者恰好覆盖全部 7 个状态。
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
@@ -298,6 +301,29 @@ mod tests {
         }
     }
 
+    /// 七个状态逐个断言 `is_terminal`，并钉住它与 `in_flight()` 恰好互补——
+    /// 两边都不落的状态会让 supervisor 既不重启也不升级，设备静默卡死。
+    #[test]
+    fn is_terminal_is_the_exact_complement_of_in_flight() {
+        for (p, in_flight, terminal) in [
+            (UpdatePhase::Idle, false, true),
+            (UpdatePhase::Requested, true, false),
+            (UpdatePhase::StartingNew, true, false),
+            (UpdatePhase::Committed, false, true),
+            (UpdatePhase::RollingBack, true, false),
+            (UpdatePhase::RolledBack, false, true),
+            (UpdatePhase::Failed, false, true),
+        ] {
+            assert_eq!(p.in_flight(), in_flight, "{p}");
+            assert_eq!(p.is_terminal(), terminal, "{p}");
+            assert_ne!(
+                p.in_flight(),
+                p.is_terminal(),
+                "{p} must fall on one side only"
+            );
+        }
+    }
+
     #[test]
     fn requested_state_is_in_flight_and_rollback_ready() {
         let d = tempfile::tempdir().unwrap();
@@ -431,10 +457,10 @@ mod tests {
         std::fs::write(&p, b"{ not json").unwrap();
         let (state, read) = read_state(&p);
         assert!(state.is_none(), "corrupt file must not deserialize");
-        match &read {
-            StateRead::Corrupt(msg) => assert!(!msg.is_empty()),
-            other => panic!("expected Corrupt, got {other:?}"),
-        }
+        assert!(
+            matches!(&read, StateRead::Corrupt(msg) if !msg.is_empty()),
+            "a corrupt state file must say why, got {read:?}"
+        );
         assert!(read.is_problem(), "corruption must be visible, not silent");
     }
 
@@ -535,6 +561,7 @@ mod tests {
             (UpdatePhase::Idle, "idle"),
             (UpdatePhase::Requested, "requested"),
             (UpdatePhase::StartingNew, "starting_new"),
+            (UpdatePhase::Committed, "committed"),
             (UpdatePhase::RollingBack, "rolling_back"),
             (UpdatePhase::RolledBack, "rolled_back"),
             (UpdatePhase::Failed, "failed"),

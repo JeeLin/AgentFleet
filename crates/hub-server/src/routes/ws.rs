@@ -247,6 +247,13 @@ async fn handshake(
     }
 }
 
+/// enroll 被拒：回一帧 `fingerprint race, retry` 再断开（§3——绝不 upsert）。
+async fn reject_enroll(socket: &mut WebSocket, hs: &mut Handshake, seq: u64) -> String {
+    let reason = protocol::message::reason::FINGERPRINT_RACE_RETRY;
+    send_best_effort(socket, hs.auth_fail(seq, reason, None), "handshake").await;
+    String::from(reason)
+}
+
 /// Hub 是否已设密码。
 ///
 /// 读不到（storage 错）时按**未初始化**处理：宁可拒绝 enroll，
@@ -292,12 +299,10 @@ async fn finish_auth(
             };
             let outcome = match state.registry().enroll(&accepted.public_key, info) {
                 Ok(o) => o,
+                // enroll 失败绝不重试到「换个 node_id 再插」：那会绕过 UNIQUE。
                 Err(e) => {
-                    // enroll 失败绝不重试到「换个 node_id 再插」：那会绕过 UNIQUE。
                     tracing::error!(error = %e, "enroll failed");
-                    let reason = protocol::message::reason::FINGERPRINT_RACE_RETRY;
-                    send_best_effort(socket, hs.auth_fail(seq, reason, None), "handshake").await;
-                    return Err(String::from(reason));
+                    return Err(reject_enroll(socket, hs, seq).await);
                 }
             };
             // 签名已验证 + 指纹已入库 → 这台设备就是它自称的那台。
@@ -305,11 +310,11 @@ async fn finish_auth(
             // 又来了一次 enroll（§4.3 第二行），直接放行并复用它已有的 node_id。
             let node_id = match outcome.node_id() {
                 Some(id) => id.to_string(),
-                None => {
-                    let reason = protocol::message::reason::FINGERPRINT_RACE_RETRY;
-                    send_best_effort(socket, hs.auth_fail(seq, reason, None), "handshake").await;
-                    return Err(String::from(reason));
-                }
+                // coverage: excluded — `None` 即 `EnrollOutcome::Race`，而
+                // `Registry::enroll` 构造不出它：`BEGIN IMMEDIATE` 在事务开始
+                // 就拿到写锁，事务内 SELECT 之后不可能再有别的事务提交同指纹的行，
+                // 那条 INSERT 永远撞不上 UNIQUE（要触达得先破坏单写者不变式）。
+                None => return Err(reject_enroll(socket, hs, seq).await),
             };
             // 公钥另存（M0 权宜：库里只有指纹，无法反推公钥，见 BUGS.md）。
             // 失败不阻塞 enroll：重连时缺公钥会走 identity mismatch，

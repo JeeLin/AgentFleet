@@ -470,3 +470,27 @@ async fn a_rejected_reconnect_is_not_a_transport_failure() {
         other => panic!("expected Rejected, got {other:?}"),
     }
 }
+
+/// 约束 14 的另一半：未知**必需**类型（hub 发的 `err`/`heartbeat` 等）
+/// 走 `Rejected`，不是忽略——身份语义已分叉，继续握手只会产生更难查的错。
+///
+/// 复用本文件的裸服务端脚手架（`serve`/`Act::Frame`），不另起炉灶。
+#[tokio::test]
+async fn an_unknown_required_message_is_rejected_not_ignored() {
+    // `err` 属于必需集，`connect_once` 的握手循环不认它 → 必须断。
+    let addr = serve(
+        vec![
+            Act::Challenge,
+            Act::Frame(frame("err", r#"{"code":"handshake_timeout"}"#)),
+        ],
+        Tail::Close,
+    )
+    .await;
+    let out = connect_once(&url(addr), &KeyPair::generate(), None, device_info()).await;
+    match out {
+        Err(ConnOutcome::Rejected { reason }) => {
+            assert_eq!(reason, protocol::message::reason::IDENTITY_MISMATCH);
+        }
+        other => panic!("expected Rejected for unknown required type, got {other:?}"),
+    }
+}

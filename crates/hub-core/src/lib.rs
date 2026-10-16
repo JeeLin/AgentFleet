@@ -4,6 +4,7 @@
 //! `hub-storage` 的 repo；**不做 HTTP**——路由装配在 `hub-server`。
 
 pub mod auth;
+pub mod channels;
 pub mod connections;
 pub mod error;
 pub mod limits;
@@ -11,6 +12,7 @@ pub mod registry;
 pub mod session;
 
 pub use auth::{HubAuth, SetupToken};
+pub use channels::{HubChannels, OpenSpec};
 pub use connections::{ConnHandle, ConnectionRegistry};
 pub use error::CoreError;
 pub use identity::{Fingerprint, KeyPair};

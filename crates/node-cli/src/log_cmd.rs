@@ -128,6 +128,31 @@ mod tests {
         )
     }
 
+    /// 读到第 `broken_at` 次写入时返回 `BrokenPipe` 的 writer，
+    /// 复现 `afcli log | head` 里 head 提前关掉管道的情形。
+    struct BrokenPipeWriter {
+        broken_at: usize,
+        writes: usize,
+    }
+
+    impl std::io::Write for BrokenPipeWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            if self.writes >= self.broken_at {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "模拟管道被读端关闭",
+                ))
+            } else {
+                Ok(buf.len())
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn no_args_uses_the_default_line_count() {
         assert_eq!(
@@ -193,34 +218,63 @@ mod tests {
 
     #[test]
     fn missing_line_count_is_a_usage_error() {
-        match parse(&v(&["-n"])) {
-            LogCommand::Usage { problem } => assert!(problem.contains("缺行数"), "{problem}"),
-            other => panic!("expected Usage, got {other:?}"),
-        }
+        let cmd = parse(&v(&["-n"]));
+        assert!(
+            matches!(cmd, LogCommand::Usage { ref problem } if problem.contains("缺行数")),
+            "got {cmd:?}"
+        );
     }
 
     #[test]
     fn non_numeric_line_count_is_a_usage_error() {
-        match parse(&v(&["-n", "abc"])) {
-            LogCommand::Usage { problem } => assert!(problem.contains("abc"), "{problem}"),
-            other => panic!("expected Usage, got {other:?}"),
-        }
+        let cmd = parse(&v(&["-n", "abc"]));
+        assert!(
+            matches!(cmd, LogCommand::Usage { ref problem } if problem.contains("abc")),
+            "got {cmd:?}"
+        );
     }
 
     #[test]
     fn equals_form_with_bad_number_is_a_usage_error() {
-        match parse(&v(&["-n=xyz"])) {
-            LogCommand::Usage { problem } => assert!(problem.contains("xyz"), "{problem}"),
-            other => panic!("expected Usage, got {other:?}"),
-        }
+        let cmd = parse(&v(&["-n=xyz"]));
+        assert!(
+            matches!(cmd, LogCommand::Usage { ref problem } if problem.contains("xyz")),
+            "got {cmd:?}"
+        );
     }
 
     #[test]
     fn unknown_flag_is_a_usage_error() {
-        match parse(&v(&["--follow"])) {
-            LogCommand::Usage { problem } => assert!(problem.contains("--follow"), "{problem}"),
-            other => panic!("expected Usage, got {other:?}"),
+        let cmd = parse(&v(&["--follow"]));
+        assert!(
+            matches!(cmd, LogCommand::Usage { ref problem } if problem.contains("--follow")),
+            "got {cmd:?}"
+        );
+    }
+
+    /// `afcli log -n 5 | head`：head 只读 5 行就关掉管道，剩余 writeln 失败。
+    /// 这是正常用法，不当错误、不喷 stderr，干净退出 0。
+    #[test]
+    fn broken_pipe_from_a_closed_reader_is_not_an_error() {
+        let d = tempfile::tempdir().unwrap();
+        for i in 1..=50 {
+            log::append_line(&log::log_path(d.path()), &format!("l{i}")).unwrap();
         }
+        let mut out = BrokenPipeWriter {
+            broken_at: 3,
+            writes: 0,
+        };
+        let mut err = Vec::new();
+        let code = run(&v(&["-n", "50"]), d.path(), &mut out, &mut err);
+        let _ = out.flush();
+        assert!(
+            code == std::process::ExitCode::SUCCESS,
+            "broken pipe must be silent success, got {code:?}"
+        );
+        assert!(
+            err.is_empty(),
+            "broken pipe must not pollute stderr: {err:?}"
+        );
     }
 
     #[test]

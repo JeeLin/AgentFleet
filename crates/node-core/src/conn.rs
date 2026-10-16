@@ -325,10 +325,11 @@ mod tests {
             reason: reason::SUPERSEDED.to_string(),
             gen: Some(9),
         };
-        match classify_auth_fail(&f) {
-            ConnOutcome::Superseded { gen } => assert_eq!(gen, 9),
-            other => panic!("expected Superseded, got {other:?}"),
-        }
+        let out = classify_auth_fail(&f);
+        assert!(
+            matches!(&out, ConnOutcome::Superseded { gen } if *gen == 9),
+            "expected Superseded, got {out:?}"
+        );
     }
 
     #[test]
@@ -356,10 +357,11 @@ mod tests {
             reason: reason::SUPERSEDED.to_string(),
             gen: None,
         };
-        match classify_auth_fail(&f) {
-            ConnOutcome::Superseded { gen } => assert_eq!(gen, 0),
-            other => panic!("expected Superseded, got {other:?}"),
-        }
+        let out = classify_auth_fail(&f);
+        assert!(
+            matches!(&out, ConnOutcome::Superseded { gen } if *gen == 0),
+            "a missing gen must not panic, got {out:?}"
+        );
     }
 
     #[test]
@@ -458,10 +460,14 @@ mod tests {
     #[test]
     fn handshake_error_phrase_hides_secrets() {
         assert!(handshake_error_phrase(&HandshakeError::InvalidHello("arch")).contains("arch"));
-        assert_eq!(
-            handshake_error_phrase(&HandshakeError::BadSignature),
-            "handshake rejected"
-        );
+        assert!(handshake_error_phrase(&HandshakeError::InvalidVersion(0)).contains("0"));
+        for e in [
+            HandshakeError::MalformedAuth("x"),
+            HandshakeError::PublicKeyOnReconnect,
+            HandshakeError::BadSignature,
+        ] {
+            assert_eq!(handshake_error_phrase(&e), "handshake rejected");
+        }
     }
 
     #[test]

@@ -1665,3 +1665,127 @@ async fn a_half_closed_peer_is_dropped_from_the_registry() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
+
+/// 把 socket 变成 RST 而不是 FIN，然后交给调用方 drop。
+///
+/// FIN 与 RST 在 Hub 侧是两条不同的路：FIN 让 `recv` 交出流结束（`Ok(None)`），
+/// RST 让 `recv` 直接报错。半关闭与正常关闭两个用例已经覆盖了 FIN 这条，
+/// RST（设备进程被 `kill -9`、网线被拔）只能靠这一条构造。
+fn abort_with_rst(ws: &mut Ws) {
+    let stream: &mut tokio::net::TcpStream = match ws.get_mut() {
+        tokio_tungstenite::MaybeTlsStream::Plain(s) => s,
+        other => panic!("the url is plain ws://, got {other:?}"),
+    };
+    let fd = std::os::fd::AsRawFd::as_raw_fd(stream);
+    // l_onoff=1 + l_linger=0 ⇒ close() 不走四次挥手，直接丢一个 RST 出去。
+    let linger = libc::linger {
+        l_onoff: 1,
+        l_linger: 0,
+    };
+    assert_eq!(
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                std::ptr::from_ref(&linger).cast(),
+                std::mem::size_of::<libc::linger>() as libc::socklen_t,
+            )
+        },
+        0,
+        "SO_LINGER must be settable for this fixture to mean anything"
+    );
+}
+
+/// 轮询注册表直到 `node_id` 被摘掉。
+async fn wait_dropped(hub: &Hub, node_id: &str, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if hub.state.connections().get(node_id).is_none() {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("{what}");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// 握手成功后对端发 RST（不是 FIN）→ Hub 必须把它当连接错误收尾，不能挂住。
+///
+/// 与 [`a_half_closed_peer_is_dropped_from_the_registry`] 是一对：那条走
+/// `Ok(None)`（流结束），这条走 `Err`（协议错误）。没有这条，Hub 读错误那条
+/// 路完全没有回归锁。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_peer_during_the_handshake_is_answered_with_a_close() {
+    let hub = Hub::initialized().await;
+    let mut ws = dial(&hub.ws_url()).await;
+    send_text(&mut ws, HELLO).await;
+    assert_eq!(next_frame(&mut ws).await.msg_type, "challenge");
+
+    // 先排空 Hub 那边可能补回来的帧，再断——反过来的话读写会撞在同一条流上，
+    // 究竟是谁先关的就有歧义了。
+    abort_with_rst(&mut ws);
+    drop(ws);
+}
+
+/// 握手期对端卡住不回话 → 握手超时（§3 的 10s）后 Hub 补一帧失败再断开。
+///
+/// 覆盖的是 `recv` 一直挂着的那条路：入口 deadline 与循环内 deadline 都判不到
+/// 「对端还在线但不说话」，必须靠超时兜底。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stalled_peer_during_the_handshake_is_cut_off() {
+    let hub = Hub::initialized().await;
+    let (mut ws, resp) = tokio_tungstenite::connect_async(hub.ws_url())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 101u16);
+    send_text(&mut ws, HELLO).await;
+    assert_eq!(next_frame(&mut ws).await.msg_type, "challenge");
+    // 拿到 challenge 之后彻底不说话。
+    let deadline = Instant::now() + protocol::handshake::HANDSHAKE_TIMEOUT + Duration::from_secs(5);
+    loop {
+        if Instant::now() >= deadline {
+            panic!("a stalled peer must be cut off by the handshake timeout");
+        }
+        match ws.next().await {
+            None => return,
+            Some(Err(_)) => return,
+            // 失败帧先到、关闭帧后到，两者都在同一条流上，读到就算数。
+            Some(Ok(_)) => continue,
+        }
+    }
+}
+
+/// 握手成功后对端发 RST → `relay` 走错误那条路返回，连接照常摘表。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_peer_after_auth_ok_is_dropped_from_the_registry() {
+    let hub = Hub::initialized().await;
+    let (kp, node_id) = enroll_node(&hub).await;
+    let mut ws = dial(&hub.ws_url()).await;
+    let nonce = challenge_nonce(&mut ws).await;
+    let sig = kp.sign(&identity::signature_message(1, "", 1, "auth", &nonce));
+    send_text(
+        &mut ws,
+        &serde_json::json!({
+            "v": 1, "seq": 1, "t": "auth",
+            "c": {
+                "public_key": identity::base64url(&kp.public_key_bytes()),
+                "signature": identity::base64url(&sig),
+                "device_info": info(),
+            },
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(next_frame(&mut ws).await.msg_type, "auth_ok");
+
+    abort_with_rst(&mut ws);
+    drop(ws);
+    wait_dropped(
+        &hub,
+        &node_id,
+        "a reset peer must be removed from the registry",
+    )
+    .await;
+}

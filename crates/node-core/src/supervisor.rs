@@ -384,12 +384,10 @@ mod tests {
             CrashStats::default(),
             Reconcile::Nothing,
         );
-        match d {
-            Decision::Spawn {
-                backoff_secs: b, ..
-            } => assert_eq!(b, super::backoff_secs(0)),
-            other => panic!("expected Spawn, got {other:?}"),
-        }
+        assert!(
+            matches!(d, Decision::Spawn { backoff_secs: b, .. } if b == super::backoff_secs(0)),
+            "got {d:?}"
+        );
         assert_eq!(backoff_secs(0), 1);
         assert_eq!(backoff_secs(1), 2);
         assert_eq!(backoff_secs(3), 8);
@@ -405,10 +403,10 @@ mod tests {
             CrashStats::default(),
             Reconcile::Nothing,
         );
-        match d {
-            Decision::Spawn { reason, .. } => assert!(reason.contains("normally"), "{reason}"),
-            other => panic!("expected Spawn, got {other:?}"),
-        }
+        assert!(
+            matches!(d, Decision::Spawn { ref reason, .. } if reason.contains("normally")),
+            "got {d:?}"
+        );
     }
 
     #[test]
@@ -419,12 +417,10 @@ mod tests {
             CrashStats::default(),
             Reconcile::Nothing,
         );
-        match d {
-            Decision::Spawn { reason, .. } => {
-                assert!(reason.contains('1'), "code 12 should appear: {reason}")
-            }
-            other => panic!("expected Spawn, got {other:?}"),
-        }
+        assert!(
+            matches!(d, Decision::Spawn { ref reason, .. } if reason.contains('1')),
+            "got {d:?}"
+        );
     }
 
     /// D2-① 的核心回归：REX 因为 fast_crash 判定在读状态之前，
@@ -467,12 +463,10 @@ mod tests {
             CrashStats::default(),
             Reconcile::Nothing,
         );
-        match d {
-            Decision::Stop { reason } => {
-                assert!(reason.contains("configuration"), "{reason}");
-            }
-            other => panic!("expected Stop, got {other:?}"),
-        }
+        assert!(
+            matches!(d, Decision::Stop { ref reason } if reason.contains("configuration")),
+            "got {d:?}"
+        );
     }
 
     #[test]
@@ -492,13 +486,10 @@ mod tests {
             rollback_count: 0,
         };
         let d = call(ExitInfo::new(0, 1), None, stats, Reconcile::Nothing);
-        match d {
-            Decision::Stop { reason } => {
-                assert!(reason.contains('3'), "{reason}");
-                assert!(reason.contains('1'), "last ran_for should appear: {reason}");
-            }
-            other => panic!("expected Stop, got {other:?}"),
-        }
+        assert!(
+            matches!(d, Decision::Stop { ref reason } if reason.contains('3') && reason.contains('1')),
+            "got {d:?}"
+        );
     }
 
     #[test]
@@ -624,19 +615,11 @@ mod tests {
             rollback_count: 0,
         };
         let d = call(ExitInfo::new(0, 1), Some(&s), stats, Reconcile::Nothing);
-        match d {
-            Decision::Rollback { reason } => {
-                assert!(
-                    reason.contains(&format!("{EXIT_STORM_THRESHOLD} times")),
-                    "理由要说清反复退出的次数：{reason}"
-                );
-                assert!(
-                    reason.contains("old version"),
-                    "理由要说清在退到哪：{reason}"
-                );
-            }
-            other => panic!("expected Rollback, got {other:?}"),
-        }
+        assert!(
+            matches!(d, Decision::Rollback { ref reason }
+                if reason.contains(&format!("{EXIT_STORM_THRESHOLD} times")) && reason.contains("old version")),
+            "got {d:?}"
+        );
     }
 
     #[test]
@@ -683,10 +666,10 @@ mod tests {
             CrashStats::default(),
             Reconcile::Nothing,
         );
-        match d {
-            Decision::ReplaceAndSpawn { version, .. } => assert_eq!(version, "2.0.0"),
-            other => panic!("expected ReplaceAndSpawn, got {other:?}"),
-        }
+        assert!(
+            matches!(d, Decision::ReplaceAndSpawn { ref version, .. } if version == "2.0.0"),
+            "got {d:?}"
+        );
     }
 
     /// D2-③：备份不可用时**拒绝替换**——不能拿一个来历不明的二进制去换。
@@ -700,12 +683,10 @@ mod tests {
             CrashStats::default(),
             Reconcile::Nothing,
         );
-        match d {
-            Decision::Stop { reason } => {
-                assert!(reason.contains("backup is unusable"), "{reason}")
-            }
-            other => panic!("expected Stop, got {other:?}"),
-        }
+        assert!(
+            matches!(d, Decision::Stop { ref reason } if reason.contains("backup is unusable")),
+            "got {d:?}"
+        );
     }
 
     /// exit(10) 却没写状态文件：worker 没按协议来，不能猜。
@@ -717,12 +698,10 @@ mod tests {
             CrashStats::default(),
             Reconcile::Nothing,
         );
-        match d {
-            Decision::Stop { reason } => {
-                assert!(reason.contains("no update-state.json"), "{reason}")
-            }
-            other => panic!("expected Stop, got {other:?}"),
-        }
+        assert!(
+            matches!(d, Decision::Stop { ref reason } if reason.contains("no update-state.json")),
+            "got {d:?}"
+        );
     }
 
     /// D2-⑤：回滚过一次后旧版也不健康 → 停下等人，不无限「回滚 → 失败 → 回滚」。
@@ -736,12 +715,10 @@ mod tests {
             CrashStats::default(),
             Reconcile::Nothing,
         );
-        match d {
-            Decision::Stop { reason } => {
-                assert!(reason.contains("manual intervention"), "{reason}")
-            }
-            other => panic!("expected Stop, got {other:?}"),
-        }
+        assert!(
+            matches!(d, Decision::Stop { ref reason } if reason.contains("manual intervention")),
+            "got {d:?}"
+        );
     }
 
     /// D2-⑥：崩溃在 rename 之后、状态写入之前 → 认定已替换，继续验证，
@@ -760,12 +737,10 @@ mod tests {
             Reconcile::AlreadyReplaced,
             false,
         );
-        match d {
-            Decision::Spawn { reason, .. } => {
-                assert!(reason.contains("already applied"), "{reason}")
-            }
-            other => panic!("expected Spawn, got {other:?}"),
-        }
+        assert!(
+            matches!(d, Decision::Spawn { ref reason, .. } if reason.contains("already applied")),
+            "got {d:?}"
+        );
     }
 
     /// 已经替换完、备份也真的还在、且这一版确实不健康 → 这时才回滚。
@@ -790,12 +765,10 @@ mod tests {
             CrashStats::default(),
             Reconcile::AlreadyReplaced,
         );
-        match d {
-            Decision::Spawn { reason, .. } => {
-                assert!(reason.contains("no state file"), "{reason}")
-            }
-            other => panic!("expected Spawn, got {other:?}"),
-        }
+        assert!(
+            matches!(d, Decision::Spawn { ref reason, .. } if reason.contains("no state file")),
+            "got {d:?}"
+        );
     }
 
     #[test]
@@ -807,10 +780,10 @@ mod tests {
             CrashStats::default(),
             Reconcile::Inconsistent,
         );
-        match d {
-            Decision::Stop { reason } => assert!(reason.contains("inconsistent"), "{reason}"),
-            other => panic!("expected Stop, got {other:?}"),
-        }
+        assert!(
+            matches!(d, Decision::Stop { ref reason } if reason.contains("inconsistent")),
+            "got {d:?}"
+        );
     }
 
     #[test]

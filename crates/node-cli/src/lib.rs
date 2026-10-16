@@ -87,6 +87,7 @@ where
             // 而真相是「根本没找到日志目录」。当成失败退出并说明。
             match node_core::data_dir() {
                 Ok(d) => log_cmd::run(&rest, &d, out, err),
+                // coverage: excluded — data_dir 取不到：dirs::data_dir 在 HOME 存在即返回 Some，且 root 下权限错误不可构造，本环境下该 Err 分支不可达（防御性兜底）。
                 Err(e) => {
                     drop(writeln!(err, "afcli log: 无法定位数据目录：{e}"));
                     std::process::ExitCode::FAILURE
