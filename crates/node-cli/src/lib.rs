@@ -1,12 +1,16 @@
-//! afcli：node 对外的命令入口（enroll / run / worker）。
+//! afcli：node 对外的命令入口（run / log）。
 //!
-//! 当前里程碑只落地**骨架**：解析 `--version` / `--help` 与「无/未知参数」，
-//! 真正的 Hub 连接逻辑（enroll 注册、run 常驻、worker 子进程）留待后续子任务。
+//! `run` 是唯一需要用户主动敲的接入命令（首次自动 enroll，见 `DECISIONS.md` D1）；
+//! `log` 是排障入口——设备可能**根本没在跑**（supervisor 已退出、升级停在
+//! `Failed`），此时要看的正是上一个进程留下的日志。
+//!
 //! 逻辑放在这里而不是 `main.rs`，是为了**可直接单测**，且让 `main.rs` 保持极薄、
 //! 每条分支都能由「spawn 二进制 + 不同 argv」走到（覆盖率门禁要求 main.rs 100%）。
 //!
 //! 注意：**不要**自己实现连接逻辑——本文件只负责「解析 + 输出」，网络部分由后续
 //! 子任务补。这里任何「看起来像实现」的占位都是为后续接线的正确接缝。
+
+pub mod log_cmd;
 
 /// 二进制名称。命令名必须是 `afcli`（与 Node.js 运行时 `node` 撞名才改的），
 /// crate 名是 `node-cli`，二者都不要改。
@@ -14,43 +18,36 @@ pub const BIN_NAME: &str = "afcli";
 
 /// 用法文本。无参数 / 未知参数时打到 stderr。
 pub const USAGE: &str = "\
-afcli — AgentFleet node 命令（M0 占位骨架）
+afcli — AgentFleet node 命令
 
 用法:
   afcli --version     打印版本并退出 0
   afcli --help        打印本帮助并退出 0
+  afcli log [-n N]    打印最近 N 行日志（默认 200）
 
-后续子任务将实现: enroll / run / worker。";
-
-/// 支持的长选项。
-enum Flag {
-    Version,
-    Help,
-}
+后续子任务将实现: run（首次自动 enroll）/ worker。";
 
 /// 解析 argv（不含程序名）。
 ///
-/// 返回 [`ParseResult`]：要么命中一个已知 flag，要么说明「需要打印用法并失败退出」。
+/// 返回 [`ParseResult`]：要么命中一个已知子命令/flag，要么说明
+/// 「需要打印用法并失败退出」。
 /// 这里**不**碰 `std::env::args()`，参数由调用方传进来——便于单测，也让 `main.rs`
 /// 只做「读 argv → 传进来 → 打印」三件事。
 fn parse_args<I: IntoIterator<Item = String>>(args: I) -> ParseResult {
-    let mut it = args.into_iter();
-    // 只认第一个 token：M0 骨架阶段没有子命令/位置参数，
-    // 出现「不止一个 token」也按「未知参数」处理（留给后续子任务扩展）。
-    match it.next() {
-        None => ParseResult::Usage,
-        Some(first) => {
-            let flag = match first.as_str() {
-                "--version" | "-V" => Some(Flag::Version),
-                "--help" | "-h" => Some(Flag::Help),
-                _ => None,
-            };
-            match flag {
-                Some(Flag::Version) => ParseResult::Version,
-                Some(Flag::Help) => ParseResult::Help,
-                None => ParseResult::Usage,
-            }
+    let all: Vec<String> = args.into_iter().collect();
+    let mut it = all.iter();
+    let Some(first) = it.next() else {
+        return ParseResult::Usage;
+    };
+    match first.as_str() {
+        "--version" | "-V" => ParseResult::Version,
+        "--help" | "-h" => ParseResult::Help,
+        "log" => {
+            let rest: Vec<String> = it.cloned().collect();
+            ParseResult::Log(rest)
         }
+        // 后续子任务会在这里加 `run`；现在任何其它 token 都算未知参数
+        _ => ParseResult::Usage,
     }
 }
 
@@ -60,6 +57,8 @@ enum ParseResult {
     Version,
     /// 命中 `--help`：打印用法（成功退出）。
     Help,
+    /// 命中 `log`：把余下参数交给 `log_cmd` 处理。
+    Log(Vec<String>),
     /// 无参数或未知参数：打印用法（失败退出）。
     Usage,
 }
@@ -82,6 +81,17 @@ where
         ParseResult::Help => {
             drop(writeln!(out, "{USAGE}"));
             std::process::ExitCode::SUCCESS
+        }
+        ParseResult::Log(rest) => {
+            // 数据目录取不到时不能静默打印空日志——那会让用户以为「设备没出过事」，
+            // 而真相是「根本没找到日志目录」。当成失败退出并说明。
+            match node_core::data_dir() {
+                Ok(d) => log_cmd::run(&rest, &d, out, err),
+                Err(e) => {
+                    drop(writeln!(err, "afcli log: 无法定位数据目录：{e}"));
+                    std::process::ExitCode::FAILURE
+                }
+            }
         }
         ParseResult::Usage => {
             drop(writeln!(err, "{USAGE}"));
