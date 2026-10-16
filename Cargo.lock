@@ -765,6 +765,8 @@ dependencies = [
 name = "node-cli"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
+ "libc",
  "node-core",
  "protocol",
  "rand 0.8.8",
@@ -772,6 +774,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-tungstenite 0.24.0",
  "tracing",
  "tracing-subscriber",
 ]

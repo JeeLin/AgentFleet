@@ -7,10 +7,15 @@
 //! 逻辑放在这里而不是 `main.rs`，是为了**可直接单测**，且让 `main.rs` 保持极薄、
 //! 每条分支都能由「spawn 二进制 + 不同 argv」走到（覆盖率门禁要求 main.rs 100%）。
 //!
-//! 注意：**不要**自己实现连接逻辑——本文件只负责「解析 + 输出」，网络部分由后续
-//! 子任务补。这里任何「看起来像实现」的占位都是为后续接线的正确接缝。
+//! 注意：**不要**把连接 / 进程逻辑挪进来——本文件只负责「解析 + 分派」。
+//! supervisor 与 worker 各自成模块，`main.rs` 保持极薄、每条分支都能由
+//! 「spawn 二进制 + 不同 argv」走到（覆盖率门禁要求 main.rs 100%）。
 
+pub mod filelog;
 pub mod log_cmd;
+pub mod runargs;
+pub mod supervisor;
+pub mod worker;
 
 /// 二进制名称。命令名必须是 `afcli`（与 Node.js 运行时 `node` 撞名才改的），
 /// crate 名是 `node-cli`，二者都不要改。
@@ -23,9 +28,13 @@ afcli — AgentFleet node 命令
 用法:
   afcli --version     打印版本并退出 0
   afcli --help        打印本帮助并退出 0
+  afcli run           启动 supervisor（默认角色）
   afcli log [-n N]    打印最近 N 行日志（默认 200）
 
-后续子任务将实现: run（首次自动 enroll）/ worker。";
+`run --worker` 是 supervisor 拉起 worker 用的内部形态（DECISIONS D1），
+不需要手工敲；手敲了也只会跑成 worker，不会变成 supervisor。
+
+Hub 地址取环境变量 AFCLI_HUB_URL，缺省 ws://127.0.0.1:8080/ws。";
 
 /// 解析 argv（不含程序名）。
 ///
@@ -46,8 +55,30 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> ParseResult {
             let rest: Vec<String> = it.cloned().collect();
             ParseResult::Log(rest)
         }
-        // 后续子任务会在这里加 `run`；现在任何其它 token 都算未知参数
+        "run" => {
+            let rest: Vec<String> = it.cloned().collect();
+            ParseResult::Run(rest)
+        }
         _ => ParseResult::Usage,
+    }
+}
+
+/// 这次 `run` 要以哪个角色执行。
+///
+/// **角色只由 argv 决定**（`DECISIONS.md` D1）：进 worker 角色的路径有且只有
+/// 「`run` 后面含 `--worker`」这一条。第二个信息源（环境变量）会让
+/// `ps` 里看不出这个进程是哪个角色，还会顺着继承传给孙进程。
+pub enum Role {
+    Supervisor,
+    Worker,
+}
+
+/// 从 `run` 的余下参数里定角色。
+pub fn role_of(run_args: &[String]) -> Role {
+    if run_args.iter().any(|a| a == runargs::WORKER_FLAG) {
+        Role::Worker
+    } else {
+        Role::Supervisor
     }
 }
 
@@ -59,6 +90,8 @@ enum ParseResult {
     Help,
     /// 命中 `log`：把余下参数交给 `log_cmd` 处理。
     Log(Vec<String>),
+    /// 命中 `run`：把余下参数交给 supervisor / worker 分派。
+    Run(Vec<String>),
     /// 无参数或未知参数：打印用法（失败退出）。
     Usage,
 }
@@ -97,6 +130,51 @@ where
         ParseResult::Usage => {
             drop(writeln!(err, "{USAGE}"));
             std::process::ExitCode::FAILURE
+        }
+        ParseResult::Run(rest) => run_node(&rest, out, err),
+    }
+}
+
+/// 跑 `run`：按角色分派到 supervisor 或 worker。
+///
+/// 角色判定只有 [`role_of`] 一处，但**两处都要用**——本函数决定现在跑谁，
+/// supervisor 用 `worker_argv` 决定下次 spawn 谁。两处判定漂移的后果是
+/// supervisor 把自己当 worker（或反过来）spawn 出一个 supervisor，
+/// 设备变成两个进程互相等对方退出。
+fn run_node<W1, W2>(args: &[String], mut out: W1, mut err: W2) -> std::process::ExitCode
+where
+    W1: std::io::Write,
+    W2: std::io::Write,
+{
+    let data_dir = match runargs::data_dir() {
+        Ok(d) => d,
+        // coverage: excluded — data_dir 取不到：dirs::data_dir 在 HOME 存在即返回
+        // Some，root 下权限错误又不可构造，本环境下该 Err 分支不可达（防御性兜底）。
+        Err(e) => {
+            drop(writeln!(err, "afcli run: 无法定位数据目录：{e}"));
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let hub_url = runargs::hub_url(std::env::var(runargs::ENV_HUB_URL).ok().as_deref());
+    match role_of(args) {
+        Role::Worker => {
+            let mut w = worker::Worker::new(data_dir, hub_url);
+            w.work()
+        }
+        Role::Supervisor => {
+            // **完整 argv**（不含程序名）原样传下去：用户给的参数全部自动继承
+            // （标准①）；Hub 地址走环境变量，子进程同样继承得到。
+            let mut full = vec!["run".to_string()];
+            full.extend_from_slice(args);
+            // 数据目录打到 stdout：它是「日志在哪」的唯一入口，
+            // 而 stdout 在 systemd 下会进 journal，用户不用猜。
+            drop(writeln!(
+                out,
+                "{} run: data dir {}",
+                BIN_NAME,
+                data_dir.display()
+            ));
+            supervisor::Supervisor::new(full, data_dir).supervise()
         }
     }
 }
@@ -181,13 +259,41 @@ mod tests {
         assert!(err.contains("afcli log [-n N]"), "{err}");
     }
 
-    /// 子任务 4 之后 `run` 才是主命令；在它落地前，`run` 必须落到
-    /// 「未知参数」而不是被静默接受。
+    /// `run` 的参数原样交给分派层——supervisor 靠它把参数透传给 worker
+    /// （标准①：父进程 argv + `--worker`）。
     #[test]
-    fn run_is_not_yet_a_command() {
-        let (code, out, err) = run_capture(&["run"]);
-        assert!(code != std::process::ExitCode::SUCCESS);
-        assert!(out.is_empty());
-        assert!(err.contains("用法"), "{err}");
+    fn run_subcommand_dispatches_with_the_remaining_args() {
+        let a: Vec<String> = ["run", "--hub", "ws://h/ws"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(matches!(parse_args(a), ParseResult::Run(ref r) if r == &["--hub", "ws://h/ws"]));
+    }
+
+    /// **角色只由 argv 决定**（D1）：`run --worker` 是 worker，`run` 是 supervisor。
+    /// 没有第二条路径（没有环境变量），所以这两个用例就是全部。
+    #[test]
+    fn role_comes_from_argv_alone() {
+        assert!(matches!(role_of(&[]), Role::Supervisor));
+        assert!(matches!(role_of(&["--worker".to_string()]), Role::Worker));
+        // flag 在 `run` 之后任意位置都算，不要求紧挨
+        assert!(matches!(
+            role_of(&[
+                "--hub".to_string(),
+                "ws://h/ws".to_string(),
+                "--worker".to_string()
+            ]),
+            Role::Worker
+        ));
+    }
+
+    /// 用法文本必须说清 `run` 的存在与 `--worker` 的性质——
+    /// 用户看到 supervisor 拉起一个 `run --worker` 进程时，
+    /// 至少要能从 `--help` 里查出它是什么。
+    #[test]
+    fn usage_documents_run_and_the_worker_flag() {
+        assert!(USAGE.contains("afcli run"), "{USAGE}");
+        assert!(USAGE.contains("--worker"), "{USAGE}");
+        assert!(USAGE.contains("AFCLI_HUB_URL"), "{USAGE}");
     }
 }

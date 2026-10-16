@@ -6,17 +6,21 @@
 //!   旧连接必须**退出且不再重连**。若把它当普通断开去退避重连，
 //!   两边会无限互抢（§7.1 的「每 60s 顶替一次，永久进行」）。
 //! - **「不再重连」不依赖帧送达**：`disconnect` 帧可能丢，所以还要记
-//!   `last_seen_gen`，下次 `auth` 带上让 Hub 单方面判定（子任务 6/7 接线）。
+//!   `last_seen_gen`，下次 `auth` 带上让 Hub 单方面判定（子任务 7 接线）。
 //! - **私钥永不外泄**（约束 13）：签名只用 `identity::KeyPair::sign`，
 //!   没有任何字段承载私钥或它的 base64。
 //!
-//! 本文件**不含退避重连**（子任务 6）与心跳（子任务 5）——那些是
-//! 包在本模块外面的循环。这里只回答「连一次会发生什么」。
+//! 本文件回答「连一次会发生什么」；退避重连的时间策略在
+//! [`crate::reconnect`]，把两者串起来的循环在 `node-cli` 的 worker 里。
+//! 握手之后连接由 [`Established`] 独占持有——[`connect_once`] 返回的 socket
+//! 不能被丢掉，否则调用方拿到的只是一次「曾经握过手」的记录。
 
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use identity::KeyPair;
+use tokio::net::TcpStream;
+
 use protocol::frame::Frame;
 use protocol::handshake::{HandshakeError, HANDSHAKE_TIMEOUT};
 use protocol::message::{
@@ -45,18 +49,65 @@ pub enum ConnOutcome {
 
 /// 一次连接的输出：握手通过后的 socket + `auth_ok` 的字段。
 ///
-/// **socket 不实现 `Clone`、不被注册表持有**：它由调用方（supervisor）
-/// 独占持有到连接结束。这正好对应「连接注册表不落库 socket」（标准④）——
-/// node 侧同样不把 socket 塞进任何可共享的结构。
+/// **socket 不实现 `Clone`、不被注册表持有**：它由调用方独占持有到连接结束。
+/// 这正好对应「连接注册表不落库 socket」（标准④）——node 侧同样不把 socket
+/// 塞进任何可共享的结构。
 ///
 /// 手写 `Debug` 而不是派生：`Debug` 只暴露 `auth_ok` 的字段，
 /// socket 本身不是 `Debug`，而它的 `Debug` 也没有信息量
 /// （会打出整个 TLS/TCP 内部状态）。
-#[derive(Debug)]
 pub struct Established {
     pub auth_ok: AuthOk,
     /// 是否本次新注册（首次 enroll 成功）。
     pub enrolled: bool,
+    /// 握手通过的连接本体。**必须由它持有**：`connect_once` 一返回就把
+    /// socket 丢掉的话，调用方拿到的只是一次「曾经握过手」的记录，
+    /// 连接当场就断了（worker 的消息循环无处可挂）。
+    socket: Socket,
+}
+
+/// node 侧的连接类型别名。与 Hub 侧只用 `MaybeTlsStream<TcpStream>` 对齐，
+/// 免得调用方到处写这一长串。
+type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
+
+impl std::fmt::Debug for Established {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Established")
+            .field("auth_ok", &self.auth_ok)
+            .field("enrolled", &self.enrolled)
+            .finish()
+    }
+}
+
+impl Established {
+    /// 读下一帧文本。`Ok(None)` = 对端关闭（正常下线）。
+    ///
+    /// 握手之后 node 侧唯一的读入口：**未知帧类型一律原样交给调用方**，
+    /// 由它决定忽略还是断开（约束 14 的分档在这里做不了——要看 `t`）。
+    pub async fn next_text(&mut self) -> Result<Option<String>, ConnOutcome> {
+        loop {
+            match self.socket.next().await {
+                None => return Ok(None),
+                Some(Err(e)) => {
+                    return Err(ConnOutcome::Transport {
+                        detail: format!("read failed: {e}"),
+                    })
+                }
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Text(t))) => {
+                    return Ok(Some(t.to_string()))
+                }
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => return Ok(None),
+                // ping/pong 由 tungstenite 自动应答
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(_)))
+                | Some(Ok(tokio_tungstenite::tungstenite::Message::Pong(_))) => continue,
+                Some(Ok(_)) => {
+                    return Err(ConnOutcome::Transport {
+                        detail: "unexpected frame kind".to_string(),
+                    })
+                }
+            }
+        }
+    }
 }
 
 /// 建立一次 WS 连接并跑完握手。
@@ -157,6 +208,7 @@ pub async fn connect_once(
                 return Ok(Established {
                     auth_ok: ok,
                     enrolled,
+                    socket,
                 });
             }
             "auth_fail" => {

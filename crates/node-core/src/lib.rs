@@ -6,6 +6,7 @@
 pub mod conn;
 pub mod identity;
 pub mod log;
+pub mod reconnect;
 pub mod supervisor;
 pub mod update;
 

@@ -24,6 +24,11 @@ rand.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# 集成测试要当 WS 对端验「worker 握手后怎么读帧」，用现成的服务端脚手架。
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+# 「被信号杀死」那条退出码映射要真的 spawn 一个进程自杀。
+libc.workspace = true
 
 [lints]
 workspace = true

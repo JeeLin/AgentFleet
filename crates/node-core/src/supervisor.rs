@@ -80,8 +80,11 @@ pub struct CrashStats {
 
 impl CrashStats {
     /// 记一次退出，返回更新后的统计。
-    pub fn record_exit(&mut self, info: &ExitInfo) -> Self {
-        let _ = info;
+    ///
+    /// `info` 不参与计数：判据全在 `ExitInfo` 的方法与调用方持有的
+    /// `stats` 上（退避、`is_exit_storm` 各自按需读退出信息），
+    /// 这里只管「又退了一次」。
+    pub fn record_exit(&mut self, _info: &ExitInfo) -> Self {
         self.recent_exits += 1;
         self.consecutive += 1;
         *self
@@ -90,6 +93,16 @@ impl CrashStats {
     /// 窗口滑出后重置（由调用方按时间驱动）。
     pub fn window_elapsed(&mut self) {
         self.recent_exits = 0;
+    }
+
+    /// 这一次退出**不算崩溃循环**：退避回落，连击清零。
+    ///
+    /// 判据是「跑满了 [`EXIT_STORM_WINDOW_SECS`]」而不是「没触发 fast_crash」：
+    /// 跑满 10s 才退出的 worker 可能是正常下班，也可能是一点点坏掉，但两种
+    /// 都不该让此后的每次重启都背 30s。而真正「反复退出」的形态——秒崩、
+    /// 热循环——必然跑不满这个时长，于是完全不受这条影响。
+    pub fn ran_stably(&mut self) {
+        self.consecutive = 0;
     }
 
     /// 是否已进入「反复退出、不可恢复」状态。
