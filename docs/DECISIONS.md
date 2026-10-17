@@ -177,7 +177,22 @@ enum Decision { ReplaceAndSpawn, Rollback, Spawn, BackoffSleep, Stop }
 
 ---
 
-## D7. Origin 检查
+## D7. Hub 自身不参与自更新
+
+- **Hub 不实现自更新**：`afhub` 没有 `update` 子命令，也没有 `self_replace` 路径。
+  M0 的升级机制（D2 的 supervisor/worker + 退出码协议 + 回滚）**只服务 node 侧**。
+- **为什么**：supervisor 那套机制的可靠全押在「执行回滚的进程未被替换」上。Hub 若是
+  单进程（Docker / systemd 托管），替换正在运行的二进制仍需一次重启，而那正是 D2
+  想避开的东西；把 supervisor 再套一层到 Hub 上，收益为零而复杂度实打实。
+- **Hub 怎么升级**：换镜像 / 换二进制后由外部进程管理器重启，与 D3 一致——
+  **Hub 升级是部署动作，不是产品功能**。
+- **与 D6 的关系**：Windows 改造面里 `libc::execv` 那一行**只属于 node 侧的自更新**，
+  Hub 不上 Windows 不影响它；反过来 Hub 若真要上 Windows，也不必因此获得自更新能力。
+  两项互不牵连，可分别裁决。
+
+---
+
+## D8. Origin 检查
 
 **决策**：保留，定位为**纵深防御，不是安全边界**。
 （曾提议改用自定义 User-Agent —— ⬜ 未落地，未被否决）
