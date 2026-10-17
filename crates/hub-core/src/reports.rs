@@ -211,6 +211,11 @@ fn non_null(v: &serde_json::Value) -> Option<serde_json::Value> {
 /// 与「缺省保留」是两回事：那条规则说的是「这次没报就不动」，而这里连报的
 /// 时候也不许动。
 ///
+/// **改 `merge_into_stored` 之前先读这里**：这个键是 M0 没有 schema 列、
+/// 寄存在 `capabilities` 里的权宜之计（`docs/BUGS.md` 已登记）。合并规则
+/// 每加一条，都要保证 `public_key` 仍然活着——它一丢，所有设备重连一律
+/// `identity mismatch`，而根因在一条看似无关的合并逻辑里。
+///
 /// 两边都取不到就什么都不加：那台设备本来就没存过公钥（老数据），
 /// 编一个空串进去只会让重连走进同一条 `identity mismatch`，还更难查。
 fn preserve_public_key(incoming: &serde_json::Value, stored: Option<&str>) -> serde_json::Value {

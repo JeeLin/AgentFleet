@@ -178,8 +178,8 @@ impl Registry {
 /// 从设备行取公钥。库里只存指纹，公钥需由客户端在 enroll 时上传并另存。
 ///
 /// M0 的实现取舍：指纹本身由公钥单向导出，无法反推公钥。因此
-/// **Hub 必须另存公钥**才能验签。这在 schema 上是 `device.capabilities` 之外的
-/// 一个隐含需求——见 `docs/BUGS.md`（M0 已知缺口：库里没有公钥列）。
+/// **Hub 必须另存公钥**才能验签，而库里没有这一列，只能寄存在
+/// `capabilities` 的 `public_key` 键里（`docs/BUGS.md` 已登记该缺口）。
 fn pubkey_from_fingerprint(device: &Device) -> Result<[u8; 32], CoreError> {
     // 从 capabilities JSON 里取（M0 的权宜之计，BUGS.md 已登记）
     let caps: serde_json::Value = device
