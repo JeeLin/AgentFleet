@@ -24,6 +24,38 @@ pub enum Reply {
     Frame(Frame),
 }
 
+/// 构造一帧 Hub → node 的推送帧。
+///
+/// `to_value` 失败时兜底成空对象而不是 `unwrap`：这些 payload 全是字符串键与
+/// 有限数值，serde 结构上不会失败，但生产代码禁 panic，而「回不了一帧」
+/// 比「回一帧空的」更糟——后者至少让 node 知道 Hub 收到了。
+fn push(msg_type: &str, payload: impl serde::Serialize) -> Frame {
+    Frame::push(
+        msg_type,
+        0,
+        serde_json::to_value(payload).unwrap_or_else(|_| serde_json::json!({})),
+    )
+}
+
+/// 通道帧的类型集合（§5）。**唯一的权威**——`routes/ws.rs` 靠它决定一帧
+/// 该不该进通道分发，`on_channel_frame` 靠它决定怎么处理。
+///
+/// 写两遍的后果是加一种通道帧时要改两处，而漏改的那处不会报错，只会让
+/// 新帧静默掉进「未知类型忽略」里。
+const CHANNEL_TYPES: &[&str] = &[
+    types::OPEN_CHANNEL,
+    types::CHANNEL_READY,
+    types::CHANNEL_DATA,
+    types::CHANNEL_CREDIT,
+    types::CHANNEL_ERROR,
+    types::CLOSE_CHANNEL,
+];
+
+/// 这一帧是不是通道帧。
+pub fn is_channel_type(msg_type: &str) -> bool {
+    CHANNEL_TYPES.contains(&msg_type)
+}
+
 /// 分发一帧通道帧。
 pub fn on_channel_frame(state: &AppState, node_id: &str, frame: &Frame) -> Reply {
     match frame.msg_type.as_str() {
@@ -83,14 +115,12 @@ fn on_open(state: &AppState, node_id: &str, frame: &Frame) -> Reply {
         credit_start = credit_start,
         "channel ready"
     );
-    Reply::Frame(Frame::push(
+    Reply::Frame(push(
         types::CHANNEL_READY,
-        0,
-        serde_json::to_value(protocol::channel::ChannelReady {
+        protocol::channel::ChannelReady {
             channel_id: spec.channel_id,
             capabilities: serde_json::json!({}),
-        })
-        .unwrap_or_else(|_| serde_json::json!({})),
+        },
     ))
 }
 
@@ -109,14 +139,12 @@ fn on_data(state: &AppState, node_id: &str, frame: &Frame) -> Reply {
     {
         Ok(CreditStatus::Granted) => Reply::Nothing,
         // 余额归零：按 §6 补一轮信用。信用只增不减，补的是协议常量。
-        Ok(CreditStatus::Exhausted) => Reply::Frame(Frame::push(
+        Ok(CreditStatus::Exhausted) => Reply::Frame(push(
             types::CHANNEL_CREDIT,
-            0,
-            serde_json::to_value(protocol::channel::ChannelCredit {
+            protocol::channel::ChannelCredit {
                 channel_id: data.channel_id,
                 delta: protocol::channel::CREDIT_DELTA,
-            })
-            .unwrap_or_else(|_| serde_json::json!({})),
+            },
         )),
         Err(e) => Reply::Frame(error_frame(&data.channel_id, &e)),
     }
@@ -147,27 +175,22 @@ fn on_close(state: &AppState, node_id: &str, frame: &Frame) -> Reply {
 }
 
 /// 把一个 `ChannelError` 变成 `channel_error` 帧。
+///
+/// **所有变体都映射到 `unsupported`**：`ErrorCode` 没有「未知通道」这一档，
+/// 而对 node 来说「这个 id 我不认识」「这个通道我没有」「它已经关了」是
+/// 同一件事——都是「这个通道用不了」。分档只会让 node 多几个要处理的分支，
+/// 而它对每一种都只能做同一件事：把错误显示给人看。
+///
+/// 真正区分得了的是单帧超限（`frame too large`）与洪峰（`flood`）——那两种
+/// 在读侧限流那条路上分，运维侧要拿它们判断该不该拉黑，不能混。
 fn error_frame(channel_id: &str, e: &ChannelError) -> Frame {
-    let code = match e {
-        // `ErrorCode` 没有「未知通道」这一档：对 node 来说，通道 id 不认识
-        // 与「这个通道我没有」是同一件事，都按 `unsupported` 回。
-        ChannelError::EmptyChannelId | ChannelError::UnknownChannel(_) => {
-            ChannelErrorCode::Unsupported
-        }
-        ChannelError::AlreadyClosed(_) | ChannelError::AlreadyReady(_) => {
-            ChannelErrorCode::Unsupported
-        }
-        ChannelError::NotReady(_) => ChannelErrorCode::Unsupported,
-    };
-    Frame::push(
+    push(
         types::CHANNEL_ERROR,
-        0,
-        serde_json::to_value(protocol::channel::ChannelErrorPayload {
+        protocol::channel::ChannelErrorPayload {
             channel_id: channel_id.to_string(),
-            code,
+            code: ChannelErrorCode::Unsupported,
             reason: e.to_string(),
-        })
-        .unwrap_or_else(|_| serde_json::json!({"channel_id": channel_id})),
+        },
     )
 }
 
@@ -191,15 +214,13 @@ pub fn sweep_unready(state: &AppState, node_id: &str, now: Instant) -> Vec<Frame
                     channel_id = %id,
                     "channel never became ready; rejecting it"
                 );
-                out.push(Frame::push(
+                out.push(push(
                     types::CHANNEL_ERROR,
-                    0,
-                    serde_json::to_value(protocol::channel::ChannelErrorPayload {
+                    protocol::channel::ChannelErrorPayload {
                         channel_id: id.clone(),
                         code: ChannelErrorCode::Unsupported,
                         reason: reason::UNSUPPORTED.to_string(),
-                    })
-                    .unwrap_or_else(|_| serde_json::json!({})),
+                    },
                 ));
             }
             Err(e) => tracing::debug!(error = %e, "cannot reject an unready channel"),
@@ -293,30 +314,27 @@ mod tests {
         }
     }
 
-    /// 未知/空 channel_id 都按 `unsupported`：`ErrorCode` 没有「未知通道」这一档，
-    /// 而对 node 来说两者是同一件事。
+    /// 每个 `ChannelError` 变体都能变成一帧、且都回 `unsupported`。
+    ///
+    /// 逐个变体列出来不是为了一遍遍断言同一个常量，而是为了**锁住映射的完备性**：
+    /// 将来 `ChannelError` 若新增变体，这里编译不过，逼人决定「它该回什么码」——
+    /// 而不是默默落进 `_ =>` 里回一个错的。
     #[test]
     fn every_channel_error_maps_to_a_code() {
-        assert_eq!(
-            error_code_of(&ChannelError::EmptyChannelId),
-            ChannelErrorCode::Unsupported
-        );
-        assert_eq!(
-            error_code_of(&ChannelError::UnknownChannel("x".into())),
-            ChannelErrorCode::Unsupported
-        );
-        assert_eq!(
-            error_code_of(&ChannelError::AlreadyClosed("x".into())),
-            ChannelErrorCode::Unsupported
-        );
-        assert_eq!(
-            error_code_of(&ChannelError::AlreadyReady("x".into())),
-            ChannelErrorCode::Unsupported
-        );
-        assert_eq!(
-            error_code_of(&ChannelError::NotReady("x".into())),
-            ChannelErrorCode::Unsupported
-        );
+        let cases: Vec<ChannelError> = vec![
+            ChannelError::EmptyChannelId,
+            ChannelError::UnknownChannel("x".into()),
+            ChannelError::AlreadyClosed("x".into()),
+            ChannelError::AlreadyReady("x".into()),
+            ChannelError::NotReady("x".into()),
+        ];
+        for e in &cases {
+            assert_eq!(
+                error_code_of(e),
+                ChannelErrorCode::Unsupported,
+                "{e} 应当映射到 unsupported"
+            );
+        }
     }
 
     fn error_code_of(e: &ChannelError) -> ChannelErrorCode {

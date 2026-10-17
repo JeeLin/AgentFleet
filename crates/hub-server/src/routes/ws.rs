@@ -542,19 +542,6 @@ fn flood_frame(e: &hub_core::limits::LimitError) -> Frame {
     )
 }
 
-/// 这一帧是不是通道帧（§5）。
-fn is_channel_type(msg_type: &str) -> bool {
-    matches!(
-        msg_type,
-        types::OPEN_CHANNEL
-            | types::CHANNEL_READY
-            | types::CHANNEL_DATA
-            | types::CHANNEL_CREDIT
-            | types::CHANNEL_ERROR
-            | types::CLOSE_CHANNEL
-    )
-}
-
 /// 业务帧循环：收 node 发来的帧，同时把 Hub 要推的控制帧发出去。
 ///
 /// 两个方向用 `select!` 而不是串行：控制帧（`disconnect{superseded}`）必须
@@ -655,7 +642,7 @@ async fn relay(
                     on_heartbeat(state, conn_id, auth, &frame);
                     continue;
                 }
-                if is_channel_type(&frame.msg_type) {
+                if crate::channels::is_channel_type(&frame.msg_type) {
                     match crate::channels::on_channel_frame(state, &auth.node_id, &frame) {
                         crate::channels::Reply::Nothing => {}
                         crate::channels::Reply::Frame(out) => {

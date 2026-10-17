@@ -33,9 +33,6 @@ pub type ChannelErrorCode = ErrorCode;
 pub mod reason {
     /// §5：`channel_ready` 5s 超时，Hub 显式回 `channel_error{reason:"unsupported"}`。
     pub const UNSUPPORTED: &str = "unsupported";
-
-    /// 收到未 `open_channel` 过的通道上的 `channel_data`。
-    pub const UNKNOWN_CHANNEL: &str = "unknown channel";
 }
 
 /// `open_channel` 的默认信用额度（§6「如 32」）。
