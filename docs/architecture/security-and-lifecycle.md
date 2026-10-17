@@ -232,6 +232,23 @@ supervisor 唯一要做的是「保证有一个能用的 worker」，它不需�
 > supervisor 的职责被显式约束为一个**极小的稳定 ABI**：`spawn` + 退出码协议 +
 > `update-state.json`。它必须向后兼容——这是上面「懒生效」能成立的前提。
 
+#### 4.1.1 落地情况（M0 子任务 4）
+
+两条承诺**只在真进程上验证过**（`crates/node-cli/tests/supervisor_lifecycle.rs`：
+真 Hub + 真 `afcli`，`kill -9` 掉 worker 再观察）：
+
+- **换 worker 不换身份**：kill 掉 worker 后，Hub 侧重新出现的连接带的是同一个
+  `node_id`，且全程不出现第二个 `node_id`。身份在 worker 的密钥对里、由 Hub 按指纹认，
+  所以进程换了设备没换。若身份挂在 supervisor 上或每次 spawn 都重新 enroll，
+  这条测试会看到两个不同的 `node_id`。
+- **换 worker 期间 Hub 不判离线**：采样 20s 内 `status` 一次都没变成 `offline`。
+  之所以成立有两个前提：supervisor 自己从不持连接（「换 worker」对 Hub 只是
+  一次普通重连），以及**离线判据只看心跳年龄**（§5，45s）——2–5s 的重连窗口
+  远不到阈值。若断开即清内存上报，这里会立刻 offline。
+
+`kill -9` 是被信号杀死，`ExitStatus::code()` 是 `None`，supervisor 必须把它当成
+`CRASH`(12) 而不是让 `-9` 落进 i32 里——后者会让 supervisor 自己 panic。
+
 ### 4.2 为什么必须两层
 
 若只有一个进程：升级 = 重启 = **WS 断开 + 身份需重新协商**。

@@ -535,7 +535,7 @@ fn flood_frame(e: &hub_core::limits::LimitError) -> Frame {
         types::ERR,
         0,
         serde_json::to_value(protocol::message::ErrPayload {
-            code: code.clone(),
+            code,
             message: e.to_string(),
         })
         .unwrap_or_else(|_| serde_json::json!({"code": code})),

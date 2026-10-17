@@ -29,6 +29,13 @@ tokio-tungstenite.workspace = true
 futures-util.workspace = true
 # 「被信号杀死」那条退出码映射要真的 spawn 一个进程自杀。
 libc.workspace = true
+# 子任务 4 的进程级测试要一台真 Hub：换 worker 期间「身份不变、Hub 不判离线」
+# 这条承诺只能在真进程 + 真 Hub 上验证（单测里 spawn 自己等于递归起自己）。
+hub-server.workspace = true
+hub-core.workspace = true
+hub-storage.workspace = true
+axum.workspace = true
+identity.workspace = true
 
 [lints]
 workspace = true

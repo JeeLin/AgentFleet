@@ -765,7 +765,12 @@ dependencies = [
 name = "node-cli"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "futures-util",
+ "hub-core",
+ "hub-server",
+ "hub-storage",
+ "identity",
  "libc",
  "node-core",
  "protocol",

@@ -16,7 +16,7 @@ use hub_core::auth::{AuthParams, LoginRateLimiter};
 use hub_server::AppState;
 use identity::KeyPair;
 use node_core::conn::{connect_once, Established};
-use protocol::channel::{ChannelCredit, ChannelData, CloseChannel, OpenChannel};
+use protocol::channel::{ChannelCredit, ChannelData, CloseChannel};
 use protocol::frame::Frame;
 use protocol::message::{types, DeviceInfo};
 use tokio::net::TcpListener;
@@ -483,7 +483,7 @@ async fn the_superseded_frame_still_arrives_while_data_is_flooding() {
     let hub = Hub::boot().await;
     let (mut est, node_id, kp) = connect_enrolled(&hub).await;
 
-    let mut est2 = connect_once(&hub.ws_url(), &kp, Some(&node_id), None, device_info())
+    let est2 = connect_once(&hub.ws_url(), &kp, Some(&node_id), None, device_info())
         .await
         .expect("reconnect must succeed");
     drop(est2);

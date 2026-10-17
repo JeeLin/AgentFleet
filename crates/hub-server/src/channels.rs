@@ -164,7 +164,7 @@ fn error_frame(channel_id: &str, e: &ChannelError) -> Frame {
         0,
         serde_json::to_value(protocol::channel::ChannelErrorPayload {
             channel_id: channel_id.to_string(),
-            code: code.clone(),
+            code,
             reason: e.to_string(),
         })
         .unwrap_or_else(|_| serde_json::json!({"channel_id": channel_id})),
