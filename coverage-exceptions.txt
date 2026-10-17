@@ -5,7 +5,7 @@ crates/hub-server/src/routes/setup.rs:222:同 221：tracing::error! 的参数行
 crates/hub-server/src/routes/setup.rs:223:同 221：login semaphore 关闭的返回行
 crates/hub-core/src/reports.rs:104:锁中毒只在别的持锁者 panic 时出现，而 workspace lint 把 panic 禁成 deny，无法构造
 crates/hub-core/src/reports.rs:122:同 104：锁中毒分支
-crates/hub-core/src/reports.rs:249:读锁中毒的 Err 臂：workspace lint 把 panic 禁成 deny，构造不出别的持锁者 panic
+crates/hub-core/src/reports.rs:254:读锁中毒的 Err 臂：workspace lint 把 panic 禁成 deny，构造不出别的持锁者 panic
 crates/node-cli/src/worker.rs:48:work 的 Identity::load 成功臂后段：需真 data_dir，与 run_with 同一不可达形状
 crates/node-cli/src/worker.rs:56:work 转调 run_with：run_with 自建多线程 runtime，嵌在 tokio::test 里会 panic
 crates/node-cli/src/worker.rs:66:run_with 本体：进程入口，建 runtime 并 block_on（只能由真进程触达）
