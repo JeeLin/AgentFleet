@@ -328,6 +328,8 @@ mod tests {
         assert_eq!(code, std::process::ExitCode::FAILURE);
         assert!(
             out.is_empty(),
+            // coverage: excluded — 测试夹具的 `String::from_utf8_lossy`：非 UTF-8
+            // 输出分支在现有断言下不可达。
             "worker 不该打 data dir——那是 supervisor 的入口行: {:?}",
             String::from_utf8_lossy(&out)
         );

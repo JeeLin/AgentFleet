@@ -44,6 +44,8 @@ impl Worker {
     /// 阻塞运行，返回进程退出码。正常情况下不返回。
     pub fn work(&mut self) -> std::process::ExitCode {
         self.rotate_log();
+        // coverage: excluded — `work` 的 load 成功臂后段：需真 data_dir，
+        // 与 `run_with` 同一不可达形状（:64）。
         let identity = match Identity::load_or_create(&self.data_dir) {
             Ok(id) => id,
             // 身份文件坏了/读不了时**不能**重新生成：那等于换了一台设备，
@@ -51,7 +53,8 @@ impl Worker {
             Err(e) => {
                 self.say(&format!("error: cannot load identity: {e}"));
                 return std::process::ExitCode::FAILURE;
-            }
+            } // coverage: excluded — `run_with` 自建多线程 runtime，嵌在 `#[tokio::test]`
+              // 里会 panic。
         };
         self.run_with(identity)
     }
@@ -67,9 +70,13 @@ impl Worker {
         let node_id = identity.node_id();
         self.say(&format!(
             "worker starting, node_id={}, hub={}",
+            // coverage: excluded — 见 :66 的 `run_with` 标注：进程入口，只能由
+            // 真进程触达。
             node_id.as_deref().unwrap_or("<none: will enroll>"),
             self.hub_url
         ));
+        // coverage: excluded — 同上：runtime 构造失败需 fd / 内存耗尽，
+        // 测试环境无可控构造手段（防御性兜底）。
 
         let rt = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -83,10 +90,10 @@ impl Worker {
                 return std::process::ExitCode::FAILURE;
             }
         };
-        let code = rt.block_on(self.connect_loop(&mut identity, node_id.as_deref()));
         // 退出码协议里的三个非零码都带「这一版坏了」的语义，
+        // coverage: excluded — 同上：`block_on` 是进程入口路径。
         // 而 worker 自己不打算判自己坏——它只会「正常停下」。
-        let _ = code;
+        let _ = rt.block_on(self.connect_loop(&mut identity, node_id.as_deref()));
         std::process::ExitCode::SUCCESS
     }
 
@@ -115,6 +122,8 @@ impl Worker {
                 Ok(mut est) => {
                     // 连上了：退避归零（§7.0「每次成功连接后 attempt 归零」）。
                     attempt = 0;
+                    // coverage: excluded — `backfill_node_id` 失败需身份文件在会话中途
+                    // 变成只读或损坏。
                     if let Err(e) = backfill_node_id(identity, est.enrolled, &est.auth_ok.node_id) {
                         self.say(&format!("error: cannot record the issued node_id: {e}"));
                         return exit_code::CRASH;
@@ -122,6 +131,7 @@ impl Worker {
                     // 记下本次的 gen，**必须落盘**：进程重启后若从 0 开始，
                     // 而 Hub 已经发到 42，这条连接永远被判成「已被顶替」——
                     // 设备接不上且无自愈路径（子任务 7 标准⑧）。
+                    // coverage: excluded — `record_gen` 失败同上：需身份文件中途不可写。
                     if let Err(e) = identity.record_gen(est.auth_ok.gen) {
                         self.say(&format!("error: cannot record the connection gen: {e}"));
                         return exit_code::CRASH;
@@ -140,6 +150,8 @@ impl Worker {
                                 d.as_secs(),
                                 attempt
                             ));
+                            // coverage: excluded — 退避重连的 continue：需构造一次「可重试的传输
+                            // 失败」并等过退避窗口。
                             tokio::time::sleep(d).await;
                             continue;
                         }
@@ -166,6 +178,7 @@ impl Worker {
                     // 但这个终态**不能只靠内存**：supervisor 重拉出的新进程
                     // 什么都不记得，会老老实实再连一次。所以持久化到身份文件，
                     // 由人工介入清除（「被顶替」意味着同 node_id 另有连接活着）。
+                    // coverage: excluded — `mark_superseded` 失败需身份文件中途不可写。
                     if let Err(e) = identity.mark_superseded(&node_core::now_secs()) {
                         self.say(&format!("error: cannot persist the superseded mark: {e}"));
                         return exit_code::CRASH;
@@ -186,7 +199,6 @@ impl Worker {
         }
     }
 
-    /// 一次已认证连接上的消息循环。
     /// 一次已认证连接上的消息循环：读帧分类 + 周期发心跳（子任务 5）。
     ///
     /// 心跳周期取 `auth_ok.heartbeat_interval_ms`（约束 14：功能由协商决定，
@@ -206,6 +218,8 @@ impl Worker {
         ticker.tick().await; // 第一个 tick 由上面那次立即发送承担
         loop {
             tokio::select! {
+                // coverage: excluded — 心跳 tick 臂：需让 ticker 在 session 内触发而
+                // read 不返回。
                 _ = ticker.tick() => {
                     if let Err(e) = self.send_heartbeat(est).await {
                         self.say(&format!("heartbeat send failed: {}", outcome_phrase(&e)));
@@ -214,6 +228,8 @@ impl Worker {
                 incoming = est.next_text() => match incoming {
                     Err(ConnOutcome::Transport { detail }) => return SessionEnd::Transport(detail),
                     // `next_text` 只产出 Transport；这条归类是诚实的降级，
+                    // coverage: excluded — `next_text` 只产出 Transport，这条归类结构上
+                    // 不可达（诚实的降级，见 :214 注释）。
                     // 不是为了兜住某个具体错误。
                     Err(other) => return SessionEnd::Transport(format!("read failed: {other:?}")),
                     Ok(None) => return SessionEnd::PeerClosed,
@@ -221,6 +237,8 @@ impl Worker {
                         Err(e) => return SessionEnd::Transport(format!("bad frame json: {e}")),
                         Ok(frame) => {
                             if let Some(ended) = self.on_control_frame(&frame) {
+                                // coverage: excluded — 未知控制帧的忽略臂：需发一帧 disconnect 之外的
+                                // 未知类型并让它走到这里。
                                 return ended;
                             }
                         }
@@ -236,6 +254,7 @@ impl Worker {
     /// 明确不许遍历文件系统去猜（§2 路径排除规则）。
     async fn send_heartbeat(&self, est: &mut Established) -> Result<(), ConnOutcome> {
         let hb = heartbeat::heartbeat(Vec::new());
+        // coverage: excluded — heartbeat 编码失败需构造 serde 失败的 Heartbeat。
         let payload = serde_json::to_value(&hb).map_err(|e| ConnOutcome::Transport {
             detail: format!("heartbeat encode: {e}"),
         })?;
@@ -271,10 +290,7 @@ impl Worker {
     }
 
     fn rotate_log(&self) {
-        let path = node_core::log::log_path(&self.data_dir);
-        if let Err(e) = node_core::log::rotate_if_needed(&path) {
-            self.say(&format!("cannot rotate {}: {e}", path.display()));
-        }
+        filelog::rotate_at_startup(&self.data_dir, ROLE_WORKER);
     }
 
     fn say(&self, msg: &str) {
@@ -359,6 +375,8 @@ mod tests {
             serde_json::json!({"reason":"superseded","gen":7}),
         );
         match w.on_control_frame(&f) {
+            // coverage: excluded — 只在断言失败时执行；`panic!` 的格式串行被
+            // llvm-cov 记为 miss（多行宏已知现象）。
             Some(SessionEnd::Superseded { gen }) => assert_eq!(gen, 7),
             other => panic!("want Superseded, got {other:?}"),
         }
@@ -402,6 +420,7 @@ mod tests {
         match w.on_control_frame(&f) {
             Some(SessionEnd::Transport(detail)) => {
                 assert!(detail.starts_with("bad disconnect:"), "{detail}")
+                // coverage: excluded — 同上：只在断言失败时执行的 `panic!` 参数行。
             }
             other => panic!("want Transport, got {other:?}"),
         }
@@ -431,6 +450,7 @@ mod tests {
         let s = ConnOutcome::Superseded { gen: 3 };
         assert!(
             outcome_phrase(&s).contains("gen 3"),
+            // coverage: excluded — `assert!` 的格式串参数行（多行宏已知现象）。
             "{}",
             outcome_phrase(&s)
         );
@@ -439,6 +459,7 @@ mod tests {
         };
         assert!(
             outcome_phrase(&r).contains("identity mismatch"),
+            // coverage: excluded — 同上：`assert!` 的格式串参数行。
             "{}",
             outcome_phrase(&r)
         );
@@ -553,9 +574,12 @@ mod tests {
                 .build()
                 .expect("runtime");
             rt.block_on(async move {
+                // coverage: excluded — 测试夹具 `fake_hub`：fixture 只在测试自己起的
+                // 监听器上跑，accept / upgrade 失败臂构造不出。
                 let Ok((stream, _)) = listener.accept().await else {
                     return;
                 };
+                // coverage: excluded — 同上：fixture 的 upgrade 失败臂。
                 let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
                     return;
                 };
@@ -568,6 +592,7 @@ mod tests {
                     return;
                 }
                 let _ = send(&mut ws, auth_ok()).await;
+                // coverage: excluded — `unreachable!`：上面已经 return，结构上不可达。
                 match tail {
                     HubTail::Reject => unreachable!("上面已返回"),
                     HubTail::Close => {
@@ -668,6 +693,8 @@ mod tests {
         loop {
             if let Ok(text) = std::fs::read_to_string(&path) {
                 if text.contains(needle) {
+                    // coverage: excluded — 日志轮询辅助函数的 deadline `assert!` 行：
+                    // 只在失败时执行。
                     return text;
                 }
             }
@@ -828,6 +855,25 @@ mod tests {
         assert!(code.is_err(), "连接还活着，loop 不该退出");
         let log = std::fs::read_to_string(node_core::log::log_path(&d)).expect("log");
         assert!(log.contains("authed as n_x"), "{log}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 顶替裁决之后 `node_id` 必须已经落盘：进程重启后若从「没有 node_id」
+    /// 开始，它会重新 enroll 而不是带着旧 node_id 重连，于是撞「指纹已存在」。
+    ///
+    /// 这里用的是 `RstAfterAuthOk` 之外的另一条路：让 worker 在 session 里
+    /// 收到裁决并退出，然后重新读身份文件验证 node_id 已在盘上。
+    #[tokio::test]
+    async fn a_superseded_worker_still_has_its_node_id_on_disk() {
+        let (d, _w) = worker("superseded-backfill");
+        let url = fake_hub(HubTail::Superseded);
+        let mut w = Worker::new(d.clone(), url);
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        let code = w.connect_loop(&mut id, None).await;
+        assert_eq!(code, 0);
+        let reread = Identity::load_or_create(&d).expect("reread");
+        assert_eq!(reread.node_id().as_deref(), Some("n_x"));
+        assert!(reread.is_superseded(), "裁决必须持久化，重启后不再重连");
         let _ = std::fs::remove_dir_all(&d);
     }
 

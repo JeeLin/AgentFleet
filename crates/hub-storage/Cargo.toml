@@ -14,6 +14,7 @@ thiserror.workspace = true
 tracing.workspace = true
 dirs.workspace = true
 libc.workspace = true
+identity.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

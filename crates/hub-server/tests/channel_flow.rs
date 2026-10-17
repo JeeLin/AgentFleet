@@ -10,94 +10,20 @@
     clippy::indexing_slicing
 )]
 
+mod common;
+
 use std::time::{Duration, Instant};
 
-use hub_core::auth::{AuthParams, LoginRateLimiter};
-use hub_server::AppState;
-use identity::KeyPair;
-use node_core::conn::{connect_once, Established};
+use common::{connect_enrolled, device_info, Hub};
+use node_core::conn::connect_once;
 use protocol::channel::{ChannelCredit, ChannelData, CloseChannel};
 use protocol::frame::Frame;
-use protocol::message::{types, DeviceInfo};
-use tokio::net::TcpListener;
-use tokio::sync::oneshot;
-
-struct Hub {
-    addr: std::net::SocketAddr,
-    state: AppState,
-    _dir: tempfile::TempDir,
-    _shutdown: Option<oneshot::Sender<()>>,
-}
+use protocol::message::types;
 
 impl Hub {
-    async fn boot() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let pool = hub_storage::db::open_in(dir.path()).unwrap().1;
-        let state = AppState::bootstrap_with(
-            pool,
-            dir.path(),
-            AuthParams {
-                m_cost: 8192,
-                t_cost: 1,
-                p_cost: 1,
-            },
-            Duration::from_millis(200),
-            LoginRateLimiter::new(10, 60),
-        )
-        .unwrap();
-        state
-            .auth()
-            .setup_password("correct horse battery")
-            .unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (tx, rx) = oneshot::channel::<()>();
-        let app = hub_server::build_app(state.clone());
-        let task = tokio::spawn(async move {
-            let _ = axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .with_graceful_shutdown(async {
-                let _ = rx.await;
-            })
-            .await;
-        });
-        std::mem::forget(task);
-        Self {
-            addr,
-            state,
-            _dir: dir,
-            _shutdown: Some(tx),
-        }
-    }
-
-    fn ws_url(&self) -> String {
-        format!("ws://{}/ws", self.addr)
-    }
-
     fn credit(&self, node_id: &str, channel_id: &str) -> Option<u32> {
         self.state.channels().read().credit(node_id, channel_id)
     }
-}
-
-fn device_info() -> DeviceInfo {
-    DeviceInfo {
-        name: "pi".to_string(),
-        os: "linux".to_string(),
-        arch: "aarch64".to_string(),
-        hostname: "pi".to_string(),
-        node_version: "0.1.0".to_string(),
-    }
-}
-
-async fn connect_enrolled(hub: &Hub) -> (Established, String, KeyPair) {
-    let kp = KeyPair::generate();
-    let est = connect_once(&hub.ws_url(), &kp, None, None, device_info())
-        .await
-        .expect("enroll must succeed");
-    let node_id = est.auth_ok.node_id.clone();
-    (est, node_id, kp)
 }
 
 fn open_channel(id: &str, connector: &str, credit_start: Option<u32>) -> Frame {

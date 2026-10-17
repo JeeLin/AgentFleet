@@ -440,7 +440,7 @@ mod tests {
         let key_before = a.session_hmac_key().unwrap();
         // 签发一个 session
         let sess = crate::session::SessionStore::new(a.session_hmac_key().unwrap());
-        let token = sess.issue("admin");
+        let token = sess.issue("admin").unwrap();
         // 改密码
         a.change_password("correct horse battery", "new password here")
             .unwrap();
@@ -456,7 +456,7 @@ mod tests {
         a.setup_password("correct horse battery").unwrap();
         let k1 = a.session_hmac_key().unwrap();
         let store = crate::session::SessionStore::new(k1);
-        let token = store.issue("admin");
+        let token = store.issue("admin").unwrap();
         let k2 = a.rotate_session_hmac().unwrap();
         assert_ne!(k1, k2);
         let store2 = crate::session::SessionStore::new(k2);

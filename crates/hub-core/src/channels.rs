@@ -11,9 +11,8 @@
 //! 重连后按 `channel_id` 记账就会累积出一个恒 > 0 的信用余额，等于没有流控（§6）。
 
 use std::collections::HashMap;
-use std::time::Instant;
 
-use protocol::channel::{Channel, ChannelRegistry, ChannelState};
+use protocol::channel::ChannelRegistry;
 
 /// 全部节点的通道路由表。纯内存，不落库（§5）。
 #[derive(Debug, Default)]
@@ -31,35 +30,14 @@ impl HubChannels {
         self.per_node.entry(node_id.to_string()).or_default()
     }
 
-    /// 只读查一条通道。
-    pub fn get(&self, node_id: &str, channel_id: &str) -> Option<&Channel> {
-        self.per_node
-            .get(node_id)
-            .and_then(|reg| reg.get(channel_id))
-    }
-
-    /// 查某条通道的状态。**未知 node_id 不是错误**——通道可能是刚被对端
-    /// 弄脏的 id，报「节点不存在」会让调用方误以为节点下线了。
-    pub fn state(&self, node_id: &str, channel_id: &str) -> Option<ChannelState> {
-        self.per_node
-            .get(node_id)
-            .and_then(|reg| reg.state(channel_id))
-    }
-
     /// 查某条通道的剩余信用。
+    ///
+    /// **未知 node_id 不是错误**：通道 id 可能被对端弄脏，报「节点不存在」
+    /// 会让调用方误以为节点下线了。
     pub fn credit(&self, node_id: &str, channel_id: &str) -> Option<u32> {
         self.per_node
             .get(node_id)
             .and_then(|reg| reg.credit(channel_id))
-    }
-
-    /// 该节点是否已有通道表（用于区分「没开过通道」与「记录被摘掉了」）。
-    pub fn has_node(&self, node_id: &str) -> bool {
-        self.per_node.contains_key(node_id)
-    }
-
-    pub fn node_count(&self) -> usize {
-        self.per_node.len()
     }
 
     /// 丢弃某节点的全部通道记录（连接断开/被顶替，§7.1）。
@@ -70,45 +48,23 @@ impl HubChannels {
     }
 }
 
-/// 批量打开的通道描述：一个 `open_channel` 要落下的东西。
-///
-/// 参数带 `credit_start` 而不是让它走 [`OpenChannel`] 的 serde 缺省，
-/// 是因为**两处默认值会漂移**：这里漏填就变成 0（永远挂起），
-/// 而协议缺省是 [`protocol::channel::CREDIT_START`]。
-pub struct OpenSpec {
-    pub channel_id: String,
-    pub connector: String,
-    pub credit_start: u32,
-}
-
-impl HubChannels {
-    /// 开一条通道，等价于发 `open_channel` + 记账。
-    pub fn open_channel(
-        &mut self,
-        node_id: &str,
-        spec: &OpenSpec,
-        now: Instant,
-    ) -> Result<(), protocol::channel::ChannelError> {
-        self.registry(node_id)
-            .open(&spec.channel_id, &spec.connector, spec.credit_start, now)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use protocol::channel::{ChannelAction, ChannelState, CREDIT_START, READY_TIMEOUT};
+    use std::time::Instant;
 
     fn t0() -> Instant {
         Instant::now()
     }
 
-    fn spec(id: &str, connector: &str) -> OpenSpec {
-        OpenSpec {
-            channel_id: id.to_string(),
-            connector: connector.to_string(),
-            credit_start: CREDIT_START,
-        }
+    /// 开一条通道并置 Ready——`HubChannels` 只加 node_id 那一层，
+    /// 记账与状态转移全在 `protocol::channel` 里。
+    fn ready(h: &mut HubChannels, node_id: &str, connector: &str, now: Instant) {
+        h.registry(node_id)
+            .open("ch-1", connector, CREDIT_START, now)
+            .unwrap();
+        h.registry(node_id).mark_ready("ch-1").unwrap();
     }
 
     #[test]
@@ -116,18 +72,13 @@ mod tests {
         // 约束 4：channel_id 只在设备内唯一，不是全局 id
         let t = t0();
         let mut h = HubChannels::new();
-        h.open_channel("n_a", &spec("ch-1", "terminal"), t).unwrap();
-        h.open_channel("n_b", &spec("ch-1", "files"), t).unwrap();
+        ready(&mut h, "n_a", "terminal", t);
+        ready(&mut h, "n_b", "files", t);
+        assert_eq!(h.credit("n_a", "ch-1"), Some(CREDIT_START));
+        assert_eq!(h.credit("n_b", "ch-1"), Some(CREDIT_START));
+        assert_eq!(h.credit("n_c", "ch-1"), None);
 
-        assert_eq!(h.get("n_a", "ch-1").unwrap().connector(), "terminal");
-        assert_eq!(h.get("n_b", "ch-1").unwrap().connector(), "files");
-        assert!(h.get("n_c", "ch-1").is_none());
-        assert_eq!(h.node_count(), 2);
-
-        // 同一节点内的通道彼此独立：一个发完不动另一个
-        h.registry("n_a").mark_ready("ch-1").unwrap();
-        h.registry("n_b").mark_ready("ch-1").unwrap();
-        h.registry("n_b").on_data("ch-1").unwrap();
+        // 信用按通道独立，一个节点耗尽不动另一个
         for _ in 0..CREDIT_START {
             h.registry("n_a").on_data("ch-1").unwrap();
         }
@@ -136,8 +87,11 @@ mod tests {
             h.registry("n_a").on_data("ch-1").unwrap(),
             ChannelAction::Suspend { .. }
         ));
-        // 信用按通道独立，不跨通道共享（§6）
-        assert_eq!(h.credit("n_b", "ch-1"), Some(CREDIT_START - 1));
+        assert_eq!(
+            h.credit("n_b", "ch-1"),
+            Some(CREDIT_START),
+            "§6：信用不跨节点共享"
+        );
     }
 
     #[test]
@@ -146,62 +100,46 @@ mod tests {
         // 会累积出一个无限大的信用余额
         let t = t0();
         let mut h = HubChannels::new();
-        h.open_channel("n_a", &spec("ch-1", "terminal"), t).unwrap();
-        h.registry("n_a").mark_ready("ch-1").unwrap();
+        ready(&mut h, "n_a", "terminal", t);
         h.registry("n_a").on_data("ch-1").unwrap();
         assert_eq!(h.credit("n_a", "ch-1"), Some(CREDIT_START - 1));
 
         // 断线：整节点记录丢弃
         assert_eq!(h.drop_node("n_a"), 1);
-        assert!(!h.has_node("n_a"));
-        assert_eq!(h.state("n_a", "ch-1"), None);
         assert_eq!(h.credit("n_a", "ch-1"), None);
-        assert_eq!(h.node_count(), 0);
 
         // 重连：重新 open_channel 才是记账入口
         let later = t + READY_TIMEOUT * 2;
-        h.open_channel("n_a", &spec("ch-1", "terminal"), later)
-            .unwrap();
-        assert_eq!(h.state("n_a", "ch-1"), Some(ChannelState::Opening));
+        ready(&mut h, "n_a", "terminal", later);
         assert_eq!(h.credit("n_a", "ch-1"), Some(CREDIT_START));
         assert!(!h.registry("n_a").ready_timed_out("ch-1", later));
+        assert_eq!(h.registry("n_a").state("ch-1"), Some(ChannelState::Ready));
     }
 
     #[test]
     fn drop_node_is_idempotent_and_untouches_unknown() {
         let mut h = HubChannels::new();
         assert_eq!(h.drop_node("n_missing"), 0);
-        h.open_channel("n_a", &spec("ch-1", "terminal"), t0())
-            .unwrap();
+        ready(&mut h, "n_a", "terminal", t0());
         assert_eq!(h.drop_node("n_a"), 1);
         assert_eq!(h.drop_node("n_a"), 0);
     }
 
     #[test]
-    fn open_channel_propagates_registry_errors() {
+    fn open_rejects_a_bad_channel_id_without_leaving_a_half_record() {
         let mut h = HubChannels::new();
-        let bad = OpenSpec {
-            channel_id: String::new(),
-            connector: "terminal".to_string(),
-            credit_start: 1,
-        };
-        assert!(h.open_channel("n_a", &bad, t0()).is_err());
+        assert!(h.registry("n_a").open("", "terminal", 1, t0()).is_err());
         // 拒绝的 open 不得留下半条通道；节点表本身留着（无副作用的惰性建表）
         assert!(h.registry("n_a").is_empty());
-        assert_eq!(h.node_count(), 1);
         // 空 channel_id 之后照常能用
-        h.open_channel("n_a", &spec("ch-1", "terminal"), t0())
-            .unwrap();
-        assert_eq!(h.get("n_a", "ch-1").unwrap().connector(), "terminal");
+        ready(&mut h, "n_a", "terminal", t0());
+        assert_eq!(h.credit("n_a", "ch-1"), Some(CREDIT_START));
     }
 
     #[test]
     fn unknown_node_is_not_an_error_for_queries() {
         let h = HubChannels::new();
         // 通道 id 可能被对端弄脏：查不到就答「没有」，不得报成节点不存在
-        assert!(!h.has_node("n_a"));
-        assert!(h.get("n_a", "ch-1").is_none());
-        assert_eq!(h.state("n_a", "ch-1"), None);
         assert_eq!(h.credit("n_a", "ch-1"), None);
     }
 
@@ -209,6 +147,24 @@ mod tests {
     fn empty_registry_is_created_on_first_touch() {
         let mut h = HubChannels::new();
         assert!(h.registry("n_a").is_empty());
-        assert!(h.has_node("n_a"), "只读式访问也要留下节点表");
+    }
+
+    /// 同一台设备的两张通道表互不相干之外，**清一台不能动另一台**——
+    /// `drop_node` 返回被清条数，这个数是顶替路径上「到底清了什么」的留痕。
+    #[test]
+    fn dropping_one_node_leaves_the_others_intact() {
+        let t = t0();
+        let mut h = HubChannels::new();
+        h.registry("n_a").open("ch_a", "terminal", 2, t).unwrap();
+        h.registry("n_a").open("ch_b", "files", 3, t).unwrap();
+        ready(&mut h, "n_b", "terminal", t);
+
+        assert_eq!(h.drop_node("n_a"), 2, "n_a 有两条记录要被清掉");
+        assert_eq!(h.credit("n_a", "ch_a"), None);
+        assert_eq!(
+            h.credit("n_b", "ch-1"),
+            Some(CREDIT_START),
+            "n_b 不能被连坐"
+        );
     }
 }

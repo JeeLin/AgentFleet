@@ -15,14 +15,11 @@
 //! 握手之后连接由 [`Established`] 独占持有——[`connect_once`] 返回的 socket
 //! 不能被丢掉，否则调用方拿到的只是一次「曾经握过手」的记录。
 
-use std::time::Duration;
-
 use futures_util::{SinkExt, StreamExt};
 use identity::KeyPair;
 use tokio::net::TcpStream;
 
 use protocol::frame::Frame;
-use protocol::handshake::{HandshakeError, HANDSHAKE_TIMEOUT};
 use protocol::message::{
     reason, AuthFail, AuthOk, Challenge, DeviceInfo, Disconnect, DisconnectReason, Hello,
 };
@@ -281,12 +278,6 @@ pub fn should_stop_reconnecting(d: &Disconnect) -> bool {
     matches!(d.reason, DisconnectReason::Superseded)
 }
 
-/// 握手超时时长（§3）。node 侧与 Hub 侧用同一个常量——
-/// 两边各自立一个值就会出现「Hub 以为还早、node 已经走了」。
-pub fn handshake_timeout() -> Duration {
-    HANDSHAKE_TIMEOUT
-}
-
 /// 发一帧（JSON 文本）。
 async fn send_frame(
     socket: &mut tokio_tungstenite::WebSocketStream<
@@ -368,15 +359,6 @@ async fn read_frame_of(
         });
     }
     Ok(Some(frame))
-}
-
-/// 握手错误 → 日志短语（不含敏感信息）。
-pub fn handshake_error_phrase(e: &HandshakeError) -> String {
-    match e {
-        HandshakeError::InvalidHello(f) => format!("invalid hello field: {f}"),
-        HandshakeError::InvalidVersion(v) => format!("invalid protocol version: {v}"),
-        _ => "handshake rejected".to_string(),
-    }
 }
 
 #[cfg(test)]
@@ -476,14 +458,6 @@ mod tests {
     }
 
     #[test]
-    fn handshake_timeout_matches_the_hub_side_constant() {
-        // node 与 Hub 必须用同一个超时值，否则会出现
-        // 「Hub 以为还早、node 已经走了」的竞态
-        assert_eq!(handshake_timeout(), HANDSHAKE_TIMEOUT);
-        assert_eq!(handshake_timeout(), Duration::from_secs(10));
-    }
-
-    #[test]
     fn device_info_and_hello_serialize_without_private_key() {
         // 约束 13：hello / device_info 里绝不出现私钥材料
         let kp = KeyPair::generate();
@@ -565,19 +539,6 @@ mod tests {
                 !KeyPair::verify(&kp.public_key_bytes(), &bad, &good),
                 "signature must cover every field of the canonical encoding"
             );
-        }
-    }
-
-    #[test]
-    fn handshake_error_phrase_hides_secrets() {
-        assert!(handshake_error_phrase(&HandshakeError::InvalidHello("arch")).contains("arch"));
-        assert!(handshake_error_phrase(&HandshakeError::InvalidVersion(0)).contains("0"));
-        for e in [
-            HandshakeError::MalformedAuth("x"),
-            HandshakeError::PublicKeyOnReconnect,
-            HandshakeError::BadSignature,
-        ] {
-            assert_eq!(handshake_error_phrase(&e), "handshake rejected");
         }
     }
 

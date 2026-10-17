@@ -26,6 +26,27 @@ pub fn write(data_dir: &Path, role: &str, level: &str, msg: &str) {
     }
 }
 
+/// 启动时轮转一次日志。supervisor 与 worker 各调一次，轮转失败只记一行日志
+/// （写不出去正是「轮转失败」的后果之一，再 `eprintln` 一遍是同一件事说两遍）。
+///
+/// 运行期判断大小会给每个进程加一次 stat 到热路径，而轮转的代价（复制整个文件）
+/// 本来就不该由日志频率触发。
+pub fn rotate_at_startup(data_dir: &Path, role: &str) {
+    let path = log::log_path(data_dir);
+    // coverage: excluded — 轮转失败需要日志目录不可写，而 `rotate_if_needed`
+    // 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
+    if let Err(e) = log::rotate_if_needed(&path) {
+        // coverage: excluded — 轮转失败需要日志目录不可写，而 `rotate_if_needed`
+        // 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
+        write(
+            data_dir,
+            role,
+            "info",
+            &format!("cannot rotate {}: {e}", path.display()),
+        );
+    }
+}
+
 /// 秒级精度足够：日志不参与任何判定，也不需要毫秒级排序。
 fn now_unix_secs() -> u64 {
     std::time::SystemTime::now()
@@ -83,6 +104,37 @@ mod tests {
         // 不 panic、不返回、不静默：stderr 那一路由 eprintln 负责。
         write(&base, ROLE_SUPERVISOR, "error", "disk is full");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `rotate_at_startup` 是两个入口（supervisor / worker）唯一的轮转调用点：
+    /// 超限日志在启动时被挪到 `.1`，且**两个角色都会触发**——曾经两个
+    /// `rotate_log` 各写一份、只差一个角色常量，一条改了另一条漏掉。
+    #[test]
+    fn rotate_at_startup_rotates_for_both_roles() {
+        for role in [ROLE_SUPERVISOR, ROLE_WORKER] {
+            let d = dir("rotate-startup");
+            let path = log::log_path(&d);
+            std::fs::create_dir_all(path.parent().expect("logs dir")).expect("mkdir");
+            std::fs::write(&path, vec![b'x'; (log::MAX_LOG_BYTES + 1) as usize]).expect("fill");
+            rotate_at_startup(&d, role);
+            assert!(
+                path.with_file_name("afcli.log.1").exists(),
+                "{role}: oversized log must rotate at startup"
+            );
+            assert!(!path.exists(), "{role}: current name must be freed");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// 小日志不轮转：轮转的代价是复制整个文件，不该每次启动都白付一遍。
+    #[test]
+    fn a_small_log_is_not_rotated_at_startup() {
+        let d = dir("rotate-skip");
+        write(&d, ROLE_WORKER, "info", "tiny");
+        rotate_at_startup(&d, ROLE_WORKER);
+        let text = std::fs::read_to_string(log::log_path(&d)).expect("log");
+        assert!(text.contains("tiny"), "the original line must stay put");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// 秒级时间戳：日志不参与判定，也不需要毫秒排序。

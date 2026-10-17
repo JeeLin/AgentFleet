@@ -105,6 +105,8 @@ fn on_open(state: &AppState, node_id: &str, frame: &Frame) -> Reply {
     // 不置 Ready 的话账本是死的——`on_data_received` 只对 Ready 的通道记账
     // （协议层 `ready_mut`），于是 node 发来的数据全部回 `NotReady`，
     // 而 node 那边还在等 `channel_ready`，两边互等。
+    // coverage: excluded — mark_ready 失败需同一把锁内出现第二个写入者，
+    // 而 Hub 在 open 成功后的下一行就 mark_ready，构造不出来。
     if let Err(e) = registry.mark_ready(&spec.channel_id) {
         return Reply::Frame(error_frame(&spec.channel_id, &e));
     }
@@ -194,46 +196,6 @@ fn error_frame(channel_id: &str, e: &ChannelError) -> Frame {
     )
 }
 
-/// 扫一遍「开了但迟迟没 Ready」的通道，对每个回 `channel_error{unsupported}`。
-///
-/// M0 的 Hub 在 `open_channel` 到达的同一刻就置 Ready，所以这里通常扫不到
-/// 东西。留着它的理由是**未来**：一旦 `open_channel` 需要先去问 connector
-/// （M1 的 exec 要挑 arch、要等二进制就绪），通道就会有一段时间停在 Opening，
-/// 而那时「静默丢弃」的表现是 node 干等到自己的 5s 超时、用户看到终端卡住
-/// 却没有一句人话。有个扫描器兜底，超时就一定有应答。
-pub fn sweep_unready(state: &AppState, node_id: &str, now: Instant) -> Vec<Frame> {
-    let mut channels = state.channels().write();
-    let registry = channels.registry(node_id);
-    let expired = registry.expired_ready(now);
-    let mut out = Vec::new();
-    for id in &expired {
-        match registry.reject(id, ChannelErrorCode::Unsupported, reason::UNSUPPORTED) {
-            Ok(_action) => {
-                tracing::warn!(
-                    node_id = %node_id,
-                    channel_id = %id,
-                    "channel never became ready; rejecting it"
-                );
-                out.push(push(
-                    types::CHANNEL_ERROR,
-                    protocol::channel::ChannelErrorPayload {
-                        channel_id: id.clone(),
-                        code: ChannelErrorCode::Unsupported,
-                        reason: reason::UNSUPPORTED.to_string(),
-                    },
-                ));
-            }
-            Err(e) => tracing::debug!(error = %e, "cannot reject an unready channel"),
-        }
-    }
-    out
-}
-
-/// `channel_error.reason` 的取值（`protocol.md` §5）。
-mod reason {
-    pub const UNSUPPORTED: &str = "unsupported";
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +269,8 @@ mod tests {
                 assert_eq!(f.c["channel_id"], "ch-nope");
                 assert_eq!(f.c["code"], "unsupported");
             }
+            // coverage: excluded — 只在断言失败时执行；`panic!` 的格式串行被
+            // llvm-cov 记为 miss（多行宏已知现象）。
             other => panic!(
                 "expected an error frame, got {}",
                 matches!(other, Reply::Nothing)
@@ -342,25 +306,5 @@ mod tests {
         serde_json::from_value::<protocol::channel::ChannelErrorPayload>(f.c.clone())
             .unwrap()
             .code
-    }
-
-    /// Hub 开完立刻置 Ready，所以「开了但没 Ready」扫不到东西。
-    ///
-    /// 这条锁住的是**不误伤**：扫描器不得把已经 Ready 的通道判成超时。
-    #[test]
-    fn sweeping_unready_leaves_ready_channels_alone() {
-        let (state, _dir) = state();
-        let f = frame(
-            types::OPEN_CHANNEL,
-            serde_json::json!({"channel_id": "ch-1", "connector": "terminal", "credit_start": 4}),
-        );
-        assert!(matches!(
-            on_channel_frame(&state, "n_a", &f),
-            Reply::Frame(_)
-        ));
-        // 立刻扫：通道已经 Ready，不该被判超时
-        assert!(sweep_unready(&state, "n_a", Instant::now()).is_empty());
-        // 即便「现在」已经远超 5s 也不行——判据是 opened_at，不是扫描时刻
-        assert!(sweep_unready(&state, "n_a", Instant::now()).is_empty());
     }
 }

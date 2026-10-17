@@ -105,27 +105,10 @@ impl Reports {
         }
     }
 
-    /// 连接断开时清掉：内存上报必须与「当前是否有连接」同生命周期，
-    /// 否则断线设备仍会拿着断线前的负载被路由到。
-    pub fn forget(&self, node_id: &str) {
-        if let Ok(mut m) = self.0.write() {
-            m.remove(node_id);
-        }
-        // coverage: excluded — 同 record。
-    }
-
-    /// 当前注册过的 node 数量。
-    pub fn len(&self) -> usize {
-        match self.0.read() {
-            Ok(m) => m.len(),
-            // coverage: excluded — 同 record。
-            Err(_) => 0,
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
+    // **故意没有 `forget`**：内存上报必须活过连接断开，否则断线设备在
+    // 心跳还没超时的窗口里会被判成「没有上报」，而那正是
+    // `Presence::Reconnecting` 存在的理由（`ws.rs` 的断开处理器也不清它）。
+    // 判离线只认心跳年龄（`OFFLINE_AFTER`），不需要断开时主动删。
 }
 
 /// 判在线状态。`connected` 是「WS 现在是否连着」，与心跳新鲜度**分开看**。
@@ -255,6 +238,9 @@ pub fn timed_out(reports: &Reports, now: Instant) -> Vec<String> {
     };
     // 排序让调用方落库顺序稳定：同一批超时的设备每次以同样顺序写，
     // 测试断言与日志比对才可复现。
+    //
+    // 与 `presence` 不同的是**排序不依赖内容**——调用方（`sweep`）拿到的
+    // 就是落库顺序，同一批设备两次扫描的 SQL 序列必须逐字相同。
     ids.sort();
     ids
 }
@@ -303,16 +289,17 @@ mod tests {
         r.record("n_1", report(now));
         let got = r.get("n_1").expect("must be present");
         assert_eq!(got.age(now), Duration::ZERO, "second report must win");
-        assert_eq!(r.len(), 1);
     }
 
+    /// 上报**活过连接断开**：断开那一刻不清它，重连中的设备才拿得到
+    /// `Presence::Reconnecting` 而不是「没有上报 → Offline」。
     #[test]
-    fn forget_drops_the_entry() {
+    fn a_report_survives_the_absence_of_a_live_socket() {
         let r = Reports::new();
-        r.record("n_1", report(Instant::now()));
-        r.forget("n_1");
-        assert!(r.get("n_1").is_none());
-        assert!(r.is_empty());
+        let now = Instant::now();
+        r.record("n_1", report(now));
+        // 没有任何 forget：presence 的入参 `connected` 由调用方给
+        assert_eq!(presence(&r, "n_1", false, now), Presence::Reconnecting);
     }
 
     #[test]

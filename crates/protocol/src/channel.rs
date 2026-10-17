@@ -206,10 +206,7 @@ impl Channel {
         self.credit
     }
 
-    pub fn opened_at(&self) -> Instant {
-        self.opened_at
-    }
-
+    /// 是否已 `channel_ready`。
     pub fn is_ready(&self) -> bool {
         self.state == ChannelState::Ready
     }
@@ -326,17 +323,6 @@ impl ChannelRegistry {
         Ok(())
     }
 
-    /// 主动关通道：置终态并回 `close_channel`。**幂等**——网络重放下多回
-    /// 一帧 `close_channel` 无害，终态也不会回退。
-    pub fn close(&mut self, channel_id: &str, reason: &str) -> Result<ChannelAction, ChannelError> {
-        let ch = self.channels_mut(channel_id)?;
-        ch.state = ChannelState::Closed;
-        Ok(ChannelAction::ReplyClose {
-            channel_id: ch.id.clone(),
-            reason: reason.to_string(),
-        })
-    }
-
     /// 被动收 `close_channel`：只置终态，**不回帧**。
     pub fn mark_closed(&mut self, channel_id: &str) -> Result<(), ChannelError> {
         let ch = self.channels_mut(channel_id)?;
@@ -372,6 +358,10 @@ impl ChannelRegistry {
     }
 
     /// 所有已超时的 `Opening` 通道，**按 `channel_id` 排序**保证输出稳定。
+    ///
+    /// M0 的 Hub 在 `open_channel` 到达的同一刻就置 Ready，所以这条恒返回空：
+    /// 它是 `reject` 的兜底调用点，M1 引入 connector 协商（`open_channel` 要先
+    /// 问 connector）之后才会有「开了没 Ready」的通道可扫。
     pub fn expired_ready(&self, now: Instant) -> Vec<String> {
         let mut ids: Vec<String> = self
             .channels
@@ -381,17 +371,6 @@ impl ChannelRegistry {
             .collect();
         ids.sort();
         ids
-    }
-
-    /// 清掉终态通道，返回清掉的数量。
-    ///
-    /// 必须能被调用：`channel_id` 由对端给，一个只开不关的对端会让这张表
-    /// 无界增长，而它长在常驻的 Hub 进程里（§6.1 的 OOM 论证）。
-    pub fn purge_closed(&mut self) -> usize {
-        let before = self.channels.len();
-        self.channels
-            .retain(|_, ch| ch.state != ChannelState::Closed);
-        before - self.channels.len()
     }
 
     pub fn get(&self, channel_id: &str) -> Option<&Channel> {
@@ -418,13 +397,6 @@ impl ChannelRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.channels.is_empty()
-    }
-
-    /// 全部 `channel_id`，排序后返回。
-    pub fn ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.channels.keys().cloned().collect();
-        ids.sort();
-        ids
     }
 
     /// 取可变引用，含终态。
@@ -487,12 +459,10 @@ mod tests {
         assert_eq!(ch.connector(), "terminal");
         assert_eq!(ch.state(), ChannelState::Opening);
         assert_eq!(ch.credit(), CREDIT_START);
-        assert_eq!(ch.opened_at(), t);
         assert!(!ch.is_ready());
 
         reg.mark_ready("c1").unwrap();
         assert!(reg.get("c1").unwrap().is_ready());
-        assert_eq!(reg.ids(), vec!["c1".to_string()]);
     }
 
     #[test]
@@ -682,28 +652,6 @@ mod tests {
     }
 
     #[test]
-    fn close_returns_reply_close_and_is_idempotent() {
-        let mut reg = ready_registry("c1", "terminal", 1);
-        assert_eq!(
-            reg.close("c1", "session ended").unwrap(),
-            ChannelAction::ReplyClose {
-                channel_id: "c1".into(),
-                reason: "session ended".into()
-            }
-        );
-        assert_eq!(reg.state("c1"), Some(ChannelState::Closed));
-        // 重复 close：终态不回退、不报错
-        assert!(matches!(
-            reg.close("c1", "again").unwrap(),
-            ChannelAction::ReplyClose { .. }
-        ));
-        assert!(matches!(
-            reg.close("nope", "x"),
-            Err(ChannelError::UnknownChannel(_))
-        ));
-    }
-
-    #[test]
     fn mark_closed_is_silent_and_idempotent() {
         let mut reg = ready_registry("c1", "terminal", 1);
         reg.mark_closed("c1").unwrap();
@@ -780,21 +728,58 @@ mod tests {
         );
     }
 
+    /// 状态机对「超时判定只看 `Opening`」的另一个推论：Ready 通道**永远不会**
+    /// 出现在 `expired_ready` 里，无论过多久。两条混在一起会让一次慢 connector
+    /// 的重连把一条已经就绪的通道掐断。
     #[test]
-    fn purge_closed_drops_terminal_channels() {
+    fn a_ready_channel_is_never_expired() {
         let t = t0();
         let mut reg = ChannelRegistry::new();
-        reg.open("c1", "terminal", 1, t).unwrap();
-        reg.mark_closed("c1").unwrap();
-        assert_eq!(reg.purge_closed(), 1);
-        assert!(reg.get("c1").is_none());
-        assert_eq!(reg.credit("c1"), None);
-        assert_eq!(reg.connector("c1"), None);
+        reg.open("c1", "terminal", CREDIT_START, t).unwrap();
+        assert!(reg.expired_ready(t).is_empty());
 
-        reg.open("c2", "files", 1, t).unwrap();
-        assert_eq!(reg.purge_closed(), 0);
-        assert_eq!(reg.ids(), vec!["c2".to_string()]);
-        assert!(!reg.is_empty());
+        reg.mark_ready("c1").unwrap();
+        assert!(reg
+            .expired_ready(t + READY_TIMEOUT + Duration::from_secs(86_400))
+            .is_empty());
+    }
+
+    /// 重开一个**已经 Ready 过**的 `channel_id` 会把它打回 `Opening`：
+    /// §6 末条要求每次 `open_channel` 都重置信用，状态同理——
+    /// 否则 Hub 侧会拿着一份陈旧的 `Ready` 去路由数据。
+    #[test]
+    fn reopening_a_ready_channel_puts_it_back_into_opening() {
+        let t = t0();
+        let mut reg = ready_registry("c1", "terminal", 4);
+        assert!(reg.expired_ready(t).is_empty());
+
+        reg.open("c1", "files", CREDIT_START, t).unwrap();
+        assert_eq!(reg.state("c1"), Some(ChannelState::Opening));
+        assert_eq!(reg.credit("c1"), Some(CREDIT_START));
+        assert_eq!(reg.connector("c1"), Some("files"));
+        // 回到 Opening 就重新开始算 5s：刚才那份 Ready 不能让它一开局就超时
+        assert!(reg.expired_ready(t).is_empty());
+        assert_eq!(reg.expired_ready(t + READY_TIMEOUT), vec!["c1".to_string()]);
+    }
+
+    /// 数据面在 `Opening` 期间必须**一条都收不到**（§5：先 `channel_ready`）。
+    ///
+    /// 这条与「信用耗尽 → Suspend」方向相反：那边是 Ready 但没额度，
+    /// 这里是额度满着但还没 Ready。两者混为一谈会让未就绪的 connector
+    /// 直接开始吐数据。
+    #[test]
+    fn an_opening_channel_carries_data_in_neither_direction() {
+        let mut reg = ChannelRegistry::new();
+        reg.open("c1", "terminal", 0, t0()).unwrap();
+        assert!(matches!(reg.on_data("c1"), Err(ChannelError::NotReady(_))));
+        assert!(matches!(
+            reg.on_data_received("c1"),
+            Err(ChannelError::NotReady(_))
+        ));
+
+        // 就绪之后同一个 channel_id 立刻恢复可用——不是被 open 拒掉了
+        reg.mark_ready("c1").unwrap();
+        assert!(reg.on_data("c1").is_ok());
     }
 
     #[test]
@@ -935,7 +920,7 @@ mod tests {
         let reg = ChannelRegistry::new();
         assert!(reg.is_empty());
         assert_eq!(reg.len(), 0);
-        assert!(reg.ids().is_empty());
+        assert!(reg.is_empty());
         assert_eq!(reg.state("nope"), None);
         assert_eq!(reg.credit("nope"), None);
         assert_eq!(reg.connector("nope"), None);

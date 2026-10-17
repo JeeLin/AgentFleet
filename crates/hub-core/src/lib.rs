@@ -13,11 +13,11 @@ pub mod reports;
 pub mod session;
 
 pub use auth::{HubAuth, SetupToken};
-pub use channels::{HubChannels, OpenSpec};
+pub use channels::HubChannels;
 pub use connections::{ConnHandle, ConnectionRegistry};
 pub use error::CoreError;
 pub use identity::{Fingerprint, KeyPair};
-pub use limits::{ReadLimiter, WriteQueue};
+pub use limits::ReadLimiter;
 pub use registry::Registry;
 pub use reports::{
     merge_into_stored, presence, report_from_heartbeat, Presence, Report, Reports, OFFLINE_AFTER,

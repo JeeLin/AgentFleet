@@ -20,251 +20,70 @@
     clippy::indexing_slicing
 )]
 
-// 测试代码豁免生产级 panic 禁令：测试里 unwrap 失败就是要立刻炸，
-// 而 panic 消息比 match 分支更能说明哪一行、哪个值不对。
-// let_underscore_must_use / indexing_slicing 同理：测试里故意 `let _ =`
-// 丢弃一个错误来验证「失败不影响状态」，按索引取值也是常规写法。
-use std::net::SocketAddr;
+mod common;
+
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use common::{
+    break_device_insert, break_device_lookup, break_device_writes, break_secret_table, device_info,
+    dial, insert_legacy_device, next_frame, send_text, wait_until, Hub, Ws, HELLO,
+};
 use tokio::io::AsyncWriteExt as _;
 
 use futures_util::{SinkExt, StreamExt};
-use hub_core::auth::{AuthParams, LoginRateLimiter};
 use hub_server::AppState;
 use identity::KeyPair;
 use node_core::conn::{connect_once, ConnOutcome};
 use node_core::identity::Identity;
-use protocol::message::DeviceInfo;
-use tokio::net::TcpListener;
-use tokio::sync::oneshot;
 use tower::ServiceExt;
 
-/// 给测试进程装一个 `tracing` subscriber。
+/// 设备信息（enroll 载荷的 `device_info`）。
+fn info() -> serde_json::Value {
+    serde_json::json!({
+        "name": "pi", "os": "linux", "arch": "aarch64",
+        "hostname": "testhost", "node_version": "0.1.0",
+    })
+}
+
+/// 发一帧非文本帧（ping / pong / 二进制），用来打「帧种类」这一关。
+async fn send_raw(ws: &mut Ws, msg: tokio_tungstenite::tungstenite::Message) {
+    ws.send(msg).await.unwrap();
+}
+
+/// 故障注入：握手期**任何**一帧回程都发不出去（触发 socket 上限）。
 ///
-/// **不是为了看日志，而是为了覆盖 `tracing::info!` 里的字段表达式**：
-/// 没有 subscriber 时 `tracing` 的 dispatch 判否就短路，`conn_id = %conn_id`
-/// 与 `elapsed_ms = started.elapsed().as_millis()` 这些行**根本不会执行**——
-/// llvm-cov 把它们记成未覆盖。装上 sink writer 后它们真的会跑。
-///
-/// 全局只能装一次，用 `Once` 保证；多个测试并发调用是安全的。
-fn install_subscriber() {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
-            .with_writer(std::io::sink)
-            .init();
-    });
-}
-
-fn fast_params() -> AuthParams {
-    AuthParams {
-        m_cost: 8192,
-        t_cost: 1,
-        p_cost: 1,
-    }
-}
-
-fn device_info() -> DeviceInfo {
-    DeviceInfo {
-        name: "test-node".into(),
-        os: "linux".into(),
-        arch: "aarch64".into(),
-        hostname: "testhost".into(),
-        node_version: "0.1.0".into(),
-    }
-}
-
-/// 起一个真 listener 的 Hub，返回地址与关闭句柄。
-struct Hub {
-    addr: SocketAddr,
-    state: AppState,
-    /// 持有 `tempdir`，确保它在 Hub 存活期间不被删除（删了 DB 文件就废了）。
-    _dir: tempfile::TempDir,
-    shutdown: Option<oneshot::Sender<()>>,
-}
-
-impl Hub {
-    /// 未初始化模式（无密码）——`/ws` 仍应能 upgrade（§3.1：握手才拒 enroll）。
-    async fn uninitialized() -> Self {
-        Self::boot(false).await
-    }
-
-    /// 正常模式（已设密码）。
-    async fn initialized() -> Self {
-        Self::boot(true).await
-    }
-
-    async fn boot(with_password: bool) -> Self {
-        install_subscriber();
-        let dir = tempfile::tempdir().unwrap();
-        let pool = hub_storage::db::open_in(dir.path()).unwrap().1;
-        let state = AppState::bootstrap_with(
-            pool,
-            dir.path(),
-            fast_params(),
-            Duration::from_millis(200),
-            LoginRateLimiter::new(10, 60),
-        )
-        .unwrap();
-        if with_password {
-            state
-                .auth()
-                .setup_password("correct horse battery")
-                .unwrap();
-        }
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (tx, rx) = oneshot::channel::<()>();
-        let app = hub_server::build_app(state.clone());
-        let task = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
+/// 用 `SO_SNDBUF` 把发送缓冲压到内核下限，再让对端握手期间既不发数据、
+/// 也不读任何东西：内核缓冲立刻填满，Hub 的 `send` 就会拿到
+/// `WouldBlock`/`Io` 错误。这覆盖的是「帧发不出去」这条真实存在的路
+/// （对端在握手中途消失、或链路拥塞），而不是构造一个假 socket。
+async fn squeeze_send_buffer(ws: &mut Ws) {
+    let stream: &mut tokio::net::TcpStream = match ws.get_mut() {
+        tokio_tungstenite::MaybeTlsStream::Plain(s) => s,
+        other => panic!("the url is plain ws://, got {other:?}"),
+    };
+    let fd = std::os::fd::AsRawFd::as_raw_fd(stream);
+    let min: libc::c_int = 1;
+    let size = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    assert_eq!(
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                std::ptr::from_ref(&min).cast(),
+                size,
             )
-            .with_graceful_shutdown(async {
-                let _ = rx.await;
-            })
-            .await
-        });
-        // 保留 join handle 的任务 alive：task 被 drop 会让 serve 提前结束
-        std::mem::forget(task);
-        Self {
-            addr,
-            state,
-            _dir: dir,
-            shutdown: Some(tx),
-        }
-    }
-
-    fn ws_url(&self) -> String {
-        format!("ws://{}/ws", self.addr)
-    }
-
-    /// 在本 Hub 的数据库里直接塞一行设备（不经过 enroll 握手）。
-    ///
-    /// 用它构造「库里有这行、但行里没有公钥」的重连路径：正常 enroll 总会
-    /// 顺手把公钥写进 `capabilities`，而「设备早于该字段存在」的历史数据
-    /// 造不出别的方式。
-    fn insert_device(&self, id: &str) {
-        let pool = hub_storage::db::open_in(self.state.data_dir()).unwrap().1;
-        let conn = pool.get().unwrap();
-        conn.execute(
-            "INSERT INTO device (id, name, key_fingerprint, enrolled_at, status, os, arch, hostname, node_version)
-             VALUES (?1, 'legacy', ?2, 'unix:0', 'offline', 'linux', 'aarch64', 'h', '0.1.0')",
-            [id, &format!("fp-{id}")],
-        )
-        .unwrap();
-    }
-
-    /// 故障注入：让 `device` 表的 **UPDATE 一律失败**。
-    ///
-    /// 用 `BEFORE UPDATE` 触发器 + `RAISE(ABORT)` 而不是删表：删表会让
-    /// 「读也失败」，于是同一个用例只能覆盖读错误路径；而这里要的正是
-    /// **读成功、写失败**——`set_public_key` / `set_gen` 只在读得到行、
-    /// 写不进去时才报 Err（那两条 warn 分支只在这种情况下可达）。
-    /// `RAISE(ABORT)` 只回滚本次语句，不影响连接，所以 Hub 侧继续可用。
-    fn break_device_writes(&self) {
-        let pool = hub_storage::db::open_in(self.state.data_dir()).unwrap().1;
-        pool.get()
-            .unwrap()
-            .execute_batch(
-                "CREATE TRIGGER boom_update BEFORE UPDATE ON device
-                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;",
-            )
-            .unwrap();
-    }
-
-    /// 故障注入：让**查询设备**这一步直接报错（表还在，SELECT 失败）。
-    ///
-    /// 对应 Hub 侧「查设备失败就当身份不符、绝不猜」的那条安全边界（§3）。
-    ///
-    /// **把表改名而不是 `DROP TABLE`**：DROP 后 Hub 的连接池会命中一个
-    /// 「schema 已变更但语句已缓存」的中间态，表现为 hello 阶段就报
-    /// `handshake rejected`，压根走不到重连分支。改名同样让 `SELECT` 报
-    /// `no such table`，而语句缓存与表名一致、行为稳定可复现。
-    fn break_device_lookup(&self) {
-        let pool = hub_storage::db::open_in(self.state.data_dir()).unwrap().1;
-        pool.get()
-            .unwrap()
-            .execute_batch("ALTER TABLE device RENAME TO device_moved")
-            .unwrap();
-    }
-
-    /// 故障注入：让「Hub 是否已初始化」这个问题本身**读不出答案**。
-    ///
-    /// `is_initialized` 读的是 `secret` 表，所以要单独破坏 `secret`
-    /// （`break_device_lookup` 动的是另一张表）。对应 `hub_is_initialized`
-    /// 的取值规则：**读不出来按「未初始化」处理**——宁可拒绝 enroll，
-    /// 也不能在「不知道」的状态下放行（§3.1）。
-    fn break_secret_table(&self) {
-        let pool = hub_storage::db::open_in(self.state.data_dir()).unwrap().1;
-        pool.get()
-            .unwrap()
-            .execute_batch("DROP TABLE secret")
-            .unwrap();
-    }
-
-    /// 故障注入：**新设备**的 INSERT 失败（读仍正常）。
-    ///
-    /// 对应 `Registry::enroll` 把 SQLite 错误往上抛的那条路：Hub 必须回
-    /// `fingerprint_race_retry` 而不是 panic、也不是把设备「先记着以后再说」。
-    fn break_device_insert(&self) {
-        let pool = hub_storage::db::open_in(self.state.data_dir()).unwrap().1;
-        pool.get()
-            .unwrap()
-            .execute_batch(
-                "CREATE TRIGGER boom_insert BEFORE INSERT ON device
-                 BEGIN SELECT RAISE(ABORT, 'injected insert failure'); END;",
-            )
-            .unwrap();
-    }
-
-    /// 故障注入：握手期**任何**一帧回程都发不出去（触发 socket 上限）。
-    ///
-    /// 用 `SO_SNDBUF` 把发送缓冲压到内核下限，再让对端握手期间既不发数据、
-    /// 也不读任何东西：内核缓冲立刻填满，Hub 的 `send` 就会拿到
-    /// `WouldBlock`/`Io` 错误。这覆盖的是「帧发不出去」这条真实存在的路
-    /// （对端在握手中途消失、或链路拥塞），而不是构造一个假 socket。
-    async fn squeeze_send_buffer(&self, ws: &mut Ws) {
-        let stream: &mut tokio::net::TcpStream = match ws.get_mut() {
-            tokio_tungstenite::MaybeTlsStream::Plain(s) => s,
-            other => panic!("the url is plain ws://, got {other:?}"),
-        };
-        let fd = std::os::fd::AsRawFd::as_raw_fd(stream);
-        let min: libc::c_int = 1;
-        let size = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-        assert_eq!(
-            unsafe {
-                libc::setsockopt(
-                    fd,
-                    libc::SOL_SOCKET,
-                    libc::SO_SNDBUF,
-                    std::ptr::from_ref(&min).cast(),
-                    size,
-                )
-            },
-            0,
-            "SO_SNDBUF must be settable for this fixture to mean anything"
-        );
-        // 发送缓冲要**真的**被填满：auth_ok 只有一百来字节，Linux 会把
-        // SO_SNDBUF 翻倍到最小值（约 4 KiB）并立刻发出去，所以先把
-        // 缓冲缩到内核下限之后还要再灌一票数据把它占满。
-        let filler = vec![b'x'; 256 * 1024];
-        let _ = stream.write_all(&filler).await;
-    }
-}
-
-impl Drop for Hub {
-    fn drop(&mut self) {
-        if let Some(tx) = self.shutdown.take() {
-            let _ = tx.send(());
-        }
-    }
+        },
+        0,
+        "SO_SNDBUF must be settable for this fixture to mean anything"
+    );
+    // 发送缓冲要**真的**被填满：auth_ok 只有一百来字节，Linux 会把
+    // SO_SNDBUF 翻倍到最小值（约 4 KiB）并立刻发出去，所以先把
+    // 缓冲缩到内核下限之后还要再灌一票数据把它占满。
+    let filler = vec![b'x'; 256 * 1024];
+    let _ = stream.write_all(&filler).await;
 }
 
 /// 标准①：`afcli run` 启动后 5s 内 Hub 日志出现 `ws connected`，
@@ -276,7 +95,7 @@ impl Drop for Hub {
 /// 在进程级做（那里真的看得到 stderr）。
 #[tokio::test]
 async fn ws_upgrade_returns_challenge_as_first_frame() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let kp = KeyPair::generate();
 
     // 裸 tungstenite 只做到「upgrade + 收 challenge」，不走完整握手：
@@ -345,7 +164,7 @@ async fn ws_upgrades_without_any_cookie_in_both_modes() {
     drop(hub);
 
     // 正常模式（已设密码）
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let (mut sock, resp) = tokio_tungstenite::connect_async(hub.ws_url())
         .await
         .unwrap();
@@ -378,7 +197,7 @@ async fn ws_upgrades_without_any_cookie_in_both_modes() {
 async fn ws_upgrade_with_origin_is_rejected_before_upgrade() {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let mut req = IntoClientRequest::into_client_request(hub.ws_url()).unwrap();
     req.headers_mut().insert(
         axum::http::header::ORIGIN,
@@ -400,7 +219,7 @@ async fn ws_upgrade_with_origin_is_rejected_before_upgrade() {
 /// 编译期断言 + schema 断言，比「跑一遍看没写进去」更强。
 #[tokio::test]
 async fn connection_registry_never_touches_the_database() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
 
     // 类型层面：ConnHandle 不含任何 socket / 句柄类字段
     let h = hub_core::ConnHandle {
@@ -453,7 +272,7 @@ async fn device_columns(state: &AppState) -> Vec<String> {
 /// 轮询到就算过（避免把实现细节的时间假设写进测试）。
 #[tokio::test]
 async fn registry_entry_is_cleared_after_disconnect() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let kp = KeyPair::generate();
 
     let est = connect_once(&hub.ws_url(), &kp, None, None, device_info())
@@ -499,7 +318,7 @@ async fn registry_entry_is_cleared_after_disconnect() {
 async fn superseded_outcome_stops_reconnecting() {
     // 真跑一次「两个连接同 node_id」：第二个 enroll 复用同一指纹，
     // 走 `AlreadyRegistered` 分支（§4.3 第二行）而不是被拒。
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let kp = KeyPair::generate();
 
     let first = connect_once(&hub.ws_url(), &kp, None, None, device_info())
@@ -547,7 +366,7 @@ async fn superseded_outcome_stops_reconnecting() {
 /// listening socket」——否则会算到兄弟测试的 listener，假性失败。
 #[tokio::test]
 async fn hub_listens_on_exactly_one_port() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let pid = std::process::id();
 
     // 只统计指向本 Hub 端口的 listening socket
@@ -626,7 +445,7 @@ fn fd_points_to(pid: u32, inode: &str) -> bool {
 /// 回填用 `node_core::identity::Identity::set_node_id`（子任务 2 的原子写）。
 #[tokio::test]
 async fn node_id_round_trips_through_identity_json() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let dir = tempfile::tempdir().unwrap();
     let mut id = Identity::load_or_create(dir.path()).unwrap();
 
@@ -730,70 +549,6 @@ async fn auth_payloads_have_no_slot_for_a_private_key() {
 // 真实节点那一侧的镜像路径在 `crates/node-core/tests/conn_paths.rs`
 // ——两端都得能扛住对端发疯，否则断在谁手里都查不出来。
 // ============================================================================
-
-type Ws =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-/// 一条合法的 `hello`（§2：帧信封 `v/seq/t/c`）。
-const HELLO: &str = r#"{"v":1,"seq":0,"t":"hello","c":{"client_version":"0.1.0","arch":"aarch64","os":"linux","features":[]}}"#;
-
-/// 设备信息（enroll 载荷的 `device_info`）。
-fn info() -> serde_json::Value {
-    serde_json::json!({
-        "name": "pi", "os": "linux", "arch": "aarch64",
-        "hostname": "testhost", "node_version": "0.1.0",
-    })
-}
-
-/// 连上 Hub：断言 101 之后把 socket 交给调用方驱动。
-///
-/// 每个用例自己决定「发什么、什么时候断」——这些失败路径的差别几乎全在
-/// 「什么时候不发」与「怎么收尾」。
-async fn dial(url: &str) -> Ws {
-    let (ws, resp) = tokio_tungstenite::connect_async(url).await.unwrap();
-    assert_eq!(resp.status(), 101u16, "must upgrade before anything else");
-    ws
-}
-
-/// 发一帧原始文本。**不保证是合法 JSON**——发坏载荷正是这些用例的目的。
-///
-/// 发送失败**不 panic**：这些负向用例里 Hub 关连接是**预期行为**（比如把
-/// 发送缓冲压满逼它回不了帧），此时 `BrokenPipe` 恰恰是待验证的现象本身。
-/// 真正的「连接已死」由后续的 `wait_closed` 断言，不在这里提前炸掉。
-async fn send_text(ws: &mut Ws, t: &str) {
-    let _ = ws
-        .send(tokio_tungstenite::tungstenite::Message::Text(t.into()))
-        .await;
-}
-
-/// 发一帧非文本帧（ping / pong / 二进制），用来打「帧种类」这一关。
-async fn send_raw(ws: &mut Ws, msg: tokio_tungstenite::tungstenite::Message) {
-    ws.send(msg).await.unwrap();
-}
-
-/// 读下一个**文本**帧，顺手跳过自动应答的 pong。
-///
-/// pong 是 Hub 对我们 ping 的自动应答（约束：ping 不打断协议流程），
-/// 所以它混在帧流里是正常的，读帧的用例必须容忍它。
-async fn next_text(ws: &mut Ws) -> String {
-    loop {
-        let msg = ws.next().await.expect("hub must send a frame").unwrap();
-        match msg {
-            tokio_tungstenite::tungstenite::Message::Text(t) => return t.to_string(),
-            tokio_tungstenite::tungstenite::Message::Pong(_)
-            | tokio_tungstenite::tungstenite::Message::Ping(_) => {
-                continue;
-            }
-            other => panic!("expected a text frame, got {other:?}"),
-        }
-    }
-}
-
-/// 读回一帧并解成 [`protocol::frame::Frame`]。
-async fn next_frame(ws: &mut Ws) -> protocol::frame::Frame {
-    let text = next_text(ws).await;
-    serde_json::from_str(&text).unwrap_or_else(|e| panic!("hub sent unparsable json: {text} ({e})"))
-}
 
 /// 发起握手，把 Hub 下发的 challenge nonce 交回调用方——后续帧的签名要用它。
 async fn challenge_nonce(ws: &mut Ws) -> String {
@@ -959,7 +714,7 @@ async fn expect_auth_fail(ws: &mut Ws, want: &str) {
 /// 不是 JSON 的文本帧 → 断开，不得当成 `hello` 处理。
 #[tokio::test]
 async fn a_frame_that_is_not_json_ends_the_handshake() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let mut ws = dial(&hub.ws_url()).await;
     send_text(&mut ws, "}{").await;
     wait_closed(&mut ws).await;
@@ -968,7 +723,7 @@ async fn a_frame_that_is_not_json_ends_the_handshake() {
 /// `hello` 载荷缺字段（这里缺 `arch`）→ 断开，**不发** challenge。
 #[tokio::test]
 async fn a_hello_with_a_broken_payload_ends_the_handshake() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let mut ws = dial(&hub.ws_url()).await;
     send_text(
         &mut ws,
@@ -981,7 +736,7 @@ async fn a_hello_with_a_broken_payload_ends_the_handshake() {
 /// 协议版本 0（`negotiate_version` 判非法）→ 断开。
 #[tokio::test]
 async fn a_hello_with_protocol_version_zero_ends_the_handshake() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let mut ws = dial(&hub.ws_url()).await;
     send_text(
         &mut ws,
@@ -994,7 +749,7 @@ async fn a_hello_with_protocol_version_zero_ends_the_handshake() {
 /// 帧种类不对（二进制）→ 断开：协议只用 JSON 文本（§2）。
 #[tokio::test]
 async fn a_binary_frame_ends_the_handshake() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let mut ws = dial(&hub.ws_url()).await;
     send_raw(
         &mut ws,
@@ -1007,7 +762,7 @@ async fn a_binary_frame_ends_the_handshake() {
 /// Close 帧 → 断开（对端自己走了，不是协议错误）。
 #[tokio::test]
 async fn a_close_frame_ends_the_handshake() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let mut ws = dial(&hub.ws_url()).await;
     send_raw(
         &mut ws,
@@ -1031,7 +786,7 @@ async fn a_close_frame_ends_the_handshake() {
 /// 握手期的 ping **不得打断流程**：axum 自动应答 pong，握手照常走到 challenge。
 #[tokio::test]
 async fn a_ping_during_the_handshake_is_answered_and_ignored() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let mut ws = dial(&hub.ws_url()).await;
     send_raw(
         &mut ws,
@@ -1049,7 +804,7 @@ async fn a_ping_during_the_handshake_is_answered_and_ignored() {
 /// 两端对协议的理解已经分叉，继续下去只会产生更难查的错（§2、§4）。
 #[tokio::test]
 async fn a_required_message_out_of_order_ends_the_handshake() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let mut ws = dial(&hub.ws_url()).await;
     send_text(
         &mut ws,
@@ -1066,7 +821,7 @@ async fn a_required_message_out_of_order_ends_the_handshake() {
 /// 「老 node + 新 Hub」就再也连不上了（约束 14 明确要保住这个组合）。
 #[tokio::test]
 async fn an_optional_message_before_hello_is_ignored() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let mut ws = dial(&hub.ws_url()).await;
     send_text(&mut ws, r#"{"v":1,"seq":0,"t":"hub_hello","c":{}}"#).await;
     let nonce = challenge_nonce(&mut ws).await;
@@ -1077,7 +832,7 @@ async fn an_optional_message_before_hello_is_ignored() {
 /// `hello` 的载荷畸形 → 断开。
 #[tokio::test]
 async fn a_malformed_auth_payload_ends_the_handshake() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let mut ws = dial(&hub.ws_url()).await;
     let _nonce = challenge_nonce(&mut ws).await;
     // enroll 形态缺 public_key / signature / device_info
@@ -1089,7 +844,7 @@ async fn a_malformed_auth_payload_ends_the_handshake() {
 /// 带公钥的重连正是想改绑指纹的接管动作，必须显式失败）。
 #[tokio::test]
 async fn a_public_key_on_reconnect_ends_the_handshake() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let mut ws = dial(&hub.ws_url()).await;
     let _nonce = challenge_nonce(&mut ws).await;
     send_text(
@@ -1113,7 +868,7 @@ async fn a_public_key_on_reconnect_ends_the_handshake() {
 /// enroll 的签名不过 → 回 `identity mismatch` 并断开。
 #[tokio::test]
 async fn an_enroll_with_a_bad_signature_is_rejected() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let mut ws = dial(&hub.ws_url()).await;
     let _nonce = challenge_nonce(&mut ws).await;
     send_enroll_auth(&mut ws, [0u8; 64]).await;
@@ -1126,7 +881,7 @@ async fn an_enroll_with_a_bad_signature_is_rejected() {
 /// 重连一个库里根本没有的 `node_id` → 回 `identity mismatch` 并断开。
 #[tokio::test]
 async fn a_reconnect_to_an_unknown_node_id_is_rejected() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let kp = KeyPair::generate();
     let mut ws = dial(&hub.ws_url()).await;
     send_reconnect_auth(&mut ws, "n_does_not_exist", &kp, false).await;
@@ -1141,8 +896,8 @@ async fn a_reconnect_to_an_unknown_node_id_is_rejected() {
 /// 「相信本次上传的公钥」，那等于任何人都能顶替这台设备（§3）。
 #[tokio::test]
 async fn a_reconnect_without_a_stored_public_key_is_rejected() {
-    let hub = Hub::initialized().await;
-    hub.insert_device("n_legacy");
+    let hub = Hub::boot().await;
+    insert_legacy_device(&hub, "n_legacy");
     let kp = KeyPair::generate();
     let mut ws = dial(&hub.ws_url()).await;
     send_reconnect_auth(&mut ws, "n_legacy", &kp, false).await;
@@ -1153,7 +908,7 @@ async fn a_reconnect_without_a_stored_public_key_is_rejected() {
 /// 重连的签名不过（库里公钥是另一把）→ 拒，且**不得改写**库内指纹。
 #[tokio::test]
 async fn a_reconnect_with_a_bad_signature_is_rejected() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let (_kp, node_id) = enroll_node(&hub).await;
     let mut ws = dial(&hub.ws_url()).await;
     // 用一把全新的钥匙签名：载荷合法、签名合法，验签必然不过
@@ -1170,7 +925,7 @@ async fn a_reconnect_with_a_bad_signature_is_rejected() {
 /// Web 上会一直显示这台设备在线，而它其实已经不在了（标准②）。
 #[tokio::test]
 async fn an_abrupt_drop_after_auth_ok_is_cleaned_up() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let kp = KeyPair::generate();
     let mut ws = dial(&hub.ws_url()).await;
     let nonce = challenge_nonce(&mut ws).await;
@@ -1252,7 +1007,7 @@ async fn an_abrupt_drop_after_auth_ok_is_cleaned_up() {
 /// 这一帧并继续读（约束 14 的前向兼容在业务帧上同样成立）。
 #[tokio::test]
 async fn an_unparsable_business_frame_does_not_end_the_connection() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let (kp, node_id) = enroll_node(&hub).await;
     let mut ws = dial(&hub.ws_url()).await;
     let nonce = challenge_nonce(&mut ws).await;
@@ -1282,11 +1037,14 @@ async fn an_unparsable_business_frame_does_not_end_the_connection() {
     drop(ws);
 }
 
-/// 业务帧里的 ping / 二进制 / Close 各自怎么走：
-/// ping 跳过、二进制跳过、Close 结束连接（§2 只收文本帧，但**不得因此崩掉**）。
+/// 业务帧里的 ping / Close 各自怎么走：ping 跳过、Close 结束连接。
+///
+/// ⚠️ **二进制不在这里**：`frame_text` 把二进制判成 Transport 错误（协议 §2
+/// 只用文本 JSON 帧），所以「握手后发二进制」的结果是连接结束，不是跳过。
+/// 放在这里断言「二进制被跳过」会锁住一个与协议相反的行为——它已经这么失败过一次。
 #[tokio::test]
-async fn ping_and_binary_are_skipped_but_close_ends_the_session() {
-    let hub = Hub::initialized().await;
+async fn a_ping_is_skipped_but_close_ends_the_session() {
+    let hub = Hub::boot().await;
     let (kp, node_id) = enroll_node(&hub).await;
     let mut ws = dial(&hub.ws_url()).await;
     let nonce = challenge_nonce(&mut ws).await;
@@ -1312,16 +1070,10 @@ async fn ping_and_binary_are_skipped_but_close_ends_the_session() {
         tokio_tungstenite::tungstenite::Message::Ping(Vec::new()),
     )
     .await;
-    send_raw(
-        &mut ws,
-        tokio_tungstenite::tungstenite::Message::Binary(vec![1, 2, 3]),
-    )
+    wait_until(Duration::from_secs(5), || {
+        hub.state.connections().get(&node_id).is_some()
+    })
     .await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(
-        hub.state.connections().get(&node_id).is_some(),
-        "ping and binary frames must not end the session"
-    );
 
     send_raw(
         &mut ws,
@@ -1340,11 +1092,113 @@ async fn ping_and_binary_are_skipped_but_close_ends_the_session() {
     }
 }
 
+/// 握手失败帧（`auth_fail`）发不出去 → 连接结束，且**不 panic**。
+///
+/// 覆盖 `send_best_effort` 的那条留痕分支：帧发不出去时 Hub 只记一行
+/// info，绝不让一个写死的 socket 把连接处理函数带崩（那会连带杀掉
+/// 同一进程里所有其他设备的连接）。
+#[tokio::test]
+async fn a_failure_frame_that_cannot_be_sent_only_leaves_a_trace() {
+    let hub = Hub::boot().await;
+    let mut ws = dial(&hub.ws_url()).await;
+    send_text(&mut ws, HELLO).await;
+    // challenge 很小，压缓冲之前已经发出；auth 之前把发送缓冲占满
+    assert_eq!(next_frame(&mut ws).await.msg_type, "challenge");
+    squeeze_send_buffer(&mut ws).await;
+    // 载荷畸形 → Hub 要回 auth_fail，而这一帧写不出去
+    send_text(
+        &mut ws,
+        r#"{"v":1,"seq":1,"t":"auth","c":{"signature":"!!!"}}"#,
+    )
+    .await;
+    wait_closed(&mut ws).await;
+
+    // Hub 进程没被这一条连接带崩
+    let (kp, node_id) = enroll_node(&hub).await;
+    wait_until(Duration::from_secs(5), || {
+        hub.state.connections().get(&node_id).is_some()
+    })
+    .await;
+    assert_eq!(kp.public_key_bytes().len(), 32, "sanity check");
+}
+
+/// 握手期**收不到回程帧**（发送缓冲压满）→ 连接结束，且不 panic。
+///
+/// 这里刻意不发 `hello`：Hub 在第一帧 `challenge` 上就写不出去，
+/// 于是 `handshake()` 的 `send_frame` 失败臂被真实触达（不是靠断言
+/// 「发了个不存在的类型」绕出来的）。同时证明 Hub 不因此崩：一条
+/// 半死不活的连接被扔掉，别的设备照常接入。
+#[tokio::test]
+async fn a_challenge_that_cannot_be_sent_ends_the_connection() {
+    let hub = Hub::boot().await;
+    let mut ws = dial(&hub.ws_url()).await;
+    squeeze_send_buffer(&mut ws).await;
+    send_text(&mut ws, HELLO).await;
+    wait_closed(&mut ws).await;
+
+    // 别的设备不受影响：Hub 进程本身还活着
+    let (kp, node_id) = enroll_node(&hub).await;
+    wait_until(Duration::from_secs(5), || {
+        hub.state.connections().get(&node_id).is_some()
+    })
+    .await;
+    assert_eq!(kp.public_key_bytes().len(), 32, "sanity check");
+}
+
+/// 业务期的 `open_channel` 真的会收到 `channel_ready` 回帧，且连接不断。
+///
+/// M0 的 Hub 侧**没有 connector 协商**（`on_open` 开完立刻置 Ready）：先回
+/// `channel_ready` 是让账本活起来的唯一办法，否则 node 发来的数据全部回
+/// `NotReady`、node 又在等 ready，两边互等成死锁。
+#[tokio::test]
+async fn a_business_open_channel_is_answered_with_channel_ready() {
+    let hub = Hub::boot().await;
+    let (kp, node_id) = enroll_node(&hub).await;
+    let mut ws = dial(&hub.ws_url()).await;
+    let nonce = challenge_nonce(&mut ws).await;
+    let sig = kp.sign(&identity::signature_message(1, "", 1, "auth", &nonce));
+    send_text(
+        &mut ws,
+        &serde_json::json!({
+            "v": 1, "seq": 1, "t": "auth",
+            "c": {
+                "public_key": identity::base64url(&kp.public_key_bytes()),
+                "signature": identity::base64url(&sig),
+                "device_info": info(),
+            },
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(next_frame(&mut ws).await.msg_type, "auth_ok");
+
+    send_text(
+        &mut ws,
+        r#"{"v":1,"seq":2,"t":"open_channel","c":{"channel_id":"ch-1","connector":"terminal"}}"#,
+    )
+    .await;
+    let reply = next_frame(&mut ws).await;
+    assert_eq!(reply.msg_type, "channel_ready", "M0 开完即就绪");
+    assert_eq!(reply.c["channel_id"], "ch-1");
+
+    // 就绪之后数据面才走得通（§5：先 ready 后 data）
+    send_text(
+        &mut ws,
+        r#"{"v":1,"seq":3,"t":"channel_data","c":{"channel_id":"ch-1","payload":"x"}}"#,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_until(Duration::from_secs(5), || {
+        hub.state.connections().get(&node_id).is_some()
+    })
+    .await;
+}
+
 /// 业务帧里的心跳被收到（此时**只是记一行**，落库是子任务 5），
 /// 且连接继续活着——本组的回归锁是「心跳不引发任何副作用」。
 #[tokio::test]
 async fn a_business_heartbeat_keeps_the_session_alive() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let (kp, node_id) = enroll_node(&hub).await;
     let mut ws = dial(&hub.ws_url()).await;
     let nonce = challenge_nonce(&mut ws).await;
@@ -1385,7 +1239,7 @@ async fn a_business_heartbeat_keeps_the_session_alive() {
 /// 是因为**自己的**超时判定而断开。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_silent_peer_is_cut_off_after_the_handshake_timeout() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let (mut ws, resp) = tokio_tungstenite::connect_async(hub.ws_url())
         .await
         .unwrap();
@@ -1417,7 +1271,7 @@ async fn a_silent_peer_is_cut_off_after_the_handshake_timeout() {
 /// 读这一帧时就把连接判死，然后立刻超时——此时失败帧必然无人接收。
 #[tokio::test(flavor = "multi_thread")]
 async fn the_timeout_frame_fails_to_deliver_when_the_peer_is_already_gone() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let (mut ws, resp) = tokio_tungstenite::connect_async(hub.ws_url())
         .await
         .unwrap();
@@ -1462,8 +1316,8 @@ async fn the_timeout_frame_fails_to_deliver_when_the_peer_is_already_gone() {
 /// 判成失败，设备会卡在一个用户根本无从修复的状态里。
 #[tokio::test]
 async fn enroll_survives_a_public_key_write_failure() {
-    let hub = Hub::initialized().await;
-    hub.break_device_writes();
+    let hub = Hub::boot().await;
+    break_device_writes(&hub);
 
     let (_kp, node_id) = enroll_node(&hub).await;
     assert!(
@@ -1486,8 +1340,8 @@ async fn enroll_survives_a_public_key_write_failure() {
 /// 而不是放宽任何身份校验。所以它同样只记 warn。
 #[tokio::test]
 async fn enroll_survives_a_gen_write_failure() {
-    let hub = Hub::initialized().await;
-    hub.break_device_writes();
+    let hub = Hub::boot().await;
+    break_device_writes(&hub);
     let (_kp, node_id) = enroll_node(&hub).await;
     let device = hub.state.registry().device(&node_id).unwrap().unwrap();
     assert_eq!(
@@ -1502,9 +1356,9 @@ async fn enroll_survives_a_gen_write_failure() {
 /// superseded」，而**验签已经过了**，此时断开反而会把一台合法设备拒之门外。
 #[tokio::test]
 async fn a_reconnect_survives_a_gen_write_failure() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let (kp, node_id) = enroll_node(&hub).await;
-    hub.break_device_writes();
+    break_device_writes(&hub);
 
     let mut ws = dial(&hub.ws_url()).await;
     send_reconnect_auth(&mut ws, &node_id, &kp, false).await;
@@ -1527,9 +1381,9 @@ async fn a_reconnect_survives_a_gen_write_failure() {
 /// 这里断言的是「宁可全断，不猜」。
 #[tokio::test]
 async fn a_reconnect_ends_when_the_device_cannot_be_looked_up() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let (kp, node_id) = enroll_node(&hub).await;
-    hub.break_device_lookup();
+    break_device_lookup(&hub);
 
     let mut ws = dial(&hub.ws_url()).await;
     send_reconnect_auth(&mut ws, &node_id, &kp, false).await;
@@ -1549,8 +1403,8 @@ async fn a_reconnect_ends_when_the_device_cannot_be_looked_up() {
 /// 故障期间放行，等于 Hub 在自己都不知道自己是什么状态时接纳新设备。
 #[tokio::test]
 async fn a_rejected_auth_is_rejected_when_the_init_state_cannot_be_read() {
-    let hub = Hub::initialized().await;
-    hub.break_secret_table();
+    let hub = Hub::boot().await;
+    break_secret_table(&hub);
 
     let mut ws = dial(&hub.ws_url()).await;
     let _nonce = challenge_nonce(&mut ws).await;
@@ -1567,7 +1421,7 @@ async fn a_rejected_auth_is_rejected_when_the_init_state_cannot_be_read() {
 /// 触发器是在空表上建的、对 INSERT 一样拦。
 #[tokio::test]
 async fn a_failed_enroll_write_is_reported_as_a_race_retry() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
 
     // 先正常 enroll 一个设备，证明触发器是「只在 INSERT 失败时拦」，
     // 而不是「在空表上把所有 INSERT 都拦」。
@@ -1593,7 +1447,7 @@ async fn a_failed_enroll_write_is_reported_as_a_race_retry() {
         drop(ws);
     }
 
-    hub.break_device_insert();
+    break_device_insert(&hub);
     let mut ws = dial(&hub.ws_url()).await;
     // 签名必须是**合法**的：坏签名会在验签阶段就拒成 `identity mismatch`，
     // 那样根本走不到 INSERT，这个用例什么也测不到。
@@ -1610,10 +1464,10 @@ async fn a_failed_enroll_write_is_reported_as_a_race_retry() {
 /// （`ws.rs` 把「发不出去」翻译成 `peer closed` 而非崩溃）。
 #[tokio::test]
 async fn a_handskake_frame_that_cannot_be_sent_ends_the_connection() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let mut ws = dial(&hub.ws_url()).await;
     // 在发 hello 之前先把发送缓冲占满，让 Hub 下发的 challenge 发不回去
-    hub.squeeze_send_buffer(&mut ws).await;
+    squeeze_send_buffer(&mut ws).await;
     send_text(&mut ws, HELLO).await;
     wait_closed(&mut ws).await;
 }
@@ -1631,7 +1485,7 @@ async fn a_handskake_frame_that_cannot_be_sent_ends_the_connection() {
 /// （对端还能读），但设备已经不会再发任何帧了，不摘表就是一条僵尸连接。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_half_closed_peer_is_dropped_from_the_registry() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let (kp, node_id) = enroll_node(&hub).await;
     let mut ws = dial(&hub.ws_url()).await;
     let nonce = challenge_nonce(&mut ws).await;
@@ -1724,7 +1578,7 @@ async fn wait_dropped(hub: &Hub, node_id: &str, what: &str) {
 /// 路完全没有回归锁。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reset_peer_during_the_handshake_is_answered_with_a_close() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let mut ws = dial(&hub.ws_url()).await;
     send_text(&mut ws, HELLO).await;
     assert_eq!(next_frame(&mut ws).await.msg_type, "challenge");
@@ -1741,7 +1595,7 @@ async fn a_reset_peer_during_the_handshake_is_answered_with_a_close() {
 /// 「对端还在线但不说话」，必须靠超时兜底。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stalled_peer_during_the_handshake_is_cut_off() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let (mut ws, resp) = tokio_tungstenite::connect_async(hub.ws_url())
         .await
         .unwrap();
@@ -1766,7 +1620,7 @@ async fn a_stalled_peer_during_the_handshake_is_cut_off() {
 /// 握手成功后对端发 RST → `relay` 走错误那条路返回，连接照常摘表。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reset_peer_after_auth_ok_is_dropped_from_the_registry() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let (kp, node_id) = enroll_node(&hub).await;
     let mut ws = dial(&hub.ws_url()).await;
     let nonce = challenge_nonce(&mut ws).await;
@@ -1803,7 +1657,7 @@ async fn a_reset_peer_after_auth_ok_is_dropped_from_the_registry() {
 /// `recv` 返回 `None`、循环自然结束。两条都要有回归锁。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_peer_that_drops_the_stream_after_auth_ok_is_cleaned_up() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let (kp, node_id) = enroll_node(&hub).await;
     let mut ws = dial(&hub.ws_url()).await;
     let nonce = challenge_nonce(&mut ws).await;
@@ -1849,12 +1703,12 @@ async fn a_peer_that_drops_the_stream_after_auth_ok_is_cleaned_up() {
 /// `auth_ok` 一旦发出去（哪怕 Hub 随后才失败）测试就失去确定性。
 #[tokio::test]
 async fn an_auth_ok_that_cannot_be_sent_ends_the_connection() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let mut ws = dial(&hub.ws_url()).await;
     send_text(&mut ws, HELLO).await;
     // 先把 challenge 拿到（它很小，压缓冲前发出），再占满缓冲。
     assert_eq!(next_frame(&mut ws).await.msg_type, "challenge");
-    hub.squeeze_send_buffer(&mut ws).await;
+    squeeze_send_buffer(&mut ws).await;
     send_text(&mut ws, "this frame cannot possibly reach hub").await;
     wait_closed(&mut ws).await;
 }
@@ -1866,11 +1720,11 @@ async fn an_auth_ok_that_cannot_be_sent_ends_the_connection() {
 /// `send_frame`（失败即断开）——两条路的错误处理不同，都要有锁。
 #[tokio::test]
 async fn a_failure_frame_that_cannot_be_sent_does_not_panic() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let mut ws = dial(&hub.ws_url()).await;
     send_text(&mut ws, HELLO).await;
     assert_eq!(next_frame(&mut ws).await.msg_type, "challenge");
-    hub.squeeze_send_buffer(&mut ws).await;
+    squeeze_send_buffer(&mut ws).await;
     // 坏签名 → Hub 要回 auth_fail，而回程已经堵死。
     send_enroll_auth(&mut ws, [0u8; 64]).await;
     wait_closed(&mut ws).await;
@@ -1884,7 +1738,7 @@ async fn a_failure_frame_that_cannot_be_sent_does_not_panic() {
 /// 这一条覆盖 `finish_ok` 里「auth_ok 发不出去 = 连接没有成立」那条。
 #[tokio::test]
 async fn an_auth_ok_that_cannot_be_delivered_does_not_establish_the_connection() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let kp = KeyPair::generate();
     let mut ws = dial(&hub.ws_url()).await;
     let nonce = challenge_nonce(&mut ws).await;
@@ -1921,7 +1775,7 @@ async fn an_auth_ok_that_cannot_be_delivered_does_not_establish_the_connection()
 /// 没有第二个渠道能通知节点，所以只能留痕。
 #[tokio::test]
 async fn an_auth_fail_that_cannot_be_delivered_does_not_panic() {
-    let hub = Hub::initialized().await;
+    let hub = Hub::boot().await;
     let mut ws = dial(&hub.ws_url()).await;
     let nonce = challenge_nonce(&mut ws).await;
     let _ = nonce;

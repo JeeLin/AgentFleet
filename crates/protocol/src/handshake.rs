@@ -50,15 +50,6 @@ pub enum HandshakeState {
     Rejected,
 }
 
-impl HandshakeState {
-    /// 握手是否仍在进行中（既没 `Authed` 也没 `Rejected`）。
-    ///
-    /// 超时判定只看这个：**已 `Authed` 的连接不因为「握手慢」被关**。
-    pub fn in_progress(self) -> bool {
-        matches!(self, Self::AwaitingHello | Self::Challenged)
-    }
-}
-
 /// 握手期内部状态。数据与状态放在一起，`nonce` 的存在性就是
 /// 「还在 `Challenged`」的证明——不维护两个可能互相矛盾的变量。
 #[derive(Debug)]
@@ -139,12 +130,17 @@ pub fn negotiate_version(node_v: u32, hub_v: u32) -> Result<u32, HandshakeError>
     Ok(node_v.min(hub_v))
 }
 
-/// 握手超时判定（§3）：**纯函数**，调用方自己计时——本 crate 不起定时器。
+/// 握手错误 → 日志短语（不含任何敏感信息）。
 ///
-/// `state` 不在进行中（已 `Authed` / `Rejected`）时恒为 `false`：
-/// 握手已经结束了，慢不慢与超时无关。
-pub fn should_close_for_timeout(state: HandshakeState, elapsed: Duration) -> bool {
-    state.in_progress() && elapsed >= HANDSHAKE_TIMEOUT
+/// **两侧逐字相同**：Hub（`hub-server`）与 node（`node-core`）都要把
+/// `HandshakeError` 变成一句能进日志的话，而短语只在本地出现、不上线传输。
+/// 两份实现会各自漂移，于是「同一台设备两种 Hub 版本给出两种措辞」无从查起。
+pub fn error_phrase(e: HandshakeError) -> String {
+    match e {
+        HandshakeError::InvalidHello(f) => format!("invalid hello field: {f}"),
+        HandshakeError::InvalidVersion(v) => format!("invalid protocol version: {v}"),
+        _ => "handshake rejected".to_string(),
+    }
 }
 
 /// 验签用的公钥来源（§3）。
@@ -1015,51 +1011,7 @@ mod tests {
         assert_eq!(hs.pending_nonce(), Some(ch2.nonce.as_str()));
     }
 
-    // ---------- 测试标准 ⑥：握手超时判定（10s 边界前后） ----------
-
-    #[test]
-    fn timeout_boundary_at_ten_seconds() {
-        let before = HANDSHAKE_TIMEOUT - Duration::from_millis(1);
-        assert!(!should_close_for_timeout(
-            HandshakeState::Challenged,
-            before
-        ));
-        // 正好 10s：没收到 auth 就该关了（§3）
-        assert!(should_close_for_timeout(
-            HandshakeState::Challenged,
-            HANDSHAKE_TIMEOUT
-        ));
-        assert!(should_close_for_timeout(
-            HandshakeState::Challenged,
-            HANDSHAKE_TIMEOUT + Duration::from_millis(1)
-        ));
-        // 连 hello 都没来也是超时
-        assert!(!should_close_for_timeout(
-            HandshakeState::AwaitingHello,
-            before
-        ));
-        assert!(should_close_for_timeout(
-            HandshakeState::AwaitingHello,
-            HANDSHAKE_TIMEOUT
-        ));
-    }
-
-    #[test]
-    fn timeout_does_not_apply_after_handshake_ends() {
-        // 已鉴权的连接不因「握手慢」被关：慢与它无关了
-        assert!(!should_close_for_timeout(
-            HandshakeState::Authed,
-            HANDSHAKE_TIMEOUT * 100
-        ));
-        assert!(!should_close_for_timeout(
-            HandshakeState::Rejected,
-            HANDSHAKE_TIMEOUT * 100
-        ));
-        assert!(!HandshakeState::Authed.in_progress());
-        assert!(!HandshakeState::Rejected.in_progress());
-        assert!(HandshakeState::AwaitingHello.in_progress());
-        assert!(HandshakeState::Challenged.in_progress());
-    }
+    // ---------- 测试标准 ⑥：握手超时（10s 边界由 Hub 的 relay 循环兑现） ----------
 
     #[test]
     fn timeout_error_frame_carries_handshake_timeout_code() {
@@ -1118,6 +1070,23 @@ mod tests {
             })
         ));
         assert!(hs.hello().is_none());
+    }
+
+    #[test]
+    fn error_phrase_names_the_field_and_never_leaks_material() {
+        assert_eq!(
+            error_phrase(HandshakeError::InvalidHello("arch")),
+            "invalid hello field: arch"
+        );
+        assert_eq!(
+            error_phrase(HandshakeError::InvalidVersion(0)),
+            "invalid protocol version: 0"
+        );
+        // 签名失败只给一句通用话：phrase 会进日志，不能带 key / 签名内容
+        assert_eq!(
+            error_phrase(HandshakeError::BadSignature),
+            "handshake rejected"
+        );
     }
 
     #[test]

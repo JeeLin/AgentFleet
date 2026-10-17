@@ -1,31 +1,29 @@
-//! Hub 读侧硬上限与写队列。
+//! Hub 的**读侧**硬上限（`protocol.md` §6.1）。
 //!
-//! 设计要点（`protocol.md` §6.1）：
 //! - Hub 是单进程服务多设备，**一条连接失控不能拖垮其他人**。
-//! - 读侧限的是「单位时间读到的字节数」与「单帧大小」；超限不是断开重连
-//!   （那会被恶意节点当放大器），而是 `err{code:"flood"}` 后**主动断开**。
-//! - 写侧不丢消息：队列有界，满了就**反压**（停止读），不静默丢弃。
+//! - 限的是「单位时间读到的字节数」与「单帧大小」；超限不是断开重连
+//!   （那会被恶意节点当放大器），而是**慢读**、持续 30s 才 `err{code:"flood"}` 断开。
+//! - **只有读侧**：M0 的写侧全走 WebSocket 自身的背压，尚无独立队列
+//!   （`protocol.md` §6.1 把写侧列成待办）。
 
 pub mod error;
 pub use error::LimitError;
 
-use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-/// 单帧上限。与 `protocol::MAX_FRAME_BYTES` 一致（§2）。
-pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+/// 单帧上限。**与协议同源**（§2）——两份数值各写一遍，漂移了没有任何东西会报错。
+pub use protocol::frame::MAX_FRAME_BYTES;
 
 /// 读侧令牌桶容量（字节）：允许的突发量。
-pub const READ_BUCKET_CAPACITY: usize = 4 * 1024 * 1024;
+///
+/// 4× 单帧上限：允许一次 `cat` 大文件那样的洪峰，而不是第一帧大文件就被慢读。
+const READ_BUCKET_CAPACITY: usize = 4 * MAX_FRAME_BYTES;
 
 /// 读侧每秒补充的令牌（字节）：稳态速率上限。
-pub const READ_REFILL_PER_SEC: usize = 1024 * 1024;
+const READ_REFILL_PER_SEC: usize = MAX_FRAME_BYTES;
 
 /// 超过这个速率持续这么久就判定 flood（§6.1）。
 pub const FLOOD_SUSTAINED: Duration = Duration::from_secs(30);
-
-/// 写队列容量（帧数）。满即反压，不丢弃。
-pub const WRITE_QUEUE_CAPACITY: usize = 1024;
 
 /// 令牌桶：读侧速率限制。
 #[derive(Debug)]
@@ -41,7 +39,9 @@ impl ReadLimiter {
         Self::with_params(READ_BUCKET_CAPACITY, READ_REFILL_PER_SEC)
     }
 
-    pub fn with_params(capacity: usize, refill_per_sec: usize) -> Self {
+    /// 构造非默认限额。**只给测试用**——生产路径一律 `new()`：
+    /// 「默认路径」与「显式 new」走出两套限额时，线上限流器与文档各说各话。
+    fn with_params(capacity: usize, refill_per_sec: usize) -> Self {
         Self {
             capacity,
             refill_per_sec,
@@ -83,58 +83,6 @@ impl ReadLimiter {
 }
 
 impl Default for ReadLimiter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// 有界写队列：满了反压，**不丢帧**。
-#[derive(Debug)]
-pub struct WriteQueue {
-    cap: usize,
-    q: VecDeque<Vec<u8>>,
-}
-
-impl WriteQueue {
-    pub fn new() -> Self {
-        Self::with_capacity(WRITE_QUEUE_CAPACITY)
-    }
-
-    pub fn with_capacity(cap: usize) -> Self {
-        Self {
-            cap,
-            q: VecDeque::with_capacity(cap.min(4096)),
-        }
-    }
-
-    /// 入队。返回 `Err` 表示队列已满——调用方应停止读上游，而不是丢帧。
-    pub fn push(&mut self, frame: Vec<u8>) -> Result<(), LimitError> {
-        if self.q.len() >= self.cap {
-            return Err(LimitError::WriteQueueFull);
-        }
-        self.q.push_back(frame);
-        Ok(())
-    }
-
-    /// 出队一帧。
-    pub fn pop(&mut self) -> Option<Vec<u8>> {
-        self.q.pop_front()
-    }
-
-    pub fn len(&self) -> usize {
-        self.q.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.q.is_empty()
-    }
-
-    pub fn is_full(&self) -> bool {
-        self.q.len() >= self.cap
-    }
-}
-
-impl Default for WriteQueue {
     fn default() -> Self {
         Self::new()
     }
@@ -191,38 +139,6 @@ mod tests {
     }
 
     #[test]
-    fn write_queue_never_drops_when_full() {
-        let mut q = WriteQueue::with_capacity(2);
-        q.push(vec![1]).unwrap();
-        q.push(vec![2]).unwrap();
-        // 满：必须报错让调用方反压，而不是丢
-        assert!(matches!(q.push(vec![3]), Err(LimitError::WriteQueueFull)));
-        assert_eq!(q.len(), 2);
-        // 取出一帧后又能进
-        assert_eq!(q.pop(), Some(vec![1]));
-        q.push(vec![3]).unwrap();
-    }
-
-    #[test]
-    fn write_queue_is_fifo() {
-        let mut q = WriteQueue::new();
-        q.push(vec![1]).unwrap();
-        q.push(vec![2]).unwrap();
-        assert_eq!(q.pop(), Some(vec![1]));
-        assert_eq!(q.pop(), Some(vec![2]));
-        assert!(q.is_empty());
-    }
-
-    #[test]
-    fn write_queue_reports_full() {
-        let mut q = WriteQueue::with_capacity(1);
-        q.push(vec![0]).unwrap();
-        assert!(q.is_full());
-        q.pop().unwrap();
-        assert!(!q.is_full());
-    }
-
-    #[test]
     fn defaults_use_production_constants() {
         // Default 必须等价于 new()：配置漂移会让「默认路径」与
         // 「显式 new」走出两套不同的限额。
@@ -232,11 +148,66 @@ mod tests {
             r.try_consume(MAX_FRAME_BYTES + 1),
             Err(LimitError::FrameTooLarge)
         ));
+    }
 
-        let mut q = WriteQueue::default();
-        assert!(q.is_empty());
-        assert!(!q.is_full());
-        q.push(vec![7]).unwrap();
-        assert_eq!(q.pop(), Some(vec![7]));
+    /// 硬上限必须与协议常量同值。两份数值各写一遍，漂移了没有任何东西会报错——
+    /// 而 Hub 会按自己那份拒掉一个协议认为合法的帧。
+    #[test]
+    fn the_hard_limit_is_the_protocol_one() {
+        assert_eq!(MAX_FRAME_BYTES, protocol::MAX_FRAME_BYTES);
+    }
+
+    /// 默认桶必须放行 4 个满帧的突发量（`READ_BUCKET_CAPACITY = 4 ×
+    /// MAX_FRAME_BYTES`）：桶调小会让一次 `cat` 大文件直接进慢读，
+    /// 也就是「输出多的命令一律卡住」。
+    #[test]
+    fn the_default_bucket_holds_four_full_frames() {
+        let mut r = ReadLimiter::new();
+        for _ in 0..4 {
+            r.try_consume(MAX_FRAME_BYTES).unwrap();
+        }
+        // 断言的是「第五个满帧被拒」，不是「第 1 字节被拒」：桶排空后回补
+        // 一直在跑（1 MiB/s），插桩构建下多花几毫秒就攒得出几 KiB。
+        // 而一次 `cat` 大文件的洪峰是整帧整帧来的，挡不住整帧就等于没挡。
+        assert!(matches!(
+            r.try_consume(MAX_FRAME_BYTES),
+            Err(LimitError::Flood)
+        ));
+    }
+
+    /// 慢读语义的终态（§6.1）：超限**不断开**——`Flood` 是「等令牌回补」，
+    /// 不是错误码。第 30s 才由调用方拿 `FLOOD_SUSTAINED` 判持久超限而断开。
+    #[test]
+    fn a_flood_is_a_pause_not_a_disconnect() {
+        // refill=0 把时间因素彻底消掉：这个用例只判「超速」与「单帧过大」
+        // 是两条不同的路（§6.1 vs §2），不该被回补速率干扰。
+        let mut r = ReadLimiter::with_params(MAX_FRAME_BYTES, 0);
+        r.try_consume(MAX_FRAME_BYTES).unwrap();
+        assert!(matches!(
+            r.try_consume(MAX_FRAME_BYTES),
+            Err(LimitError::Flood)
+        ));
+        assert!(matches!(
+            r.try_consume(MAX_FRAME_BYTES + 1),
+            Err(LimitError::FrameTooLarge)
+        ));
+    }
+
+    /// 稳态速率就是每秒一个满帧（`READ_REFILL_PER_SEC = MAX_FRAME_BYTES`）：
+    /// 限得再低，正常心跳与通道数据就得排队；限得再高，桶的突发量失去意义。
+    #[test]
+    fn the_steady_state_rate_is_one_full_frame_per_second() {
+        let mut r = ReadLimiter::with_params(MAX_FRAME_BYTES, MAX_FRAME_BYTES);
+        r.try_consume(MAX_FRAME_BYTES).unwrap();
+        // 桶已排空：之后再放行的每一字节都来自回补，回补速率就是稳态速率
+        assert!(r.try_consume(1).is_err());
+        std::thread::sleep(Duration::from_millis(250));
+        // 250ms ≈ 1/4 帧（128 KiB）。给一半的余量防 CI 慢机，仍远小于一整帧
+        assert!(
+            r.try_consume(MAX_FRAME_BYTES / 8).is_ok(),
+            "1/4 秒必须攒得出 1/8 帧"
+        );
+        // 但一整秒的量在 1/4 秒里凑不出来
+        assert!(r.try_consume(MAX_FRAME_BYTES).is_err());
     }
 }

@@ -17,218 +17,22 @@
     clippy::indexing_slicing
 )]
 
+mod common;
+
 use std::time::{Duration, Instant};
 
-use futures_util::{SinkExt, StreamExt};
+use common::{
+    break_device_lookup, break_device_writes, connect_enrolled, connect_reconnect, device_info,
+    device_row, dial, insert_legacy_device, install_subscriber, next_frame, send_heartbeat,
+    send_text, wait_until, Hub, HELLO,
+};
 use hub_core::auth::{AuthParams, LoginRateLimiter};
 use hub_server::AppState;
 use identity::KeyPair;
 use node_core::conn::{connect_once, ConnOutcome, Established};
 use node_core::identity::Identity;
 use protocol::frame::Frame;
-use protocol::message::{types, DeviceInfo};
-use tokio::net::TcpListener;
-use tokio::sync::oneshot;
-type Ws =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-/// 测试进程装一个 `tracing` sink。
-///
-/// 不是为了看日志：没有 subscriber 时 `tracing` 的 dispatch 判否短路，
-/// `error!(... "heartbeat persistence failed")` 里的字段表达式不执行，
-/// llvm-cov 会把它们记成未覆盖。
-fn install_subscriber() {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
-            .with_writer(std::io::sink)
-            .init();
-    });
-}
-
-struct Hub {
-    addr: std::net::SocketAddr,
-    state: AppState,
-    _dir: tempfile::TempDir,
-    shutdown: Option<oneshot::Sender<()>>,
-}
-
-impl Hub {
-    async fn boot() -> Self {
-        install_subscriber();
-        let dir = tempfile::tempdir().unwrap();
-        let pool = hub_storage::db::open_in(dir.path()).unwrap().1;
-        let state = AppState::bootstrap_with(
-            pool,
-            dir.path(),
-            AuthParams {
-                m_cost: 8192,
-                t_cost: 1,
-                p_cost: 1,
-            },
-            Duration::from_millis(200),
-            LoginRateLimiter::new(10, 60),
-        )
-        .unwrap();
-        state
-            .auth()
-            .setup_password("correct horse battery")
-            .unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (tx, rx) = oneshot::channel::<()>();
-        let app = hub_server::build_app(state.clone());
-        let task = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .with_graceful_shutdown(async {
-                let _ = rx.await;
-            })
-            .await
-        });
-        std::mem::forget(task);
-        Self {
-            addr,
-            state,
-            _dir: dir,
-            shutdown: Some(tx),
-        }
-    }
-
-    fn ws_url(&self) -> String {
-        format!("ws://{}/ws", self.addr)
-    }
-
-    /// 直接查库（绕过内存缓存）——标准⑤ 要的就是「离线后仍可读」。
-    fn device_row(&self, id: &str, column: &str) -> Option<String> {
-        let pool = hub_storage::db::open_in(self.state.data_dir()).unwrap().1;
-        let conn = pool.get().unwrap();
-        conn.query_row(
-            &format!("SELECT {column} FROM device WHERE id = ?1"),
-            [id],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .unwrap()
-    }
-
-    /// 库里塞一行「有 node_id、没有公钥」的设备（重连必被拒的那条路径）。
-    fn insert_legacy_device(&self, id: &str) {
-        let pool = hub_storage::db::open_in(self.state.data_dir()).unwrap().1;
-        pool.get()
-            .unwrap()
-            .execute(
-                "INSERT INTO device (id, name, key_fingerprint, enrolled_at, status, os, arch, hostname, node_version)
-                 VALUES (?1, 'legacy', ?2, 'unix:0', 'offline', 'linux', 'aarch64', 'h', '0.1.0')",
-                [id, &format!("fp-{id}")],
-            )
-            .unwrap();
-    }
-
-    /// 故障注入：让**查询设备**失败（把表改名，SELECT 报 no such table）。
-    ///
-    /// 读失败与写失败是两条不同的降级路径，要分开造：写失败留给
-    /// `break_device_writes`，这里要的是「连旧值都读不到」。
-    fn break_device_lookup(&self) {
-        let pool = hub_storage::db::open_in(self.state.data_dir()).unwrap().1;
-        pool.get()
-            .unwrap()
-            .execute_batch("ALTER TABLE device RENAME TO device_moved")
-            .unwrap();
-    }
-
-    /// 故障注入：让 `device` 表的 **UPDATE 一律失败**。
-    ///
-    /// `RAISE(ABORT)` 只回滚本语句、连接照常可用，于是 Hub 侧走的是
-    /// 「读得到、写不进」——落库失败但连接不断的那条路。
-    fn break_device_writes(&self) {
-        let pool = hub_storage::db::open_in(self.state.data_dir()).unwrap().1;
-        pool.get()
-            .unwrap()
-            .execute_batch(
-                "CREATE TRIGGER boom_update BEFORE UPDATE ON device
-                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;",
-            )
-            .unwrap();
-    }
-}
-
-impl Drop for Hub {
-    fn drop(&mut self) {
-        if let Some(tx) = self.shutdown.take() {
-            let _ = tx.send(());
-        }
-    }
-}
-
-async fn dial(url: &str) -> Ws {
-    let (ws, resp) = tokio_tungstenite::connect_async(url).await.unwrap();
-    assert_eq!(resp.status(), 101u16, "must upgrade before anything else");
-    ws
-}
-
-async fn send_text(ws: &mut Ws, t: &str) {
-    let _ = ws
-        .send(tokio_tungstenite::tungstenite::Message::Text(t.into()))
-        .await;
-}
-
-/// 读下一个文本帧（跳过自动应答的 pong）。
-async fn next_text(ws: &mut Ws) -> String {
-    loop {
-        let msg = ws.next().await.expect("hub must send a frame").unwrap();
-        match msg {
-            tokio_tungstenite::tungstenite::Message::Text(t) => return t.to_string(),
-            tokio_tungstenite::tungstenite::Message::Pong(_)
-            | tokio_tungstenite::tungstenite::Message::Ping(_) => continue,
-            other => panic!("expected a text frame, got {other:?}"),
-        }
-    }
-}
-
-async fn next_frame(ws: &mut Ws) -> Frame {
-    let text = next_text(ws).await;
-    serde_json::from_str(&text).unwrap_or_else(|e| panic!("unparsable json: {text} ({e})"))
-}
-
-const HELLO: &str = r#"{"v":1,"seq":0,"t":"hello","c":{"client_version":"0.1.0","arch":"aarch64","os":"linux","features":[]}}"#;
-
-fn device_info() -> DeviceInfo {
-    DeviceInfo {
-        name: "hb-node".into(),
-        os: "linux".into(),
-        arch: "aarch64".into(),
-        hostname: "hbhost".into(),
-        node_version: "0.1.0".into(),
-    }
-}
-
-/// 一份 enroll 成功后的连接。`node_id` 用 Hub 签发回来的那个。
-async fn connect_enrolled(hub: &Hub) -> (Established, String, KeyPair) {
-    let kp = KeyPair::generate();
-    let est = connect_once(&hub.ws_url(), &kp, None, None, device_info())
-        .await
-        .expect("enroll must succeed");
-    let node_id = est.auth_ok.node_id.clone();
-    (est, node_id, kp)
-}
-
-/// 用**同一把钥匙**重连（重连形态：只带 node_id 与签名，不带公钥，§3）。
-async fn connect_reconnect(hub: &Hub, kp: &KeyPair, node_id: &str) -> Established {
-    connect_once(&hub.ws_url(), kp, Some(node_id), None, device_info())
-        .await
-        .expect("reconnect must succeed")
-}
-
-/// 发一份心跳。
-async fn send_heartbeat(ws: &mut Established, c: serde_json::Value) {
-    ws.send(&Frame::push(types::HEARTBEAT, 0, c))
-        .await
-        .expect("heartbeat must send");
-}
+use protocol::message::types;
 
 /// 一份完整心跳（§2 的能力 + 负载 + 工作区根）。
 fn full_heartbeat() -> serde_json::Value {
@@ -252,45 +56,29 @@ fn full_heartbeat() -> serde_json::Value {
     })
 }
 
-/// 等内存里出现该 node 的上报。轮询而不是固定 sleep：CI 慢时固定 sleep
-/// 会 flakes，而「出现」本身就是我们要等的事件。
+/// 等内存里出现该 node 的上报。
 async fn wait_for_report(hub: &Hub, node_id: &str, budget: Duration) {
-    let deadline = Instant::now() + budget;
-    loop {
-        if hub.state.reports().get(node_id).is_some() {
-            return;
-        }
-        assert!(Instant::now() < deadline, "心跳始终没进内存缓存");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    wait_until(budget, || hub.state.reports().get(node_id).is_some()).await;
 }
 
-/// 等连接从注册表摘掉（断开后）。
+/// 等连接从注册表摘掉。
 ///
 /// ⚠️ **不是**等内存上报消失：上报要活过重连窗口，才有「WS 断了但心跳新鲜
 /// → `Reconnecting`，调度仍算可用」这回事（子任务 6）。断开时清掉它，
 /// `PRODUCT.md`「离线期间会话仍存活」的承诺就落空了。
 async fn wait_for_no_report(hub: &Hub, node_id: &str, budget: Duration) {
-    let deadline = Instant::now() + budget;
-    loop {
-        if hub.state.connections().get(node_id).is_none() {
-            return;
-        }
-        assert!(Instant::now() < deadline, "连接始终没被摘掉");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    wait_until(budget, || hub.state.connections().get(node_id).is_none()).await;
 }
 
 /// 等 `device.last_seen_at` 出现（第一份心跳落库完成的信号）。
 async fn wait_for_seen(hub: &Hub, node_id: &str, budget: Duration) -> String {
-    let deadline = Instant::now() + budget;
-    loop {
-        if let Some(v) = hub.device_row(node_id, "last_seen_at") {
-            return v;
-        }
-        assert!(Instant::now() < deadline, "last_seen_at 始终没被写上");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    let mut seen = String::new();
+    wait_until(budget, || {
+        seen = device_row(hub, node_id, "last_seen_at").unwrap_or_default();
+        !seen.is_empty()
+    })
+    .await;
+    seen
 }
 
 /// 断开一条连接：直接 drop。drop 会关 TCP，Hub 侧 relay 随即结束并摘表。
@@ -301,10 +89,6 @@ async fn disconnect(est: Established) {
     drop(est);
 }
 
-/// 标准③：心跳进内存，且时间戳就是刚刚（≤ 1 个周期 + 1s）。
-///
-/// 顺带锁住「能力与负载是两个独立字段」——路由一个用于硬过滤、
-/// 一个用于有序打分，合成一个就写不出正确的调度。
 #[tokio::test]
 async fn heartbeat_updates_the_in_memory_report() {
     let hub = Hub::boot().await;
@@ -360,10 +144,8 @@ async fn a_minimal_heartbeat_keeps_the_persisted_capabilities() {
     send_heartbeat(&mut est2, full_heartbeat()).await;
     wait_for_seen(&hub, &node_id, Duration::from_secs(3)).await;
 
-    let caps = hub.device_row(&node_id, "capabilities").expect("caps 仍在");
-    let res = hub
-        .device_row(&node_id, "resources")
-        .expect("resources 仍在");
+    let caps = device_row(&hub, &node_id, "capabilities").expect("caps 仍在");
+    let res = device_row(&hub, &node_id, "resources").expect("resources 仍在");
     let caps: serde_json::Value = serde_json::from_str(&caps).unwrap();
     assert_eq!(
         caps["connectors"][0], "terminal",
@@ -372,12 +154,12 @@ async fn a_minimal_heartbeat_keeps_the_persisted_capabilities() {
     let res: serde_json::Value = serde_json::from_str(&res).unwrap();
     assert_eq!(res["load"]["load1"], 1.8, "负载同样必须保留");
     assert_eq!(
-        hub.device_row(&node_id, "status").as_deref(),
+        device_row(&hub, &node_id, "status").as_deref(),
         Some("online")
     );
     // 版本不被心跳改写：它停在 enroll 那一刻
     assert_eq!(
-        hub.device_row(&node_id, "node_version").as_deref(),
+        device_row(&hub, &node_id, "node_version").as_deref(),
         Some("0.1.0")
     );
 }
@@ -451,9 +233,7 @@ async fn capabilities_survive_the_device_going_offline() {
         "内存里这份已经过期，读到的值只能来自库"
     );
 
-    let caps = hub
-        .device_row(&node_id, "capabilities")
-        .expect("离线后 capabilities 仍可读");
+    let caps = device_row(&hub, &node_id, "capabilities").expect("离线后 capabilities 仍可读");
     assert_ne!(caps, "null");
     let caps: serde_json::Value = serde_json::from_str(&caps).unwrap();
     assert_eq!(caps["connectors"][0], "terminal");
@@ -544,7 +324,7 @@ async fn a_failing_write_does_not_drop_the_link() {
     let hub = Hub::boot().await;
     let (mut est, node_id, _kp) = connect_enrolled(&hub).await;
 
-    hub.break_device_writes();
+    break_device_writes(&hub);
 
     send_heartbeat(&mut est, full_heartbeat()).await;
     wait_for_report(&hub, &node_id, Duration::from_secs(3)).await;
@@ -586,17 +366,17 @@ async fn the_heartbeat_version_reaches_the_device_row() {
     send_heartbeat(&mut est, full_heartbeat()).await;
     wait_for_seen(&hub, &node_id, Duration::from_secs(3)).await;
     assert_eq!(
-        hub.device_row(&node_id, "status").as_deref(),
+        device_row(&hub, &node_id, "status").as_deref(),
         Some("online")
     );
     // 版本来自 enroll 首帧的 device_info，心跳不改它（§3）
     assert_eq!(
-        hub.device_row(&node_id, "node_version").as_deref(),
+        device_row(&hub, &node_id, "node_version").as_deref(),
         Some("0.1.0"),
         "设备行必须记着这台设备 enroll 时的版本"
     );
     assert!(
-        hub.device_row(&node_id, "last_seen_at").is_some(),
+        device_row(&hub, &node_id, "last_seen_at").is_some(),
         "last_seen_at 必须被心跳刷新"
     );
 }
@@ -626,7 +406,7 @@ async fn the_heartbeat_payload_has_no_slot_for_key_material() {
 #[tokio::test]
 async fn a_failed_handshake_yields_no_connection_to_heartbeat_on() {
     let hub = Hub::boot().await;
-    hub.insert_legacy_device("n_absent");
+    insert_legacy_device(&hub, "n_absent");
     let kp = KeyPair::generate();
     let out = connect_once(&hub.ws_url(), &kp, Some("n_absent"), None, device_info()).await;
     assert!(
@@ -674,7 +454,7 @@ async fn a_heartbeat_when_the_device_row_cannot_be_read_still_lands_in_memory() 
     let (mut est, node_id, _kp) = connect_enrolled(&hub).await;
 
     // 让 SELECT 失败（表改名，与 ws_flow 的 break_device_lookup 同手段）
-    hub.break_device_lookup();
+    break_device_lookup(&hub);
 
     send_heartbeat(&mut est, full_heartbeat()).await;
     wait_for_report(&hub, &node_id, Duration::from_secs(3)).await;

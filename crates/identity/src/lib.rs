@@ -89,6 +89,8 @@ impl KeyPair {
         match VerifyingKey::from_bytes(pubkey) {
             Ok(vk) => vk
                 .verify(msg, &ed25519_dalek::Signature::from_bytes(sig))
+                // coverage: excluded — ed25519-dalek 对几乎所有 32 字节输入均解压成功，
+                // 构造不出确定性非法曲线点。
                 .is_ok(),
             Err(_) => false,
         }

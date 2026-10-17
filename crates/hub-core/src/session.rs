@@ -54,12 +54,12 @@ impl SessionStore {
     /// 签发一个 session，返回 cookie 值。
     ///
     /// 格式：`<payload_b64url>.<sig_b64url>`，payload 是 `sub|exp|iat`。
-    pub fn issue(&self, subject: &str) -> String {
+    pub fn issue(&self, subject: &str) -> Result<String, SessionError> {
         let now = now_unix();
         let exp = now + self.ttl_secs;
         let payload = format!("{subject}|{exp}|{now}");
-        let sig = self.sign(payload.as_bytes());
-        format!("{}.{}", b64url(payload.as_bytes()), b64url(&sig))
+        let sig = self.sign(payload.as_bytes())?;
+        Ok(format!("{}.{}", b64url(payload.as_bytes()), b64url(&sig)))
     }
 
     /// 验签并解出 session。
@@ -105,23 +105,22 @@ impl SessionStore {
     }
 }
 
-/// 签名（原始字节）。
-///
-/// `key` 恒为 `[u8; 32]`，而 HMAC 接受任意长度 key——所以这里
-/// **结构上不可能失败**。用 `new_from_slice` 的 `Result` 再 `unwrap` 只会
-/// 制造一个永不触达的 panic 分支；HMAC-SHA256 的 block size 是 64，
-/// 32 字节远小于上限，直接走无返回错误的内核初始化路径。
-fn sign_bytes(key: &[u8; 32], msg: &[u8]) -> Vec<u8> {
-    // hmac 0.12 起 `new_from_slice` 对任意长度都成功；这里不做冗余校验。
-    let mut mac = HmacSha256::new_from_slice(key)
-        .unwrap_or_else(|_| unreachable!("HMAC accepts any key length"));
-    mac.update(msg);
-    mac.finalize().into_bytes().to_vec()
-}
-
 impl SessionStore {
-    fn sign(&self, msg: &[u8]) -> Vec<u8> {
-        sign_bytes(&self.key, msg)
+    /// 签名原始字节。
+    ///
+    /// 与 [`SessionStore::verify`] 对同一次 `new_from_slice` 用**同一个** `?`。
+    /// 签名路径同样可能失败（签名与验签用同一把钥匙），把它压成
+    /// `unreachable!` 只是把一个可传播的错误换成藏进闭包、躲过 `panic` lint
+    /// 的进程退出。
+    ///
+    /// key 是 `[u8; 32]` 而 HMAC 接受任意长度，所以 `BadKey` 实际不可达——
+    /// 但两条路径的写法必须一致，否则「为什么这里能失败那里不能」会变成
+    /// 只有注释能回答的问题。
+    fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, SessionError> {
+        let mut mac = HmacSha256::new_from_slice(&self.key)
+            .map_err(|e| SessionError::BadKey(e.to_string()))?;
+        mac.update(msg);
+        Ok(mac.finalize().into_bytes().to_vec())
     }
 }
 
@@ -141,40 +140,10 @@ pub fn b64url(bytes: &[u8]) -> String {
     identity::base64url(bytes)
 }
 
-/// base64url 无填充解码。
+/// base64url 无填充解码。与 [`identity::base64url_decode`] 同一份实现——
+/// cookie 与 nonce 共用一套字母表，两份解码器只会在「哪个字符算非法」上分叉。
 pub fn b64url_decode(s: &str) -> Result<Vec<u8>, SessionError> {
-    fn val(c: u8) -> Result<u32, SessionError> {
-        match c {
-            b'A'..=b'Z' => Ok((c - b'A') as u32),
-            b'a'..=b'z' => Ok((c - b'a' + 26) as u32),
-            b'0'..=b'9' => Ok((c - b'0' + 52) as u32),
-            b'-' => Ok(62),
-            b'_' => Ok(63),
-            _ => Err(SessionError::Malformed),
-        }
-    }
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len() / 4 * 3);
-    for chunk in b.chunks(4) {
-        let n = chunk.iter().enumerate().try_fold(0u32, |acc, (i, &c)| {
-            let v = val(c)?;
-            Ok::<_, SessionError>(acc | (v << (18 - 6 * i)))
-        })?;
-        // 尾块只有 1 个字符时，6 bit 凑不出任何完整字节 → 拒绝。
-        // （编码端从不产出这种输入，但解码端必须拒：否则攻击者可构造
-        //   `AAAA` 之外的畸形 cookie 试探解析路径。）
-        if chunk.len() < 2 {
-            return Err(SessionError::Malformed);
-        }
-        out.push((n >> 16) as u8);
-        if chunk.len() > 2 {
-            out.push((n >> 8) as u8);
-        }
-        if chunk.len() > 3 {
-            out.push(n as u8);
-        }
-    }
-    Ok(out)
+    identity::base64url_decode(s).map_err(|_| SessionError::Malformed)
 }
 
 #[cfg(test)]
@@ -188,16 +157,59 @@ mod tests {
     #[test]
     fn issue_and_verify_roundtrip() {
         let s = store();
-        let cookie = s.issue("admin");
+        let cookie = s.issue("admin").unwrap();
         let sess = s.verify(&cookie).unwrap();
         assert_eq!(sess.subject, "admin");
         assert!(sess.exp > sess.iat);
     }
 
+    /// `issue` 的形状：两段 base64url 用 `.` 分隔，payload 是 `sub|exp|iat`。
+    ///
+    /// payload 明文可读是**有意的**（便于审计，见下），所以这条把顺序也钉住：
+    /// `verify` 按 0/1/2 位解出 subject/exp/iat，改一处就得同时改另一处。
+    #[test]
+    fn an_issued_cookie_is_two_b64url_parts_over_three_payload_fields() {
+        let cookie = store().issue("admin").expect("must be issued");
+        let (payload_b64, sig_b64) = cookie.split_once('.').expect("two parts");
+        assert_eq!(sig_b64.len(), 43, "HMAC-SHA256 输出的 base64url 无填充");
+        // 解码出来就是签名本身（32 字节），不是又套了一层
+        assert_eq!(b64url_decode(sig_b64).expect("sig b64").len(), 32);
+        let payload = String::from_utf8(b64url_decode(payload_b64).expect("b64")).unwrap();
+        let fields: Vec<&str> = payload.split('|').collect();
+        assert_eq!(fields.len(), 3, "sub|exp|iat, got {payload}");
+        assert_eq!(fields[0], "admin");
+        assert!(
+            fields[1].parse::<i64>().expect("exp is numeric")
+                > fields[2].parse::<i64>().expect("iat is numeric"),
+            "过期时刻必须在签发之后: {payload}"
+        );
+    }
+
+    /// 两个转发函数必须与 `identity` 那份**逐字节一致**。
+    ///
+    /// 它们存在的理由是「让本模块调用点保持简短」，一旦各写一份实现，
+    /// cookie 与 nonce 会按不同字母表编解码，症状是间歇性 `Malformed`。
+    #[test]
+    fn the_base64url_helpers_match_the_identity_ones() {
+        for bytes in [
+            Vec::new(),
+            vec![0u8],
+            vec![0u8; 32],
+            b"admin|1770000000|1770000000".to_vec(),
+        ] {
+            let encoded = b64url(&bytes);
+            assert_eq!(encoded, identity::base64url(&bytes));
+            assert_eq!(
+                b64url_decode(&encoded).expect("roundtrip"),
+                identity::base64url_decode(&encoded).expect("identity roundtrip")
+            );
+        }
+    }
+
     #[test]
     fn tampered_payload_fails_signature() {
         let s = store();
-        let cookie = s.issue("admin");
+        let cookie = s.issue("admin").unwrap();
         // 改 subject：admin → root
         let forged_payload = b64url(b"root|9999999999|1");
         let forged = format!("{forged_payload}.{}", cookie.split_once('.').unwrap().1);
@@ -207,7 +219,7 @@ mod tests {
     #[test]
     fn tampered_expiry_fails_signature() {
         let s = store();
-        let cookie = s.issue("admin");
+        let cookie = s.issue("admin").unwrap();
         let (p, sig) = cookie.split_once('.').unwrap();
         let payload = b64url_decode(p).unwrap();
         let text = String::from_utf8(payload).unwrap();
@@ -225,7 +237,7 @@ mod tests {
     fn wrong_key_rejects() {
         let a = SessionStore::new([1u8; 32]);
         let b = SessionStore::new([2u8; 32]);
-        let cookie = a.issue("admin");
+        let cookie = a.issue("admin").unwrap();
         assert!(matches!(b.verify(&cookie), Err(SessionError::BadSignature)));
     }
 
@@ -233,7 +245,7 @@ mod tests {
     fn expired_session_is_rejected() {
         // TTL = -120s：iat 在过去，exp 已过且超出容差
         let s = SessionStore::with_ttl([7u8; 32], -120);
-        let cookie = s.issue("admin");
+        let cookie = s.issue("admin").unwrap();
         assert!(matches!(s.verify(&cookie), Err(SessionError::Expired)));
     }
 
@@ -241,7 +253,7 @@ mod tests {
     fn expiry_within_clock_skew_is_accepted() {
         // 刚过期 30s，在 60s 容差内 → 仍有效（容忍时钟偏差）
         let s = SessionStore::with_ttl([7u8; 32], -30);
-        let cookie = s.issue("admin");
+        let cookie = s.issue("admin").unwrap();
         assert!(s.verify(&cookie).is_ok());
     }
 
@@ -312,7 +324,7 @@ mod tests {
     fn payload_is_readable_but_not_tamperable() {
         // 签名 cookie：payload 明文可读（便于审计），但改动即失败
         let s = store();
-        let cookie = s.issue("admin");
+        let cookie = s.issue("admin").unwrap();
         let p = cookie.split_once('.').unwrap().0;
         let raw = String::from_utf8(b64url_decode(p).unwrap()).unwrap();
         assert!(

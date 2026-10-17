@@ -118,6 +118,15 @@ impl ApiError {
         Self::internal()
     }
 
+    /// 内部错误，附一条只在 `tracing` 里出现的说明。
+    ///
+    /// 与 [`Self::from_auth`] 同一个理由：响应体绝不带内部消息串
+    /// （它可能含数据库路径或密钥材料），细节只进日志。
+    pub fn internal_with(context: &'static str, e: impl std::fmt::Display) -> Self {
+        tracing::error!(error = %e, context);
+        Self::internal()
+    }
+
     /// 状态码（测试用）。
     pub fn status(&self) -> StatusCode {
         self.status
@@ -456,7 +465,9 @@ mod tests {
         let key = st.session_key().unwrap();
         let cookie = format!(
             "{SESSION_COOKIE}={}",
-            hub_core::session::SessionStore::new(key).issue("admin")
+            hub_core::session::SessionStore::new(key)
+                .issue("admin")
+                .unwrap()
         );
         let req = Request::builder()
             .uri("/nope")
@@ -666,6 +677,24 @@ mod tests {
         )));
         assert_eq!(e.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(e.code(), "internal_error");
+    }
+
+    /// `internal_with` 与 [`Self::from_auth`] 同一条安全边界：**响应体只有固定
+    /// code**，附带的说明只进 `tracing`。M0 唯一调用点是「签发 session cookie 失败」，
+    /// 那条错误串可能含密钥材料——泄漏出去等于把签名密钥交出去。
+    #[test]
+    fn internal_with_never_leaks_the_context_into_the_body() {
+        let e = ApiError::internal_with(
+            "cannot sign the session cookie",
+            AuthError::Storage(hub_storage::StorageError::Io(std::io::Error::other(
+                "leak-me",
+            ))),
+        );
+        assert_eq!(e.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(e.code(), "internal_error");
+        // ApiError 本身不带消息串——它只有 status + code 两个字段，
+        // 泄漏的唯一途径就是给这条错误再加一个字段
+        assert_eq!(format!("{:?}", e), format!("{:?}", ApiError::internal()));
     }
 
     #[test]

@@ -15,12 +15,11 @@ pub use channel::{
 };
 pub use frame::{Frame, MAX_FRAME_BYTES, PROTOCOL_VERSION};
 pub use handshake::{
-    negotiate_version, should_close_for_timeout, AuthAttempt, AuthPayload, Authenticator,
-    EnrollAccepted, EnrollAuth, Handshake, HandshakeError, HandshakeState, PublicKeySource,
-    ReconnectAccepted, ReconnectAuth, HANDSHAKE_TIMEOUT, NONCE_BYTES, PUBLIC_KEY_BYTES,
-    SIGNATURE_BYTES,
+    error_phrase, negotiate_version, AuthAttempt, AuthPayload, Authenticator, EnrollAccepted,
+    EnrollAuth, Handshake, HandshakeError, HandshakeState, PublicKeySource, ReconnectAccepted,
+    ReconnectAuth, HANDSHAKE_TIMEOUT, NONCE_BYTES, PUBLIC_KEY_BYTES, SIGNATURE_BYTES,
 };
 pub use message::{
     reason, AuthFail, AuthOk, Challenge, DeviceInfo, Disconnect, DisconnectReason, ErrPayload,
-    ErrorCode, Hello, Message, MessageType,
+    ErrorCode, Hello, MessageType, UnknownAction,
 };

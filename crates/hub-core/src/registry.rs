@@ -78,7 +78,7 @@ impl Registry {
         }
 
         let node_id = identity::issue_node_id();
-        let now = now_rfc3339();
+        let now = now_stamp();
 
         // 显式事务：BEGIN IMMEDIATE → INSERT(UNIQUE) → COMMIT
         let conn = self.devices.pool().get()?;
@@ -123,13 +123,13 @@ impl Registry {
                 conn.execute("ROLLBACK", [])?;
                 Ok(EnrollOutcome::AlreadyRegistered { node_id: id })
             }
-            // coverage: excluded — 129-132（`if let Err(rb)` 的 Err 分支）不可达：
-            // 只要闭包返回 Err 事务仍活跃，SQLite 的 ROLLBACK 必然成功；
-            // 该分支仅防御连接级故障，无可控测试手段。
-            // 126 臂本身（Err(e) 主体）已由 enroll_rolls_back_on_transaction_error 覆盖。
+            // Err(e) 主体由 enroll_rolls_back_on_transaction_error 覆盖。
+            //
+            // coverage: excluded — 下面的 `if let Err(rb)` 不可达：只要闭包返回
+            // Err 事务仍活跃，SQLite 的 ROLLBACK 必然成功；该分支仅防御连接级
+            // 故障，无可控测试手段。而「回滚失败」这条本身也不该被覆盖——
+            // 原错误才是调用方要的，它只负责留痕。
             Err(e) => {
-                // 回滚失败不能覆盖原始错误：原错误才是调用方要的，
-                // 但也不能静默丢掉（静默丢错会让事务悬挂难以排查）——记日志。
                 if let Err(rb) = conn.execute("ROLLBACK", []) {
                     tracing::warn!(error = %rb, "rollback failed after enroll error");
                 }
@@ -204,9 +204,15 @@ fn pubkey_from_fingerprint(device: &Device) -> Result<[u8; 32], CoreError> {
     Ok(out)
 }
 
-/// 当前时刻的 RFC3339 串（本仓不用 chrono，只需稳定可比）。
-pub fn now_rfc3339() -> String {
-    // 不引 chrono：只需要一个稳定可比的 RFC3339 串
+/// 当前时刻的时间戳串，落库进 `enrolled_at` / `last_seen_at`。
+///
+/// **格式是 `unix:<秒>`，不是 RFC3339**（函数名与这个文档串都曾经说成
+/// RFC3339，而代码从没做到过）。引 chrono 只为把它改成真的 RFC3339 一件
+/// 纯装饰的事：本仓没有一处按时间**解析**这些列——判在线只看心跳年龄
+/// （`reports::OFFLINE_AFTER`），落库的 `last_seen_at` 仅供人工阅读，
+/// 所以「稳定可比」就够了，而这正是前缀要写清格式的原因。
+pub fn now_stamp() -> String {
+    // 不引 chrono：只需要一个稳定可比的时间戳
     let d = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -398,6 +404,31 @@ mod tests {
             r.verify_reconnect(&node_id, "n", &sig, 1, 0, "auth"),
             Err(CoreError::NoSuchNode(_))
         ));
+    }
+
+    /// 时间戳格式是 `unix:<秒>`——落库的两列（`enrolled_at` / `last_seen_at`）
+    /// 都靠它**排序可比**。函数名曾经说成 `now_rfc3339`、文档也写着 RFC3339，
+    /// 而代码从来没做到过；这条把真格式钉住，免得又有人按 RFC3339 去解析。
+    #[test]
+    fn the_timestamp_is_unix_seconds_not_rfc3339() {
+        let stamp = now_stamp();
+        let secs = stamp
+            .strip_prefix("unix:")
+            .unwrap_or_else(|| panic!("prefix must be `unix:`, got {stamp}"))
+            .parse::<u64>()
+            .unwrap_or_else(|e| panic!("payload must be plain seconds, got {stamp} ({e})"));
+        // 量级检查而不是具体值：写死某个时刻会随时间变假
+        assert!(secs > 1_577_836_800, "stamp {stamp} is too old");
+        assert!(secs < 100_000_000_000, "stamp {stamp} looks like millis");
+    }
+
+    /// 两次取戳必须可比且非递减：落库的「谁先谁后」判据就是字符串里的数字。
+    #[test]
+    fn timestamps_are_comparable_and_never_go_backwards() {
+        let first: u64 = now_stamp().strip_prefix("unix:").unwrap().parse().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let second: u64 = now_stamp().strip_prefix("unix:").unwrap().parse().unwrap();
+        assert!(second >= first, "{second} must not precede {first}");
     }
 
     #[test]

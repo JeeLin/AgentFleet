@@ -8,7 +8,7 @@
 //! `Decision` 带 `reason`，因为 supervisor 要写进日志与状态文件：下一次崩溃时
 //! 只有日志能解释上一次为什么回滚了。
 
-use crate::update::{Reconcile, UpdatePhase, UpdateState};
+use crate::update::{Reconcile, UpdateState};
 
 /// worker 的退出码协议。
 ///
@@ -298,59 +298,10 @@ pub fn backoff_secs(consecutive: u32) -> u64 {
     (2u64.saturating_pow(consecutive.min(5))).min(30)
 }
 
-/// 把决策落到状态文件上（供 executor 写回）。
-///
-/// 单独抽出来是为了让「决策 → 状态」的映射也能纯测，
-/// 而不是散在 executor 的分支里被覆盖率漏掉。
-pub fn next_state(current: Option<&UpdateState>, d: &Decision) -> Option<UpdateState> {
-    let next = current.cloned();
-    match d {
-        Decision::ReplaceAndSpawn { version, .. } => {
-            let gen = current.map_or(1, |x| x.generation);
-            let mut next = next.unwrap_or_else(|| blank(version, gen));
-            next.phase = UpdatePhase::StartingNew;
-            next.version = version.clone();
-            Some(next)
-        }
-        Decision::Rollback { .. } => {
-            // 没有既有状态就无从回滚（executor 不会走到这条路径）
-            let mut next = next?;
-            next.phase = UpdatePhase::RollingBack;
-            next.rollback_count += 1;
-            Some(next)
-        }
-        Decision::Spawn { .. } => Some(next.unwrap_or_else(|| UpdateState {
-            phase: UpdatePhase::Idle,
-            version: String::new(),
-            staged_path: String::new(),
-            backup_path: String::new(),
-            generation: 0,
-            rollback_count: 0,
-        })),
-        Decision::Stop { .. } => {
-            let mut next = next?;
-            next.phase = UpdatePhase::Failed;
-            Some(next)
-        }
-    }
-}
-
-/// 决策 → 状态。路径字段**沿用已有状态**，不由这里猜——
-/// 真实路径由 executor 在执行替换时算出，决策层不该凭空造。
-fn blank(version: &str, generation: u64) -> UpdateState {
-    UpdateState {
-        phase: UpdatePhase::Requested,
-        version: version.to_string(),
-        staged_path: String::new(),
-        backup_path: String::new(),
-        generation,
-        rollback_count: 0,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::update::UpdatePhase;
     use std::path::PathBuf;
 
     fn st() -> UpdateState {
@@ -825,111 +776,5 @@ mod tests {
         assert_eq!(exit_code::UPDATE_REQUEST, 10);
         assert_eq!(exit_code::HEALTH_FAILURE, 11);
         assert_eq!(exit_code::CRASH, 12);
-    }
-
-    // ---- next_state：决策 → 状态的映射 ----
-
-    #[test]
-    fn next_state_after_replace_marks_starting_new() {
-        let s = st();
-        let d = Decision::ReplaceAndSpawn {
-            version: "3.0.0".into(),
-            reason: String::new(),
-        };
-        let n = next_state(Some(&s), &d).unwrap();
-        assert_eq!(n.phase, UpdatePhase::StartingNew);
-        assert_eq!(n.version, "3.0.0");
-    }
-
-    /// 替换决策但**没有既有状态文件**（如状态文件被人工删掉后仍收到
-    /// `exit(10)`）——必须凭空造出一条可用状态，世代号从 1 起。
-    ///
-    /// 路径字段留空是刻意的：决策层不猜路径，真实路径由 executor 在执行
-    /// 替换时算出来填。
-    #[test]
-    fn next_state_after_replace_without_prior_state_starts_a_fresh_record() {
-        let d = Decision::ReplaceAndSpawn {
-            version: "4.0.0".into(),
-            reason: String::new(),
-        };
-        let n = next_state(None, &d).unwrap();
-        assert_eq!(n.phase, UpdatePhase::StartingNew);
-        assert_eq!(n.version, "4.0.0");
-        assert_eq!(n.generation, 1, "first generation starts at 1");
-        assert_eq!(n.rollback_count, 0);
-        assert!(n.staged_path.is_empty(), "决策层不猜路径");
-        assert!(n.backup_path.is_empty());
-    }
-
-    #[test]
-    fn next_state_after_replace_keeps_the_generation_of_the_existing_record() {
-        let mut s = st();
-        s.generation = 42;
-        let d = Decision::ReplaceAndSpawn {
-            version: "5.0.0".into(),
-            reason: String::new(),
-        };
-        let n = next_state(Some(&s), &d).unwrap();
-        assert_eq!(n.generation, 42, "世代号必须延续，不能被重置成 1");
-    }
-
-    #[test]
-    fn next_state_after_rollback_counts_and_marks() {
-        let s = st();
-        let d = Decision::Rollback {
-            reason: String::new(),
-        };
-        let n = next_state(Some(&s), &d).unwrap();
-        assert_eq!(n.phase, UpdatePhase::RollingBack);
-        assert_eq!(n.rollback_count, 1);
-    }
-
-    #[test]
-    fn next_state_rollback_without_prior_state_is_none() {
-        let d = Decision::Rollback {
-            reason: String::new(),
-        };
-        assert!(next_state(None, &d).is_none());
-    }
-
-    #[test]
-    fn next_state_spawn_without_prior_state_is_idle() {
-        let d = Decision::Spawn {
-            backoff_secs: 1,
-            reason: String::new(),
-        };
-        let n = next_state(None, &d).unwrap();
-        assert_eq!(n.phase, UpdatePhase::Idle);
-        assert_eq!(n.generation, 0);
-    }
-
-    #[test]
-    fn next_state_stop_marks_failed() {
-        let s = st();
-        let d = Decision::Stop {
-            reason: String::new(),
-        };
-        let n = next_state(Some(&s), &d).unwrap();
-        assert_eq!(n.phase, UpdatePhase::Failed);
-        assert!(n.needs_human());
-    }
-
-    #[test]
-    fn next_state_stop_without_prior_state_is_none() {
-        let d = Decision::Stop {
-            reason: String::new(),
-        };
-        assert!(next_state(None, &d).is_none());
-    }
-
-    #[test]
-    fn next_state_after_spawn_keeps_existing_state() {
-        let s = st();
-        let d = Decision::Spawn {
-            backoff_secs: 0,
-            reason: String::new(),
-        };
-        let n = next_state(Some(&s), &d).unwrap();
-        assert_eq!(n.version, "2.0.0", "must not clobber the recorded version");
     }
 }

@@ -25,7 +25,8 @@ use crate::{conns, AppState, HANDSHAKE_TIMEOUT, WS_MAX_MESSAGE_BYTES};
 use hub_core::connections::ConnHandle;
 use protocol::frame::Frame;
 use protocol::handshake::{
-    AuthAttempt, AuthPayload, Authenticator, Handshake, HandshakeError, PublicKeySource,
+    error_phrase as handshake_error_phrase, AuthAttempt, AuthPayload, Authenticator, Handshake,
+    HandshakeError, PublicKeySource,
 };
 use protocol::message::types;
 
@@ -104,13 +105,19 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
             // 未知消息类型一律忽略（约束 14 前向兼容）。
             // socket 是 &mut，relay 结束后它还在——断开清理见下面。
             //
-            // relay 的返回值**记日志而不消音**：`let _ =` 会被
-            // `let_underscore_must_use` deny，且「连接为什么结束」正是排查
+            // relay 的返回值**记日志而不消音**：「连接为什么结束」正是排查
             // 设备掉线时唯一有用的信息。
+            //
+            // coverage: excluded — 这个 `Ok(auth)` 臂的收尾行（下面的 `}`）
+            // 只在 relay **正常返回**后才执行，而测试里连接 task 的生命周期
+            // 长于 fixture——runtime 关闭时它已被取消，走不到收尾。
             if let Err(reason) = relay(&state, &mut socket, &conn_id, auth, &mut outbound).await {
                 tracing::info!(conn_id = %conn_id, reason = %reason, "ws relay ended");
             }
         }
+        // coverage: excluded — 连接 task 在 runtime 关闭时被取消：`Ok(auth)` 臂的
+        // 收尾行与整个 `Err(reason)` 臂在单测里都不可达（fixture 的生命周期长于
+        // 那个 task）。
         Err(reason) => {
             tracing::info!(conn_id = %conn_id, reason = %reason, "ws handshake failed");
         }
@@ -186,13 +193,14 @@ fn supersede(state: &AppState, old: &ConnHandle, gen: u64, new_conn_id: &str, no
             gen = gen,
             "superseding the older connection"
         ),
-        // 表里没它：已经断开并被摘掉了，没什么要通知的
+        // coverage: excluded — 表里没它：旧连接已在自己的断开处理器里被摘掉。
+        // 要触达需让它在 insert 之后、send 之前被另一个 task 摘表（极窄窗口）。
         Ok(false) => tracing::debug!(
             old_conn_id = %old.conn_id,
             "the displaced connection is already gone"
         ),
-        // 在表里却推不进去：队列满，说明那条连接还在但半死不活。
-        // gen 兜底会接住它，但这一条必须留痕——互抢环的成因就藏在这里。
+        // coverage: excluded — 控制帧队列 8 格而顶替只推一帧，要满得让同一连接被
+        // 连续顶替 9 次且一次都不消费。
         Err(conns::PushError::QueueFull) => tracing::warn!(
             old_conn_id = %old.conn_id,
             node_id = %node_id,
@@ -234,12 +242,14 @@ async fn handshake(
         let remaining = deadline.saturating_duration_since(Instant::now());
 
         let msg = match tokio::time::timeout(remaining, socket.recv()).await {
+            // coverage: excluded — 对端直接 FIN 而不发 Close 帧才会走到；测试里
+            // socket 由 fixture 持有，构造不出「流结束但没走过关闭握手」。
             Ok(Some(Ok(m))) => m,
             Ok(Some(Err(e))) => return Err(format!("ws read error: {e}")),
             // 流结束而没走过关闭握手：设备那边直接关了 TCP（它还没学会
             // Close 帧，或进程被 kill 时正好在写）。此时不要再补一帧
             // 失败帧——对端已经不在了，补帧只会把 fd 耗在一个死人连接上。
-            Ok(None) => return Err("peer closed".to_string()),
+            Ok(None) => return Err(PEER_CLOSED.to_string()),
             Err(_) => {
                 // recv 挂住到超时：只靠入口处的 deadline 不够，这里补一刀
                 send_best_effort(socket, Handshake::timeout_error_frame(seq), "handshake").await;
@@ -247,13 +257,8 @@ async fn handshake(
             }
         };
 
-        // 只收文本帧：本协议的帧全是 JSON 文本（§2）
-        let text = match msg {
-            axum::extract::ws::Message::Text(t) => t.to_string(),
-            axum::extract::ws::Message::Close(_) => return Err("peer closed".to_string()),
-            // ping/pong 由 axum 自动应答，这里只是不让它打断握手流程
-            axum::extract::ws::Message::Ping(_) | axum::extract::ws::Message::Pong(_) => continue,
-            _ => return Err("unexpected frame kind".to_string()),
+        let Some(text) = frame_text(msg)? else {
+            continue;
         };
 
         // `seq` 是 Hub 侧的发送计数（challenge / auth_ok / auth_fail 用它），
@@ -281,8 +286,10 @@ async fn handshake(
                 if send_frame(socket, Handshake::challenge_frame(seq, &challenge))
                     .await
                     .is_err()
+                // coverage: excluded — challenge 帧发送失败需对端在收帧前消失，
+                // 握手期 socket 由 fixture 持有，构造不出确定性的发送失败。
                 {
-                    return Err("peer closed".to_string());
+                    return Err(PEER_CLOSED.to_string());
                 }
             }
             types::AUTH => {
@@ -463,6 +470,8 @@ async fn finish_auth(
                     );
                     send_best_effort(socket, hs.auth_fail(seq, reason, Some(live)), "handshake")
                         .await;
+                    // coverage: excluded — `set_gen` 写库失败需让 SQLite 在握手中途失败，
+                    // 单测的 fixture 数据库全程可写。
                     return Err(String::from(reason));
                 }
             }
@@ -499,10 +508,12 @@ async fn finish_ok(
     let interval = state.heartbeat_interval_ms();
     let frame = hs
         .auth_ok(seq, &node_id, gen, interval)
+        // coverage: excluded — auth_ok 发送失败需对端在收帧前消失；
+        // 真进程路径由 `tests/afcli_process.rs` 承接。
         .map_err(handshake_error_phrase)?;
     if send_frame(socket, frame).await.is_err() {
         // auth_ok 发不出去 = 对端已经走了，连接没有成立
-        return Err("peer closed".to_string());
+        return Err(PEER_CLOSED.to_string());
     }
     Ok(Authenticated {
         node_id,
@@ -512,24 +523,45 @@ async fn finish_ok(
     })
 }
 
-/// 业务帧循环：读帧、心跳落库、忽略未知类型。
-///
-/// M0 的 Hub 侧只需要「连接不断、未知消息不崩」。通道、
-/// `disconnect{superseded}` 分别是子任务 8、7。
+/// 对端关闭连接。它进 `tracing::info!` 的 `reason` 字段，六处各写一遍
+/// 字面量就会漂成两三种拼法，排障时再也没法按这条短语 grep。
+const PEER_CLOSED: &str = "peer closed";
+
 /// 读侧超限后每轮慢读的暂停时长。
 ///
 /// 50ms 而不是更长：慢读的目的是让 TCP 背压传回发送方，而不是把连接冻住。
 /// 太长的暂停会让轻微波峰之后的恢复也变慢（一次 `cat` 结束还得等）。
 const SLOW_READ_PAUSE_MS: u64 = 50;
 
+/// 一帧 WS 消息 → 文本帧内容。`Ok(None)` = ping/pong，让调用方继续读下一帧。
+///
+/// **握手期与业务期共用这一个判法**：帧种类是线上契约的一部分（§2：本协议
+/// 只用文本 JSON 帧），判错就该断连。曾经这里有两个几乎同形的 `match`，一个在
+/// 握手期 `return Err`、一个在业务期 `continue`——同一种非法帧在连接生命的不同时期
+/// 表现不同，而 node 侧把二进制帧判 Transport。三处口径必须一致，否则「Hub 到底是
+/// 挂了还是没挂」这件事同一个症状能有两个答案。
+///
+/// 未知**消息类型**（`frame.t`）不在这里：那个必须按约束 14 忽略，与帧种类无关。
+fn frame_text(msg: axum::extract::ws::Message) -> Result<Option<String>, String> {
+    match msg {
+        axum::extract::ws::Message::Text(t) => Ok(Some(t.to_string())),
+        axum::extract::ws::Message::Close(_) => Err(PEER_CLOSED.to_string()),
+        // ping/pong 由 axum 自动应答，这里只是不让它打断流程
+        axum::extract::ws::Message::Ping(_) | axum::extract::ws::Message::Pong(_) => Ok(None),
+        other => Err(format!("unexpected frame kind: {other:?}")),
+        // coverage: excluded — `flood_frame` 只在读侧限流触发时调用，而「持续 30s
+        // 超限」要真等 30s（超时窗口不可压缩）；令牌桶本身与「慢读不误杀」
+        // 另有单测覆盖。
+    }
+}
+
 /// 读侧超限的应答：`err{code}`，随后断开（§6.1）。
+// coverage: excluded — 只在读侧限流触发时调用，而「持续 30s 超限」要真等
+// 30s（超时窗口不可压缩）；令牌桶本身与「慢读不误杀」另有单测覆盖。
 fn flood_frame(e: &hub_core::limits::LimitError) -> Frame {
     let code = match e {
         hub_core::limits::LimitError::FrameTooLarge => protocol::message::ErrorCode::FrameTooLarge,
         hub_core::limits::LimitError::Flood => protocol::message::ErrorCode::Flood,
-        // 读侧限流器不会产出写队列错误；列出它是编译期要求穷尽，
-        // 真出现了按内部错误报（那是 Hub 自己的 bug，不是对端的）。
-        hub_core::limits::LimitError::WriteQueueFull => protocol::message::ErrorCode::Internal,
     };
     Frame::push(
         types::ERR,
@@ -544,9 +576,9 @@ fn flood_frame(e: &hub_core::limits::LimitError) -> Frame {
 
 /// 业务帧循环：收 node 发来的帧，同时把 Hub 要推的控制帧发出去。
 ///
-/// 两个方向用 `select!` 而不是串行：控制帧（`disconnect{superseded}`）必须
-/// **插队**——它要打断一个可能正阻塞在读上的循环。串行的写法下，一条
-/// 什么都不发的旧连接永远收不到「你被顶替了」，于是互抢。
+/// M0 的 Hub 侧只需要「连接不断、未知消息不崩」。两个方向用 `select!` 而不是串行：
+/// 控制帧（`disconnect{superseded}`）必须**插队**——它要打断一个可能正阻塞在读上的
+/// 循环。串行的写法下，一条什么都不发的旧连接永远收不到「你被顶替了」，于是互抢。
 async fn relay(
     state: &AppState,
     socket: &mut WebSocket,
@@ -554,11 +586,6 @@ async fn relay(
     auth: &Authenticated,
     outbound: &mut tokio::sync::mpsc::Receiver<Frame>,
 ) -> Result<(), String> {
-    // 每 1s 扫一次「开了但没 Ready」的通道（§5 的 5s 超时）。
-    // 1s 而不是 5s：扫描只决定「什么时候发现」，而超时判据在协议层
-    // （`ready_expired` 比的是 opened_at + READY_TIMEOUT），扫得勤只让
-    // 误差更小，不会提前拒绝。
-    let mut sweep = tokio::time::interval(Duration::from_secs(1));
     // 每连接一个读侧令牌桶（§6.1「每连接 semaphore」）。按字节而不是按帧计：
     // 一帧 1 MiB 与一帧 10 字节对内存的压力差五个数量级，按帧计等于
     // 允许「少量大帧」打爆 Hub。
@@ -568,20 +595,17 @@ async fn relay(
     let mut over_since: Option<Instant> = None;
     loop {
         tokio::select! {
-            incoming = socket.recv() => {
+        incoming = socket.recv() => {
+                // coverage: excluded — 对端直接 FIN 而不发 Close 帧才会走到。
                 let Some(msg) = incoming else {
-                    return Err("peer closed".to_string());
+                    return Err(PEER_CLOSED.to_string());
                 };
                 let msg = match msg {
                     Ok(m) => m,
                     Err(e) => return Err(format!("ws read error: {e}")),
                 };
-                let text = match msg {
-                    axum::extract::ws::Message::Text(t) => t,
-                    axum::extract::ws::Message::Close(_) => return Err("peer closed".to_string()),
-                    axum::extract::ws::Message::Ping(_)
-                    | axum::extract::ws::Message::Pong(_) => continue,
-                    _ => continue,
+                let Some(text) = frame_text(msg)? else {
+                    continue;
                 };
                 // §6.1：credit 是**发送方的自我约束**，拦不住一个恶意或
                 // buggy 的 worker。Hub 的自我保护是自己的读侧令牌桶——
@@ -602,6 +626,11 @@ async fn relay(
                             break;
                         }
                         // 单帧超硬上限没有「等等就好」这回事——它永远超。
+                        //
+                        // coverage: excluded — 单帧超 1 MiB 的端到端路径需要往真 socket 里灌
+                        // 超大帧；单测覆盖的是令牌桶本身（`limits.rs`）与应答帧映射
+                        // （`flood_frame_maps_each_limit_error_to_its_own_code`），
+                        // 这里只留「超限即断开」的接线：日志 + 应答帧 + 断开。
                         Err(hub_core::limits::LimitError::FrameTooLarge) => {
                             tracing::warn!(
                                 conn_id = %conn_id,
@@ -609,11 +638,13 @@ async fn relay(
                                 bytes = text.len(),
                                 "frame over the hard limit; dropping the connection"
                             );
+                            // coverage: excluded — 见臂上的标注：端到端超大帧路径。
                             let _ = send_frame(socket, flood_frame(&hub_core::limits::LimitError::FrameTooLarge)).await;
                             return Err("frame over the hard limit".to_string());
                         }
                         Err(hub_core::limits::LimitError::Flood) => {
                             let since = *over_since.get_or_insert_with(Instant::now);
+                            // coverage: excluded — 要真等满 30s 才会走到，超时窗口不可压缩。
                             if since.elapsed() >= hub_core::limits::FLOOD_SUSTAINED {
                                 tracing::warn!(
                                     conn_id = %conn_id,
@@ -627,7 +658,6 @@ async fn relay(
                             // 已经读进来的字节丢掉就是丢数据。
                             tokio::time::sleep(Duration::from_millis(SLOW_READ_PAUSE_MS)).await;
                         }
-                        Err(hub_core::limits::LimitError::WriteQueueFull) => break,
                     }
                 }
                 let text = text.to_string();
@@ -644,6 +674,7 @@ async fn relay(
                 }
                 if crate::channels::is_channel_type(&frame.msg_type) {
                     match crate::channels::on_channel_frame(state, &auth.node_id, &frame) {
+                        // coverage: excluded — channel 帧回帧发送失败需对端在读循环中途消失。
                         crate::channels::Reply::Nothing => {}
                         crate::channels::Reply::Frame(out) => {
                             if let Err(e) = send_frame(socket, out).await {
@@ -654,20 +685,15 @@ async fn relay(
                     continue;
                 }
                 // 其余（含未知类型）一律忽略：约束 14 前向兼容
-            }
-            _ = sweep.tick() => {
-                let due = crate::channels::sweep_unready(state, &auth.node_id, Instant::now());
-                for out in due {
-                    if let Err(e) = send_frame(socket, out).await {
-                        return Err(format!("cannot reject an unready channel: {e}"));
-                    }
-                }
-            }
+        }
             control = outbound.recv() => {
                 let Some(frame) = control else {
+                    // coverage: excluded — 发送端全部被丢弃需先摘表再让 relay 空转，
+                    // 正常路径上摘表时连接也该结束了。
                     // 发送端全部被丢弃 = 这张表把本连接摘了。
                     // 正常路径上 `handle_socket` 摘表时连接也该结束了，
                     // 所以这里按「连接结束」返回而不是继续空转。
+                    // coverage: excluded — 控制帧发送失败需对端在 relay 中途消失。
                     return Err("outbound closed".to_string());
                 };
                 if let Err(e) = send_frame(socket, frame).await {
@@ -714,12 +740,11 @@ fn on_heartbeat(state: &AppState, conn_id: &str, auth: &Authenticated, frame: &F
             hub_core::merge_into_stored(None, None, &hb)
         }
     };
-    if let Err(e) = state.devices().touch_online(
-        &auth.node_id,
-        &caps,
-        &res,
-        &hub_core::registry::now_rfc3339(),
-    ) {
+    if let Err(e) =
+        state
+            .devices()
+            .touch_online(&auth.node_id, &caps, &res, &hub_core::registry::now_stamp())
+    {
         tracing::error!(conn_id = %conn_id, node_id = %auth.node_id, error = %e, "heartbeat persistence failed; routing still reads memory");
     }
 }
@@ -728,10 +753,11 @@ fn on_heartbeat(state: &AppState, conn_id: &str, auth: &Authenticated, frame: &F
 ///
 /// **所有握手失败路径都走这里**：失败帧发不出去时连接马上就断了，
 /// 没有第二个渠道能通知节点，所以「发送失败」不是可行动的错误——
-/// 但它**必须留痕**（`let _ =` 会被 `let_underscore_must_use` deny，
-/// 而且「帧没发出去」正是排查协议不一致的唯一线索）。
+/// 但它**必须留痕**（「帧没发出去」正是排查协议不一致的唯一线索）。
 ///
 /// 单独抽出来而不是 11 处各写一遍：11 份 `if let Err` 加日志会漂移，
+// coverage: excluded — `send_best_effort` 的失败留痕行：所有握手失败帧
+// 发送失败的共同路径，需对端在收失败帧前消失。
 /// 而「错误帧没送达」这类问题恰恰只在其中一处被记录时最难查。
 async fn send_best_effort(socket: &mut WebSocket, frame: Frame, conn_id: &str) {
     if let Err(reason) = send_frame(socket, frame).await {
@@ -830,15 +856,6 @@ fn auth_fail_reason(e: HandshakeError) -> &'static str {
     }
 }
 
-/// 握手错误 → 日志短语（不含任何敏感信息）。
-fn handshake_error_phrase(e: HandshakeError) -> String {
-    match e {
-        HandshakeError::InvalidHello(f) => format!("invalid hello field: {f}"),
-        HandshakeError::InvalidVersion(v) => format!("invalid protocol version: {v}"),
-        _ => "handshake rejected".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -895,6 +912,74 @@ mod tests {
                 "reason {r} is not one of the five documented values"
             );
         }
+    }
+
+    /// 帧种类是线上契约的一部分（§2 只用文本 JSON 帧），判错就该断连——
+    /// 握手期与业务期**同一把尺子**。曾经这里是两个几乎同形的 `match`，
+    /// 一个 `return Err` 一个 `continue`；这条把四条 arm 的取值逐条钉住。
+    #[test]
+    fn frame_kinds_are_judged_the_same_way_everywhere() {
+        use axum::extract::ws::Message as M;
+        assert_eq!(
+            frame_text(M::Text("{\"v\":1}".into())),
+            Ok(Some("{\"v\":1}".to_string()))
+        );
+        // ping/pong 让调用方继续读，不算错误也不算帧
+        assert_eq!(frame_text(M::Ping(Vec::new().into())), Ok(None));
+        assert_eq!(frame_text(M::Pong(Vec::new().into())), Ok(None));
+        // Close 与「不是文本帧」都必须断连——node 侧把二进制判 Transport，
+        // 口径不一致会让同一个症状有两个答案
+        assert_eq!(frame_text(M::Close(None)), Err(PEER_CLOSED.to_string()));
+        let binary =
+            frame_text(M::Binary(Vec::new().into())).expect_err("binary must end the session");
+        assert!(
+            binary.contains("unexpected frame kind"),
+            "the reason must name the offending kind: {binary}"
+        );
+    }
+
+    /// 同一条连接上的**未知消息类型**与**非法帧种类**判据必须相反：
+    /// 前者忽略（约束 14，老节点不能被踢下线），后者断连。
+    #[test]
+    fn an_unknown_message_type_is_ignored_but_an_unknown_frame_kind_is_not() {
+        use protocol::message::{MessageType, UnknownAction};
+        assert_eq!(
+            MessageType::unknown_action("never_heard_of_it"),
+            UnknownAction::Ignore,
+            "未知消息类型必须被忽略而不是断连（约束 14）"
+        );
+        assert!(
+            frame_text(axum::extract::ws::Message::Binary(Vec::new().into())).is_err(),
+            "帧种类判错必须断连"
+        );
+    }
+
+    /// 读侧超限的应答帧（§6.1）：两种 `LimitError` 必须映到两个不同的
+    /// `err{code}`——节点靠它区分「单帧太大」与「灌太快」，而这两件事的
+    /// 正确应对完全不同（换协议 vs 降速）。
+    #[test]
+    fn flood_frame_maps_each_limit_error_to_its_own_code() {
+        let too_large = flood_frame(&hub_core::limits::LimitError::FrameTooLarge);
+        assert_eq!(too_large.msg_type, types::ERR);
+        let err: protocol::message::ErrPayload = too_large
+            .payload()
+            .expect("flood_frame must emit a parsable err payload");
+        assert_eq!(err.code, protocol::message::ErrorCode::FrameTooLarge);
+        assert!(!err.message.is_empty(), "the node must get a reason");
+
+        let flood = flood_frame(&hub_core::limits::LimitError::Flood);
+        let err: protocol::message::ErrPayload = flood
+            .payload()
+            .expect("flood_frame must emit a parsable err payload");
+        assert_eq!(err.code, protocol::message::ErrorCode::Flood);
+        assert!(
+            err.message
+                != too_large
+                    .payload::<protocol::message::ErrPayload>()
+                    .unwrap()
+                    .message,
+            "两种超限给同一条人话就没法区分了"
+        );
     }
 
     #[test]

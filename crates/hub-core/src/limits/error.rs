@@ -9,8 +9,4 @@ pub enum LimitError {
     /// 单帧超过 1 MiB 硬上限（§2）。
     #[error("frame too large")]
     FrameTooLarge,
-
-    /// 写队列满。调用方应反压，**不得丢帧**。
-    #[error("write queue full, apply backpressure")]
-    WriteQueueFull,
 }

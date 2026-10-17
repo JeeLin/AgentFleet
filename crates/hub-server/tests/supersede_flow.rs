@@ -13,73 +13,16 @@
     clippy::panic,
     clippy::indexing_slicing
 )]
+mod common;
 
 use std::time::{Duration, Instant};
 
-use hub_core::auth::{AuthParams, LoginRateLimiter};
-use hub_server::AppState;
-use identity::KeyPair;
-use node_core::conn::{connect_once, ConnOutcome, Established};
+use common::{connect_enrolled, device_info, wait_disconnected, Hub};
+use node_core::conn::{connect_once, ConnOutcome};
 use protocol::frame::Frame;
-use protocol::message::{types, DeviceInfo};
-use tokio::net::TcpListener;
-use tokio::sync::oneshot;
-
-/// 一台跑起来的 Hub（随机端口 + 临时数据目录）。
-struct Hub {
-    addr: std::net::SocketAddr,
-    state: AppState,
-    _dir: tempfile::TempDir,
-    _shutdown: Option<oneshot::Sender<()>>,
-}
+use protocol::message::types;
 
 impl Hub {
-    async fn boot() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let pool = hub_storage::db::open_in(dir.path()).unwrap().1;
-        let state = AppState::bootstrap_with(
-            pool,
-            dir.path(),
-            AuthParams {
-                m_cost: 8192,
-                t_cost: 1,
-                p_cost: 1,
-            },
-            Duration::from_millis(200),
-            LoginRateLimiter::new(10, 60),
-        )
-        .unwrap();
-        state
-            .auth()
-            .setup_password("correct horse battery")
-            .unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (tx, rx) = oneshot::channel::<()>();
-        let app = hub_server::build_app(state.clone());
-        let task = tokio::spawn(async move {
-            let _ = axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .with_graceful_shutdown(async {
-                let _ = rx.await;
-            })
-            .await;
-        });
-        std::mem::forget(task);
-        Self {
-            addr,
-            state,
-            _dir: dir,
-            _shutdown: Some(tx),
-        }
-    }
-
-    fn ws_url(&self) -> String {
-        format!("ws://{}/ws", self.addr)
-    }
-
     fn device_count(&self) -> usize {
         self.state.devices().list().unwrap().len()
     }
@@ -91,38 +34,6 @@ impl Hub {
             .unwrap()
             .expect("device row must exist")
             .last_seen_gen
-    }
-}
-
-fn device_info() -> DeviceInfo {
-    DeviceInfo {
-        name: "pi".to_string(),
-        os: "linux".to_string(),
-        arch: "aarch64".to_string(),
-        hostname: "pi".to_string(),
-        node_version: "0.1.0".to_string(),
-    }
-}
-
-/// 一份 enroll 成功后的连接（enroll 形态：不带 node_id、不带 gen）。
-async fn connect_enrolled(hub: &Hub) -> (Established, String, KeyPair) {
-    let kp = KeyPair::generate();
-    let est = connect_once(&hub.ws_url(), &kp, None, None, device_info())
-        .await
-        .expect("enroll must succeed");
-    let node_id = est.auth_ok.node_id.clone();
-    (est, node_id, kp)
-}
-
-/// 等到某台设备的连接从注册表里摘掉。
-async fn wait_disconnected(hub: &Hub, node_id: &str, budget: Duration) {
-    let deadline = Instant::now() + budget;
-    loop {
-        if hub.state.connections().get(node_id).is_none() {
-            return;
-        }
-        assert!(Instant::now() < deadline, "连接始终没被摘掉");
-        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 

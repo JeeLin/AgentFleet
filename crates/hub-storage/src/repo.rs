@@ -8,39 +8,17 @@ use r2d2_sqlite::rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
-/// base64url 无填充编码（hub-storage 内自足，不反向依赖 hub-core）。
-///
-/// 写法上刻意避开裸索引与算术运算：`chunk[i]` 越界 / `<<` 溢出在 Rust 里
-/// 都是 panic，而这个函数在设备指纹落库等路径上会被调用——一处 panic
-/// 就是一次 Hub 进程退出。全部走 `get` + 显式 `u32` 加宽 + 表查找。
-pub fn base64url_of(bytes: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        // 补齐到 3 字节，缺的按 0 处理——`get` 返回 Option，不用索引
-        let b0 = u32::from(*chunk.first().unwrap_or(&0));
-        let b1 = u32::from(*chunk.get(1).unwrap_or(&0));
-        let b2 = u32::from(*chunk.get(2).unwrap_or(&0));
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        // 尾块（1 或 2 字节）只输出 2 或 3 个字符；满块输出 4 个
-        let take = chunk.len() + 1;
-        for (i, &shift) in [18u32, 12, 6, 0].iter().enumerate() {
-            if i >= take {
-                break;
-            }
-            let idx = ((n >> shift) & 63) as usize;
-            // `idx` 恒 < 64 且 T 长 64 —— 必命中。用 get 而不是裸索引：
-            // 索引一旦被改错就是 panic，而这个函数在设备指纹落库路径上。
-            if let Some(&c) = T.get(idx) {
-                out.push(c as char);
-            }
-        }
-    }
-    out
-}
-
 use crate::error::{Result, StorageError};
 use crate::Db;
+
+/// base64url 无填充编码。与 [`identity::base64url`] 同一份实现。
+///
+/// 设备指纹、公钥落库都走这里，而 Hub 侧解析同一串用的是
+/// `identity::base64url_decode`——两份编解码器只会在「哪个字符算非法」上分叉，
+/// 届时存的公钥永远解不出来。
+pub fn base64url_of(bytes: &[u8]) -> String {
+    identity::base64url(bytes)
+}
 
 /// 设备状态。**只有两值**——「重连中」只存在于内存（security §5）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -547,9 +525,10 @@ mod tests {
 
     #[test]
     fn base64url_of_emits_only_valid_alphabet_and_grows_with_input() {
-        // 独立实现（hub-storage 不依赖 hub-core，不能复用其 base64url）。
         // 锁住契约：① 只输出 base64url 字符集 ② 长度随输入非递减
         // （这是它作为指纹/公钥编码被下游消费的前提，不变量而非具体公式）。
+        // 编解码本身在 identity 里，这两条断言守的是「落库的那份与解析的那份
+        // 用的是同一套字母表」——两份编解码器只会在非法字符的分歧上裂开。
         let mut prev_len: usize = 0;
         for len in 0u32..=34 {
             let b: Vec<u8> = (0..len).map(|i| i as u8).collect();
@@ -569,6 +548,22 @@ mod tests {
         }
         // 32 字节公钥 → 43 字符（base64url 的 n*8/6 向上取整：32*8/6≈42.7→43）
         assert_eq!(base64url_of(&[0u8; 32]).len(), 43);
+    }
+
+    /// `base64url_of` 是转发，不是另一份实现——落库的那份编码与 identity
+    /// 解析的那份必须逐字节相同，否则「库里读出来的公钥解不开」。
+    #[test]
+    fn base64url_of_is_the_same_encoder_as_identity() {
+        for bytes in [Vec::new(), vec![7u8; 32], b"n_a|unix:0".to_vec()] {
+            assert_eq!(base64url_of(&bytes), identity::base64url(&bytes));
+        }
+        // 解码回同一串：这一侧才是被 `Registry` 直接消费的方向
+        let kp = identity::KeyPair::generate();
+        let encoded = base64url_of(&kp.public_key_bytes());
+        assert_eq!(
+            identity::base64url_decode(&encoded).expect("must decode"),
+            kp.public_key_bytes().to_vec()
+        );
     }
 
     #[test]

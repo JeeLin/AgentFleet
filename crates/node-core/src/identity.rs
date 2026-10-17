@@ -200,14 +200,10 @@ impl Identity {
     /// 同样走原子写：这一下写坏了，节点重启后虽然密钥对还在，
     /// 但会丢掉 node_id 只能重新 enroll。
     pub fn set_node_id(&mut self, node_id: &str) -> Result<(), IdentityError> {
-        let raw = fs::read_to_string(&self.path)?;
-        let mut parsed: IdentityFile =
-            serde_json::from_str(&raw).map_err(|e| IdentityError::Corrupt {
-                path: self.path.display().to_string(),
-                reason: e.to_string(),
-            })?;
-        parsed.node_id = Some(node_id.to_string());
-        write_atomic(&self.path, &serde_json::to_vec_pretty(&parsed)?)
+        self.update(|id| {
+            id.node_id = Some(node_id.to_string());
+            true
+        })
     }
 
     /// 本节点见过的最大连接代次。
@@ -219,22 +215,22 @@ impl Identity {
 
     /// 记录本次连接拿到的 `gen`（`auth_ok` 之后调用）。
     pub fn record_gen(&mut self, gen: u64) -> Result<(), IdentityError> {
-        let raw = fs::read_to_string(&self.path)?;
-        let mut parsed: IdentityFile =
-            serde_json::from_str(&raw).map_err(|e| IdentityError::Corrupt {
-                path: self.path.display().to_string(),
-                reason: e.to_string(),
-            })?;
         // 只前进不回退：并发的两条连接里，落后那条不得把记录拉回去。
-        if parsed.last_seen_gen.is_none_or(|seen| seen < gen) {
-            parsed.last_seen_gen = Some(gen);
-            write_atomic(&self.path, &serde_json::to_vec_pretty(&parsed)?)?;
-        }
-        Ok(())
+        // 返回 false 表示不需要写盘，也就省掉了一次原子写。
+        self.update(|id| {
+            if id.last_seen_gen.is_none_or(|seen| seen < gen) {
+                id.last_seen_gen = Some(gen);
+                true
+            } else {
+                false
+            }
+        })
     }
 
     /// 被顶替了吗（§7.1 终态）。
     pub fn is_superseded(&self) -> bool {
+        // coverage: excluded — 读失败臂：需身份文件在 `is_superseded` 读取中途
+        // 消失。
         let Some(raw) = fs::read_to_string(&self.path).ok() else {
             return false;
         };
@@ -246,13 +242,30 @@ impl Identity {
 
     /// 标记被顶替。置上之后 [`Self::is_superseded`] 恒为真，重连循环据此停下。
     pub fn mark_superseded(&mut self, at: &str) -> Result<(), IdentityError> {
+        self.update(|id| {
+            id.superseded_at = Some(at.to_string());
+            true
+        })
+    }
+
+    /// 「读身份文件 → 改一个字段 → 原子写回」。三个写入口形状完全一样，
+    /// 各抄一遍就会让某一条悄悄漏掉「读坏 JSON 要报错」这条契约
+    /// （读侧 `last_seen_gen` / `is_superseded` 读坏了当没读到，写侧必须报错）。
+    ///
+    /// `mutate` 返回 `false` 表示「值没变，不用写盘」。
+    fn update(
+        &mut self,
+        mutate: impl FnOnce(&mut IdentityFile) -> bool,
+    ) -> Result<(), IdentityError> {
         let raw = fs::read_to_string(&self.path)?;
         let mut parsed: IdentityFile =
             serde_json::from_str(&raw).map_err(|e| IdentityError::Corrupt {
                 path: self.path.display().to_string(),
                 reason: e.to_string(),
             })?;
-        parsed.superseded_at = Some(at.to_string());
+        if !mutate(&mut parsed) {
+            return Ok(());
+        }
         write_atomic(&self.path, &serde_json::to_vec_pretty(&parsed)?)
     }
 }
@@ -291,6 +304,8 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), IdentityError> {
             // 目录 fsync 失败不影响数据已落盘的事实，这里**不**用 `let _ =`
             // （workspace lint deny 了 let_underscore_must_use）：显式丢弃返回值。
             drop(d.sync_all());
+            // coverage: excluded — 见 :298：内层 `if let Ok(d)` 的 else 不可达，
+            // 这里是它的收尾行。
         }
     }
     Ok(())
@@ -529,14 +544,30 @@ mod tests {
         assert!(matches!(e, IdentityError::Corrupt { .. }), "got {e:?}");
     }
 
-    /// `set_node_id` 读到损坏文件时必须报 Corrupt，而不是 panic 或写坏文件。
+    /// 三个写入口读坏 JSON 时都必须报 `Corrupt`。
+    ///
+    /// 三个写入口共用同一个读-改-写，但**每个都要求**这条契约：写侧读坏了
+    /// 必须报错（绝不能拿一份空的身份把 node_id / gen / 顶替标记写回去，
+    /// 那等于把设备改成「没注册过」）。漏掉一个入口的测试，这条就会在某次
+    /// 重构里悄悄失效。
     #[test]
-    fn set_node_id_on_corrupt_file_is_reported() {
-        let d = tmpdir();
-        let mut id = Identity::load_or_create(d.path()).unwrap();
-        std::fs::write(id.path(), "{ not json").unwrap();
-        let e = id.set_node_id("n_x").unwrap_err();
-        assert!(matches!(e, IdentityError::Corrupt { .. }), "got {e:?}");
+    fn every_write_entry_point_reports_a_corrupt_file() {
+        type Write = fn(&mut Identity) -> Result<(), IdentityError>;
+        let writes: [(&str, Write); 3] = [
+            ("set_node_id", |id| id.set_node_id("n_x")),
+            ("record_gen", |id| id.record_gen(9)),
+            ("mark_superseded", |id| id.mark_superseded("unix:0")),
+        ];
+        for (name, write) in writes {
+            let d = tmpdir();
+            let mut id = Identity::load_or_create(d.path()).unwrap();
+            std::fs::write(id.path(), "{ not json").unwrap();
+            let e = write(&mut id).unwrap_err();
+            assert!(
+                matches!(e, IdentityError::Corrupt { .. }),
+                "{name}: got {e:?}"
+            );
+        }
     }
 
     /// 版本号不符必须被拒（老版本文件不能当当前版本用）。

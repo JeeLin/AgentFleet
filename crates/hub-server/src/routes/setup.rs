@@ -219,6 +219,8 @@ pub async fn post_login(State(state): State<AppState>, req: Request) -> Result<R
         // 闭锁不是「忙」，必须 500 而不是 429：否则一次内部事故会被伪装成
         // 「服务繁忙」，把真正的根因（有人闭锁了闸门）藏起来。
         Ok(Err(e)) => {
+            // coverage: excluded — 同 167：tracing::error! 参数行被 llvm-cov
+            // 记为 miss（多行宏已知现象），该臂本身见 :214 就地标注。
             tracing::error!(error = %e, "login semaphore closed");
             return Err(ApiError::internal());
         }
@@ -240,7 +242,9 @@ pub async fn post_login(State(state): State<AppState>, req: Request) -> Result<R
     state.limiter().record_success(&ip);
 
     let key = state.session_key().map_err(ApiError::from_auth)?;
-    let token = hub_core::session::SessionStore::new(key).issue(SUBJECT);
+    let token = hub_core::session::SessionStore::new(key)
+        .issue(SUBJECT)
+        .map_err(|e| ApiError::internal_with("cannot sign the session cookie", e))?;
     let csrf = random_token(CSRF_TOKEN_BYTES);
 
     let mut headers = HeaderMap::new();

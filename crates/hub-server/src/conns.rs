@@ -25,7 +25,7 @@ pub type Outbound = Frame;
 /// 收到一个。给 8 是留余量（同一条连接上连续几次顶替），但**不允许无界**——
 /// 无界队列会让「Hub 想让旧连接走」这件事永远延迟兑现，而旧连接每多活一秒
 /// 就多一次互抢。
-pub const CONTROL_QUEUE: usize = 8;
+pub(crate) const CONTROL_QUEUE: usize = 8;
 
 /// 推送失败的原因。命名而不是 `()`：调用方要能区分「它已经走了」与
 /// 「它还在但推不进去」，后者是异常且必须留痕。
@@ -75,14 +75,6 @@ impl OutboundTable {
     pub fn remove(&self, conn_id: &str) {
         self.0.write().remove(conn_id);
     }
-
-    pub fn len(&self) -> usize {
-        self.0.read().len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 #[cfg(test)]
@@ -122,7 +114,24 @@ mod tests {
         let _rx = t.register("c1");
         t.remove("c1");
         assert!(!t.send("c1", frame()).unwrap());
-        assert!(t.is_empty());
+    }
+
+    /// 一条连接把队列塞满，**不能连累别的连接**（§6.2「每通道独立信用」
+    /// 在控制帧上的对应面）。按 `conn_id` 分桶就是为了这条：一台设备半死不活
+    /// 不该让别的设备收不到「你被顶替了」。
+    #[tokio::test]
+    async fn one_stalled_connection_does_not_block_the_others() {
+        let t = OutboundTable::new();
+        let _stalled = t.register("c_stuck"); // 收端从不消费
+        let mut healthy = t.register("c_ok");
+        for _ in 0..CONTROL_QUEUE {
+            assert!(t.send("c_stuck", frame()).unwrap());
+        }
+        assert_eq!(t.send("c_stuck", frame()), Err(PushError::QueueFull));
+
+        assert!(t.send("c_ok", frame()).unwrap());
+        let got = healthy.recv().await.expect("must arrive");
+        assert_eq!(got.msg_type, types::DISCONNECT);
     }
 
     /// 队列满 → `Err`，且**不至于 panic**。

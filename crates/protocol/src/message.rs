@@ -32,22 +32,11 @@ pub mod types {
     /// 必需集：缺失或未知即握手失败。
     pub const REQUIRED: &[&str] = &[HELLO, CHALLENGE, AUTH, AUTH_OK, AUTH_FAIL, HEARTBEAT, ERR];
 
-    /// 可选集：必须忽略（前向兼容，约束 14）。
-    pub const OPTIONAL: &[&str] = &[
-        HUB_HELLO,
-        HEARTBEAT_ACK,
-        DISCONNECT,
-        OPEN_CHANNEL,
-        CHANNEL_READY,
-        CHANNEL_ERROR,
-        CHANNEL_DATA,
-        CHANNEL_CREDIT,
-        CLOSE_CHANNEL,
-        EXEC_REQUEST,
-        EXEC_RESULT,
-    ];
-
     /// 该类型属于必需集吗。
+    ///
+    /// **可选集没有对应的清单**：处置只按「在不在 `REQUIRED` 里」分档
+    /// （见 [`crate::message::MessageType::unknown_action`]），维护一份
+    /// `OPTIONAL` 只会诱使人改错那一份。
     pub fn is_required(t: &str) -> bool {
         REQUIRED.contains(&t)
     }
@@ -181,32 +170,6 @@ pub struct DeviceInfo {
     pub node_version: String,
 }
 
-/// 一个消息 = 帧 + 已解析的类型归属。
-#[derive(Debug, Clone)]
-pub struct Message {
-    pub frame: crate::frame::Frame,
-}
-
-impl Message {
-    pub fn msg_type(&self) -> &str {
-        &self.frame.msg_type
-    }
-
-    /// 该消息是否**可以忽略**（而不是断开重连）。
-    ///
-    /// 与 [`MessageType::unknown_action`] 同源，判定口径必须一致：
-    /// **只有必需集才断开**；其余（含可选集与将来新增的类型名）一律忽略——
-    /// 这正是约束 14 的前向兼容：Hub 新增一个可选消息类型时，
-    /// 老 node 遇到它必须忽略而不是崩。
-    ///
-    /// 早期实现写成 `OPTIONAL.contains(t)`，与 `unknown_action` 矛盾：
-    /// 一个「既不在必需集也不在可选集」的新类型名，前者说「不可忽略」
-    /// 后者说「忽略」。以 `unknown_action` 为准。
-    pub fn unknown_is_ignorable(&self) -> bool {
-        MessageType::unknown_action(&self.frame.msg_type) == UnknownAction::Ignore
-    }
-}
-
 /// 消息类型枚举（用于 match 分发；未知类型走 `Unknown`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageType {
@@ -263,7 +226,14 @@ impl std::str::FromStr for MessageType {
 }
 
 impl MessageType {
-    /// 未知且属于可选集 → 忽略；未知且属于必需集 → 断连。
+    /// 未知类型的处置：**只有必需集才断开**。
+    ///
+    /// 口径是「在不在 `REQUIRED` 里」，**不是**「在不在 `OPTIONAL` 里」——
+    /// 一个「两套集合都不在」的新类型名必须算可忽略，否则 Hub 每新增一个可选
+    /// 消息类型，老 node 就会因遇到不认识的名字而断连（约束 14）。
+    ///
+    /// 两侧的握手/业务帧循环都读这一处（`hub-server` 的 `routes::ws`、
+    /// `node-core` 的 `conn`），各写一份判定就是两份会漂移的真相源。
     pub fn unknown_action(s: &str) -> UnknownAction {
         if types::is_required(s) {
             UnknownAction::Disconnect
@@ -276,7 +246,7 @@ impl MessageType {
 /// 未知消息类型的处置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnknownAction {
-    /// 忽略（可选集）。
+    /// 忽略（可选集，以及两套集合之外的新类型名）。
     Ignore,
     /// 断开并退避重连（必需集）。
     Disconnect,
@@ -419,28 +389,22 @@ mod tests {
     }
 
     #[test]
-    fn message_wrapper_exposes_type_and_ignorability() {
+    fn unknown_types_are_ignorable_unless_they_are_required() {
         // 判定口径：**只有必需集才断开**，其余一律忽略（约束 14 前向兼容）
-        let f = crate::frame::Frame::push(types::HEARTBEAT, 3, serde_json::json!({}));
-        let m = Message { frame: f };
-        assert_eq!(m.msg_type(), types::HEARTBEAT);
-        assert!(!m.unknown_is_ignorable(), "heartbeat is required");
-
-        // 明确在可选集里的类型 → 可忽略
-        let opt = Message {
-            frame: crate::frame::Frame::push(types::CHANNEL_DATA, 0, serde_json::json!({})),
-        };
-        assert!(
-            opt.unknown_is_ignorable(),
+        assert_eq!(
+            MessageType::unknown_action(types::HEARTBEAT),
+            UnknownAction::Disconnect,
+            "heartbeat is required"
+        );
+        assert_eq!(
+            MessageType::unknown_action(types::CHANNEL_DATA),
+            UnknownAction::Ignore,
             "optional type must be ignorable"
         );
-
         // 不属于必需集的（含将来新增的类型名）→ 可忽略，这是约束 14 的
-        // 前向兼容：老 node 遇到新 Hub 的新消息类型必须忽略而不是崩
-        let unknown = Message {
-            frame: crate::frame::Frame::push("teleport_channel", 0, serde_json::json!({})),
-        };
-        assert!(unknown.unknown_is_ignorable());
+        // 前向兼容：老 node 遇到新 Hub 的新消息类型必须忽略而不是崩。
+        // 早期实现写成 `OPTIONAL.contains(t)`，那会让一个新增的类型名算成
+        // 「不可忽略」——本条锁住这个坑不再回来。
         assert_eq!(
             MessageType::unknown_action("teleport_channel"),
             UnknownAction::Ignore

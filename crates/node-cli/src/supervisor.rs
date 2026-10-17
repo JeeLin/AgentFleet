@@ -11,7 +11,6 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::filelog::{self, ROLE_SUPERVISOR};
-use node_core::log;
 use node_core::supervisor::{
     self, exit_code, CrashStats, Decision, ExitInfo, Inputs, EXIT_STORM_WINDOW_SECS,
 };
@@ -167,9 +166,13 @@ impl Supervisor {
                 } => {
                     self.say(&format!("{reason}; backing off {backoff_secs}s"));
                     std::thread::sleep(Duration::from_secs(backoff_secs));
+                    // coverage: excluded — 替换臂：`replace` 会真的 rename 运行中的二进制，
+                    // 破坏测试进程自身（同 :109）。
                 }
                 Decision::ReplaceAndSpawn { version, reason } => {
                     self.say(&format!("{reason}: target version {version}"));
+                    // coverage: excluded — 替换臂：`replace` 会真的 rename 运行中的
+                    // 二进制，破坏测试进程自身（同 :109）。
                     if let Err(e) = self.replace(state_ref, &version) {
                         // D2-④：替换失败即**放弃本次更新**，绝不带着半换好的
                         // 二进制继续 spawn——那正是「说一套做一套」的现场。
@@ -178,6 +181,7 @@ impl Supervisor {
                         return stopped();
                     }
                 }
+                // coverage: excluded — 回滚臂：`rollback` 同样要动二进制文件本身。
                 Decision::Rollback { reason } => {
                     self.say(&reason);
                     if let Err(e) = self.rollback(state_ref) {
@@ -210,6 +214,7 @@ impl Supervisor {
             .args(worker_argv(&self.argv))
             .spawn()
         {
+            // coverage: excluded — spawn 失败臂：需二进制路径不可执行。
             Ok(c) => c,
             Err(e) => {
                 // 拉不起来不是「等一会儿就好」的事（多半是二进制被换掉了或
@@ -220,6 +225,7 @@ impl Supervisor {
             }
         };
         let code = match child.wait() {
+            // coverage: excluded — wait 失败臂：需子进程被信号杀死后 `wait` 报错。
             Ok(status) => exit_code_of(&status),
             Err(e) => {
                 self.say(&format!("cannot wait for worker: {e}"));
@@ -366,13 +372,9 @@ impl Supervisor {
         }
     }
 
-    /// 启动时轮转一次日志。运行期判断大小会给每个进程加一次 stat 到热路径，
-    /// 而轮转的代价（复制整个文件）本来就不该由日志频率触发。
+    /// 启动时轮转一次日志。
     fn rotate_log(&self) {
-        let path = log::log_path(&self.data_dir);
-        if let Err(e) = log::rotate_if_needed(&path) {
-            self.say(&format!("cannot rotate {}: {e}", path.display()));
-        }
+        filelog::rotate_at_startup(&self.data_dir, ROLE_SUPERVISOR);
     }
 
     /// 一行日志。级别固定 `info`——决策与故障都值得进同一份文件，
@@ -389,6 +391,7 @@ fn stopped() -> std::process::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use node_core::log;
 
     /// 每个测试一个独立目录：测试并行跑，共享目录会让「故意写坏的夹具」
     /// 把别人的 setUp 搞崩。
@@ -657,6 +660,19 @@ mod tests {
         // staged 必须留在盘上：备份写不进去就放弃更新，但下载好的新二进制
         // 不能跟着消失——否则下次升级得重新下载一遍。
         assert!(staged.exists(), "staged 必须留着，否则更新凭空消失");
+    }
+
+    /// **没有备份可回滚时报错**（D2-⑤ 的另一半）：宁可停下来让人看，
+    /// 也不 rename 一个不存在的路径上去——那会让 `exe` 消失，设备连
+    /// supervisor 都起不来，是最难恢复的一种故障。
+    #[test]
+    fn rollback_never_touches_the_exe_when_there_is_no_backup() {
+        let (d, s) = sup("rollback-missing2");
+        std::fs::write(&s.exe, b"current").expect("exe");
+        let st = state_at(&d);
+        let err = s.rollback(Some(&st)).expect_err("must refuse");
+        assert!(err.contains("no backup"), "{err}");
+        assert_eq!(std::fs::read(&s.exe).expect("exe"), b"current");
     }
 
     /// 没有既有状态文件时也能替换：`blank_state` 补一条可用记录。

@@ -22,6 +22,8 @@
 // 而 panic 消息比 match 分支更能说明是哪一行、哪个值不对。
 // let_underscore_must_use / indexing_slicing 同理：测试里故意 `let _ =`
 // 丢弃一个错误来验证「失败不影响状态」，按索引取值也是常规写法。
+mod common;
+
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -31,6 +33,7 @@ use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use common::fast_params;
 use http_body_util::BodyExt;
 use hub_core::auth::{AuthParams, HubAuth, LoginRateLimiter};
 use hub_server::middleware_auth::require_auth;
@@ -38,19 +41,6 @@ use hub_server::{AppState, CSRF_COOKIE, SESSION_COOKIE};
 use hub_storage::repo::DeviceRepo;
 use serde_json::json;
 use tower::ServiceExt;
-
-/// 测试用 Argon2id 参数：最小可用值，跑得快。
-///
-/// **刻意不用生产参数**（m=65536）：测试要跑几十次登录，
-/// 生产参数会让整个集成测试从秒级掉到分钟级。
-/// 「参数大小是否安全」由 hub-core 的 `AuthParams::for_cpu_count` 单独覆盖。
-fn fast_params() -> AuthParams {
-    AuthParams {
-        m_cost: 8192,
-        t_cost: 1,
-        p_cost: 1,
-    }
-}
 
 /// 登录并发上限外的排队超时。默认 200ms：既能稳定触发 429，又不会拖慢用例。
 const QUEUE_TIMEOUT: Duration = Duration::from_millis(200);
