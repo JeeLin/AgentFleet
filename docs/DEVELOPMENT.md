@@ -78,18 +78,18 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
 | # | 里程碑 | 目标 | 承接 §3.1 能力 |
 |---|--------|------|--------------|
 | M0 ✅ 已完成 | 设备接入 | `afcli run` 一条命令（首次自动 enroll）；**密钥对在 node 本地生成、Hub 只存指纹**；supervisor/worker 同二进制双角色（`run --worker`，回滚由未被替换的 supervisor 执行，见 `DECISIONS.md` D1/D2）；单条 WS 主动外联；心跳即能力上报；掉线指数退避重连；防重复注册（同一指纹不得新建设备）；`afcli log` 看最近日志；**WS 协议层与 enroll 时序一并设计**（见 `architecture/protocol.md`） | 设备接入、节点身份与状态、存储与启动基座 |
-| M1 🔄 当前 | 会话工作区与首个演示 | 工作区 `(node_id, path)` 落库；会话创建即挂载工作区；**在树莓派上开一个 agent 会话，会话内的 terminal / files 面板可用，零入站端口、不装 openssh-server**；exec connector（一次性命令、无 PTY，供页面与 Hub 侧系统调用）随此里程碑落地。**connector 只面向页面用户，不向 agent 暴露** | Bash/PTY、文件浏览 |
+| M1 🔄 当前 | 会话容器与首个演示 | 工作区 `(node_id, path)` 落库；会话创建即挂载工作区；**在树莓派上开一个会话，会话内的 terminal / files / exec 面板可用，零入站端口、不装 openssh-server**；exec connector（一次性命令、无 PTY，供页面与 Hub 侧系统调用）随此里程碑落地。**connector 只面向页面用户，不向 agent 暴露**。**「会话」指页面级容器，不是 ACP agent 会话**——ACP 归 M3 | Bash/PTY、文件浏览 |
 | M2 | 工作区供料与同步 | Hub 内容寻址仓库（CAS）；manifest 差分物化到 `(node_id, path)`；排除依赖目录；技能/配置走托管覆盖层（只读 + 漂移检测 + **全局/会话两层权限规则**）；产物归档（见 `architecture/workspace-and-sync.md`） | 工作区供料、统一配置 agent、产物归档、模型配置一处切换 |
 | M3 | ACP 会话与轨迹 | 接入 ACP；Trajectory 逐条可查（事件表含类型/输入/输出/耗时/归属节点）；会话开始建基线，**随时可看**改动文件与 diff | 对话与动作流、AI agent 管理与对话 |
 | M4 | Git 界面 | 会话工作区的 git 状态 / diff / 提交视图；**此时会话面板补齐第三个 git 面板** | Git 操作界面 |
-| M5 | 任务分发与 agent 安装 | **Hub 新建任务 → 按节点能力/负载自动路由到某台 node 执行**（硬过滤 → 有序打分 → 可钉死，见 `architecture/scheduling.md`）；任务工作区来源分发时确认；节点上 agent 运行时的父子 agent 由运行时自身决定，Hub 不编排（约束 8）；预置的专家 agent 定义走托管覆盖层（约束 8）；**Hub 一键把 agent 装到设备**并套用托管配置（升级策略未决，见 `architecture/workspace-and-sync.md` §4.4） | Hub 一键安装 agent |
+| M5 | 任务分发与 agent 安装 | **Hub 新建任务 → 仅节点内编排**：Hub 建任务，**node 决定开几个 sub-task**（按 `DECISIONS.md` D9 收窄为节点内编排，跨设备分发留 M8——其三支柱 CAS 工作区物化 / checkpoint 续跑 / 环境声明分别在 M2 / M8，M5 做必残缺）；任务工作区来源分发时确认；预置的专家 agent 定义走托管覆盖层（约束 8）；**Hub 一键把 agent 装到设备**并套用托管配置（升级策略未决，见 `architecture/workspace-and-sync.md` §4.4） | Hub 一键安装 agent |
 | M6 | 推理网关 | 一个 OpenAI 兼容端点，背后是 N 台设备各自的全量副本（阶段 1，请求级路由） | —（新增能力） |
 | M7 | connector 插件化 | 把协议族做成插件按需加载 + 抓包插件 + 端口转发插件 | —（§3.2 后续项） |
-| M8 | 任务系统 | 完整任务定义 / 状态 / 进度 / 断点续跑（跨节点任务连贯性，见 `architecture/task-continuity.md`） | —（§3.2 后续项） |
+| M8 | 任务系统 | 完整任务定义 / 状态 / 进度 / 断点续跑（跨节点任务连贯性，见 `architecture/task-continuity.md`）。**前置条件：M2 的 CAS 与 checkpoint 重建**——跨设备续跑必须能从 CAS 取到所需文件与产物，否则「换一台机器接着跑」没有数据基座 | —（§3.2 后续项） |
 | 后续 | 后续能力 | 自动化、社交软件接入、原生客户端、分布式推理进阶（RPC 层切分 / MoE 分片） | —（§3.2 后续项） |
 
-> 首个演示是 M1：在树莓派上开一个会话，会话里的 shell 与文件浏览就能用，且零入站端口。
-> 终端 / 文件 / git 都在会话内，因此演示必须经由会话，不能脱离 agent 直接开终端。
+> 首个演示是 M1：在树莓派上开一个**会话**（页面级容器，不是 ACP agent 会话——ACP 归 M3），会话里的 shell 与文件浏览就能用，且零入站端口。
+> 终端 / 文件 / git 都在会话内，因此演示必须经由会话，不能脱离会话直接开终端。
 
 > M2 排在 ACP 与 Git 之前：会话要在目标设备上正确跑起来，工作区必须先能被喂进去。
 > git 项目走「Hub 只发 commit 引用、节点自己去 origin 拉」的主路径；非 git 项目走 CAS 差分。
@@ -127,9 +127,9 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
 | 设备接入 | M0 | `security-and-lifecycle.md` §4（supervisor/worker、身份） |
 | 节点身份与状态 | M0 | `security-and-lifecycle.md` §4.0/§5；`scheduling.md` §2 |
 | 存储与启动基座 | M0（新增，非 §3.1 能力） | `architecture/README.md` §3/§8；`security-and-lifecycle.md` §2.1（强制防护） |
-| Bash / PTY | M1 | `architecture/README.md` §4.1（工作区绑定） |
+| Bash / PTY | M1 | `architecture/README.md` §4.1（工作区绑定）；`design-system.md` §7.0（入口是会话） |
 | 文件浏览 | M1 | 同上 |
-| AI agent 管理与对话 | M3 | `session-and-trajectory.md`（ACP 会话） |
+| AI agent 管理与对话 | M3 | `session-and-trajectory.md`（ACP 会话）。**M1 的会话容器不是 agent 会话**，见 §3 M1 行 |
 | 对话与动作流 | M3 | `session-and-trajectory.md` §3/§4/§7（轨迹表） |
 | Git 操作界面 | M4 | `architecture/README.md` §4 |
 | 工作区供料 | M2 | `workspace-and-sync.md` §1/§3 |

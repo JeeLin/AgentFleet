@@ -99,7 +99,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
    被本地改过的文件标记为「漂移」，可 push 或 pull。
 6. **取回产物**：任务结束 → 产物归档到 Hub → 设备关机后仍可下载。
 7. **设备掉线**：WS 断开 → 节点自动指数退避重连（1s/2s/4s…上限 30s），UI 显示「重连中」与已重试时长；
-   连续失败超过约 3 分钟转为「离线」；离线期间工作区与 agent 会话在设备上仍存活，
+   连续心跳丢失 > 45s（= 3 个心跳周期）转为「离线」；离线期间工作区与 agent 会话在设备上仍存活，
    面板转为只读并显示最后已知状态，禁止发起新操作；用户可手动点「立即重连」。
 8. **在新设备上装 agent**：Hub 选设备 + 选 agent 模板 → 下发安装指令 → 节点本地安装 →
    自动套用托管配置 → 心跳回报就绪 → 即可开会话。
@@ -183,7 +183,8 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 | connector | 节点上提供的一类**有类型**的能力（terminal / files / git / exec / ssh / db / …），可插件化 |
 | task | 一个完整任务；sub-task 是任务下可独立执行/续跑的单元，在某台 node 上由 agent 会话执行 |
 | trajectory | dsh 式的会话动作事件流，Web 逐条回放 |
-| workspace | 工作区：设备上的一个 `(node_id, path)`，归属于某个 agent 会话，终端 / 文件 / git 面板绑在其上。Workspace: a `(node_id, path)` on a device, owned by one agent session; terminal / files / git panels bind to it |
+| 会话 / 会话页 | M1 的**会话容器**：一个页面（`/sessions/:id`），持有对话流与面板坞。**它不是 ACP agent 会话**——那归 M3，本阶段不含 ACP。Session page: the container page `/sessions/:id`; an M1 concept, not an ACP agent session (M3) |
+| workspace | 工作区：设备上的一个 `(node_id, path)`，**会话的一个字段**，不是路由、不是页面；可被多个会话引用（同一条路径可被两个会话同时打开，各自持有自己的通道）。Workspace: a `(node_id, path)` on a device, carried as a field on a session — not a route and not a page |
 | artifact | 产物：任务产出的最终制品，按 id 归档到 Hub，设备关机后仍可取回。Artifact: a task's final output, archived on the Hub by id and retrievable after the device powers off |
 | channel_id | 通道号：一条设备 WebSocket 上的子通道，通道键为 `(node_id, channel_id)`，每通道独立流控。Channel id: a sub-channel on one node WebSocket, keyed `(node_id, channel_id)`, with per-channel flow control |
 | baseline | 基线：会话开始时记录的工作区初始状态，用于随时计算改动文件与 diff。Baseline: the workspace state captured at session start, used to compute changed files and diffs on demand |
@@ -191,7 +192,14 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 | supervisor | 守护进程的父进程：不碰业务与 WebSocket，只负责拉起 / 监控 / 替换 / 回滚 worker——**执行回滚的代码不参与被回滚**。Supervisor: the parent process that touches neither business logic nor the WebSocket, only starting, monitoring, swapping and rolling back the worker — the code performing a rollback is never itself replaced |
 | worker | 工作进程：持有设备身份与 WebSocket，实际执行 connector 与 agent；升级时更换，`node_id` 不变。Worker: the process holding device identity and the WebSocket that actually runs connectors and agents; swapped on upgrade, `node_id` unchanged |
 | worktree | Git 工作树：同一仓库的多个独立工作目录，用于隔离并行任务，共享 object store。Worktree: independent working directories of one repository, isolating parallel tasks while sharing the object store |
-| Workbench | 会话工作台：Web 端承载会话的界面外壳，终端 / 文件 / git / 轨迹都渲染在其面板里。Workbench: the web UI shell that hosts a session; terminal / files / git / trajectory all render as its panels |
+| Workbench | 会话工作台：**会话页的布局外壳**（标题栏 + 会话 tab 条 + 面板坞 + 轨迹抽屉），不是一个有地址的容器——**它自己没有路由**。Workbench: the layout shell of a session page (title bar + session tab strip + panel dock + trajectory drawer); it has no route of its own |
+
+> **三分法，别混**（本术语表与 `design-system.md` §7.0 的唯一口径）：
+> **会话页** = `/sessions/:id`，有路由；**工作区** = `(node_id, path)` 字段，**没有路由**；
+> **Workbench** = 会话页的布局外壳，**没有路由**。
+> 「工作区不是路由」是硬约束：工作区一旦有地址，它就成了可枚举、可跳转、可长期持有的句柄，
+> 于是「设备级多资源长驻管理台」在结构上成为可能——而那正是 §3.1 排除的形态。
+> 同理「会话页 ≠ 工作区」：会话页是承载页，工作区只是它身上的一个字段。
 
 ---
 
