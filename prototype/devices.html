@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html class="devices" lang="zh-CN" data-state="online">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>设备 · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css">
+<link rel="stylesheet" href="assets/components.css">
+<style>
+  /* 本页两处页面级样式：① 行的主操作按钮与行本体分开——「看一眼详情」和
+     「用它开会话」是两个不同的决定，所以 Enter 与按钮是两个不同的动作；
+     ② 「就绪 / 未装」徽标串的间距。 */
+  .rowacts { display: flex; align-items: center; gap: var(--af-space-2); }
+  .caps { display: flex; flex-wrap: wrap; gap: var(--af-space-1); }
+  .head { display: flex; align-items: center; gap: var(--af-space-4); flex-wrap: wrap; margin-bottom: var(--af-space-8); }
+</style>
+</head>
+<body data-page="devices">
+<div data-shell>
+
+  <div class="af-page">
+
+    <div class="af-page__head">
+      <div>
+        <h1 class="af-page__title">设备</h1>
+        <p class="af-page__sub">
+          每台设备一条 WebSocket 主动外联，Hub 无入站端口。状态只看心跳年龄：
+          超过 45 秒判离线，45 秒内是 <b>reconnecting</b>（Hub 内存推导值，不是持久化字段）。
+          <br>「用它开会话」是这一页唯一的会话入口。本页<b>没有打开面板 / 工作区的路径</b>——
+          终端 / 文件是会话内的面板，绑定某个会话的工作区（<span class="af-fp">node_id, path</span>），
+          生命周期随会话（约束 3）。
+        </p>
+      </div>
+    </div>
+
+    <div class="head">
+      <span class="af-t-mute" style="font-size:var(--af-text-xs)">
+        <kbd>↑</kbd><kbd>↓</kbd> 移动 · <kbd>⏎</kbd> 看详情 · <kbd>/</kbd> 聚焦顶栏搜索
+      </span>
+      <span class="af-spacer"></span>
+      <span class="af-t-mute" style="font-size:var(--af-text-xs)">
+        <kbd>g n</kbd> 新建会话 · <kbd>g a</kbd> Agent 目录
+      </span>
+    </div>
+
+    <table class="af-table">
+      <thead>
+        <tr>
+          <th style="width:120px">状态</th>
+          <th>名称</th>
+          <th style="width:130px">平台</th>
+          <th style="width:96px" data-num>agent 版本</th>
+          <th style="width:190px">已装 agent</th>
+          <th style="width:76px" data-num>CPU</th>
+          <th style="width:76px" data-num>内存</th>
+          <th style="width:96px">最近心跳</th>
+          <th style="width:120px"></th>
+        </tr>
+      </thead>
+      <tbody id="tbody" data-role="list" tabindex="0" role="listbox" aria-label="设备列表"></tbody>
+    </table>
+
+  </div>
+
+</div>
+
+<script src="assets/keynav.js"></script>
+<script src="assets/app.js"></script>
+<script>
+/* ===========================================================================
+   设备列表。
+   ---------------------------------------------------------------------------
+   字段名对齐 crates/hub-storage/src/schema.sql 的 device 列，数据只读 AF.mock。
+   reconnecting 不写库：前端按「WS 断开 + 心跳年龄 ≤45s」自推，所以 AF.stateHTML
+   的那个「推」徽标由 derived 字段驱动——读的人能一眼看出它是推导值。
+
+   这一页刻意只有两个动作：看详情（模态）与「用它开会话」（跳 new-session）。
+   没有任何面板 / 工作区入口——理由见页面副标题与 §「行激活」的注释。
+   =========================================================================== */
+(function () {
+  'use strict';
+  var AF = window.AF;
+  var $ = function (s, r) { return (r || document).querySelector(s); };
+  var $$ = function (s, r) { return [].slice.call((r || document).querySelectorAll(s)); };
+
+  AF.mount('devices');
+
+  var DEVICES = AF.mock.devices;
+  var tbody = $('#tbody');
+
+  /* =========================================================================
+     渲染
+     -------------------------------------------------------------------------
+     行是 <tr data-row tabindex="-1" role="option">：Enter 由 keynav 的
+     list:enter 抛 af:enter（行内确实有一个 button，但那是**另一个动作**，
+     见下面 §行激活——所以 Enter 必须走 af:enter，不能被内嵌按钮吃掉）。
+
+     离线行 data-inert="true"：降亮（af-table §8 已经处理），且行内按钮
+     加 disabled + title。aria-disabled 一并写上，屏幕阅读器读到的是
+     「不可用」而不是静默的按钮。
+     ======================================================================= */
+  function render() {
+    tbody.innerHTML = DEVICES.map(function (d) {
+      var off = d.status === 'offline';
+      var agents = d.agents.map(function (a) {
+        return '<span class="af-badge af-badge--agent">' + AF.esc(a) + '</span>';
+      }).join('') || '<span class="af-badge af-badge--off">未装</span>';
+
+      return '<tr data-row tabindex="-1" role="option" aria-selected="false" ' +
+          'data-id="' + AF.esc(d.id) + '"' + (off ? ' data-inert="true"' : '') + '>' +
+        '<td>' + AF.stateHTML(d.status, { derived: !!d.derived }) + '</td>' +
+        '<td style="color:var(--af-fg-primary)">' + AF.esc(d.name) + '</td>' +
+        '<td>' + AF.esc(d.platform) + '</td>' +
+        '<td data-num>' + AF.esc(d.agent_version) + '</td>' +
+        '<td><span class="caps">' + agents + '</span></td>' +
+        /* 未上报就是 0% 并写清楚，不编一个数字（scheduling §2） */ +
+        '<td data-num>' + (off ? '<span class="af-t-mute">—</span>' : d.cpu + '%') + '</td>' +
+        '<td data-num>' + (off ? '<span class="af-t-mute">—</span>' : d.mem + '%') + '</td>' +
+        '<td>' + AF.esc(d.last_seen) + '前</td>' +
+        '<td><span class="rowacts">' +
+          (off
+            ? '<button class="af-btn af-btn--sm af-btn--primary" type="button" disabled ' +
+                'aria-disabled="true" title="设备已判离线，ACP 端点不可达——会话建不起来">' +
+                '用它开会话</button>'
+            : '<button class="af-btn af-btn--sm af-btn--primary" type="button" ' +
+                'data-use="' + AF.esc(d.id) + '">用它开会话</button>') +
+        '</span></td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  /* =========================================================================
+     行激活：Enter = 看详情
+     -------------------------------------------------------------------------
+     详情用 AF.modal：它进焦点栈（背后 inert、Esc 关闭、焦点回到那一行），
+     所以这里不写任何 overlay 焦点代码。
+
+     「看一眼」与「建会话」分开的原因：设备页的绝大多数访问是扫一眼，
+     把点一下就变成跳走会让扫一眼变得昂贵。反过来，「用它开会话」这个
+     **会改变系统状态**的动作必须是显式按钮，不能藏在 Enter 里。
+     ======================================================================= */
+  function devById(id) {
+    for (var i = 0; i < DEVICES.length; i++) if (DEVICES[i].id === id) return DEVICES[i];
+    return null;
+  }
+
+  function openDetail(d) {
+    var off = d.status === 'offline';
+    var agents = d.agents.map(function (a) {
+      return '<span class="af-badge af-badge--agent">' + AF.esc(a) + '</span>';
+    }).join('') || '<span class="af-t-mute">未装任何 agent——在这台设备上开不了会话</span>';
+
+    var body =
+      '<div class="af-col gap-5">' +
+        '<div class="af-row gap-3">' + AF.stateHTML(d.status, { derived: !!d.derived }) +
+          '<span class="af-spacer"></span>' +
+          '<span class="af-badge af-badge--off">' + AF.esc(d.platform) + '</span>' +
+          (d.gpu ? '<span class="af-badge af-badge--ok">GPU</span>' : '') +
+        '</div>' +
+
+        '<div class="af-kv" style="--af-kv-w:96px">' +
+          '<span class="af-kv__k">node_id</span><span class="af-kv__v af-fp">' + AF.esc(d.id) + '</span>' +
+          '<span class="af-kv__k">afcli</span><span class="af-kv__v">' + AF.esc(d.agent_version) + '</span>' +
+          '<span class="af-kv__k">最近心跳</span><span class="af-kv__v">' + AF.esc(d.last_seen) + '前</span>' +
+          '<span class="af-kv__k">连接</span><span class="af-kv__v">' +
+            (off ? '已断 · 判离线' : d.status === 'reconnecting' ? '已断 · 指数退避重连中' : '单条 WebSocket · 设备主动外联') +
+          '</span>' +
+        '</div>' +
+
+        '<div>' +
+          '<div class="af-t-label" style="margin-bottom:var(--af-space-2)">资源余量</div>' +
+          (off
+            ? '<div class="af-field__hint">未上报：离线期间 Hub 收不到心跳，' +
+              '<b>「未上报」与「0」不是一回事</b>——编一个数字比不报坏得多（scheduling §2）。</div>'
+            : '<div class="af-kv" style="--af-kv-w:96px">' +
+              '<span class="af-kv__k">CPU</span><span class="af-kv__v af-t-num">' + d.cpu + '%</span>' +
+              '<span class="af-kv__k">内存</span><span class="af-kv__v af-t-num">' + d.mem + '%</span>' +
+              '<span class="af-kv__k">GPU</span><span class="af-kv__v">' + (d.gpu ? '已上报' : '未上报') + '</span>' +
+            '</div>') +
+        '</div>' +
+
+        '<div>' +
+          '<div class="af-t-label" style="margin-bottom:var(--af-space-2)">已装 agent（心跳上报，非「支持」）</div>' +
+          '<div class="caps">' + agents + '</div>' +
+          '<div class="af-field__hint" style="margin-top:var(--af-space-2)">' +
+            '完整定义见 <a href="agents.html" style="color:var(--af-accent-fg)">Agent 目录</a>。' +
+            '会话要选的是这里面的一个。</div>' +
+        '</div>' +
+
+        '<div class="af-field__hint">' +
+          '本页不提供终端 / 文件面板的入口：它们绑定某个会话的工作区，' +
+          '进入会话才建立、退出即释放（约束 3）。' +
+        '</div>' +
+      '</div>';
+
+    AF.modal({
+      title: d.name,
+      body: body,
+      actions: off
+        ? [{ label: '知道了', primary: true }]
+        : [{ label: '用它开会话', primary: true,
+             fn: function () { location.href = 'new-session.html?device=' + encodeURIComponent(d.id); } }]
+    });
+  }
+
+  tbody.addEventListener('af:enter', function (e) {
+    var d = devById(e.detail.row.dataset.id);
+    if (d) openDetail(d);
+  });
+
+  /* 行内「用它开会话」：带的 device 让新建会话第一步预填。
+     click 与 Enter 是两条独立的路，所以这里 stopPropagation——Enter 已经
+     由 af:enter 处理成「看详情」，不能让按钮的 click 冒泡把 Enter 也变成跳走。 */
+  tbody.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-use]');
+    if (!b) return;
+    e.stopPropagation();
+    location.href = 'new-session.html?device=' + encodeURIComponent(b.dataset.use);
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>

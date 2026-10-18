@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html class="files" lang="zh-CN" data-state="online">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>files 面板 · AgentFleet</title>
+<link rel="stylesheet" href="../assets/tokens.css">
+<link rel="stylesheet" href="../assets/components.css">
+<style>
+  .fgrid { display: grid; grid-template-columns: minmax(0, 320px) minmax(0, 1fr); gap: var(--af-space-5); align-items: stretch; min-height: 420px; }
+  @media (max-width: 900px) { .fgrid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body data-page="session">
+<div data-shell>
+
+  <div class="af-panel" style="border-radius:0;border-width:0 0 1px 0;border-color:var(--af-border-default)">
+    <div class="af-panel__body" style="padding:var(--af-space-4) var(--af-space-5);display:flex;gap:var(--af-space-3);align-items:center">
+      <span class="af-badge af-badge--accent">位置</span>
+      <span class="af-field__hint">
+        files 面板只存在于<b>会话工作台的面板坞</b>（<a href="../session.html">看它在会话里</a>）。
+        它读写的根是<b>会话的工作区路径</b>，不是设备根——越界不是一个错误状态，是结构本身。
+      </span>
+    </div>
+  </div>
+
+  <div class="af-page">
+    <div class="af-page__head">
+      <div>
+        <h1 class="af-page__title">files 面板</h1>
+        <p class="af-page__sub">树 + 预览 + 编辑保存 + 越界四路反馈。键盘可操作整棵树：Tab 进树，↑↓ 走行，Space 展开/收起，⏎ 进目录或开文件，⌃S 保存，Backspace 上一级。</p>
+      </div>
+    </div>
+
+    <div class="af-col gap-5">
+      <!-- ================= 主演示：树 + 预览 ================= -->
+      <div class="fgrid">
+        <div class="af-panel">
+          <div class="af-panel__head">
+            <span class="af-panel__title">树</span>
+            <span class="af-spacer"></span>
+            <span class="af-t-mute" style="font-size:var(--af-text-2xs)">~/src/AgentFleet</span>
+          </div>
+          <div class="af-panel__body">
+            <div class="af-tree" id="tree" data-role="tree" tabindex="0" role="tree" aria-label="工作区文件树"></div>
+          </div>
+        </div>
+
+        <div class="af-panel">
+          <div class="af-panel__head">
+            <span class="af-panel__title" id="pv-name">预览</span>
+            <span class="af-spacer"></span>
+            <span class="af-badge" id="pv-state">未打开</span>
+            <button class="af-btn af-btn--sm" type="button" id="save" disabled>保存 <kbd>⌃S</kbd></button>
+          </div>
+          <div class="af-panel__body af-fpane__preview" id="pv" tabindex="0" role="region" aria-label="文件预览">
+点击左侧文件查看预览。
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= 越界四路反馈 ================= -->
+      <div>
+        <div class="af-t-label" style="margin-bottom:var(--af-space-3)">越界的四路可见证据</div>
+        <p class="af-field__hint" style="margin-bottom:var(--af-space-4);max-width:80ch">
+          工作区之外的路径<b>照常显示</b>（斜纹 + 删除线 + ⊘），点击弹解释性错误。
+          「看不见」会让用户以为自己点歪了或系统坏了；「看见但进不去 + 说明为什么」才是一条完整的反馈。
+        </p>
+        <div class="af-col gap-3" style="max-width:80ch;font-size:var(--af-text-sm)">
+          <div><b style="color:var(--af-fg-primary)">① 树里照常显示</b> <span class="af-t-mute">— 斜纹底 + 删除线 + ⊘ 前缀，不是消失</span></div>
+          <div><b style="color:var(--af-fg-primary)">② 点击弹解释面板</b> <span class="af-t-mute">— 说清「为什么进不去」和「怎么才能进去」，不是静默失败</span></div>
+          <div><b style="color:var(--af-fg-primary)">③ 面包屑越界层标红</b> <span class="af-t-mute">— 每一层都可见，越界那一层 <code style="color:var(--af-danger-fg)">红色</code></span></div>
+          <div><b style="color:var(--af-fg-primary)">④ 写操作独立 409 通道</b> <span class="af-t-mute">— 读失败与写失败是两个错误，不说混</span></div>
+        </div>
+        <button class="af-btn af-btn--sm" type="button" id="try-oob" style="margin-top:var(--af-space-4)">
+          演示：点击越界节点 <kbd>⏎</kbd>
+        </button>
+      </div>
+
+      <!-- ================= 大文件 / 二进制 ================= -->
+      <div>
+        <div class="af-t-label" style="margin-bottom:var(--af-space-3)">大文件与二进制的结论</div>
+        <div class="af-col gap-3" style="max-width:80ch;font-size:var(--af-text-sm)">
+          <div><b style="color:var(--af-fg-primary)">&gt; 1 MB 文本</b> <span class="af-t-mute">— 不整份载入。只读前后各 4 KB + 中间提示「已截断，N 行未显示」。编辑整份文件请去会话里让 agent 做，浏览器不是 IDE。</span></div>
+          <div><b style="color:var(--af-fg-primary)">二进制</b> <span class="af-t-mute">— 显示类型 + 大小 + 「不支持预览」。不猜、不糊一层假预览。</span></div>
+          <div><b style="color:var(--af-fg-primary)">diff</b> <span class="af-t-mute">— 加/删行用低饱和底色 + 行文字仍是 fg-primary。染了字的红绿盲用户读不了代码。</span></div>
+        </div>
+        <div class="af-diff" style="margin-top:var(--af-space-4);border:1px solid var(--af-border-subtle);border-radius:var(--af-radius-sm);padding:var(--af-space-3);background:var(--af-inset);max-width:640px">
+          <div class="af-diff__row" data-kind="hunk"><span class="af-diff__sign"> </span>@@ -14,6 +14,8 @@ fn relay(</div>
+          <div class="af-diff__row" data-kind="del"><span class="af-diff__sign">-</span>  let text = text.to_string();</div>
+          <div class="af-diff__row" data-kind="add"><span class="af-diff__sign">+</span>  if text.is_empty() { break; }</div>
+          <div class="af-diff__row" data-kind="add"><span class="af-diff__sign">+</span>  if text.len() &gt; MAX_FRAME { return Err(FloodError); }</div>
+          <div class="af-diff__row"><span class="af-diff__sign"> </span>  match msg {</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script src="../assets/keynav.js"></script>
+<script src="../assets/app.js"></script>
+<script>
+(function () {
+  'use strict';
+  var AF = window.AF;
+  var $ = function (s) { return document.querySelector(s); };
+
+  AF.mount('session', { title: 'files 面板' });
+
+  var TREE = [
+    { n: 'crates/', k: 'dir', o: true, kids: [
+      { n: 'hub-server/', k: 'dir', o: true, kids: [
+        { n: 'ws.rs', k: 'file', s: '9.4 KB' },
+        { n: 'lib.rs', k: 'file', s: '1.1 KB' }
+      ]},
+      { n: 'hub-storage/', k: 'dir', o: false, kids: [] },
+      { n: 'identity/', k: 'dir', o: false, kids: [] }
+    ]},
+    { n: 'docs/', k: 'dir', o: false, kids: [] },
+    { n: 'Cargo.toml', k: 'file', s: '806 B' },
+    { n: 'README.md', k: 'file', s: '2.1 KB' },
+    { n: 'target/', k: 'oob', note: '软链 → 工作区之外' },
+    { n: '~/.ssh/', k: 'oob', note: '工作区之外' }
+  ];
+
+  var openFile = null;
+  function renderTree() {
+    var rows = [];
+    function walk(nodes, depth) {
+      nodes.forEach(function (n) {
+        var pad = 'padding-left:' + (12 + depth * 14) + 'px';
+        if (n.k === 'oob') {
+          rows.push('<button class="af-tree__row" data-row data-kind="oob" tabindex="-1" ' +
+            'aria-selected="false" style="' + pad + '" data-name="' + AF.esc(n.n) + '">' +
+            '<span class="af-tree__twisty" aria-hidden="true">⊘</span>' +
+            '<span class="af-tree__name">' + AF.esc(n.n) + '</span>' +
+            '<span class="af-tree__meta">' + AF.esc(n.note) + '</span></button>');
+          return;
+        }
+        var tw = n.k === 'dir' ? (n.o ? '▾' : '▸') : '·';
+        rows.push('<button class="af-tree__row" data-row data-kind="' + n.k + '" tabindex="-1" ' +
+          'aria-selected="false" data-name="' + AF.esc(n.n) + '" ' +
+          (n.k === 'dir' ? 'aria-expanded="' + (n.o ? 'true' : 'false') + '"' : '') +
+          ' style="' + pad + '">' +
+          '<span class="af-tree__twisty" aria-hidden="true">' + tw + '</span>' +
+          '<span class="af-tree__name">' + AF.esc(n.n) + '</span>' +
+          (n.s ? '<span class="af-tree__meta">' + n.s + '</span>' : '') +
+          '</button>');
+        if (n.k === 'dir' && n.o) walk(n.kids, depth + 1);
+      });
+    }
+    walk(TREE, 0);
+    $('#tree').innerHTML = rows.join('');
+  }
+  renderTree();
+
+  function findFile(name, nodes) {
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      if (n.n === name) return n;
+      if (n.kids) { var r = findFile(name, n.kids); if (r) return r; }
+    }
+    return null;
+  }
+
+  function preview(name) {
+    var f = findFile(name, TREE);
+    if (!f || f.k !== 'file') return;
+    openFile = name;
+    $('#pv-name').textContent = name;
+    $('#pv-state').className = 'af-badge af-badge--ok';
+    $('#pv-state').textContent = '已打开';
+    $('#save').disabled = false;
+    var big = f.s && f.s.indexOf('KB') >= 0 && parseFloat(f.s) > 8;
+    var lines = [];
+    var n = big ? 6 : 12;
+    for (var i = 1; i <= n; i++) {
+      lines.push('<div><span class="ln">' + String(i).padStart(3, ' ') + '  </span>' +
+        (i === 2 && big ? '…  [已截断：4,812 行未显示 — 大文件只读前后各 4 KB]' :
+         '// ' + name + ' line ' + i) + '</div>');
+    }
+    $('#pv').innerHTML = lines.join('');
+  }
+
+  $('#tree').addEventListener('af:enter', function (e) {
+    var row = e.detail.row;
+    if (row.dataset.kind === 'dir') {
+      var n = findFile(row.dataset.name, TREE);
+      n.o = !n.o; renderTree();
+    } else if (row.dataset.kind === 'file') {
+      preview(row.dataset.name);
+    } else if (row.dataset.kind === 'oob') {
+      AF.explainOutOfScope(row, row.dataset.name,
+        '它在这个会话的工作区路径之外（' + row.dataset.note + '）。');
+    }
+  });
+  $('#tree').addEventListener('af:toggle', function (e) {
+    if (e.detail.row.dataset.kind !== 'dir') return;
+    var n = findFile(e.detail.row.dataset.name, TREE);
+    if (n) { n.o = !n.o; renderTree(); }
+  });
+
+  $('#save').addEventListener('click', save);
+  function save() {
+    if (!openFile) return false;
+    AF.toast({ tone: 'ok', title: '已保存', text: openFile });
+    return true;
+  }
+
+  $('#try-oob').addEventListener('click', function () {
+    AF.explainOutOfScope(null, '~/.ssh/',
+      '它在这个会话的工作区路径之外。');
+  });
+})();
+</script>
+</body>
+</html>

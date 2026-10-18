@@ -1,0 +1,1055 @@
+/* ===========================================================================
+   components.css —— 组件样式（原型与实现共用）
+   ---------------------------------------------------------------------------
+   这个文件只放组件：可复用的形状与状态。页面级布局一律内联在页面
+   <style> 里，且不得超过 30 行——超过说明它本该在这里。
+
+   ── 三条组织规则 ──────────────────────────────────────────────────
+   ① 每个组件的四态（hover / active / focus / disabled）在同一个块里写完，
+      不允许散到文件末尾的「状态补丁」区——那是状态漏画的开始。
+   ② 焦点态**不在这里重复定义**（tokens.css §13 已全局统一），
+      组件只负责「别把它盖住」：不写 outline:none，不加 overflow:hidden
+      到聚焦元素的外层容器。
+   ③ 禁用态不只是变灰：要同时降低不透明度、去指针事件、加 aria-disabled。
+      只变灰的禁用态在色盲用户眼里与可用态无异。
+   =========================================================================== */
+
+/* ===========================================================================
+   0. 复位与基础
+   =========================================================================== */
+*, *::before, *::after { box-sizing: border-box; }
+
+html { color-scheme: dark; }
+
+body {
+  margin: 0;
+  background: var(--af-surface-0);
+  color: var(--af-fg-primary);
+  font-family: var(--af-font-sans);
+  font-size: var(--af-text-md);
+  line-height: var(--af-leading-snug);
+  -webkit-font-smoothing: antialiased;
+  /* 终端里选字要能选出来，但 UI  chrome 上的误选很烦 */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* 只有内容区可选中：终端输出、代码预览、路径、日志 */
+.af-selectable,
+.af-term,
+.af-code,
+.af-fp,
+td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
+
+[hidden] { display: none !important; }
+
+/* ===========================================================================
+   1. 应用外壳：图标轨 + 侧栏 + 顶栏 + 主区 + 状态条
+   =========================================================================== */
+.af-app {
+  display: grid;
+  grid-template-columns: 44px 208px 1fr;
+  grid-template-rows: 40px 1fr 24px;
+  grid-template-areas: 'brand sidebar topbar' 'brand sidebar main' 'status status status';
+  height: 100vh;
+  background: var(--af-surface-1);
+}
+.af-app[data-rail='collapsed'] { grid-template-columns: 44px 52px 1fr; }
+.af-app[data-rail='collapsed'] .af-sidebar__item-text,
+.af-app[data-rail='collapsed'] .af-sidebar__hint,
+.af-app[data-rail='collapsed'] .af-navgroup__title,
+.af-app[data-rail='collapsed'] .af-sidebar__close { display: none; }
+.af-app[data-rail='collapsed'] .af-sidebar { align-items: center; }
+
+/* 图标轨：折叠后仍有图标 + 悬浮标签，导航不消失 */
+.af-brand {
+  grid-area: brand;
+  display: flex; flex-direction: column; align-items: center;
+  gap: var(--af-space-4); padding: var(--af-space-3) 0;
+  background: var(--af-surface-1);
+  border-right: 1px solid var(--af-border-subtle);
+}
+.af-brand__mark {
+  width: 22px; height: 22px; border-radius: var(--af-radius-sm);
+  background: var(--af-accent);
+  box-shadow: 0 0 0 3px var(--af-accent-bg);
+}
+.af-brand__name {
+  writing-mode: vertical-rl; font-size: var(--af-text-2xs);
+  color: var(--af-fg-tertiary); letter-spacing: var(--af-tracking-label);
+}
+
+.af-sidebar {
+  grid-area: sidebar;
+  display: flex; flex-direction: column; gap: var(--af-space-2);
+  padding: var(--af-space-3);
+  background: var(--af-surface-1);
+  border-right: 1px solid var(--af-border-subtle);
+  overflow-y: auto;
+}
+.af-navgroup { display: flex; flex-direction: column; gap: 1px; }
+.af-navgroup__title {
+  font-size: var(--af-text-2xs); color: var(--af-fg-tertiary);
+  text-transform: uppercase; letter-spacing: var(--af-tracking-label);
+  padding: var(--af-space-3) var(--af-space-3) var(--af-space-1);
+}
+.af-sidebar__item {
+  display: flex; align-items: center; gap: var(--af-space-3);
+  height: var(--af-row-regular); padding: 0 var(--af-space-3);
+  border-radius: var(--af-radius-sm); text-decoration: none;
+  color: var(--af-fg-secondary); font-size: var(--af-text-sm);
+  position: relative;
+  transition: background-color var(--af-dur-instant) linear, color var(--af-dur-instant) linear;
+}
+.af-sidebar__item:hover { background: var(--af-surface-2); color: var(--af-fg-primary); }
+.af-sidebar__item:active { background: var(--af-surface-3); }
+.af-sidebar__item[aria-current='page'] {
+  background: var(--af-accent-bg); color: var(--af-accent-fg);
+  box-shadow: inset 2px 0 0 var(--af-accent);
+}
+.af-sidebar__icon { flex: 0 0 16px; text-align: center; font-size: var(--af-text-sm); }
+.af-sidebar__item-text { flex: 1 1 auto; }
+.af-sidebar__hint {
+  font-size: var(--af-text-2xs); color: var(--af-fg-tertiary);
+  opacity: 0; transition: opacity var(--af-dur-fast) var(--af-ease-out);
+}
+.af-sidebar__item:hover .af-sidebar__hint,
+.af-sidebar__item:focus-visible .af-sidebar__hint { opacity: 1; }
+.af-sidebar__count {
+  font-size: var(--af-text-2xs); color: var(--af-fg-tertiary);
+  border: 1px solid var(--af-border-subtle); border-radius: var(--af-radius-sm);
+  padding: 0 var(--af-space-1);
+}
+.af-sidebar__close {
+  text-align: left; background: none; border: 0; cursor: pointer;
+  color: var(--af-fg-tertiary); font-size: var(--af-text-xs);
+  font-family: inherit; padding: var(--af-space-2) var(--af-space-3);
+  border-radius: var(--af-radius-sm);
+}
+.af-sidebar__close:hover { background: var(--af-surface-2); color: var(--af-fg-primary); }
+
+.af-topbar {
+  grid-area: topbar;
+  display: flex; align-items: center; gap: var(--af-space-3);
+  padding: 0 var(--af-space-4);
+  background: var(--af-surface-1);
+  border-bottom: 1px solid var(--af-border-subtle);
+}
+.af-main { grid-area: main; overflow: auto; background: var(--af-surface-0); }
+.af-topbar__title {
+  font-size: var(--af-text-md); font-weight: var(--af-weight-medium);
+  color: var(--af-fg-primary); margin: 0;
+}
+
+.af-statusbar {
+  grid-area: status;
+  display: flex; align-items: center; gap: var(--af-space-4);
+  padding: 0 var(--af-space-4);
+  background: var(--af-surface-1);
+  border-top: 1px solid var(--af-border-subtle);
+  font-size: var(--af-text-2xs); color: var(--af-fg-tertiary);
+}
+.af-statusbar__item { display: flex; align-items: center; gap: var(--af-space-2); white-space: nowrap; }
+.af-statusbar__key { color: var(--af-fg-tertiary); }
+.af-spacer { flex: 1 1 auto; }
+
+/* ===========================================================================
+   2. 布局原语
+   =========================================================================== */
+.af-page { max-width: 1400px; margin: 0 auto; padding: var(--af-space-10) var(--af-space-11); }
+.af-page--flush { max-width: none; padding: 0; height: 100%; }
+.af-page__head {
+  display: flex; align-items: flex-end; gap: var(--af-space-4);
+  margin-bottom: var(--af-space-8);
+}
+.af-page__title {
+  font-size: var(--af-text-xl); font-weight: var(--af-weight-semibold);
+  margin: 0 0 var(--af-space-2); letter-spacing: -0.01em;
+}
+.af-page__sub {
+  margin: 0; color: var(--af-fg-secondary); font-size: var(--af-text-sm);
+  line-height: var(--af-leading-base); max-width: 76ch;
+}
+.af-col { display: flex; flex-direction: column; }
+.af-col.gap-1 { gap: var(--af-space-1); } .af-col.gap-2 { gap: var(--af-space-2); }
+.af-col.gap-3 { gap: var(--af-space-3); } .af-col.gap-4 { gap: var(--af-space-4); }
+.af-col.gap-5 { gap: var(--af-space-5); } .af-col.gap-6 { gap: var(--af-space-6); }
+.af-col.gap-7 { gap: var(--af-space-7); } .af-col.gap-8 { gap: var(--af-space-8); }
+.af-row { display: flex; align-items: center; gap: var(--af-space-3); }
+.af-t-label {
+  font-size: var(--af-text-2xs); color: var(--af-fg-tertiary);
+  text-transform: uppercase; letter-spacing: var(--af-tracking-label);
+}
+.af-t-mute { color: var(--af-fg-tertiary); }
+.af-t-num { font-variant-numeric: tabular-nums; }
+.af-fp { font-family: var(--af-font-mono); color: var(--af-fg-secondary); }
+.af-truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.af-hairline { height: 1px; background: var(--af-border-subtle); border: 0; margin: 0; }
+.af-vline { width: 1px; align-self: stretch; background: var(--af-border-subtle); }
+
+/* ===========================================================================
+   3. Button
+   -------------------------------------------------------------------------
+   四态一次写完。size 三档：sm（行内）/ md（默认）/ lg（认证页）。
+   禁用态三管齐下：opacity + pointer-events + aria-disabled。
+   =========================================================================== */
+.af-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--af-space-2);
+  height: var(--af-row-compact); padding: 0 var(--af-space-4);
+  background: var(--af-surface-2); color: var(--af-fg-primary);
+  border: 1px solid var(--af-border-default); border-radius: var(--af-radius-sm);
+  font-family: inherit; font-size: var(--af-text-sm); font-weight: var(--af-weight-medium);
+  cursor: pointer; white-space: nowrap; text-decoration: none;
+  transition: background-color var(--af-dur-instant) linear, border-color var(--af-dur-instant) linear;
+}
+.af-btn:hover { background: var(--af-surface-3); border-color: var(--af-border-strong); }
+.af-btn:active { background: var(--af-surface-1); }
+.af-btn:disabled, .af-btn[aria-disabled='true'] {
+  opacity: 0.5; pointer-events: none; color: var(--af-fg-disabled);
+}
+.af-btn--sm { height: 22px; padding: 0 var(--af-space-3); font-size: var(--af-text-xs); }
+.af-btn--lg { height: var(--af-row-regular); padding: 0 var(--af-space-6); font-size: var(--af-text-md); }
+.af-btn--icon { width: 26px; padding: 0; }
+.af-btn--icon.af-btn--sm { width: 22px; }
+
+.af-btn--primary {
+  background: var(--af-accent); color: var(--af-fg-on-accent); border-color: var(--af-accent);
+}
+.af-btn--primary:hover { background: var(--af-accent-hover); border-color: var(--af-accent-hover); }
+.af-btn--primary:active { background: var(--af-accent-active); border-color: var(--af-accent-active); }
+
+.af-btn--danger {
+  background: var(--af-danger-bg); color: var(--af-danger-fg); border-color: var(--af-danger-line);
+}
+.af-btn--danger:hover { background: var(--af-danger); color: var(--af-fg-on-accent); border-color: var(--af-danger); }
+
+.af-btn--ghost { background: none; border-color: transparent; color: var(--af-fg-secondary); }
+.af-btn--ghost:hover { background: var(--af-surface-2); color: var(--af-fg-primary); border-color: transparent; }
+
+/* 分段控件：互斥选项，选中的那格必须比 hover 更亮（否则分不出） */
+.af-seg { display: inline-flex; background: var(--af-surface-2); border-radius: var(--af-radius-sm); padding: 1px; }
+.af-seg__b {
+  background: none; border: 0; cursor: pointer; font-family: inherit;
+  font-size: var(--af-text-xs); color: var(--af-fg-tertiary);
+  padding: var(--af-space-1) var(--af-space-3); border-radius: var(--af-radius-sm);
+  transition: background-color var(--af-dur-instant) linear, color var(--af-dur-instant) linear;
+}
+.af-seg__b:hover { color: var(--af-fg-primary); }
+.af-seg__b[aria-pressed='true'] { background: var(--af-surface-3); color: var(--af-fg-primary); }
+
+/* ===========================================================================
+   4. Input / Select / Textarea / 字段
+   -------------------------------------------------------------------------
+   输入框的框就是控件本身，所以它的边界走 ≥3:1（--af-border-default 在
+   输入态被提到 --af-border-strong + focus 环，双保险）。
+   =========================================================================== */
+.af-input, .af-select, .af-textarea {
+  width: 100%; background: var(--af-surface-2); color: var(--af-fg-primary);
+  border: 1px solid var(--af-border-default); border-radius: var(--af-radius-sm);
+  font-family: inherit; font-size: var(--af-text-sm);
+  padding: var(--af-space-2) var(--af-space-3); height: var(--af-row-compact);
+  transition: border-color var(--af-dur-instant) linear;
+}
+.af-input::placeholder, .af-textarea::placeholder { color: var(--af-fg-disabled); }
+.af-input:hover, .af-select:hover, .af-textarea:hover { border-color: var(--af-border-strong); }
+.af-input:disabled, .af-select:disabled, .af-textarea:disabled {
+  background: var(--af-surface-1); color: var(--af-fg-disabled); cursor: not-allowed;
+}
+.af-textarea { height: auto; min-height: 64px; resize: vertical; line-height: var(--af-leading-snug); }
+.af-input--invalid, .af-input[aria-invalid='true'] { border-color: var(--af-danger); }
+
+.af-field { display: flex; flex-direction: column; gap: var(--af-space-2); }
+.af-field__label { font-size: var(--af-text-sm); color: var(--af-fg-secondary); }
+.af-field__hint { font-size: var(--af-text-xs); color: var(--af-fg-tertiary); line-height: var(--af-leading-snug); }
+.af-field__error { font-size: var(--af-text-xs); color: var(--af-danger-fg); line-height: var(--af-leading-snug); }
+
+/* Checkbox / Radio：用 accent 而不是系统默认（系统样式在暗底上不可见） */
+.af-check, .af-radio {
+  appearance: none; width: 14px; height: 14px; flex: 0 0 14px;
+  background: var(--af-surface-2); border: 1px solid var(--af-border-strong);
+  border-radius: var(--af-radius-sm); cursor: pointer; position: relative;
+  transition: background-color var(--af-dur-instant) linear, border-color var(--af-dur-instant) linear;
+}
+.af-radio { border-radius: var(--af-radius-full); }
+.af-check:hover, .af-radio:hover { border-color: var(--af-accent); }
+.af-check:checked, .af-radio:checked { background: var(--af-accent); border-color: var(--af-accent); }
+.af-check:checked::after {
+  content: ''; position: absolute; left: 3px; top: 0px;
+  width: 4px; height: 8px; border: solid var(--af-fg-on-accent);
+  border-width: 0 2px 2px 0; transform: rotate(45deg);
+}
+.af-radio:checked::after {
+  content: ''; position: absolute; inset: 3px; border-radius: var(--af-radius-full);
+  background: var(--af-fg-on-accent);
+}
+.af-check:disabled, .af-radio:disabled { opacity: 0.5; pointer-events: none; }
+
+/* Switch：滑块轨道是控件本体 → 边界 ≥3:1 */
+.af-switch {
+  appearance: none; width: 30px; height: 16px; flex: 0 0 30px;
+  background: var(--af-surface-3); border: 1px solid var(--af-border-strong);
+  border-radius: var(--af-radius-full); cursor: pointer; position: relative;
+  transition: background-color var(--af-dur-instant) linear, border-color var(--af-dur-instant) linear;
+}
+.af-switch::after {
+  content: ''; position: absolute; left: 2px; top: 1px;
+  width: 10px; height: 10px; border-radius: var(--af-radius-full);
+  background: var(--af-fg-tertiary);
+  transition: transform var(--af-dur-instant) var(--af-ease-out), background-color var(--af-dur-instant) linear;
+}
+.af-switch:checked { background: var(--af-accent-bg); border-color: var(--af-accent); }
+.af-switch:checked::after { transform: translateX(14px); background: var(--af-accent); }
+.af-switch:disabled { opacity: 0.5; pointer-events: none; }
+
+/* ===========================================================================
+   5. StatusDot / State / Badge
+   -------------------------------------------------------------------------
+   三态四通道：颜色 + 字形 + 填充 + 必带文字。灰度打印、8px 缩略、
+   色觉障碍、reduce-motion 下都仍能区分——少任何一个通道都不行。
+   =========================================================================== */
+.af-dot, .af-state__glyph { flex: 0 0 auto; line-height: 1; }
+.af-dot { width: 8px; height: 8px; border-radius: var(--af-radius-full); background: currentColor; }
+
+.af-state { display: inline-flex; align-items: center; gap: var(--af-space-2); font-size: var(--af-text-xs); white-space: nowrap; }
+.af-state__glyph { font-size: 10px; }
+.af-state[data-state='online']   { color: var(--af-ok-fg); }
+.af-state[data-state='reconnecting'] { color: var(--af-warn-fg); }
+.af-state[data-state='offline']  { color: var(--af-danger-fg); }
+.af-state[data-state='unknown']  { color: var(--af-fg-tertiary); }
+.af-state[data-state='active']   { color: var(--af-ok-fg); }
+.af-state[data-state='disconnected'] { color: var(--af-warn-fg); }
+.af-state[data-state='ended']    { color: var(--af-fg-tertiary); }
+.af-state[data-state='building'] { color: var(--af-info-fg); }
+.af-state[data-state='readonly'] { color: var(--af-fg-tertiary); }
+
+/* 字形 + 填充差异：颜色之外的两条备份通道 */
+.af-state__glyph[data-glyph='filled']  { font-style: normal; }
+.af-state[data-state='reconnecting'] .af-state__glyph { animation: af-pulse 1.4s var(--af-ease-in-out) infinite; }
+.af-state[data-state='offline'] .af-state__glyph { opacity: 0.7; }
+@keyframes af-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+.af-badge {
+  display: inline-flex; align-items: center; gap: var(--af-space-1);
+  height: 16px; padding: 0 var(--af-space-2);
+  border-radius: var(--af-radius-sm); border: 1px solid var(--af-border-subtle);
+  font-size: var(--af-text-2xs); color: var(--af-fg-tertiary); white-space: nowrap;
+}
+.af-badge--accent { background: var(--af-accent-bg); border-color: var(--af-accent-line); color: var(--af-accent-fg); }
+.af-badge--ok { background: var(--af-ok-bg); border-color: var(--af-ok-line); color: var(--af-ok-fg); }
+.af-badge--warn { background: var(--af-warn-bg); border-color: var(--af-warn-line); color: var(--af-warn-fg); }
+.af-badge--danger { background: var(--af-danger-bg); border-color: var(--af-danger-line); color: var(--af-danger-fg); }
+.af-badge--info { background: var(--af-info-bg); border-color: var(--af-info-line); color: var(--af-info-fg); }
+.af-badge--agent { background: var(--af-agent-bg); border-color: var(--af-agent-line); color: var(--af-agent-fg); }
+.af-badge--off { color: var(--af-fg-disabled); }
+
+/* ===========================================================================
+   6. Panel
+   -------------------------------------------------------------------------
+   面板是「一块有标题的内容区」。head 固定，body 滚动——这样长内容
+   不会把标题顶出视野（上一版有几处标题跟着内容滚走了）。
+   =========================================================================== */
+.af-panel {
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--af-surface-1); border: 1px solid var(--af-border-default);
+  border-radius: var(--af-radius-md); overflow: hidden;
+}
+.af-panel__head {
+  display: flex; align-items: center; gap: var(--af-space-3);
+  height: var(--af-row-compact); padding: 0 var(--af-space-4);
+  background: var(--af-surface-2); border-bottom: 1px solid var(--af-border-subtle);
+  flex: 0 0 auto;
+}
+.af-panel__title { font-size: var(--af-text-sm); font-weight: var(--af-weight-medium); color: var(--af-fg-primary); }
+.af-panel__body { flex: 1 1 auto; overflow: auto; min-height: 0; }
+.af-panel__state {
+  padding: var(--af-space-4); font-size: var(--af-text-xs); color: var(--af-fg-tertiary);
+  border-bottom: 1px solid var(--af-border-subtle); background: var(--af-surface-1);
+}
+
+/* ===========================================================================
+   7. Tabs
+   -------------------------------------------------------------------------
+   只有真的互斥时才用 tabs。终端与文件是同时看的 → 不用 tabs（见规范 §7.1）。
+   =========================================================================== */
+.af-tabs { display: flex; gap: var(--af-space-1); border-bottom: 1px solid var(--af-border-subtle); }
+.af-tabs__tab {
+  background: none; border: 0; border-bottom: 2px solid transparent; cursor: pointer;
+  font-family: inherit; font-size: var(--af-text-sm); color: var(--af-fg-tertiary);
+  padding: var(--af-space-3) var(--af-space-4);
+  transition: color var(--af-dur-instant) linear, border-color var(--af-dur-instant) linear;
+}
+.af-tabs__tab:hover { color: var(--af-fg-primary); }
+.af-tabs__tab[aria-selected='true'] { color: var(--af-accent-fg); border-bottom-color: var(--af-accent); }
+
+/* ===========================================================================
+   8. Table
+   -------------------------------------------------------------------------
+   紧凑行高 26px：一屏能放更多行。选中行走 aria-selected（辅助技术可读），
+   不只是加个背景色。data-inert = 降亮但不禁用（离线设备仍可选中复制）。
+   =========================================================================== */
+.af-table { width: 100%; border-collapse: collapse; font-size: var(--af-text-sm); }
+.af-table th {
+  text-align: left; font-weight: var(--af-weight-medium); color: var(--af-fg-tertiary);
+  font-size: var(--af-text-xs); padding: var(--af-space-2) var(--af-space-4);
+  border-bottom: 1px solid var(--af-border-default);
+  position: sticky; top: 0; background: var(--af-surface-1); z-index: var(--af-z-sticky);
+}
+.af-table td { padding: 0 var(--af-space-4); height: var(--af-row-compact); border-bottom: 1px solid var(--af-border-subtle); color: var(--af-fg-secondary); }
+.af-table--compact td { height: var(--af-row-compact); font-size: var(--af-text-xs); }
+.af-table th[data-num], .af-table td[data-num] { text-align: right; font-variant-numeric: tabular-nums; }
+.af-table tbody tr { transition: background-color var(--af-dur-instant) linear; }
+.af-table tbody tr:hover { background: var(--af-surface-2); }
+.af-table tbody tr[aria-selected='true'] { background: var(--af-accent-bg); box-shadow: inset 2px 0 0 var(--af-accent); }
+.af-table tbody tr[aria-selected='true'] td { color: var(--af-fg-primary); }
+.af-table tbody tr[data-inert='true'] td { color: var(--af-fg-tertiary); }
+.af-table tbody tr[data-inert='true'] .af-btn { pointer-events: none; opacity: 0.6; }
+
+/* ===========================================================================
+   9. Tree
+   -------------------------------------------------------------------------
+   树的每一行是一个 button（不是 div）：键盘 Tab 天然可达，Enter 天然触发。
+   上一版用 div + tabindex=-1 + 全局 Enter 代理，Tab 根本进不去。
+   =========================================================================== */
+.af-tree { font-size: var(--af-text-sm); }
+.af-tree__row {
+  display: flex; align-items: center; gap: var(--af-space-2); width: 100%;
+  height: var(--af-row-compact); padding: 0 var(--af-space-3);
+  background: none; border: 0; cursor: pointer; text-align: left;
+  font-family: inherit; font-size: inherit; color: var(--af-fg-secondary);
+  border-radius: var(--af-radius-sm);
+  transition: background-color var(--af-dur-instant) linear;
+}
+.af-tree__row:hover { background: var(--af-surface-2); color: var(--af-fg-primary); }
+.af-tree__row[aria-selected='true'] { background: var(--af-accent-bg); color: var(--af-fg-primary); }
+.af-tree__twisty { flex: 0 0 12px; color: var(--af-fg-tertiary); font-size: var(--af-text-2xs); }
+.af-tree__row[aria-expanded='true'] .af-tree__twisty { transform: rotate(90deg); }
+.af-tree__name { flex: 1 1 auto; }
+.af-tree__meta { font-size: var(--af-text-2xs); color: var(--af-fg-tertiary); font-variant-numeric: tabular-nums; }
+/* 被排除的节点照常显示（斜纹 + 删除线 + ⊘），但点击给解释性错误 */
+.af-tree__row[data-excluded='true'] {
+  color: var(--af-fg-disabled); text-decoration: line-through;
+  background: repeating-linear-gradient(45deg, transparent, transparent 4px, var(--af-danger-bg) 4px, var(--af-danger-bg) 8px);
+}
+.af-tree__row[data-excluded='true'] .af-tree__name::before { content: '⊘ '; text-decoration: none; }
+
+/* ===========================================================================
+   10. Toast
+   -------------------------------------------------------------------------
+   aria-live 由 JS 在创建时按 sticky 决定（alert vs status）。
+   sticky = 不自动消失：可恢复的失败必须走这一条。
+   =========================================================================== */
+.af-toasts {
+  position: fixed; right: var(--af-space-5); bottom: var(--af-space-10);
+  display: flex; flex-direction: column; gap: var(--af-space-2);
+  z-index: var(--af-z-toast); max-width: 380px;
+}
+.af-toast {
+  display: flex; align-items: flex-start; gap: var(--af-space-3);
+  padding: var(--af-space-3) var(--af-space-4);
+  background: var(--af-surface-3); border: 1px solid var(--af-border-default);
+  border-radius: var(--af-radius-md); box-shadow: var(--af-shadow-2);
+  font-size: var(--af-text-xs);
+  animation: af-toast-in var(--af-dur-fast) var(--af-ease-out);
+}
+@keyframes af-toast-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.af-toast[data-tone='ok'] { border-left: 2px solid var(--af-ok); }
+.af-toast[data-tone='warn'] { border-left: 2px solid var(--af-warn); }
+.af-toast[data-tone='danger'] { border-left: 2px solid var(--af-danger); }
+.af-toast[data-tone='info'] { border-left: 2px solid var(--af-info); }
+.af-toast__body { flex: 1 1 auto; display: flex; flex-direction: column; gap: var(--af-space-1); }
+.af-toast__title { color: var(--af-fg-primary); font-weight: var(--af-weight-medium); }
+.af-toast__text { color: var(--af-fg-secondary); line-height: var(--af-leading-snug); }
+.af-toast__actions { display: flex; gap: var(--af-space-2); margin-top: var(--af-space-1); }
+
+/* ===========================================================================
+   11. Modal / 抽屉 / 命令面板
+   -------------------------------------------------------------------------
+   这三个都走焦点栈（keynav.js 的 focusPush/focusPop），
+   背后内容由 JS 设 inert。CSS 只负责层级与外观。
+   =========================================================================== */
+.af-scrim {
+  position: fixed; inset: 0; background: var(--af-scrim);
+  z-index: var(--af-z-modal); display: flex; align-items: center; justify-content: center;
+  padding: var(--af-space-10);
+}
+.af-modal {
+  width: min(560px, 100%); max-height: 80vh; display: flex; flex-direction: column;
+  background: var(--af-surface-3); border: 1px solid var(--af-border-default);
+  border-radius: var(--af-radius-lg); box-shadow: var(--af-shadow-3);
+  overflow: hidden;
+}
+.af-modal__head {
+  display: flex; align-items: center; gap: var(--af-space-3);
+  padding: var(--af-space-4) var(--af-space-5); border-bottom: 1px solid var(--af-border-subtle);
+  flex: 0 0 auto;
+}
+.af-modal__body { padding: var(--af-space-5); overflow: auto; font-size: var(--af-text-sm); line-height: var(--af-leading-base); }
+.af-modal__foot {
+  display: flex; gap: var(--af-space-3); padding: var(--af-space-4) var(--af-space-5);
+  border-top: 1px solid var(--af-border-subtle); flex: 0 0 auto;
+}
+
+.af-drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 100%);
+  display: flex; flex-direction: column;
+  background: var(--af-surface-2); border-left: 1px solid var(--af-border-default);
+  box-shadow: var(--af-shadow-3); z-index: var(--af-z-drawer);
+}
+
+/* 命令面板：模态的替代品，所以层级更高 */
+.af-palette {
+  position: fixed; left: 50%; top: 12vh; transform: translateX(-50%);
+  width: min(560px, calc(100% - var(--af-space-10)));
+  display: flex; flex-direction: column;
+  background: var(--af-surface-3); border: 1px solid var(--af-border-default);
+  border-radius: var(--af-radius-lg); box-shadow: var(--af-shadow-3);
+  z-index: var(--af-z-palette); overflow: hidden;
+}
+.af-palette__input {
+  background: none; border: 0; border-bottom: 1px solid var(--af-border-subtle);
+  color: var(--af-fg-primary); font-family: inherit; font-size: var(--af-text-md);
+  padding: var(--af-space-4) var(--af-space-5); width: 100%;
+}
+.af-palette__input:focus { outline: none; }
+.af-palette__list { max-height: 50vh; overflow: auto; padding: var(--af-space-2); }
+.af-palette__item {
+  display: flex; align-items: center; gap: var(--af-space-3);
+  padding: var(--af-space-2) var(--af-space-3); border-radius: var(--af-radius-sm);
+  font-size: var(--af-text-sm); color: var(--af-fg-secondary); cursor: pointer;
+}
+.af-palette__item:hover { background: var(--af-surface-2); }
+.af-palette__item[aria-selected='true'] { background: var(--af-accent-bg); color: var(--af-fg-primary); }
+.af-palette__keys { margin-left: auto; display: flex; gap: var(--af-space-1); }
+
+/* 键位帮助：最高层级，它解释其他所有 */
+.af-help {
+  position: fixed; inset: 0; z-index: var(--af-z-help);
+  background: var(--af-scrim); display: flex; align-items: flex-start; justify-content: center;
+  padding: var(--af-space-12) var(--af-space-10); overflow: auto;
+}
+.af-help__box {
+  width: min(680px, 100%); background: var(--af-surface-2);
+  border: 1px solid var(--af-border-default); border-radius: var(--af-radius-lg);
+  box-shadow: var(--af-shadow-3);
+}
+.af-help__head {
+  display: flex; align-items: center; gap: var(--af-space-3);
+  padding: var(--af-space-4) var(--af-space-5); border-bottom: 1px solid var(--af-border-default);
+}
+.af-help__body { padding: var(--af-space-5); display: grid; gap: var(--af-space-6); }
+.help__gh {
+  display: flex; align-items: baseline; gap: var(--af-space-3);
+  font-size: var(--af-text-2xs); text-transform: uppercase;
+  letter-spacing: var(--af-tracking-label); color: var(--af-fg-tertiary);
+  margin-bottom: var(--af-space-2);
+}
+.help__t { width: 100%; border-collapse: collapse; }
+.help__t td { padding: var(--af-space-2) 0; font-size: var(--af-text-sm); color: var(--af-fg-secondary); vertical-align: top; }
+.help__t .kbd-cell { width: 120px; }
+.help__t tr[data-unimplemented='true'] td { color: var(--af-fg-disabled); }
+.help__t tr[data-unimplemented='true'] .kbd-cell::after { content: '（未实现）'; font-size: var(--af-text-2xs); color: var(--af-danger-fg); margin-left: var(--af-space-2); }
+
+/* ===========================================================================
+   12. EmptyState / Skeleton
+   -------------------------------------------------------------------------
+   分工：空状态 = 「这里本来该有东西但没有」；骨架 = 「正在加载」。
+   两者必须一眼能区分，否则用户分不清「等一等」和「没有了」。
+   =========================================================================== */
+.af-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--af-space-3); padding: var(--af-space-12) var(--af-space-8); text-align: center;
+}
+.af-empty__glyph { font-size: var(--af-text-3xl); color: var(--af-fg-disabled); }
+.af-empty__title { font-size: var(--af-text-md); color: var(--af-fg-primary); font-weight: var(--af-weight-medium); }
+.af-empty__text { font-size: var(--af-text-sm); color: var(--af-fg-tertiary); line-height: var(--af-leading-base); max-width: 44ch; }
+.af-empty__actions { display: flex; gap: var(--af-space-3); margin-top: var(--af-space-2); }
+
+.af-skeleton {
+  background: linear-gradient(90deg, var(--af-surface-2) 0%, var(--af-surface-3) 50%, var(--af-surface-2) 100%);
+  background-size: 200% 100%; border-radius: var(--af-radius-sm);
+  animation: af-shimmer 1.4s var(--af-ease-in-out) infinite;
+}
+@keyframes af-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.af-skeleton--line { height: 12px; }
+.af-skeleton--row { height: var(--af-row-compact); }
+
+/* ===========================================================================
+   13. Tooltip
+   -------------------------------------------------------------------------
+   键盘用户也要看得到：tooltip 在 :focus-visible 时同样出现。
+   且 tooltip 内容**必须**同时存在于 aria-label 或正文里——
+   不许让信息只活在 hover 中。
+   =========================================================================== */
+.af-tip { position: relative; }
+.af-tip__body {
+  position: absolute; left: 50%; bottom: calc(100% + 6px); transform: translateX(-50%);
+  background: var(--af-surface-3); border: 1px solid var(--af-border-default);
+  border-radius: var(--af-radius-sm); box-shadow: var(--af-shadow-2);
+  padding: var(--af-space-2) var(--af-space-3); font-size: var(--af-text-2xs);
+  color: var(--af-fg-secondary); white-space: nowrap;
+  opacity: 0; pointer-events: none; z-index: var(--af-z-sticky);
+  transition: opacity var(--af-dur-fast) var(--af-ease-out);
+}
+.af-tip:hover .af-tip__body,
+.af-tip:focus-visible .af-tip__body { opacity: 1; }
+
+/* ===========================================================================
+   14. Kbd
+   =========================================================================== */
+kbd, .kbd {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; padding: 0 var(--af-space-1);
+  background: var(--af-surface-3); border: 1px solid var(--af-border-default);
+  border-bottom-width: 2px; border-radius: var(--af-radius-sm);
+  font-family: inherit; font-size: var(--af-text-2xs); color: var(--af-fg-secondary);
+}
+
+/* ===========================================================================
+   15. 拆分把手与尺寸轨道
+   -------------------------------------------------------------------------
+   把手本身是可聚焦的（tabindex=0）+ role=separator + 方向键调尺寸。
+   没有键盘的把手等于鼠标专属——上一版就是这样。
+   =========================================================================== */
+.af-gutter {
+  flex: 0 0 6px; cursor: col-resize; position: relative;
+  background: var(--af-border-subtle);
+  transition: background-color var(--af-dur-instant) linear;
+  display: flex; align-items: center; justify-content: center;
+}
+.af-gutter:hover, .af-gutter[data-dragging='true'] { background: var(--af-accent); }
+.af-gutter__label {
+  position: absolute; left: 50%; top: var(--af-space-3); transform: translateX(-50%);
+  font-size: var(--af-text-2xs); color: var(--af-fg-tertiary);
+  background: var(--af-surface-2); border: 1px solid var(--af-border-subtle);
+  border-radius: var(--af-radius-sm); padding: 0 var(--af-space-2);
+  opacity: 0; pointer-events: none; white-space: nowrap;
+  transition: opacity var(--af-dur-fast) var(--af-ease-out);
+}
+.af-gutter:hover .af-gutter__label, .af-gutter:focus-visible .af-gutter__label { opacity: 1; }
+.af-track {
+  width: 2px; height: 28px; background: var(--af-border-strong);
+  border-radius: var(--af-radius-full);
+}
+.af-track__cap { display: block; width: 2px; height: 6px; background: var(--af-accent); border-radius: var(--af-radius-full); }
+
+/* ===========================================================================
+   16. 只读遮罩
+   -------------------------------------------------------------------------
+   断线冻结用「压一层极淡斜纹」而不是盖遮罩：遮住内容就等于把
+   「设备上它还活着，Hub 暂时够不着」这句话变成唯一信息。
+   =========================================================================== */
+.af-frozen { position: relative; }
+.af-frozen::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background: repeating-linear-gradient(45deg, transparent, transparent 6px, rgba(224, 82, 92, 0.07) 6px, rgba(224, 82, 92, 0.07) 12px);
+  border: 1px solid var(--af-danger-line); border-radius: var(--af-radius-sm);
+}
+.af-frozen > * { pointer-events: none; }
+.af-frozen__note {
+  position: absolute; left: 50%; top: var(--af-space-3); transform: translateX(-50%);
+  background: var(--af-danger-bg); border: 1px solid var(--af-danger-line);
+  border-radius: var(--af-radius-sm); padding: var(--af-space-1) var(--af-space-3);
+  font-size: var(--af-text-2xs); color: var(--af-danger-fg); white-space: nowrap;
+  z-index: 1;
+}
+
+/* ===========================================================================
+   17. 退避走带（reconnecting 的进度感）
+   -------------------------------------------------------------------------
+   指数退避的等待不是「转圈圈」：让用户看见「下一次重连在什么时候」。
+   =========================================================================== */
+.af-backoff {
+  height: 2px; background: var(--af-warn-bg); border-radius: var(--af-radius-full);
+  overflow: hidden; position: relative;
+}
+.af-backoff__fill {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 40%;
+  background: var(--af-warn); border-radius: var(--af-radius-full);
+  animation: af-backoff 1.6s var(--af-ease-in-out) infinite;
+}
+@keyframes af-backoff { 0% { left: -40%; } 100% { left: 100%; } }
+
+/* ===========================================================================
+   18. 认证页布局
+   -------------------------------------------------------------------------
+   登录/setup 是仅有的两个「宽屏也居中窄列」的页面：单用户自托管下
+   没有第二个人在看，宽屏铺满只会让一个表单显得慌张。
+   =========================================================================== */
+.af-auth {
+  min-height: 100vh; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; padding: var(--af-space-10);
+  background:
+    radial-gradient(60% 50% at 50% 0%, rgba(95, 217, 200, 0.06), transparent 70%),
+    var(--af-surface-0);
+}
+.af-auth__box { width: min(400px, 100%); display: flex; flex-direction: column; gap: var(--af-space-6); }
+.af-auth__brand { display: flex; align-items: center; gap: var(--af-space-3); }
+.af-auth__title { font-size: var(--af-text-3xl); font-weight: var(--af-weight-semibold); margin: 0; letter-spacing: -0.02em; }
+.af-auth__sub { color: var(--af-fg-secondary); font-size: var(--af-text-sm); line-height: var(--af-leading-base); margin: 0; }
+.af-auth__foot { font-size: var(--af-text-xs); color: var(--af-fg-tertiary); line-height: var(--af-leading-base); text-align: center; }
+
+/* 密码强度条：四级，用 aria-live 播报（不只靠颜色） */
+.pw-meter { display: flex; gap: 2px; height: 3px; }
+.pw-meter i { flex: 1 1 0; background: var(--af-border-default); border-radius: var(--af-radius-full); transition: background-color var(--af-dur-instant) linear; }
+.pw-meter[data-level='1'] i:nth-child(1) { background: var(--af-danger); }
+.pw-meter[data-level='2'] i:nth-child(-n+2) { background: var(--af-warn); }
+.pw-meter[data-level='3'] i:nth-child(-n+3) { background: var(--af-info); }
+.pw-meter[data-level='4'] i { background: var(--af-ok); }
+
+/* ===========================================================================
+   19. 禁用清单（这些组件**不存在**）
+   -------------------------------------------------------------------------
+   写在这里是为了让实现阶段的人知道「不是漏了，是不许有」：
+     · 没有卡片阴影组件——层级靠表面色差（§1）
+     · 没有圆角大于 8px 的容器
+     · 没有双主题切换——深色优先是范围选择
+     · 没有 hover 才可见的唯一信息——键盘用户看不见
+     · 没有「确定/取消」之外的第三种模态页脚按钮
+   =========================================================================== */
+
+/* ===========================================================================
+   20. 会话工作台
+   ---------------------------------------------------------------------------
+   对话左列（可缩）+ 面板坞右列（默认关）。面板坞不是 tabs：
+   终端与文件是**同时看**的两件事（改代码 → 跑命令 → 看报错），
+   tabs 会强迫用户在两个面板间来回切。
+   =========================================================================== */
+.af-wb {
+  display: flex; flex-direction: column; height: 100%;
+  background: var(--af-surface-0);
+}
+.af-wb__head {
+  display: flex; align-items: center; gap: var(--af-space-4);
+  padding: var(--af-space-3) var(--af-space-5);
+  background: var(--af-surface-1); border-bottom: 1px solid var(--af-border-subtle);
+  flex: 0 0 auto;
+}
+.af-wb__title {
+  font-size: var(--af-text-lg); font-weight: var(--af-weight-medium);
+  margin: 0; display: flex; align-items: center; gap: var(--af-space-3);
+}
+.af-wb__meta {
+  display: flex; align-items: center; gap: var(--af-space-3);
+  font-size: var(--af-text-xs); color: var(--af-fg-tertiary);
+}
+.af-wb__target {
+  display: inline-flex; align-items: center; gap: var(--af-space-2);
+  padding: var(--af-space-1) var(--af-space-3);
+  background: var(--af-surface-2); border: 1px solid var(--af-border-subtle);
+  border-radius: var(--af-radius-sm);
+  font-size: var(--af-text-xs); color: var(--af-fg-secondary);
+}
+.af-wb__target b { color: var(--af-fg-primary); font-weight: var(--af-weight-medium); }
+.af-wb__target .af-badge { margin-left: var(--af-space-1); }
+
+.af-wb__body { display: flex; flex: 1 1 auto; min-height: 0; }
+.af-wb__conv {
+  display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto;
+  background: var(--af-surface-1);
+}
+.af-wb__conv[data-size='narrow'] { flex: 0 0 34%; }
+.af-wb__conv[data-size='wide']   { flex: 0 0 56%; }
+
+.af-wb__dock {
+  flex: 0 0 auto; display: flex; flex-direction: column; min-width: 0;
+  background: var(--af-surface-0); border-left: 1px solid var(--af-border-subtle);
+}
+.af-wb__dock[hidden] { display: none; }
+
+/* 对话流 */
+.af-flow { flex: 1 1 auto; overflow: auto; padding: var(--af-space-5); display: flex; flex-direction: column; gap: var(--af-space-5); }
+.af-flow__day {
+  align-self: center; font-size: var(--af-text-2xs); color: var(--af-fg-tertiary);
+  background: var(--af-surface-2); border-radius: var(--af-radius-full);
+  padding: var(--af-space-1) var(--af-space-3);
+}
+.af-msg { display: flex; flex-direction: column; gap: var(--af-space-2); max-width: 76ch; }
+.af-msg__who {
+  display: flex; align-items: center; gap: var(--af-space-2);
+  font-size: var(--af-text-2xs); color: var(--af-fg-tertiary);
+}
+.af-msg__body {
+  padding: var(--af-space-3) var(--af-space-4); border-radius: var(--af-radius-md);
+  font-size: var(--af-text-sm); line-height: var(--af-leading-base);
+  background: var(--af-surface-2); color: var(--af-fg-primary);
+  border: 1px solid var(--af-border-subtle);
+}
+.af-msg[data-who='user'] .af-msg__body {
+  background: var(--af-accent-bg); border-color: var(--af-accent-line);
+}
+.af-msg[data-who='agent'] .af-msg__body { background: var(--af-surface-2); }
+.af-msg[data-who='agent'] .af-msg__who { color: var(--af-agent-fg); }
+.af-msg[data-who='system'] .af-msg__body {
+  background: none; border: 0; padding: var(--af-space-1) 0;
+  color: var(--af-fg-tertiary); font-size: var(--af-text-xs);
+}
+
+/* 工具调用块：折叠成一行，展开才看详情 */
+.af-tool {
+  border: 1px solid var(--af-border-subtle); border-radius: var(--af-radius-md);
+  background: var(--af-surface-1); overflow: hidden;
+}
+.af-tool__head {
+  display: flex; align-items: center; gap: var(--af-space-3); width: 100%;
+  padding: var(--af-space-2) var(--af-space-3); background: var(--af-surface-2);
+  border: 0; cursor: pointer; text-align: left; font-family: inherit;
+  font-size: var(--af-text-xs); color: var(--af-fg-secondary);
+}
+.af-tool__head:hover { background: var(--af-surface-3); color: var(--af-fg-primary); }
+.af-tool__name { color: var(--af-fg-primary); font-weight: var(--af-weight-medium); }
+.af-tool__ms { margin-left: auto; color: var(--af-fg-tertiary); font-variant-numeric: tabular-nums; }
+.af-tool__body {
+  padding: var(--af-space-3); font-family: var(--af-font-mono); font-size: var(--af-text-xs);
+  line-height: var(--af-leading-tight); color: var(--af-fg-secondary);
+  background: var(--af-inset); white-space: pre-wrap; overflow-x: auto;
+}
+.af-tool[data-open='false'] .af-tool__body { display: none; }
+
+/* 输入区 */
+.af-compose {
+  flex: 0 0 auto; display: flex; flex-direction: column; gap: var(--af-space-2);
+  padding: var(--af-space-4) var(--af-space-5); border-top: 1px solid var(--af-border-subtle);
+  background: var(--af-surface-1);
+}
+.af-compose__row { display: flex; gap: var(--af-space-3); align-items: flex-end; }
+.af-compose__input {
+  flex: 1 1 auto; min-height: 44px; max-height: 160px; resize: vertical;
+}
+.af-compose__hint {
+  display: flex; align-items: center; gap: var(--af-space-3);
+  font-size: var(--af-text-2xs); color: var(--af-fg-tertiary);
+}
+.af-compose__hint kbd { font-size: var(--af-text-2xs); }
+/* 输入区是单键不抢的唯一例外区（keynav.js §7）——但要让人看得见 */
+.af-compose__input:focus { border-color: var(--af-accent); box-shadow: 0 0 0 3px var(--af-accent-bg); }
+
+/* 面板坞标签 */
+.af-docktabs { display: flex; gap: 1px; background: var(--af-surface-1); border-bottom: 1px solid var(--af-border-subtle); flex: 0 0 auto; }
+.af-docktabs__b {
+  display: flex; align-items: center; gap: var(--af-space-2);
+  padding: var(--af-space-2) var(--af-space-4); border: 0; background: none;
+  cursor: pointer; font-family: inherit; font-size: var(--af-text-xs);
+  color: var(--af-fg-tertiary); border-bottom: 2px solid transparent;
+  transition: color var(--af-dur-instant) linear, background-color var(--af-dur-instant) linear;
+}
+.af-docktabs__b:hover { background: var(--af-surface-2); color: var(--af-fg-primary); }
+.af-docktabs__b[aria-selected='true'] { color: var(--af-fg-primary); border-bottom-color: var(--af-accent); background: var(--af-surface-0); }
+.af-docktabs__b .af-badge { font-size: 9px; }
+.af-docktabs__spacer { flex: 1 1 auto; }
+.af-docktabs__close {
+  padding: var(--af-space-2) var(--af-space-3); border: 0; background: none;
+  cursor: pointer; color: var(--af-fg-tertiary); font-family: inherit; font-size: var(--af-text-xs);
+}
+.af-docktabs__close:hover { color: var(--af-danger-fg); }
+
+/* 面板体 */
+.af-panelhost { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+
+/* 终端 */
+.af-term {
+  flex: 1 1 auto; overflow: auto; padding: var(--af-space-3) var(--af-space-4);
+  background: var(--af-term-bg); font-family: var(--af-font-mono);
+  font-size: var(--af-text-sm); line-height: var(--af-leading-tight);
+  color: var(--af-term-fg); white-space: pre-wrap; word-break: break-word;
+}
+.af-term__line { min-height: 1.35em; }
+.af-term__prompt { color: var(--af-term-ansi-cyan); }
+.af-term__err { color: var(--af-term-ansi-red); }
+.af-term__dim { color: var(--af-term-ansi-bright-black); }
+.af-term__ok  { color: var(--af-term-ansi-green); }
+.af-term__warn { color: var(--af-term-ansi-yellow); }
+.af-term__agent { color: var(--af-term-ansi-magenta); }
+
+/* 文件树面板内嵌版 */
+.af-fpane { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.af-fpane__crumbs {
+  display: flex; align-items: center; gap: var(--af-space-2);
+  padding: var(--af-space-2) var(--af-space-3); font-size: var(--af-text-xs);
+  color: var(--af-fg-tertiary); border-bottom: 1px solid var(--af-border-subtle);
+  background: var(--af-surface-1); flex: 0 0 auto; overflow-x: auto;
+}
+.af-fpane__crumbs b { color: var(--af-fg-secondary); font-weight: var(--af-weight-regular); }
+.af-fpane__crumbs [data-oob='true'] { color: var(--af-danger-fg); }
+.af-fpane__body { flex: 1 1 auto; overflow: auto; min-height: 0; }
+.af-fpane__preview {
+  flex: 0 0 40%; overflow: auto; padding: var(--af-space-3) var(--af-space-4);
+  background: var(--af-inset); border-top: 1px solid var(--af-border-subtle);
+  font-family: var(--af-font-mono); font-size: var(--af-text-xs);
+  line-height: var(--af-leading-tight); color: var(--af-fg-secondary);
+  white-space: pre;
+}
+.af-fpane__preview .ln { color: var(--af-fg-disabled); user-select: none; }
+
+/* diff */
+.af-diff { font-family: var(--af-font-mono); font-size: var(--af-text-xs); line-height: var(--af-leading-tight); }
+.af-diff__row { display: flex; padding: 0 var(--af-space-3); white-space: pre; }
+.af-diff__row[data-kind='add'] { background: var(--af-add-ink); color: var(--af-fg-primary); }
+.af-diff__row[data-kind='del'] { background: var(--af-del-ink); color: var(--af-fg-primary); }
+.af-diff__row[data-kind='hunk'] { background: var(--af-surface-2); color: var(--af-info-fg); }
+.af-diff__sign { flex: 0 0 14px; user-select: none; color: var(--af-fg-tertiary); }
+.af-diff__row[data-kind='add'] .af-diff__sign { color: var(--af-ok-fg); }
+.af-diff__row[data-kind='del'] .af-diff__sign { color: var(--af-danger-fg); }
+
+/* 轨迹抽屉 */
+.af-traj {
+  position: fixed; top: 40px; right: 0; bottom: 24px; width: min(460px, 100%);
+  display: flex; flex-direction: column;
+  background: var(--af-surface-2); border-left: 1px solid var(--af-border-default);
+  box-shadow: var(--af-shadow-3); z-index: var(--af-z-drawer);
+}
+.af-traj__head {
+  display: flex; align-items: center; gap: var(--af-space-3);
+  padding: var(--af-space-3) var(--af-space-4); border-bottom: 1px solid var(--af-border-subtle);
+  flex: 0 0 auto;
+}
+.af-traj__body { flex: 1 1 auto; overflow: auto; }
+.af-traj__row {
+  display: grid; grid-template-columns: 44px 14px 1fr auto; gap: var(--af-space-3);
+  align-items: baseline; width: 100%; padding: var(--af-space-2) var(--af-space-4);
+  background: none; border: 0; border-bottom: 1px solid var(--af-border-subtle);
+  text-align: left; font-family: inherit; font-size: var(--af-text-xs);
+  color: var(--af-fg-secondary); cursor: pointer;
+}
+.af-traj__row:hover { background: var(--af-surface-3); }
+.af-traj__row[aria-selected='true'] { background: var(--af-accent-bg); color: var(--af-fg-primary); }
+.af-traj__seq { color: var(--af-fg-tertiary); font-variant-numeric: tabular-nums; }
+.af-traj__kind { font-size: var(--af-text-2xs); }
+.af-traj__kind[data-kind='say']  { color: var(--af-accent-fg); }
+.af-traj__kind[data-kind='tool'] { color: var(--af-info-fg); }
+.af-traj__kind[data-kind='note'] { color: var(--af-fg-tertiary); }
+.af-traj__ms { color: var(--af-fg-tertiary); font-variant-numeric: tabular-nums; }
+
+/* 状态模拟条（原型专用：让「断线三态」可一键看到） */
+.af-sim {
+  display: flex; align-items: center; gap: var(--af-space-2);
+  padding: var(--af-space-2) var(--af-space-5);
+  background: var(--af-surface-1); border-bottom: 1px solid var(--af-border-subtle);
+  font-size: var(--af-text-2xs); color: var(--af-fg-tertiary); flex: 0 0 auto;
+}
+.af-sim__b {
+  padding: var(--af-space-1) var(--af-space-3); border-radius: var(--af-radius-sm);
+  border: 1px solid var(--af-border-subtle); background: var(--af-surface-2);
+  color: var(--af-fg-secondary); font-family: inherit; font-size: var(--af-text-2xs);
+  cursor: pointer;
+}
+.af-sim__b:hover { border-color: var(--af-border-strong); color: var(--af-fg-primary); }
+.af-sim__b[aria-pressed='true'] { background: var(--af-accent-bg); border-color: var(--af-accent-line); color: var(--af-accent-fg); }
+
+/* ===========================================================================
+   21. 会话 tab 条（多会话切换）
+   ---------------------------------------------------------------------------
+   这一条 bar 只有一件职责：**回答「我在哪个会话里」**。所以它与
+   §20 的 .af-wb__head 共享同一层表面色、只共享**一条**发丝线——
+   两块读起来是一整块 chrome，不是一张卡片的标题栏 + 一个工具条。
+   唯一被允许打破这条缝的，是当前会话那个 tab（它的底色就是页面色
+   --af-surface-0，像从条上「开了一个口」通进页面里）。
+
+   结构是三层而不是一层：.af-tab（视觉盒）> .af-tab__label（真按钮，
+   承载 role=tab 与键盘焦点）+ .af-tab__x（真按钮，关这个会话）。
+   曾经把关闭做成 <span role="button"> 塞在按钮里——那样它既不在
+   Tab 序列里，又让父元素的 :focus-within 永远不成立，于是
+   「键盘用户能关掉一个会话」这件事在结构上做不出来。
+   关闭是**不可逆**动作（会释放通道、丢未保存改动），所以它必须真的可达。
+   =========================================================================== */
+
+/* 条本身与 .af-wb__head 同底色、只留一条发丝线：两段 chrome 之间
+   出现第二条线会读成「上面是一个模块、下面是一个模块」 */
+.af-tabbar {
+  flex: 0 0 auto; display: flex; align-items: stretch;
+  background: var(--af-surface-1); border-bottom: 1px solid var(--af-border-subtle);
+  /* 横向滚动是「会话多到一行放不下」的正解（换行会把高度撑成两行，
+     26px 的紧凑行不再是紧凑行）。但滚动容器必然裁剪，于是全局焦点环
+     （§13 的 2px 线 + 2px offset，向外共 4px）默认会被削成一条 1px 的
+     残影——焦点态等于看不见。所以留 4px 的上内边距专供焦点环外扩：
+     这是滚动条与焦点态之间的账，不是装饰。 */
+  padding-top: var(--af-space-4);
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+}
+/* 隐藏滚动条而不是加边缘渐隐：mask-image 会连同文字抗锯齿一起被裁成
+   半透明，渐隐区里的 tab 名会发虚。裸滚动条不好看但内容始终是硬的。 */
+.af-tabbar::-webkit-scrollbar { height: 0; }
+
+/* tab 本体只画内容区边框，条自己画底边——「哪条线属于谁」不能含糊。
+   四条边框里只留左边一条（给未连接态上色），另外三条要么透明、要么零 */
+.af-tab {
+  box-sizing: border-box;
+  flex: 0 0 auto; display: flex; align-items: center; gap: var(--af-space-2);
+  height: var(--af-row-compact); padding-left: var(--af-space-3);
+  border: 0; border-left: 1px solid transparent; border-bottom: 2px solid transparent;
+  background: none;
+  transition: background-color var(--af-dur-instant) linear;
+}
+/* 名字按钮吃掉盒子里除关闭以外的全部空间：标签区按内容伸缩，
+   而关闭按钮被挤到最右，于是「tab 越宽 ✕ 越靠右」不会发生 */
+.af-tab__label {
+  flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: var(--af-space-2);
+  height: 100%; padding: 0 var(--af-space-2) 0 0;
+  background: none; border: 0; cursor: pointer; text-align: left;
+  font-family: inherit; font-size: var(--af-text-xs); color: var(--af-fg-secondary);
+  transition: color var(--af-dur-instant) linear;
+}
+.af-tab__name {
+  min-width: 0; max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* hover：抬一层表面、名字升到 primary，底边**不动**——留白的那一格永远看得见自己没被选中 */
+.af-tab:hover { background: var(--af-surface-2); }
+.af-tab:hover .af-tab__label { color: var(--af-fg-primary); }
+
+/* 选中态不用「更亮的条」，用「更暗的口」：页面的底色比外壳深，
+   用户眼睛落在暗的那一块上，位置不用读文字就知道 */
+.af-tab:has(.af-tab__label[aria-selected='true']) {
+  background: var(--af-surface-0); border-bottom-color: var(--af-accent);
+}
+.af-tab:has(.af-tab__label[aria-selected='true']) .af-tab__label { color: var(--af-fg-primary); }
+/* hover 的表面色会盖住 active 的页面色，所以 active 的 hover 得再补一次 */
+.af-tab:has(.af-tab__label[aria-selected='true']):hover { background: var(--af-surface-0); }
+
+/* 未选中且这台设备连不上：给 tab 的**左边**一道 1px 色标。为什么不用
+   inset 阴影而用实打实的边框：高对比度模式下边框会被强制成
+   CanvasText 仍然看得见，box-shadow 会被整个吃掉。为什么必须非
+   active 才有：选中 tab 的底色本身就是页面色，再叠一条红边只会把它
+   与其它 tab 的区别搅浑。**这里刻意不写 animation**——重连抖动每
+   1.4s 跳一次，而 tab 条是常驻视线的横向条带，一排同步闪烁的点会被
+   读成「界面在闪」。省下的是闪动，不是状态。 */
+.af-tab[data-conn='offline']:not(:has(.af-tab__label[aria-selected='true'])) { border-left-color: var(--af-danger-line); }
+.af-tab[data-conn='reconnecting']:not(:has(.af-tab__label[aria-selected='true'])) { border-left-color: var(--af-warn-line); }
+
+/* 活跃面板数徽标复用 .af-badge 原样，只是紧跟名字——
+   绝不用 margin-left:auto：它会被推到 tab 最右端，宽度跟着
+   「离右边缘多远」变化，切 tab 时整条 bar 会左右抽动。
+   名字与徽标之间是连续的 flex 间距、不换行，所以名字省略号与徽标
+   之间不会多出一道空隙。 */
+.af-tab .af-badge { flex: 0 0 auto; }
+
+/* 未保存标记：琥珀点、永不动画（它由用户自己的编辑触发，在没动手的
+   会话上闪就是噪声）。宽高写死而不是靠内容，这样「有没有未保存改动」
+   不改变 tab 的宽度、切 tab 时不会左右抽。 */
+.af-tab__dirty {
+  flex: 0 0 auto; width: 6px; height: 6px; line-height: 0;
+  border-radius: var(--af-radius-full); background: var(--af-warn); color: var(--af-warn);
+}
+
+/* 关闭按钮默认藏起来：常驻的 ✕ 每个 tab 6px 宽，六个 tab 就是一个
+   分心的大问号。用 opacity 而不是 display——淡入淡出要能被
+   reduce-motion 关掉，而 display 切换没有中间态可关。
+   它是**真 button**（不是 span）：关闭会释放通道、丢未保存改动，
+   不可逆动作不许是鼠标专属。 */
+.af-tab__x {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; margin-right: var(--af-space-1);
+  padding: 0; border: 0; border-radius: var(--af-radius-sm);
+  background: none; color: var(--af-fg-tertiary);
+  font-family: inherit; font-size: var(--af-text-2xs); line-height: 1;
+  cursor: pointer; opacity: 0;
+  transition: opacity var(--af-dur-instant) linear, color var(--af-dur-instant) linear;
+}
+/* 键盘焦点落在 tab 里（方向键切 tab）时也要露出来：否则「我能到的
+   下一个会话」在眼前是个空白，看不出它能被关 */
+.af-tab:hover .af-tab__x,
+.af-tab:focus-within .af-tab__x { opacity: 1; }
+.af-tab__x:hover { color: var(--af-danger-fg); background: var(--af-danger-bg); }
+/* 当前会话是用户**正在看**的那一个，它的关闭入口必须不用 hover 就可见；
+   压到次要前景而不是全不透明，是既能被找到又不与名字抢注意力 */
+.af-tab:has(.af-tab__label[aria-selected='true']) .af-tab__x { opacity: 0.55; }
+.af-tab:has(.af-tab__label[aria-selected='true']) .af-tab__x:hover { opacity: 1; }

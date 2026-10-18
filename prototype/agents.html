@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html class="agents" lang="zh-CN" data-state="online">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent 目录 · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css">
+<link rel="stylesheet" href="assets/components.css">
+<style>
+  /* 本页两处页面级样式：① 定义卡片的网格（列数随宽度自减，最窄一列 320px）；
+     ② 「定义 vs 就绪实例」两块之间的分隔间距。 */
+  .defs { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--af-space-5); }
+  .def { display: flex; flex-direction: column; gap: var(--af-space-4); }
+  .def[aria-selected='true'] { background: var(--af-accent-bg); border-color: var(--af-accent-line); }
+  .def__reqs { display: flex; flex-wrap: wrap; gap: var(--af-space-1); }
+  .sep { margin-top: var(--af-space-11); }
+</style>
+</head>
+<body data-page="agents">
+<div data-shell>
+
+  <div class="af-page">
+
+    <div class="af-page__head">
+      <div>
+        <h1 class="af-page__title">Agent 目录</h1>
+        <p class="af-page__sub">
+          Hub 知道哪些 agent 定义，以及<b>哪台设备上装好了哪个版本</b>。数据来自心跳的
+          <span class="af-fp">capabilities.agents</span>，没有第二份存储。
+          <b>只读聚合</b>：装 agent 是 M5 的流程，托管覆盖层是 M2，都不在本阶段。
+        </p>
+      </div>
+    </div>
+
+    <!-- ============ 目录 ≠ 会话（第一次） ============ -->
+    <div class="af-banner" data-tone="info">
+      <span class="af-banner__glyph">◆</span>
+      <div class="af-banner__body">
+        <div class="af-banner__title">这一页<b>没有</b>对话、没有面板、没有时间轴</div>
+        <div class="af-banner__text">
+          <b>目录 = 静态聚合。</b>它回答「哪个节点上能用什么」，可枚举、无运行期；
+          <b>实例离线时目录仍在</b>——「这台设备上装过，但够不着」是一条要保留的事实。
+          <br><b>会话 = 有运行期。</b>一次在某个 node、某条路径上的运行，有对话、有轨迹，
+          断线会冻结成只读（45 秒内是 reconnecting，不冻结）。
+          <br>所以本页每个定义卡片的唯一动作是「用它开会话」，<b>没有「进入目录」这种动作</b>——
+          目录不是一个能进去的地方。
+        </div>
+      </div>
+      <div class="af-banner__actions">
+        <a class="af-btn af-btn--sm" href="sessions.html">看会话 →</a>
+      </div>
+    </div>
+
+    <!-- ============ 定义 ============ -->
+    <section aria-labelledby="h-def">
+      <div class="af-row gap-4" style="margin-bottom:var(--af-space-5)">
+        <div class="af-t-label" id="h-def">定义 · <span class="af-t-num" id="cnt">0</span></div>
+        <span class="af-spacer"></span>
+        <span class="af-t-mute" style="font-size:var(--af-text-xs)">
+          <kbd>↑</kbd><kbd>↓</kbd> 移动 · <kbd>⏎</kbd> 用它开会话
+        </span>
+      </div>
+      <div class="defs" id="defs" data-role="list" tabindex="0" role="listbox" aria-label="agent 定义"></div>
+    </section>
+
+    <!-- ============ 按设备的就绪实例 ============ -->
+    <section class="sep" aria-labelledby="h-inst">
+      <div class="af-row gap-4" style="margin-bottom:var(--af-space-5)">
+        <div class="af-t-label" id="h-inst">按设备的就绪实例</div>
+        <span class="af-spacer"></span>
+        <span class="af-t-mute" style="font-size:var(--af-text-xs)">
+          定义 × 设备的笛卡尔积：改动定义不改变已装实例
+        </span>
+      </div>
+      <table class="af-table">
+        <thead>
+          <tr>
+            <th style="width:150px">agent</th>
+            <th style="width:150px">设备</th>
+            <th style="width:130px">设备状态</th>
+            <th style="width:110px">实例状态</th>
+            <th>装它的版本</th>
+          </tr>
+        </thead>
+        <tbody id="inst" data-role="list" tabindex="0" role="listbox" aria-label="按设备的就绪实例"></tbody>
+      </table>
+      <div class="af-field__hint" style="margin-top:var(--af-space-4)">
+        设备状态与实例状态<b>刻意分成两列</b>：一台离线设备上的实例仍是「已装」的事实，
+        只是此刻不可用。合成一列会让「装过」这件事随着设备掉线一起消失——
+        而目录的全部意义正是把这些事实留住。
+      </div>
+    </section>
+
+    <!-- ============ 目录 ≠ 会话（第二次） ============ -->
+    <section class="sep" aria-labelledby="h-cmp">
+      <div class="af-t-label" id="h-cmp" style="margin-bottom:var(--af-space-5)">目录与会话，差在哪</div>
+      <div class="af-panel">
+        <table class="af-table">
+          <thead>
+            <tr>
+              <th style="width:112px"></th>
+              <th style="width:42%">Agent 目录（本页）</th>
+              <th>会话</th>
+            </tr>
+          </thead>
+          <tbody id="cmp"></tbody>
+        </table>
+      </div>
+    </section>
+
+  </div>
+
+</div>
+
+<script src="assets/keynav.js"></script>
+<script src="assets/app.js"></script>
+<script>
+/* ===========================================================================
+   Agent 目录页 —— 只读聚合。
+   ---------------------------------------------------------------------------
+   这一页存在的理由不是「展示 agent 列表」，而是回答一个具体问题：
+   **「我要用某个 agent，它在哪台设备上是装好的？」**
+
+   所以第二块表的行粒度是 (定义 × 设备) 而不是只有定义：
+   「claude-code 装在 3 台设备上」对一个想开会话的人没用，
+   他需要的是「mbp.local 上就绪，win-desktop 上离线」。
+
+   两个不能省的区分，页首与页尾各说一次（页首说结论，页尾给对照表）：
+     ① 定义 ≠ 实例。改定义不改变已装实例（那是 M5 的托管覆盖层）。
+     ② 目录 ≠ 会话。目录无时间轴、实例离线目录仍在；
+        会话有运行期、断线冻结成只读。
+   =========================================================================== */
+(function () {
+  'use strict';
+  var AF = window.AF;
+  var $ = function (s, r) { return (r || document).querySelector(s); };
+  var $$ = function (s, r) { return [].slice.call((r || document).querySelectorAll(s)); };
+
+  AF.mount('agents', { title: 'Agent 目录' });
+
+  var AGENTS = AF.mock.agents;
+  var DEVICES = AF.mock.devices;
+
+  /* =========================================================================
+     定义卡片
+     -------------------------------------------------------------------------
+     每张卡的唯一动作是「用它开会话」：它带 ?agent= 去新建会话，
+     于是第二步预填这个定义，用户仍要自己选设备与路径。
+     刻意**不做整卡可点**：卡片里有 requires / notes 要读，整卡可点会
+     让「选中」与「想细看」混成一个手势，而这里只有前者是动作。
+     ======================================================================= */
+  function renderDefs() {
+    $('#defs').innerHTML = AGENTS.map(function (a) {
+      var onDevs = DEVICES.filter(function (d) { return d.agents.indexOf(a.id) >= 0; });
+      return '<div class="af-panel def" data-row tabindex="-1" role="option" aria-selected="false" ' +
+          'data-agent="' + AF.esc(a.id) + '">' +
+        '<div class="af-panel__head">' +
+          '<span class="af-panel__title"><span style="color:var(--af-agent)">◇</span> ' +
+            AF.esc(a.label) + '</span>' +
+          '<span class="af-spacer"></span>' +
+          '<span class="af-badge' + (onDevs.length ? ' af-badge--ok' : ' af-badge--off') + '">' +
+            (onDevs.length ? onDevs.length + ' 台就绪' : '无就绪实例') + '</span>' +
+        '</div>' +
+        '<div class="af-panel__body af-panel__body--pad af-col gap-4">' +
+          '<div class="af-field__hint" style="font-size:var(--af-text-sm);color:var(--af-fg-secondary)">' +
+            AF.esc(a.desc) + '</div>' +
+          '<div>' +
+            '<div class="af-t-label" style="margin-bottom:var(--af-space-1)">需要</div>' +
+            '<div class="def__reqs">' + a.requires.map(function (r) {
+              return '<span class="af-badge af-badge--info">' + AF.esc(r) + '</span>';
+            }).join('') + '</div>' +
+          '</div>' +
+          '<div>' +
+            '<div class="af-t-label" style="margin-bottom:var(--af-space-1)">备注</div>' +
+            '<div class="af-field__hint">' + AF.esc(a.notes) + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="af-panel__foot">' +
+          '<span class="af-t-mute">' + AF.esc(a.vendor) + '</span>' +
+          '<span class="af-spacer"></span>' +
+          '<button class="af-btn af-btn--sm af-btn--primary" type="button" ' +
+            'data-use="' + AF.esc(a.id) + '">用它开会话</button>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+    $('#cnt').textContent = AGENTS.length;
+  }
+
+  /* =========================================================================
+     按设备的就绪实例
+     -------------------------------------------------------------------------
+     从 AF.mock.devices × 各自的 agents 数组推导，不另立一份实例表。
+     设备状态走 AF.stateHTML（三态四通道），实例状态是它派生的布尔：
+     设备在线 ⇒ 就绪；reconnecting ⇒ 就绪但不建议（45s 内仍在）；
+     offline ⇒ 已装、此刻不可达。
+     ======================================================================= */
+  function instState(d) {
+    if (d.status === 'online') return { label: '就绪', cls: 'af-badge--ok' };
+    if (d.status === 'reconnecting') return { label: '重连中', cls: 'af-badge--warn' };
+    return { label: '不可达', cls: 'af-badge--off' };
+  }
+
+  function renderInst() {
+    var rows = [];
+    AGENTS.forEach(function (a) {
+      DEVICES.forEach(function (d) {
+        if (d.agents.indexOf(a.id) < 0) return;
+        var s = instState(d);
+        rows.push({ a: a, d: d, s: s });
+      });
+    });
+    $('#inst').innerHTML = rows.map(function (r) {
+      var off = r.d.status === 'offline';
+      return '<tr data-row tabindex="-1" role="option" aria-selected="false" ' +
+          'data-agent="' + AF.esc(r.a.id) + '"' + (off ? ' data-inert="true"' : '') + '>' +
+        '<td style="color:var(--af-fg-primary)">' + AF.esc(r.a.label) + '</td>' +
+        '<td>' + AF.esc(r.d.name) + '</td>' +
+        '<td>' + AF.stateHTML(r.d.status, { derived: !!r.d.derived }) + '</td>' +
+        '<td><span class="af-badge ' + r.s.cls + '">' + r.s.label + '</span></td>' +
+        '<td class="af-t-num">' + AF.esc(r.d.agent_version) + '</td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  /* =========================================================================
+     目录 vs 会话（页尾对照表）
+     -------------------------------------------------------------------------
+     六行对照，逐条对上一个可验证的行为差异，不写形容词。
+     ======================================================================= */
+  var CMP = [
+    ['有没有时间轴', '没有。它是一份快照，任何时刻重算都一样。', '有。轨迹是 append-only 流水，逐条可查。'],
+    ['掉线会怎样', '目录仍在，实例那一行标「不可达」。', '会话冻结成只读；45s 内是 reconnecting，不冻结。'],
+    ['行的粒度', '(定义 × 设备)：哪台设备上装好了哪个版本。', '(会话)：一次在 (node_id, path) 上的运行。'],
+    ['能不能改', '不能。装 agent 是 M5，托管覆盖层是 M2。', '不能换设备 / 换 agent / 改路径；换环境就是新会话。'],
+    ['面板', '没有。面板不在这一层。', '有。终端 / 文件绑定这个会话的工作区。'],
+    ['唯一动作', '「用它开会话」。', '「进入会话」。']
+  ];
+
+  function renderCmp() {
+    $('#cmp').innerHTML = CMP.map(function (r) {
+      return '<tr><td class="af-t-label">' + r[0] + '</td><td>' + r[1] + '</td><td>' + r[2] + '</td></tr>';
+    }).join('');
+  }
+
+  /* =========================================================================
+     行激活：Enter = 用它开会话
+     -------------------------------------------------------------------------
+     两种列表（卡片网格与实例表）都只是跳到同一个目的地，所以同一
+     个 handler。行是 div/tr + data-row + tabindex=-1，Enter 由 keynav 的
+     list:enter 抛 af:enter——注意卡片行内有一个 button，所以 Enter 落到
+     af:enter 之前先被内嵌按钮接住；这里用卡片行的 data-href 与实例表的
+     af:enter 分别处理，两条路同一个 URL。
+     ======================================================================= */
+  function use(id) {
+    location.href = 'new-session.html?agent=' + encodeURIComponent(id);
+  }
+
+  $$('#defs, #inst').forEach(function (list) {
+    list.addEventListener('af:enter', function (e) {
+      var row = e.detail.row;
+      if (row.dataset.agent) use(row.dataset.agent);
+    });
+    /* 卡片行整行可点（网格不是表格，没有行的主操作按钮要抢） */
+    list.addEventListener('click', function (e) {
+      var row = e.target.closest('[data-agent]');
+      if (row && !e.target.closest('[data-use]')) use(row.dataset.agent);
+    });
+  });
+
+  /* 卡片脚部的按钮：与整行同一个目的地，显式给鼠标用户 */
+  $('#defs').addEventListener('click', function (e) {
+    var b = e.target.closest('[data-use]');
+    if (b) { e.stopPropagation(); use(b.dataset.use); }
+  });
+
+  renderDefs();
+  renderInst();
+  renderCmp();
+})();
+</script>
+</body>
+</html>

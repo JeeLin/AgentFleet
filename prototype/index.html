@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html class="index" lang="zh-CN" data-state="online">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentFleet 控制台 · 设计原型总览</title>
+<link rel="stylesheet" href="assets/tokens.css">
+<link rel="stylesheet" href="assets/components.css">
+<style>
+  /* 本页不用外壳：它是「关于原型」的说明页，不是产品页面。
+     页面级样式 ≤30 行，超出的进 components.css。 */
+  .hero { padding: var(--af-space-12) var(--af-space-11) var(--af-space-9); border-bottom: 1px solid var(--af-border-default); background: radial-gradient(90% 120% at 8% 0%, rgba(95, 217, 200, 0.08), transparent 60%), var(--af-surface-1); }
+  .hero h1 { font-size: var(--af-text-4xl); line-height: 1.15; letter-spacing: -0.02em; margin: 0 0 var(--af-space-5); max-width: 22ch; }
+  .hero p { max-width: 68ch; color: var(--af-fg-secondary); font-size: var(--af-text-md); line-height: var(--af-leading-base); margin: 0 0 var(--af-space-6); }
+  .facts { display: flex; flex-wrap: wrap; gap: var(--af-space-7); }
+  .fact b { display: block; font-size: var(--af-text-2xl); color: var(--af-fg-primary); font-variant-numeric: tabular-nums; }
+  .fact span { font-size: var(--af-text-xs); color: var(--af-fg-tertiary); }
+  .pages { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: var(--af-space-5); }
+  .pc { display: flex; flex-direction: column; gap: var(--af-space-3); padding: var(--af-space-6); background: var(--af-surface-1); border: 1px solid var(--af-border-default); border-radius: var(--af-radius-md); text-decoration: none; transition: border-color var(--af-dur-instant) linear, background-color var(--af-dur-instant) linear; }
+  .pc:hover { border-color: var(--af-accent-line); background: var(--af-surface-2); }
+  .pc__t { display: flex; align-items: center; gap: var(--af-space-3); }
+  .pc__n { font-size: var(--af-text-2xs); color: var(--af-fg-disabled); font-variant-numeric: tabular-nums; }
+  .pc__name { font-size: var(--af-text-md); color: var(--af-fg-primary); font-weight: var(--af-weight-medium); }
+  .pc__d { font-size: var(--af-text-sm); color: var(--af-fg-tertiary); line-height: var(--af-leading-snug); flex: 1 1 auto; }
+  .swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: var(--af-space-3); }
+  .sw { border: 1px solid var(--af-border-default); border-radius: var(--af-radius-sm); overflow: hidden; background: var(--af-surface-1); }
+  .sw__c { height: 42px; }
+  .sw__m { padding: var(--af-space-3); font-size: var(--af-text-2xs); color: var(--af-fg-tertiary); line-height: 1.5; }
+  .sw__m code { color: var(--af-fg-secondary); }
+</style>
+</head>
+<body>
+<main tabindex="-1">
+
+<div class="hero">
+  <div class="af-row" style="margin-bottom:var(--af-space-5)">
+    <span class="af-brand__mark" aria-hidden="true"></span>
+    <span class="af-t-label">AgentFleet · Web 控制台 · M1 设计定稿</span>
+    <span class="af-badge af-badge--accent">原型 · 双击即开</span>
+  </div>
+  <h1>深色、等宽、高密度、键盘优先 —— 一套能落到 Vue 组件的契约。</h1>
+  <p>
+    本目录是<b>设计依据，不是代码资产</b>。全部是零依赖的 HTML/CSS/JS：没有构建、没有依赖、没有网络请求。
+    规范正文在 <code>docs/design-system.md</code>；原型的职责是把规范里那些「容易写错的地方」画出来核对。
+    这一版重写了交互层：焦点归<b>焦点栈</b>管、键位归<b>一张表</b>管、背后内容被 <code>inert</code>、
+    跳转后焦点有确定落点——上一版的 7 条焦点缺陷在这里都有对应的结构性修复（规范 §4.8）。
+  </p>
+  <div class="facts">
+    <div class="fact"><b>22</b><span>键位动作 · 每个 act 都有 handler</span></div>
+    <div class="fact"><b>1 张</b><span>KEYS 表 · `?` 面板照它渲染</span></div>
+    <div class="fact"><b>0</b><span>死键 · 表里没有的键位不进表</span></div>
+    <div class="fact"><b>14 档</b><span>间距刻度（2px 基数）</span></div>
+    <div class="fact"><b>4 层半</b><span>表面层级 · 相邻 ΔL ≈ 0.006</span></div>
+  </div>
+</div>
+
+<!-- ================= 信息架构 ================= -->
+<section class="af-page" style="padding-bottom:0">
+  <div class="af-page__head">
+    <div>
+      <h2 class="af-page__title">信息架构：入口是<b>一次对话</b>，不是一块工作区</h2>
+      <p class="af-page__sub">
+        上一版把「工作区」做成了一级页面，于是它成了可以单独打开、可以为它挑面板的容器——
+        那正是设备级多资源管理台。这一版取消了这个页面，全站只有一条主线：
+        <b>选机器 → 选 agent → 选路径 → 在对话里开面板</b>。
+      </p>
+    </div>
+  </div>
+
+  <div class="af-row" style="align-items:flex-start;gap:var(--af-space-8);flex-wrap:wrap">
+    <div style="flex:1 1 340px;min-width:300px">
+      <div class="af-t-label" style="margin-bottom:var(--af-space-3)">路由</div>
+      <ol class="af-col gap-1" style="list-style:none;margin:0;padding:0">
+        <li><a href="sessions.html"><code>/sessions</code></a> <span class="af-t-mute">会话列表</span></li>
+        <li><a href="new-session.html"><code>/sessions/new</code></a> <span class="af-t-mute">三步建会话</span></li>
+        <li><a href="session.html"><code>/sessions/:id</code></a> <span class="af-t-mute"><b>会话工作台 · 重心</b></span></li>
+        <li><a href="devices.html"><code>/devices</code></a> <span class="af-t-mute">设备列表</span></li>
+        <li><a href="agents.html"><code>/agents</code></a> <span class="af-t-mute">Agent 目录（只读聚合）</span></li>
+        <li><a href="settings.html"><code>/settings</code></a> <span class="af-t-mute">设置 <span class="af-badge af-badge--off">M2</span></span></li>
+        <li><a href="login.html"><code>/login</code></a> <span class="af-t-mute">登录</span></li>
+        <li><a href="setup.html"><code>/setup</code></a> <span class="af-t-mute">首次 setup</span></li>
+      </ol>
+      <div class="af-t-label" style="margin:var(--af-space-6) 0 var(--af-space-3)">被删掉的路由</div>
+      <p class="af-field__hint" style="border:1px dashed var(--af-danger-line);border-radius:var(--af-radius-sm);padding:var(--af-space-4)">
+        <s><code>/w/:node/:path</code></s> —— 一条都没有。工作区<b>没有地址</b>，
+        所以它不可能成为目的地。这不是「暂时没做」，是架构上不存在。
+      </p>
+    </div>
+    <div style="flex:1 1 340px;min-width:300px">
+      <div class="af-t-label" style="margin-bottom:var(--af-space-3)">四条结构性保证（可 grep 验证）</div>
+      <ol class="af-col gap-4" style="margin:0;padding:0 0 0 var(--af-space-6);font-size:var(--af-text-sm)">
+        <li><b>无路由</b> <span class="af-t-mute">— <code>grep -rn 'workspace' prototype/</code> 应当零命中</span></li>
+        <li><b>无第二父容器</b> <span class="af-t-mute">— 每个面板都是 <code>#wb</code> 的后代，没有 portal、没有 modal 承载面板</span></li>
+        <li><b>入口在会话内</b> <span class="af-t-mute">— 设备页 grep 不到任何面板字样</span></li>
+        <li><b>路径是创建期输入</b> <span class="af-t-mute">— 建立后只读，不可变 ⇒ 会话无法退化成多资源句柄</span></li>
+      </ol>
+      <div class="af-t-label" style="margin:var(--af-space-6) 0 var(--af-space-3)">本阶段刻意不做</div>
+      <ul class="af-col gap-3" style="margin:0;padding:0 0 0 var(--af-space-6);font-size:var(--af-text-xs);color:var(--af-fg-secondary)">
+        <li><b>任务分发</b>：整体推迟到 M5，<b>不留占位页</b>——留一个空壳入口等于在导航里承诺一件本阶段不做的事</li>
+        <li><b>git 面板</b>：M4 时长在面板坞的同一个位置</li>
+        <li><b>装 agent / 改定义</b>：一键安装是 M5，Agent 目录因此是只读聚合</li>
+        <li><b>往设备上传项目文件</b>：路径必须<b>已经存在于那台设备上</b></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 交互模型 ================= -->
+<section class="af-page">
+  <div class="af-page__head">
+    <div>
+      <h2 class="af-page__title">交互模型：焦点与键位的四条规则</h2>
+      <p class="af-page__sub">上一版的 7 条可验证缺陷全部源自同一个根因：焦点散在各页面各写各的，没有统一所有权。这一版把所有权收归两份文件。</p>
+    </div>
+  </div>
+  <div class="af-col gap-5" style="max-width:900px">
+    <div class="af-panel"><div class="af-panel__body">
+      <b style="color:var(--af-fg-primary)">① 焦点归最内层活动容器（FocusStack）</b>
+      <div class="af-field__hint" style="margin-top:var(--af-space-2)">
+        浮层打开时背后全部 <code>inert</code>（浏览器原生语义：焦点、指针、辅助树三处一起管）。
+        关闭时焦点还给打开它的元素——Esc、点遮罩、点关闭按钮三条路都走 <code>focusPop()</code>，行为必然一致。
+        上一版 6 页宣传 <code>?</code> 是死键、<code>trapFocus</code> 缓存过期快照，都是绕过这条规则的后果。
+      </div>
+    </div></div>
+    <div class="af-panel"><div class="af-panel__body">
+      <b style="color:var(--af-fg-primary)">② 键位表即文档（KEYS）</b>
+      <div class="af-field__hint" style="margin-top:var(--af-space-2)">
+        <code>? </code>面板由 <code>keynav.js</code> 的 KEYS 表渲染，所以「文档写的键位」与「按下会发生的键位」不可能漂移。
+        <code>AF.register()</code> 检查 act 在表里；<code>AF.unimplemented()</code> 在控制台列出表里有、没人实现的项——
+        上一版 31 个键位 15 个死键的根因就是「表」与「实现」是两份东西。
+      </div>
+    </div></div>
+    <div class="af-panel"><div class="af-panel__body">
+      <b style="color:var(--af-fg-primary)">③ 跳转后焦点有确定落点</b>
+      <div class="af-field__hint" style="margin-top:var(--af-space-2)">
+        上一版 12 个页面 0 个 <code>autofocus</code>、0 个 <code>main[tabindex=-1]</code>：跳转后焦点回到 body，
+        屏幕阅读器不播报新页面。现在由外壳统一做 <code>AF.focusMain()</code>。
+      </div>
+    </div></div>
+    <div class="af-panel"><div class="af-panel__body">
+      <b style="color:var(--af-fg-primary)">④ 键位从 31 砍到 22，没有 handler 的键位不进表</b>
+      <div class="af-field__hint" style="margin-top:var(--af-space-2)">
+        砍掉的是 <code>file:open/up/save/revert</code>、<code>list:expand/multi/end</code>、<code>palette:move/enter</code>、
+        <code>focus:cycle</code>、<code>escape</code> 等死键。列表导航改为标准 listbox 模式（Tab 进容器、↑↓ 在行间走），
+        不再用全局 Enter 代理。
+      </div>
+    </div></div>
+  </div>
+</section>
+
+<!-- ================= 色板 ================= -->
+<section class="af-page" style="padding-bottom:0">
+  <div class="af-page__head">
+    <div>
+      <h2 class="af-page__title">语义色板</h2>
+      <p class="af-page__sub">四层半表面 + 四级前景 + 六个功能色。每个取值都在 tokens.css 里量过对比度并写了理由；改任何一个都要重算。</p>
+    </div>
+  </div>
+  <div class="af-col gap-5">
+    <div>
+      <div class="af-t-label" style="margin-bottom:var(--af-space-2)">表面（深色里的四层半）</div>
+      <div class="swatches">
+        <div class="sw"><div class="sw__c" style="background:var(--af-surface-0)"></div><div class="sw__m">surface-0<br><code>页面底 · 最深</code></div></div>
+        <div class="sw"><div class="sw__c" style="background:var(--af-surface-1)"></div><div class="sw__m">surface-1<br><code>应用外壳</code></div></div>
+        <div class="sw"><div class="sw__c" style="background:var(--af-surface-2)"></div><div class="sw__m">surface-2<br><code>浮起一层</code></div></div>
+        <div class="sw"><div class="sw__c" style="background:var(--af-surface-3)"></div><div class="sw__m">surface-3<br><code>浮起两层</code></div></div>
+        <div class="sw"><div class="sw__c" style="background:var(--af-inset)"></div><div class="sw__m">inset<br><code>终端 / 代码凹槽</code></div></div>
+      </div>
+    </div>
+    <div>
+      <div class="af-t-label" style="margin-bottom:var(--af-space-2)">功能色（角色按「用户该做什么决定」，不按色相）</div>
+      <div class="swatches">
+        <div class="sw"><div class="sw__c" style="background:var(--af-accent)"></div><div class="sw__m">accent 青<br><code>可交互 · 在线 · 焦点</code></div></div>
+        <div class="sw"><div class="sw__c" style="background:var(--af-ok)"></div><div class="sw__m">ok 绿<br><code>已完成</code></div></div>
+        <div class="sw"><div class="sw__c" style="background:var(--af-warn)"></div><div class="sw__m">warn 琥珀<br><code>等待 · 降级</code></div></div>
+        <div class="sw"><div class="sw__c" style="background:var(--af-danger)"></div><div class="sw__m">danger 红<br><code>阻断 · 越界</code></div></div>
+        <div class="sw"><div class="sw__c" style="background:var(--af-info)"></div><div class="sw__m">info 蓝<br><code>说明性</code></div></div>
+        <div class="sw"><div class="sw__c" style="background:var(--af-agent)"></div><div class="sw__m">agent 紫<br><code>来自 agent 而非用户</code></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 页面清单 ================= -->
+<section class="af-page">
+  <div class="af-page__head">
+    <div>
+      <h2 class="af-page__title">页面</h2>
+      <p class="af-page__sub">全部页面可点、可键盘走完。<kbd>?</kbd> 看键位，<kbd>/</kbd> 聚焦搜索，<kbd>⌃B</kbd> 折叠侧栏，<kbd>g s / g d / g a / g ,</kbd> 跳页。</p>
+    </div>
+    <span class="af-spacer"></span>
+    <a class="af-btn af-btn--sm" href="session.html">直接看重心页 →</a>
+  </div>
+  <div class="pages">
+    <a class="pc" href="sessions.html">
+      <div class="pc__t"><span class="pc__n">01</span><span class="pc__name">会话</span><span class="af-badge af-badge--accent">入口</span></div>
+      <div class="pc__d">进行中卡片 + 历史表格。路径只是会话的一个字段，<b>不是一栏可点的容器</b>。卡片脚上那排小色块是「这个会话开着几个面板」。</div>
+    </a>
+    <a class="pc" href="new-session.html">
+      <div class="pc__t"><span class="pc__n">02</span><span class="pc__name">新建会话</span></div>
+      <div class="pc__d">三步：选机器 → 选 agent → 选工作区路径。右栏常驻摘要；三步走完后<b>路径不可改</b>。</div>
+    </a>
+    <a class="pc" href="session.html">
+      <div class="pc__t"><span class="pc__n">03</span><span class="pc__name">会话工作台</span><span class="af-badge af-badge--accent">重心</span></div>
+      <div class="pc__d">对话在左、面板坞在右（可拖拽，键盘也能调）。面板在对话过程中打开、关掉即释放。轨迹是抽屉。断线三态可一键模拟。</div>
+    </a>
+    <a class="pc" href="devices.html">
+      <div class="pc__t"><span class="pc__n">04</span><span class="pc__name">设备</span></div>
+      <div class="pc__d">紧凑表格 + 抽屉详情。行尾主动作是<b>「用它开会话」</b>，不是「打开工作区」。已装 agent 折成徽标串。</div>
+    </a>
+    <a class="pc" href="agents.html">
+      <div class="pc__t"><span class="pc__n">05</span><span class="pc__name">Agent 目录</span></div>
+      <div class="pc__d">定义卡片 + 按设备的就绪实例（来自心跳）。只读聚合，唯一动作是「用它开会话」。</div>
+    </a>
+    <a class="pc" href="components.html">
+      <div class="pc__t"><span class="pc__n">06</span><span class="pc__name">组件陈列</span></div>
+      <div class="pc__d">每个基础组件的四态并排 + 尺寸档位 + 禁用场景。实现阶段照它写 Vue 组件。</div>
+    </a>
+    <a class="pc" href="login.html">
+      <div class="pc__t"><span class="pc__n">07</span><span class="pc__name">登录</span></div>
+      <div class="pc__d">三种错误态分开呈现（密码错 / Hub 仍处于初始化 / 会话失效），并演示限流后的 429。</div>
+    </a>
+    <a class="pc" href="setup.html">
+      <div class="pc__t"><span class="pc__n">08</span><span class="pc__name">首次 setup</span></div>
+      <div class="pc__d">一次性 token 的取用引导。三种失败分开说，各给下一步命令。</div>
+    </a>
+    <a class="pc" href="panels/terminal.html">
+      <div class="pc__t"><span class="pc__n">09a</span><span class="pc__name">terminal 面板</span></div>
+      <div class="pc__d">四态、尺寸协商读数、丢帧标记、断线不冻结。本页带「它在会话里」的位置声明。</div>
+    </a>
+    <a class="pc" href="panels/files.html">
+      <div class="pc__t"><span class="pc__n">09b</span><span class="pc__name">files 面板</span></div>
+      <div class="pc__d">树 + 预览 + 编辑保存 + 越界四路反馈。键盘可操作整棵树。</div>
+    </a>
+    <a class="pc" href="settings.html">
+      <div class="pc__t"><span class="pc__n">10</span><span class="pc__name">设置</span><span class="af-badge af-badge--off">M2</span></div>
+      <div class="pc__d">Hub 设置、改密码、模型 API key、节点凭据（只显示 fingerprint）。</div>
+    </a>
+  </div>
+</section>
+
+<footer class="af-page af-t-mute" style="font-size:var(--af-text-xs);padding-top:0">
+  <span>AgentFleet M1 · 设计规范与原型 · 基线：M0 已交付（M1 起始 ref a960510）</span>
+  <span class="af-spacer"></span>
+  <span>按 <kbd>?</kbd> 看全局键位 · <kbd>g s</kbd> 跳会话</span>
+</footer>
+
+</main>
+
+<script src="assets/keynav.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

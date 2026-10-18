@@ -1,0 +1,883 @@
+<!DOCTYPE html>
+<html class="session" lang="zh-CN" data-state="online">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>会话工作台 · AgentFleet</title>
+<link rel="stylesheet" href="../assets/tokens.css">
+<link rel="stylesheet" href="../assets/components.css">
+<style>
+  /* 本页布局全部走 components.css §20。这里只留两行：
+     工作台要撑满外壳主区，所以 main 自己不能滚。 */
+  main[data-role="main"] { overflow: hidden; }
+  .af-page--flush { height: 100%; }
+</style>
+</head>
+<body data-page="session">
+<div data-shell>
+
+  <!-- ================= 工作台头 ================= -->
+  <div class="af-page--flush">
+    <div class="af-wb" id="wb">
+
+      <div class="af-wb__head">
+        <h1 class="af-wb__title" id="wb-title">修 ws 断线重连</h1>
+        <span id="wb-state"></span>
+        <span class="af-wb__meta">
+          <span class="af-wb__target" id="wb-target">
+            <span aria-hidden="true">▣</span>
+            <b>mbp.local</b>
+            <span class="af-t-mute">·</span>
+            <span class="af-fp">~/src/AgentFleet</span>
+            <span class="af-badge" title="建会话时确定，之后不可改">路径锁定</span>
+          </span>
+          <span id="wb-agent">Claude Code</span>
+          <span class="af-t-mute">·</span>
+          <span id="wb-started">14 分钟前开始</span>
+        </span>
+        <span class="af-spacer"></span>
+        <button class="af-btn af-btn--sm" type="button" data-wb="panel-open">
+          <span aria-hidden="true">▤</span> 打开面板 <kbd>o</kbd>
+        </button>
+      </div>
+
+      <!-- ================= 会话 tab 条 =================
+           一个 tab stop，←→ 移动并激活（roving tabindex）。
+           切 tab 是「视图切换」不是「生命周期边界」：面板与通道跟着 tab
+           一起留着，离开 tab 不释放；关掉 tab 才 release。
+           代价是 N 个 tab = N×面板数条活跃通道，所以每个 tab 显示自己的
+           面板数——让代价可见，而不是让用户猜。
+           切 tab 后焦点进工作台正文而不是留在 tab 条：用户意图是
+           「去那儿干活」，不是「继续看标签栏」；⇧Tab 一步就回到 tab 条。
+      -->
+      <div class="af-tabbar" id="tabbar" role="tablist" aria-label="打开的会话"></div>
+
+      <!-- 状态模拟：让「断线三态」不需要真的断线就能看到 -->
+      <div class="af-sim" role="group" aria-label="连接状态模拟（原型专用）">
+        <span>模拟连接：</span>
+        <button class="af-sim__b" type="button" data-sim="online" aria-pressed="true">在线</button>
+        <button class="af-sim__b" type="button" data-sim="reconnecting" aria-pressed="false">reconnecting（45s 内）</button>
+        <button class="af-sim__b" type="button" data-sim="offline" aria-pressed="false">offline（判离线）</button>
+        <span class="af-spacer"></span>
+        <span>reconnecting 是 Hub 内存推导值，不是持久化字段</span>
+      </div>
+
+      <div class="af-wb__body">
+
+        <!-- ================= 左列：对话 ================= -->
+        <div class="af-wb__conv" id="conv" data-size="mid">
+          <div class="af-flow" id="flow" data-role="list" tabindex="0" role="listbox" aria-label="对话流">
+            <div class="af-flow__day">今天 14:02</div>
+
+            <div class="af-msg" data-who="user">
+              <div class="af-msg__who"><span>你</span><span class="af-t-mute">14:02</span></div>
+              <div class="af-msg__body">ws 断了重连不上，帮我看看 relay() 里的 incoming 处理。</div>
+            </div>
+
+            <div class="af-msg" data-who="agent">
+              <div class="af-msg__who"><span class="af-badge af-badge--agent">claude-code</span><span class="af-t-mute">14:02</span></div>
+              <div class="af-msg__body">先读文件。重连逻辑在 <code>relay()</code> 里，我看清它怎么处理 incoming 再动手。</div>
+            </div>
+
+            <div class="af-tool" data-open="true">
+              <button class="af-tool__head" type="button" aria-expanded="true">
+                <span class="af-tree__twisty" aria-hidden="true">▾</span>
+                <span class="af-tool__name">Read</span>
+                <span class="af-fp af-truncate">crates/hub-server/src/routes/ws.rs</span>
+                <span class="af-tool__ms">42ms</span>
+              </button>
+              <div class="af-tool__body">read 312 lines · matched 1 hunk</div>
+            </div>
+
+            <div class="af-msg" data-who="agent">
+              <div class="af-msg__who"><span class="af-badge af-badge--agent">claude-code</span><span class="af-t-mute">14:03</span></div>
+              <div class="af-msg__body">问题在 <code>select!</code> 的 incoming 臂：它先 <code>text.to_string()</code> 再判 <code>Ok</code>，
+                断开时空文本也会被当消息处理。我加一个长度守卫。</div>
+            </div>
+
+            <div class="af-tool" data-open="false">
+              <button class="af-tool__head" type="button" aria-expanded="false">
+                <span class="af-tree__twisty" aria-hidden="true">▸</span>
+                <span class="af-tool__name">Edit</span>
+                <span class="af-fp af-truncate">crates/hub-server/src/routes/ws.rs</span>
+                <span class="af-tool__ms">+6 −2</span>
+              </button>
+              <div class="af-tool__body">+  if text.is_empty() { break; }
++  if text.len() > MAX_FRAME { return Err(FloodError); }
+-  let text = text.to_string();</div>
+            </div>
+
+            <div class="af-msg" data-who="user">
+              <div class="af-msg__who"><span>你</span><span class="af-t-mute">14:05</span></div>
+              <div class="af-msg__body">跑一遍测试。</div>
+            </div>
+
+            <div class="af-tool" data-open="false">
+              <button class="af-tool__head" type="button" aria-expanded="false">
+                <span class="af-tree__twisty" aria-hidden="true">▸</span>
+                <span class="af-tool__name">Bash</span>
+                <span class="af-fp af-truncate">cargo test --workspace</span>
+                <span class="af-tool__ms">18.4s</span>
+              </button>
+              <div class="af-tool__body">running 26 tests
+test result: ok. 26 passed; 0 failed</div>
+            </div>
+
+            <div class="af-msg" data-who="agent">
+              <div class="af-msg__who"><span class="af-badge af-badge--agent">claude-code</span><span class="af-t-mute">14:06</span></div>
+              <div class="af-msg__body">全绿。接着查 <code>flood_frame</code> 的错误码映射——它是纯函数，可以直接补测试。</div>
+            </div>
+          </div>
+
+          <div class="af-compose">
+            <div class="af-compose__row">
+              <textarea class="af-input af-textarea af-compose__input" id="compose"
+                placeholder="说点什么…（单键在这里不生效；⏎ 发送，⇧⏎ 换行）"
+                aria-label="对话输入"></textarea>
+              <button class="af-btn af-btn--primary" type="button" id="send">发送</button>
+            </div>
+            <div class="af-compose__hint">
+              <span><kbd>⏎</kbd> 发送</span>
+              <span><kbd>⇧⏎</kbd> 换行</span>
+              <span class="af-spacer"></span>
+              <span><kbd>t</kbd> 轨迹抽屉</span>
+              <span><kbd>o</kbd> 打开面板</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ================= 把手 ================= -->
+        <div class="af-gutter" id="gutter" role="separator" tabindex="0"
+             aria-orientation="vertical" aria-label="调整对话与面板宽度" aria-valuenow="50"
+             aria-valuemin="30" aria-valuemax="70">
+          <span class="af-track" aria-hidden="true"></span>
+          <span class="af-gutter__label" aria-hidden="true">← → 调整</span>
+        </div>
+
+        <!-- ================= 右列：面板坞 ================= -->
+        <div class="af-wb__dock" id="dock" hidden style="flex:0 0 44%">
+          <div class="af-docktabs" role="tablist" aria-label="面板">
+            <button class="af-docktabs__b" type="button" role="tab" data-panel="terminal"
+                    aria-selected="true" aria-controls="panel-terminal">
+              <span aria-hidden="true">▶</span> 终端
+              <span class="af-badge af-badge--ok">已连接</span>
+            </button>
+            <button class="af-docktabs__b" type="button" role="tab" data-panel="files"
+                    aria-selected="false" aria-controls="panel-files" hidden>
+              <span aria-hidden="true">▤</span> 文件
+            </button>
+            <span class="af-docktabs__spacer"></span>
+            <button class="af-docktabs__close" type="button" data-wb="dock-close"
+                    aria-label="收起面板坞">✕</button>
+          </div>
+          <div class="af-panelhost" id="panelhost"></div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- 轨迹抽屉：会话内的一条覆盖层，不是第三栏 -->
+<div class="af-traj" id="traj" role="dialog" aria-modal="true" aria-label="轨迹抽屉" hidden>
+  <div class="af-traj__head">
+    <span class="af-t-label">轨迹</span>
+    <span class="af-t-mute" style="font-size:var(--af-text-xs)">append-only 流水 · 128 条</span>
+    <span class="af-spacer"></span>
+    <button class="af-btn af-btn--ghost af-btn--sm af-btn--icon" type="button" data-wb="traj-close" aria-label="关闭">✕</button>
+  </div>
+  <div class="af-traj__body" id="trajbody" data-role="list" tabindex="0" role="listbox" aria-label="轨迹事件"></div>
+</div>
+
+<script src="../assets/keynav.js"></script>
+<script src="../assets/app.js"></script>
+<script>
+/* ===========================================================================
+   会话工作台
+   ---------------------------------------------------------------------------
+   这个页面是全部交互模型的样板。上面两个文件是框架，这里是应用。
+   分工写在每一段开头：框架负责的，这里一行都不写。
+   =========================================================================== */
+(function () {
+  'use strict';
+  var AF = window.AF;
+  var $ = function (s, r) { return (r || document).querySelector(s); };
+  var $$ = function (s, r) { return [].slice.call((r || document).querySelectorAll(s)); };
+
+  AF.mount('session', { title: '会话工作台' });
+
+  var wb = $('#wb'), dock = $('#dock'), conv = $('#conv'), traj = $('#traj');
+  var panelhost = $('#panelhost'), trajbody = $('#trajbody'), tabbar = $('#tabbar');
+
+  /* =========================================================================
+     会话 tab：每个 tab 持有**自己的一份会话状态**
+     -------------------------------------------------------------------------
+     这是「支持看多个」的全部代价所在。如果只有一个全局 `state`，
+     切到 B 会把 A 的面板、终端内容、文件树位置全冲掉——于是
+     「支持多个」只剩一条 tab 条，是个假的。
+     所以 state 挂在一个对象上，由 activateTab 整体换掉。
+     ======================================================================= */
+  var TABS = AF.mock.sessions.filter(function (s) { return s.status !== 'ended'; });
+  var activeTab = TABS[0].id;
+
+  function tabById(id) { return TABS.filter(function (t) { return t.id === id; })[0]; }
+
+  /* 每个 tab 一份：面板坞开关 / 当前面板 / 已挂载的面板 / 终端输出 / 文件树位置 */
+  var TABSTATE = {};
+  function st(id) {
+    if (!TABSTATE[id]) TABSTATE[id] = { dock: false, panel: null, mounted: {} };
+    return TABSTATE[id];
+  }
+
+  /* =========================================================================
+     面板定义
+     -------------------------------------------------------------------------
+     两个面板是**内容**，不是容器：它们都长在 #dock 里，dock 是 #wb 的后代，
+     没有 portal、没有兄弟节点。这就是「无第二父容器」的结构保证。
+     ======================================================================= */
+  var PANELS = {
+    terminal: {
+      label: '终端', icon: '▶',
+      html: function (t) {
+        return '<div class="af-panel" style="border:0;border-radius:0;height:100%">' +
+          '<div class="af-panel__head">' +
+            '<span class="af-panel__title">终端</span>' +
+            '<span class="af-t-mute" style="font-size:var(--af-text-xs)">' +
+              AF.esc(t.device) + ' · ' + AF.esc(t.path) + '</span>' +
+            '<span class="af-spacer"></span>' +
+            '<span class="af-badge af-badge--ok" data-term-state>已连接</span>' +
+            '<span class="af-t-mute" style="font-size:var(--af-text-2xs)">120×36</span>' +
+          '</div>' +
+          '<div class="af-term" data-term tabindex="0" role="log" aria-label="终端输出">' +
+            (t.termHtml || '<div class="af-term__line"><span class="af-term__prompt">' +
+              AF.esc(t.path) + ' $</span> cargo test --workspace</div>' +
+              '<div class="af-term__line af-term__dim">   Compiling hub-server v0.1.0</div>' +
+              '<div class="af-term__line af-term__ok">    Finished test [unoptimized] target(s) in 18.42s</div>' +
+              '<div class="af-term__line af-term__ok">test result: ok. 26 passed; 0 failed; 0 ignored</div>' +
+              '<div class="af-term__line"><span class="af-term__prompt">' +
+              AF.esc(t.path) + ' $</span> </div>') +
+          '</div>' +
+          '<div class="af-compose" style="padding:var(--af-space-2) var(--af-space-4);border-top:1px solid var(--af-border-subtle)">' +
+            '<div class="af-compose__row">' +
+              '<input class="af-input" data-term-in placeholder="在这里输命令…（⌃L 清屏）" aria-label="终端输入">' +
+              '<button class="af-btn af-btn--sm" type="button" data-term-run>执行</button>' +
+            '</div>' +
+            '<div class="af-compose__hint"><span>⌃L 清屏</span><span>断线 45s 内<b style="color:var(--af-warn-fg)">不冻结</b>：PTY 还活着</span></div>' +
+          '</div>' +
+        '</div>';
+      }
+    },
+    files: {
+      label: '文件', icon: '▤',
+      html: function () {
+        return '<div class="af-fpane">' +
+          '<div class="af-panel__head">' +
+            '<span class="af-panel__title">文件</span>' +
+            '<span class="af-spacer"></span>' +
+            '<span class="af-t-mute" style="font-size:var(--af-text-2xs)">⌃S 保存 · Backspace 上一级</span>' +
+          '</div>' +
+          '<div class="af-fpane__crumbs" data-fp-crumbs></div>' +
+          '<div class="af-fpane__body">' +
+            '<div class="af-tree" data-fp-tree data-role="tree" tabindex="0" role="tree" aria-label="文件树"></div>' +
+          '</div>' +
+          '<div class="af-fpane__preview" data-fp-preview tabindex="0" role="region" aria-label="文件预览"></div>' +
+        '</div>';
+      }
+    }
+  };
+
+  /* 文件树：越界的那一层**照常显示**（四路可见证据之一） */
+  var TREE = [
+    { n: 'crates', k: 'dir', o: true, kids: [
+      { n: 'hub-server', k: 'dir', o: true, kids: [
+        { n: 'src', k: 'dir', o: true, kids: [
+          { n: 'routes', k: 'dir', o: true, kids: [
+            { n: 'ws.rs', k: 'file', s: '9.4 KB' },
+            { n: 'mod.rs', k: 'file', s: '412 B' }
+          ]},
+          { n: 'lib.rs', k: 'file', s: '1.1 KB' }
+        ]},
+        { n: 'tests', k: 'dir', o: false, kids: [] }
+      ]},
+      { n: 'hub-storage', k: 'dir', o: false, kids: [] },
+      { n: 'identity', k: 'dir', o: false, kids: [] }
+    ]},
+    { n: 'docs', k: 'dir', o: false, kids: [] },
+    { n: 'Cargo.toml', k: 'file', s: '806 B' },
+    { n: '..', k: 'up', note: '上一级目录' },
+    { n: '~/.ssh', k: 'oob', note: '工作区之外' },
+    { n: '/etc', k: 'oob', note: '工作区之外' }
+  ];
+
+  var openPanelName = 'terminal';
+
+  /* =========================================================================
+     面板开 / 关 / 切换（全部作用在**当前 tab** 上）
+     -------------------------------------------------------------------------
+     状态只有三个：dock 关着、dock 开着且显示某个面板。
+     上一版把「开哪个面板」与「dock 开不开」分成两套布尔，
+     于是出现「dock 关着但 activePanel 是 files」的中间态——用户按 ]
+     看到的还是终端，不知道为什么。
+     ======================================================================= */
+  function renderDockTabs() {
+    var s = st(activeTab);
+    $$('.af-docktabs__b').forEach(function (b) {
+      var name = b.dataset.panel;
+      b.hidden = !(s.dock && (name === s.panel || s.mounted[name]));
+      b.setAttribute('aria-selected', name === s.panel ? 'true' : 'false');
+    });
+  }
+
+  function openPanel(name) {
+    var t = tabById(activeTab);
+    if (!PANELS[name]) return false;
+    var s = st(activeTab);
+    s.dock = true;
+    s.panel = name;
+    dock.hidden = false;
+    if (!s.mounted[name]) {
+      s.mounted[name] = true;
+      panelhost.innerHTML = PANELS[name].html(t);
+      if (name === 'files') mountFiles(t);
+      if (name === 'terminal') mountTerm();
+      renderSessionTabBar();
+    }
+    renderDockTabs();
+    var host = panelhost.firstElementChild;
+    if (host) {
+      var f = host.querySelector('[tabindex="0"], input, button');
+      if (f) f.focus();
+    }
+    return true;
+  }
+
+  function toggleDock() {
+    var s = st(activeTab);
+    if (!s.dock) return openPanel(s.panel || 'terminal');
+    closeDock();
+    return true;
+  }
+
+  function closeDock() {
+    st(activeTab).dock = false;
+    dock.hidden = true;
+    renderDockTabs();
+    renderSessionTabBar();
+    /* 关面板坞 = 焦点回对话输入框，这是「用户接下来大概要打字」的落点 */
+    $('#compose').focus();
+    return true;
+  }
+
+  function cyclePanel(delta) {
+    var s = st(activeTab);
+    if (!s.dock) return openPanel('terminal');
+    var names = Object.keys(s.mounted);
+    if (names.length < 2) return openPanel(names[0] === 'terminal' ? 'files' : 'terminal');
+    var i = names.indexOf(s.panel);
+    var next = names[(i + delta + names.length) % names.length];
+    return openPanel(next);
+  }
+
+  AF.workbench = {
+    openPanel: openPanel,
+    toggleDock: toggleDock,
+    cyclePanel: cyclePanel,
+    clearTerm: clearTerm,
+    fileUp: fileUp,
+    fileSave: fileSave
+  };
+
+  /* =========================================================================
+     终端模拟
+     -------------------------------------------------------------------------
+     终端内容存回 tab 的状态里（t.termHtml），所以切走再切回来
+     **滚动记录还在**——这正是「切 tab 不关面板」的全部意义：
+     否则来回切两次，用户就丢了他刚跑出来的输出。
+     ======================================================================= */
+  function mountTerm() {
+    var term = panelhost.querySelector('[data-term]');
+    var termIn = panelhost.querySelector('[data-term-in]');
+    var run = panelhost.querySelector('[data-term-run]');
+    run.addEventListener('click', function () { runCmd(); });
+    termIn.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); runCmd(); }
+    });
+  }
+  function appendLine(html) {
+    var term = panelhost.querySelector('[data-term]');
+    if (!term) return;
+    var d = document.createElement('div');
+    d.className = 'af-term__line';
+    d.innerHTML = html;
+    term.appendChild(d);
+    term.scrollTop = term.scrollHeight;
+    var t = tabById(activeTab);
+    t.termHtml = term.innerHTML;   /* 存回 tab：切走再回来输出还在 */
+  }
+  function runCmd() {
+    var termIn = panelhost.querySelector('[data-term-in]');
+    if (!termIn) return;
+    var v = termIn.value.trim();
+    if (!v) return;
+    var path = tabById(activeTab).path;
+    appendLine('<span class="af-term__prompt">' + AF.esc(path) + ' $</span> ' + AF.esc(v));
+    termIn.value = '';
+    var out;
+    if (/^ls\b/.test(v)) out = 'crates  docs  Cargo.toml  target';
+    else if (/^cargo test/.test(v)) out = '<span class="af-term__ok">test result: ok. 26 passed; 0 failed</span>';
+    else if (/^pwd/.test(v)) out = '/home/dev/src/AgentFleet';
+    else out = '<span class="af-term__err">command not found: ' + AF.esc(v.split(' ')[0]) + '</span>';
+    appendLine(out);
+  }
+  function clearTerm() {
+    var term = panelhost.querySelector('[data-term]');
+    if (!term) return false;
+    var path = tabById(activeTab).path;
+    term.innerHTML = '<div class="af-term__line"><span class="af-term__prompt">' +
+      AF.esc(path) + ' $</span> </div>';
+    tabById(activeTab).termHtml = term.innerHTML;
+    return true;
+  }
+  function setTermState(s) {
+    var el = panelhost.querySelector('[data-term-state]');
+    if (!el) return;
+    if (s === 'offline') {
+      el.className = 'af-badge af-badge--danger';
+      el.textContent = '只读 · 冻结';
+    } else if (s === 'reconnecting') {
+      el.className = 'af-badge af-badge--warn';
+      el.textContent = '重连中 · 不冻结';
+    } else {
+      el.className = 'af-badge af-badge--ok';
+      el.textContent = '已连接';
+    }
+  }
+
+  /* =========================================================================
+     文件面板
+     -------------------------------------------------------------------------
+     面包屑每一层都可见，越界那一层标红——这是「四路可见证据」的第三路。
+     ======================================================================= */
+  var fpCrumbs, fpTree, fpPreview, fpCwd = [];
+  function mountFiles(t) {
+    fpCrumbs = panelhost.querySelector('[data-fp-crumbs]');
+    fpTree = panelhost.querySelector('[data-fp-tree]');
+    fpPreview = panelhost.querySelector('[data-fp-preview]');
+    fpCwd = t.cwd || [];
+    renderCrumbs();
+    renderTree();
+    fpTree.addEventListener('af:enter', function (e) {
+      var row = e.detail.row;
+      if (row.dataset.kind === 'dir') { fpCwd.push(row.dataset.name); saveCwd(); renderCrumbs(); renderTree(); }
+      else if (row.dataset.kind === 'file') previewFile(row.dataset.name);
+      else if (row.dataset.kind === 'oob') {
+        AF.explainOutOfScope(row, row.dataset.name, '它在这个会话的工作区路径之外。');
+      }
+    });
+    fpTree.addEventListener('af:toggle', function (e) {
+      if (e.detail.row.dataset.kind === 'dir') renderTree();
+    });
+  }
+  /* 当前目录存回 tab：两个 tab 开着文件面板时，进的目录不该互相污染 */
+  function saveCwd() { tabById(activeTab).cwd = fpCwd.slice(); }
+  function renderCrumbs() {
+    var parts = ['<b>' + AF.esc(tabById(activeTab).path) + '</b>'].concat(fpCwd.map(function (p) {
+      return '<b>' + AF.esc(p) + '</b>';
+    }));
+    fpCrumbs.innerHTML = parts.join('<span class="af-t-mute"> / </span>');
+  }
+  function renderTree() {
+    var rows = [];
+    function walk(nodes, depth, parentPath) {
+      nodes.forEach(function (n) {
+        var pad = 'padding-left:' + (12 + depth * 14) + 'px';
+        if (n.k === 'oob') {
+          rows.push('<button class="af-tree__row" data-row data-kind="oob" tabindex="-1" ' +
+            'aria-selected="false" style="' + pad + '" data-name="' + AF.esc(n.n) + '">' +
+            '<span class="af-tree__twisty" aria-hidden="true">⊘</span>' +
+            '<span class="af-tree__name">' + AF.esc(n.n) + '</span>' +
+            '<span class="af-tree__meta">越界</span></button>');
+          return;
+        }
+        if (n.k === 'up') {
+          rows.push('<button class="af-tree__row" data-row data-kind="up" tabindex="-1" ' +
+            'aria-selected="false" style="' + pad + '">' +
+            '<span class="af-tree__twisty" aria-hidden="true">↑</span>' +
+            '<span class="af-tree__name">' + AF.esc(n.n) + '</span></button>');
+          return;
+        }
+        var expanded = n.o ? 'true' : 'false';
+        var tw = n.k === 'dir' ? (n.o ? '▾' : '▸') : '·';
+        rows.push('<button class="af-tree__row" data-row data-kind="' + n.k + '" tabindex="-1" ' +
+          'aria-selected="false" data-name="' + AF.esc(n.n) + '" ' +
+          (n.k === 'dir' ? 'aria-expanded="' + expanded + '"' : '') + ' style="' + pad + '">' +
+          '<span class="af-tree__twisty" aria-hidden="true">' + tw + '</span>' +
+          '<span class="af-tree__name">' + AF.esc(n.n) + (n.k === 'dir' ? '/' : '') + '</span>' +
+          (n.s ? '<span class="af-tree__meta">' + n.s + '</span>' : '') +
+          '</button>');
+        if (n.k === 'dir' && n.o) walk(n.kids, depth + 1);
+      });
+    }
+    walk(TREE, 0);
+    fpTree.innerHTML = rows.join('');
+  }
+  function previewFile(name) {
+    if (!/\.(rs|toml|md|json)$/.test(name)) {
+      fpPreview.innerHTML = '<span class="af-term__dim">二进制或不支持预览的类型。</span>' +
+        '<span class="af-term__dim">大文件（&gt;1 MB）不整份载入，只读前后各 4 KB。</span>';
+      return;
+    }
+    var lines = [];
+    for (var i = 1; i <= 14; i++) {
+      lines.push('<div><span class="ln">' + String(i).padStart(3, ' ') + '  </span>' +
+        (i === 9 ? '    if text.is_empty() { break; }' :
+         i === 10 ? '    if text.len() > MAX_FRAME { return Err(FloodError); }' :
+         '    // ' + name + ' line ' + i) + '</div>');
+    }
+    fpPreview.innerHTML = '<div class="af-diff">' + lines.join('') + '</div>';
+  }
+  function fileUp() {
+    var s = st(activeTab);
+    if (!s.dock || s.panel !== 'files') return false;
+    if (!fpCwd.length) return false;
+    fpCwd.pop(); saveCwd(); renderCrumbs(); renderTree();
+    return true;
+  }
+  function fileSave() {
+    var s = st(activeTab);
+    if (!s.dock || s.panel !== 'files') return false;
+    AF.toast({ tone: 'ok', title: '已保存', text: 'crates/hub-server/src/routes/ws.rs' });
+    return true;
+  }
+
+  /* =========================================================================
+     会话 tab 条
+     -------------------------------------------------------------------------
+     roving tabindex：整个条是一个 tab stop，只有当前 tab 是 tabindex=0，
+     其余 -1。←→ 移动**并激活**（像浏览器 tab 条），
+     Home/End 到两端，Delete 关当前 tab。
+
+     为什么切换是「移动即激活」而不是「移动后再按 ⏎」：
+     切一个 tab 便宜且可逆（不丢任何状态），所以没有理由让用户多按一次；
+     真正不可逆的动作（关 tab）才需要确认。
+
+     为什么 Close 是 tab 内部的 <button> 而不是 <span role=button>：
+     span 在 button 里既不可聚焦（父元素把它从 Tab 序列里拿走了），
+     又让父元素的 :focus-within 永远不成立——于是「键盘用户能关掉一个会话」
+     这件事做不出来。这正是本设计要消灭的那类缺陷，所以宁可让 markup
+     多一层 wrapper：tab 是一个 div，名字是 button，关闭是 button，
+     整组用 role=tab / aria-selected 表达语义。
+     ======================================================================= */
+  function deviceOf(id) {
+    return AF.mock.devices.filter(function (d) { return d.id === id; })[0];
+  }
+  function agentLabel(id) {
+    return (AF.mock.agents.filter(function (a) { return a.id === id; })[0] || {}).label || id;
+  }
+
+  function renderSessionTabBar() {
+    var html = TABS.map(function (t) {
+      var s = st(t.id);
+      var panelCount = Object.keys(s.mounted).length;
+      var isActive = t.id === activeTab;
+      /* data-conn 挂在盒子上而不是 label 上：CSS 的 :not(:has(selected))
+         要按「未选中」筛盒子，标记在盒子上这条规则才写得出来 */
+      return '<div class="af-tab" data-sid="' + t.id + '" data-conn="' + t.status + '">' +
+        '<button class="af-tab__label" type="button" role="tab"' +
+          ' aria-selected="' + (isActive ? 'true' : 'false') + '"' +
+          ' tabindex="' + (isActive ? '0' : '-1') + '"' +
+          ' data-tab-label="' + t.id + '"' +
+          ' title="' + AF.esc(deviceOf(t.device).name + ' · ' + t.path) + '">' +
+          AF.stateHTML(t.status) +
+          '<span class="af-tab__name">' + AF.esc(t.title) + '</span>' +
+        '</button>' +
+        (panelCount ? '<span class="af-badge af-badge--info" title="活跃面板数 ' + panelCount + '">' + panelCount + '</span>' : '') +
+        '<button class="af-tab__x" type="button" data-tab-close="' + t.id + '"' +
+          ' aria-label="关闭会话：' + AF.esc(t.title) + '" title="关闭此会话（会释放它的面板通道）">✕</button>' +
+      '</div>';
+    }).join('');
+    tabbar.innerHTML = html;
+  }
+
+  /* 切换 tab：把**整个工作台**换成目标 tab 的那份状态。
+     焦点落在工作台正文而不是 tab 条——用户意图是「去那儿干活」；
+     要回到标签栏 ⇧Tab 一步就够（tab 条是紧邻的上一个 tab stop）。 */
+  function activateTab(id, opts) {
+    opts = opts || {};
+    var t = tabById(id);
+    if (!t || id === activeTab) return false;
+    activeTab = id;
+    var s = st(id);
+
+    renderSessionTabBar();
+    $('#wb-title').textContent = t.title;
+    $('#wb-target').innerHTML =
+      '<span aria-hidden="true">▣</span><b>' + AF.esc(deviceOf(t.device).name) + '</b>' +
+      '<span class="af-t-mute">·</span><span class="af-fp">' + AF.esc(t.path) + '</span>' +
+      '<span class="af-badge" title="建会话时确定，之后不可改">路径锁定</span>';
+    $('#wb-agent').textContent = agentLabel(t.agent);
+    $('#wb-started').textContent = t.started + '开始';
+    $('#wb-state').innerHTML = AF.stateHTML(t.status);
+
+    /* 面板坞按这个 tab 的开关重建；没开过面板的 tab 直接关着 */
+    if (s.dock && s.panel) {
+      dock.hidden = false;
+      panelhost.innerHTML = PANELS[s.panel].html(t);
+      if (s.panel === 'files') mountFiles(t);
+      if (s.panel === 'terminal') mountTerm();
+      /* 文件面板不重建终端内容时，切回来靠 termHtml 恢复——见 mountTerm */
+    } else {
+      dock.hidden = true;
+      panelhost.innerHTML = '';
+    }
+    renderDockTabs();
+
+    if (!opts.keepFocus) {
+      var f = $('#flow') || $('#compose');
+      if (f) f.focus();
+    }
+    return true;
+  }
+
+  function closeTab(id) {
+    var t = tabById(id);
+    if (!t) return false;
+    var s = st(id);
+    /* 关 tab = 释放它的通道：这是生命周期边界，与「切走」不同 */
+    var n = Object.keys(s.mounted).length;
+    var wasActive = id === activeTab;
+    /* 索引必须**在过滤前**取：过滤之后 TABS 里已经没有这个 tab，
+       再去 indexOf 会得到 -1，于是「该激活哪一个」永远算错 */
+    var at = TABS.indexOf(t);
+    TABS = TABS.filter(function (x) { return x.id !== id; });
+    delete TABSTATE[id];
+
+    if (TABS.length === 0) {
+      AF.toast({ tone: 'info', title: '没有打开的会话', text: '回到会话列表选一个。' });
+      setTimeout(function () { location.href = 'sessions.html'; }, 600);
+      return true;
+    }
+    if (wasActive) {
+      /* 关闭当前 tab → 落在原位置的右邻，关掉最后一个就落在左邻 */
+      var next = TABS[Math.min(at, TABS.length - 1)].id;
+      activateTab(next, { keepFocus: true });
+      var nb = tabbar.querySelector('[data-tab-label="' + next + '"]');
+      if (nb) nb.focus();
+    } else {
+      renderSessionTabBar();
+    }
+    AF.toast({
+      tone: 'info', title: '已关闭会话',
+      text: n ? '释放了 ' + n + ' 个面板通道。重新打开会按 (node_id, path) 重建。' : '它没有开面板，无需释放通道。'
+    });
+    return true;
+  }
+
+  tabbar.addEventListener('click', function (e) {
+    var x = e.target.closest('[data-tab-close]');
+    if (x) { closeTab(x.dataset.tabClose); return; }
+    var lab = e.target.closest('[data-tab-label]');
+    if (lab) { activateTab(lab.dataset.tabLabel); return; }
+  });
+
+  /* ←→ 移动即激活；Delete 关当前 tab。
+     没有 Home/End 之外的快捷键，也没有 ⌃W —— 那是浏览器的，拦不住。 */
+  tabbar.addEventListener('keydown', function (e) {
+    var lab = e.target.closest('[data-tab-label]');
+    if (!lab) return;
+    var i = TABS.map(function (t) { return t.id; }).indexOf(lab.dataset.tabLabel);
+    var next = null;
+    if (e.key === 'ArrowRight') next = TABS[(i + 1) % TABS.length].id;
+    else if (e.key === 'ArrowLeft') next = TABS[(i - 1 + TABS.length) % TABS.length].id;
+    else if (e.key === 'Home') next = TABS[0].id;
+    else if (e.key === 'End') next = TABS[TABS.length - 1].id;
+    else if (e.key === 'Delete') { closeTab(lab.dataset.tabLabel); return; }
+    if (!next) return;
+    e.preventDefault();
+    activateTab(next, { keepFocus: true });
+    var nb = tabbar.querySelector('[data-tab-label="' + next + '"]');
+    if (nb) nb.focus();
+  });
+
+  /* =========================================================================
+     轨迹抽屉
+     -------------------------------------------------------------------------
+     抽屉也走焦点栈（AF.focusPush），所以 Esc 关它、焦点回到打开它的按钮。
+     它是一条覆盖层，不是第三栏——否则对话被挤到 1/3 屏宽。
+     ======================================================================= */
+  var trajOpen = false;
+  function renderTraj() {
+    var rows = AF.mock.trajectory.map(function (t) {
+      return '<button class="af-traj__row" data-row tabindex="-1" aria-selected="false">' +
+        '<span class="af-traj__seq">' + t.seq + '</span>' +
+        '<span class="af-traj__kind" data-kind="' + t.kind + '">' +
+          ({ say: '说', tool: '工具', note: '注' })[t.kind] + '</span>' +
+        '<span class="af-truncate">' + AF.esc(t.text) + '</span>' +
+        '<span class="af-traj__ms">' + (t.ms ? (t.ms / 1000).toFixed(1) + 's' : '—') + '</span>' +
+      '</button>';
+    }).join('');
+    trajbody.innerHTML = rows;
+  }
+  function toggleTraj() {
+    trajOpen = !trajOpen;
+    traj.hidden = !trajOpen;
+    if (trajOpen) {
+      renderTraj();
+      AF.focusPush(traj, { opener: document.activeElement });
+      var first = trajbody.querySelector('[data-row]');
+      if (first) first.focus();
+    } else {
+      AF.focusPop(traj);
+    }
+    return true;
+  }
+  function closeTraj() {
+    if (!trajOpen) return;
+    trajOpen = false;
+    traj.hidden = true;
+    AF.focusPop(traj);
+  }
+
+  /* =========================================================================
+     状态模拟：一键看到断线三态
+     -------------------------------------------------------------------------
+     reconnecting = 琥珀「不阻断」：45s 内 PTY 还活着，冻结会让用户
+     以为 shell 死了。offline = 红色「只读 + 冻结」。
+     这是两个不同的决定，所以是两个不同的按钮。
+     ======================================================================= */
+  var connState = 'online';
+  $$('[data-sim]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      connState = b.dataset.sim;
+      $$('[data-sim]').forEach(function (o) {
+        o.setAttribute('aria-pressed', o === b ? 'true' : 'false');
+      });
+      applyConn();
+    });
+  });
+  function applyConn() {
+    document.documentElement.setAttribute('data-state', connState);
+    setTermState(connState);
+    var flow = $('#flow');
+    if (connState === 'offline') {
+      flow.classList.add('af-frozen');
+      $('#compose').disabled = true;
+      $('#send').disabled = true;
+      AF.toast({
+        tone: 'danger', sticky: true, title: '设备已判离线',
+        text: 'Hub 暂时够不着 mbp.local。会话内容仍然在设备上，恢复连接后继续。',
+        actions: [{ label: '知道了', primary: true }]
+      });
+    } else {
+      flow.classList.remove('af-frozen');
+      $('#compose').disabled = false;
+      $('#send').disabled = false;
+      if (connState === 'reconnecting') {
+        AF.toast({
+          tone: 'warn', title: '正在重连',
+          text: '45 秒内的断线不冻结终端——PTY 还活着。这是 Hub 内存里的推导值。'
+        });
+      }
+    }
+  }
+
+  /* =========================================================================
+     装配：按钮绑定
+     -------------------------------------------------------------------------
+     每一个按钮都有一个键位等价物，反之亦然（键位表里没有的动作，
+     页面上也不该有按钮）。这条对称性是「键盘用户不是二等公民」的
+     可检查形式。
+     ======================================================================= */
+  $('[data-wb="panel-open"]').addEventListener('click', function () { openPanel('terminal'); });
+  $('[data-wb="dock-close"]').addEventListener('click', function () { closeDock(); });
+  $('[data-wb="traj-close"]').addEventListener('click', function () { closeTraj(); });
+
+  $$('.af-docktabs__b').forEach(function (b) {
+    b.addEventListener('click', function () { openPanel(b.dataset.panel); });
+  });
+
+  $('#send').addEventListener('click', send);
+  $('#compose').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  function send() {
+    var v = $('#compose').value.trim();
+    if (!v) return;
+    AF.toast({ tone: 'info', title: '已发送', text: v.slice(0, 60) });
+    $('#compose').value = '';
+  }
+
+  /* 工具调用块折叠 */
+  $$('.af-tool__head').forEach(function (h) {
+    h.addEventListener('click', function () {
+      var t = h.closest('.af-tool');
+      var open = t.getAttribute('data-open') === 'true';
+      t.setAttribute('data-open', open ? 'false' : 'true');
+      h.setAttribute('aria-expanded', open ? 'false' : 'true');
+    });
+  });
+
+  /* 对话流：↑↓ 在消息间移动焦点 */
+  $$('#flow > *').forEach(function (el) {
+    if (el.classList.contains('af-flow__day')) return;
+    el.setAttribute('data-row', '');
+    el.setAttribute('tabindex', '-1');
+    el.setAttribute('role', 'option');
+  });
+  $('#flow').addEventListener('af:enter', function () {
+    AF.toast({ tone: 'info', title: '对话流', text: '这里只读；输入在下方。' });
+  });
+
+  /* =========================================================================
+     把手：鼠标拖拽 + 键盘调尺寸
+     -------------------------------------------------------------------------
+     上一版的把手是鼠标专属（没有 tabindex、没有 role）。键盘用户
+     根本调不了分栏宽度——而「可拖拽」是写在设计决断里的。
+     ======================================================================= */
+  var gutter = $('#gutter'), dragging = false;
+  function setConv(pct) {
+    pct = Math.max(30, Math.min(70, pct));
+    conv.style.flex = '0 0 ' + pct + '%';
+    gutter.setAttribute('aria-valuenow', String(Math.round(pct)));
+  }
+  function dockPct() {
+    return parseInt(getComputedStyle(dock).flexBasis, 10) || 44;
+  }
+  gutter.addEventListener('pointerdown', function (e) {
+    dragging = true;
+    gutter.setAttribute('data-dragging', 'true');
+    gutter.setPointerCapture(e.pointerId);
+  });
+  gutter.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    var r = wb.getBoundingClientRect();
+    setConv(((e.clientX - r.left) / r.width) * 100);
+  });
+  gutter.addEventListener('pointerup', function (e) {
+    dragging = false;
+    gutter.removeAttribute('data-dragging');
+  });
+  gutter.addEventListener('keydown', function (e) {
+    var cur = parseInt(gutter.getAttribute('aria-valuenow'), 10) || 50;
+    if (e.key === 'ArrowLeft')  { setConv(cur - 4); e.preventDefault(); }
+    if (e.key === 'ArrowRight') { setConv(cur + 4); e.preventDefault(); }
+    if (e.key === 'Home')       { setConv(30); e.preventDefault(); }
+    if (e.key === 'End')        { setConv(70); e.preventDefault(); }
+  });
+
+  /* 初始：对话占 56%，面板坞关着（它是「按需打开」的，不预开） */
+  setConv(56);
+  $('#wb-state').innerHTML = AF.stateHTML(TABS[0].status);
+  $('#wb-agent').textContent = agentLabel(TABS[0].agent);
+  renderSessionTabBar();
+  renderDockTabs();
+
+  /* 自检：把本页的键位handler缺失暴露在控制台，而不是等用户按到死键 */
+  if (AF.unimplemented().length) {
+    console.warn('[session] 未实现的 act：', AF.unimplemented().join(', '));
+  }
+})();
+</script>
+</body>
+</html>

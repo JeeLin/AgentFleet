@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html class="settings" lang="zh-CN" data-state="online">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>设置 · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css">
+<link rel="stylesheet" href="assets/components.css">
+<style>
+  .srow { display: flex; align-items: flex-start; gap: var(--af-space-6); padding: var(--af-space-5) 0; border-bottom: 1px solid var(--af-border-subtle); }
+  .srow__t { flex: 0 0 220px; }
+  .srow__c { flex: 1 1 auto; max-width: 560px; display: flex; flex-direction: column; gap: var(--af-space-2); }
+</style>
+</head>
+<body data-page="settings">
+<div data-shell>
+
+  <div class="af-page" style="max-width:900px">
+    <div class="af-page__head">
+      <div>
+        <h1 class="af-page__title">设置</h1>
+        <p class="af-page__sub">
+          M2 范围——这一页只定结构，不定交互。列在这里是因为导航需要知道它存在，
+          但<b>没有一项是真的能改的</b>：每个控件都禁用，旁边写明它 M2 时会做什么。
+        </p>
+      </div>
+      <span class="af-badge af-badge--off" style="margin-bottom:var(--af-space-2)">M2+</span>
+    </div>
+
+    <div class="af-col gap-2">
+      <div class="srow">
+        <div class="srow__t">
+          <b style="color:var(--af-fg-primary)">Hub 连接</b>
+          <div class="af-field__hint">绑定地址、TLS、心跳间隔。</div>
+        </div>
+        <div class="srow__c">
+          <input class="af-input" value="127.0.0.1:8080" disabled aria-label="绑定地址（M2 可改）">
+          <span class="af-field__hint">M2：改这里要重启 Hub，页面上会说明影响。</span>
+        </div>
+      </div>
+
+      <div class="srow">
+        <div class="srow__t">
+          <b style="color:var(--af-fg-primary)">改密码</b>
+          <div class="af-field__hint">单用户唯一凭据。</div>
+        </div>
+        <div class="srow__c">
+          <input class="af-input" type="password" value="000000000000" disabled aria-label="新密码（M2 可改）">
+          <span class="af-field__hint">M2：改完其他会话不失效（会话绑定凭据版本）。</span>
+        </div>
+      </div>
+
+      <div class="srow">
+        <div class="srow__t">
+          <b style="color:var(--af-fg-primary)">模型 API key</b>
+          <div class="af-field__hint">agent 运行时用的密钥。</div>
+        </div>
+        <div class="srow__c">
+          <input class="af-input" type="password" value="sk-…" disabled aria-label="API key（M2 可改）">
+          <span class="af-field__hint">M2：只写不读（回显打点），换 key 不重启会话。</span>
+        </div>
+      </div>
+
+      <div class="srow" style="border-bottom:0">
+        <div class="srow__t">
+          <b style="color:var(--af-fg-primary)">节点凭据</b>
+          <div class="af-field__hint">设备侧 agent 的身份密钥。</div>
+        </div>
+        <div class="srow__c">
+          <div class="af-fp">ed25519:9f3a…c21b</div>
+          <span class="af-field__hint">只显示 fingerprint，永不显示私钥——这里不是保险箱，是展示窗口。</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script src="assets/keynav.js"></script>
+<script src="assets/app.js"></script>
+<script>
+(function () {
+  'use strict';
+  var AF = window.AF;
+  AF.mount('settings', { title: '设置' });
+})();
+</script>
+</body>
+</html>

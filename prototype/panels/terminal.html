@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html class="terminal" lang="zh-CN" data-state="online">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>terminal 面板 · AgentFleet</title>
+<link rel="stylesheet" href="../assets/tokens.css">
+<link rel="stylesheet" href="../assets/components.css">
+<style>
+  /* 本页是「单独抽出来细看」的 terminal 面板。
+     它在产品里的唯一位置是会话工作台的面板坞——所以页首带一条
+     位置声明（见 markup）。布局只是让面板在说明页里也好看。 */
+  .pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: var(--af-space-5); align-items: start; }
+  .pstate { border: 1px solid var(--af-border-default); border-radius: var(--af-radius-md); overflow: hidden; }
+  .pstate__h { padding: var(--af-space-2) var(--af-space-4); background: var(--af-surface-2); border-bottom: 1px solid var(--af-border-subtle); display: flex; gap: var(--af-space-3); align-items: center; }
+  .pstate__b { padding: var(--af-space-3) var(--af-space-4); }
+</style>
+</head>
+<body data-page="session">
+<div data-shell>
+
+  <!-- 位置声明：它被单独抽出来细看，所以要说明它在产品里的位置 -->
+  <div class="af-panel" style="border-radius:0;border-width:0 0 1px 0;border-color:var(--af-border-default)">
+    <div class="af-panel__body" style="padding:var(--af-space-4) var(--af-space-5);display:flex;gap:var(--af-space-3);align-items:center">
+      <span class="af-badge af-badge--accent">位置</span>
+      <span class="af-field__hint">
+        terminal 面板只存在于<b>会话工作台的面板坞</b>（<a href="../session.html">看它在会话里</a>）。
+        它没有自己的路由、没有设备级入口——通道按 panel 懒建立，退出即释放。
+      </span>
+    </div>
+  </div>
+
+  <div class="af-page">
+    <div class="af-page__head">
+      <div>
+        <h1 class="af-page__title">terminal 面板</h1>
+        <p class="af-page__sub">四态、尺寸协商、丢帧、断线不冻结。下面是同一块面板在四种连接状态下的样子——状态由 Hub 判定，用户看到的永远是这四样之一。</p>
+      </div>
+    </div>
+
+    <!-- ================= 四态并排 ================= -->
+    <div class="af-col gap-5">
+      <div>
+        <div class="af-t-label" style="margin-bottom:var(--af-space-3)">四态（颜色 + 字形 + 文字三通道）</div>
+        <div class="pgrid" id="states">
+          <div class="pstate">
+            <div class="pstate__h"><span class="af-badge af-badge--ok">已连接</span><span class="af-t-mute" style="font-size:var(--af-text-2xs)">120×36 · 帧率正常</span></div>
+            <div class="pstate__b af-term" style="min-height:110px" tabindex="0" role="log">
+<div class="af-term__line"><span class="af-term__prompt">~/src/AgentFleet $</span> cargo test --workspace</div>
+<div class="af-term__line af-term__ok">    Finished test target(s) in 18.42s</div>
+<div class="af-term__line af-term__ok">test result: ok. 26 passed; 0 failed</div>
+<div class="af-term__line"><span class="af-term__prompt">~/src/AgentFleet $</span> </div>
+            </div>
+          </div>
+
+          <div class="pstate">
+            <div class="pstate__h"><span class="af-badge af-badge--warn">重连中 · 不冻结</span><span class="af-t-mute" style="font-size:var(--af-text-2xs)">31s / 45s · PTY 还活着</span></div>
+            <div class="af-backoff" style="margin:0 var(--af-space-4)"><span class="af-backoff__fill"></span></div>
+            <div class="pstate__b af-term" style="min-height:110px;border-top:0" tabindex="0" role="log">
+<div class="af-term__line"><span class="af-term__prompt">~/src/AgentFleet $</span> cargo test</div>
+<div class="af-term__line af-term__dim">…（等待 Hub 重连；你在设备上的 shell 仍然在跑）</div>
+<div class="af-term__line af-term__warn">● Hub 连接中断，正在重连（12.4s 后重试）</div>
+            </div>
+          </div>
+
+          <div class="pstate">
+            <div class="pstate__h"><span class="af-badge af-badge--danger">只读 · 冻结</span><span class="af-t-mute" style="font-size:var(--af-text-2xs)">判离线 · 输入被拦</span></div>
+            <div class="af-frozen" style="position:relative">
+              <span class="af-frozen__note">设备上它还活着，Hub 暂时够不着</span>
+              <div class="pstate__b af-term" style="min-height:110px" tabindex="0" role="log">
+<div class="af-term__line"><span class="af-term__prompt">~/src/AgentFleet $</span> cargo test</div>
+<div class="af-term__line af-term__err">● 已判离线 · 只读</div>
+<div class="af-term__line af-term__dim">输入被暂停。恢复连接后继续。</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="pstate">
+            <div class="pstate__h"><span class="af-badge af-badge--off">已释放</span><span class="af-t-mute" style="font-size:var(--af-text-2xs)">面板已关 · 通道已释放</span></div>
+            <div class="af-empty" style="min-height:110px">
+              <span class="af-empty__glyph" aria-hidden="true">▢</span>
+              <span class="af-empty__title">面板已释放</span>
+              <span class="af-empty__text">终端通道随会话退出而关闭。重新打开即重建 PTY。</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= 尺寸协商 ================= -->
+      <div>
+        <div class="af-t-label" style="margin-bottom:var(--af-space-3)">尺寸协商（cols×rows）</div>
+        <div class="af-field__hint" style="margin-bottom:var(--af-space-3);max-width:76ch">
+          终端面板的尺寸不是「占满剩余空间」那么简单：浏览器里显示的是 <b>cols×rows</b>，
+          实际下发给 PTY 的是 <b>cols+1, rows-1</b>（终端最后一行要留给输入提示）。
+          所以面板头永远显示<b>协商后的</b>尺寸，不是 CSS 算出来的像素。
+        </div>
+        <div class="af-term" style="min-height:120px" tabindex="0" role="log" id="resize">
+<div class="af-term__line af-term__dim">[PTY] cols=120 rows=37 → 协商 → cols=120 rows=36（输入行占用最后一行）</div>
+<div class="af-term__line"><span class="af-term__prompt">~/src/AgentFleet $</span> </div>
+        </div>
+        <div class="af-row" style="margin-top:var(--af-space-3)">
+          <span class="af-t-label">拖宽/拖窄面板坞，看读数变化：</span>
+          <input type="range" id="w" min="320" max="720" value="520" style="width:200px" aria-label="面板宽度（演示）">
+          <span class="af-t-mute" id="wread" style="font-variant-numeric:tabular-nums"></span>
+        </div>
+      </div>
+
+      <!-- ================= 丢帧与粘贴 ================= -->
+      <div>
+        <div class="af-t-label" style="margin-bottom:var(--af-space-3)">丢帧、粘贴块、断线不冻结</div>
+        <div class="af-col gap-4" style="max-width:76ch">
+          <div><b style="color:var(--af-fg-primary)">丢帧</b> <span class="af-t-mute">— 输出超出带宽时 Hub 可能丢帧，终端必须显式告知（丢了多少帧），
+            而不是让用户以为「这就是全部输出」。终端底部一条 <code class="af-badge af-badge--warn">丢帧 ×N</code> 徽标。</span></div>
+          <div><b style="color:var(--af-fg-primary)">可粘贴选择块</b> <span class="af-t-mute">— 终端输出里的路径、错误串、命令可以粘贴。
+            粘贴多行时 Hub 先确认（防止把整个脚本误贴进 shell）。</span></div>
+          <div><b style="color:var(--af-fg-primary)">断线不冻结</b> <span class="af-t-mute">— 45 秒内的断线不冻结终端（PTY 在设备上还活着）。
+            只有判离线才拦输入，并同时说明「设备上它还活着」——
+            冻结一个还活着的东西会让用户以为它死了。</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script src="../assets/keynav.js"></script>
+<script src="../assets/app.js"></script>
+<script>
+/* 本页没有工作台，所以 keynav 的 panel:*/dock:* 没有 handler——
+   `?` 面板里它们会被标成「未实现」，这是诚实的。 */
+(function () {
+  'use strict';
+  var AF = window.AF;
+  AF.mount('session', { title: 'terminal 面板' });
+
+  /* 尺寸协商演示：cols 取自面板宽度（等宽字宽 ≈ 7.2px @13px 字号） */
+  var w = document.getElementById('w'), read = document.getElementById('wread');
+  function calc() {
+    var cols = Math.floor(w.value / 7.2);
+    var rows = Math.floor(120 / 17.2);
+    read.textContent = w.value + 'px → ' + cols + '×' + rows + '（下发 PTY ' + (cols + 1) + '×' + (rows - 1) + '）';
+  }
+  w.addEventListener('input', calc);
+  calc();
+})();
+</script>
+</body>
+</html>
