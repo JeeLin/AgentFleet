@@ -7,6 +7,11 @@
 # 与 CI 保持一致；升级时同步改 .github/workflows/ci.yml 与 README
 rust = "1.99.0"
 bun = "1.4.3"
+# Vite 7 的 engines 是 `^20.19.0 || >=22.12.0`，且 `@vitejs/plugin-vue` 用
+# `node:crypto` 的 `crypto.hash`（Node 20.12+ 才有）。系统 node 18 上
+# `bun run build` 会以 `crypto.hash is not a function` 失败——不是代码问题，
+# 是工具链版本问题，所以按本文件开头的原则钉死。
+node = "24.21.0"
 
 # ---------------------------------------------------------------------------
 # 任务：把 AGENTS.md 的质量门禁固化成可执行命令，避免每次手打一串

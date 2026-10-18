@@ -255,12 +255,21 @@ cargo llvm-cov --workspace --all-targets          # 覆盖率，见下
 Web（`packages/web`，Vue 3 + Bun + Vite）：
 
 ```bash
-bun install
+bun install --frozen-lockfile
 bun run type-check     # vue-tsc --noEmit
 bun run lint           # eslint
 bun run test           # vitest
 bun run build          # vite build
 ```
+
+工具链版本钉在 `mise.toml` 的 `[tools]`：**node 24 是硬需求**，不是建议——
+Vite 7 的 `engines` 是 `^20.19.0 || >=22.12.0`，且 `@vitejs/plugin-vue` 用
+`node:crypto` 的 `crypto.hash`（Node 20.12+ 才有）。系统 node 18 上
+`bun run build` 报的是 `crypto.hash is not a function`，看起来像代码 bug，
+实则是工具链版本问题。
+
+四道门禁的 mise 入口是 `mise run web-ci`（`web-check` + `web-test` +
+`web-build`），`mise run ci` 已 depends 它。
 
 测试与覆盖率项若确实无法本地自证，如实记录「不可执行 + 根因」，
 不得记为通过；也不要把「环境因素导致失败」写成「环境限制」——
