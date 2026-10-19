@@ -363,24 +363,36 @@ mod tests {
         assert_eq!(wr.list_for_node("n_b").unwrap().len(), 1);
     }
 
-    /// 删会话不删工作区：工作区独立于会话存在（M2 的 manifest 按 `(node_id, path)`
-    /// 定位，它得比会话活得久）。
+    /// 裁决的两条正面证据：**多个会话指向同一 `(node_id, path)` 合法**，
+    /// 而**删会话不删工作区**——工作区是主实体，比会话活得久（M2 的 manifest
+    /// 按 `(node_id, path)` 定位，它不能是某个会话的附属品）。
+    ///
+    /// 这两条断言是 `session.workspace_id` 那个外键方向的全部意义：
+    /// 改回「工作区是会话的属性」时，它们会立刻红。
     #[test]
-    fn deleting_the_last_session_keeps_the_workspace() {
+    fn sessions_share_one_workspace_and_deleting_them_keeps_it() {
         let (_d, wr, sr) = setup();
-        let s = create(&sr, "n_a", "/srv/app", TS);
-        {
-            let conn = wr.pool().get().unwrap();
-            conn.execute("DELETE FROM session WHERE id = ?1", params![s.id])
+        let first = create(&sr, "n_a", "/srv/app", TS);
+        let second = create(&sr, "n_a", "/srv/app", "unix:1700000009");
+        assert_eq!(
+            first.workspace_id, second.workspace_id,
+            "多个会话必须引用同一行工作区，而不是各建一份"
+        );
+
+        for s in [&first, &second] {
+            wr.pool()
+                .get()
+                .unwrap()
+                .execute("DELETE FROM session WHERE id = ?1", params![s.id])
                 .unwrap();
         }
         assert!(
-            wr.by_id(&s.workspace_id).unwrap().is_some(),
+            wr.by_id(&first.workspace_id).unwrap().is_some(),
             "删会话不得连带删工作区"
         );
         // 而且它还在下一次建会话时被复用，而不是变成第二行
         let again = create(&sr, "n_a", "/srv/app", TS);
-        assert_eq!(again.workspace_id, s.workspace_id);
+        assert_eq!(again.workspace_id, first.workspace_id);
         assert_eq!(wr.list_for_node("n_a").unwrap().len(), 1);
     }
 

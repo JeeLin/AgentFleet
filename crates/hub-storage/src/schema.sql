@@ -52,3 +52,8 @@ CREATE TABLE IF NOT EXISTS secret (
 --
 -- `device.public_key` 与 workspace / session 两张表的 DDL 在 `schema_v2.sql`。
 -- 留在 v1 里改不动已存在的库——迁移按 `user_version` 只跑一遍。
+--
+-- **两者的定位（M1 裁决）**：`workspace` 是**主实体**，`(node_id, path)` 唯一；
+-- `session.workspace_id` 是指向它的外键。多个会话可以引用同一个工作区，
+-- 删会话不删工作区（M2 的 manifest 按 `(node_id, path)` 定位，它得比会话活得久）。
+-- 反过来不成立：工作区不是会话的附属品，删它要显式走仓储层检查有没有会话指着。
