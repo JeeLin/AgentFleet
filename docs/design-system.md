@@ -861,6 +861,14 @@ Mock 形状 = 将来 API 的形状。前端只读。
 `path_locked` 恒为 `true`：**路径是创建期输入，建立后只读**。
 不可变 ⇒ 会话无法退化成多资源句柄 ⇒ 设备级管理台在结构上不可能出现（约束 3）。
 
+**落库模型与这条不矛盾**：Hub 库里 `workspace` 表是主实体、`session.workspace_id`
+引用它（子任务 5c 的裁决），但**「主实体」是存储层的事，不是可寻址的事**——
+没有 `GET /api/workspaces`，工作区没有路由、不能收藏、不能跳转。
+页面上它出现的地方只有两处：`GET /api/sessions` 的每一项里，以及
+`POST /api/sessions` 的响应里。所以 M1 的 `/api/sessions` 每一项带
+`workspace { node_id, path, path_locked }`（`node_id` 在前，因为通道键是
+`(node_id, channel_id)`，约束 4）。
+
 ---
 
 ## 7. 八个设计决断

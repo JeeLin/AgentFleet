@@ -19,14 +19,14 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use hub_core::session::SessionStore;
 
-use crate::routes::{is_auth_exempt, is_init_mode_path};
+use crate::routes::{api, is_auth_exempt, is_init_mode_path};
 use crate::{ApiError, AppState, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};
 
 /// 会改变服务端状态的 HTTP 方法（CSRF 双重提交适用范围）。
 pub const STATE_CHANGING_METHODS: &[&str] = &["POST", "PUT", "PATCH", "DELETE"];
 
 /// session 认证中间件。
-pub async fn require_auth(State(state): State<AppState>, req: Request, next: Next) -> Response {
+pub async fn require_auth(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
 
     // 规则 1：初始化模式
@@ -59,15 +59,22 @@ pub async fn require_auth(State(state): State<AppState>, req: Request, next: Nex
             return ApiError::internal().into_response();
         }
     };
-    if SessionStore::new(key).verify(&token).is_err() {
-        return ApiError::unauthorized("invalid_session").into_response();
-    }
+    let session = match SessionStore::new(key).verify(&token) {
+        Ok(s) => s,
+        Err(_) => return ApiError::unauthorized("invalid_session").into_response(),
+    };
 
     // 规则 3：状态变更要 CSRF 双重提交
     if is_state_changing(req.method().as_str()) && !csrf_ok(req.headers()) {
         return ApiError::forbidden("csrf_token_missing_or_mismatch").into_response();
     }
 
+    // 身份在**验签之后**才插进请求扩展：handler 拿到 `Authenticated` 就意味着
+    // 「Hub 已经能证明这个 cookie 是自己签的」，不必在每个 handler 里再验一遍。
+    // 顺序写在代码里而不是文档里：插早了会让「取密钥失败 → 500」的那条路上
+    // 带着一个身份继续往下走。
+    req.extensions_mut()
+        .insert(api::Authenticated::new(session.subject));
     next.run(req).await
 }
 

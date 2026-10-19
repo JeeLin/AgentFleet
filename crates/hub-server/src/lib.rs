@@ -73,6 +73,9 @@ pub enum BootstrapError {
 pub struct ApiError {
     status: StatusCode,
     code: &'static str,
+    /// 附加的展示用字段（目前只有 409 的 `status`）。**只放枚举与计数值**，
+    /// 与 `code` 一样受「绝不夹带 secret」的约束约束 13 管辖。
+    detail: Option<serde_json::Value>,
 }
 
 impl ApiError {
@@ -97,6 +100,24 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, code)
     }
 
+    /// 404 的错误码。**全路由一个码**（不带资源名）：第一版是单用户，
+    /// 「不存在」与「存在但不属于你」对页面没有区别——把两者分开只会
+    /// 让前端多写一套分支（而那份分支在单用户下永远走不到）。
+    pub fn not_found() -> Self {
+        Self::new(StatusCode::NOT_FOUND, "not_found")
+    }
+
+    /// 409，且错误体里**额外带一个可显示的字段**（设备离线时要带设备状态）。
+    ///
+    /// `error` 的值仍然是那个固定 code——`make` 只往 body 里加键，
+    /// 所以「错误体是 `{"error": "<code>"}`」那条契约只被破例这一处，
+    /// 而破例的理由（页面要显示**是什么**让状态冲突）是可见的。
+    pub fn conflict_with(code: &'static str, make: impl FnOnce() -> serde_json::Value) -> Self {
+        let mut e = Self::new(StatusCode::CONFLICT, code);
+        e.detail = Some(make());
+        e
+    }
+
     pub fn too_many_requests(code: &'static str) -> Self {
         Self::new(StatusCode::TOO_MANY_REQUESTS, code)
     }
@@ -106,7 +127,11 @@ impl ApiError {
     }
 
     fn new(status: StatusCode, code: &'static str) -> Self {
-        Self { status, code }
+        Self {
+            status,
+            code,
+            detail: None,
+        }
     }
 
     /// 存储/认证层错误 → 500。
@@ -140,7 +165,11 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(json!({"error": self.code}))).into_response()
+        let mut body = json!({"error": self.code});
+        if let (Some(obj), Some(detail)) = (body.as_object_mut(), self.detail) {
+            obj.insert("detail".to_string(), detail);
+        }
+        (self.status, Json(body)).into_response()
     }
 }
 
@@ -176,6 +205,10 @@ struct Inner {
     reports: Reports,
     /// 设备仓储（心跳落库用）。
     devices: hub_storage::repo::DeviceRepo,
+    /// 连接池句柄。**只在路由里读**（`/api/*` 的会话仓储要用它），
+    /// 而连接池是 `Arc`——clone 不产生新连接，所以路由各建各的仓储
+    /// 没有代价，也不会让心跳路径上的「一次心跳建一个 repo」变成惯例。
+    pool: Db,
     /// `conn_id → 出站控制帧队列`（顶替时通知旧连接用，子任务 7）。
     outbound: conns::OutboundTable,
     /// `node_id → 该设备的通道表`（子任务 8）。纯内存，不落库（§5）。
@@ -233,6 +266,7 @@ impl AppState {
             connections: Arc::new(ConnectionRegistry::with_boot_gen(boot_gen)),
             heartbeat_interval_ms: DEFAULT_HEARTBEAT_INTERVAL_MS,
             reports: Reports::new(),
+            pool: devices.pool().clone(),
             devices,
             outbound: conns::OutboundTable::new(),
             channels: Arc::new(parking_lot::RwLock::new(
@@ -320,6 +354,11 @@ impl AppState {
         &self.0.devices
     }
 
+    /// 连接池句柄（`/api/*` 里的会话仓储用它）。
+    pub fn pool(&self) -> &Db {
+        &self.0.pool
+    }
+
     /// 起离线判定扫瞄器，返回「关掉它的把手」。
     ///
     /// 由进程入口显式调用并持有返回值：drop 或 send 都会让扫瞄器停下。
@@ -389,8 +428,13 @@ async fn healthz() -> Json<serde_json::Value> {
 
 /// 装配全部路由。
 ///
-/// `.layer(...)` 放在最后：**认证中间件覆盖 fallback**，
-/// 未知路径在初始化模式返回 403 而不是 404（少暴露一条路由是否存在）。
+/// **`.layer(...)` 只覆盖它之前添加的路由**——这是 axum 的既定语义，也是
+/// 这条链式调用里最容易踩的坑：新加的路由若写在 `.layer(require_auth)`
+/// **之后**，它就不在认证覆盖范围内（本项目：设备数据免认证可读）。
+/// 所以规矩是：**先 `.route(...)`，最后 `.layer(...)`**，新增路由一律插在
+/// `:last_route` 之前。`tests/api.rs` 的 `api_routes_are_covered_by_the_auth_layer`
+/// 把这条钉住（未认证必须 401，**404 说明路由压根没挂上、200 说明没被覆盖**，
+/// 两种回归都会红）。
 pub fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
@@ -400,6 +444,14 @@ pub fn build_app(state: AppState) -> Router {
         )
         .route("/login", post(routes::setup::post_login))
         .route("/ws", get(routes::ws::upgrade))
+        // `/api/*`（子任务 5）：设备 / 会话 / agent 列表与建会话。
+        // 必须落在下面那条 `.layer(...)` 之前。
+        .route("/api/devices", get(routes::api::list_devices))
+        .route(
+            "/api/sessions",
+            get(routes::api::list_sessions).post(routes::api::create_session),
+        )
+        .route("/api/agents", get(routes::api::list_agents))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware_auth::require_auth,

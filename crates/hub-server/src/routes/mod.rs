@@ -44,5 +44,33 @@ pub fn is_init_mode_path(path: &str) -> bool {
     INIT_MODE_PATHS.contains(&path)
 }
 
+/// 设备指纹的显示形式：**前 3 + `***` + 后 3**（约束 13）。
+///
+/// 太短的值（不足 6 个字符）整串打码：那种串不可能是真的 Ed25519 指纹
+/// （hex 64 字符），而露出它的全部反而没有任何价值。页面拿它做「这台设备
+/// 我已经认过了」的视觉锚点，不是拿它做身份判据。
+pub fn masked_fingerprint(fp: &str) -> String {
+    let chars: Vec<char> = fp.chars().collect();
+    if chars.len() < 6 {
+        return "***".to_string();
+    }
+    let head: String = chars.iter().take(3).collect();
+    let tail: String = chars.iter().skip(chars.len() - 3).collect();
+    format!("{head}***{tail}")
+}
+
+/// 把 `Last-Event-ID` 头取成序号（SSE 断线重连语义，子任务 5a）。
+///
+/// 定义在这里而不是挂在某个路由模块上：M1 没有 agent 会话，「订阅哪条会话」
+/// 与「从第几个事件续收」是同一个问题；把「解析头」和「挂了哪些端点」写在
+/// 一处，后来加 `GET /api/sessions/:id/stream` 时就不用复制它。
+pub fn last_event_id(headers: &axum::http::HeaderMap) -> Option<u64> {
+    headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+}
+
+pub mod api;
 pub mod setup;
 pub mod ws;
