@@ -42,8 +42,33 @@ description = "覆盖率明细：找出未覆盖的行"
 run = "cargo llvm-cov --workspace --all-targets"
 
 [tasks.ci]
-description = "本地全量门禁 = check + fmt + lint + test + cov"
-depends = ["check", "fmt", "lint", "test", "cov"]
+description = "本地全量门禁 = check + fmt + lint + test + cov + web-ci"
+depends = ["check", "fmt", "lint", "test", "cov", "web-ci"]
+
+# ---- 前端四道门禁（`packages/web`）-----------------------------------------
+# AGENTS.md 明确：前端**不设行覆盖率阈值**，只要求关键逻辑有单测——理由写在
+# AGENTS.md 的「覆盖率门禁」节。这里只固化命令入口。
+[tasks.web-check]
+description = "前端 type-check + lint"
+run = """
+cd packages/web && bun run type-check && bun run lint
+"""
+
+[tasks.web-test]
+description = "前端单测（vitest）"
+run = """
+cd packages/web && bun run test
+"""
+
+[tasks.web-build]
+description = "前端构建（vite build）"
+run = """
+cd packages/web && bun run build
+"""
+
+[tasks.web-ci]
+description = "前端三道门禁 = web-check + web-test + web-build"
+depends = ["web-check", "web-test", "web-build"]
 
 [tasks.build]
 description = "release 构建（lto + strip）"
