@@ -4,8 +4,12 @@
 # 且 `cargo llvm-cov` 的覆盖率数值跨工具链不可比（覆盖率门禁要求可复现）。
 
 [tools]
+# 顺序与项目一致：node / bun / rust。版本钉死，不用 `latest`——
+# 否则换一次 stable 就重编译全树，且 `cargo llvm-cov` 的覆盖率数值跨工具链
+# 不可比（覆盖率门禁要求可复现）。
 node = "24.21.0"
 bun = "1.4.3"
+# 与 CI 保持一致；升级时同步改 .github/workflows/ci.yml 与 README
 rust = "1.99.0"
 
 # ---------------------------------------------------------------------------
@@ -39,6 +43,22 @@ run = "cargo llvm-cov --workspace --all-targets"
 [tasks.ci]
 description = "本地全量门禁 = check + fmt + lint + test + cov + web-ci"
 depends = ["check", "fmt", "lint", "test", "cov", "web-ci"]
+
+# ---- 开发环境 ---------------------------------------------------------------
+
+# 两个进程同时起：Hub 在 8080 托管 API 与设备 WebSocket，Vite 在 5173 提供
+# HMR 并把 `/api`、`/ws` 代理回 Hub（`packages/web/vite.config.ts` 的
+# `server.proxy`）。**前端代码里不写绝对地址**，所以生产（Hub 自托管 dist）
+# 与开发（Vite 代理）是同一份代码的两种后端。
+#
+# 任一进程退出会把另一个带走——留下一个 Hub 却没有页面，等于开发机上挂一个
+# 看不见的服务。
+[tasks.dev]
+description = "开发环境：Hub (8080) + Vite (5173)，Vite 代理 /api 与 /ws 回 Hub"
+run = [
+  "cargo run -p hub-server",
+  "cd packages/web && bun run dev",
+]
 
 # ---- 前端四道门禁（`packages/web`）-----------------------------------------
 # AGENTS.md 明确：前端**不设行覆盖率阈值**，只要求关键逻辑有单测——理由写在
