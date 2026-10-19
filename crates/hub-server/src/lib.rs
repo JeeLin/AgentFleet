@@ -470,10 +470,19 @@ async fn healthz() -> Json<serde_json::Value> {
 /// **`.layer(...)` 只覆盖它之前添加的路由**——这是 axum 的既定语义，也是
 /// 这条链式调用里最容易踩的坑：新加的路由若写在 `.layer(require_auth)`
 /// **之后**，它就不在认证覆盖范围内（本项目：设备数据免认证可读）。
-/// 所以规矩是：**先 `.route(...)`，最后 `.layer(...)`**，新增路由一律插在
-/// `:last_route` 之前。`tests/api.rs` 的 `api_routes_are_covered_by_the_auth_layer`
-/// 把这条钉住（未认证必须 401，**404 说明路由压根没挂上、200 说明没被覆盖**，
-/// 两种回归都会红）。
+///
+/// 所以这里分成三段，顺序是安全边界：
+///
+/// 1. **受保护的路由**（`require_auth` 之前）：`/api/*`、`/ws`、
+///    `/setup`、`/healthz`、`POST /login`。它们被 `require_auth` 覆盖；
+///    `/api/{*rest}` 是认证后的 404 兜底（未认证时先 401）。
+/// 2. `.layer(require_auth)`。
+/// 3. **免认证的静态资产**（之后）：`/`、`GET /login`、`/assets/*`、SPA fallback。
+///    登录页自己得能加载 JS/CSS，而它们不含任何设备数据。
+///
+/// 第 3 段的路由**绝不**放进 [`routes::AUTH_EXEMPT_PATHS`]：那张表是精确匹配，
+/// 而静态路径是前缀；更重要的是，把静态路由排在 layer 之后，语义上就只豁免
+/// 这几条，不会顺带把某个将来新增的 `/api/*` 也漏出去。
 pub fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
@@ -481,6 +490,14 @@ pub fn build_app(state: AppState) -> Router {
             "/setup",
             get(routes::setup::get_setup).post(routes::setup::post_setup),
         )
+        // 这里只注册 `post(...)`——认证端点。`GET /login` 是**页面**（SPA 外壳），
+        // 注册在下面 `.layer` 之后（见静态资产段）。
+        //
+        // 必须拆开：`INIT_MODE_PATHS` 刻意不含 `/login`（初始化模式下没有密码
+        // 可验，登录必须 403，§2.4.3 表第二行），而中间件对**所有**经过它的
+        // 请求做 init 模式判断。整条 `/login` 留在 layer 之前，就会连
+        // `GET /login` 一起 403——首次部署时登录页自己打不开，而 `/sessions/abc`
+        // 却因为走 fallback 能出外壳，症状看起来像「只有登录页坏了」。
         .route("/login", post(routes::setup::post_login))
         .route("/ws", get(routes::ws::upgrade))
         // `/api/*`（子任务 5）：设备 / 会话 / agent 列表与建会话。
@@ -505,13 +522,36 @@ pub fn build_app(state: AppState) -> Router {
             "/api/channels/{id}",
             axum::routing::delete(routes::stream::close_channel),
         )
+        // **认证后的 404 兜底**（子任务 6）：SPA fallback 挂在 layer 之后，
+        // 没有这一条的话未匹配的 `/api/*` 会落到 SPA 上、回一个 200 的
+        // index.html——前端的 fetch 会把 HTML 当 JSON 解析失败，而「接口不存在」
+        // 看起来像「后端坏了」。注册在 layer 之前 = 未认证先 401。
+        .route("/api/{*rest}", axum::routing::any(api_not_found))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware_auth::require_auth,
         ))
+        // ---- 以下免认证（静态资产）----
+        // `GET /login` 是登录**页面**，与 `/` 同样公开：登录页自己得能在
+        // 未初始化 / 未登录时加载出 JS/CSS，否则用户没有任何路径走到表单。
+        // 与上面那条 `POST /login` **同路径不同方法**：axum 会把它们合并进
+        // 同一个 `MethodRouter`，而只有 POST 那一半被 `.layer` 包过——
+        // 这正是「页面公开、端点受控」的落点。
+        .route("/login", get(routes::assets::index))
+        .route(
+            "/assets/{*path}",
+            get(routes::assets::asset).layer(routes::assets::asset_cache_layer()),
+        )
+        .route("/", get(routes::assets::index))
+        .fallback(routes::assets::spa_index)
         // 状态已经进了中间件与各 handler，这里固化成 `Router<()>`，
         // 调用方（main.rs / 测试）拿到的就是可直接 serve / oneshot 的 Router
         .with_state(state)
+}
+
+/// 认证后的 `/api/*` 未匹配路径：固定 JSON 错误体。
+async fn api_not_found() -> crate::ApiError {
+    crate::ApiError::not_found()
 }
 
 #[cfg(test)]
@@ -561,12 +601,16 @@ mod tests {
         assert!(v.get("version").is_none());
     }
 
+    /// SPA fallback：**非 API** 的未知路径返回控制台外壳（history 模式的前提）。
+    ///
+    /// 语义变了，所以断言也得变：以前这里是 404（没有静态资产），现在
+    /// `/sessions/abc` 这类前端路由必须能直接打开。关键不在「200」，
+    /// 而在**回的是 HTML 外壳而不是任何设备数据**。
     #[tokio::test]
-    async fn unknown_route_is_404_in_normal_mode_with_valid_session() {
+    async fn an_unknown_non_api_route_falls_back_to_the_spa_shell() {
         let d = tempdir();
         let (app, st) = app_at(d.path());
         st.auth().setup_password("correct horse battery").unwrap();
-        // 正常模式：未知路径先过认证，带合法 cookie 才看得到「路由不存在」。
         let key = st.session_key().unwrap();
         let cookie = format!(
             "{SESSION_COOKIE}={}",
@@ -580,18 +624,76 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("text/html; charset=utf-8"),
+            "fallback 必须回 HTML 外壳"
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(
+            !body.contains("/api/devices"),
+            "外壳里不得夹带任何设备数据: {body}"
+        );
     }
 
+    /// 静态资产与 SPA fallback **免 session**（登录页自己得能加载 JS/CSS），
+    /// 而 `/api/*` 仍要认证——两者的分界由 `.layer` 的注册次序决定。
+    ///
+    /// 这里把四条边界一起钉住：
+    /// - `/` 与 `/login`（GET）无 cookie 也 200；
+    /// - `/api/nonexistent` 无 cookie **401**（不是 404、更不是 200）；
+    /// - 有 cookie 时 `/api/nonexistent` 是 **404 JSON**（不是 index.html）；
+    /// - 未认证的未知非 API 路径也是 200 外壳（没有任何设备数据可漏）。
     #[tokio::test]
-    async fn unknown_route_is_404_in_normal_mode_without_cookie() {
-        // 认证中间件盖住 fallback：没有 cookie 时先 401，路由存不存在都不透露
+    async fn static_routes_are_public_but_api_404s_stay_behind_auth() {
         let d = tempdir();
         let (app, st) = app_at(d.path());
         st.auth().setup_password("correct horse battery").unwrap();
-        let req = Request::builder().uri("/nope").body(Body::empty()).unwrap();
+
+        for uri in ["/", "/login", "/nope"] {
+            let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{uri} 必须免认证可读");
+        }
+
+        let req = Request::builder()
+            .uri("/api/nonexistent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "未认证的 /api/* 必须先 401，路由存不存在都不透露"
+        );
+
+        let key = st.session_key().unwrap();
+        let cookie = format!(
+            "{SESSION_COOKIE}={}",
+            hub_core::session::SessionStore::new(key)
+                .issue("admin")
+                .unwrap()
+        );
+        let req = Request::builder()
+            .uri("/api/nonexistent")
+            .header("cookie", cookie)
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes)
+                .unwrap()
+                .get("error")
+                .and_then(|v| v.as_str()),
+            Some("not_found"),
+            "API 404 必须是 JSON 错误体，不能被 SPA fallback 吞掉"
+        );
     }
 
     #[tokio::test]

@@ -23,6 +23,8 @@ tokio.workspace = true
 axum.workspace = true
 tower.workspace = true
 tower-http.workspace = true
+# 子任务 6：`include_dir!` 编译期嵌入 `packages/web/dist`（单二进制硬需求）
+include_dir.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
 tracing.workspace = true
