@@ -1,0 +1,462 @@
+/* ===========================================================================
+   channel.ts —— 通道生命周期（子任务 5a 之上的薄层）
+   ---------------------------------------------------------------------------
+   一条通道 = 面板与设备之间的一条 `(node_id, channel_id)`。这个文件负责
+   **什么时候建、什么时候关、输出往哪送**，不负责渲染——渲染是面板组件的事。
+
+   ── 生命周期只有两条规则（规范 §5.5 / §7.2） ─────────────────────
+   1. **懒建立**：面板第一次交互才 `open_channel`。打开一个关着的面板不建
+      通道，因为还没有任何数据要流动。
+   2. **关面板才 `close_channel`**；**切 tab 不关**。`DECISIONS.md` D10：
+      切 tab 是视图切换，不是生命周期边界。边界是「关掉这个 tab」。
+
+   代价是 N 个 tab = N × 面板数条活跃通道，所以 tab 上要显示面板数徽标。
+
+   ── 为什么不在这里排队重发 ────────────────────────────────────────
+   下行断线期间发出去的 `/send` **直接丢弃并计数**，由 UI 标注「有 N 条已丢」。
+   排队会让重连之后一整段字符乱序灌进 PTY——那比丢几个字符难查得多，而
+   `/send` 本来就是无状态裸字节（`protocol.md` §7 的可靠投递只覆盖带 `id`
+   的消息）。
+
+   ── 上行都要 CSRF，下行不要 ───────────────────────────────────────
+   下行是 `EventSource`，**它发不了自定义请求头**，所以 CSRF 双重提交只可能
+   落在三个上行端点上。`http.ts` 按方法自动回填 `X-CSRF-Token`，这里只管
+   用 `request()`。
+
+   ── `Last-Event-ID` 由浏览器带 ────────────────────────────────────
+   Hub 的 `Envelope::to_event` 给每条事件设了 `id:`（`routes/stream.rs`），
+   所以 `EventSource` 断线重连时会自动带 `Last-Event-ID`，Hub 从有界回放
+   缓冲里补齐。前端**不手写重连**：`EventSource` 自带指数退避，手写一层只会
+   和它抢。
+   =========================================================================== */
+
+import { del, postJson, request } from './http'
+
+/** SSE 连接状态。`connecting` 是首次建连与 EventSource 自动重连期间。 */
+export type StreamState = 'connecting' | 'online' | 'offline'
+
+/** 通道自身状态。文案映射在 `CHANNEL_STATE_LABEL`。 */
+export type ChannelState = 'idle' | 'opening' | 'ready' | 'failed' | 'closed'
+
+/** 通道帧的载荷。`channel.frame` 事件的 `payload` 就是它本身——别再剥一层。 */
+export interface ChannelFrame {
+  node_id: string
+  channel_id: string
+  /** `channel_data` 的 `c` 字段（terminal 是 `{ bytes }` / `{ resize }`）。 */
+  payload: unknown
+}
+
+/** 开一条通道所需的全部输入。 */
+export interface ChannelSpec {
+  sessionId: string
+  /** `terminal` / `files` / `exec`。 */
+  connector: string
+  /** connector 私有参数（terminal 的 `cwd` / `cols` / `rows` 等）。 */
+  params?: Record<string, unknown>
+}
+
+/** `POST /api/channels` 的响应。 */
+interface OpenedChannel {
+  channel_id: string
+  node_id: string
+  session_id: string
+}
+
+/** 一个面板持有的一条通道。 */
+export interface ChannelHandle {
+  /** 调用方的键（每个 tab 每个面板各一个，例如 `s-1:terminal`）。 */
+  readonly key: string
+  /** `idle` → `opening` → `ready`；失败进 `failed`，关掉进 `closed`。 */
+  state(): ChannelState
+  /** Hub 生成的 channel_id；还没开时为 `null`。 */
+  id(): string | null
+  /** 最近一次失败的错误码（`device_offline` / `session_ended` / …）。 */
+  errorCode(): string | null
+  /**
+   * 断线期间被丢弃的输入条数。
+   *
+   * 这个数必须能被 UI 读出来：丢弃是**有意的**（排队会让重连后的字符
+   * 乱序灌进 PTY），但用户有权知道「我刚才敲的东西没进去」。
+   */
+  dropped(): number
+  /** 建通道（幂等：已 ready 时直接返回）。 */
+  open(): Promise<void>
+  /** 送一段文本。断线期间**丢弃**并计入 `dropped`。 */
+  send(text: string): void
+  /** 终端尺寸。未建通道 / 断线时记为「待发」，建好或重连后补一次。 */
+  resize(cols: number, rows: number): void
+  /** 关通道。幂等。 */
+  close(): Promise<void>
+  /** 订阅本通道的帧。返回退订函数。 */
+  onFrame(fn: (frame: ChannelFrame) => void): () => void
+  /** 订阅状态变化。返回退订函数。 */
+  onState(fn: (state: ChannelState) => void): () => void
+}
+
+export interface HubOptions {
+  /** 注入 EventSource 的构造器（测试用）。缺省用全局的那个。 */
+  createEventSource?: (url: string) => EventSource
+  /** 建连的路径。缺省 `/api/stream`。 */
+  streamPath?: string
+}
+
+/** 通道状态的短文案（面板头右侧那个标签，§7.2）。 */
+export const CHANNEL_STATE_LABEL: Readonly<Record<ChannelState, string>> = {
+  idle: '未建立',
+  opening: '建立中',
+  ready: '已连接',
+  failed: '建立失败',
+  closed: '已释放',
+}
+
+/**
+ * 一个页面共用一个 `ChannelHub`：一条 SSE 订阅、一张 `channel_id → 通道`
+ * 的分派表。**不是每条通道一条 SSE**——那会把「N 个 tab 的代价」再乘一次。
+ */
+export class ChannelHub {
+  private readonly createEventSource: (url: string) => EventSource
+  private readonly streamPath: string
+
+  private source: EventSource | null = null
+  private streamState: StreamState = 'connecting'
+  private readonly byId = new Map<string, ChannelHandleImpl>()
+  private readonly byKey = new Map<string, ChannelHandleImpl>()
+  private readonly streamListeners = new Set<(s: StreamState) => void>()
+  private streamTimer: ReturnType<typeof setTimeout> | null = null
+
+  constructor(opts: HubOptions = {}) {
+    this.streamPath = opts.streamPath ?? '/api/stream'
+    this.createEventSource =
+      opts.createEventSource ??
+      ((url) => {
+        if (typeof EventSource === 'undefined') {
+          throw new Error('channel: EventSource 不可用')
+        }
+        return new EventSource(url)
+      })
+  }
+
+  /** 现在的下行连接状态。 */
+  state(): StreamState {
+    return this.streamState
+  }
+
+  /** 下行状态变化（面板头上的「连接中 / 已连接 / 已断开」）。 */
+  onStreamState(fn: (s: StreamState) => void): () => void {
+    this.streamListeners.add(fn)
+    return () => this.streamListeners.delete(fn)
+  }
+
+  /** 建 SSE。重复调用是空操作——一个页面只需要一条。 */
+  connect(): void {
+    if (this.source) return
+    try {
+      const src = this.createEventSource(this.streamPath)
+      this.source = src
+      src.addEventListener('open', () => this.setStream('online'))
+      src.addEventListener('error', () => this.setStream('offline'))
+      src.addEventListener('device.status', () => undefined)
+      src.addEventListener('session.state', (ev) => this.onSessionState(ev))
+      src.addEventListener('channel.frame', (ev) => this.onFrame(ev))
+    } catch {
+      // 构造失败（环境没有 EventSource、或 URL 被拦）——走同一条「断开」路径，
+      // 让面板显示「已断开·有 N 条已丢」，而不是在启动时抛一个没人接的异常。
+      this.setStream('offline')
+    }
+  }
+
+  /** 断开 SSE 并释放全部通道。只在页面卸载时调（切 tab **不调**）。 */
+  dispose(): void {
+    if (this.streamTimer) {
+      clearTimeout(this.streamTimer)
+      this.streamTimer = null
+    }
+    for (const ch of [...this.byId.values()]) void ch.close()
+    this.byId.clear()
+    this.byKey.clear()
+    this.source?.close()
+    this.source = null
+    this.streamListeners.clear()
+  }
+
+  /** 取（或建）一个键对应的通道句柄。**不建通道**，只是拿到句柄。 */
+  handle(key: string, spec: ChannelSpec): ChannelHandle {
+    const existing = this.byKey.get(key)
+    if (existing) return existing
+    const ch = new ChannelHandleImpl(key, spec, this)
+    this.byKey.set(key, ch)
+    return ch
+  }
+
+  /** 已开着的通道数（tab 上的面板数徽标用它）。 */
+  openCount(): number {
+    return [...this.byKey.values()].filter((c) => c.state() === 'ready').length
+  }
+
+  // ---- 内部 ----------------------------------------------------------------
+
+  /** 通道句柄在 `open()` 成功后登记，好让帧能按 `channel_id` 找到它。 */
+  bind(channelId: string, ch: ChannelHandleImpl): void {
+    this.byId.set(channelId, ch)
+  }
+
+  unbind(channelId: string): void {
+    this.byId.delete(channelId)
+  }
+
+  /** 断线或未连接时 `send` 该丢弃。 */
+  canSend(): boolean {
+    return this.streamState === 'online'
+  }
+
+  private setStream(s: StreamState): void {
+    if (this.streamState === s) return
+    this.streamState = s
+    if (s === 'online') {
+      // 重连后把断线期间攒下的尺寸补发：`resize` 没有乱序风险，
+      // 最新一次就是对的（`send` 不同，所以那条一律丢弃，见 `send`）。
+      for (const ch of this.byKey.values()) ch.flushPending()
+    }
+    for (const fn of this.streamListeners) fn(s)
+  }
+
+  private onFrame(ev: Event): void {
+    const data = (ev as MessageEvent<string>).data
+    let frame: ChannelFrame
+    try {
+      frame = JSON.parse(data) as ChannelFrame
+    } catch {
+      // 不是 JSON 的帧是 Hub 的 bug，不是页面的；丢掉这一条，不要整条流崩
+      return
+    }
+    if (!frame || typeof frame.channel_id !== 'string') return
+    this.byId.get(frame.channel_id)?.deliver(frame)
+  }
+
+  private onSessionState(ev: Event): void {
+    const data = (ev as MessageEvent<string>).data
+    let payload: { session_id?: string; state?: string }
+    try {
+      payload = JSON.parse(data) as { session_id?: string; state?: string }
+    } catch {
+      return
+    }
+    if (payload.state !== 'ended' || typeof payload.session_id !== 'string') return
+    // 会话结束了，属于它的通道不会再有任何输出：主动关掉并把状态标成 released。
+    // 不这么做的话，面板会一直显示「已连接」，而设备那边已经没有这条通道了。
+    for (const [id, ch] of [...this.byId.entries()]) {
+      if (ch.sessionId() === payload.session_id) {
+        this.byId.delete(id)
+        ch.markEnded()
+      }
+    }
+  }
+}
+
+/** 每个键一条，实现放在这里而不是导出：调用方只该通过 `ChannelHub.handle` 拿到它。 */
+class ChannelHandleImpl implements ChannelHandle {
+  readonly key: string
+  private readonly spec: ChannelSpec
+  private readonly hub: ChannelHub
+
+  private current: ChannelState = 'idle'
+  private channelId: string | null = null
+  private failure: string | null = null
+  private inflight: Promise<void> | null = null
+
+  /** 断线期间丢掉的**文本条数**（UI 要显示的这个数）。 */
+  private dropCount = 0
+
+  private readonly frameHandlers = new Set<(f: ChannelFrame) => void>()
+  private readonly stateHandlers = new Set<(s: ChannelState) => void>()
+
+  /** 还没建通道时收到的尺寸，建好后补发一次。 */
+  private pendingSize: { cols: number; rows: number } | null = null
+
+  constructor(key: string, spec: ChannelSpec, hub: ChannelHub) {
+    this.key = key
+    this.spec = spec
+    this.hub = hub
+  }
+
+  state(): ChannelState {
+    return this.current
+  }
+
+  id(): string | null {
+    return this.channelId
+  }
+
+  errorCode(): string | null {
+    return this.failure
+  }
+
+  dropped(): number {
+    return this.dropCount
+  }
+
+  sessionId(): string {
+    return this.spec.sessionId
+  }
+
+  open(): Promise<void> {
+    if (this.current === 'ready') return Promise.resolve()
+    if (this.inflight) return this.inflight
+    this.set('opening')
+    this.failure = null
+    // **先建 SSE**：开了通道但没有下行订阅，用户会看到「已连接」却收不到一个字。
+    this.hub.connect()
+    this.inflight = postJson<OpenedChannel>('/api/channels', {
+      session_id: this.spec.sessionId,
+      connector: this.spec.connector,
+      params: this.spec.params ?? {},
+    })
+      .then((res) => {
+        this.channelId = res.channel_id
+        this.hub.bind(res.channel_id, this)
+        this.set('ready')
+        if (this.pendingSize) {
+          const size = this.pendingSize
+          this.pendingSize = null
+          this.resize(size.cols, size.rows)
+        }
+      })
+      .catch((err: unknown) => {
+        this.failure = errorCodeOf(err)
+        this.set('failed')
+        throw err
+      })
+      .finally(() => {
+        this.inflight = null
+      })
+    return this.inflight
+  }
+
+  send(text: string): void {
+    if (!this.channelId || this.current !== 'ready') return
+    if (!this.hub.canSend()) {
+      // 断线：丢弃 + 计数。**不排队**——排队会在重连后把字符乱序灌进 PTY。
+      // 计的是「几次输入」，不是字节数：UI 上「有 3 条已丢」比「丢了 41 字节」
+      // 更贴近用户刚才做了什么（三次回车 / 一段命令）。
+      this.dropCount += 1
+      this.notifyState()
+      return
+    }
+    // 不 await：键盘输入是「发出去就别挡着下一步」的动作。失败（通道刚被设备
+    // 关掉、Hub 409）时只把状态改成 failed，让面板头显示出来。
+    void request(`/api/channels/${encodeURIComponent(this.channelId)}/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: text,
+    }).catch((err: unknown) => {
+      this.failure = errorCodeOf(err)
+      this.set('failed')
+    })
+  }
+
+  resize(cols: number, rows: number): void {
+    if (!this.channelId || this.current !== 'ready' || !this.hub.canSend()) {
+      // 尺寸与按键不同：**最新一次就是对的**，没有乱序风险，所以断线期间
+      // 记下来、重连后补发一次。丢掉它只会让 PTY 一直按旧宽度折行。
+      this.pendingSize = { cols, rows }
+      return
+    }
+    this.postResize(cols, rows)
+  }
+
+  /** 补发待定的尺寸。流恢复在线时由 Hub 调。 */
+  flushPending(): void {
+    const size = this.pendingSize
+    if (!size || !this.channelId || this.current !== 'ready') return
+    if (!this.hub.canSend()) return
+    this.pendingSize = null
+    this.postResize(size.cols, size.rows)
+  }
+
+  private postResize(cols: number, rows: number): void {
+    if (!this.channelId) return
+    void postJson(`/api/channels/${encodeURIComponent(this.channelId)}/resize`, {
+      cols,
+      rows,
+    }).catch(() => {
+      // 尺寸协商失败不是致命错：PTY 会保持上一次的尺寸，而输入仍然可用。
+      // 把面板标成 failed 会把「能打字」的终端画成「建立失败」。
+    })
+  }
+
+  async close(): Promise<void> {
+    const id = this.channelId
+    if (!id) {
+      this.set('closed')
+      return
+    }
+    this.hub.unbind(id)
+    this.channelId = null
+    this.set('closed')
+    try {
+      await del(`/api/channels/${encodeURIComponent(id)}`)
+    } catch {
+      // 关不掉（Hub 已经清了、设备断了）不该拦住 UI：Hub 侧那个端点是幂等的，
+      // 而且通道本来就随设备连接生灭（§7.1）。
+    }
+  }
+
+  onFrame(fn: (f: ChannelFrame) => void): () => void {
+    this.frameHandlers.add(fn)
+    return () => this.frameHandlers.delete(fn)
+  }
+
+  onState(fn: (s: ChannelState) => void): () => void {
+    this.stateHandlers.add(fn)
+    return () => this.stateHandlers.delete(fn)
+  }
+
+  deliver(frame: ChannelFrame): void {
+    for (const fn of this.frameHandlers) fn(frame)
+  }
+
+  markEnded(): void {
+    this.channelId = null
+    this.set('closed')
+  }
+
+  private set(s: ChannelState): void {
+    if (this.current === s) return
+    this.current = s
+    this.notifyState()
+  }
+
+  private notifyState(): void {
+    for (const fn of this.stateHandlers) fn(this.current)
+  }
+}
+
+/** 从 `ApiError` 里取 code；别的错误一律 `unknown`。 */
+function errorCodeOf(err: unknown): string {
+  if (typeof err === 'object' && err !== null && 'code' in err) {
+    const code = (err as { code: unknown }).code
+    if (typeof code === 'string') return code
+  }
+  if (err instanceof Error && err.name === 'NetworkError') return 'network'
+  return 'unknown'
+}
+
+/** 建通道失败的可读理由。与 `api.ts` 的同名函数同一条口径。 */
+export function channelErrorLabel(code: string | null): string {
+  switch (code) {
+    case 'device_offline':
+      return '设备离线，通道建不起来。'
+    case 'session_ended':
+      return '会话已结束，不能再开面板。'
+    case 'device_busy':
+      return '设备读不过来（队列打满），稍后再试。'
+    case 'invalid_terminal_size':
+      return '终端尺寸不合法。'
+    case 'network':
+      return 'Hub 连不上。'
+    case 'channel_not_yours':
+      return '这条通道不属于当前登录身份。'
+    default:
+      return code ? `通道建立失败（${code}）。` : '通道建立失败。'
+  }
+}
