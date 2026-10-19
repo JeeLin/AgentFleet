@@ -56,7 +56,8 @@ pub async fn upgrade(
 /// **只按「有没有这个头」判，不看它的值**：node 是原生程序，从不发 `Origin`；
 /// 浏览器一定发。看值的做法（白名单比对）会引入「允许哪些站点跨站连 Hub」的
 /// 配置面，而这个产品里**没有任何一个站点需要直连 `/ws`**——
-/// 前端一律走带 session 的 HTTP API。所以「有这个头就拒」才是对的边界。
+/// 请求-响应走带 session 的 HTTP API，持续数据面走 `/api/stream`（SSE），
+/// 两者都不在这个函数管的范围内。所以「有这个头就拒」才是对的边界。
 /// 反代（Tailscale Serve / nginx）不会凭空加 `Origin`，不受影响。
 fn reject_origin(headers: &HeaderMap) -> Option<&'static str> {
     if headers.contains_key(axum::http::header::ORIGIN) {

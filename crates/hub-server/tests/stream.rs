@@ -1116,14 +1116,11 @@ async fn device_status_events_follow_the_connection() {
 async fn read_events_for(body: &mut axum::body::Body, budget: Duration) -> Vec<SseEvent> {
     let mut buf = String::new();
     let deadline = tokio::time::Instant::now() + budget;
-    loop {
-        match tokio::time::timeout_at(deadline, body.frame()).await {
-            Ok(Some(Ok(frame))) => {
-                let chunk = frame.into_data().expect("data frame");
-                buf.push_str(&String::from_utf8_lossy(&chunk));
-            }
-            Ok(None) | Ok(Some(Err(_))) | Err(_) => break,
-        }
+    // `while let Ok(Some(Ok(frame)))`：流结束 / 读出错 / 等到超时都会让
+    // 这条 `while` 自然退出——三种都是「剩下的读不到了」。
+    while let Ok(Some(Ok(frame))) = tokio::time::timeout_at(deadline, body.frame()).await {
+        let chunk = frame.into_data().expect("data frame");
+        buf.push_str(&String::from_utf8_lossy(&chunk));
     }
     parse_frames(&buf)
 }

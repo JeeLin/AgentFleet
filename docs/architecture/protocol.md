@@ -337,3 +337,33 @@ M0 枚举的「防第二台抢走第一台身份」= §3 的两处保证：
 - terminal / files / git 各通道的 `channel_data` 具体 schema
 - PTY 流的分片与帧大小上限（留给 M1 的 exec/terminal 实现）
 - 文件传输的大文件走 CAS blob 还是通道内分片（M2 再定）
+
+---
+
+## 11. 页面侧数据面（M1 落地）
+
+本文档 §2–§8 描述的是**设备 ↔ Hub** 那条 `/ws`。浏览器用的是另一条：
+
+| | 设备侧 | 页面侧 |
+|---|---|---|
+| 路径 | `/ws` | `/api/stream`、`/api/channels/*` |
+| 认证 | challenge / 设备签名 | `af_session` cookie（+ 状态变更方法的 CSRF） |
+| `Origin` | **有则拒**（浏览器一定带，node 一定不带） | 允许 |
+| 格式 | `protocol::Frame` JSON | SSE 事件 / JSON / 原始字节 |
+
+**两者的帧格式、认证方式、流控策略互不复用**——这是一条硬分界，不是同一个协议的两种
+编码。设备通道的 `channel_id` 只在 `(node_id, channel_id)` 下有唯一性（§5），页面侧的
+`channel_id` 是 Hub 自己发的句柄，两者没有对应关系。
+
+- **下行**：`GET /api/stream`（SSE，需 session）→ `device.status` / `channel.frame` /
+  `session.state`。断线重连带 `Last-Event-ID`，Hub 从**有界回放缓冲**补齐缺口；
+  缓冲窗口外的历史不承诺。断开只断订阅，通道本身在 Hub 侧存活。
+- **上行**：`POST /api/channels`（开）、`POST /api/channels/{id}/send`（裸字节）、
+  `POST /api/channels/{id}/resize`、`DELETE /api/channels/{id}`。`EventSource` 是只读的，
+  只做下行会让终端「能看不能敲」，所以上行必须是独立的 HTTP 端点。
+- **断线期间的上行**：前端丢弃并在 UI 标注，**不排队重发**。§7 的可靠投递只覆盖带 `id`
+  的消息，`/send` 是无状态裸字节，排队会让重连后的字符乱序灌进 PTY。
+
+**`reject_origin` 的豁免边界**：设备 `/ws` 的「有 `Origin` 就拒」照旧，页面侧路由根本不设
+这条检查。这不是放宽——真正的防线是 `af_session` cookie 的 `SameSite=Strict`，
+跨站页面无法让浏览器带上它。理由三条写在 `crates/hub-server/src/routes/stream.rs` 模块注释。
