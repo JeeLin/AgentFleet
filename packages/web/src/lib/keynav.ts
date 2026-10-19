@@ -211,6 +211,22 @@ export function register(act: string, fn: KeyHandler): void {
 }
 
 /**
+ * 撤销一个 act 的 handler。没有注册过时是空操作。
+ *
+ * 存在的唯一理由是**页面级键位随页面挂载 / 卸载**：会话工作台的
+ * `panel:open` / `dock:toggle` 在离开工作台后必须失效，否则用户回到设备页
+ * 按 `o` 会打开一个已经不存在的面板。`register` 拒绝重复注册，所以没有
+ * 对应的 `unregister` 时，第二个工作台实例（测试里、或同一个页面重挂载）
+ * 会直接在挂载期抛错。
+ *
+ * 外壳级键位（`?` / `g s` / `⌃B`）**不**走这条路：它们由
+ * `shell-keys.ts` 注册一次、永远在，靠回调槽位跟随当前组件。
+ */
+export function unregister(act: string): void {
+  handlers.delete(act)
+}
+
+/**
  * 内部注册：Esc / Tab / 焦点栈是本模块与 `focus.ts` 的职责，
  * 它们同样要在 `?` 里查得到，所以走的是同一张表，只是不做重复检查
  * （模块加载时只注册一次，重复调用是 bug 而不是重复注册）。

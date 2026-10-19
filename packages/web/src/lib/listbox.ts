@@ -34,8 +34,19 @@ export interface ListboxOptions {
   /** ↑↓ 到头时是否绕回另一端。默认不绕回。 */
   wrap?: boolean
   /**
+   * Enter **归行**：不点行内的 a / button，直接交给 `onEnter`（或抛 `ENTER_EVENT`）。
+   *
+   * 默认行为（规范 §4.4）是「行内有可点的 a|button 就点它」——对文件树
+   * 这类「行本身就是那个控件」的列表是对的。但一个**表格行**里常驻着一个
+   * 行内动作按钮（设备行的「用它开会话」），那条规则会让 ⏎ 变成「点那个
+   * 按钮」：用户想「看这一台」，却新建了一个会话。所以这类行必须显式声明
+   * Enter 属于行，而不是让 DOM 里的按钮顺序决定 Enter 的语义。
+   */
+  rowEnter?: boolean
+  /**
    * Enter 的兜底。行有 `data-href` 或内含 a/button 时**不**调它——
    * 「Enter 的语义属于行」是规范 §4.4 的否决项，不许在监听器里猜。
+   * 设了 `rowEnter` 的行不受此限：那样写出来的意图就是「Enter 归我」。
    */
   onEnter?: (row: HTMLElement, e: KeyboardEvent) => boolean
   /** Space 的兜底。目录行自己切 `aria-expanded`，不调它。 */
@@ -154,16 +165,20 @@ export function attach(el: HTMLElement, opts: ListboxOptions = {}): ListboxHandl
 
   /** 行的 Enter：语义属于行——有去向就去，没有就抛事件给页面。 */
   function activate(row: HTMLElement, e: KeyboardEvent): boolean {
-    const href = row.dataset.href
-    const win = row.ownerDocument.defaultView
-    if (href && win) {
-      win.location.assign(href)
-      return true
-    }
-    const inner = row.querySelector<HTMLElement>('a[href], button')
-    if (inner) {
-      inner.click()
-      return true
+    // `rowEnter` 的行跳过「点行内控件」这一步：表格行里常驻的动作按钮
+    // 不该决定 ⏎ 的含义（见 ListboxOptions.rowEnter）。
+    if (!opts.rowEnter) {
+      const href = row.dataset.href
+      const win = row.ownerDocument.defaultView
+      if (href && win) {
+        win.location.assign(href)
+        return true
+      }
+      const inner = row.querySelector<HTMLElement>('a[href], button')
+      if (inner) {
+        inner.click()
+        return true
+      }
     }
     if (opts.onEnter) return opts.onEnter(row, e)
     row.dispatchEvent(new CustomEvent(ENTER_EVENT, { bubbles: true, detail: { row } }))
