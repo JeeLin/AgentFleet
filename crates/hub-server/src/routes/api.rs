@@ -353,6 +353,11 @@ pub async fn create_session(
         created = true,
         "session created"
     );
+    // 页面侧（子任务 5a）：会话建成的瞬间推给所有订阅者，好让另一个标签页
+    // 的工作台 tab 条上立刻多出这一条，而不必等它下次轮询。
+    state
+        .streams()
+        .session_state(&session.id, session.state.as_str());
     Ok((StatusCode::CREATED, Json(detail)).into_response())
 }
 

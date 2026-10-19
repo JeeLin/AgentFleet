@@ -122,6 +122,15 @@ impl ApiError {
         Self::new(StatusCode::TOO_MANY_REQUESTS, code)
     }
 
+    /// 503：设备读不过来（写侧队列打满，§6.1.1）。
+    ///
+    /// 不用 409：409 是「资源状态不对，重试前要先改点什么」，而这一档的
+    /// 正确处置就是**稍后重试同一件事**——把它报成 429 会让前端去退避登录
+    /// 那种「永远不该重试」的错误。
+    pub fn service_unavailable(code: &'static str) -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, code)
+    }
+
     pub fn internal() -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
     }
@@ -213,6 +222,21 @@ struct Inner {
     outbound: conns::OutboundTable,
     /// `node_id → 该设备的通道表`（子任务 8）。纯内存，不落库（§5）。
     channels: Arc<parking_lot::RwLock<hub_core::channels::HubChannels>>,
+    /// 页面侧事件总线（子任务 5a）：`GET /api/stream` 的唯一数据源。
+    ///
+    /// 放共享状态而不是每条 SSE 连接自建一条 channel：设备侧的通道帧是
+    /// **每个到达点只有一份**，而订阅它的可能有好几个面板（同一会话开两个
+    /// 终端）或好几个标签页。要让每个订阅者各自一份，就得在 ws 读循环里
+    /// 维护一张订阅表——而那张表的唯一能力就是「把一帧发给所有订阅者」，
+    /// `broadcast` 正是它，不需要第二份真相。
+    streams: routes::stream::Streams,
+    /// `channel_id → 谁在哪台设备上开的这条通道`（子任务 5a）。
+    ///
+    /// 与 [`Self::channels`] 分开：那个是**协议层账本**（按 `(node_id, channel_id)`，
+    /// 断线即清），这个是**页面归属**（谁开的这一条）。混在一张表里的后果是
+    /// `drop_node` 会顺手把页面归属也清掉，而归属是用来判 403 的——
+    /// 清错了会让「越权访问」看起来像「通道不存在」。
+    bindings: routes::stream::Bindings,
 }
 
 impl AppState {
@@ -272,6 +296,8 @@ impl AppState {
             channels: Arc::new(parking_lot::RwLock::new(
                 hub_core::channels::HubChannels::new(),
             )),
+            streams: routes::stream::Streams::new(),
+            bindings: routes::stream::Bindings::new(),
         }));
 
         if state.is_initialized()? {
@@ -390,6 +416,19 @@ impl AppState {
         &self.0.channels
     }
 
+    /// 页面侧事件总线（子任务 5a）：`GET /api/stream` 的订阅源。
+    ///
+    /// 与 [`Self::channels`] 分开的原因写在字段注释里：一个是协议账本，
+    /// 一个是事件分发，两者生命周期不同（后者活到进程结束）。
+    pub fn streams(&self) -> &routes::stream::Streams {
+        &self.0.streams
+    }
+
+    /// `channel_id → 页面归属`（子任务 5a），用来判 403 与 404。
+    pub fn bindings(&self) -> &routes::stream::Bindings {
+        &self.0.bindings
+    }
+
     /// 数据目录（测试用：读 schema / 直接查库）。
     pub fn data_dir(&self) -> &Path {
         &self.0.data_dir
@@ -452,6 +491,20 @@ pub fn build_app(state: AppState) -> Router {
             get(routes::api::list_sessions).post(routes::api::create_session),
         )
         .route("/api/agents", get(routes::api::list_agents))
+        // 页面侧实时数据面（子任务 5a）：SSE 下行 + 四个上行端点。
+        //
+        // 同样**必须落在下面那条 `.layer(...)` 之前**：`/api/channels*` 是
+        // 状态变更端点（POST / DELETE），一旦跑到 `.layer` 之后，它们会绕过
+        // session 认证与 CSRF 双重提交——全仓库唯一的、能被任意网页用
+        // 「读得着的 cookie」当武器往设备上打字节的口子。
+        .route("/api/stream", get(routes::stream::stream))
+        .route("/api/channels", post(routes::stream::open_channel))
+        .route("/api/channels/{id}/send", post(routes::stream::send_bytes))
+        .route("/api/channels/{id}/resize", post(routes::stream::resize))
+        .route(
+            "/api/channels/{id}",
+            axum::routing::delete(routes::stream::close_channel),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware_auth::require_auth,

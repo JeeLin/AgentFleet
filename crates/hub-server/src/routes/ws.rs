@@ -98,6 +98,8 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
                 gen = gen,
                 "ws authenticated"
             );
+            // 连接成立 → 页面上的这台设备立刻变 `online`，不必等下一次轮询
+            state.streams().device_status(&auth.node_id, "online");
             if let Some(old) = displaced {
                 supersede(&state, &old, gen, &conn_id, &auth.node_id);
             }
@@ -155,6 +157,26 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
                     node_id = %auth.node_id,
                     channels = dropped,
                     "dropped channel records on disconnect"
+                );
+            }
+            // 页面侧：设备掉线 + 这条通道的归属一并清掉（子任务 5a）。
+            //
+            // **只在「这条连接确实是当前连接」时才推 `device.status`**：
+            // 被顶替的旧连接自己也会走到这里，而那时表里已经是新连接、
+            // 设备明明在线——推一发 `offline` 会让页面把一台好端端的设备
+            // 标成离线，而且没有任何东西会把它改回来（心跳只往 online 改）。
+            //
+            // `removed == false` 也覆盖「被顶替」之外的情况：两条连接抢一个
+            // node_id 时，先摘表的那条正是被顶掉的那条。
+            if removed {
+                state.streams().device_status(&auth.node_id, "offline");
+            }
+            let orphaned = state.bindings().drop_node(&auth.node_id);
+            if orphaned > 0 {
+                tracing::debug!(
+                    node_id = %auth.node_id,
+                    channels = orphaned,
+                    "dropped browser channel bindings on disconnect"
                 );
             }
             let elapsed_ms = started.elapsed().as_millis();
@@ -673,6 +695,16 @@ async fn relay(
                     continue;
                 }
                 if crate::channels::is_channel_type(&frame.msg_type) {
+                    // 页面侧数据面（子任务 5a）：`channel_data` 的**载荷**推给
+                    // 浏览器的 SSE 订阅者。只推载荷、不推整帧——`Frame` 的
+                    // `v` / `seq` 是设备侧 WS 的语义（§2），页面不验签也不重放。
+                    //
+                    // 推送在记账**之前**：这样即使这帧随后被判 `NotReady` 而回错，
+                    // 页面也已经看到了字节。而反过来（先记账成功才推）会让
+                    // 「Hub 回了 channel_error 但终端里字符已经出现」永远不可能发生。
+                    if frame.msg_type == types::CHANNEL_DATA {
+                        publish_channel_data(state, &auth.node_id, &frame);
+                    }
                     match crate::channels::on_channel_frame(state, &auth.node_id, &frame) {
                         // coverage: excluded — channel 帧回帧发送失败需对端在读循环中途消失。
                         crate::channels::Reply::Nothing => {}
@@ -702,6 +734,21 @@ async fn relay(
             }
         }
     }
+}
+
+/// 把一帧 `channel_data` 的载荷推给页面订阅者（子任务 5a）。
+///
+/// 载荷解析不出来就**不推**、也不记 error：那是一帧 Hub 没法解释的 JSON，
+/// 推给页面的只会是 `{"node_id":..., "channel_id": ""}` 这种既没有字节
+/// 也没有通道号的东西，前端拿它渲染终端只会显示一个空面板。
+fn publish_channel_data(state: &AppState, node_id: &str, frame: &Frame) {
+    let Ok(data) = frame.payload::<protocol::channel::ChannelData>() else {
+        tracing::debug!(node_id = %node_id, "not forwarding an unparsable channel_data");
+        return;
+    };
+    state
+        .streams()
+        .channel_frame(node_id, &data.channel_id, data.payload);
 }
 
 /// 一条心跳：内存更新 + 落库。
