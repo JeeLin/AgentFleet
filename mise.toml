@@ -12,6 +12,13 @@ bun = "1.4.3"
 # 与 CI 保持一致；升级时同步改 .github/workflows/ci.yml 与 README
 rust = "1.99.0"
 
+# 数据目录钉在仓库内，不落 `~/.local/share/agentfleet/`（`dirs::data_dir()` 的缺省）。
+# 那个缺省是给生产部署用的：开发时换个 checkout、清个缓存，dev 库与 setup token
+# 就不知道跑哪去了，而 setup token 只在首次启动打印一次。
+# `.gitignore` 已忽略 `/data/`。
+[env]
+AFHUB_DATA_DIR = "{{config_root}}/data"
+
 # ---------------------------------------------------------------------------
 # 任务：把 AGENTS.md 的质量门禁固化成可执行命令，避免每次手打一串
 # ---------------------------------------------------------------------------
@@ -46,19 +53,24 @@ depends = ["check", "fmt", "lint", "test", "cov", "web-ci"]
 
 # ---- 开发环境 ---------------------------------------------------------------
 
-[tasks.dev]
-description = "开发环境：Hub (8080) + Vite (5173)，Vite 代理 /api 与 /ws 回 Hub"
-run = [
-  "cargo run -p hub-server",
-  "cd packages/web && bun run dev",
-]
-
-[tasks.watch]
-description = "监听 Hub 侧，改动即重编并重启 Hub (8080)"
+[tasks.dev-hub]
+description = "Hub（8080），改 Rust 即重编重启"
 run = """
 command -v cargo-watch >/dev/null || { echo "缺少 cargo-watch：cargo install cargo-watch" >&2; exit 1; }
 cargo watch -x 'run -p hub-server' -w crates/hub-server -w crates/hub-core -w crates/hub-storage -w crates/identity -w crates/protocol
 """
+
+[tasks.dev-web]
+description = "Vite 开发服务器（3002），文件改动即时热更新"
+run = "cd packages/web && bun run dev"
+
+# 两个长驻进程并行：前端 3002 把 `/api` 与 `/ws` 转发到 Hub 8080。
+#
+# **必须是 `depends` 而不是 `run = [...]`**：后者是**顺序**执行，而 `dev-hub`
+# 是长驻的 watch 进程、永不返回，前端永远轮不到启动。
+[tasks.dev]
+description = "本地开发：Hub watch（8080）+ 前端热更新（3002），前端转发请求到 Hub"
+depends = ["dev-hub", "dev-web"]
 
 # ---- 前端四道门禁（`packages/web`）-----------------------------------------
 [tasks.web-check]
@@ -84,8 +96,13 @@ description = "前端三道门禁 = web-check + web-test + web-build"
 depends = ["web-check", "web-test", "web-build"]
 
 [tasks.build]
-description = "release 构建（lto + strip）"
+description = "生产构建：先编译前端，再构建 release 二进制（Hub 内嵌 dist/）"
+depends = ["web-build"]
 run = "cargo build --release --workspace"
+
+[tasks.start]
+description = "运行生产构建产物（Hub 托管前端，单端口 8080）"
+run = "./target/release/afhub"
 
 # 交叉编译：树莓派一类设备（M0 子任务 0 测试⑦）
 [tasks.check-arm64]

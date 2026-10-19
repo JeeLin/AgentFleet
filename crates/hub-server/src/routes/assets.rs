@@ -48,12 +48,8 @@ pub const INDEX_CACHE: &str = "no-cache";
 ///
 /// `overriding` 而不是 `if_not_present`：这些文件的缓存策略由构建产物决定，
 /// 不该让别处的默认值覆盖它。
-pub fn asset_cache_layer(
-) -> SetResponseHeaderLayer<HeaderValue> {
-    SetResponseHeaderLayer::overriding(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static(ASSET_CACHE),
-    )
+pub fn asset_cache_layer() -> SetResponseHeaderLayer<HeaderValue> {
+    SetResponseHeaderLayer::overriding(header::CACHE_CONTROL, HeaderValue::from_static(ASSET_CACHE))
 }
 
 /// `GET /assets/{*path}`。
@@ -96,7 +92,11 @@ fn serve_index() -> Response {
         // 构造上不可达：`build.rs` 在 dist 缺失时写的就是 index.html。
         // 真走到这里（有人手工改 AF_WEB_DIST）也不该 panic——那是一台
         // 活着但页面打不开的 Hub，比进程退出好排查。
-        return (StatusCode::INTERNAL_SERVER_ERROR, "web console is not built").into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "web console is not built",
+        )
+            .into_response();
     };
     (
         StatusCode::OK,
