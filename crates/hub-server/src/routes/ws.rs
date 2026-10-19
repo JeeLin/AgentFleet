@@ -11,15 +11,27 @@
 //!   Hub 是单进程服务多设备，一条连接的内存占用必须有硬上限（§6.1）。
 //!
 //! 这里**不做**心跳、退避重连、通道流控——分别是子任务 5、6、8。
+//!
+//! ## 写侧有界队列（子任务 5b）
+//!
+//! 读循环与写协程**分开两个 task**（[`relay`] + [`write_loop`]），出站帧
+//! 一律经 [`conns::OutboundTable`] 的两条有界队列：控制面 8 帧、数据面 256 帧。
+//! 分成两个 task 是必须的，不是风格选择：同一个循环里既 produce 又 consume
+//! 时，`send_frame(...).await` 一旦在对端不读时阻塞，循环就再也回不到
+//! `try_send`，队列永远填不满——「有界」在纸面上成立、在运行时失效。
+//! 写协程按 `biased` 先取控制面：数据面打满绝不能延迟 `disconnect{superseded}`。
 
 use std::time::{Duration, Instant};
 
-use axum::extract::ws::{WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::json;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::{conns, AppState, HANDSHAKE_TIMEOUT, WS_MAX_MESSAGE_BYTES};
 use hub_core::connections::ConnHandle;
@@ -78,8 +90,12 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
     let outcome = handshake(&state, &mut socket, gen).await;
     match &outcome {
         Ok(auth) => {
-            // 出站队列先登记：下面顶替旧连接要用它，而 relay 也要拿它收帧。
-            let mut outbound = state.outbound().register(&conn_id);
+            // 出站队列先登记：下面顶替旧连接要用它，而写协程也要拿它收帧。
+            let (control_rx, data_rx) = state.outbound().register(&conn_id);
+            // 写协程拿到 sink 的一半所有权；读者继续用 `&mut socket` 的 stream 半边。
+            // `split` 之后两边各自 `await`，互不阻塞——这正是 5b 的前提。
+            let (sink, mut stream) = socket.split();
+            let writer: JoinHandle<()> = tokio::spawn(write_loop(sink, control_rx, data_rx));
 
             // 注册表只存句柄。socket 不进表、不落库（标准④）。
             //
@@ -114,7 +130,14 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
             // coverage: excluded — 这个 `Ok(auth)` 臂的收尾行（下面的 `}`）
             // 只在 relay **正常返回**后才执行，而测试里连接 task 的生命周期
             // 长于 fixture——runtime 关闭时它已被取消，走不到收尾。
-            if let Err(reason) = relay(&state, &mut socket, &conn_id, auth, &mut outbound).await {
+            let relayed = relay(&state, &mut stream, &conn_id, auth).await;
+            // 读者结束 → 写协程没有存在的理由了。`abort` 而不是 await：
+            // 对端不读时写协程正卡在 `send().await` 上，等它退出会把断开
+            // 拖成「等对端愿意收」——而断开恰恰是对端不配合时才发生的。
+            writer.abort();
+            // coverage: excluded — 同上面的收尾行：单测里 task 被 runtime 取消，
+            // `Err` 臂走不到，故这行日志不可达。
+            if let Err(reason) = relayed {
                 tracing::info!(conn_id = %conn_id, reason = %reason, "ws relay ended");
             }
         }
@@ -597,17 +620,18 @@ fn flood_frame(e: &hub_core::limits::LimitError) -> Frame {
     )
 }
 
-/// 业务帧循环：收 node 发来的帧，同时把 Hub 要推的控制帧发出去。
+/// 业务帧循环：**只读**，把收到的帧交给业务处理。
 ///
-/// M0 的 Hub 侧只需要「连接不断、未知消息不崩」。两个方向用 `select!` 而不是串行：
-/// 控制帧（`disconnect{superseded}`）必须**插队**——它要打断一个可能正阻塞在读上的
-/// 循环。串行的写法下，一条什么都不发的旧连接永远收不到「你被顶替了」，于是互抢。
+/// 写侧已拆成独立的 [`write_loop`]（子任务 5b）。这个函数因此不再同时
+/// `send().await` 与 `recv().await`：以前那两个方向共用 `&mut socket`，
+/// 一次慢写就把读循环冻住，控制帧也要排在那次写之后。
+///
+/// M0 的 Hub 侧只需要「连接不断、未知消息不崩」。
 async fn relay(
     state: &AppState,
-    socket: &mut WebSocket,
+    stream: &mut futures_util::stream::SplitStream<WebSocket>,
     conn_id: &str,
     auth: &Authenticated,
-    outbound: &mut tokio::sync::mpsc::Receiver<Frame>,
 ) -> Result<(), String> {
     // 每连接一个读侧令牌桶（§6.1「每连接 semaphore」）。按字节而不是按帧计：
     // 一帧 1 MiB 与一帧 10 字节对内存的压力差五个数量级，按帧计等于
@@ -617,122 +641,184 @@ async fn relay(
     // 每一次超限都无从判断是突发还是持续。
     let mut over_since: Option<Instant> = None;
     loop {
-        tokio::select! {
-        incoming = socket.recv() => {
-                // coverage: excluded — 对端直接 FIN 而不发 Close 帧才会走到。
-                let Some(msg) = incoming else {
-                    return Err(PEER_CLOSED.to_string());
-                };
-                let msg = match msg {
-                    Ok(m) => m,
-                    Err(e) => return Err(format!("ws read error: {e}")),
-                };
-                let Some(text) = frame_text(msg)? else {
-                    continue;
-                };
-                // §6.1：credit 是**发送方的自我约束**，拦不住一个恶意或
-                // buggy 的 worker。Hub 的自我保护是自己的读侧令牌桶——
-                // 不看对端有没有信用，只看它灌了多少字节。
+        // coverage: excluded — 对端直接 FIN 而不发 Close 帧才会走到。
+        let Some(msg) = stream.next().await else {
+            return Err(PEER_CLOSED.to_string());
+        };
+        let msg = match msg {
+            Ok(m) => m,
+            Err(e) => return Err(format!("ws read error: {e}")),
+        };
+        let Some(text) = frame_text(msg)? else {
+            continue;
+        };
+        // §6.1：credit 是**发送方的自我约束**，拦不住一个恶意或
+        // buggy 的 worker。Hub 的自我保护是自己的读侧令牌桶——
+        // 不看对端有没有信用，只看它灌了多少字节。
+        //
+        // 没有这条，一台设备持续灌数据就能让 Hub 逐帧解析 JSON 写进
+        // 内存直到 OOM，连带打垮所有其他设备与 Web 端——而那正是
+        // credit 想防的事，却只防了 node 的发送侧。
+        //
+        // 超限**先慢读，不立刻断开**（§6.1「超限 → 慢读/暂停，
+        // 持续 30s 才断开」）。立刻断是错的：`cat` 一个大文件就是
+        // 一次合法的 PTY 洪峰，误杀它等于「输出多的命令一律失败」。
+        // 慢读让 TCP 背压传回发送方，流量自然降下来。
+        loop {
+            match limiter.try_consume(text.len()) {
+                Ok(()) => {
+                    over_since = None;
+                    break;
+                }
+                // 单帧超硬上限没有「等等就好」这回事——它永远超。
                 //
-                // 没有这条，一台设备持续灌数据就能让 Hub 逐帧解析 JSON 写进
-                // 内存直到 OOM，连带打垮所有其他设备与 Web 端——而那正是
-                // credit 想防的事，却只防了 node 的发送侧。
-                //
-                // 超限**先慢读，不立刻断开**（§6.1「超限 → 慢读/暂停，
-                // 持续 30s 才断开」）。立刻断是错的：`cat` 一个大文件就是
-                // 一次合法的 PTY 洪峰，误杀它等于「输出多的命令一律失败」。
-                // 慢读让 TCP 背压传回发送方，流量自然降下来。
-                loop {
-                    match limiter.try_consume(text.len()) {
-                        Ok(()) => {
-                            over_since = None;
-                            break;
-                        }
-                        // 单帧超硬上限没有「等等就好」这回事——它永远超。
-                        //
-                        // coverage: excluded — 单帧超 1 MiB 的端到端路径需要往真 socket 里灌
-                        // 超大帧；单测覆盖的是令牌桶本身（`limits.rs`）与应答帧映射
-                        // （`flood_frame_maps_each_limit_error_to_its_own_code`），
-                        // 这里只留「超限即断开」的接线：日志 + 应答帧 + 断开。
-                        Err(hub_core::limits::LimitError::FrameTooLarge) => {
-                            tracing::warn!(
-                                conn_id = %conn_id,
-                                node_id = %auth.node_id,
-                                bytes = text.len(),
-                                "frame over the hard limit; dropping the connection"
-                            );
-                            // coverage: excluded — 见臂上的标注：端到端超大帧路径。
-                            let _ = send_frame(socket, flood_frame(&hub_core::limits::LimitError::FrameTooLarge)).await;
-                            return Err("frame over the hard limit".to_string());
-                        }
-                        Err(hub_core::limits::LimitError::Flood) => {
-                            let since = *over_since.get_or_insert_with(Instant::now);
-                            // coverage: excluded — 要真等满 30s 才会走到，超时窗口不可压缩。
-                            if since.elapsed() >= hub_core::limits::FLOOD_SUSTAINED {
-                                tracing::warn!(
-                                    conn_id = %conn_id,
-                                    node_id = %auth.node_id,
-                                    "read limit exceeded for too long; dropping the connection"
-                                );
-                                let _ = send_frame(socket, flood_frame(&hub_core::limits::LimitError::Flood)).await;
-                                return Err("sustained read limit exceeded".to_string());
-                            }
-                            // 慢读：等令牌回补再处理这一帧。**不重读**——
-                            // 已经读进来的字节丢掉就是丢数据。
-                            tokio::time::sleep(Duration::from_millis(SLOW_READ_PAUSE_MS)).await;
-                        }
-                    }
+                // coverage: excluded — 单帧超 1 MiB 的端到端路径需要往真 socket 里灌
+                // 超大帧；单测覆盖的是令牌桶本身（`limits.rs`）与应答帧映射
+                // （`flood_frame_maps_each_limit_error_to_its_own_code`），
+                // 这里只留「超限即断开」的接线：日志 + 应答帧 + 断开。
+                Err(hub_core::limits::LimitError::FrameTooLarge) => {
+                    tracing::warn!(
+                        conn_id = %conn_id,
+                        node_id = %auth.node_id,
+                        bytes = text.len(),
+                        "frame over the hard limit; dropping the connection"
+                    );
+                    // coverage: excluded — 见臂上的标注：端到端超大帧路径。
+                    queue_control(
+                        state,
+                        conn_id,
+                        flood_frame(&hub_core::limits::LimitError::FrameTooLarge),
+                    );
+                    return Err("frame over the hard limit".to_string());
                 }
-                let text = text.to_string();
-                let frame: Frame = match serde_json::from_str(&text) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        tracing::debug!(conn_id = %conn_id, error = %e, "dropping unparsable frame");
-                        continue;
+                Err(hub_core::limits::LimitError::Flood) => {
+                    let since = *over_since.get_or_insert_with(Instant::now);
+                    // coverage: excluded — 要真等满 30s 才会走到，超时窗口不可压缩。
+                    if since.elapsed() >= hub_core::limits::FLOOD_SUSTAINED {
+                        tracing::warn!(
+                            conn_id = %conn_id,
+                            node_id = %auth.node_id,
+                            "read limit exceeded for too long; dropping the connection"
+                        );
+                        // coverage: excluded — 同上：30s 窗口不可压缩。
+                        queue_control(
+                            state,
+                            conn_id,
+                            flood_frame(&hub_core::limits::LimitError::Flood),
+                        );
+                        return Err("sustained read limit exceeded".to_string());
                     }
-                };
-                if frame.msg_type == types::HEARTBEAT {
-                    on_heartbeat(state, conn_id, auth, &frame);
-                    continue;
-                }
-                if crate::channels::is_channel_type(&frame.msg_type) {
-                    // 页面侧数据面（子任务 5a）：`channel_data` 的**载荷**推给
-                    // 浏览器的 SSE 订阅者。只推载荷、不推整帧——`Frame` 的
-                    // `v` / `seq` 是设备侧 WS 的语义（§2），页面不验签也不重放。
-                    //
-                    // 推送在记账**之前**：这样即使这帧随后被判 `NotReady` 而回错，
-                    // 页面也已经看到了字节。而反过来（先记账成功才推）会让
-                    // 「Hub 回了 channel_error 但终端里字符已经出现」永远不可能发生。
-                    if frame.msg_type == types::CHANNEL_DATA {
-                        publish_channel_data(state, &auth.node_id, &frame);
-                    }
-                    match crate::channels::on_channel_frame(state, &auth.node_id, &frame) {
-                        // coverage: excluded — channel 帧回帧发送失败需对端在读循环中途消失。
-                        crate::channels::Reply::Nothing => {}
-                        crate::channels::Reply::Frame(out) => {
-                            if let Err(e) = send_frame(socket, out).await {
-                                return Err(format!("cannot reply to a channel frame: {e}"));
-                            }
-                        }
-                    }
-                    continue;
-                }
-                // 其余（含未知类型）一律忽略：约束 14 前向兼容
-        }
-            control = outbound.recv() => {
-                let Some(frame) = control else {
-                    // coverage: excluded — 发送端全部被丢弃需先摘表再让 relay 空转，
-                    // 正常路径上摘表时连接也该结束了。
-                    // 发送端全部被丢弃 = 这张表把本连接摘了。
-                    // 正常路径上 `handle_socket` 摘表时连接也该结束了，
-                    // 所以这里按「连接结束」返回而不是继续空转。
-                    // coverage: excluded — 控制帧发送失败需对端在 relay 中途消失。
-                    return Err("outbound closed".to_string());
-                };
-                if let Err(e) = send_frame(socket, frame).await {
-                    return Err(format!("cannot deliver control frame: {e}"));
+                    // 慢读：等令牌回补再处理这一帧。**不重读**——
+                    // 已经读进来的字节丢掉就是丢数据。
+                    tokio::time::sleep(Duration::from_millis(SLOW_READ_PAUSE_MS)).await;
                 }
             }
+        }
+        let frame: Frame = match serde_json::from_str(&text) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::debug!(conn_id = %conn_id, error = %e, "dropping unparsable frame");
+                continue;
+            }
+        };
+        if frame.msg_type == types::HEARTBEAT {
+            on_heartbeat(state, conn_id, auth, &frame);
+            continue;
+        }
+        if crate::channels::is_channel_type(&frame.msg_type) {
+            // 页面侧数据面（子任务 5a）：`channel_data` 的**载荷**推给
+            // 浏览器的 SSE 订阅者。只推载荷、不推整帧——`Frame` 的
+            // `v` / `seq` 是设备侧 WS 的语义（§2），页面不验签也不重放。
+            //
+            // 推送在记账**之前**：这样即使这帧随后被判 `NotReady` 而回错，
+            // 页面也已经看到了字节。而反过来（先记账成功才推）会让
+            // 「Hub 回了 channel_error 但终端里字符已经出现」永远不可能发生。
+            if frame.msg_type == types::CHANNEL_DATA {
+                publish_channel_data(state, &auth.node_id, &frame);
+            }
+            // 回帧**入数据面队列**（子任务 5b），不再直接写 socket：
+            // 写 socket 会阻塞读循环，而那正是「设备不读时 Hub 的写缓冲无界」
+            // 与「控制帧被数据帧拖住」两个问题的同一根源。
+            if let crate::channels::Reply::Frame(out) =
+                crate::channels::on_channel_frame(state, &auth.node_id, &frame)
+            {
+                queue_data(
+                    state,
+                    conn_id,
+                    out,
+                    flood_frame(&hub_core::limits::LimitError::Flood),
+                );
+            }
+            continue;
+        }
+        // 其余（含未知类型）一律忽略：约束 14 前向兼容
+    }
+}
+
+/// 写协程：只消费出站队列，只写 sink。
+///
+/// **`biased` 是功能性的**：控制面（`disconnect{superseded}`）必须插队，
+/// 否则一条正在被 256 帧 PTY 输出灌满的连接，会先写完数据才看到「你被顶替了」。
+/// 没有 `biased` 时 `select!` 随机选臂，延迟上限就成了掷骰子。
+async fn write_loop(
+    mut sink: futures_util::stream::SplitSink<WebSocket, Message>,
+    mut control: mpsc::Receiver<Frame>,
+    mut data: mpsc::Receiver<Frame>,
+) {
+    let mut control_open = true;
+    let mut data_open = true;
+    while control_open || data_open {
+        tokio::select! {
+            biased;
+            frame = control.recv(), if control_open => match frame {
+                Some(frame) => {
+                    if let Err(reason) = send_frame(&mut sink, frame).await {
+                        tracing::info!(reason = %reason, "ws writer ended on a control frame");
+                        return;
+                    }
+                }
+                // 收端关闭 = 表里已摘掉这条连接。继续把数据面剩下的写完，
+                // 但不再选它（否则 `recv()` 立刻返回 `None`，空转成忙循环）。
+                None => control_open = false,
+            },
+            frame = data.recv(), if data_open => match frame {
+                Some(frame) => {
+                    if let Err(reason) = send_frame(&mut sink, frame).await {
+                        tracing::info!(reason = %reason, "ws writer ended on a data frame");
+                        return;
+                    }
+                }
+                None => data_open = false,
+            },
+        }
+    }
+}
+
+/// 控制帧入队；连接已走就丢（没什么可通知的了）。
+fn queue_control(state: &AppState, conn_id: &str, frame: Frame) {
+    match state.outbound().send(conn_id, frame) {
+        Ok(_) => {}
+        // coverage: excluded — 控制面 8 格，而这里一次只投一帧；要满需
+        // 同一连接在极窄窗口里被连续顶替 9 次且写协程一次都不消费。
+        Err(conns::PushError::QueueFull) => {
+            tracing::warn!(conn_id = %conn_id, "control queue full; dropping a control frame");
+        }
+    }
+}
+
+/// 数据帧入队；打满则丢帧并回 `err{code:"flood"}`（走控制面）。
+fn queue_data(state: &AppState, conn_id: &str, frame: Frame, flood: Frame) {
+    match state.outbound().send_data(conn_id, frame) {
+        Ok(_) => {}
+        // coverage: excluded — 数据面 256 帧；写协程在测试里始终消费，
+        // 端到端构造「对端不读 + 256 帧回帧」需要真 socket 背压，
+        // 而决策本身（满 → 丢 + 回 err）由 `conns.rs` 的单测覆盖。
+        Err(conns::PushError::QueueFull) => {
+            tracing::warn!(
+                conn_id = %conn_id,
+                "data queue full; dropping a channel reply and reporting flood"
+            );
+            queue_control(state, conn_id, flood);
         }
     }
 }
@@ -814,10 +900,17 @@ async fn send_best_effort(socket: &mut WebSocket, frame: Frame, conn_id: &str) {
 }
 
 /// 发一帧（JSON 文本）。
-async fn send_frame(socket: &mut WebSocket, frame: Frame) -> Result<(), String> {
+///
+/// 泛型而不是接收 `&mut WebSocket`：写协程拿到的是 `SplitSink`，握手路径
+/// 拿到的是整条 `WebSocket`，两者都是 `Sink<Message>`。写两份会漂移——
+/// 而「序列化失败」与「对端关了」在这两处必须被同样地报告。
+async fn send_frame<S>(sink: &mut S, frame: Frame) -> Result<(), String>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
     let text = frame.to_text().map_err(|e| e.to_string())?;
-    socket
-        .send(axum::extract::ws::Message::Text(text.into()))
+    sink.send(Message::Text(text.into()))
         .await
         .map_err(|e| e.to_string())
 }
