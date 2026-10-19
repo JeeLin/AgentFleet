@@ -113,26 +113,50 @@ fn an_unknown_connector_is_refused_with_an_error_frame() {
     }
 }
 
-/// 一个**已注册但实现是骨架**的 connector（子任务 7 的三个），开通道要回
-/// 一句人话（`invalid`）而不是假装成功——用户看到的是错误，不是黑屏。
+/// **M1 的三个 connector 全部是真实现了**（子任务 8/9/10）：开通道要么拿到
+/// `channel_ready`，要么拿到一句**说清为什么**的 `channel_error`——而不是
+/// 「打开成功但什么都不做」的黑屏。
+///
+/// 这条测试**曾是**「骨架 connector 必须说人话」——子任务 7 写下它是为了
+/// 防止那种黑屏。现在三个都落地了，那条判据按它自己写的注释到期了
+/// （"会随实现推进自己失效，而它的失效方式是新实现被当成 bug 报回来"）。
+///
+/// **换成什么**：M1 剩下的那个真不变式是「**注册表里有的，开通道绝不沉默
+/// 失败**」。每个 connector 按各自契约给参数：exec 一次性命令没有「先开
+/// 再发」两步，所以命令随 `open` 来（子任务 10 的形状），裸开必然被拒——
+/// 那正是「说人话」，不是失败。
 #[test]
-fn a_connector_that_is_not_built_yet_says_so_instead_of_pretending_to_work() {
+fn every_registered_connector_either_opens_or_says_why_not() {
     reset();
-    // **逐个点名，不再遍历注册表**：terminal 已经是真的了（子任务 8），
-    // 「遍历全部注册表并断言都还没实现」这条判据会随实现推进自己失效，
-    // 而它的失效方式是新实现被当成 bug 报回来。
-    for name in [connector::names::FILES, connector::names::EXEC] {
-        let action = channel::on_channel_frame(&open_frame("ch-s", name, 8));
-        let f = expect_frame(&action, types::CHANNEL_ERROR);
-        assert_eq!(f.c["channel_id"], "ch-s");
-        assert!(
-            f.c["reason"]
-                .as_str()
-                .unwrap_or("")
-                .contains("not implemented"),
-            "{name} 的错误要说人话: {}",
-            f.c
-        );
+    let cases = [
+        (connector::names::TERMINAL, serde_json::json!({})),
+        (connector::names::FILES, serde_json::json!({})),
+        (
+            connector::names::EXEC,
+            serde_json::json!({ "command": "/bin/true" }),
+        ),
+    ];
+    for (i, (name, params)) in cases.iter().enumerate() {
+        let id = format!("ch-real-{i}");
+        // **根与 connector 私有参数平级**（`OpenReq` 的形状）：`workspace_root`
+        // 是一等字段，其余透传给 `#[serde(flatten)]` 出去的那部分。
+        let mut merged = serde_json::Map::new();
+        merged.insert("workspace_root".to_string(), serde_json::json!("."));
+        if let Some(obj) = params.as_object() {
+            for (k, v) in obj {
+                merged.insert(k.clone(), v.clone());
+            }
+        }
+        let spec = OpenChannel {
+            channel_id: id.clone(),
+            connector: (*name).to_string(),
+            params: serde_json::Value::Object(merged),
+            credit_start: 8,
+        };
+        let frame = Frame::push(types::OPEN_CHANNEL, 1, serde_json::to_value(&spec).unwrap());
+        let action = channel::on_channel_frame(&frame);
+        let f = expect_frame(&action, types::CHANNEL_READY);
+        assert_eq!(f.c["channel_id"], id, "{name} 没能真的开起来");
     }
     channel::on_disconnect();
 }
