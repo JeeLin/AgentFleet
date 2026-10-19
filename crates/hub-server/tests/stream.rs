@@ -579,6 +579,54 @@ async fn opening_a_channel_reaches_the_device_as_an_open_channel_frame() {
     );
 }
 
+/// 设备**没上报**这个 connector → 409，且响应里带上「它到底上报了什么」。
+///
+/// 夹具里的设备上报 `["terminal"]`，所以 exec 必须被拒。关键不在 409 本身，
+/// 而在 `reported` 字段：页面要能说清「这台机器只装了 terminal」，而不是给用户
+/// 一个没有主语的失败。
+#[tokio::test]
+async fn opening_a_channel_for_an_unreported_connector_is_a_conflict() {
+    let hub = common::Hub::boot().await;
+    let (node_id, mut est) = enrolled_device(&hub).await;
+    let h = Harness::from_hub(hub).await;
+    let session_id = make_session(&h, &node_id).await;
+
+    let r = h.open_channel(&session_id, "exec").await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "body: {}", r.body);
+    let v = r.json();
+    assert_eq!(v["error"], json!("connector_not_reported"));
+    assert_eq!(v["detail"]["connector"], json!("exec"));
+    assert_eq!(
+        v["detail"]["reported"],
+        json!(["terminal"]),
+        "必须回设备真实上报的能力表，页面才能解释为什么开不了"
+    );
+
+    // 而且**没有**下发 open_channel：门禁在写 socket 之前就拦住了。
+    // 用「等一小段时间确认没有这一帧」而不是 drain 整个流——后者在
+    // 「恰好没发」与「发了别的帧」之间分不清。
+    let got = next_frame_of_or_timeout(&mut est, types::OPEN_CHANNEL, Duration::from_millis(300)).await;
+    assert!(got.is_none(), "被拒的请求不得下发 open_channel");
+}
+
+/// 反过来：**上报了** 的 connector 照常开通。
+///
+/// 没有这条，上面那条测试可以靠「永远返回 409」通过——那正是门禁写坏时
+/// 最可能的形态。
+#[tokio::test]
+async fn opening_a_channel_for_a_reported_connector_still_works() {
+    let hub = common::Hub::boot().await;
+    let (node_id, mut est) = enrolled_device(&hub).await;
+    let h = Harness::from_hub(hub).await;
+    let session_id = make_session(&h, &node_id).await;
+
+    let r = h.open_channel(&session_id, "terminal").await;
+    assert_eq!(r.status, StatusCode::CREATED, "body: {}", r.body);
+    let open = next_frame_of(&mut est, types::OPEN_CHANNEL).await;
+    let spec: protocol::channel::OpenChannel = open.payload().unwrap();
+    assert_eq!(spec.connector, "terminal");
+}
+
 /// 会话不存在 → 404（与 `POST /api/sessions` 的 404 口径一致）。
 #[tokio::test]
 async fn opening_a_channel_on_an_unknown_session_is_404() {
@@ -1144,6 +1192,30 @@ async fn next_matching(
     let f: protocol::frame::Frame =
         serde_json::from_str(&text).unwrap_or_else(|e| panic!("unparsable json: {text} ({e})"));
     (f.msg_type == want).then_some(f)
+}
+
+/// 读到某一类帧为止（跳过别的），带超时；**超时返回 `None` 而不是 panic**。
+///
+/// 用于断言「Hub 不应该发这个」：那种断言必须能等到超时才成立，
+/// 而 [`next_matching`] 在超时时会 panic——它适用于「必须来」的帧。
+async fn next_frame_of_or_timeout(
+    ws: &mut node_core::conn::Established,
+    want: &str,
+    budget: Duration,
+) -> Option<protocol::frame::Frame> {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        let Ok(read) = tokio::time::timeout_at(deadline, ws.next_text()).await else {
+            return None;
+        };
+        let Ok(Some(text)) = read else { return None };
+        let Ok(f) = serde_json::from_str::<protocol::frame::Frame>(&text) else {
+            continue;
+        };
+        if f.msg_type == want {
+            return Some(f);
+        }
+    }
 }
 
 /// 读到某一类帧为止（跳过别的），带超时。

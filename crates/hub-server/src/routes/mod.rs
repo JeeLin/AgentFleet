@@ -72,6 +72,7 @@ pub fn last_event_id(headers: &axum::http::HeaderMap) -> Option<u64> {
 }
 
 pub mod api;
+pub mod assets;
 pub mod setup;
 pub mod stream;
 pub mod ws;

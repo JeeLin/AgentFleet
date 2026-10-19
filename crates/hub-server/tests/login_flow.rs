@@ -245,10 +245,13 @@ async fn standard_01_first_start_is_uninitialized_and_blocks_the_rest() {
 
     // 初始化模式下「一切除豁免表外都是 403」，**不是 401**
     assert_eq!(h.get("/api/devices").await.status, StatusCode::FORBIDDEN);
-    // /login 在豁免表内（登录前没有 session），但**不豁免初始化模式门禁**
-    assert_eq!(h.get("/login").await.status, StatusCode::FORBIDDEN);
+    // `GET /login` 是**页面**（SPA 外壳），与 `/` 同属免认证静态资产，
+    // 未初始化时也要能打开——否则首次部署时登录页自己加载不出来。
+    assert_eq!(h.get("/login").await.status, StatusCode::OK);
+    // `POST /login` 才是认证端点：它在豁免表内（登录前没有 session），
+    // 但**不豁免初始化模式门禁**——没有密码可验，403。
+    assert_eq!(h.post_login("whatever", None).await.status, StatusCode::FORBIDDEN);
     let login = h.post_login("whatever", None).await;
-    assert_eq!(login.status, StatusCode::FORBIDDEN);
     assert_eq!(login.json()["error"], json!("hub_not_initialized"));
 
     // 豁免表内的照常可用

@@ -310,6 +310,45 @@ mod err {
     pub const SESSION_ENDED: &str = "session_ended";
     pub const BUSY: &str = "device_busy";
     pub const INVALID_SIZE: &str = "invalid_terminal_size";
+    /// 设备上报的能力里没有这个 connector（子任务 11 的硬过滤）。
+    pub const NOT_REPORTED: &str = "connector_not_reported";
+}
+
+/// 该节点上报过 `connector` 吗？（子任务 11 的能力硬过滤）
+///
+/// 返回 `None` 表示「放行」，`Some(上报的列表)` 表示拒绝。
+///
+/// **设备从未上报过心跳时放行**，理由与 `scheduling.md` §3 的硬过滤口径一致：
+/// 那里排的是「能力不够的设备再闲也不能用」，排除条件是**已知能力不足**。
+/// 「还没上报」不是「已知不足」——刚 enroll 完、第一个心跳（15s 周期）还没到达的
+/// 设备完全可能是全能力的，一律拒会把它在头 15 秒里变成一台废机器，而页面看到
+/// 的只是「开不了通道」。
+///
+/// 反过来说，宁可放行也不静默成功：真开了不支持的 connector 时，node 侧的注册表
+/// 查不到这个名字，会回一个明确的 `channel_error`——那不是这个门禁该管的
+/// （它只管**已声明能力**与请求是否一致），而是 node 自己也说得出话的场景。
+///
+/// **为什么门禁在开通道而不是建会话**：M1 的 `POST /api/sessions` 请求体里没有
+/// connector 字段——会话不声明 connector，connector 是开面板时才指定的
+/// （里程碑子任务 11 的「落地口径修正」）。建会话处做这条校验只能凭空捏一个字段。
+fn unreported_connector(state: &AppState, node_id: &str, asked: &str) -> Option<Vec<String>> {
+    let report = state.reports().get(node_id)?;
+    let reported: Vec<String> = report
+        .capabilities
+        .get("connectors")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if reported.iter().any(|c| c == asked) {
+        None
+    } else {
+        Some(reported)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +444,14 @@ pub async fn open_channel(
     let node_id = detail.workspace.node_id.clone();
     if state.connections().get(&node_id).is_none() {
         return Err(ApiError::conflict(err::OFFLINE));
+    }
+    // 能力硬过滤（子任务 11）：设备上报的 connectors 里没有它，就不下发。
+    // 下发一帧注定被 node 拒绝的 `open_channel` 会让页面拿到 `channel.ready`
+    // 之后才知道失败——那时通道号已经发出去、面板已经显示「已连接」。
+    if let Some(reported) = unreported_connector(&state, &node_id, &body.connector) {
+        return Err(ApiError::conflict_with(err::NOT_REPORTED, || {
+            json!({ "connector": body.connector, "reported": reported })
+        }));
     }
 
     let channel_id = identity::random_id();
