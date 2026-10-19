@@ -487,13 +487,19 @@ mod tests {
     ///
     /// **走的是和用户完全一样的路**（敲键 → `on_data` → 输出 → `poll`），
     /// 所以这个测试验证的是接线的整体，而不是单个零件。
+    /// 跑一条命令直到 shell 退出，返回 `(收到的文本, 是否退出)`。
+    ///
+    /// **60 s 上限**：这是真 fork 真 shell，而全仓并行跑测试时 CPU 被抢，
+    /// 10 s 在 `-j 2` 下偶发不够——判据是真的（一个字都没生完），
+    /// 但它会随机假红，而随机假红的测试比没有测试更坏：它训练人忽略
+    /// 红灯。上界比单次运行的耗时大一截就够，成本只是挂到上限的耗时。
     fn run_to_completion(cmd: &str) -> (String, bool) {
         let mut t = Terminal::new();
         t.open(req(serde_json::json!({ "shell": "/bin/sh" })))
             .expect("open");
         t.on_data(&serde_json::json!({ "bytes": format!("{cmd}\nexit\n") }))
             .expect("type the command");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let mut text = String::new();
         loop {
             for f in t.poll().expect("poll") {
@@ -570,7 +576,7 @@ mod tests {
         let mut t = Terminal::new();
         t.open(req(serde_json::json!({ "shell": "/bin/sh" })))
             .expect("open");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let mut seen = String::new();
         while std::time::Instant::now() < deadline && seen.trim().is_empty() {
             for f in t.poll().expect("poll") {
@@ -603,7 +609,7 @@ mod tests {
             .expect("open");
         t.on_data(&serde_json::json!({ "bytes": "exit\n" }))
             .expect("type exit");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while !t.finished() && std::time::Instant::now() < deadline {
             t.poll().expect("poll");
             std::thread::sleep(std::time::Duration::from_millis(10));

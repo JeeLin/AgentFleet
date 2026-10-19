@@ -107,7 +107,7 @@ fn a_typed_command_comes_back_as_channel_data_with_no_further_downlink() {
 
     // **只 pump，一个下行帧都不再发**：这就是 M1 要证明的那件事——
     // 终端的输出是被主动问出来的，不依赖用户再敲一个键。
-    let text = pump_until("e2e-marker", std::time::Duration::from_secs(15));
+    let text = pump_until("e2e-marker", std::time::Duration::from_secs(60));
     assert!(
         text.contains("e2e-marker"),
         "命令的输出没有主动回来：{text:?}"
@@ -130,7 +130,7 @@ fn the_channel_is_released_once_the_shell_exits() {
     // **判据是「输出停了」而不是「活通道数降了」**：后者要等到 Hub 发
     // `close_channel` 或连接断开才发生，而本测试里没有那一步——拿它当判据
     // 就只能写成「等到超时也算过」的恒真断言。
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let mut quiet_from: Option<std::time::Instant> = None;
     while std::time::Instant::now() < deadline {
         let chunk = pump_once();
@@ -139,7 +139,7 @@ fn the_channel_is_released_once_the_shell_exits() {
             (false, _) => quiet_from = None,
             (true, None) => quiet_from = Some(now),
             // 连着 1s 什么都没产出来 —— shell 确实退了。
-            (true, Some(from)) if now.duration_since(*from) > std::time::Duration::from_secs(1) => {
+            (true, Some(from)) if now.duration_since(*from) > std::time::Duration::from_secs(3) => {
                 assert!(
                     pump_once().is_empty(),
                     "shell 退出之后还在持续产出，它没真的退出"
@@ -169,7 +169,7 @@ fn output_beyond_the_credit_budget_is_queued_rather_than_dropped() {
 
     // 信用只有 2。**先等到 backlog 里真的有东西**再看——刚敲完命令时
     // shell 还没吐出任何东西，此刻 backlog=0 是「还没开始」而不是「丢了」。
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while channel::backlog_of("ch-credit") == 0 && std::time::Instant::now() < deadline {
         pump_once();
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -183,7 +183,7 @@ fn output_beyond_the_credit_budget_is_queued_rather_than_dropped() {
     // 补信用并继续 pump，直到拿到结束标记。
     channel::on_channel_frame(&credit_frame("ch-credit", 100_000));
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let mut text = String::new();
     while std::time::Instant::now() < deadline && !text.contains("DONE") {
         text.push_str(&pump_once());
