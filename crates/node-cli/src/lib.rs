@@ -8,14 +8,14 @@
 //! 每条分支都能由「spawn 二进制 + 不同 argv」走到（覆盖率门禁要求 main.rs 100%）。
 //!
 //! 注意：**不要**把连接 / 进程逻辑挪进来——本文件只负责「解析 + 分派」。
-//! supervisor 与 worker 各自成模块，`main.rs` 保持极薄、每条分支都能由
-//! 「spawn 二进制 + 不同 argv」走到（覆盖率门禁要求 main.rs 100%）。
+//! supervisor 在 [`supervisor`]，worker 在 [`node_core::worker`]：连接能力属于
+//! `node-core`（connector 只能被已认证连接使用），本 crate 只决定「起哪个角色」。
+//! `main.rs` 保持极薄、每条分支都能由「spawn 二进制 + 不同 argv」走到
+//! （覆盖率门禁要求 main.rs 100%）。
 
-pub mod filelog;
 pub mod log_cmd;
 pub mod runargs;
 pub mod supervisor;
-pub mod worker;
 
 use std::path::PathBuf;
 
@@ -178,7 +178,7 @@ fn dispatch<W: std::io::Write>(
 ) -> std::process::ExitCode {
     match role_of(args) {
         Role::Worker => {
-            let mut w = worker::Worker::new(data_dir, hub_url);
+            let mut w = node_core::worker::Worker::new(data_dir, hub_url);
             w.work()
         }
         Role::Supervisor => {

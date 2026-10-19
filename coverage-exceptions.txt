@@ -45,14 +45,14 @@ crates/hub-server/src/routes/ws.rs:700: 控制帧发送失败需对端在 relay 
 crates/hub-server/src/routes/ws.rs:764: `send_best_effort` 的失败留痕行：所有握手失败帧 发送失败的共同路径，需对端在收失败帧前消失。 / 而「错误帧没送达」这类问题恰恰只在其中一处被记录时最难查。
 crates/identity/src/lib.rs:127: else 臂（first_chunk::<16> 返回 None）结构上不可达， SHA-256 digest 恒为 32 字节，恒 ≥ 16。
 crates/identity/src/lib.rs:95: ed25519-dalek 对几乎所有 32 字节输入均解压成功， 构造不出确定性非法曲线点。
-crates/node-cli/src/filelog.rs:39: 轮转失败需要日志目录不可写，而 `rotate_if_needed` 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
-crates/node-cli/src/filelog.rs:40: 轮转失败需要日志目录不可写，而 `rotate_if_needed` 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
-crates/node-cli/src/filelog.rs:41: 轮转失败需要日志目录不可写，而 `rotate_if_needed` 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
-crates/node-cli/src/filelog.rs:42: 轮转失败需要日志目录不可写，而 `rotate_if_needed` 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
-crates/node-cli/src/filelog.rs:43: 轮转失败需要日志目录不可写，而 `rotate_if_needed` 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
-crates/node-cli/src/filelog.rs:44: 轮转失败需要日志目录不可写，而 `rotate_if_needed` 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
-crates/node-cli/src/filelog.rs:45: 轮转失败需要日志目录不可写，而 `rotate_if_needed` 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
-crates/node-cli/src/filelog.rs:46: 轮转失败需要日志目录不可写，而 `rotate_if_needed` 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
+crates/node-core/src/entry.rs:39: 轮转失败需要日志目录不可写，而 `rotate_if_needed` 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
+crates/node-core/src/entry.rs:40: 轮转失败需要日志目录不可写，而 `rotate_if_needed` 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
+crates/node-core/src/entry.rs:41: 轮转失败需要日志目录不可写，而 `rotate_if_needed` 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
+crates/node-core/src/entry.rs:42: 轮转失败需要日志目录不可写，而 `rotate_if_needed` 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
+crates/node-core/src/entry.rs:43: 轮转失败需要日志目录不可写，而 `rotate_if_needed` 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
+crates/node-core/src/entry.rs:44: 轮转失败需要日志目录不可写，而 `rotate_if_needed` 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
+crates/node-core/src/entry.rs:45: 轮转失败需要日志目录不可写，而 `rotate_if_needed` 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
+crates/node-core/src/entry.rs:46: 轮转失败需要日志目录不可写，而 `rotate_if_needed` 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
 crates/node-cli/src/lib.rs:126: data_dir 取不到：dirs::data_dir 在 HOME 存在即返回 Some，且 root 下权限错误不可构造，本环境下该 Err 分支不可达（防御性兜底）。
 crates/node-cli/src/lib.rs:127: data_dir 取不到：dirs::data_dir 在 HOME 存在即返回 Some，且 root 下权限错误不可构造，本环境下该 Err 分支不可达（防御性兜底）。
 crates/node-cli/src/lib.rs:128: data_dir 取不到：dirs::data_dir 在 HOME 存在即返回 Some，且 root 下权限错误不可构造，本环境下该 Err 分支不可达（防御性兜底）。
@@ -79,49 +79,49 @@ crates/node-cli/src/supervisor.rs:224: spawn 失败臂：需二进制路径不�
 crates/node-cli/src/supervisor.rs:230: wait 失败臂：需子进程被信号杀死后 `wait` 报错。
 crates/node-cli/src/supervisor.rs:231: wait 失败臂：需子进程被信号杀死后 `wait` 报错。
 crates/node-cli/src/supervisor.rs:232: wait 失败臂：需子进程被信号杀死后 `wait` 报错。
-crates/node-cli/src/worker.rs:128: `backfill_node_id` 失败需身份文件在会话中途 变成只读或损坏。
-crates/node-cli/src/worker.rs:129: `backfill_node_id` 失败需身份文件在会话中途 变成只读或损坏。
-crates/node-cli/src/worker.rs:136: `record_gen` 失败同上：需身份文件中途不可写。
-crates/node-cli/src/worker.rs:137: `record_gen` 失败同上：需身份文件中途不可写。
-crates/node-cli/src/worker.rs:156: 退避重连的 continue：需构造一次「可重试的传输 失败」并等过退避窗口。
-crates/node-cli/src/worker.rs:183: `mark_superseded` 失败需身份文件中途不可写。
-crates/node-cli/src/worker.rs:184: `mark_superseded` 失败需身份文件中途不可写。
-crates/node-cli/src/worker.rs:224: 心跳 tick 臂：需让 ticker 在 session 内触发而 read 不返回。
-crates/node-cli/src/worker.rs:225: 心跳 tick 臂：需让 ticker 在 session 内触发而 read 不返回。
-crates/node-cli/src/worker.rs:226: 心跳 tick 臂：需让 ticker 在 session 内触发而 read 不返回。
-crates/node-cli/src/worker.rs:234: `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
-crates/node-cli/src/worker.rs:243: 未知控制帧的忽略臂：需发一帧 disconnect 之外的 未知类型并让它走到这里。
-crates/node-cli/src/worker.rs:259: heartbeat 编码失败需构造 serde 失败的 Heartbeat。
-crates/node-cli/src/worker.rs:260: heartbeat 编码失败需构造 serde 失败的 Heartbeat。
-crates/node-cli/src/worker.rs:381: 只在断言失败时执行；`panic!` 的格式串行被 llvm-cov 记为 miss（多行宏已知现象）。
-crates/node-cli/src/worker.rs:425: 同上：只在断言失败时执行的 `panic!` 参数行。
-crates/node-cli/src/worker.rs:455: `assert!` 的格式串参数行（多行宏已知现象）。
-crates/node-cli/src/worker.rs:464: 同上：`assert!` 的格式串参数行。
-crates/node-cli/src/worker.rs:50: `work` 的 load 成功臂后段：需真 data_dir， 与 `run_with` 同一不可达形状（:64）。
-crates/node-cli/src/worker.rs:580: 测试夹具 `fake_hub`：fixture 只在测试自己起的 监听器上跑，accept / upgrade 失败臂构造不出。
-crates/node-cli/src/worker.rs:584: 同上：fixture 的 upgrade 失败臂。
-crates/node-cli/src/worker.rs:59: `run_with` 自建多线程 runtime，嵌在 `#[tokio::test]` 里会 panic。
-crates/node-cli/src/worker.rs:597: `unreachable!`：上面已经 return，结构上不可达。
-crates/node-cli/src/worker.rs:69: 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-cli/src/worker.rs:699: 日志轮询辅助函数的 deadline `assert!` 行： 只在失败时执行。
-crates/node-cli/src/worker.rs:70: 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-cli/src/worker.rs:71: 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-cli/src/worker.rs:72: 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-cli/src/worker.rs:73: 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-cli/src/worker.rs:74: 见 :66 的 `run_with` 标注：进程入口，只能由 真进程触达。
-crates/node-cli/src/worker.rs:75: 见 :66 的 `run_with` 标注：进程入口，只能由 真进程触达。
-crates/node-cli/src/worker.rs:76: 见 :66 的 `run_with` 标注：进程入口，只能由 真进程触达。
-crates/node-cli/src/worker.rs:77: 见 :66 的 `run_with` 标注：进程入口，只能由 真进程触达。
-crates/node-cli/src/worker.rs:81: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
-crates/node-cli/src/worker.rs:82: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
-crates/node-cli/src/worker.rs:83: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
-crates/node-cli/src/worker.rs:85: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
-crates/node-cli/src/worker.rs:88: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
-crates/node-cli/src/worker.rs:89: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
-crates/node-cli/src/worker.rs:90: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
-crates/node-cli/src/worker.rs:96: 同上：`block_on` 是进程入口路径。 而 worker 自己不打算判自己坏——它只会「正常停下」。
-crates/node-cli/src/worker.rs:97: 同上：`block_on` 是进程入口路径。 而 worker 自己不打算判自己坏——它只会「正常停下」。
-crates/node-cli/src/worker.rs:98: 同上：`block_on` 是进程入口路径。 而 worker 自己不打算判自己坏——它只会「正常停下」。
+crates/node-core/src/worker.rs:128: `backfill_node_id` 失败需身份文件在会话中途 变成只读或损坏。
+crates/node-core/src/worker.rs:129: `backfill_node_id` 失败需身份文件在会话中途 变成只读或损坏。
+crates/node-core/src/worker.rs:136: `record_gen` 失败同上：需身份文件中途不可写。
+crates/node-core/src/worker.rs:137: `record_gen` 失败同上：需身份文件中途不可写。
+crates/node-core/src/worker.rs:156: 退避重连的 continue：需构造一次「可重试的传输 失败」并等过退避窗口。
+crates/node-core/src/worker.rs:183: `mark_superseded` 失败需身份文件中途不可写。
+crates/node-core/src/worker.rs:184: `mark_superseded` 失败需身份文件中途不可写。
+crates/node-core/src/worker.rs:224: 心跳 tick 臂：需让 ticker 在 session 内触发而 read 不返回。
+crates/node-core/src/worker.rs:225: 心跳 tick 臂：需让 ticker 在 session 内触发而 read 不返回。
+crates/node-core/src/worker.rs:226: 心跳 tick 臂：需让 ticker 在 session 内触发而 read 不返回。
+crates/node-core/src/worker.rs:234: `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
+crates/node-core/src/worker.rs:243: 未知控制帧的忽略臂：需发一帧 disconnect 之外的 未知类型并让它走到这里。
+crates/node-core/src/worker.rs:259: heartbeat 编码失败需构造 serde 失败的 Heartbeat。
+crates/node-core/src/worker.rs:260: heartbeat 编码失败需构造 serde 失败的 Heartbeat。
+crates/node-core/src/worker.rs:381: 只在断言失败时执行；`panic!` 的格式串行被 llvm-cov 记为 miss（多行宏已知现象）。
+crates/node-core/src/worker.rs:425: 同上：只在断言失败时执行的 `panic!` 参数行。
+crates/node-core/src/worker.rs:455: `assert!` 的格式串参数行（多行宏已知现象）。
+crates/node-core/src/worker.rs:464: 同上：`assert!` 的格式串参数行。
+crates/node-core/src/worker.rs:50: `work` 的 load 成功臂后段：需真 data_dir， 与 `run_with` 同一不可达形状（:64）。
+crates/node-core/src/worker.rs:580: 测试夹具 `fake_hub`：fixture 只在测试自己起的 监听器上跑，accept / upgrade 失败臂构造不出。
+crates/node-core/src/worker.rs:584: 同上：fixture 的 upgrade 失败臂。
+crates/node-core/src/worker.rs:59: `run_with` 自建多线程 runtime，嵌在 `#[tokio::test]` 里会 panic。
+crates/node-core/src/worker.rs:597: `unreachable!`：上面已经 return，结构上不可达。
+crates/node-core/src/worker.rs:69: 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
+crates/node-core/src/worker.rs:699: 日志轮询辅助函数的 deadline `assert!` 行： 只在失败时执行。
+crates/node-core/src/worker.rs:70: 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
+crates/node-core/src/worker.rs:71: 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
+crates/node-core/src/worker.rs:72: 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
+crates/node-core/src/worker.rs:73: 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
+crates/node-core/src/worker.rs:74: 见 :66 的 `run_with` 标注：进程入口，只能由 真进程触达。
+crates/node-core/src/worker.rs:75: 见 :66 的 `run_with` 标注：进程入口，只能由 真进程触达。
+crates/node-core/src/worker.rs:76: 见 :66 的 `run_with` 标注：进程入口，只能由 真进程触达。
+crates/node-core/src/worker.rs:77: 见 :66 的 `run_with` 标注：进程入口，只能由 真进程触达。
+crates/node-core/src/worker.rs:81: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
+crates/node-core/src/worker.rs:82: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
+crates/node-core/src/worker.rs:83: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
+crates/node-core/src/worker.rs:85: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
+crates/node-core/src/worker.rs:88: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
+crates/node-core/src/worker.rs:89: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
+crates/node-core/src/worker.rs:90: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
+crates/node-core/src/worker.rs:96: 同上：`block_on` 是进程入口路径。 而 worker 自己不打算判自己坏——它只会「正常停下」。
+crates/node-core/src/worker.rs:97: 同上：`block_on` 是进程入口路径。 而 worker 自己不打算判自己坏——它只会「正常停下」。
+crates/node-core/src/worker.rs:98: 同上：`block_on` 是进程入口路径。 而 worker 自己不打算判自己坏——它只会「正常停下」。
 crates/node-core/src/conn.rs:291: `Frame` 只含字符串键与有限数值，serde 结构上不会 失败；要触达需往协议里塞 NaN/非字符串键，那会被 protocol crate 的单测挡住。
 crates/node-core/src/conn.rs:292: `Frame` 只含字符串键与有限数值，serde 结构上不会 失败；要触达需往协议里塞 NaN/非字符串键，那会被 protocol crate 的单测挡住。
 crates/node-core/src/conn.rs:317: 对端 Close 帧先到并命中下面的 Close 臂， 这个「流结束」臂因此被遮蔽；纯 FIN 而不发 Close 的对端会被 tungstenite 报成读错误，走的是另一条路。

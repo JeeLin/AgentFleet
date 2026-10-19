@@ -6,18 +6,36 @@
 //!
 //! 身份（`identity.json`）由 worker 打开：它是设备身份，不是进程身份
 //! （约束 12：升级只换 worker，`node_id` 不能变）。
+//!
+//! 为什么在 `node-core` 而不在 `node-cli`（进程入口那一侧）：connector 只能被
+//! **已认证的 WS 连接**使用，而「进程入口」不该是连接能力的拥有者——那样
+//! 每加一种能力都要动 `node-cli`，而 `node-cli` 恰是升级流程之外的薄壳。
+//! 同理 [`crate::entry`]（日志写入侧）也一并搬了过来。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::filelog::{self, ROLE_WORKER};
-use node_core::conn::{self, ConnOutcome, Established};
-use node_core::heartbeat;
-use node_core::reconnect;
-use node_core::supervisor::exit_code;
-use node_core::Identity;
+use crate::channel;
+use crate::conn::{self, ConnOutcome, Established};
+use crate::entry;
+use crate::heartbeat;
+use crate::reconnect;
+use crate::supervisor::exit_code;
+use crate::Identity;
 use protocol::frame::Frame;
 use protocol::message::{DeviceInfo, Disconnect};
+
+/// worker 的日志落点。**由构造方注入**，不直接依赖数据目录。
+///
+/// 为什么是接缝而不是直接写文件：本 crate 不决定进程怎么起、数据目录在哪
+/// （那是 `node-cli` 的事），而通道帧处理一旦上线，日志就同时是
+/// 「连接活着」与「通道处理没崩」的唯一证据。这里用一行闭包把落点留给调用方，
+/// 测试因此能断言「处理了哪些帧」而不必去读盘。
+type Logger = dyn Fn(&str) + Send + Sync;
+
+/// `afcli` 二进制名。命令行首行用它自称，避免「日志里写着 node-cli」那种
+/// 用户要愣一下才反应过来的错位。
+const BIN_NAME: &str = "afcli";
 
 /// 一次已认证连接上的循环被什么终止了。
 #[derive(Debug)]
@@ -34,11 +52,23 @@ enum SessionEnd {
 pub struct Worker {
     data_dir: PathBuf,
     hub_url: String,
+    log: Box<Logger>,
 }
 
 impl Worker {
     pub fn new(data_dir: PathBuf, hub_url: String) -> Self {
-        Self { data_dir, hub_url }
+        let log = log_to(&data_dir);
+        Self {
+            data_dir,
+            hub_url,
+            log: Box::new(log),
+        }
+    }
+
+    /// 自定日志落点（集成测试用：把帧处理过程收进内存缓冲）。
+    pub fn with_logger(mut self, log: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        self.log = Box::new(log);
+        self
     }
 
     /// 阻塞运行，返回进程退出码。正常情况下不返回。
@@ -69,7 +99,7 @@ impl Worker {
     fn run_with(&mut self, mut identity: Identity) -> std::process::ExitCode {
         let node_id = identity.node_id();
         self.say(&format!(
-            "worker starting, node_id={}, hub={}",
+            "{BIN_NAME} worker starting, node_id={}, hub={}",
             // coverage: excluded — 见 :66 的 `run_with` 标注：进程入口，只能由
             // 真进程触达。
             node_id.as_deref().unwrap_or("<none: will enroll>"),
@@ -179,7 +209,7 @@ impl Worker {
                     // 什么都不记得，会老老实实再连一次。所以持久化到身份文件，
                     // 由人工介入清除（「被顶替」意味着同 node_id 另有连接活着）。
                     // coverage: excluded — `mark_superseded` 失败需身份文件中途不可写。
-                    if let Err(e) = identity.mark_superseded(&node_core::now_secs()) {
+                    if let Err(e) = identity.mark_superseded(&crate::now_secs()) {
                         self.say(&format!("error: cannot persist the superseded mark: {e}"));
                         return exit_code::CRASH;
                     }
@@ -241,9 +271,48 @@ impl Worker {
                                 // 未知类型并让它走到这里。
                                 return ended;
                             }
+                            if let Some(ended) = self.on_channel_message(est, &frame).await {
+                                return ended;
+                            }
                         }
                     },
                 },
+            }
+        }
+    }
+
+    /// 一帧通道帧 → [`channel::on_channel_frame`] → 依次发出该回的那些帧。
+    ///
+    /// **回多帧**是常态：`open_channel` 回 `channel_ready`，PTY 一帧输入就可能
+    /// 带回一大串输出（按信用额度放行若干帧，剩下排队等 `channel_credit`）。
+    ///
+    /// 返回 `Some` = 这条连接该结束了。通道帧只有一种能到这一步：**载荷
+    /// 解不开**（比如 `open_channel.c` 不是对象）。那不是「没听懂」而是
+    /// 协议分叉——留着这条连接只会让后面每一帧都解析失败（约束 14 的
+    /// 「未知类型忽略」针对的是**类型名**，不是坏载荷）。
+    async fn on_channel_message(&self, est: &mut Established, frame: &Frame) -> Option<SessionEnd> {
+        if !channel::is_channel_type(&frame.msg_type) {
+            return None;
+        }
+        match channel::on_channel_frame(frame) {
+            channel::Action::None => None,
+            channel::Action::End => Some(SessionEnd::Transport(format!(
+                "bad {} payload",
+                frame.msg_type
+            ))),
+            channel::Action::Send(frames) => {
+                for out in &frames {
+                    if let Err(e) = est.send(out).await {
+                        // 通道帧回不回得出去**不**当成断连理由：Hub 判离站靠的是
+                        // 收不到心跳，而它自己会发现这里断没断。只留痕。
+                        self.say(&format!(
+                            "channel frame send failed ({}): {}",
+                            out.msg_type,
+                            outcome_phrase(&e)
+                        ));
+                    }
+                }
+                None
             }
         }
     }
@@ -290,12 +359,18 @@ impl Worker {
     }
 
     fn rotate_log(&self) {
-        filelog::rotate_at_startup(&self.data_dir, ROLE_WORKER);
+        entry::rotate_at_startup(&self.data_dir, entry::ROLE_WORKER);
     }
 
     fn say(&self, msg: &str) {
-        filelog::write(&self.data_dir, ROLE_WORKER, "info", msg);
+        (self.log)(msg);
     }
+}
+
+/// 默认日志落点：`<data_dir>/logs/afcli.log`，角色 worker。
+fn log_to(data_dir: &Path) -> impl Fn(&str) + Send + Sync + 'static {
+    let d = data_dir.to_path_buf();
+    move |msg: &str| entry::write(&d, entry::ROLE_WORKER, "info", msg)
 }
 
 /// enroll 成功后把 Hub 签发的 `node_id` 回填进身份文件。
@@ -351,8 +426,8 @@ fn device_info() -> DeviceInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Identity;
     use futures_util::{SinkExt, StreamExt};
-    use node_core::Identity;
 
     fn frame_of(t: &str, c: serde_json::Value) -> Frame {
         serde_json::from_value(serde_json::json!({"v":1,"seq":1,"t":t,"c":c})).expect("frame")
@@ -688,7 +763,7 @@ mod tests {
         needle: &str,
         budget: std::time::Duration,
     ) -> String {
-        let path = node_core::log::log_path(d);
+        let path = crate::log::log_path(d);
         let deadline = tokio::time::Instant::now() + budget;
         loop {
             if let Ok(text) = std::fs::read_to_string(&path) {
@@ -742,7 +817,7 @@ mod tests {
         let mut id = Identity::load_or_create(&d).expect("identity");
         let code = w.connect_loop(&mut id, None).await;
         assert_eq!(code, 0, "被拒绝是终态，但退出码是「正常退出」");
-        let log = std::fs::read_to_string(node_core::log::log_path(&d)).expect("log");
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
         assert!(log.contains("hub refused"), "{log}");
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -756,7 +831,7 @@ mod tests {
         let mut id = Identity::load_or_create(&d).expect("identity");
         let code = w.connect_loop(&mut id, None).await;
         assert_eq!(code, 0);
-        let log = std::fs::read_to_string(node_core::log::log_path(&d)).expect("log");
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
         assert!(log.contains("superseded"), "{log}");
         assert!(log.contains("stopping without reconnecting"), "{log}");
         let _ = std::fs::remove_dir_all(&d);
@@ -833,7 +908,7 @@ mod tests {
         // 第二次连的是同一个已关闭的端口 → 传输失败 → 继续退避，
         // 所以这个 timeout 一定到点；到点说明它确实在重连而不是退出。
         assert!(code.is_err(), "peer close 后必须重连，不该退出");
-        let log = std::fs::read_to_string(node_core::log::log_path(&d)).expect("log");
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
         assert!(log.contains("peer closed"), "{log}");
         assert!(log.contains("reconnecting"), "{log}");
         let _ = std::fs::remove_dir_all(&d);
@@ -853,7 +928,7 @@ mod tests {
         )
         .await;
         assert!(code.is_err(), "连接还活着，loop 不该退出");
-        let log = std::fs::read_to_string(node_core::log::log_path(&d)).expect("log");
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
         assert!(log.contains("authed as n_x"), "{log}");
         let _ = std::fs::remove_dir_all(&d);
     }

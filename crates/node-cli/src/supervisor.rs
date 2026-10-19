@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::filelog::{self, ROLE_SUPERVISOR};
+use node_core::entry::{self, ROLE_SUPERVISOR};
 use node_core::supervisor::{
     self, exit_code, CrashStats, Decision, ExitInfo, Inputs, EXIT_STORM_WINDOW_SECS,
 };
@@ -374,13 +374,13 @@ impl Supervisor {
 
     /// 启动时轮转一次日志。
     fn rotate_log(&self) {
-        filelog::rotate_at_startup(&self.data_dir, ROLE_SUPERVISOR);
+        entry::rotate_at_startup(&self.data_dir, ROLE_SUPERVISOR);
     }
 
     /// 一行日志。级别固定 `info`——决策与故障都值得进同一份文件，
     /// 而 supervisor 的日志量本来就小（每次 worker 退出才一行）。
     fn say(&self, msg: &str) {
-        filelog::write(&self.data_dir, ROLE_SUPERVISOR, "info", msg);
+        entry::write(&self.data_dir, ROLE_SUPERVISOR, "info", msg);
     }
 }
 

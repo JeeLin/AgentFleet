@@ -170,6 +170,44 @@ pub struct DeviceInfo {
     pub node_version: String,
 }
 
+/// `exec_request` 载荷（Hub→node，`protocol.md` §4）。
+///
+/// 一次性命令、**无 PTY**：跑完就结束，通道随即关闭（里程碑子任务 10）。
+/// `timeout_ms` 与 `max_output_bytes` **都是必填**：没有超时，一条
+/// `tail -f` 就能把通道永久占住；没有输出上限，同一条命令能让内存爆掉。
+/// 两者给 `0` 表示「不限」——但那是**调用方明确写下来的选择**，
+/// 而不是「字段没填就当 0」这两种默认值会漂移的地方。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecRequest {
+    pub channel_id: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// 工作目录。**相对工作区根解析**，绝对路径会被拒绝（约束 3 的边界强制）。
+    #[serde(default)]
+    pub cwd: String,
+    pub timeout_ms: u32,
+    pub max_output_bytes: u32,
+}
+
+/// `exec_result` 载荷（node→Hub，`protocol.md` §4）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecResult {
+    pub channel_id: String,
+    pub exit_code: i32,
+    /// 二进制安全：stdout / stderr 都是 **base64** 的字节串而不是文本。
+    /// 一条 `grep` 打到二进制文件上就会产出非法 UTF-8，而 JSON 只能装文本——
+    /// 换成 base64 之后「原样字节」才成立。
+    #[serde(default)]
+    pub stdout: String,
+    #[serde(default)]
+    pub stderr: String,
+    /// 输出是否被 `max_output_bytes` 截断。
+    #[serde(default)]
+    pub truncated: bool,
+    pub duration_ms: u64,
+}
+
 /// 消息类型枚举（用于 match 分发；未知类型走 `Unknown`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageType {
@@ -409,6 +447,84 @@ mod tests {
             MessageType::unknown_action("teleport_channel"),
             UnknownAction::Ignore
         );
+    }
+
+    #[test]
+    fn exec_result_carries_bytes_and_truncation() {
+        // 子任务 7 补的载荷：M0 的 `exec_*` 是没有 payload 的空壳。
+        let f = crate::frame::Frame::push(
+            types::EXEC_RESULT,
+            0,
+            serde_json::json!({
+                "channel_id": "ch-1",
+                "exit_code": 0,
+                "stdout": "aGk=",
+                "stderr": "",
+                "truncated": true,
+                "duration_ms": 12,
+            }),
+        );
+        let got: ExecResult = f.payload().unwrap();
+        assert_eq!(got.channel_id, "ch-1");
+        assert_eq!(got.exit_code, 0);
+        assert_eq!(got.stdout, "aGk=");
+        assert!(got.truncated);
+        assert_eq!(got.duration_ms, 12);
+        // stdout 缺省即空串而不是解码失败：Hub 侧只用它做展示
+        let f = crate::frame::Frame::push(
+            types::EXEC_RESULT,
+            0,
+            serde_json::json!({"channel_id":"ch-1","exit_code":1,"duration_ms":1}),
+        );
+        let got: ExecResult = f.payload().unwrap();
+        assert_eq!(got.stdout, "");
+        assert!(!got.truncated);
+    }
+
+    #[test]
+    fn exec_request_requires_command_and_both_limits() {
+        // 超时与输出上限是**必填**：没有它们，一条 `tail -f` 就能把通道
+        // 永久占住（里程碑子任务 10 的接口设计）。
+        let missing_limits = crate::frame::Frame::push(
+            types::EXEC_REQUEST,
+            0,
+            serde_json::json!({
+                "channel_id": "ch-1",
+                "command": "echo",
+                "timeout_ms": 1000,
+            }),
+        );
+        assert!(
+            missing_limits.payload::<ExecRequest>().is_err(),
+            "max_output_bytes must be required"
+        );
+        let missing_command = crate::frame::Frame::push(
+            types::EXEC_REQUEST,
+            0,
+            serde_json::json!({
+                "channel_id": "ch-1",
+                "timeout_ms": 1000,
+                "max_output_bytes": 1024,
+            }),
+        );
+        assert!(missing_command.payload::<ExecRequest>().is_err());
+
+        let f = crate::frame::Frame::push(
+            types::EXEC_REQUEST,
+            0,
+            serde_json::json!({
+                "channel_id": "ch-1",
+                "command": "ls",
+                "args": ["-la"],
+                "cwd": "sub",
+                "timeout_ms": 0,
+                "max_output_bytes": 0,
+            }),
+        );
+        let got: ExecRequest = f.payload().unwrap();
+        assert_eq!(got.args, vec!["-la".to_string()]);
+        assert_eq!(got.cwd, "sub");
+        assert_eq!(got.timeout_ms, 0, "0 = 不限，是调用方写下来的选择");
     }
 
     #[test]
