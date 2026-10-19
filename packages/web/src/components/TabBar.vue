@@ -31,14 +31,25 @@ import { neighborId, type TabMeta, type TabsState } from '@/lib/tabs'
 /** 一台 tab 的设备连接态。未选中且断开时 tab 左侧有一道 1px 色标（§5.5.7）。 */
 export type TabConn = 'online' | 'reconnecting' | 'offline'
 
-const props = defineProps<{
-  tabs: TabMeta[]
-  activeId: string | null
-  /** 每个 tab 已打开的面板数——**让「N 个 tab = N × 面板数条通道」这个代价可见**。 */
-  panelCounts: Record<string, number>
-  /** tab 所属设备的连接态。 */
-  connOf: (nodeId: string) => TabConn
-}>()
+const props = withDefaults(
+  defineProps<{
+    tabs: TabMeta[]
+    activeId: string | null
+    /** 每个 tab 已打开的面板数——**让「N 个 tab = N × 面板数条通道」这个代价可见**。 */
+    panelCounts: Record<string, number>
+    /** tab 所属设备的连接态。 */
+    connOf: (nodeId: string) => TabConn
+    /**
+     * 哪个 tab 有未保存的改动（文件面板编辑区）。
+     *
+     * §5.5.2 明写「关 tab 会丢未保存改动」——这句话只有在 tab 上**看得见**
+     * 时才成立，否则它只是一句写在文档里的免责声明。缺省为空：不是每个
+     * 宿主都有文件编辑（列表页复用本组件时没有这个概念）。
+     */
+    dirty?: Record<string, boolean>
+  }>(),
+  { dirty: () => ({}) },
+)
 
 const emit = defineEmits<{
   (e: 'activate', id: string): void
@@ -143,6 +154,14 @@ defineExpose({ focusTab })
         class="af-badge af-badge--info"
         :title="`这个会话开了 ${panelCounts[tab.id]} 个面板：每个都是一条活跃通道`"
       >{{ panelCounts[tab.id] }}</span>
+      <!-- 脏标记：关掉这个 tab 会丢掉未保存的改动（§5.5.2）。写在 tab 上是因为
+           那份改动随 tab 一起消失，而面板在切走时已经被卸掉、说不出口。 -->
+      <span
+        v-if="dirty[tab.id]"
+        class="af-badge af-badge--warn"
+        data-tab-dirty
+        title="有未保存的改动：关掉这个 tab 会丢掉它"
+      >未保存</span>
       <button
         class="af-tab__x"
         type="button"

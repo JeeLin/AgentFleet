@@ -152,40 +152,50 @@ function onInteract(e: Event): void {
           <span class="af-t-mute">点一下面板正文可以重试。</span>
         </div>
 
-        <!-- 终端：13a 只做纯文本缓冲（切 tab 后内容仍在），ANSI 渲染归 13b -->
-        <template v-if="panel === 'terminal'">
-          <div
-            class="af-term"
-            tabindex="0"
-            role="log"
-            aria-label="终端输出（纯文本，xterm 渲染归 13b）"
-            data-panel-focus
-          >
-            <div v-for="(line, i) in lines()" :key="i" class="af-term__line">{{ line }}</div>
-            <div v-if="!lines().length" class="af-term__line af-term__dim">
-              终端内容由 13b 挂入（xterm.js）。点这里会建立通道；之后设备上的输出会出现在这一块。
-            </div>
-          </div>
-          <p class="af-panelhost__note af-field__hint">
-            通道在第一次交互时建立：这个面板还没动过时是「未建立」。
-            关掉面板坞才会 close_channel；切 tab 不释放。
-          </p>
-        </template>
+         <!--
+           面板正文由宿主挂进来（13b / 13c）。
 
-        <!-- 文件：13c 挂入树 + 预览；这里只显示工作区根与目录 -->
-        <template v-else>
-          <div class="af-fpane">
-            <div class="af-fpane__crumbs">
-              <b>{{ path }}</b>
-              <template v-for="seg in cwd" :key="seg">
-                <span class="af-t-mute"> / </span><b>{{ seg }}</b>
-              </template>
-            </div>
-            <div class="af-fpane__body af-panelhost__void af-t-mute">
-              文件树与预览由 13c 挂入。工作区根就是会话的路径——文件面板没有第二个根。
-            </div>
-          </div>
-        </template>
+           这里是**具名插槽 + 13a 占位兜底**，不是直接接入组件：坞不知道
+           终端与文件树的区别，把「面板里面是什么」留在这一层等于让容器
+           依赖它托管的每一件东西；而留一个**没有插槽时不渲染任何东西**的
+           空位也同样糟——那时「坞开着但面板没挂」看起来就是「面板坏了」。
+           兜底内容说清「它还没挂进来」，与 M1 别处的空态同一口径
+           （§3.12：空态回答「这里本来该有东西但没有」）。
+         -->
+         <slot name="terminal">
+           <template v-if="panel === 'terminal'">
+             <div
+               class="af-term"
+               tabindex="0"
+               role="log"
+               aria-label="终端输出（纯文本，xterm 渲染归 13b）"
+               data-panel-focus
+             >
+               <div v-for="(line, i) in lines()" :key="i" class="af-term__line">{{ line }}</div>
+               <div v-if="!lines().length" class="af-term__line af-term__dim">
+                 终端内容由 13b 挂入（xterm.js）。点这里会建立通道；之后设备上的输出会出现在这一块。
+               </div>
+             </div>
+             <p class="af-panelhost__note af-field__hint">
+               通道在第一次交互时建立：这个面板还没动过时是「未建立」。
+               关掉面板坞才会 close_channel；切 tab 不释放。
+             </p>
+           </template>
+         </slot>
+
+         <slot name="files">
+           <div v-if="panel === 'files'" class="af-fpane">
+             <div class="af-fpane__crumbs">
+               <b>{{ path }}</b>
+               <template v-for="seg in cwd" :key="seg">
+                 <span class="af-t-mute"> / </span><b>{{ seg }}</b>
+               </template>
+             </div>
+             <div class="af-fpane__body af-panelhost__void af-t-mute">
+               文件树与预览由 13c 挂入。工作区根就是会话的路径——文件面板没有第二个根。
+             </div>
+           </div>
+         </slot>
       </template>
     </div>
   </div>

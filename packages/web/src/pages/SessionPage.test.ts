@@ -60,6 +60,12 @@ interface Ctx {
   fetchMock: ReturnType<typeof stubFetch>
   posts: () => number
   deletes: () => string[]
+  /**
+   * 页面建的那条下行。SSE 是**页面共用一条**（hub.connect），所以这里是
+   * `instances[0]` 而不是「每个面板一条」——按「一个 tab 一条」去取会拿到
+   * undefined，帧就发不出去，而症状看起来像「页面没解帧」。
+   */
+  src: () => FakeEventSource | undefined
 }
 
 async function mountWorkbench(seed: TabMeta[] = TWO_TABS, id = 's_1'): Promise<Ctx> {
@@ -87,6 +93,7 @@ async function mountWorkbench(seed: TabMeta[] = TWO_TABS, id = 's_1'): Promise<C
     fetchMock,
     posts: () => calls().filter((c) => c.url === '/api/channels' && c.method === 'POST').length,
     deletes: () => calls().filter((c) => c.method === 'DELETE').map((c) => c.url),
+    src: () => FakeEventSource.instances[0],
   }
 }
 
@@ -106,6 +113,49 @@ function tabLabel(w: ReturnType<typeof mountIn>, id: string): HTMLElement {
   const el = w.element.querySelector<HTMLElement>(`[data-tab-label="${id}"]`)
   if (!el) throw new Error(`no tab ${id}`)
   return el
+}
+
+/**
+ * 把文件面板拉进坞并显示它。**到此为止不碰面板正文**——通道因此还没建
+ * （§5.5.1 的懒建立：点 / 聚焦坞标签都**不**算交互，只有碰正文才算）。
+ *
+ * 走 `]`（cyclePanel）而不是「点坞标签」：坞里只有一个面板时没有第二个
+ * 标签可点，而 `[` / `]` 的语义正是「把另一个拉进来」（§5.4：坞能同时放
+ * 终端与文件）。
+ */
+async function openFiles(w: ReturnType<typeof mountIn>): Promise<void> {
+  await w.element.querySelector<HTMLElement>('.af-wb__head button')?.click()
+  await flush(w)
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: ']', bubbles: true, cancelable: true }))
+  await flush(w)
+  const tab = w.element.querySelector<HTMLElement>('[data-panel="files"]')
+  if (!tab) throw new Error('files panel did not mount')
+  await tab.click()
+  await flush(w)
+}
+
+/** 碰一下面板正文：这是建通道的判据。返回之后通道应该在 `ready`。 */
+async function touchFiles(w: ReturnType<typeof mountIn>): Promise<void> {
+  const tree = w.element.querySelector<HTMLElement>('[data-role="tree"]')
+  if (!tree) throw new Error('files panel body not rendered')
+  tree.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+  await flush(w)
+}
+
+/**
+ * 从假 SSE 上发一帧，并等到它被解完。
+ *
+ * `hub.connect()` 是**懒**的：第一次 `open()` 时才建 SSE。所以这条 helper
+ * 必须在交互之后用，否则 `src()` 还是 undefined。
+ */
+async function frame(
+  w: ReturnType<typeof mountIn>,
+  src: FakeEventSource | undefined,
+  payload: unknown,
+): Promise<void> {
+  if (!src) throw new Error('no EventSource: 还没有任何通道试图建立')
+  src.emit('channel.frame', { node_id: 'n_1', channel_id: 'ch-1', payload })
+  await flush(w)
 }
 
 beforeEach(() => {
@@ -332,6 +382,216 @@ describe('键盘', () => {
     probe.dispatchEvent(new KeyboardEvent('keydown', { key: 'o', bubbles: true, cancelable: true }))
     await flush(w)
     expect(w.element.querySelector('[data-panelhost]')).toBeNull()
+  })
+})
+
+describe('面板正文是 13b / 13c 的真组件，不是 13a 的占位', () => {
+  it('终端位挂着真 xterm 面板（占位那句「13b 挂入」不再出现）', async () => {
+    const { w } = await mountWorkbench()
+    await w.element.querySelector<HTMLElement>('.af-wb__head button')?.click()
+    await flush(w)
+
+    expect(w.element.querySelector('[data-terminal]')).not.toBeNull()
+    expect(w.element.textContent).not.toContain('终端内容由 13b 挂入')
+  })
+
+  it('`]` 把文件面板拉进坞：真树挂上，占位那句不再出现', async () => {
+    const { w } = await mountWorkbench()
+    await openFiles(w)
+    expect(w.element.querySelector('[data-role="tree"]')).not.toBeNull()
+    expect(w.element.textContent).not.toContain('文件树与预览由 13c 挂入')
+  })
+
+  it('碰正文之前树说「通道还没建立」——不是「这一层是空的」', async () => {
+    const { w } = await mountWorkbench()
+    await openFiles(w)
+    // 传错 `channelReady`（恒 true）时，组件会把「还没问过设备」说成
+    // 「目录是空的」——那正是 §3.12 要分开的两种空。
+    expect(w.element.querySelector('[data-tree-empty]')?.textContent).toContain('通道还没建立')
+  })
+
+  it('`list` 回帧进 listings → 树上有行（页面负责解帧，面板只吃 props）', async () => {
+    const { w, src } = await mountWorkbench()
+    await openFiles(w)
+    await touchFiles(w)
+    await frame(w, src(), {
+      op: 'list',
+      path: '',
+      entries: [{ name: 'src', kind: 'dir', size: 0, mtime_ms: null }],
+      total: 1,
+      truncated: false,
+    })
+
+    const rows = Array.from(w.element.querySelectorAll<HTMLElement>('[data-row]'))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.dataset.path).toBe('src')
+    expect(rows[0]?.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('通道建好之后空树说的是「这一层是空的」（不再是「没问过设备」）', async () => {
+    const { w, src } = await mountWorkbench()
+    await openFiles(w)
+    await touchFiles(w)
+    await frame(w, src(), { op: 'list', path: '', entries: [], total: 0, truncated: false })
+
+    expect(w.element.querySelector('[data-tree-empty]')?.textContent).toContain('这一层是空的')
+  })
+
+  it('`read` 回帧进 preview → 预览区给出结论（§3.14）', async () => {
+    const { w, src } = await mountWorkbench()
+    await openFiles(w)
+    await touchFiles(w)
+    await frame(w, src(), {
+      op: 'read',
+      path: 'README.md',
+      size: 12,
+      kind: 'text',
+      truncated: false,
+      text: 'hello\nworld',
+    })
+
+    expect(w.element.querySelector('[data-kind-text]')).not.toBeNull()
+    expect(w.element.querySelector('.af-files__pvname')?.textContent).toContain('README.md')
+  })
+
+  it('编辑文件和设备上的内容不一致 → tab 上出现脏标记（§5.5.2）', async () => {
+    const { w, src } = await mountWorkbench()
+    await openFiles(w)
+    await touchFiles(w)
+    await frame(w, src(), {
+      op: 'read',
+      path: 'a.txt',
+      size: 2,
+      kind: 'text',
+      truncated: false,
+      text: 'ab',
+    })
+
+    const tab = () => w.element.querySelector<HTMLElement>('[data-sid="s_1"]')
+    expect(tab()?.querySelector('[data-tab-dirty]')).toBeNull()
+
+    const area = w.element.querySelector<HTMLTextAreaElement>('.af-files__edit')
+    if (!area) throw new Error('no editor')
+    area.value = 'abc'
+    area.dispatchEvent(new Event('input'))
+    await flush(w)
+
+    expect(tab()?.querySelector('[data-tab-dirty]')?.textContent).toContain('未保存')
+  })
+
+  it('没在保存时的 error 只进 filesError（③），不动 writeError（④）', async () => {
+    const { w, src } = await mountWorkbench()
+    await openFiles(w)
+    await touchFiles(w)
+    await frame(w, src(), { op: 'error', path: '../x', reason: '越界', code: 'path_outside_root' })
+
+    expect(w.element.querySelector('[data-nav-error]')).not.toBeNull()
+    expect(w.element.querySelector('[data-write-error]')).toBeNull()
+  })
+
+  it('已结束的会话：面板只读的文本在场且「打开面板」入口禁用', async () => {
+    const fetchMock = stubFetch({
+      '/api/sessions': {
+        body: [
+          session({ id: 's_1', state: 'ended', workspace: { node_id: 'n_1', path: '/srv/alpha', path_locked: true } }),
+        ],
+      },
+      '/api/devices': { body: DEVICES },
+    })
+    window.history.replaceState(null, '', '/sessions/s_1')
+    route.value = matchRoute('/sessions/s_1')
+    void fetchMock
+    const w = mountIn(SessionPage)
+    await flush(w)
+
+    expect(w.element.querySelector('[data-conv-input]')).not.toBeNull()
+    expect((w.element.querySelector<HTMLTextAreaElement>('[data-conv-input]') as HTMLTextAreaElement).disabled).toBe(true)
+    expect(w.element.textContent).toContain('这个会话已结束')
+  })
+})
+
+describe('对话列：ConvFlow 与轨迹抽屉', () => {
+  it('对话区挂着 ConvFlow（M1 恒空，明写「M3 起有数据」）', async () => {
+    const { w } = await mountWorkbench()
+    const conv = w.element.querySelector('.af-wb__conv')
+    expect(conv?.querySelector('[data-conv-input]')).not.toBeNull()
+    expect(conv?.textContent).toContain('M3 起有数据')
+    expect(conv?.textContent).toContain('输入区是唯一有数据源的部分')
+  })
+
+  it('`t` 打开轨迹抽屉，再按一次关掉（键位由页面注册）', async () => {
+    const { w } = await mountWorkbench()
+    const press = (key: string): void => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+    }
+
+    press('t')
+    await flush(w)
+    expect(document.querySelector('[data-traj]')).not.toBeNull()
+
+    press('t')
+    await flush(w)
+    expect(document.querySelector('[data-traj]')).toBeNull()
+  })
+
+  it('抽屉 Teleport 到 body（焦点栈要按 body 子树判 inert）', async () => {
+    const { w } = await mountWorkbench()
+    await w.element.querySelector<HTMLElement>('[data-conv-traj]')?.click()
+    await flush(w)
+
+    const drawer = document.querySelector('[data-traj]')
+    expect(drawer).not.toBeNull()
+    // 在工作台的 DOM 之外：留在里面时 `inertOthers` 会退化成「一个都没 inert」
+    expect(w.element.contains(drawer)).toBe(false)
+  })
+
+  it('抽屉的三条关闭路径都只 emit close：页面把 open 置回 false', async () => {
+    const { w } = await mountWorkbench()
+    await w.element.querySelector<HTMLElement>('[data-conv-traj]')?.click()
+    await flush(w)
+
+    await document.querySelector<HTMLElement>('[data-traj-close]')?.click()
+    await flush(w)
+    expect(document.querySelector('[data-traj]')).toBeNull()
+  })
+
+  it('抽屉开着时「轨迹」按钮是 aria-expanded=true（受控组件不自己记开关）', async () => {
+    const { w } = await mountWorkbench()
+    const btn = w.element.querySelector<HTMLElement>('[data-conv-traj]')
+    expect(btn?.getAttribute('aria-expanded')).toBe('false')
+
+    await btn?.click()
+    await flush(w)
+    expect(btn?.getAttribute('aria-expanded')).toBe('true')
+  })
+})
+
+describe('一次性命令走 exec 通道', () => {
+  it('提交一条命令 = 开一条 exec 通道，参数带 command / args / cwd', async () => {
+    const { w, fetchMock } = await mountWorkbench()
+    const input = w.element.querySelector<HTMLTextAreaElement>('[data-conv-input]')
+    if (!input) throw new Error('no conv input')
+    input.value = 'ls -la'
+    input.dispatchEvent(new Event('input'))
+    await w.vm.$nextTick()
+    await w.element.querySelector<HTMLFormElement>('.af-compose')?.dispatchEvent(
+      new Event('submit', { bubbles: true, cancelable: true }),
+    )
+    await flush(w)
+
+    const opens = fetchMock.mock.calls
+      .map(([u, i]) => ({ url: String(u), init: i as RequestInit | undefined }))
+      .filter((c) => c.url === '/api/channels' && c.init?.method === 'POST')
+    const exec = opens.find((c) => String(c.init?.body ?? '').includes('"exec"'))
+    expect(exec).toBeDefined()
+    const body = JSON.parse(String(exec?.init?.body ?? '{}')) as {
+      connector: string
+      params: { command: string; args: string[]; cwd: string }
+    }
+    expect(body.connector).toBe('exec')
+    expect(body.params.command).toBe('ls')
+    expect(body.params.args).toEqual(['-la'])
+    expect(body.params.cwd).toBe('')
   })
 })
 

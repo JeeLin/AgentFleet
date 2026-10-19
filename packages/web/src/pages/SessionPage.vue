@@ -1,14 +1,29 @@
 <script setup lang="ts">
 /* ===========================================================================
-   SessionPage —— 会话工作台（骨架，规范 §5.4 / §5.5 / §7.1 / §7.2）
+   SessionPage —— 会话工作台（规范 §5.4 / §5.5 / §7.1 / §7.2）
    ---------------------------------------------------------------------------
-   13a 只做**结构与焦点**：对话列 + 可拖拽分栏 + 面板坞 + 顶部 tab 条。
-   对话流（13d）、终端（13b）、文件（13c）各自挂进来；这里不画假数据。
+   13a 做了**结构与焦点**：对话列 + 可拖拽分栏 + 面板坞 + 顶部 tab 条。
+   13b / 13c / 13d 的三个面板在这里挂进来：终端（TerminalPanel）、
+   文件（FilesPanel）、对话流 + 轨迹抽屉（ConvFlow + TrajDrawer）。
+
+   ── 宿主喂数据，面板只报意图 ──────────────────────────────────────
+   三个面板**都不 import `channel.ts`、都不发请求**：通道的生命周期是页面
+   这一层的事实（§5.5.1），面板若各持一条句柄就会出现「面板以为通道活着、
+   页面已经关了它」的第二份真相。所以页面负责：喂输出 / 清单 / 预览，
+   收 `input` / `list` / `read` / `save` / `run`，把它们翻译成上行。
+
+   ── `channel.frame` 的解帧只有一处 ────────────────────────────────
+   真 files connector 到位后，`onFileFrame` 是唯一要改的地方：现在它认
+   `payload.op === 'list' | 'read' | 'write'` 的形状，而那个形状就是
+   `node-core/src/connector/files.rs` 已经定好的回帧形状。终端那条
+   （`payload.bytes` 累加进 `ws.output`）与 exec 那条（`exec_result`）
+   同理，各在自己的段落里。
 
    ── 每个 tab 持有自己的一份状态 ───────────────────────────────────
-   `{ dock, panel, mounted }` + 终端缓冲 + 文件树 cwd 挂在 workspace 对象上，
-   切 tab 时整体换掉。只有一个全局 state 的话，切到 B 会把 A 的面板与输出
-   全冲掉——于是「支持多个」只剩一条 tab 条，是个假的（§5.5.2）。
+   `{ dock, panel, mounted }` + 终端缓冲 + 文件树 cwd / 清单 / 预览 / 脏标记
+   挂在 workspace 对象上，切 tab 时整体换掉。只有一个全局 state 的话，
+   切到 B 会把 A 的面板与输出全冲掉——于是「支持多个」只剩一条 tab 条，
+   是个假的（§5.5.2）。
 
    ── 通道的生命周期只有两条规则（§5.5.1 / §7.2） ─────────────────
    ① **懒建立**：第一次与面板正文交互才 `open_channel`。打开坞、切面板都
@@ -31,14 +46,27 @@
 
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
+import ConvFlow, { type ConvExecRequest } from '@/components/ConvFlow.vue'
 import EmptyState from '@/components/EmptyState.vue'
+import FilesPanel, {
+  type FileListing,
+  type FilePreview,
+  type FilesError,
+} from '@/components/FilesPanel.vue'
 import PanelDock, { type ChannelView, type PanelName } from '@/components/PanelDock.vue'
 import SplitHandle from '@/components/SplitHandle.vue'
 import StateBadge from '@/components/StateBadge.vue'
 import TabBar, { type TabConn } from '@/components/TabBar.vue'
+import TerminalPanel, { type TerminalSize } from '@/components/TerminalPanel.vue'
+import TrajDrawer from '@/components/TrajDrawer.vue'
 import type { DeviceSummary, SessionSummary } from '@/lib/api'
 import { listDevices, listSessions } from '@/lib/api'
-import { ChannelHub, type ChannelHandle, type ChannelState } from '@/lib/channel'
+import {
+  ChannelHub,
+  type ChannelFrame,
+  type ChannelHandle,
+  type ChannelState,
+} from '@/lib/channel'
 import { relativeTime, sessionTitle } from '@/lib/format'
 import { ApiError, NetworkError } from '@/lib/http'
 import { dispatch, isTyping, register, unregister } from '@/lib/keynav'
@@ -95,10 +123,40 @@ interface TabWorkspace {
   panel: PanelName | null
   /** 这个 tab 已打开过的面板（决定坞标签与徽标数）。 */
   mounted: PanelName[]
-  /** 终端缓冲：纯文本，切走再回来仍在。 */
+  /**
+   * 终端缓冲：纯文本（PTY 的原始字节），切走再回来仍在。
+   *
+   * 缓冲**必须**由宿主持有：xterm 实例随面板卸载（`v-if`），而 §5.5.2
+   * 要求「切走再回来时滚动记录还在」。组件只写增量。
+   */
   output: string
-  /** 文件面板当前目录（相对工作区根）。 */
+  /** 文件面板当前目录（相对工作区根）。每项一层。 */
   cwd: string[]
+  /** 已列过的层：`相对路径 → 该层条目`。没列过的层没有键（不是「空目录」）。 */
+  listings: Map<string, FileListing>
+  /** 正在列的层（相对路径）。 */
+  loading: Set<string>
+  /** 当前打开的文件预览。没打开文件时 `null`。 */
+  preview: FilePreview | null
+  /** 正在读的文件（相对路径）。 */
+  readingPath: string | null
+  /** 导航越界 / 读失败（§7.4 ③）。 */
+  filesError: FilesError | null
+  /** 写越界 / 写失败（§7.4 ④）。**与 `filesError` 分开**：下一步不同。 */
+  writeError: FilesError | null
+  /** 写操作进行中。 */
+  saving: boolean
+  /**
+   * 编辑区有未保存的改动。
+   *
+   * §5.5.2 承诺「关 tab 会丢未保存改动」——这个标记是那条承诺的兑现处：
+   * 面板报 `dirty-change`，页面把它挂在 tab 上。
+   */
+  dirty: boolean
+  /** 轨迹抽屉开着吗。**页面持有**：TrajDrawer 是受控组件，不自己记开关。 */
+  traj: boolean
+  /** 打开抽屉的那个元素——关闭后焦点还给它。 */
+  trajOpener: HTMLElement | null
   /** 每个面板的通道视图（状态 / 错误 / 丢弃数）。 */
   views: Record<PanelName, ChannelView>
 }
@@ -112,6 +170,16 @@ function blankWorkspace(): TabWorkspace {
     mounted: [],
     output: '',
     cwd: [],
+    listings: new Map(),
+    loading: new Set(),
+    preview: null,
+    readingPath: null,
+    filesError: null,
+    writeError: null,
+    saving: false,
+    dirty: false,
+    traj: false,
+    trajOpener: null,
     views: {
       terminal: { state: 'idle', error: null, dropped: 0 },
       files: { state: 'idle', error: null, dropped: 0 },
@@ -145,6 +213,20 @@ const panelCounts = computed<Record<string, number>>(() => {
   return out
 })
 
+/**
+ * 每个 tab 的脏标记。
+ *
+ * §5.5.2 明写「关 tab 会丢未保存改动」：这句话只有在 tab 上**看得见**
+ * 时才成立，否则它只是一句写在文档里的免责声明。徽标由 FilesPanel 的
+ * `dirty-change` 喂进来，页面把它挂在 tab 上——面板自己不持久化（它在
+ * 切 tab 时被 `v-if` 卸掉，留不住）。
+ */
+const dirtyTabs = computed<Record<string, boolean>>(() => {
+  const out: Record<string, boolean> = {}
+  for (const tab of tabs.value.tabs) out[tab.id] = workspaces.get(tab.id)?.dirty ?? false
+  return out
+})
+
 const channelView = computed<ChannelView>(() => {
   const ws = activeWs.value
   const panel = ws?.panel
@@ -158,10 +240,31 @@ let hub: ChannelHub | null = null
 /** `tabId\\u0000panel` → 句柄。不放进 reactive：句柄内部状态由 views 镜像。 */
 const channels = new Map<string, ChannelHandle>()
 const channelUnsubs = new Map<string, () => void>()
+/** `tabId\\u0000panel` → 帧订阅的退订函数。与状态订阅分开存，各自退订。 */
+const frameUnsubs = new Map<string, () => void>()
 
 function channelKey(tabId: string, panel: PanelName): string {
   return `${tabId}\u0000${panel}`
 }
+
+/**
+ * exec 的序号：每条命令一条通道，所以键里要有序号。
+ *
+ * 带序号**不是**为了给同一条命令去重——同一条命令在不同时刻跑是不同的
+ * 事实；是为了让两条同时发出的命令不撞进同一条通道（`exec.rs`：`spent`
+ * 之后不接受第二帧，重用它必然报「这条通道是一次性的」）。
+ */
+let execSeq = 0
+
+/**
+ * 活着的 exec 句柄。
+ *
+ * 它们**不进 `channels`**：那条表的键是 `tabId␀panel`，而 exec 的键里有
+ * 序号，一个 tab 名下可以同时有多条。混进去会让「这个 tab 有哪些面板」
+ * 与「这个 tab 有哪些通道」变成两张对不上的账——面板数徽标正是按
+ * `mounted.length` 算的。
+ */
+const execHandles = new Set<ChannelHandle>()
 
 function ensureChannel(tab: TabMeta, panel: PanelName): ChannelHandle {
   const key = channelKey(tab.id, panel)
@@ -181,9 +284,49 @@ function ensureChannel(tab: TabMeta, panel: PanelName): ChannelHandle {
     ws.views[panel].state = state
     ws.views[panel].error = handle.errorCode()
     ws.views[panel].dropped = handle.dropped()
+    // 通道刚建好：把想问而没问成的那一层补上（files 的取数不走 `send` 的
+    // 丢弃语义，见 `pendingFiles` 头注释）。终端不需要这一步——它没有
+    // 「打开时该问的第一件事」，输出是设备自己推的。
+    if (state === 'ready' && panel === 'files') filesKick(tab)
   })
   channelUnsubs.set(key, unsub)
+  const unframe = handle.onFrame((frame) => onPanelFrame(tab.id, panel, frame))
+  frameUnsubs.set(key, unframe)
   return handle
+}
+
+/**
+ * 面板通道的帧落到 tab 的那份状态上。
+ *
+ * 这是**唯一的解帧处**。三个 connector 各有自己的形状，混在一处解是为了
+ * 让「这条数据最后落到哪儿」只有一张表：
+ *
+ * | connector | 帧形状 | 落点 |
+ * |---|---|---|
+ * | terminal | `{ bytes }`（可能是半条控制序列） | `ws.output`（append-only） |
+ * | files | `{ op: 'list' \| 'read' \| 'write' \| 'error', … }` | `ws.listings` / `ws.preview` / `ws.writeError` |
+ * | exec | `{ exit_code, stdout_b64, … }` | 执行结果（一次性，回完即关） |
+ *
+ * **真 files connector 到位后这里是唯一要改的地方**——形状已经按
+ * `node-core/src/connector/files.rs` 的回帧写好了，验一次即可。
+ */
+function onPanelFrame(tabId: string, panel: PanelName, frame: ChannelFrame): void {
+  const ws = workspaces.get(tabId)
+  if (!ws) return
+  if (panel === 'terminal') {
+    const bytes = payloadString(frame.payload, 'bytes')
+    if (bytes !== null) ws.output += bytes
+    return
+  }
+  if (panel === 'files') {
+    applyFileFrame(ws, frame.payload)
+  }
+}
+
+function payloadString(payload: unknown, key: string): string | null {
+  if (typeof payload !== 'object' || payload === null) return null
+  const v = (payload as Record<string, unknown>)[key]
+  return typeof v === 'string' ? v : null
 }
 
 /**
@@ -229,6 +372,11 @@ async function releaseChannel(tabId: string, panel: PanelName): Promise<void> {
   if (unsub) {
     unsub()
     channelUnsubs.delete(key)
+  }
+  const unframe = frameUnsubs.get(key)
+  if (unframe) {
+    unframe()
+    frameUnsubs.delete(key)
   }
   const ws = workspaces.get(tabId)
   if (ws) {
@@ -282,6 +430,10 @@ function focusPanelBody(): void {
   })
 }
 
+function otherPanel(name: PanelName): PanelName {
+  return name === 'terminal' ? 'files' : 'terminal'
+}
+
 function cyclePanel(delta: number): void {
   const ws = activeWs.value
   if (!ws) return
@@ -292,6 +444,13 @@ function cyclePanel(delta: number): void {
   const order = ws.mounted
   if (!order.length) {
     openPanel('terminal')
+    return
+  }
+  if (order.length < 2) {
+    // 只挂过一个面板时 `[` / `]` 是**开另一个**（原型 `cyclePanel` 的同一条）：
+    // 在这两个键的语义里「切换」包括了「把另一个拉进坞」——否则坞里永远
+    // 只有终端，而「坞能同时放两个」这条（§5.4）在键盘上就走不到。
+    openPanel(otherPanel(ws.panel ?? order[0] ?? 'terminal'))
     return
   }
   const idx = ws.panel ? order.indexOf(ws.panel) : 0
@@ -323,8 +482,360 @@ function closeDock(): void {
   void nextTick(() => openButtonEl.value?.focus())
 }
 
+/**
+ * 终端输入 → PTY。
+ *
+ * `interact` 在 `onData` 里已经由组件报过一次（它挂在 `onData` 而不是
+ * `focusin` 上，理由见组件头），这里再报一次是**幂等**的：`open()` 在
+ * `ready` 下直接返回，而 `send()` 在通道没建好时丢弃并计数——那正是
+ * §7.3 要的「敲第一个键」的语义：通道在那时开始建，第一个字符不丢。
+ */
+function terminalInput(text: string): void {
+  const tab = activeTab.value
+  if (!tab || ended.value) return
+  const handle = ensureChannel(tab, 'terminal')
+  if (handle.state() !== 'ready') interact('terminal')
+  handle.send(text)
+}
+
+/** 尺寸协商的结果 → `TIOCSWINSZ`（走控制帧，不新增消息类型）。 */
+function terminalResize(size: TerminalSize): void {
+  const tab = activeTab.value
+  if (!tab) return
+  const handle = channels.get(channelKey(tab.id, 'terminal'))
+  handle?.resize(size.cols, size.rows)
+}
+
+/** 对话流里选了「终端」这个目标：等于在终端里敲这一行。 */
+function convSend(text: string): void {
+  terminalInput(text)
+}
+
 const dockEl = ref<HTMLElement | null>(null)
 const openButtonEl = ref<HTMLButtonElement | null>(null)
+
+/* ---------------------------------------------------------------- 轨迹抽屉 */
+
+/**
+ * 开 / 关轨迹抽屉。
+ *
+ * 开关**由页面持有**（`ws.traj`）：TrajDrawer 是受控组件，不自己记状态，
+ * 三条关闭路径（Esc / 遮罩 / 关闭按钮）都只 emit `close`。所以这里唯一要
+ * 做的就是把 `open` 置回 `false`——焦点已由组件 `pop()` 还完了。
+ *
+ * `opener` 也由页面持有：抽屉要把它交还给焦点栈，而按 `t` 键时「触发元素」
+ * 是键盘而不是某个按钮——那时传 `null`，焦点栈退到 `main[tabindex="-1"]`。
+ */
+function toggleTraj(opener: HTMLElement | null): void {
+  const ws = activeWs.value
+  if (!ws) return
+  if (ws.traj) {
+    ws.traj = false
+    ws.trajOpener = null
+    return
+  }
+  ws.traj = true
+  ws.trajOpener = opener
+}
+
+function closeTraj(): void {
+  const ws = activeWs.value
+  if (!ws) return
+  ws.traj = false
+  ws.trajOpener = null
+}
+
+/* ---------------------------------------------------------------- 文件取数 */
+
+/**
+ * 文件面板要东西的入口。**面板不持通道**（组件头注释），所以「谁去取」这一步
+ * 在页面：把意图包成通道数据帧送下去。
+ *
+ * 意图 → op 的对应关系与 node 侧 `files.rs` 的入帧（`op = "list" | "read" |
+ * "write"`）逐字一致。将来换成别的搬运方式只改这里，面板不知道。
+ *
+ * **只应对已 `ready` 的通道**：`send()` 在未 ready / 断线时丢弃并计数——
+ * 那是终端敲击的正确语义，不是取数的（一次 `list` 被丢就再也没人回应它，
+ * 而用户也看不到「丢了一条」这个提示是在说取数）。未 ready 的那一次由
+ * `pendingFiles` 记下，等通道 ready 时补发。
+ */
+function fileRequest(tab: TabMeta, op: 'list' | 'read' | 'write', payload: Record<string, unknown>): void {
+  const handle = channels.get(channelKey(tab.id, 'files'))
+  if (!handle || handle.state() !== 'ready') return
+  handle.send(JSON.stringify({ op, ...payload }))
+}
+
+/**
+ * 通道还没 `ready` 时想做而没做成的那一次取数（`tabId␀files` → 意图）。
+ *
+ * 只留最后一个：files 的 `list` 是一次一层，而用户连着展开两层时，列旧的那
+ * 层没有意义——屏幕上已经不在那儿了。`read` 同理。
+ *
+ * **为什么必须存在**：`send()` 在未 ready 时静默丢弃并计数（`channel.ts`）。
+ * 那是终端敲击的正确语义（丢几个字符比乱序灌进 PTY 好查），不是取数的——
+ * 一次 `list` 被丢就再也没人回应它，而「有 N 条已丢」那个徽标在说取数这件
+ * 事时用户根本读不懂。所以取数改成「记下来，等 ready 时补发」。
+ */
+const pendingFiles = new Map<string, { op: 'list' | 'read'; path: string }>()
+
+/** 当前目录的相对路径。与 FilesPanel 里那份同口径（每层一个数组项）。 */
+function cwdPathOf(ws: TabWorkspace): string {
+  return ws.cwd.filter((s) => s.length > 0).join('/')
+}
+
+/**
+ * 把一次取数送出去；通道还没 `ready` 就先记下并去建通道。
+ *
+ * 交互（第一次与面板正文打交道）与取数在这里是同一次——用户按下第一个键
+ * 的意思就是「把这一层给我看」。
+ */
+function fileAsk(op: 'list' | 'read', path: string): void {
+  const tab = activeTab.value
+  if (!tab || ended.value) return
+  const handle = ensureChannel(tab, 'files')
+  if (handle.state() === 'ready') {
+    fileRequest(tab, op, { path })
+    return
+  }
+  pendingFiles.set(channelKey(tab.id, 'files'), { op, path })
+  interact('files')
+}
+
+/**
+ * 一次性命令走的是另一条路：它没有「补发」这回事。
+ *
+ * `exec` 是一次性的，而一条命令**只想要一次**（用户在对话里提交一次命令，
+ * 不该因为通道还没建好而在建好后自动再跑一遍）。所以未 ready 时它直接
+ * 返回，由用户再按一次——而不是被 `pendingFiles` 悄悄记住。
+ */
+function fileList(path: string): void {
+  const ws = activeWs.value
+  if (!ws || ended.value) return
+  ws.loading.add(path)
+  fileAsk('list', path)
+}
+
+function fileRead(path: string): void {
+  const ws = activeWs.value
+  if (!ws || ended.value) return
+  ws.readingPath = path
+  ws.preview = null
+  ws.writeError = null
+  fileAsk('read', path)
+}
+
+function fileSave(payload: { path: string; text: string }): void {
+  const ws = activeWs.value
+  const tab = activeTab.value
+  if (!ws || !tab || ended.value) return
+  ws.saving = true
+  ws.writeError = null
+  fileRequest(tab, 'write', payload)
+}
+
+/**
+ * files 通道刚 `ready`：把攒下的那一次取数补发；没有攒下的就问当前这一层。
+ *
+ * ### 为什么它必须是异步的
+ *
+ * 状态回调是从 `channel.ts` 的 `set('ready')` 里**同步**调进来的
+ * （`notifyState`）。在这里直接 `send()` 会撞上同一条递归：
+ * `send` → `hub.canSend()` 为假 → 计数 → `notifyState` → 本回调 → `send` …，
+ * 栈溢出之后那次 `open()` 以 `RangeError` 收尾，通道于是停在 `failed`——
+ * 症状是「POST 成功了，面板却写着建立失败（unknown）」。把取数推到微任务
+ * 里，让 `set('ready')` 先返回，这条环就断了。
+ *
+ * ### 为什么没有攒下的也要问一层
+ *
+ * 挂上文件面板后用户看到的是一棵空树；不主动列，那棵树会一直空着，而它的
+ * 空态写着「通道还没建立」——于是**一个已经建好的通道看起来像没建**（§3.12
+ * 的两种空被读反）。所以通道一 ready 就把当前层问一遍；已经列过的层不问
+ * （面板折叠再展开时数据还在，重问一次只是多一轮往返）。
+ */
+function filesKick(tab: TabMeta): void {
+  void Promise.resolve().then(() => {
+    const ws = workspaces.get(tab.id)
+    if (!ws) return
+    const pending = pendingFiles.get(channelKey(tab.id, 'files'))
+    if (pending) {
+      pendingFiles.delete(channelKey(tab.id, 'files'))
+      fileRequest(tab, pending.op, { path: pending.path })
+      return
+    }
+    const path = cwdPathOf(ws)
+    if (ws.listings.has(path)) return
+    ws.loading.add(path)
+    fileRequest(tab, 'list', { path })
+  })
+}
+
+/**
+ * files 通道的帧落到 tab 的那份状态上。
+ *
+ * **真 files connector 到位后这里是唯一要改的地方**：形状已经按
+ * `node-core/src/connector/files.rs` 的回帧写好了。
+ */
+function applyFileFrame(ws: TabWorkspace, payload: unknown): void {
+  const frame = asRecord(payload)
+  if (!frame) return
+  const op = typeof frame.op === 'string' ? frame.op : null
+  if (!op) return
+
+  if (op === 'list') {
+    const listing = frame as Partial<FileListing> & { path?: unknown }
+    ws.loading.delete(String(listing.path ?? ''))
+    ws.listings.set(String(listing.path ?? ''), {
+      path: String(listing.path ?? ''),
+      entries: Array.isArray(listing.entries) ? (listing.entries as FileListing['entries']) : [],
+      total: typeof listing.total === 'number' ? listing.total : 0,
+      truncated: listing.truncated === true,
+    })
+    ws.filesError = null
+    return
+  }
+
+  if (op === 'read') {
+    ws.readingPath = null
+    const preview = frame as Partial<FilePreview> & { path?: unknown }
+    ws.preview = {
+      path: String(preview.path ?? ''),
+      size: typeof preview.size === 'number' ? preview.size : 0,
+      kind: preview.kind === 'binary' || preview.kind === 'truncated' ? preview.kind : 'text',
+      truncated: preview.truncated === true,
+      text: typeof preview.text === 'string' ? preview.text : undefined,
+      content_b64: typeof preview.content_b64 === 'string' ? preview.content_b64 : undefined,
+    }
+    return
+  }
+
+  if (op === 'write') {
+    ws.saving = false
+    const ok = frame.ok !== false
+    if (!ok) ws.writeError = errorOf(frame, String(frame.path ?? ''))
+    return
+  }
+
+  if (op === 'error') {
+    ws.loading.clear()
+    ws.readingPath = null
+    if (ws.saving) {
+      ws.saving = false
+      ws.writeError = errorOf(frame, String(frame.path ?? ''))
+      return
+    }
+    ws.filesError = errorOf(frame, String(frame.path ?? ''))
+  }
+}
+
+function asRecord(v: unknown): Record<string, unknown> | null {
+  return typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : null
+}
+
+function errorOf(frame: Record<string, unknown>, path: string): FilesError {
+  return {
+    path,
+    reason: typeof frame.reason === 'string' ? frame.reason : '设备没能完成这次操作。',
+    code: typeof frame.code === 'string' ? frame.code : null,
+  }
+}
+
+/* ---------------------------------------------------------------- 文件意图 */
+
+/** 面包屑：回到第 `depth` 层（`0` = 工作区根）。 */
+function filesGoto(depth: number): void {
+  const ws = activeWs.value
+  if (!ws) return
+  ws.cwd = ws.cwd.slice(0, depth)
+  ws.filesError = null
+}
+
+/**
+ * 打开一个节点。
+ *
+ * 目录 = 进入它（列它的那一层）；越界节点也会走到这里——那就直接把解释
+ * 摆出来（§7.4 ①：隐藏它比显示它更让人不安），而真正的判定在设备侧。
+ */
+function filesOpen(path: string): void {
+  const ws = activeWs.value
+  if (!ws) return
+  const seg = path.split('/').filter((s) => s.length > 0)
+  const last = seg[seg.length - 1] ?? ''
+  if (isOutsideSeg(last)) {
+    ws.filesError = {
+      path,
+      reason: '这一步跨出了工作区：会话的工作区在建会话时确定，之后不可改。',
+      code: 'path_outside_root',
+    }
+    return
+  }
+  ws.cwd = seg
+  ws.filesError = null
+  fileList(path)
+}
+
+/**
+ * 只认明写在路径里的两种逃逸：`..` 与绝对路径。
+ *
+ * **这不是第二份边界检查**——真判据在 node 侧的 `resolve_within`。这里只是
+ * 把已经判出来的边界**画出来**（§7.4 ①②），与 FilesPanel 里那份同口径。
+ */
+function isOutsideSeg(seg: string): boolean {
+  return seg === '..' || seg.startsWith('/')
+}
+
+/**
+ * 撤销编辑。
+ *
+ * 编辑区的内容由 FilesPanel 自己回滚（`draft = original`），这里只清
+ * **这一个文件**的写错态：撤销之后那块红字还在的话，会被读成「撤销失败」。
+ */
+function filesRevert(path: string): void {
+  const ws = activeWs.value
+  if (ws && ws.writeError?.path === path) ws.writeError = null
+}
+
+/** 脏标记 → tab（§5.5.2 的「关 tab 会丢未保存改动」靠它兑现）。 */
+function filesDirty(dirty: boolean): void {
+  const ws = activeWs.value
+  if (ws) ws.dirty = dirty
+}
+
+/* ---------------------------------------------------------------- 一次性命令 */
+
+/**
+ * 对话流提交了一条命令：这是 exec 通道——不是 PTY、是一次性的。
+ *
+ * ### 为什么每条命令一条新通道（exec 是一次性的）
+ *
+ * `exec.rs` 的 `open` **就是执行**：`params` 里带 `command` / `args`，
+ * `poll_all` 之外没有第二条产出路径；第二次 `on_data` 明确回「这条通道
+ * 是一次性的」。所以「再跑一次」是再 `open_channel`，不是往旧通道再发一帧。
+ *
+ * ### 结果在哪
+ *
+ * 第一帧就是全部：`{"exit_code","stdout_b64","stderr_b64","truncated",
+ * "duration_ms","timed_out"}`，不存在「还要等地二帧」。这也是它能带上与
+ * 那条 §3.14 的结论的原因：一顿极小的一次性 输出是一次回完的。
+ */
+function runCommand(req: ConvExecRequest): void {
+  const tab = activeTab.value
+  if (!tab || ended.value || !hub) return
+  const key = `${tab.id}\u0000exec\u0000${(execSeq += 1)}`
+  const handle = hub.handle(key, {
+    sessionId: tab.id,
+    connector: 'exec',
+    params: { command: req.command, args: req.args, cwd: req.cwd },
+  })
+  execHandles.add(handle)
+  // 第一帧就是全部（exec 一次性、没有「等第二帧」这回事）：收完即关。
+  handle.onFrame(() => {
+    execHandles.delete(handle)
+    void handle.close()
+  })
+  void handle.open().catch(() => {
+    execHandles.delete(handle)
+  })
+}
 
 /* ---------------------------------------------------------------- 工作台头 */
 
@@ -335,6 +846,36 @@ const deviceLabel = computed(() =>
 const startedLabel = computed(() =>
   current.value ? `${relativeTime(current.value.created_at)}开始` : '',
 )
+
+/**
+ * 会话工作区路径：面板 / 抽屉的「工作区」「根」都用它。
+ *
+ * 路径是**会话的字段**（§7.0：工作区不是路由），没有第二个根，所以它是
+ * 一个值而不是一个选择器。
+ */
+const rootPath = computed(() => current.value?.workspace.path ?? '')
+
+/**
+ * 设备连接态。**45s 的判定在 Hub**（`security-and-lifecycle.md` §5），
+ * 页面只吃结论：终端按它决定冻不冻结（§7.3 的三态表）。
+ */
+const conn = computed<'online' | 'reconnecting' | 'offline'>(() =>
+  current.value ? connOf(current.value.workspace.node_id) : 'offline',
+)
+
+/** 终端面板要的那份通道视图（形状与 `PanelDock` 的 `ChannelView` 一致）。 */
+const terminalView = computed(() => activeWs.value?.views.terminal ?? channelView.value)
+
+/** 文件面板的通道建好了吗。没建好时不能把空树说成「目录是空的」。 */
+const filesReady = computed(() => activeWs.value?.views.files.state === 'ready')
+
+/**
+ * 终端通道可用吗。ConvFlow 的「终端」目标能不能选，判据就是它。
+ *
+ * 看的是**通道状态**而不是「坞开没开」：坞开着但通道还没建（懒建立）时
+ * 送过去是一次 `send()` 丢弃，而那丢得无声无息。
+ */
+const terminalReady = computed(() => activeWs.value?.views.terminal.state === 'ready')
 
 /* ---------------------------------------------------------------- tab 操作 */
 
@@ -415,6 +956,7 @@ const KEY_ACTS: Readonly<Record<string, string>> = {
   '[': 'panel:prev',
   ']': 'panel:next',
   '\\': 'dock:toggle',
+  t: 'traj:toggle',
 }
 const HANDLERS: Readonly<Record<string, () => boolean>> = {
   'panel:open': () => {
@@ -435,6 +977,20 @@ const HANDLERS: Readonly<Record<string, () => boolean>> = {
   'dock:toggle': () => {
     if (!activeTab.value) return false
     toggleDock()
+    return true
+  },
+  /**
+   * 轨迹抽屉的开关。
+   *
+   * 键位**必须在页面注册**：`keynav.register` 拒绝重复注册，而页面可能被
+   * 挂载多次（测试、重挂载），所以 `TrajDrawer` 自己不注册（见它文件头
+   * 「键位不在这里注册」）。`t` 与 `g g` 是同一个 act 的两个键位，
+   * `g g` 由 `shell-keys.ts` 的 `g` 前缀表派发到同一个 act——所以注册
+   * 一次就两个键位都活。
+   */
+  'traj:toggle': () => {
+    if (!activeTab.value) return false
+    toggleTraj(null)
     return true
   },
 }
@@ -518,12 +1074,19 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   document.removeEventListener('keydown', onKeydown)
+  // 页面级键位随页面失效：离开工作台后按 `o` / `t` 不该再有作用
+  // （`register` 拒绝重复注册，所以没有这一步时第二次进工作台会直接抛）。
   for (const act of Object.keys(HANDLERS)) unregister(act)
   // 离开工作台 = 页面销毁：所有通道随之释放。切 tab 不走这里。
   hub?.dispose()
   hub = null
   channels.clear()
   channelUnsubs.clear()
+  frameUnsubs.clear()
+  // exec 是一次性的：句柄不进 `channels`（它们随命令生灭），但页面卸载时
+  // 仍要跟着走一条完整的关闭路径，否则设备上会留着跑完没回收的通道。
+  for (const handle of execHandles) void handle.close()
+  execHandles.clear()
 })
 </script>
 
@@ -606,6 +1169,7 @@ onBeforeUnmount(() => {
         :tabs="tabs.tabs"
         :active-id="tabs.activeId"
         :panel-counts="panelCounts"
+        :dirty="dirtyTabs"
         :conn-of="connOf"
         @activate="activate"
         @close="closeOneTab"
@@ -617,7 +1181,7 @@ onBeforeUnmount(() => {
       </p>
 
       <div class="af-wb__body">
-        <!-- 对话列：13d 挂入真实对话流；这里只有它的位置与一句说明 -->
+        <!-- 对话列：ConvFlow 挂在这里（13d）。M1 恒空，空态由它自己说清为什么 -->
         <div
           ref="bodyEl"
           class="af-wb__conv"
@@ -625,17 +1189,16 @@ onBeforeUnmount(() => {
           data-wb-body
           :style="activeWs?.dock ? { flex: `0 0 ${split}%` } : undefined"
         >
-          <div class="af-wb__convvoid">
-            <div class="af-flow__day">对话</div>
-            <p class="af-wb__convtxt">
-              M1 的会话是<b>页面级容器</b>：它有工作区与面板，但没有 ACP 会话与轨迹——
-              对话流由 13d 挂入，数据在 M3 才存在。这里不画假消息。
-            </p>
-            <p class="af-wb__convtxt af-t-mute">
-              面板在右边：第一次与它交互才会建立通道。同时开多个会话时，用上方 tab 条切换——
-              切换不会释放通道，关掉 tab 才会。
-            </p>
-          </div>
+          <ConvFlow
+            :device-name="deviceLabel"
+            :path="rootPath"
+            :ended="ended"
+            :terminal-ready="terminalReady"
+            :traj-open="activeWs?.traj ?? false"
+            @run="runCommand"
+            @send="convSend"
+            @open-traj="toggleTraj"
+          />
           <div class="af-wb__convhint af-field__hint">
             <span><kbd>o</kbd> 打开面板</span>
             <span><kbd>[</kbd><kbd>]</kbd> 切换面板</span>
@@ -659,9 +1222,69 @@ onBeforeUnmount(() => {
             @open="openPanel"
             @close="closeDock"
             @interact="interact"
-          />
+          >
+            <!--
+              面板正文由 13b / 13c 挂进来（坞的两个具名插槽）。
+
+              两者的共同纪律：**都不持通道**——取数写数全由本页翻译（见文件头）。
+              所以用插槽而不是让 PanelDock 直接 import 它们：坞只管容器
+              （标签 / 状态 / 释放入口），它不知道里面是终端还是文件树。
+
+              两个插槽各自带 `v-if`：坞里同时只显示一个面板，但两个组件都挂着的
+              话，切走的那一个会带着自己的 xterm / 树状态在后台活着——终端的
+              `ResizeObserver` 会在一个 0 高度的元素上一路量尺寸。
+            -->
+            <template #terminal>
+              <TerminalPanel
+                v-if="activeWs.panel === 'terminal'"
+                :device-name="deviceLabel"
+                :path="rootPath"
+                :channel="terminalView"
+                :conn="conn"
+                :output="activeWs.output"
+                :ended="ended"
+                @input="terminalInput"
+                @resize="terminalResize"
+                @interact="interact('terminal')"
+              />
+            </template>
+            <template #files>
+              <FilesPanel
+                v-if="activeWs.panel === 'files'"
+                :root="rootPath"
+                :cwd="activeWs.cwd"
+                :listings="activeWs.listings"
+                :loading="activeWs.loading"
+                :preview="activeWs.preview"
+                :reading-path="activeWs.readingPath"
+                :error="activeWs.filesError"
+                :write-error="activeWs.writeError"
+                :saving="activeWs.saving"
+                :ended="ended"
+                :channel-ready="filesReady"
+                @list="fileList"
+                @read="fileRead"
+                @save="fileSave"
+                @goto="filesGoto"
+                @open="filesOpen"
+                @revert="filesRevert"
+                @dirty-change="filesDirty"
+                @dismiss-error="activeWs.filesError = null"
+                @dismiss-write-error="activeWs.writeError = null"
+              />
+            </template>
+          </PanelDock>
         </div>
       </div>
+
+      <TrajDrawer
+        :open="activeWs?.traj ?? false"
+        :opener="activeWs?.trajOpener ?? null"
+        :title="title"
+        :device-name="deviceLabel"
+        :path="rootPath"
+        @close="closeTraj"
+      />
     </template>
   </div>
 </template>
