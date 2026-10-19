@@ -46,13 +46,6 @@ depends = ["check", "fmt", "lint", "test", "cov", "web-ci"]
 
 # ---- 开发环境 ---------------------------------------------------------------
 
-# 两个进程同时起：Hub 在 8080 托管 API 与设备 WebSocket，Vite 在 5173 提供
-# HMR 并把 `/api`、`/ws` 代理回 Hub（`packages/web/vite.config.ts` 的
-# `server.proxy`）。**前端代码里不写绝对地址**，所以生产（Hub 自托管 dist）
-# 与开发（Vite 代理）是同一份代码的两种后端。
-#
-# 任一进程退出会把另一个带走——留下一个 Hub 却没有页面，等于开发机上挂一个
-# 看不见的服务。
 [tasks.dev]
 description = "开发环境：Hub (8080) + Vite (5173)，Vite 代理 /api 与 /ws 回 Hub"
 run = [
@@ -60,9 +53,14 @@ run = [
   "cd packages/web && bun run dev",
 ]
 
+[tasks.watch]
+description = "监听 Hub 侧，改动即重编并重启 Hub (8080)"
+run = """
+command -v cargo-watch >/dev/null || { echo "缺少 cargo-watch：cargo install cargo-watch" >&2; exit 1; }
+cargo watch -x 'run -p hub-server' -w crates/hub-server -w crates/hub-core -w crates/hub-storage -w crates/identity -w crates/protocol
+"""
+
 # ---- 前端四道门禁（`packages/web`）-----------------------------------------
-# AGENTS.md 明确：前端**不设行覆盖率阈值**，只要求关键逻辑有单测——理由写在
-# AGENTS.md 的「覆盖率门禁」节。这里只固化命令入口。
 [tasks.web-check]
 description = "前端 type-check + lint"
 run = """
