@@ -430,11 +430,27 @@ fn on_open(frame: &Frame) -> Action {
         Ok(s) => s,
         Err(_) => return Action::End,
     };
-    let req = OpenReq::new("", spec.params.clone());
-    match lock().open(&spec, req) {
+    match lock().open(&spec, req_of(&spec)) {
         Ok(frames) => Action::Send(frames),
         Err(e) => Action::Send(vec![error_frame(&spec.channel_id, e.code(), &e.reason())]),
     }
+}
+
+/// 把 `open_channel.params` 解成 [`OpenReq`]。
+///
+/// **`workspace_root` 必须在这里被取出来**：它是 files 与 exec 都要的会话
+/// 工作区根，而它是 `OpenReq` 上的一等字段而不是 connector 私有参数。
+/// 整份 params 原样塞进 `OpenReq::params` 的话，那个键永远停在 `params`
+/// 里，`OpenReq::root()` 恒为 `None`——于是每个 files 通道都开不出来，
+/// 症状是「工作区没给」，而真相是「Hub 给了，没人读」。
+///
+/// 解不开（非对象，或某个字段形状不对）就**回落成整份 params 私传**：
+/// 那正是子任务 7 定的旧行为，terminal 的 params 仍然照常工作，
+/// 而一个解不开的 `workspace_root` 会在 connector 自己的 `open` 里
+/// 变成一句人话（files / exec 都这么说），不会在这里变成一条断连。
+fn req_of(spec: &OpenChannel) -> OpenReq {
+    serde_json::from_value::<OpenReq>(spec.params.clone())
+        .unwrap_or_else(|_| OpenReq::new("", spec.params.clone()))
 }
 
 fn on_data(frame: &Frame) -> Action {
