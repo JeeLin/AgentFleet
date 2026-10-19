@@ -4,17 +4,9 @@
 # 且 `cargo llvm-cov` 的覆盖率数值跨工具链不可比（覆盖率门禁要求可复现）。
 
 [tools]
-# 顺序与项目一致：node / bun / rust。工具链版本钉死，不用 `latest`——
-# 否则换一次 stable 就重编译全树，且 `cargo llvm-cov` 的覆盖率数值跨工具链
-# 不可比（覆盖率门禁要求可复现）。
 node = "24.21.0"
 bun = "1.4.3"
-# 与 CI 保持一致；升级时同步改 .github/workflows/ci.yml 与 README
 rust = "1.99.0"
-# Vite 7 的 engines 是 `^20.19.0 || >=22.12.0`，且 `@vitejs/plugin-vue` 用
-# `node:crypto` 的 `crypto.hash`（Node 20.12+ 才有）。系统 node 18 上
-# `bun run build` 会以 `crypto.hash is not a function` 失败——不是代码问题，
-# 是工具链版本问题，所以钉死。
 
 # ---------------------------------------------------------------------------
 # 任务：把 AGENTS.md 的质量门禁固化成可执行命令，避免每次手打一串
