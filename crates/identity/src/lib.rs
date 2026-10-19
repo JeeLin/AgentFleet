@@ -148,13 +148,22 @@ impl Fingerprint {
     }
 }
 
-/// 签发 `node_id`：128 位随机，base64url（43 字符）。
+/// 128 位随机 id，base64url（43 字符）。
 ///
 /// **不是秘密**（出现在每个心跳帧里），**不得作为授权依据**（§4.0）。
-pub fn issue_node_id() -> String {
+///
+/// 工作区与会话的 id 也走这里：它们要的是同一组性质——够随机（不能被猜到
+/// 就能抢占别人的会话）、够短、不承载任何授权含义——而本仓**只有一份**
+/// id 生成器。两处各写一份随机数，两个格式将来必然分叉。
+pub fn random_id() -> String {
     let mut b = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut b);
     base64url(&b)
+}
+
+/// 签发 `node_id`。语义上是「给一台设备用的 id」，值域由 [`random_id`] 给。
+pub fn issue_node_id() -> String {
+    random_id()
 }
 
 /// 签名覆盖的规范字节：`v + node_id + seq + t + nonce`。

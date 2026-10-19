@@ -31,6 +31,31 @@ pub enum StorageError {
     #[error("invalid device.status in database: {0:?}")]
     InvalidDeviceStatus(String),
 
+    /// 库里的 `session.state` 不是 'running'/'ended'。
+    ///
+    /// 与 [`StorageError::InvalidDeviceStatus`] 同一个理由：把它当成 running
+    /// 会让一个已结束的会话继续被算作在跑，而页面上没有任何东西能提示用户。
+    #[error("invalid session.state in database: {0:?}")]
+    InvalidSessionState(String),
+
+    /// 工作区路径不合法。`reason` 是**规则**而不是「非法」——
+    /// 页面上要显示它，用户得知道该改成什么。
+    #[error("invalid workspace path {path:?}: {reason}")]
+    InvalidWorkspacePath { path: String, reason: &'static str },
+
+    /// 子路径越出工作区根。同上：带用户给的那串路径，不带设备绝对路径的根
+    /// （设计规范 §7.4 要求越界可见又不泄漏布局）。
+    #[error("path {path:?} is outside the workspace root: {reason}")]
+    PathOutsideRoot { path: String, reason: &'static str },
+
+    /// 删工作区时仍有会话指着它。
+    #[error("workspace {0:?} still has sessions attached")]
+    WorkspaceInUse(String),
+
+    /// 结束一个不存在的会话。
+    #[error("no such session: {0}")]
+    NoSuchSession(String),
+
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 }

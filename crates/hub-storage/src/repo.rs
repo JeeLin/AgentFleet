@@ -20,6 +20,16 @@ pub fn base64url_of(bytes: &[u8]) -> String {
     identity::base64url(bytes)
 }
 
+/// base64url 解码。**只认无填充的 URL-safe 变体**，长度不是 4 的倍数就拒
+/// （解码失败返回 `None`）。
+///
+/// 公钥落库与出库都走它：库里的 `device.public_key` 可能来自 v2 迁移的
+/// `json_extract` 回填，也可能来自设备 enroll 时上传的字符串，两条来路必须用
+/// 同一个判据，否则「迁移回填进来的公钥验不过签」会表现成一个查不出源头的问题。
+pub fn base64url_decode(s: &str) -> Option<Vec<u8>> {
+    identity::base64url_decode(s).ok()
+}
+
 /// 设备状态。**只有两值**——「重连中」只存在于内存（security §5）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -67,6 +77,24 @@ pub struct Device {
     pub capabilities: Option<String>,
     /// JSON：CPU/内存/GPU/负载。
     pub resources: Option<String>,
+    /// 设备公钥（base64url 的 32 字节）。M1 起是**真列**——M0 没有这一列，
+    /// 只能寄存在 `capabilities` 的 `public_key` 键里，而「心跳合并必须保住它」
+    /// 成了一条只有注释守着的约定（见 `DeviceRepo::set_public_key`）。
+    pub public_key: Option<String>,
+}
+
+impl Device {
+    /// 库内公钥（解码成 32 字节原始密钥）。
+    ///
+    /// **列里没有就是没有**：绝不退回 `capabilities` 的旧键去凑——v2 迁移已把
+    /// 存量回填过，而降级二进制会被 `SchemaTooNew` 挡在开库之前，
+    /// 不存在「只有 JSON 里有公钥」的合法库。解码失败与长度不对同样返回 `None`，
+    /// 调用方据此拒绝重连——拿一个错的公钥去验签，得到的是 `identity mismatch`
+    /// 之外的更难查的现象。
+    pub fn public_key_bytes(&self) -> Option<[u8; 32]> {
+        let raw = crate::base64url_decode(self.public_key.as_deref()?)?;
+        <[u8; 32]>::try_from(raw).ok()
+    }
 }
 
 /// enroll 的输入。
@@ -101,7 +129,7 @@ impl DeviceRepo {
         conn.query_row(
             "SELECT id, name, key_fingerprint, enrolled_at, last_seen_at, status,
                     last_seen_gen, superseded_at, os, arch, hostname, node_version,
-                    capabilities, resources
+                    capabilities, resources, public_key
              FROM device WHERE key_fingerprint = ?1",
             params![fp],
             row_to_device,
@@ -116,7 +144,7 @@ impl DeviceRepo {
         conn.query_row(
             "SELECT id, name, key_fingerprint, enrolled_at, last_seen_at, status,
                     last_seen_gen, superseded_at, os, arch, hostname, node_version,
-                    capabilities, resources
+                    capabilities, resources, public_key
              FROM device WHERE id = ?1",
             params![id],
             row_to_device,
@@ -131,7 +159,7 @@ impl DeviceRepo {
         let mut stmt = conn.prepare(
             "SELECT id, name, key_fingerprint, enrolled_at, last_seen_at, status,
                     last_seen_gen, superseded_at, os, arch, hostname, node_version,
-                    capabilities, resources
+                    capabilities, resources, public_key
              FROM device ORDER BY enrolled_at",
         )?;
         let rows = stmt.query_map([], row_to_device)?;
@@ -187,39 +215,39 @@ impl DeviceRepo {
         &self.pool
     }
 
-    /// 把设备公钥存进 `capabilities.public_key`。
+    /// 把设备公钥写进 `device.public_key` 真列。
     ///
-    /// **这是 M0 的权宜之计**：schema 里没有独立公钥列，而 Hub 只存指纹时
-    /// 无法验签（指纹是单向导出）。已登记到 `docs/BUGS.md`——
-    /// M1 应改为 `device.public_key TEXT NOT NULL` 独立列 + 迁移。
+    /// M1 起不再寄生在 `capabilities` 的 JSON 键里（`docs/BUGS.md` 的彻底修法）。
+    /// 连带消失的是 `hub-core::reports::preserve_public_key` 那套合并约定：
+    /// 公钥不再是「心跳载荷里碰巧缺掉的一个键」，而是心跳压根不碰的一列。
+    ///
+    /// 同时把 JSON 里的旧键抹掉——留着它就得让 `merge_into_stored` 继续替它
+    /// 保命，而两份公钥来源（列 + JSON）迟早会分叉：那才是真正难查的故障。
     pub fn set_public_key(&self, id: &str, pubkey: &[u8; 32]) -> Result<()> {
-        let conn = self.pool.get()?;
-        let b64 = crate::base64url_of(pubkey);
-        // 读-改-写：保留 capabilities 的其它键。
-        // 显式标注 `Option<String>`：`optional()` 只处理「没有这一行」，
-        // 不处理「这一行的 capabilities 是 NULL」——那要 `Option` 来吃。
-        let current: Option<Option<String>> = conn
-            .query_row(
-                "SELECT capabilities FROM device WHERE id = ?1",
-                params![id],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .optional()?;
-        let current = current.flatten();
-        let mut v: serde_json::Value = current
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or(serde_json::Value::Object(Default::default()));
-        if let Some(o) = v.as_object_mut() {
-            o.insert("public_key".into(), serde_json::Value::String(b64));
-        }
-        // coverage: excluded — 232 行是 `execute(...)?` 隐含的 Err 传播 region，
-        // 成功路径测试（set_public_key 写入并断言）永远走不到；构造 execute 失败
-        // 需破坏底层连接，代价与收益不匹配。
-        conn.execute(
-            "UPDATE device SET capabilities = ?2 WHERE id = ?1",
-            params![id, serde_json::to_string(&v)?],
+        let mut conn = self.pool.get()?;
+        // 显式事务，**顺序要紧**：抹旧键在前，写新列在后，commit 收尾。
+        // 反过来写（新列先、commit 后）是不行的——`UPDATE capabilities` 在
+        // JSON 里没有 `public_key` 时影响 0 行（`json_remove` 改不动），
+        // 那条「没事要做」的路上就没有 commit 可言，而显式 ROLLBACK 会把
+        // 已经写好的新列一并撤销。
+        //
+        // `transaction()`（**不是** `unchecked_transaction()`）：库开着
+        // `foreign_keys=ON`，嵌套事务在 SQLite 里是 deferred 的，内外两层
+        // 各有一条隐式语句就可能撞 `cannot start a transaction within a
+        // transaction`。`transaction()` 会先查 `Connection::is_autocommit()`，
+        // 已在事务里就复用外层那层——错误路径上内层的 `Drop` 照样回滚。
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE device SET capabilities = json_remove(capabilities, '$.public_key')
+             WHERE id = ?1 AND capabilities IS NOT NULL AND json_valid(capabilities)
+               AND json_type(capabilities, '$.public_key') IS NOT NULL",
+            params![id],
         )?;
+        tx.execute(
+            "UPDATE device SET public_key = ?2 WHERE id = ?1",
+            params![id, base64url_of(pubkey)],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -264,6 +292,7 @@ fn row_to_device(
         node_version: r.get(11)?,
         capabilities: r.get(12)?,
         resources: r.get(13)?,
+        public_key: r.get(14)?,
     })
 }
 
@@ -567,13 +596,10 @@ mod tests {
     }
 
     #[test]
-    fn set_public_key_writes_into_capabilities_json() {
-        // M0 权宜之计：公钥塞进 capabilities.public_key（M1 改为独立列）。
-        // 必须验证：只写 public_key 键，不动 capabilities 里已有的其它键，
-        // 且覆盖掉上一版（重连改密钥时）。
+    fn set_public_key_writes_the_column_and_keeps_other_capability_keys() {
+        // M1：公钥进 `device.public_key` 真列，capabilities 的其它键一个不动。
         let (_d, dr, _sr) = repo();
         insert_device(&dr, "n_a", "fp_a");
-        // 先放一个无关键
         dr.touch_online(
             "n_a",
             r#"{"connectors":["a"]}"#,
@@ -583,23 +609,156 @@ mod tests {
         .unwrap();
         let pk = [7u8; 32];
         dr.set_public_key("n_a", &pk).unwrap();
-        let caps: serde_json::Value = {
-            let conn = dr.pool().get().unwrap();
-            let s: String = conn
-                .query_row("SELECT capabilities FROM device WHERE id='n_a'", [], |r| {
-                    r.get(0)
-                })
-                .unwrap();
-            serde_json::from_str(&s).unwrap()
-        };
+
+        let d = dr.find_by_id("n_a").unwrap().unwrap();
+        assert_eq!(d.public_key.as_deref(), Some(base64url_of(&pk).as_str()));
+        assert_eq!(d.public_key_bytes(), Some(pk));
         assert_eq!(
-            caps["connectors"],
-            serde_json::json!(["a"]),
-            "must keep other keys"
+            d.capabilities.as_deref(),
+            Some(r#"{"connectors":["a"]}"#),
+            "别的键必须原样保留"
         );
-        // 公钥是 base64url(32 字节) → 43 字符
-        assert_eq!(caps["public_key"].as_str().unwrap().len(), 43);
-        assert_eq!(caps["public_key"].as_str().unwrap(), base64url_of(&pk));
+    }
+
+    /// 覆盖写：设备换密钥（重装 / 重新 enroll）后旧值不得残留。
+    #[test]
+    fn set_public_key_overwrites_the_previous_one() {
+        let (_d, dr, _sr) = repo();
+        insert_device(&dr, "n_a", "fp_a");
+        dr.set_public_key("n_a", &[1u8; 32]).unwrap();
+        dr.set_public_key("n_a", &[2u8; 32]).unwrap();
+        assert_eq!(
+            dr.find_by_id("n_a").unwrap().unwrap().public_key_bytes(),
+            Some([2u8; 32])
+        );
+    }
+
+    /// 列里那一串解不出 32 字节（或压根不是 base64）时，`public_key_bytes`
+    /// 返回 `None` 而不是别的：调用方据此拒绝重连。
+    ///
+    /// 库完好时写不进这种值（`set_public_key` 只接受 `&[u8; 32]`），它来自
+    /// 外部改库或迁移回填了脏数据。
+    #[test]
+    fn a_stored_public_key_that_is_not_a_32_byte_key_reads_as_absent() {
+        let (_d, dr, _sr) = repo();
+        insert_device(&dr, "n_a", "fp_a");
+        for bad in ["!!!不是 base64!!!", "AAAA", ""] {
+            {
+                let conn = dr.pool().get().unwrap();
+                conn.execute(
+                    "UPDATE device SET public_key = ?2 WHERE id = ?1",
+                    params!["n_a", bad],
+                )
+                .unwrap();
+            }
+            let d = dr.find_by_id("n_a").unwrap().unwrap();
+            assert_eq!(d.public_key.as_deref(), Some(bad), "{bad:?} 原样读回");
+            assert_eq!(
+                d.public_key_bytes(),
+                None,
+                "{bad:?} 必须读作没有，绝不退回 capabilities 去凑"
+            );
+        }
+    }
+
+    /// 解码走的是仓储层那份，与 `base64url_of` 同一个判据——
+    /// 两处各写一份编解码器迟早在「哪个字符算非法」上分叉。
+    #[test]
+    fn the_storage_codec_is_the_inverse_of_the_identity_one() {
+        let kp = identity::KeyPair::generate();
+        let raw = kp.public_key_bytes();
+        let b64 = base64url_of(&raw);
+        assert_eq!(crate::base64url_decode(&b64), Some(raw.to_vec()));
+        assert_eq!(
+            base64url_of(raw.as_slice()),
+            b64,
+            "同一份实现，无第二套编码"
+        );
+    }
+
+    /// M0 时代公钥寄居在 `capabilities.public_key`；写进新列时顺手抹掉旧键。
+    ///
+    /// 留着它就要让心跳合并继续替它保命，而两份公钥来源迟早分叉。
+    #[test]
+    fn set_public_key_strips_the_legacy_json_key() {
+        let (_d, dr, _sr) = repo();
+        insert_device(&dr, "n_a", "fp_a");
+        dr.touch_online(
+            "n_a",
+            r#"{"connectors":["a"],"public_key":"AAAA"}"#,
+            "{}",
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+        dr.set_public_key("n_a", &[3u8; 32]).unwrap();
+        let caps = dr.find_by_id("n_a").unwrap().unwrap().capabilities;
+        let v: serde_json::Value = serde_json::from_str(&caps.unwrap()).unwrap();
+        assert_eq!(v["connectors"], serde_json::json!(["a"]));
+        assert!(
+            v.get("public_key").is_none(),
+            "JSON 键必须被抹掉，公钥只有列这一个来源"
+        );
+    }
+
+    /// 抹键的三条「原样退回」路径：capabilities 是 NULL、是坏 JSON、
+    /// 顶层不是对象。它们都是**库完好**的正常状态，不是错误。
+    #[test]
+    fn a_capabilities_that_is_not_a_json_object_is_left_alone() {
+        for caps in [
+            None,
+            Some("not json"),
+            Some(""),
+            Some(r#"["git"]"#),
+            Some(r#""git""#),
+            Some(r#"{"connectors":["a"]}"#), // 压根没有 public_key
+        ] {
+            let (_d, dr, _sr) = repo();
+            insert_device(&dr, "n_a", "fp_a");
+            if let Some(c) = caps {
+                dr.touch_online("n_a", c, "{}", "2026-01-01T00:00:00Z")
+                    .unwrap();
+            }
+            dr.set_public_key("n_a", &[4u8; 32]).unwrap();
+            let d = dr.find_by_id("n_a").unwrap().unwrap();
+            assert_eq!(
+                d.capabilities.as_deref(),
+                caps,
+                "{caps:?} must be untouched"
+            );
+            assert_eq!(d.public_key_bytes(), Some([4u8; 32]));
+        }
+    }
+
+    /// 库里根本没有这一行时两条 UPDATE 都影响 0 行——不是错误：
+    /// 真正要报的是「设备不存在」，那由调用方决定。
+    #[test]
+    fn set_public_key_on_an_unknown_device_is_a_no_op() {
+        let (_d, dr, _sr) = repo();
+        dr.set_public_key("n_ghost", &[5u8; 32]).unwrap();
+        assert!(dr.find_by_id("n_ghost").unwrap().is_none());
+    }
+
+    /// 读出来的公钥三种坏值都必须报「没有」而不是崩：非 base64、长度不对、
+    /// NULL。重连验签据此拒绝，绝不拿一个错的公钥去试。
+    #[test]
+    fn a_broken_stored_public_key_reads_as_absent() {
+        let (_d, dr, _sr) = repo();
+        insert_device(&dr, "n_a", "fp_a");
+        let mut d = dr.find_by_id("n_a").unwrap().unwrap();
+        assert_eq!(d.public_key, None);
+        assert_eq!(d.public_key_bytes(), None);
+
+        for bad in [Some("!!!not base64!!!"), Some("AAAA"), Some("")] {
+            let conn = dr.pool().get().unwrap();
+            conn.execute(
+                "UPDATE device SET public_key = ?1 WHERE id = 'n_a'",
+                params![bad],
+            )
+            .unwrap();
+            d = dr.find_by_id("n_a").unwrap().unwrap();
+            assert_eq!(d.public_key.as_deref(), bad);
+            assert_eq!(d.public_key_bytes(), None, "{bad:?} must not decode");
+        }
     }
 
     #[test]

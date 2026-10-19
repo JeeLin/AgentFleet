@@ -153,17 +153,20 @@ pub fn report_from_heartbeat(hb: &Heartbeat, at: Instant) -> Report {
 /// 只有真报了新值才会覆盖——所以「只含 node_version 的心跳」是一次
 /// 纯粹的在线确认，不动库里任何东西。
 ///
-/// ⚠️ `capabilities` 合并时**必须保住了 `public_key`**：M0 权宜把公钥存在
-/// `capabilities.public_key`（见 `repo::set_public_key` 与 `BUGS.md`），
-/// 而心跳报的 capabilities 里没有它。整对象覆盖会把它抹掉，于是下一次
-/// 重连找不到库内公钥 → `identity mismatch`，设备永久接不上。
+/// ⚠️ 本函数**只管 capabilities / resources**：设备公钥不在它的射程里。
+/// M1 起公钥是 `device.public_key` 一列，心跳既不上报也不该覆盖它。
+/// M0 时代公钥寄居在 `capabilities` 的 JSON 键里，于是这里还得额外调一次
+/// `preserve_public_key` 把它从旧值搬进新值——而那份「别的键都该更新、
+/// 唯独这一个不许动」的约定只有注释守着（`docs/BUGS.md`），一改合并规则就会
+/// 静默弄丢它，现象是所有设备重连一律 `identity mismatch`，根因却在一行
+/// 看似无关的合并逻辑里。列没有这个问题，所以约定连同函数一起没了。
 pub fn merge_into_stored(
     stored_caps: Option<&str>,
     stored_resources: Option<&str>,
     hb: &Heartbeat,
 ) -> (String, String) {
     let caps = match non_null(&hb.capabilities) {
-        Some(v) => preserve_public_key(&v, stored_caps),
+        Some(v) => v,
         None => stored_json(stored_caps),
     };
     let res = match non_null(&hb.resources) {
@@ -185,34 +188,6 @@ fn non_null(v: &serde_json::Value) -> Option<serde_json::Value> {
     } else {
         Some(v.clone())
     }
-}
-
-/// 把 `public_key` 从旧 capabilities 搬进新的那份。
-///
-/// 心跳载荷结构上没有这个键（它不属于能力上报），而库内那一份是 enroll 时
-/// 写下的、重连验签的唯一来源。所以它**不是心跳字段，无条件保留**——
-/// 与「缺省保留」是两回事：那条规则说的是「这次没报就不动」，而这里连报的
-/// 时候也不许动。
-///
-/// **改 `merge_into_stored` 之前先读这里**：这个键是 M0 没有 schema 列、
-/// 寄存在 `capabilities` 里的权宜之计（`docs/BUGS.md` 已登记）。合并规则
-/// 每加一条，都要保证 `public_key` 仍然活着——它一丢，所有设备重连一律
-/// `identity mismatch`，而根因在一条看似无关的合并逻辑里。
-///
-/// 两边都取不到就什么都不加：那台设备本来就没存过公钥（老数据），
-/// 编一个空串进去只会让重连走进同一条 `identity mismatch`，还更难查。
-fn preserve_public_key(incoming: &serde_json::Value, stored: Option<&str>) -> serde_json::Value {
-    let Some(key) = stored
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-        .and_then(|v| v.get("public_key").cloned())
-    else {
-        return incoming.clone();
-    };
-    let mut out = incoming.clone();
-    if let Some(o) = out.as_object_mut() {
-        o.insert("public_key".to_string(), key);
-    }
-    out
 }
 
 /// 库里读出来的 JSON 串。**解不动就丢**：旧值是坏的，而 Hub 没有更好的
@@ -470,41 +445,33 @@ mod tests {
         assert!(res.contains("7.0"), "没报负载就得留旧的: {res}");
     }
 
-    /// 心跳覆盖 capabilities 时**必须保住 `public_key`**。
+    /// 心跳覆盖 capabilities 是**整对象替换**，没有例外。
     ///
-    /// M0 权宜把公钥存在 `capabilities.public_key`（`BUGS.md`），而心跳报的
-    /// 能力里结构上没有它。整对象覆盖会把它抹掉 → 下次重连找不到库内公钥
-    /// → `identity mismatch`，设备永久接不上。这条曾是真 bug。
+    /// M0 时代这里是条「唯独 `public_key` 不许动」的特例，而它只有注释守着
+    /// （`docs/BUGS.md`）：改合并规则的人看不到它，丢公钥的现象却是所有设备
+    /// 重连一律 `identity mismatch`，根因隔着一层。M1 把公钥提成
+    /// `device.public_key` 一列（`schema_v2.sql`），JSON 里不再有它——
+    /// 这条锁住新口径：**capabilities 里出现的键一律跟着心跳走**，
+    /// 设备侧往里塞什么，Hub 就原样存什么（那里已经不是信任边界了）。
     #[test]
-    fn merging_capabilities_never_drops_the_stored_public_key() {
+    fn merging_capabilities_overwrites_whatever_the_device_reported() {
         let hb = Heartbeat {
             node_version: "0.1.0".into(),
-            capabilities: serde_json::json!({"connectors": ["git"]}),
+            capabilities: serde_json::json!({"connectors": ["git"], "public_key": "上报的"}),
             resources: serde_json::Value::Null,
             workspace_roots: Vec::new(),
         };
         let (caps, _) = merge_into_stored(
-            Some(r#"{"connectors":["terminal"],"public_key":"AAAAB3NzaC1yc2E"}"#),
+            Some(r#"{"connectors":["terminal"],"public_key":"库里的"}"#),
             None,
             &hb,
         );
         let v: serde_json::Value = serde_json::from_str(&caps).unwrap();
-        assert_eq!(v["public_key"], "AAAAB3NzaC1yc2E", "公钥必须活过心跳覆盖");
-        assert_eq!(v["connectors"][0], "git", "能力仍然要更新");
-    }
-
-    /// 库里没有公钥（老数据）→ 不编一个假的进去。
-    #[test]
-    fn no_stored_public_key_means_none_is_invented() {
-        let hb = Heartbeat {
-            node_version: "0.1.0".into(),
-            capabilities: serde_json::json!({"connectors": ["git"]}),
-            resources: serde_json::Value::Null,
-            workspace_roots: Vec::new(),
-        };
-        let (caps, _) = merge_into_stored(Some(r#"{"connectors":["terminal"]}"#), None, &hb);
-        let v: serde_json::Value = serde_json::from_str(&caps).unwrap();
-        assert!(v.get("public_key").is_none(), "{caps}");
+        assert_eq!(v["connectors"][0], "git", "能力跟着心跳更新");
+        assert_eq!(
+            v["public_key"], "上报的",
+            "capabilities 是一个普通的 JSON 字段，没有特例"
+        );
     }
 
     /// 库里存的是坏 JSON 时也照样保住新报的能力（旧值读不出来就只当没有）。

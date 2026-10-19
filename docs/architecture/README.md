@@ -44,7 +44,8 @@ device(
   superseded_at   TEXT,      -- 被顶替的时间戳；重启后仍生效
   os, arch, hostname, node_version,
   capabilities    TEXT,      -- JSON：支持的 connector 及参数（心跳更新，见 scheduling §2）
-  resources       TEXT       -- JSON：CPU/内存/GPU/当前负载（调度用）
+  resources       TEXT,      -- JSON：CPU/内存/GPU/当前负载（调度用）
+  public_key      TEXT       -- 设备公钥 base64url(32)；M1 的 v2 迁移提的真列（见 BUGS.md）
 )
 
 secret(          -- M0 建：Hub 自身的秘密（登录密码哈希、session HMAC 密钥、模型 key）
@@ -62,6 +63,30 @@ secret(          -- M0 建：Hub 自身的秘密（登录密码哈希、session 
   无服务端 session 存储需求。若要支持「服务端强制注销 / 踢下线 / 查看活跃会话」，
   随 M1 加表（`session(id, created_at, last_seen_at, user_agent)`），
   并把签发改为「库里存一条 + 签名 cookie 带 id」的混合形态。
+- **M1 的 v2 迁移加了两张表 + 一列**（`crates/hub-storage/src/schema_v2.sql`）：
+  ```text
+  workspace(     -- 设备上的一个 (node_id, path)，工作区是主实体
+    id            TEXT PK,
+    node_id       TEXT NOT NULL REFERENCES device(id) ON DELETE CASCADE,
+    path          TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    UNIQUE (node_id, path)      -- 「同一个工作区只有一行」是并发建会话的前提
+  )
+
+  session(       -- **工作台会话**，不是上面那个登录 cookie
+    id            TEXT PK,
+    workspace_id  TEXT NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
+    agent_id      TEXT,        -- M1 恒 NULL；M3 接 ACP 起填
+    state         TEXT NOT NULL CHECK (state IN ('running','ended')),
+    created_at    TEXT NOT NULL,
+    ended_at      TEXT         -- running 时恒 NULL
+  )
+  ```
+  加 `device.public_key TEXT`（见上），并把存量 `capabilities.public_key` 回填进去。
+  两处易混：**登录 cookie 与工作台会话是两回事**（前者靠 `secret` 表的 HMAC 密钥
+  自包含，后者是 Hub 库里的一行）；**工作区与 session 是主从**（见 §4.1）。
+  迁移按 `PRAGMA user_version` 驱动（v1 `schema.sql` / v2 `schema_v2.sql`），
+  幂等性靠「每条只跑一遍」而不是靠 DDL 本身。
 - **没有** environment 表；**没有** resource 表（connector 是有类型的，不是多态实体）。
 - **`capabilities` 必须落库**：它是路由的硬过滤输入，不能只在内存里——Hub 重启后
   设备还没连上时要能回答「有没有这台设备」，见 `scheduling.md` §2.1。
@@ -81,9 +106,16 @@ secret(          -- M0 建：Hub 自身的秘密（登录密码哈希、session 
 ### 4.1 工作区（workspace）是一等概念
 
 - 工作区 = 设备上的一个 `(node_id, path)`，**可被多个会话引用**（同一条路径可被两个会话同时打开，各自持有自己的通道）。
-  **第一版口径（M1）**：它是**会话的一个字段**，不是独立的顶级实体——
-  用户在新建会话时选路径，建立后锁定（`design-system.md` §6.2 的 `path_locked` 恒为 `true`）。
-  「归属于某个 agent 会话」是 **M3 的措辞**（那时才接 ACP），M1 的会话容器不是 agent 会话。
+  **落库形态（M1，v2 迁移）**：`workspace` 表是**主实体**（`UNIQUE (node_id, path)`），
+  `session.workspace_id` 是指向它的外键——同一个 `(node_id, path)` 永远只有一行，
+  多个会话引用的是同一行而不是各建一份互相看不见的副本。
+  理由：**M2 的 manifest 差分按 `(node_id, path)` 定位**，工作区必须独立于会话存在
+  （`workspace-and-sync.md` §3.1）；且「用户在会话里选路径」这条交互说的是**会话引用一个
+  已经在那儿的工作区**，不是会话生出一个工作区。
+  `ON DELETE RESTRICT` 是刻意的：删工作区前必须显式检查有没有会话指着它，
+  「关掉一个面板」不该悄悄连带删掉别的会话正在用的工作区。
+  反过来，**删会话不删工作区**——工作区独立于会话存在。
+  **「归属于某个 agent 会话」是 M3 的措辞**（那时才接 ACP），M1 的会话容器不是 agent 会话。
 - terminal / files / git 三个面板都绑在会话的工作区上：**进入会话才建立通道，退出即释放**。
 - 不做设备级的长驻多资源管理台（不是「一个设备下面挂 N 个资源 tab」那种形态）。
   这不是交互偏好，是结构要求：**工作区不是路由**（`PRODUCT.md` §6 术语表、`design-system.md` §7.0）。

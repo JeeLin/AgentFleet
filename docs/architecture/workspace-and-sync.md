@@ -53,6 +53,12 @@ Hub 是唯一真相源，一个内容寻址仓库（CAS）统一供料，三样�
 **A 是主路径**，绝大多数真实项目走 A。这是 git 分布式设计白送的红利，不要浪费。
 B / D 是兜底，等实测证明需要再实现。
 
+> **键的空间**：上面各档的寻址键 `(node_id, path)` 就是 Hub 库里 `workspace` 表的
+> 唯一约束（M1 落地，`crates/hub-storage/src/schema_v2.sql`）——manifest 差分按它
+> 定位，所以工作区必须**独立于会话**存在：两个会话打开同一个 `(node_id, path)` 时
+> 引用的是同一行工作区，而不是各建一份互相看不见的副本。工作区表与外键动作见
+> `docs/architecture/README.md` §3。
+
 ### 3.1 C 档机制：manifest 差分
 
 ```text

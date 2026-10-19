@@ -14,7 +14,7 @@
 # 补得了测试的（例：`flood_frame` 的应答帧映射）一律补测试，不登记。
 crates/hub-core/src/registry.rs:134: 下面的 `if let Err(rb)` 不可达：只要闭包返回 Err 事务仍活跃，SQLite 的 ROLLBACK 必然成功；该分支仅防御连接级 故障，无可控测试手段。而「回滚失败」这条本身也不该被覆盖—— 原错误才是调用方要的，它只负责留痕。
 crates/hub-core/src/reports.rs:104: 同 record：锁中毒只在别的持锁者 panic 时出现。
-crates/hub-core/src/reports.rs:237: 同 record：锁中毒只在别的持锁者 panic 时出现。
+crates/hub-core/src/reports.rs:212: 同 record：锁中毒只在别的持锁者 panic 时出现。
 crates/hub-server/src/channels.rs:111: mark_ready 失败需同一把锁内出现第二个写入者， 而 Hub 在 open 成功后的下一行就 mark_ready，构造不出来。
 crates/hub-server/src/channels.rs:274: 只在断言失败时执行；`panic!` 的格式串行被 llvm-cov 记为 miss（多行宏已知现象）。
 crates/hub-server/src/channels.rs:276: 只在断言失败时执行；`panic!` 的格式串行被 llvm-cov 记为 miss（多行宏已知现象）。

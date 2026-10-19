@@ -186,7 +186,8 @@ pub fn insert_legacy_device(hub: &Hub, id: &str) {
 ///
 /// 用 `BEFORE UPDATE` 触发器 + `RAISE(ABORT)` 而不是删表：删表会让「读也失败」，
 /// 于是同一个用例只能覆盖读错误路径；而这里要的正是**读成功、写失败**——
-/// `set_public_key` / `set_gen` 只在读得到行、写不进去时才报 Err。
+/// `set_public_key`（一个事务里的两条 UPDATE）与 `set_gen` 只在读得到行、
+/// 写不进去时才报 Err。
 /// `RAISE(ABORT)` 只回滚本次语句，不影响连接，所以 Hub 侧继续可用。
 pub fn break_device_writes(hub: &Hub) {
     hub.pool()

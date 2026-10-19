@@ -786,13 +786,9 @@ pub(crate) fn ws_error() -> Response {
         .into_response()
 }
 
-/// 从设备行里取库内公钥（M0 权宜：存在 `capabilities.public_key`）。
+/// 从设备行里取库内公钥（M1 起是 `device.public_key` 真列）。
 fn stored_public_key(device: &hub_storage::repo::Device) -> Option<[u8; 32]> {
-    let caps = device.capabilities.as_deref()?;
-    let v: serde_json::Value = serde_json::from_str(caps).ok()?;
-    let b64 = v.get("public_key")?.as_str()?;
-    let raw = identity::base64url_decode(b64).ok()?;
-    <[u8; 32]>::try_from(raw).ok()
+    device.public_key_bytes()
 }
 
 /// enroll 的验签器：用**本次上传**的公钥。
@@ -993,7 +989,7 @@ mod tests {
         );
     }
 
-    fn device_with_caps(caps: Option<&str>) -> hub_storage::repo::Device {
+    fn device_with_key(caps: Option<&str>, public_key: Option<&str>) -> hub_storage::repo::Device {
         hub_storage::repo::Device {
             id: "n_x".into(),
             name: "pi".into(),
@@ -1009,30 +1005,47 @@ mod tests {
             node_version: None,
             capabilities: caps.map(|s| s.to_string()),
             resources: None,
+            public_key: public_key.map(|s| s.to_string()),
         }
     }
 
     #[test]
-    fn stored_public_key_reads_from_capabilities() {
-        // M0 权宜：公钥存在 capabilities.public_key（BUGS.md 已登记）
+    fn stored_public_key_reads_the_column() {
         let kp = identity::KeyPair::generate();
-        let caps = serde_json::json!({"public_key": identity::base64url(&kp.public_key_bytes())})
-            .to_string();
         assert_eq!(
-            stored_public_key(&device_with_caps(Some(&caps))).unwrap(),
+            stored_public_key(&device_with_key(
+                None,
+                Some(&identity::base64url(&kp.public_key_bytes()))
+            ))
+            .unwrap(),
             kp.public_key_bytes(),
-            "capabilities.public_key must round-trip to the raw key"
+            "device.public_key must round-trip to the raw key"
         );
     }
 
     #[test]
-    fn stored_public_key_absent_when_capabilities_missing_or_wrong() {
-        assert!(stored_public_key(&device_with_caps(None)).is_none());
-        assert!(stored_public_key(&device_with_caps(Some("not json"))).is_none());
-        assert!(stored_public_key(&device_with_caps(Some("{}"))).is_none());
-        // 长度不对的 base64 → 也必须是 None，而不是 panic
-        let bad = serde_json::json!({"public_key": "AAAA"}).to_string();
-        assert!(stored_public_key(&device_with_caps(Some(&bad))).is_none());
+    fn stored_public_key_absent_when_the_column_is_empty_or_wrong() {
+        assert!(stored_public_key(&device_with_key(None, None)).is_none());
+        // 非 base64 与长度不对都必须被拒，而不是 panic
+        assert!(stored_public_key(&device_with_key(None, Some("!!!not base64!!!"))).is_none());
+        assert!(stored_public_key(&device_with_key(None, Some("AAAA"))).is_none());
+    }
+
+    /// 心跳把 `capabilities` 整个换掉之后，公钥仍然要从**列**里读得到——
+    /// M0 靠 `reports::preserve_public_key` 抢救 JSON 里的那一份，
+    /// 现在那套约定已经随 v2 迁移一起消失，这条锁住新口径。
+    #[test]
+    fn stored_public_key_survives_a_capabilities_overwrite() {
+        let kp = identity::KeyPair::generate();
+        let overwritten = device_with_key(
+            Some(r#"{"connectors":["git"]}"#),
+            Some(&identity::base64url(&kp.public_key_bytes())),
+        );
+        assert!(overwritten.capabilities.as_deref().unwrap().contains("git"));
+        assert_eq!(
+            stored_public_key(&overwritten).unwrap(),
+            kp.public_key_bytes()
+        );
     }
 
     /// 构造一个 AuthAttempt。**不收 KeyPair**：`verify_with` 的验签公钥一律来自

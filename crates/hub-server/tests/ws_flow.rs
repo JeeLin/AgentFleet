@@ -1327,9 +1327,9 @@ async fn enroll_survives_a_public_key_write_failure() {
     // 后果正如注释所写：库里没有公钥 → 下次重连会被拒（下面单独测）
     let device = hub.state.registry().device(&node_id).unwrap().unwrap();
     assert!(
-        device.capabilities.is_none(),
+        device.public_key.is_none(),
         "the trigger must really have blocked the write, got {:?}",
-        device.capabilities
+        device.public_key
     );
 }
 

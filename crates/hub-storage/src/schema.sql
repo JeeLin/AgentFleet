@@ -1,12 +1,19 @@
 -- AgentFleet Hub 存储 schema
--- M0 只建 device + secret 两张表。
--- 不建 session 表：M0 的 session 是签名 cookie（HMAC 密钥取自
--- secret(kind='hub',name='session_hmac')），无服务端 session 存储需求。
+--
+-- 迁移按 `PRAGMA user_version` 驱动（见 `migrate.rs`），每个版本一个文件：
+-- v1 = 本文件，v2 = `schema_v2.sql`。**不要把新表加进 v1**——已存在的库
+-- 停在 `user_version = 1`，改 v1 不会作用到它们。
+--
 -- 表清单与列语义见 docs/architecture/README.md §3。
 
 -- ---------------------------------------------------------------------------
--- v1: 初始 schema
+-- v1: 初始 schema（M0：设备接入 + 登录态）
 -- ---------------------------------------------------------------------------
+--
+-- v1 的 session 是**签名 cookie**（HMAC 密钥取自
+-- secret(kind='hub',name='session_hmac')），所以 v1 没有服务端 session 表。
+-- M1 的 `session` 表是**工作台会话**（一个设备上的一个工作区 + agent），
+-- 两者不是一回事，见 schema_v2.sql。
 
 CREATE TABLE IF NOT EXISTS device (
     id              TEXT PRIMARY KEY,   -- node_id，128 位随机 base64url（43 字符）
@@ -38,3 +45,10 @@ CREATE TABLE IF NOT EXISTS secret (
     created_at  TEXT NOT NULL,
     PRIMARY KEY (kind, name)
 );
+
+-- ---------------------------------------------------------------------------
+-- v2: 工作台（M1）
+-- ---------------------------------------------------------------------------
+--
+-- `device.public_key` 与 workspace / session 两张表的 DDL 在 `schema_v2.sql`。
+-- 留在 v1 里改不动已存在的库——迁移按 `user_version` 只跑一遍。

@@ -175,33 +175,21 @@ impl Registry {
     }
 }
 
-/// 从设备行取公钥。库里只存指纹，公钥需由客户端在 enroll 时上传并另存。
+/// 从设备行取公钥。
 ///
-/// M0 的实现取舍：指纹本身由公钥单向导出，无法反推公钥。因此
-/// **Hub 必须另存公钥**才能验签，而库里没有这一列，只能寄存在
-/// `capabilities` 的 `public_key` 键里（`docs/BUGS.md` 已登记该缺口）。
+/// M1 起它就是 `device.public_key` 一列（M0 时代寄居在 `capabilities` 的 JSON
+/// 键里，靠 `reports::preserve_public_key` 在心跳覆盖时抢救——那套约定已随
+/// v2 迁移一并删除）。列里没有就是没有：降级二进制会被 `SchemaTooNew` 挡在
+/// 开库之前，不存在「只有 JSON 里有公钥」的合法库。
 fn pubkey_from_fingerprint(device: &Device) -> Result<[u8; 32], CoreError> {
-    // 从 capabilities JSON 里取（M0 的权宜之计，BUGS.md 已登记）
-    let caps: serde_json::Value = device
-        .capabilities
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or(serde_json::Value::Null);
-    let b64 = caps
-        .get("public_key")
-        .and_then(|v| v.as_str())
+    let pubkey = device
+        .public_key_bytes()
         .ok_or(CoreError::Registry(RegistryError::NoStoredPublicKey))?;
-    let raw = identity::base64url_decode(b64)?;
-    let mut out = [0u8; 32];
-    if raw.len() != 32 {
-        return Err(CoreError::Registry(RegistryError::NoStoredPublicKey));
-    }
-    out.copy_from_slice(&raw);
     // 校验一致性：存公钥的指纹必须与库里一致
-    if Fingerprint::of(&out).to_hex() != device.key_fingerprint {
+    if Fingerprint::of(&pubkey).to_hex() != device.key_fingerprint {
         return Err(CoreError::Registry(RegistryError::IdentityMismatch));
     }
-    Ok(out)
+    Ok(pubkey)
 }
 
 /// 当前时刻的时间戳串，落库进 `enrolled_at` / `last_seen_at`。
@@ -350,6 +338,47 @@ mod tests {
             .verify_reconnect(&node_id, "nonce-1", &sig, 1, 0, "auth")
             .unwrap();
         assert_eq!(dev.id, node_id);
+    }
+
+    /// 心跳把 `capabilities` 整个覆盖掉之后，重连验签仍然成功。
+    ///
+    /// 这是把公钥提成真列（M1 v2 迁移）换来的东西：`set_public_key` 抹掉 JSON
+    /// 里的旧键、心跳再覆盖一次 capabilities，库里那份公钥都不受影响。
+    /// 改 `merge_into_stored` 或 `touch_online` 的人不必再知道有这件事。
+    #[test]
+    fn a_heartbeat_overwriting_capabilities_does_not_break_reconnect() {
+        let (_d, r) = setup();
+        let kp = KeyPair::generate();
+        let node_id = enroll_ok(&r, &kp);
+        r.devices()
+            .set_public_key(&node_id, &kp.public_key_bytes())
+            .unwrap();
+        r.devices()
+            .touch_online(&node_id, r#"{"connectors":["terminal"]}"#, "{}", "unix:10")
+            .unwrap();
+
+        let msg = identity::signature_message(1, &node_id, 1, "auth", "nonce-1");
+        let sig = kp.sign(&msg);
+        assert!(r
+            .verify_reconnect(&node_id, "nonce-1", &sig, 1, 1, "auth")
+            .is_ok());
+    }
+
+    /// 没有库内公钥的设备（老数据 / 手工插的行）一律拒绝重连。
+    #[test]
+    fn reconnect_without_a_stored_public_key_is_refused() {
+        let (_d, r) = setup();
+        let kp = KeyPair::generate();
+        let node_id = enroll_ok(&r, &kp); // 没调 set_public_key
+        let msg = identity::signature_message(1, &node_id, 0, "auth", "nonce-1");
+        let sig = kp.sign(&msg);
+        let err = r
+            .verify_reconnect(&node_id, "nonce-1", &sig, 1, 0, "auth")
+            .unwrap_err();
+        assert!(
+            matches!(err, CoreError::Registry(RegistryError::NoStoredPublicKey)),
+            "missing public key must surface as a registry error, got {err:?}"
+        );
     }
 
     #[test]
