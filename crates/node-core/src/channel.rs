@@ -260,23 +260,42 @@ impl ChannelTable {
                 .resource
                 .on_data(payload)
                 .map_err(DataError::Connector)?;
-            for f in out {
-                let bytes = f.payload.to_string().len();
-                if entry.backlog_bytes + bytes > MAX_BACKLOG_BYTES {
-                    // 溢出不丢字节：释放通道并报错（理由见 MAX_BACKLOG_BYTES）。
-                    entry.live = false;
-                    return Err(DataError::Connector(ConnectorError::internal(format!(
-                        "channel {channel_id} produced more than {MAX_BACKLOG_BYTES} \
-                         bytes of unbacked output"
-                    ))));
-                }
-                entry.backlog_bytes += bytes;
-                entry
-                    .backlog
-                    .push_back(push(types::CHANNEL_DATA, f.payload));
-            }
+            // 入队与溢出判定都走同一处：`poll_all` 也要入队，
+            // 两份拷贝的溢出策略迟早会分叉，而分叉的表现是
+            // 「按一下键就不溢出了」。
+            self.queue_frames(channel_id, out)?;
         }
         Ok(self.flush(channel_id))
+    }
+
+    /// 产出的帧入队 + 信用字节累计。**溢出即关通道并报错**。
+    ///
+    /// 溢出不截断：`protocol.md` §6 的信用模型是「排进待发队列、等
+    /// `channel_credit` 再放行」，所以这里只能排队。排到内存上限还排不下
+    /// 说明对端永久不读，唯一能自保的动作是放掉这条通道。
+    fn queue_frames(
+        &mut self,
+        channel_id: &str,
+        out: Vec<crate::connector::OutFrame>,
+    ) -> Result<(), DataError> {
+        let Some(entry) = self.channels.get_mut(channel_id) else {
+            return Err(DataError::UnknownChannel);
+        };
+        for f in out {
+            let bytes = f.payload.to_string().len();
+            if entry.backlog_bytes + bytes > MAX_BACKLOG_BYTES {
+                entry.live = false;
+                return Err(DataError::Connector(ConnectorError::internal(format!(
+                    "channel {channel_id} produced more than {MAX_BACKLOG_BYTES} \
+                     bytes of unbacked output"
+                ))));
+            }
+            entry.backlog_bytes += bytes;
+            entry
+                .backlog
+                .push_back(push(types::CHANNEL_DATA, f.payload));
+        }
+        Ok(())
     }
 
     /// 按信用放行待发队列（§6：每发一帧 −1，归零即挂起）。
@@ -295,6 +314,52 @@ impl ChannelTable {
                 .backlog_bytes
                 .saturating_sub(frame.c.to_string().len());
             out.push(frame);
+        }
+        out
+    }
+
+    /// 主动问每条活通道「有没有新东西」，入队后按信用放行。
+    ///
+    /// **必须有这条独立于 `on_data` 的路**：PTY 的输出是子进程写出来的，
+    /// 与 Hub 有没有再发下行帧无关。缺了它，`ls` 的输出会一直卡在
+    /// connector 里，直到用户碰巧又敲了一个键。
+    ///
+    /// 返回值是 `(channel_id, 帧列表)`：worker 要按通道分组发，
+    /// 而错误**不进这里**——某条通道的 connector 出错由 `queue_frames`
+    /// 走既有的错误路径回 `channel_error`，poll 本身不制造新语义。
+    fn poll_all(&mut self) -> Vec<(String, Vec<Frame>)> {
+        // 通道 id 先收集出来：`poll` 要 `&mut`，不能一边遍历一边借表。
+        let ids: Vec<String> = self
+            .channels
+            .iter()
+            .filter(|(_, e)| e.live)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut out = Vec::new();
+        for id in ids {
+            let Some(entry) = self.channels.get_mut(&id) else {
+                continue;
+            };
+            let Ok(produced) = entry.resource.poll() else {
+                // connector 自己的错误已经由 open/on_data 的路径处理；
+                // 这里不重复制造 `channel_error`，交给下一次 poll 再试。
+                continue;
+            };
+            if produced.is_empty() {
+                continue;
+            }
+            // 溢出不吞：`queue_frames` 已经把通道标成 dead，
+            // 这里把那句 `channel_error` 一起发出去。吞掉它的话，
+            // 页面只会看到终端不声不响地停住——而「对端永远不读」
+            // 恰恰是最需要说出口的那种故障。
+            if let Err(DataError::Connector(e)) = self.queue_frames(&id, produced) {
+                out.push((id.clone(), vec![error_frame(&id, e.code(), &e.to_string())]));
+                continue;
+            }
+            let frames = self.flush(&id);
+            if !frames.is_empty() {
+                out.push((id, frames));
+            }
         }
         out
     }
@@ -479,6 +544,18 @@ pub fn live_count() -> usize {
 /// 累计推给 Hub 的数据帧数（跨连接累计，测试与排障用）。
 pub fn sent_frames_total() -> u64 {
     lock().sent_frames()
+}
+
+/// 主动泵一轮：向每条活通道要新数据，按信用放行，返回待发帧。
+///
+/// **worker 必须定期调它**（[`crate::worker`] 的 PTY 轮询 tick）。它不是
+/// 「有下行数据时顺带泵一下」的优化项，而是终端能用的前提：PTY 输出由子
+/// 进程写出，Hub 不发下行帧时它照样在涨，不主动问就永远发不出去。
+///
+/// 返回 `(channel_id, 帧列表)` 而不是一个扁平的 `Vec<Frame>`：分组是为了
+/// 让调用方能对每条通道单独判空（一条通道没数据不该让其它通道的帧被丢）。
+pub fn pump() -> Vec<(String, Vec<Frame>)> {
+    lock().poll_all()
 }
 
 /// 这一帧是不是通道帧。

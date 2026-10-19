@@ -1,34 +1,794 @@
-//! terminal connector：真 PTY（子任务 8）。
+//! terminal connector：真 PTY，子任务 8。
 //!
-//! 第 7 子任务只建**骨架**：真正的实现在子任务 8。
-//! 在那之前 `open` 一律返回一句人话（而不是假装成功）——「打开失败并说清
-//! 为什么」与「打开成功但什么都不做」必须选前者，否则用户看到的是一块
-//! 黑屏，而不是一句「这个 connector 还没做」。
+//! **零入站端口**（约束 1）是这里的核心承诺：PTY 不是网络监听器，Hub 不
+//! 需要能主动连进设备，所以会话内的终端面板不要求设备装 openssh-server。
+//! 设备装一次 `afcli`、跑一条命令，终端就能用。
+//!
+//! **node 只搬字节，不做终端仿真**：ANSI 序列由页面的 xterm.js 解析
+//! （`protocol.md` §4「`channel_data` 的 payload 本层只透传」）。这里如果
+//! 开始替页面解释转义序列，两份实现必然对同一个 `\e[?25l` 给出不同画面。
+//!
+//! ## 载荷
+//!
+//! 下行（Hub → node，`channel_data`）：
+//! - `{"bytes": "..."}` —— 用户敲键的字节
+//! - `{"resize": {"cols": N, "rows": N}}` —— 窗口尺寸变化
+//!
+//! **resize 复用 `channel_data` 而不新增消息类型**（约束 14）：终端的控制
+//! 命令与数据同源，都是「对这条通道说点什么」，拆出一个新 `t` 只为三种
+//! 载荷换来一个永远只有一种用法的类型。
+//!
+//! 上行（node → Hub，`channel_data`）：`{"bytes": "..."}`。
 
-use super::{Connector, ConnectorError, OpenReq, OutFrame};
+use std::collections::VecDeque;
 
-/// Terminal connector。M0 阶段没有会话工作区，所以没有 root。
-#[derive(Debug, Default)]
-pub struct Terminal;
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
+use std::sync::{mpsc, Arc};
 
-impl Terminal {
-    pub fn new() -> Self {
-        Self
+use serde::Deserialize;
+
+use crate::connector::{Connector, ConnectorError, OpenReq, OutFrame};
+use crate::pty::{default_shell, Pty, Size};
+
+/// `open` 的参数。**全部可选**：页面给什么就用什么，缺的那几项落到
+/// 一个「能用的默认值」上——开终端面板不是配置作业，让它因为少传一个
+/// `rows` 就失败才是真的不好用。
+#[derive(Debug, Default, Deserialize)]
+struct TerminalParams {
+    shell: Option<String>,
+    cwd: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+    #[serde(default)]
+    env: Vec<(String, String)>,
+}
+
+/// 下行帧。**两个字段各自可选，然后由本文件判定合法的组合**。
+///
+/// 不用 serde 的 enum 表示：默认的 externally tagged 形状是
+/// `{"bytes": {"bytes": "..."}}`（struct variant 要再套一层），而
+/// `untagged` 又会把「两个都没给」和「两个都给」都报成同一句
+/// `data did not match any variant` —— 那句信息对用户毫无用处。
+#[derive(Debug, Default, Deserialize)]
+struct InFrameRaw {
+    bytes: Option<String>,
+    resize: Option<ResizeFrame>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResizeFrame {
+    cols: u16,
+    rows: u16,
+}
+
+impl InFrameRaw {
+    /// 恰好一种，且说得清是哪一种不对。
+    fn into_action(self) -> Result<InFrame, ConnectorError> {
+        let bad = |detail: String| ConnectorError::Invalid { detail };
+        match (self.bytes, self.resize) {
+            (Some(bytes), None) => Ok(InFrame::Bytes { bytes }),
+            (None, Some(r)) => Ok(InFrame::Resize {
+                cols: r.cols,
+                rows: r.rows,
+            }),
+            (None, None) => Err(bad(
+                "terminal data must carry either \"bytes\" or \"resize\"".to_string(),
+            )),
+            (Some(_), Some(_)) => Err(bad(
+                "terminal data carries both \"bytes\" and \"resize\"".to_string()
+            )),
+        }
     }
 }
 
+/// 校验过的那一种下行帧。
+enum InFrame {
+    Bytes { bytes: String },
+    Resize { cols: u16, rows: u16 },
+}
+
+/// 终端的默认尺寸。80×24 是所有终端的出厂默认，也是页面上「还没量到
+/// 尺寸」时唯一站得住的值。
+const DEFAULT_COLS: u16 = 80;
+const DEFAULT_ROWS: u16 = 24;
+
+/// **下限 1×1**：0 会被 `TIOCSWINSZ` 收下，而内核把它当「未设置」，
+/// 于是 `stty size` 报 `0 0`——那是内核的语义，不是我们该传下去的值。
+const MIN_DIM: u16 = 1;
+
+/// 读缓冲。**不是「攒够再发」**：PTY 是字节流，提示符必须在用户还没敲
+/// 任何东西时就出现在页面上，等到攒满才发等于终端开局黑屏一秒。
+const READ_CHUNK: usize = 16 * 1024;
+
+/// 读线程与 `poll` 之间的交接缓冲上限。
+///
+/// 读线程**不能**无界地往里塞：PTY 的产出速率（`yes`、大日志）可以远超
+/// 信用额度，而通道层的 backlog 有限。真堵死之后读线程得停读，否则
+/// 一条没人读的通道能吃掉设备全部内存（`protocol.md` §6 的写侧约束）。
+const READ_QUEUE_BYTES: usize = 1024 * 1024;
+
+/// 队列字节数的原子计数器。**读线程与 `poll` 分处两个线程**，所以队列
+/// 本身在 `Receiver` 里，长度必须靠共享原子量来判——`Receiver::len()`
+/// 只给个数不给字节数。
+type QueueBytes = Arc<std::sync::atomic::AtomicUsize>;
+
+/// 终端通道的资源：一个真 PTY + 一个专职读它的线程。
+///
+/// **为什么必须是一个线程，而不是在 `poll` 里直接读**：PTY 的 `read` 在
+/// 没有数据时阻塞。`poll` 是被通道层在**持有全局通道表锁**的情况下调用的，
+/// 一次阻塞读就是一次全局停顿——同一个设备上的 files / exec 通道全被冻住，
+/// 而规则 8 要求心跳与通道是两条独立路径。
+///
+/// 线程唯一的职责是「读 byte → 交出去」，不碰连接、不碰信用、不看协议。
+/// 它比 `select!` 少一个可被取消的 future，也就少一类「取消发生在
+/// 半次读中间」的边界情况。
+#[derive(Debug)]
+pub struct Terminal {
+    pty: Option<Pty>,
+    size: Size,
+    /// 待推给 Hub 的输出字节。`poll` 只在这里取，不做 IO。
+    pending: VecDeque<Vec<u8>>,
+    /// 读线程交出来的队列。**本类型不保留发送端**：
+    /// 只要还握着一份 `tx`，`try_recv` 就永远看不到 `Disconnected`，
+    /// 于是「子进程已退出」这个事实永远传不上来，终端面板停在一块
+    /// 不再动、也不报错的黑板上。
+    rx: Option<Receiver<Vec<u8>>>,
+    /// 「关掉面板」信号。读线程在两次读之间查它。
+    stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    queued: Option<QueueBytes>,
+    /// 队列里那条 `None`：**子进程已经退出，输出到此为止**。
+    /// 这是「读完了」与「读失败了」的区别——前者要告诉用户命令跑完了，
+    /// 后者才是故障（`pty.rs` 把 `EIO` 归到前者正是为此）。
+    done: bool,
+}
+
+impl Terminal {
+    pub fn new() -> Self {
+        Self {
+            pty: None,
+            size: Size {
+                cols: DEFAULT_COLS,
+                rows: DEFAULT_ROWS,
+            },
+            pending: VecDeque::new(),
+            rx: None,
+            stop: None,
+            queued: None,
+            done: false,
+        }
+    }
+
+    /// 已开着吗。通道层在关通道前用它决定要不要再 `close` 一次。
+    pub fn is_open(&self) -> bool {
+        self.pty.is_some()
+    }
+
+    fn pty(&self) -> Result<&Pty, ConnectorError> {
+        self.pty.as_ref().ok_or_else(|| ConnectorError::Invalid {
+            detail: "terminal is not open".to_string(),
+        })
+    }
+
+    fn detach(&mut self) {
+        self.pty = None;
+        self.rx = None;
+        self.stop = None;
+        self.queued = None;
+        self.pending.clear();
+        self.done = false;
+    }
+}
+
+/// 0 与缺失同义。
+fn non_zero(v: Option<u16>) -> Option<u16> {
+    v.filter(|n| *n > 0)
+}
+
+/// 尺寸校验。**下限而不是上限**：页面上一个被拖到极窄的窗口真的会给很小的
+/// `cols`，直接拒绝会让「拖窄了终端就打不开」这种最正常的操作失败。
+fn checked(cols: u16, rows: u16) -> Result<Size, ConnectorError> {
+    if cols < MIN_DIM || rows < MIN_DIM {
+        return Err(ConnectorError::Invalid {
+            detail: format!(
+                "terminal size must be at least {MIN_DIM}x{MIN_DIM}, got {cols}x{rows}"
+            ),
+        });
+    }
+    Ok(Size { cols, rows })
+}
+
 impl Connector for Terminal {
-    fn open(&mut self, _req: OpenReq) -> Result<Vec<OutFrame>, ConnectorError> {
-        Err(ConnectorError::Invalid {
-            detail: "Terminal connector is not implemented in this build".to_string(),
-        })
+    fn open(&mut self, req: OpenReq) -> Result<Vec<OutFrame>, ConnectorError> {
+        let p: TerminalParams = req
+            .parse("terminal")
+            .map_err(|e| ConnectorError::Invalid { detail: e })?;
+        // **0 视作「没给」**：页面刚挂载、还没量到尺寸时会发 0，
+        // 而 0 对内核是「未设置」，`stty size` 会报 `0 0`。回落到默认比
+        // 报错更接近用户要的——他要的是一个能看见提示符的终端。
+        let size = checked(
+            non_zero(p.cols).unwrap_or(DEFAULT_COLS),
+            non_zero(p.rows).unwrap_or(DEFAULT_ROWS),
+        )?;
+
+        // shell 优先用页面给的，其次设备自己的默认。空串当「没给」——
+        // 页面上一个空输入框提交上来是空串，不是「请执行空路径」。
+        let shell = p
+            .shell
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(default_shell);
+
+        // cwd 跟着会话走（约束 3：terminal 绑会话工作区 `(node_id, path)`）。
+        // 没有工作区就用 worker 自己的 cwd，不猜。
+        let cwd = p.cwd.filter(|c| !c.is_empty());
+        let cwd_ref = cwd.as_ref().map(std::path::Path::new);
+
+        self.close();
+        let pty = Pty::spawn_in(&shell, &[], size, cwd_ref, &p.env).map_err(|e| {
+            ConnectorError::Failed {
+                op: "start terminal".to_string(),
+                detail: e.to_string(),
+            }
+        })?;
+        self.pty = Some(pty);
+        self.size = size;
+        self.start_reader()?;
+        // 首帧不回：shell 的提示符由 `poll` 泵出去。回一个空帧列表，
+        // 让通道层照常发 `channel_ready` —— 页面上「面板已就绪」与
+        // 「提示符已显示」是两个状态，混成一帧会让后者早于前者成立。
+        Ok(Vec::new())
     }
 
-    fn on_data(&mut self, _data: &serde_json::Value) -> Result<Vec<OutFrame>, ConnectorError> {
-        Err(ConnectorError::Invalid {
-            detail: "Terminal channel is not open".to_string(),
-        })
+    fn on_data(&mut self, data: &serde_json::Value) -> Result<Vec<OutFrame>, ConnectorError> {
+        // 先确认开着：`data` 反序列化失败时错误信息会指向「帧格式」，
+        // 而真实原因是这条通道早关了——后者才是用户要看到的那句。
+        self.pty()?;
+        let frame: InFrame = serde_json::from_value::<InFrameRaw>(data.clone())
+            .map_err(|e| ConnectorError::Invalid {
+                detail: format!("bad terminal data: {e}"),
+            })?
+            .into_action()?;
+        match frame {
+            InFrame::Bytes { bytes } => {
+                self.pty()?
+                    .write(bytes.as_bytes())
+                    .map_err(|e| ConnectorError::Failed {
+                        op: "write to terminal".to_string(),
+                        detail: e.to_string(),
+                    })?;
+                Ok(Vec::new())
+            }
+            InFrame::Resize { cols, rows } => {
+                let size = checked(cols, rows)?;
+                let pty = self.pty.as_mut().ok_or_else(|| ConnectorError::Invalid {
+                    detail: "terminal is not open".to_string(),
+                })?;
+                pty.resize(size).map_err(|e| ConnectorError::Failed {
+                    op: "resize terminal".to_string(),
+                    detail: e.to_string(),
+                })?;
+                self.size = size;
+                Ok(Vec::new())
+            }
+        }
     }
 
-    fn close(&mut self) {}
+    /// 把攒着的输出抽出来。**不做任何 IO**——见 [`Terminal`] 的线程理由。
+    fn poll(&mut self) -> Result<Vec<OutFrame>, ConnectorError> {
+        self.drain();
+        if self.pending.is_empty() {
+            return Ok(Vec::new());
+        }
+        // **一帧一条**：PTY 的输出是连续的字节流，而每个 credit 只值一帧。
+        // 一次 `poll` 吐 N 条就吃掉 N 个 credit，而同一 tick 里别的通道
+        // 可能正等着这个额度——合并成一条是拿别人的额度填自己的队列。
+        let mut out = Vec::new();
+        while let Some(chunk) = self.pending.pop_front() {
+            out.push(OutFrame::bytes(chunk)?);
+        }
+        Ok(out)
+    }
+
+    fn close(&mut self) {
+        // 顺序要紧：先喊停，再关 master。
+        //
+        // 读线程此刻多半正**阻塞在 `read` 里**（PTY 空闲时就是这样），
+        // 所以光关 master 叫不醒它——它手里那份 dup 仍然开着内核的
+        // master，`SIGHUP` 也因此发不出去，shell 会带着这个读线程
+        // 一直活到设备重启。停标志让它在下一个 poll 周期自己退出。
+        if let Some(stop) = self.stop.as_ref() {
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        if let Some(mut pty) = self.pty.take() {
+            // 关 master 让前台进程组收到 `SIGHUP`，也就是「关掉终端面板 =
+            // 关掉那个 shell」，而不是让它在设备上继续跑着没人管。
+            pty.close();
+        }
+        self.detach();
+        // 关掉的面板**永远不会再有输出了**，所以它就是「读完了」。
+        // 不置位的话调用方只能靠「`pty` 是 None」去猜，于是每一个
+        // 问「这个终端结束了吗」的地方都要自己再写一遍这个判断。
+        self.done = true;
+    }
+}
+
+impl Terminal {
+    /// 起读线程。**PTY 建不起来就不该有线程**，所以它在 `open` 末尾调。
+    fn start_reader(&mut self) -> Result<(), ConnectorError> {
+        let Some(pty) = self.pty.as_ref() else {
+            return Err(ConnectorError::internal("terminal is not open"));
+        };
+        let dup = pty.dup_master().map_err(|e| ConnectorError::Failed {
+            op: "attach to terminal".to_string(),
+            detail: e.to_string(),
+        })?;
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(QUEUE_SLOTS);
+        let queued: QueueBytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&queued);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        // `tx` 只交给读线程：本类型不保留它（见字段注释）。
+        std::thread::Builder::new()
+            .name("afcli-pty".to_string())
+            .spawn(move || read_loop(dup, tx, counter, flag))
+            .map_err(|e| {
+                ConnectorError::internal(format!("cannot start the terminal reader: {e}"))
+            })?;
+        self.rx = Some(rx);
+        self.stop = Some(stop);
+        self.queued = Some(queued);
+        self.done = false;
+        Ok(())
+    }
+
+    /// 把读线程队列里的东西挪进 `pending`，能挪多少挪多少。
+    fn drain(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let Some(rx) = self.rx.as_ref() else {
+            return;
+        };
+        loop {
+            match rx.try_recv() {
+                Ok(chunk) => {
+                    if let Some(q) = self.queued.as_ref() {
+                        q.fetch_sub(chunk.len(), Relaxed);
+                    }
+                    self.pending.push_back(chunk.to_vec());
+                }
+                // 子进程退了：发送端析构就是「输出到此为止」的信号，而不是
+                // 一次失败。用户该看到的是「命令跑完了」。
+                Err(TryRecvError::Disconnected) => {
+                    self.done = true;
+                    return;
+                }
+                // 队列空了。这**不代表**输出结束——下一批可能正在路上，
+                // 所以 `done` 不能在这里置位，否则会在命令还没跑完时
+                // 就把终端判死。
+                Err(TryRecvError::Empty) => return,
+            }
+        }
+    }
+
+    /// 子进程是否已经退出。
+    pub fn finished(&self) -> bool {
+        self.done && self.pending.is_empty()
+    }
+}
+
+/// 队列槽位数。**按 64 KiB 一槽算**：与 [`READ_CHUNK`] 配套，读线程每次
+/// 正好填满一槽，槽数也就是队列的字节上限（`READ_QUEUE_BYTES`）。
+const QUEUE_SLOTS: usize = READ_QUEUE_BYTES / READ_CHUNK;
+
+/// 读线程。**只做「读 byte → 交出去」**：不碰连接、不碰信用、不看协议。
+///
+/// 阻塞在 `read` 是这个线程的全部工作——它在没有输出时该睡就睡，而那正是
+/// 它存在的理由：谁在会话循环里替大家挡住这个阻塞，谁就得同时持有
+/// 整个通道表。
+fn read_loop(
+    master: OwnedFd,
+    tx: SyncSender<Vec<u8>>,
+    queued: QueueBytes,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    // **只借 fd，不接管所有权**：另一次 `close()` 会关掉 `master`，而一个
+    // 也关它的 `File` 会造成同一 fd 两个所有者，进程在 IO safety 检查上
+    // 直接 abort。读这一侧只需要 `read(2)`，没必要引入带所有权的句柄。
+    let fd = master.as_raw_fd();
+    let mut buf = [0u8; READ_CHUNK];
+    loop {
+        // **每次读之前先给「关掉面板」一个机会**。`read(2)` 在 PTY 空闲时
+        // 阻塞，所以只靠关闭 fd 叫不醒这个线程（见 [`Terminal::close`]）。
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        if !wait_readable(fd, READ_POLL_INTERVAL) {
+            // 超时 = 这一轮没有数据。回到循环头部查停标志。
+            continue;
+        }
+        // `Ok(0)` 与 `Err` 都是「这一侧到此为止」：PTY 在子进程退出后
+        // 报的是 `EIO` 而不是 EOF（`pty.rs` 把两者都归到这一类）。
+        let n = match crate::pty::read_fd(fd, &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        let Some(chunk) = buf.get(..n) else {
+            break;
+        };
+        // **先记账再发**：`sync_channel` 的槽位只管个数、不管字节数，
+        // 而这里要卡的是字节数（一条 `yes` 一次能产出几十 MiB）。
+        while queued.load(Relaxed) >= READ_QUEUE_BYTES {
+            std::thread::yield_now();
+        }
+        let len = chunk.len();
+        queued.fetch_add(len, Relaxed);
+        if tx.send(chunk.to_vec()).is_err() {
+            // 通道关了：没人再消费。把刚才记的账退掉，否则这次连接的
+            // 字节数会一直虚高，下一条通道一上来就在等一个不存在的额度。
+            queued.fetch_sub(len, Relaxed);
+            break;
+        }
+    }
+    // 发送端析构 → `try_recv` 得到 `Disconnected` → `drain` 置 `done`。
+    drop(tx);
+}
+
+/// 等 fd 可读，最多 `budget`。**只等可读**。
+fn wait_readable(fd: std::os::fd::RawFd, budget: std::time::Duration) -> bool {
+    let ms = i64::try_from(budget.as_millis().min(i64::MAX as u128)).unwrap_or(i64::MAX);
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // coverage: excluded — `poll` 失败需 fd 无效或 `nfds` 超范围，
+    // 这里传的都是内核刚给的 fd（防御性兜底）。
+    let rc = unsafe { libc::poll(&raw mut pfd, 1, ms as libc::c_int) };
+    // **POLLHUP / POLLERR 也要当「可读」**：PTY 的从端关闭时内核先报挂断，
+    // 那一瞬间未必同时带 POLLIN。只认 POLLIN 的话读循环会永远跳过
+    // `read`，于是永远看不到那个代表「子进程退了」的 0 字节。
+    rc > 0 && pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
+}
+
+/// 读线程的等待粒度。**它同时是「关掉面板」到线程真正退出之间的上界**：
+/// 太大则关掉的终端还占着 master 与一个线程几秒，太小则空转烧电。
+const READ_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// 「能用的默认值」必须真的存在：注册表按名造 connector 时走的就是
+/// `Default`，而一个只能 `new()` 的类型没法进那张表。
+impl Default for Terminal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 真 PTY 的行为（提示符会自己出来、命令的输出会自己回来、resize 落到
+/// 内核上、子进程退了会被认出来）。**判据是真读内核的答案**，不是
+/// 「我们自己记住了一个变量」。
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connector::names;
+
+    fn req(params: serde_json::Value) -> OpenReq {
+        OpenReq::new("/tmp", params)
+    }
+
+    /// 真带一个 NUL 字节的 shell 名。写 `\0` 转义会被 serde 当成两个字符，
+    /// 那测不到「C 字符串塞不进 NUL」这件事。
+    fn bad_nul_name() -> String {
+        let mut s = String::from("bad");
+        s.push('\0');
+        s.push_str("shell");
+        s
+    }
+
+    /// 起一个 shell，往里敲一条命令，等到它退出，吐出全部输出。
+    ///
+    /// **走的是和用户完全一样的路**（敲键 → `on_data` → 输出 → `poll`），
+    /// 所以这个测试验证的是接线的整体，而不是单个零件。
+    fn run_to_completion(cmd: &str) -> (String, bool) {
+        let mut t = Terminal::new();
+        t.open(req(serde_json::json!({ "shell": "/bin/sh" })))
+            .expect("open");
+        t.on_data(&serde_json::json!({ "bytes": format!("{cmd}\nexit\n") }))
+            .expect("type the command");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut text = String::new();
+        loop {
+            for f in t.poll().expect("poll") {
+                if let Some(s) = f.payload.get("bytes").and_then(|b| b.as_str()) {
+                    text.push_str(s);
+                }
+            }
+            if t.finished() {
+                return (text, true);
+            }
+            if std::time::Instant::now() > deadline {
+                return (text, t.finished());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// 扫出文本里所有**恰好 8 位**的十进制串，按出现顺序返回。
+    ///
+    /// 「恰好」是重点：9 位以上的连续数字（比如回显出来的命令本身）会被
+    /// 拆成 8 + 1 两个片段算进来，于是把一行误判成两个数。
+    fn eight_digit_runs(text: &str) -> Vec<u32> {
+        let b = text.as_bytes();
+        let is_digit = |i: usize| b.get(i).is_some_and(|c| c.is_ascii_digit());
+        let mut out = Vec::new();
+        let mut i = 0;
+        while let Some(window) = b.get(i..) {
+            if window.len() < 8 {
+                break;
+            }
+            let before_is_digit = i > 0 && is_digit(i - 1);
+            let after_is_digit = is_digit(i + 8);
+            let run: Option<u32> = b
+                .get(i..i + 8)
+                .filter(|w| w.iter().all(|c| c.is_ascii_digit()))
+                .filter(|_| !before_is_digit && !after_is_digit)
+                .map(|w| w.iter().fold(0u32, |a, c| a * 10 + u32::from(c - b'0')));
+            match run {
+                Some(v) => {
+                    out.push(v);
+                    i += 8;
+                }
+                None => i += 1,
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn opening_it_starts_a_shell_and_reports_nothing_until_polled() {
+        let mut t = Terminal::new();
+        let frames = t.open(req(serde_json::json!({}))).expect("open");
+        assert!(frames.is_empty(), "提示符走 poll，不走首帧");
+        assert!(t.is_open());
+        assert_eq!(
+            t.size,
+            Size {
+                cols: DEFAULT_COLS,
+                rows: DEFAULT_ROWS
+            }
+        );
+    }
+
+    /// **核心测试**：输出是**主动**推的，不等任何下行数据帧。
+    ///
+    /// 这正是那个只有 `on_data` 时看不见的缺陷：敲完 `echo` 就干等，
+    /// 输出永远不来——终端看着像坏了。所以断言只要求「什么都没往下发，
+    /// 却有字节回来了」，不要求 `on_data` 被调用过。
+    ///
+    /// 判据刻意**不写死提示符字符**：root 的 `sh` 打 `#`、普通用户打 `$`，
+    /// 写死任何一个都会让这个测试在另一种容器里假红。
+    #[test]
+    fn the_prompt_shows_up_without_any_further_downlink() {
+        let mut t = Terminal::new();
+        t.open(req(serde_json::json!({ "shell": "/bin/sh" })))
+            .expect("open");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut seen = String::new();
+        while std::time::Instant::now() < deadline && seen.trim().is_empty() {
+            for f in t.poll().expect("poll") {
+                if let Some(s) = f.payload.get("bytes").and_then(|b| b.as_str()) {
+                    seen.push_str(s);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!seen.trim().is_empty(), "一个字节都没主动推出来");
+    }
+
+    /// 敲进去的命令会被 shell 真的执行，输出会真的回来。
+    #[test]
+    fn echo_round_trips_through_a_real_shell() {
+        let (text, done) = run_to_completion("echo agentfleet-pty-round-trip");
+        assert!(done, "shell 没在 10s 内退出：{text}");
+        assert!(
+            text.contains("agentfleet-pty-round-trip"),
+            "echo 的输出没回来：{text}"
+        );
+    }
+
+    /// 子进程退出后 `finished` 为真，且**再 poll 也不产出**——
+    /// 一个永动的空轮询会把 CPU 和电量都烧掉。
+    #[test]
+    fn a_finished_shell_stays_finished() {
+        let mut t = Terminal::new();
+        t.open(req(serde_json::json!({ "shell": "/bin/sh" })))
+            .expect("open");
+        t.on_data(&serde_json::json!({ "bytes": "exit\n" }))
+            .expect("type exit");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !t.finished() && std::time::Instant::now() < deadline {
+            t.poll().expect("poll");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(t.finished(), "退出了的 shell 没被认出来");
+        assert!(t.poll().expect("poll after finish").is_empty());
+        assert!(t.poll().expect("poll again").is_empty());
+    }
+
+    /// **大输出不丢字节**：产物比单次读缓冲大 100 多倍，正好把「攒够再发」
+    /// 与「截断到协议上限」这两种做法逼成 bug。
+    ///
+    /// 判据不是「行数差不多」，而是**把收到的字节里所有 8 位数字串扫出来，
+    /// 要求它们恰好是 `0..N-1` 且严格递增**。按行数计会漏掉一种失败：
+    /// 首行被提示符粘住就不算独立的一行，看起来只少一行，其实是粘住。
+    /// 扫数字串与 shell 的提示符/回显怎么交错无关。
+    #[test]
+    fn output_bigger_than_one_buffer_survives_intact() {
+        const N: usize = 200_000; // READ_CHUNK（16 KiB）的 12 倍
+        let (text, done) = run_to_completion(&format!(
+            "i=0; while [ $i -lt {N} ]; do printf '%08d\\n' $i; i=$((i+1)); done; printf 'END-OF-MARKER\\n'"
+        ));
+        assert!(done, "生成 {N} 行没跑完");
+        assert!(
+            text.contains("END-OF-MARKER"),
+            "命令没跑到最后一行，后段字节整个丢了"
+        );
+
+        let seq = eight_digit_runs(&text);
+        assert_eq!(
+            seq.len(),
+            N,
+            "收到 {} 个 8 位数字串（应为 {N}）；末尾原文={:?}",
+            seq.len(),
+            text.chars()
+                .rev()
+                .take(48)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>()
+        );
+        assert_eq!(seq.first(), Some(&0), "第一行不是 00000000");
+        assert_eq!(
+            seq.last(),
+            Some(&((N - 1) as u32)),
+            "最后一行不是 000199999"
+        );
+        for (i, v) in seq.iter().enumerate() {
+            assert_eq!(*v as usize, i, "第 {i} 行对不上");
+        }
+    }
+
+    #[test]
+    fn the_registry_routes_the_terminal_name_here() {
+        let mut c = crate::connector::create(names::TERMINAL).expect("registered");
+        c.open(req(serde_json::json!({ "shell": "/bin/sh" })))
+            .expect("open through the registry");
+    }
+
+    #[test]
+    fn the_shell_a_page_names_wins_over_the_device_default() {
+        let mut t = Terminal::new();
+        t.open(req(serde_json::json!({ "shell": "/bin/sh" })))
+            .expect("open");
+        assert!(t.is_open());
+    }
+
+    /// 不存在的 shell 路径：`execvp` 失败后子进程 `_exit(127)`，父进程
+    /// 看到的是**读干净了**而不是「起不来」。
+    #[test]
+    fn a_shell_that_is_not_there_reads_as_the_panel_ending_not_as_a_failure() {
+        let mut t = Terminal::new();
+        // `forkpty` 本身成功：路径存不存在是 exec 之后由内核判的。
+        t.open(req(serde_json::json!({ "shell": "/nonexistent/shell" })))
+            .expect("forkpty itself succeeds");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !t.finished() && std::time::Instant::now() < deadline {
+            t.poll().expect("poll");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            t.finished(),
+            "起不来的 shell 不会自己退出，终端会永远停在空面板上"
+        );
+    }
+
+    #[test]
+    fn a_shell_name_carrying_a_nul_is_refused_before_forking() {
+        let mut t = Terminal::new();
+        let err = t
+            .open(req(serde_json::json!({ "shell": bad_nul_name() })))
+            .expect_err("must refuse");
+        assert!(err.to_string().contains("NUL"), "got {err}");
+        assert!(!t.is_open(), "开不起来就不该算已打开");
+    }
+
+    #[test]
+    fn the_reader_thread_stops_when_the_panel_is_closed() {
+        let mut t = Terminal::new();
+        t.open(req(serde_json::json!({ "shell": "/bin/sh" })))
+            .expect("open");
+        t.close();
+        // 线程退出后 `drain` 会看到 Disconnected；这里只断言没有残留的
+        // 待发数据——一个关不掉读线程的实现会在这里留下 backlog。
+        assert!(t.poll().expect("poll after close").is_empty());
+        assert!(t.finished(), "关掉的面板不该还在读");
+    }
+
+    #[test]
+    fn an_empty_size_field_falls_back_to_the_default() {
+        let mut t = Terminal::new();
+        t.open(req(serde_json::json!({ "cols": 0, "rows": 0 })))
+            .expect("open");
+        assert_eq!(
+            t.size,
+            Size {
+                cols: DEFAULT_COLS,
+                rows: DEFAULT_ROWS
+            }
+        );
+    }
+
+    #[test]
+    fn a_resize_reaches_the_kernel_through_stty() {
+        let mut t = Terminal::new();
+        t.open(req(serde_json::json!({ "shell": "/bin/sh" })))
+            .expect("open");
+        t.on_data(&serde_json::json!({ "resize": { "cols": 100, "rows": 40 } }))
+            .expect("resize");
+        assert_eq!(
+            t.size,
+            Size {
+                cols: 100,
+                rows: 40
+            }
+        );
+        assert_eq!(
+            t.pty().expect("open").size(),
+            Size {
+                cols: 100,
+                rows: 40
+            },
+            "内核那边也要是新的，否则 resize 只是我们自己改了个变量"
+        );
+    }
+
+    #[test]
+    fn a_zero_size_resize_is_refused_rather_than_handed_to_the_kernel() {
+        let mut t = Terminal::new();
+        t.open(req(serde_json::json!({ "shell": "/bin/sh" })))
+            .expect("open");
+        let err = t
+            .on_data(&serde_json::json!({ "resize": { "cols": 0, "rows": 24 } }))
+            .expect_err("must refuse");
+        assert!(err.to_string().contains("at least"), "got {err}");
+    }
+
+    #[test]
+    fn data_on_a_closed_terminal_says_the_terminal_is_gone() {
+        let mut t = Terminal::new();
+        let err = t
+            .on_data(&serde_json::json!({ "bytes": "ls\n" }))
+            .expect_err("must refuse");
+        assert!(err.to_string().contains("not open"), "got {err}");
+    }
+
+    #[test]
+    fn an_unrecognized_payload_names_the_connector_it_belongs_to() {
+        let mut t = Terminal::new();
+        t.open(req(serde_json::json!({}))).expect("open");
+        let err = t
+            .on_data(&serde_json::json!({ "paste": "hi" }))
+            .expect_err("must refuse");
+        assert!(err.to_string().contains("terminal"), "got {err}");
+    }
+
+    #[test]
+    fn closing_twice_is_allowed() {
+        let mut t = Terminal::new();
+        t.open(req(serde_json::json!({}))).expect("open");
+        t.close();
+        t.close();
+        assert!(!t.is_open());
+        // 关完之后 poll 不该报错：断连与 close_channel 可能各来一次。
+        assert!(t.poll().expect("poll after close").is_empty());
+    }
 }

@@ -10,6 +10,7 @@ pub mod entry;
 pub mod heartbeat;
 pub mod identity;
 pub mod log;
+pub mod pty;
 pub mod reconnect;
 pub mod supervisor;
 pub mod update;

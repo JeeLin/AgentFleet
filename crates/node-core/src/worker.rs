@@ -55,6 +55,17 @@ pub struct Worker {
     log: Box<Logger>,
 }
 
+/// 主动泵一轮的周期。
+///
+/// **30 ms 是「终端看着是活的」与「设备不空转」之间的折中**：人眼对
+/// 「敲完回车到出字」的容忍在 100 ms 量级，1 MiB 队列在 30 ms 一轮下
+/// 折合 33 MiB/s——比任何一台目标设备上的本地命令产出都快，所以它
+/// 永远不会是瓶颈，只会被网络往返盖过去。
+///
+/// **不从 Hub 协商**（约束 14 的例外说明）：它不是「这台设备支持什么
+/// 能力」，而是本地读循环的节流参数，问一次只多一份会漂移的配置。
+const PUMP_INTERVAL: Duration = Duration::from_millis(30);
+
 impl Worker {
     pub fn new(data_dir: PathBuf, hub_url: String) -> Self {
         let log = log_to(&data_dir);
@@ -246,6 +257,7 @@ impl Worker {
         }
         let mut ticker = tokio::time::interval(heartbeat_interval);
         ticker.tick().await; // 第一个 tick 由上面那次立即发送承担
+        let mut pump = tokio::time::interval(PUMP_INTERVAL);
         loop {
             tokio::select! {
                 // coverage: excluded — 心跳 tick 臂：需让 ticker 在 session 内触发而
@@ -253,6 +265,25 @@ impl Worker {
                 _ = ticker.tick() => {
                     if let Err(e) = self.send_heartbeat(est).await {
                         self.say(&format!("heartbeat send failed: {}", outcome_phrase(&e)));
+                    }
+                }
+                // 通道的主动输出。**独立于下行帧**（`channel::pump` 的注释
+                // 解释了为什么这条臂不能省）：PTY 的输出是子进程写的，
+                // Hub 不发任何东西时它照样在涨。
+                //
+                // 它与心跳是两条独立路径（约束 8）：这一臂里做的 IO 全部
+                // 是非阻塞的 drain，连接真实读取发生在 `est.next_text`
+                // 那一臂上，所以通道繁忙不会让心跳迟到。
+                _ = pump.tick() => {
+                    for (channel_id, frames) in channel::pump() {
+                        if let Err(e) = self.send_channel_frames(est, &channel_id, &frames).await {
+                            self.say(&format!(
+                                "pumped frame send failed ({} {}): {}",
+                                channel_id,
+                                frames.len(),
+                                outcome_phrase(&e)
+                            ));
+                        }
                     }
                 }
                 incoming = est.next_text() => match incoming {
@@ -279,6 +310,29 @@ impl Worker {
                 },
             }
         }
+    }
+
+    /// 发一批通道帧。
+    ///
+    /// 回不回得出去**不**当成断连理由：Hub 判离站靠的是收不到心跳，
+    /// 而它自己会发现这里断没断。只留痕。
+    async fn send_channel_frames(
+        &self,
+        est: &mut Established,
+        channel_id: &str,
+        frames: &[protocol::Frame],
+    ) -> Result<(), ConnOutcome> {
+        for out in frames {
+            est.send(out).await.inspect_err(|e| {
+                self.say(&format!(
+                    "channel frame send failed ({} {}): {}",
+                    channel_id,
+                    out.msg_type,
+                    outcome_phrase(e)
+                ));
+            })?;
+        }
+        Ok(())
     }
 
     /// 一帧通道帧 → [`channel::on_channel_frame`] → 依次发出该回的那些帧。

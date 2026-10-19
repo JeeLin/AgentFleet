@@ -116,9 +116,12 @@ fn an_unknown_connector_is_refused_with_an_error_frame() {
 /// 一个**已注册但实现是骨架**的 connector（子任务 7 的三个），开通道要回
 /// 一句人话（`invalid`）而不是假装成功——用户看到的是错误，不是黑屏。
 #[test]
-fn a_skeleton_connector_reports_that_it_is_not_built_yet() {
+fn a_connector_that_is_not_built_yet_says_so_instead_of_pretending_to_work() {
     reset();
-    for name in connector::registered_names() {
+    // **逐个点名，不再遍历注册表**：terminal 已经是真的了（子任务 8），
+    // 「遍历全部注册表并断言都还没实现」这条判据会随实现推进自己失效，
+    // 而它的失效方式是新实现被当成 bug 报回来。
+    for name in [connector::names::FILES, connector::names::EXEC] {
         let action = channel::on_channel_frame(&open_frame("ch-s", name, 8));
         let f = expect_frame(&action, types::CHANNEL_ERROR);
         assert_eq!(f.c["channel_id"], "ch-s");
@@ -131,6 +134,17 @@ fn a_skeleton_connector_reports_that_it_is_not_built_yet() {
             f.c
         );
     }
+    channel::on_disconnect();
+}
+
+/// terminal 已经落地：开通道要拿到 `channel_ready`，不是一句错误。
+#[test]
+fn the_terminal_connector_reports_ready_rather_than_not_built_yet() {
+    reset();
+    let action = channel::on_channel_frame(&open_frame("ch-t", connector::names::TERMINAL, 8));
+    let f = expect_frame(&action, types::CHANNEL_READY);
+    assert_eq!(f.c["channel_id"], "ch-t");
+    assert_eq!(f.c["capabilities"]["connector"], connector::names::TERMINAL);
 }
 
 /// 标准③：通道关闭后**资源被释放**（有测试用计数断言）。

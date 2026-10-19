@@ -173,6 +173,15 @@ pub trait Connector: Send {
     /// 通道内收到一帧数据 → 回零到若干帧。
     fn on_data(&mut self, data: &serde_json::Value) -> Result<Vec<OutFrame>, ConnectorError>;
 
+    /// **主动**产出待发数据，与「有没有收到东西」无关。
+    ///
+    /// 不做这一步的话，PTY 的输出只在**下一帧下行数据到达时**才被泵出去：
+    /// 敲一次 `ls` 然后干等，输出永远不来——终端看着像坏了。
+    /// 空闲的 files/exec connector 返回空即可（默认实现）。
+    fn poll(&mut self) -> Result<Vec<OutFrame>, ConnectorError> {
+        Ok(Vec::new())
+    }
+
     /// 释放资源。**必须能重复调用**：断连重连与 `close_channel` 可能各来一次。
     fn close(&mut self);
 }

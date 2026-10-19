@@ -69,6 +69,13 @@ dirs = "5"
 uuid = { version = "1", features = ["v4"] }
 # umask(077)（约束 13）：Rust 标准库没有 umask 绑定
 libc = "0.2"
+# terminal connector 的真 PTY（里程碑子任务 8）。
+# 只用 libc 自己那套 `openpty` / `forkpty` / `ioctl(TIOCSWINSZ)` 就够，
+# 不引 `portable-pty` / `nix`：`portable-pty` 会把 **spawn 与读循环一起**
+# 塞进它的 `MasterPty`，而本项目的数据泵必须住在 node 的 tokio 读循环里
+# （同一任务里同时等 WS 与 PTY，约束 8 的「不阻塞心跳」），并在
+# `forkpty` 之后于子进程里补 execve —— portable-pty 的 Command 封装做不了这件事。
+# 手写 60 行 fork/exec 的代价，换来的是「零新增依赖」与全量可测的字节搬运层。
 # 节点自更新下载用（§7.1.3）：rustls-tls，不依赖系统 OpenSSL
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
