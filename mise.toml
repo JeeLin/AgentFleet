@@ -70,7 +70,7 @@ run = "cd packages/web && bun run dev"
 # `mise run cli -- --help` 就打不出 afcli 的用法。去掉它参数直接追加到命令后。
 [tasks.cli]
 description = "跑设备侧 afcli（debug 构建）：mise run cli -- run / -- log -n 50"
-env = { AFCLI_HUB_URL = "ws://127.0.0.1:8080/ws" }
+env = { AFCLI_HUB_URL = "ws://127.0.0.1:8080/ws", AFCLI_DATA_DIR = "{{config_root}}/data/node" }
 run = "exec target/debug/afcli"
 
 # 两个长驻进程并行：前端 3002 把 `/api` 与 `/ws` 转发到 Hub 8080。
