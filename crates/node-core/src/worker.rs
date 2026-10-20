@@ -457,6 +457,20 @@ fn outcome_phrase(outcome: &ConnOutcome) -> String {
     match outcome {
         ConnOutcome::Transport { detail } => detail.clone(),
         ConnOutcome::Superseded { gen } => format!("superseded by a newer connection (gen {gen})"),
+        ConnOutcome::Rejected { reason }
+            if reason == protocol::message::reason::HUB_NOT_INITIALIZED =>
+        {
+            // **这一种必须单独说清楚**：它意味的不是「Hub 拒绝了这台设备」，
+            // 而是「Hub 还没有设密码」。两台进程谁都没坏——所以一句
+            // `hub refused: hub not initialized` 之后人不知道该动哪边，
+            // 重试一万次也一样（`Rejected` 本就该停）。
+            //
+            // 最常见的来路是 Hub 换了数据目录 / 重装过：设备带着 M0 的旧身份
+            // 去连一台全新的 Hub，而 Hub 此时还没有用户，于是 enroll 一律被拒
+            // （`hub-server/src/routes/ws.rs` 的 `hub_is_initialized` 判据）。
+            // 把「下一步做什么」写进短语里，运维才不必去翻 Hub 源码。
+            "the Hub has no password yet: complete first-run setup in the browser (it prints a setup token), then restart this device".to_string()
+        }
         ConnOutcome::Rejected { reason } => format!("hub refused: {reason}"),
         // 只在「握手成功却被当成失败传进来」时才可能发生——那是 bug 不是状态。
         ConnOutcome::Authed { node_id, .. } => format!("already authed as {node_id}"),
@@ -602,6 +616,30 @@ mod tests {
         assert!(
             outcome_phrase(&a).contains("n_y"),
             "握手成功却被当成失败传进来时，日志要点名是哪个 node"
+        );
+    }
+
+    /// 「Hub 还没设密码」要说出下一步做什么，而不是一句谁都看不懂的拒绝。
+    ///
+    /// 事实来源：`hub_server::routes::ws` 的 `hub_is_initialized` 判据在
+    /// enroll 之前先看，未初始化就连签名都不验直接拒。最常见的来路是 Hub
+    /// 换了数据目录或重装过，于是设备带旧身份连一台全新 Hub。
+    #[test]
+    fn an_uninitialized_hub_is_named_as_such_not_a_bare_refusal() {
+        let phrase = outcome_phrase(&ConnOutcome::Rejected {
+            reason: protocol::message::reason::HUB_NOT_INITIALIZED.into(),
+        });
+        assert!(
+            phrase.contains("setup"),
+            "短语必须指出「先去完成首次 setup」：{phrase}"
+        );
+        assert!(
+            phrase.contains("restart"),
+            "短语必须说明设完密码要重启设备：{phrase}"
+        );
+        assert!(
+            !phrase.contains("hub refused"),
+            "这句话不该把「Hub 没有密码」说成「Hub 拒绝了设备」：{phrase}"
         );
     }
 
