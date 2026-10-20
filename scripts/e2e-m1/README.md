@@ -101,7 +101,7 @@ TMPDIR=/tmp/opencode bash scripts/e2e-m1.sh   # 换临时目录根（默认 /tmp
 |---|---|---|
 | 1 `afcli run` 一条命令接入 | `/api/devices` 出现该设备且 `status=online`；supervisor + `run --worker` 两层进程都在；API 只回 `key_fingerprint`、无密钥字段 | 自动 |
 | 2 建会话 | `POST /api/sessions` → 201，`workspace={node_id,path}`、`state=running`；`GET /api/sessions` 里能看到 | 自动 |
-| 3 终端：从页面敲 echo / resize | ①`stty size` → `24 80`（期望值从 `SessionPage.vue` 的 `ensureChannel` 读出，不是夹具写死；页面改了初值这里自动跟着改）②`POST /resize 132x40` 后 `stty size` → `40 132`（这一步的 132x40 是测试自己的输入，写死是对的）③`/send` 敲 `echo <marker>` 后，该通道字节流里 marker 出现 **≥2 次** | 自动 |
+| 3 终端：从页面敲 echo / resize | ①`stty size` → `24 80`（初值从 `SessionPage.vue` 读出，页面改了夹具跟着改）②`POST /resize 132x40` 后 `stty size` → `40 132` ③`/send` 敲 `echo <marker>` 后，该通道字节流里 marker 出现 **≥2 次** | 自动 |
 | 4 文件：浏览目录树、读文件 | 开 files 通道后 `send {"op":"list","path":"."}`，SSE 上出现 `op=list` 且 `entries` 含 `a.txt`/`src`；`{"op":"read","path":"a.txt"}` 回 `text` 含文件内容 | 自动 |
 | 5 越界被拒且错误可读 | 三种构造各发一次 `{"op":"read"}`：`../outside/secret.txt`、`/etc/hostname`、`link-outside.txt`（真符号链接指向界外）——每种都要求页面上出现一条**带原因**的拒绝信号（`channel.frame` 的 `error/code/reason`，或 `channel.error` 事件） | 自动 |
 | 6 exec：一次性命令 | `{"command":"sh","args":["-c","echo OUT; echo ERR >&2; exit 7"],"cwd":""}` → 回帧 `exit_code=7`、`stdout_b64` 解码为 `OUT`、`stderr_b64` 解码为 `ERR` | 自动 |
@@ -256,7 +256,7 @@ SIGCONT → 继续观察回到 online
   ✅ POST /api/sessions → 201，session_id=…
   ✅ 会话绑定了 (node_id, path) 且状态 running：{"state":"running","workspace":{…}}
 == 标准 3 终端面板：从页面敲 echo 有输出，stty size 验证 resize ==
-  ✅ 页面给的 80x24 到了 PTY：`stty size` → 24 80（期望值从 SessionPage.vue 读出）
+  ✅ 页面给的 80x24 到了 PTY：`stty size` → 24 80
   ✅ resize 生效：POST /resize 132x40 后 `stty size` → 40 132
   ✅ 从页面敲的 echo 有输出：AF_E2E_… 出现 2 次（≥2 = 回显 + 命令真的跑了）
 == 标准 4 文件面板：浏览工作区目录树、读文件 ==
