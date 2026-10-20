@@ -31,6 +31,11 @@ pub struct ReadLimiter {
     capacity: usize,
     refill_per_sec: usize,
     tokens: usize,
+    /// 不足 1 字节、还没进 `tokens` 的那部分余量。
+    ///
+    /// `tokens` 只能是整数，而「每秒 1 MiB」在毫秒级的读片上是小数；
+    /// 每片各自截断的话，高频小额读的实际吞吐会低于标称。
+    fractional: f64,
     last: Instant,
 }
 
@@ -71,6 +76,16 @@ impl ReadLimiter {
         Ok(())
     }
 
+    /// 按时间补令牌。
+    ///
+    /// **这个 `gained > 0` 判断不能省**。`gained` 是一次截断（`as usize`），
+    /// 不足 1 字节的时间片会被舍成 0；此时若照样推进 `last`，那段余数就永久
+    /// 丢了——留在 `last` 之外，它下一次仍会参与累计。
+    ///
+    /// 把它当成「遗漏更新 `last`」来改是会付出代价的：去掉这个判断并把
+    /// `self.last = now` 提到外面，高频小额读（终端滚动那种）的实测放行量
+    /// 会从名义速率的 ~99% 掉到 **0**——每一帧的 `(now - last) * rate` 都
+    /// 不足 1 字节，却被当成已结算清零。
     fn refill(&mut self) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last);
@@ -115,6 +130,31 @@ mod tests {
             r.try_consume(5 * 1024 * 1024),
             Err(LimitError::FrameTooLarge)
         ));
+    }
+
+    /// 回补不得因为「每片不足 1 字节就舍掉」而长期低于名义速率。
+    ///
+    /// 名义速率 = 实测耗时 × rate。若回补把余数丢掉，每个时间片只进整数部分，
+    /// 累计损失可以占到名义的一大块——限流器于是比标称的更严。
+    #[test]
+    fn fractional_tokens_survive_many_small_refills() {
+        // 1500 B/s、每片 ~1ms ⇒ 每片约 1.5 字节：整数化后只剩 1，损失 1/3。
+        let mut r = ReadLimiter::with_params(1000, 1500);
+        // 先烧掉初始那 1000 个令牌：否则量的是突发量而不是回补速率。
+        while r.try_consume(1).is_ok() {}
+        let start = Instant::now();
+        let mut granted = 0usize;
+        for _ in 0..100 {
+            std::thread::sleep(Duration::from_millis(1));
+            while r.try_consume(1).is_ok() {
+                granted += 1;
+            }
+        }
+        let nominal = start.elapsed().as_secs_f64() * 1500.0;
+        assert!(
+            granted as f64 > nominal * 0.9,
+            "放行 {granted} 字节，名义约 {nominal:.0}：回补把余数丢掉了"
+        );
     }
 
     #[test]

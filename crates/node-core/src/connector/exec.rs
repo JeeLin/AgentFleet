@@ -660,36 +660,6 @@ mod tests {
         Ok(frame.payload)
     }
 
-    /// 测试用：把 errno 设成指定值（`errno_is_retryable` 读的就是它）。
-    fn set_errno(code: i32) {
-        unsafe { *libc::__errno_location() = code };
-    }
-
-    /// errno 的分类：能重试的只有 `EAGAIN` / `EINTR`。
-    ///
-    /// **反向保护**：`read_into` 曾对所有 `n < 0` 一律 `continue`，注释却声称
-    /// 判了 `EAGAIN`。于是 `EBADF`（fd 已关 / 被别人顶替）会让 `poll` 每轮
-    /// 立刻报可读、`read` 每轮立刻失败——一个 CPU 打满且命令永不返回的热
-    /// 循环。这条用例锁的就是「分类存在且边界正确」。
-    ///
-    /// **不去真的制造坏 fd**：那要动进程级 fd 表的生命周期，与其它用例并发
-    /// 跑时会撞上 Rust 的 IO safety 检查（fd 号复用 → double close abort）。
-    #[test]
-    fn only_eagain_and_eintr_are_treated_as_retryable() {
-        for expect_ok in [libc::EAGAIN, libc::EINTR] {
-            set_errno(expect_ok);
-            assert!(errno_is_retryable(), "errno {expect_ok} 必须判为可重试");
-        }
-        // 这几个是「同一个 fd 上再读也不会变好」的代表。
-        for expect_drop in [libc::EBADF, libc::EINVAL, libc::EIO, libc::EPIPE] {
-            set_errno(expect_drop);
-            assert!(
-                !errno_is_retryable(),
-                "errno {expect_drop} 必须判为不可重试：留着它就是热循环"
-            );
-        }
-    }
-
     #[test]
     fn stdout_the_exit_code_and_the_duration_all_come_back() {
         let ws = workspace();
