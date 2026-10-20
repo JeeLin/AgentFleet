@@ -490,6 +490,45 @@ describe('面板正文是 13b / 13c 的真组件，不是 13a 的占位', () => 
     expect(w.element.querySelector('[data-write-error]')).toBeNull()
   })
 
+  it('`write` 回帧只有失败那一次进④：ok 为 true 或缺失都不过错（清错归发送方）', async () => {
+    const { w, src } = await mountWorkbench()
+    await openFiles(w)
+    await touchFiles(w)
+
+    // ok 缺失也算成功：`files.rs` 的写回帧只在出错时带 `ok:false`
+    await frame(w, src(), { op: 'write', path: 'a.txt' })
+    expect(w.element.querySelector('[data-write-error]')).toBeNull()
+    await frame(w, src(), { op: 'write', path: 'a.txt', ok: true })
+    expect(w.element.querySelector('[data-write-error]')).toBeNull()
+
+    await frame(w, src(), { op: 'write', path: 'a.txt', ok: false, reason: '磁盘满了' })
+    expect(w.element.querySelector('[data-write-error]')?.textContent).toContain('磁盘满了')
+  })
+
+  it('不认识的 op 不动状态（node 侧加 op 时旧页面不该把它解成已存在的某一档）', async () => {
+    const { w, src } = await mountWorkbench()
+    await openFiles(w)
+    await touchFiles(w)
+    await frame(w, src(), {
+      op: 'list',
+      path: '',
+      entries: [{ name: 'src', kind: 'dir', size: 0, mtime_ms: null }],
+      total: 1,
+      truncated: false,
+    })
+    const before = Array.from(w.element.querySelectorAll('[data-row]')).map((r) =>
+      r.getAttribute('data-path'),
+    )
+
+    for (const op of ['stat', 'LIST', '', 'delete']) {
+      await frame(w, src(), { op, path: 'src' })
+    }
+    expect(Array.from(w.element.querySelectorAll('[data-row]')).map((r) => r.getAttribute('data-path')))
+      .toEqual(before)
+    expect(w.element.querySelector('[data-nav-error]')).toBeNull()
+    expect(w.element.querySelector('[data-write-error]')).toBeNull()
+  })
+
   it('取数按 files 的契约发 application/json，op/字段与 node 侧 files.rs 逐字一致', async () => {
     const { w, fetchMock, src } = await mountWorkbench()
     await openFiles(w)

@@ -704,56 +704,68 @@ function filesKick(tab: TabMeta): void {
  *
  * **真 files connector 到位后这里是唯一要改的地方**：形状已经按
  * `node-core/src/connector/files.rs` 的回帧写好了。
+ *
+ * 分派按 `op` **逐个 case**，不用一串 `if`：串起来写的时候「顺序即语义」
+ * （谁先判谁先赢），而 `op` 是**互斥的键**——一帧只有一个 op，顺序不该
+ * 承载任何含义。改成一个 `switch` 之后，加一档 op 是加一个 case，
+ * 不会因为在中间插一个分支而悄悄改变另一个 op 的行为。
  */
 function applyFileFrame(ws: TabWorkspace, payload: unknown): void {
   const frame = asRecord(payload)
   if (!frame) return
-  const op = typeof frame.op === 'string' ? frame.op : null
-  if (!op) return
-
-  if (op === 'list') {
-    const listing = frame as Partial<FileListing> & { path?: unknown }
-    ws.loading.delete(String(listing.path ?? ''))
-    ws.listings.set(String(listing.path ?? ''), {
-      path: String(listing.path ?? ''),
-      entries: Array.isArray(listing.entries) ? (listing.entries as FileListing['entries']) : [],
-      total: typeof listing.total === 'number' ? listing.total : 0,
-      truncated: listing.truncated === true,
-    })
-    ws.filesError = null
-    return
-  }
-
-  if (op === 'read') {
-    ws.readingPath = null
-    const preview = frame as Partial<FilePreview> & { path?: unknown }
-    ws.preview = {
-      path: String(preview.path ?? ''),
-      size: typeof preview.size === 'number' ? preview.size : 0,
-      kind: preview.kind === 'binary' || preview.kind === 'truncated' ? preview.kind : 'text',
-      truncated: preview.truncated === true,
-      text: typeof preview.text === 'string' ? preview.text : undefined,
-      content_b64: typeof preview.content_b64 === 'string' ? preview.content_b64 : undefined,
-    }
-    return
-  }
-
-  if (op === 'write') {
-    ws.saving = false
-    const ok = frame.ok !== false
-    if (!ok) ws.writeError = errorOf(frame, String(frame.path ?? ''))
-    return
-  }
-
-  if (op === 'error') {
-    ws.loading.clear()
-    ws.readingPath = null
-    if (ws.saving) {
-      ws.saving = false
-      ws.writeError = errorOf(frame, String(frame.path ?? ''))
+  switch (frame.op) {
+    case 'list':
+      applyListing(ws, frame)
       return
-    }
-    ws.filesError = errorOf(frame, String(frame.path ?? ''))
+    case 'read':
+      applyPreview(ws, frame)
+      return
+    case 'write':
+      ws.saving = false
+      if (frame.ok === false) ws.writeError = errorOf(frame, String(frame.path ?? ''))
+      return
+    case 'error':
+      ws.loading.clear()
+      ws.readingPath = null
+      // 保存中出的错归④（写失败），其余归③（导航 / 读失败）：下一步不同
+      if (ws.saving) {
+        ws.saving = false
+        ws.writeError = errorOf(frame, String(frame.path ?? ''))
+        return
+      }
+      ws.filesError = errorOf(frame, String(frame.path ?? ''))
+      return
+    default:
+      // 不认识的 op 一律不动状态：node 侧新增 op 时旧页面不该把它解成
+      // 某个已存在的 op（约束 14 的前向兼容在页面这一侧的对应物）。
+      return
+  }
+}
+
+/** `op:"list"`：一层清单进表，并清掉「正在列这一层」。 */
+function applyListing(ws: TabWorkspace, frame: Record<string, unknown>): void {
+  const listing = frame as Partial<FileListing> & { path?: unknown }
+  ws.loading.delete(String(listing.path ?? ''))
+  ws.listings.set(String(listing.path ?? ''), {
+    path: String(listing.path ?? ''),
+    entries: Array.isArray(listing.entries) ? (listing.entries as FileListing['entries']) : [],
+    total: typeof listing.total === 'number' ? listing.total : 0,
+    truncated: listing.truncated === true,
+  })
+  ws.filesError = null
+}
+
+/** `op:"read"`：预览结论进状态，并清掉「正在读这个文件」。 */
+function applyPreview(ws: TabWorkspace, frame: Record<string, unknown>): void {
+  ws.readingPath = null
+  const preview = frame as Partial<FilePreview> & { path?: unknown }
+  ws.preview = {
+    path: String(preview.path ?? ''),
+    size: typeof preview.size === 'number' ? preview.size : 0,
+    kind: preview.kind === 'binary' || preview.kind === 'truncated' ? preview.kind : 'text',
+    truncated: preview.truncated === true,
+    text: typeof preview.text === 'string' ? preview.text : undefined,
+    content_b64: typeof preview.content_b64 === 'string' ? preview.content_b64 : undefined,
   }
 }
 
