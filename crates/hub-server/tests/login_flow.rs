@@ -1100,7 +1100,10 @@ async fn logout_expires_both_cookies() {
         Request::builder()
             .method("GET")
             .uri("/api/devices")
-            .header("cookie", cookie_header(&[(SESSION_COOKIE, &session), (CSRF_COOKIE, &csrf)]))
+            .header(
+                "cookie",
+                cookie_header(&[(SESSION_COOKIE, &session), (CSRF_COOKIE, &csrf)]),
+            )
             .body(Body::empty())
             .unwrap(),
     )
@@ -1112,7 +1115,10 @@ async fn logout_expires_both_cookies() {
         Request::builder()
             .method("POST")
             .uri("/logout")
-            .header("cookie", cookie_header(&[(SESSION_COOKIE, &session), (CSRF_COOKIE, &csrf)]))
+            .header(
+                "cookie",
+                cookie_header(&[(SESSION_COOKIE, &session), (CSRF_COOKIE, &csrf)]),
+            )
             .header("x-csrf-token", &csrf)
             .body(Body::empty())
             .unwrap(),
@@ -1133,10 +1139,7 @@ async fn logout_expires_both_cookies() {
             .iter()
             .find(|c| c.starts_with(&format!("{name}=")))
             .unwrap_or_else(|| panic!("{name} 没有被清掉：{set_cookies:?}"));
-        assert!(
-            hit.contains("Max-Age=0"),
-            "{name} 不是立即过期：{hit}"
-        );
+        assert!(hit.contains("Max-Age=0"), "{name} 不是立即过期：{hit}");
     }
 
     // **这里不写「登出后同一组 cookie 变 401」**：票据是自证的签名串，
@@ -1159,7 +1162,10 @@ async fn logout_without_a_csrf_token_is_forbidden() {
         Request::builder()
             .method("POST")
             .uri("/logout")
-            .header("cookie", cookie_header(&[(SESSION_COOKIE, &session), (CSRF_COOKIE, &csrf)]))
+            .header(
+                "cookie",
+                cookie_header(&[(SESSION_COOKIE, &session), (CSRF_COOKIE, &csrf)]),
+            )
             .body(Body::empty())
             .unwrap(),
     )
