@@ -51,6 +51,7 @@ impl ReadLimiter {
             capacity,
             refill_per_sec,
             tokens: capacity,
+            fractional: 0.0,
             last: Instant::now(),
         }
     }
@@ -78,21 +79,21 @@ impl ReadLimiter {
 
     /// 按时间补令牌。
     ///
-    /// **这个 `gained > 0` 判断不能省**。`gained` 是一次截断（`as usize`），
-    /// 不足 1 字节的时间片会被舍成 0；此时若照样推进 `last`，那段余数就永久
-    /// 丢了——留在 `last` 之外，它下一次仍会参与累计。
-    ///
-    /// 把它当成「遗漏更新 `last`」来改是会付出代价的：去掉这个判断并把
-    /// `self.last = now` 提到外面，高频小额读（终端滚动那种）的实测放行量
-    /// 会从名义速率的 ~99% 掉到 **0**——每一帧的 `(now - last) * rate` 都
-    /// 不足 1 字节，却被当成已结算清零。
+    /// **余量用 `f64` 累加，不逐片截断**：`tokens` 只能是整数，而毫秒级的读片
+    /// 上攒出的令牌是小数，每片各自 `as usize` 会把余数一次次丢掉——实测
+    /// 高频小额读的实际吞吐只有名义的 ~62%。
     fn refill(&mut self) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last);
-        let gained = (elapsed.as_secs_f64() * self.refill_per_sec as f64) as usize;
-        if gained > 0 {
-            self.tokens = (self.tokens + gained).min(self.capacity);
-            self.last = now;
+        // `last` 无条件推进：这一段时间已经被计入 `fractional`，再留着它会
+        // 在下一次被重复算一遍（凭空生出令牌）。
+        self.last = now;
+        self.fractional += elapsed.as_secs_f64() * self.refill_per_sec as f64;
+        // 只在真的攒出整字节时才落进 `tokens`，余数留在 `fractional`。
+        if self.fractional >= 1.0 {
+            let whole = self.fractional.floor();
+            self.fractional -= whole;
+            self.tokens = (self.tokens + whole as usize).min(self.capacity);
         }
     }
 }
