@@ -76,8 +76,12 @@ mise install          # node 24 是硬需求（Vite 7 + plugin-vue 用到 node:c
 mise run dev
 
 # 同一台机器上起一台设备（debug 构建，连上面那个 Hub）
-mise run afcli -- run           # 另一个终端里跑
-mise run afcli -- log -n 50     # 看设备日志
+mise run cli -- run             # 另一个终端里跑
+mise run cli -- log -n 50       # 看设备日志
+
+# 设备数据目录缺省落在仓库内的 data/node（与 Hub 的 data/ 同取向，
+# 不碰 ~/.local/share）；要用自己那台真设备的身份，显式指过去：
+XDG_DATA_HOME=~/.local/share mise run cli -- run
 
 # 生产：前端先编译、产物嵌进二进制，然后单进程单端口
 mise run build && mise run start

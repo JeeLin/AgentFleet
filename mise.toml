@@ -64,7 +64,7 @@ cargo watch -x 'run -p hub-server' -w crates/hub-server -w crates/hub-core -w cr
 description = "Vite 开发服务器（3002），文件改动即时热更新"
 run = "cd packages/web && bun run dev"
 
-# 跑设备侧二进制（开发调试用）：`mise run afcli -- run` / `-- log -n 50`。
+# 跑设备侧二进制（开发调试用）：`mise run cli -- run` / `-- log -n 50`。
 #
 # **为什么要 `shell = "bash"`**：mise 默认用 `sh` 执行 task，而 `sh` 没有数组，
 # 于是「把带空格的参数原样传给 afcli」做不到——`log -n "a b"` 会被拆成两个参数。
@@ -74,8 +74,8 @@ run = "cd packages/web && bun run dev"
 # （实测 `n=0`），参数只经 `usage_afcli_args` 这一个口子进来，且是一个**已 shell
 # 引用过的字符串**——所以必须 `eval` 回数组再展开，直接 `$usage_afcli_args` 会把
 # 带空格的单个参数拆成两个。
-[tasks.afcli]
-description = "跑设备侧 afcli（debug 构建）：mise run afcli -- run / -- log -n 50"
+[tasks.cli]
+description = "跑设备侧 afcli（debug 构建）：mise run cli -- run / -- log -n 50"
 shell = "bash"
 usage = '''
 arg "[afcli_args]" help="传给 afcli 的参数，如 run、log -n 50" var=#true
@@ -84,11 +84,22 @@ env = { AFCLI_HUB_URL = "ws://127.0.0.1:8080/ws" }
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-# 缺 debug 构建时先建，免得报一个「二进制不存在」让人猜要敲什么
-if [[ ! -x target/debug/afcli ]]; then
-  echo "target/debug/afcli 不存在，先 cargo build --bin afcli" >&2
-  exit 1
-fi
+# 数据目录缺省落在项目内的 data/node，而不是 ~/.local/share/agentfleet。
+#
+# 与 Hub 的 `[env] AFHUB_DATA_DIR = "{{config_root}}/data"` 同一取向：开发用的
+# 身份不该落在用户目录里。机器上留着 M0 时期 enroll 过的 afcli 时，用真家目录
+# 会连出一台「已注册但 Hub 不认识」的设备，反复重连被拒。
+#
+# **为什么不写在 task 的 `env = {}` 里**：实测 task 的 env 会**盖掉**调用者已经
+# 设好的 XDG_DATA_HOME，于是想指向自己那台真设备时改不动。所以这里做成
+# 「调用者没设才补」——想用真家目录，`XDG_DATA_HOME=~/.local/share mise run cli -- run`。
+#
+# 根目录取 `MISE_CONFIG_ROOT`（mise 实测会导出，且 task 的 pwd 就是它）；
+# 退回 pwd 只是防御，不靠它。**不能**假设有个 `$ROOT`——实测 mise 不导出它，
+# 用了就会把数据目录指到 `/data/node`（绝对根路径），静默写到项目外去。
+AFLEET_ROOT="${MISE_CONFIG_ROOT:-$(pwd)}"
+: "${XDG_DATA_HOME:=$AFLEET_ROOT/data/node}"
+export XDG_DATA_HOME
 eval "args=(${usage_afcli_args:-})"
 # `exec` 而不是调用：退出码与信号原样出去，Ctrl-C 直接作用于 afcli
 # （多包一层 shell 会让 systemd / 手工调试时的退出码协议 0/10/11/12 看不出来）
@@ -99,9 +110,9 @@ exec target/debug/afcli "${args[@]}"
 # 的结果，不是哪一边的 bug：
 #
 # 1. 带 `usage` 的 task 会让 mise 的**任务参数解析器**把 `--help` 认成自己的 flag
-#    （实测：`mise run afcli -- --help` 打的是 mise 的任务帮助，`afcli` 压根没被
+#    （实测：`mise run cli -- --help` 打的是 mise 的任务帮助，`afcli` 压根没被
 #    启动，退出码 1）。`--` 分隔符也挡不住它——mise 2026.10.7 实测如此。
-# 2. 想绕开 mise，就得写 `mise run afcli -- -- --help`，而 afcli 的
+# 2. 想绕开 mise，就得写 `mise run cli -- -- --help`，而 afcli 的
 #    `parse_args` 把首位的 `--` 当未知子命令 → 打用法并**退出 1**。
 #
 # 所以要看用法请直接敲 `./target/debug/afcli --help`（或 `target/release/afcli`）。
