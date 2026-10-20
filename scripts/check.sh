@@ -12,7 +12,10 @@ hits=$(grep -nE '^[[:space:]]*[a-zA-Z0-9_-]+[[:space:]]*=[[:space:]]*"[0-9]' cra
 if [[ -z "$hits" ]]; then ok "无手写版本号"; else bad "子 crate 出现手写版本号："; echo "$hits" | sed 's/^/      /'; fi
 
 echo "== C2 设备二进制不得被称作 agent（约束 2）=="
-hits=$(grep -rnE 'Dockerfile\.agent|agentfleet-agent|agent-binaries|docker-agent|agent 镜像' --include='*.md' docs/ .mdflow/ 2>/dev/null || true)
+# 与 C3 同口径排除 `-reports/`：审查报告为了证明「某模式零命中」会把正则
+# 本身写进正文，那不是规格在把设备叫 agent。
+hits=$(grep -rnE 'Dockerfile\.agent|agentfleet-agent|agent-binaries|docker-agent|agent 镜像' --include='*.md' docs/ .mdflow/ 2>/dev/null \
+  | grep -v '/M1-reports/' || true)
 if [[ -z "$hits" ]]; then ok "命名合规"; else bad "出现把设备二进制叫 agent 的用法："; echo "$hits" | sed 's/^/      /'; fi
 
 echo "== C3 里程碑文档的 docs/ 锚点必须有效（A 轨 §N.N 解析到小节标题；B 轨 file.md:N 行号有效）=="
