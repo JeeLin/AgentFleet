@@ -16,6 +16,9 @@
 //!   `/login` 不在其中：初始化模式下登录必须 403（表 §2.4.3 第二行），
 //!   因为此时还没有任何密码可验。
 //!
+//! 第三张表 [`CSRF_EXEMPT_PATHS`] 管的是**另一个横切检查**，与上面两张
+//! 正交：会话豁免的路径照样要过 CSRF（见 `middleware_auth`）。
+//!
 //! `/setup` 与 `/api/setup` 是**同一件事的两半**，两张表里都必须有：
 //! `/setup` 是页面（SPA 外壳）与初始化端点（`POST`），`/api/setup` 是
 //! 初始化状态探针（`GET`，`lib.rs` 里说明了为什么拆）。少了 `/setup`，
@@ -42,9 +45,21 @@ pub const AUTH_EXEMPT_PATHS: &[&str] = &[
 /// 401 暗示「你有身份但没登录」，而此时 Hub 根本还不存在用户。
 pub const INIT_MODE_PATHS: &[&str] = &["/healthz", "/setup", "/api/setup", "/ws"];
 
+/// 免 CSRF 的路径（精确匹配）。**只有签发 cookie 的 pre-auth 端点**。
+///
+/// 它们是唯一在请求时还不存在 `af_csrf` 可供回填的路径；
+/// 这张表之外的一切状态变更都要双重提交，**包括** [`AUTH_EXEMPT_PATHS`]
+/// 里的路径——两张表不是一回事，免 session 不等于免 CSRF。
+pub const CSRF_EXEMPT_PATHS: &[&str] = &["/setup", "/login"];
+
 /// 该路径是否豁免 session。
 pub fn is_auth_exempt(path: &str) -> bool {
     AUTH_EXEMPT_PATHS.contains(&path)
+}
+
+/// 该路径是否豁免 CSRF 双重提交。
+pub fn is_csrf_exempt(path: &str) -> bool {
+    CSRF_EXEMPT_PATHS.contains(&path)
 }
 
 /// 该路径在**初始化模式**下是否可用。

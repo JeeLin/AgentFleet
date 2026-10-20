@@ -4,14 +4,19 @@
 //! 1. **初始化模式**（`secret` 表无 `hub.password`）：只有
 //!    [`is_init_mode_path`] 表内的路径能过，其余 **403**——
 //!    不是 401：此时 Hub 还不存在「用户」，401 会误导成「你没登录」。
-//! 2. **正常模式**：豁免表内的路径（`/login`）直接过；
-//!    其余要求 `af_session` cookie，验签失败或缺失一律 **401**。
-//! 3. **状态变更**（`POST/PUT/PATCH/DELETE`）且已登录：还要过 CSRF 双重提交
-//!    ——`X-CSRF-Token` 头必须与 `af_csrf` cookie 同值。
+//! 2. **正常模式**下的 session 豁免：豁免表内的路径直接过，**但它们照样过 CSRF**
+//!    （豁免的是 session，不是 CSRF）。
+//! 3. **正常模式**：其余要求 `af_session` cookie，验签失败或缺失一律 **401**；
+//!    通过之后，`POST/PUT/PATCH/DELETE` 还要过 CSRF 双重提交——`X-CSRF-Token`
+//!    头必须与 `af_csrf` cookie 同值。
 //!
-//! CSRF 只对**带 session 的**状态变更生效：`/setup` 与 `/login` 是 pre-auth
-//! 端点，没有可被「骑乘」的登录态，防它们靠的是 setup token 与密码本身
-//! （`SameSite=Strict` 也拦不住「同源 XSS 发起的请求」）。
+//! **session 先于 CSRF**：反过来会让「没带 cookie 的 POST」拿到 403 而不是 401，
+//! 而前端的 401 才是「去登录」的信号。
+//!
+//! CSRF 的唯一白名单是 [`is_csrf_exempt`] 里的 pre-auth 端点：`/setup` 与
+//! `/login` 在请求时还没有 `af_csrf` 可回填，防它们靠的是 setup token 与
+//! 密码本身（`SameSite=Strict` 也拦不住「同源 XSS 发起的请求」）。
+//! **新增豁免路径默认要 CSRF**——fail-closed。
 
 use axum::extract::{Request, State};
 use axum::http::HeaderMap;
@@ -19,7 +24,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use hub_core::session::SessionStore;
 
-use crate::routes::{api, is_auth_exempt, is_init_mode_path};
+use crate::routes::{api, is_auth_exempt, is_csrf_exempt, is_init_mode_path};
 use crate::{ApiError, AppState, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};
 
 /// 会改变服务端状态的 HTTP 方法（CSRF 双重提交适用范围）。
@@ -43,11 +48,26 @@ pub async fn require_auth(State(state): State<AppState>, mut req: Request, next:
         }
     }
 
-    // 规则 2：正常模式下的 session 要求（豁免表里的路径不受此约束）
+    // 规则 2：session 豁免的路径（`/login`、`/setup`、`/ws`…）。
+    //
+    // **豁免的是 session，不是 CSRF**：这条分支以前直接 `return next`，于是
+    // 豁免表里的写操作整段跳过了下面那道 CSRF 检查。现在它自己补上，
+    // 白名单只有真正拿不到 `af_csrf` 的 pre-auth 端点。
     if is_auth_exempt(&path) {
+        if is_state_changing(req.method().as_str())
+            && !is_csrf_exempt(&path)
+            && !csrf_ok(req.headers())
+        {
+            return ApiError::forbidden("csrf_token_missing_or_mismatch").into_response();
+        }
         return next.run(req).await;
     }
 
+    // 规则 3：正常模式下的 session 要求。
+    //
+    // **session 在 CSRF 之前**：顺序反过来会让「没带 cookie 的 POST」拿到 403
+    // 而不是 401，而前端的 401 才是「去登录」的信号——把未认证读成 CSRF 错，
+    // 用户会看到「CSRF 令牌不匹配」而不是登录框。
     let token = match cookie_value(req.headers(), SESSION_COOKIE) {
         Some(t) => t.to_string(),
         None => return ApiError::unauthorized("missing_session").into_response(),
@@ -64,7 +84,7 @@ pub async fn require_auth(State(state): State<AppState>, mut req: Request, next:
         Err(_) => return ApiError::unauthorized("invalid_session").into_response(),
     };
 
-    // 规则 3：状态变更要 CSRF 双重提交
+    // 规则 4：已登录的状态变更还要过 CSRF 双重提交。
     if is_state_changing(req.method().as_str()) && !csrf_ok(req.headers()) {
         return ApiError::forbidden("csrf_token_missing_or_mismatch").into_response();
     }

@@ -323,6 +323,34 @@ fn parse_frames(text: &str) -> Vec<SseEvent> {
 // 坑 1：`.layer` 次序——未认证必须 401（不是 404，也不是 200）
 // ---------------------------------------------------------------------------
 
+/// 豁免 session 的路径**照样要 CSRF**：豁免的是登录态，不是「可以跨站改状态」。
+///
+/// 用 `POST /ws` 验：`/ws` 在 `AUTH_EXEMPT_PATHS` 里（设备没有 cookie），
+/// 但不在 `CSRF_EXEMPT_PATHS` 里（它有 `af_csrf` 可回填）。修复前这条会直接
+/// 穿到路由——`/ws` 只挂了 GET，于是拿到 405；修复后中间件先拦下，是 403。
+/// 405 与 403 的差别就是这条断言的判据：**看得到 405 就说明豁免分支跳过了 CSRF**。
+#[tokio::test]
+async fn an_exempt_path_still_needs_a_csrf_token_for_state_changes() {
+    let h = Harness::new().await;
+    let resp = h
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ws")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "豁免 session 的路径也要过 CSRF；拿到 405 说明豁免分支把 CSRF 一起跳过了"
+    );
+}
+
 /// 五个新端点 + SSE 端点未认证一律 401。
 ///
 /// 这是子任务 5 已经踩过一次的那个坑：新路由若写在 `.layer(require_auth)`
