@@ -13,7 +13,7 @@ pub use channel::{
     ChannelErrorCode, ChannelErrorPayload, ChannelReady, ChannelRegistry, ChannelState,
     CloseChannel, CreditStatus, OpenChannel, CREDIT_DELTA, CREDIT_START, READY_TIMEOUT,
 };
-pub use frame::{Frame, MAX_FRAME_BYTES, PROTOCOL_VERSION};
+pub use frame::{payload_or, Frame, MAX_FRAME_BYTES, PROTOCOL_VERSION};
 pub use handshake::{
     error_phrase, negotiate_version, AuthAttempt, AuthPayload, Authenticator, EnrollAccepted,
     EnrollAuth, Handshake, HandshakeError, HandshakeState, PublicKeySource, ReconnectAccepted,

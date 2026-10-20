@@ -26,15 +26,10 @@ pub enum Reply {
 
 /// 构造一帧 Hub → node 的推送帧。
 ///
-/// `to_value` 失败时兜底成空对象而不是 `unwrap`：这些 payload 全是字符串键与
-/// 有限数值，serde 结构上不会失败，但生产代码禁 panic，而「回不了一帧」
-/// 比「回一帧空的」更糟——后者至少让 node 知道 Hub 收到了。
-fn push(msg_type: &str, payload: impl serde::Serialize) -> Frame {
-    Frame::push(
-        msg_type,
-        0,
-        serde_json::to_value(payload).unwrap_or_else(|_| serde_json::json!({})),
-    )
+/// 兜底由 [`protocol::payload_or`] 给：本函数只走通道帧，而每一档通道帧都靠
+/// `channel_id` 认领，所以调用方把兜底形状一并传进来。
+fn push(msg_type: &str, payload: impl serde::Serialize, fallback: serde_json::Value) -> Frame {
+    Frame::push(msg_type, 0, protocol::payload_or(&payload, fallback))
 }
 
 /// 通道帧的类型集合（§5）。**唯一的权威**——`routes/ws.rs` 靠它决定一帧
@@ -136,9 +131,10 @@ fn on_open(state: &AppState, node_id: &str, frame: &Frame) -> Reply {
     Reply::Frame(push(
         types::CHANNEL_READY,
         protocol::channel::ChannelReady {
-            channel_id: spec.channel_id,
+            channel_id: spec.channel_id.clone(),
             capabilities: serde_json::json!({}),
         },
+        protocol::channel::fallback::ready(&spec.channel_id),
     ))
 }
 
@@ -160,9 +156,10 @@ fn on_data(state: &AppState, node_id: &str, frame: &Frame) -> Reply {
         Ok(CreditStatus::Exhausted) => Reply::Frame(push(
             types::CHANNEL_CREDIT,
             protocol::channel::ChannelCredit {
-                channel_id: data.channel_id,
+                channel_id: data.channel_id.clone(),
                 delta: protocol::channel::CREDIT_DELTA,
             },
+            protocol::channel::fallback::credit(&data.channel_id, protocol::channel::CREDIT_DELTA),
         )),
         Err(e) => Reply::Frame(error_frame(&data.channel_id, &e)),
     }
@@ -202,13 +199,15 @@ fn on_close(state: &AppState, node_id: &str, frame: &Frame) -> Reply {
 /// 真正区分得了的是单帧超限（`frame too large`）与洪峰（`flood`）——那两种
 /// 在读侧限流那条路上分，运维侧要拿它们判断该不该拉黑，不能混。
 fn error_frame(channel_id: &str, e: &ChannelError) -> Frame {
+    let reason = e.to_string();
     push(
         types::CHANNEL_ERROR,
         protocol::channel::ChannelErrorPayload {
             channel_id: channel_id.to_string(),
             code: ChannelErrorCode::Unsupported,
-            reason: e.to_string(),
+            reason: reason.clone(),
         },
+        protocol::channel::fallback::error(channel_id, ChannelErrorCode::Unsupported, &reason),
     )
 }
 

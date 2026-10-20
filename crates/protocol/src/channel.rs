@@ -136,6 +136,41 @@ pub struct CloseChannel {
     pub reason: String,
 }
 
+/// 通道帧载荷的兜底形状（序列化失败时用）。
+///
+/// **兜底必须带 `channel_id`**，且每档带的东西不同：对端按 `channel_id`
+/// 认领通道（§4），少了它那一帧会被当成「不属于任何通道」而丢掉——症状是
+/// 通道卡在 opening 而两侧日志都干净。`code` / `reason` / `connector` 这些
+/// 是**必填字段**：`channel_error` 少了它们解不开，node 会把它当成断连
+/// （`channel.rs` 的 `on_open`），比丢一帧糟得多。
+pub mod fallback {
+    use super::ChannelErrorCode;
+
+    pub fn open(channel_id: &str, connector: &str) -> serde_json::Value {
+        serde_json::json!({ "channel_id": channel_id, "connector": connector })
+    }
+
+    pub fn ready(channel_id: &str) -> serde_json::Value {
+        serde_json::json!({ "channel_id": channel_id })
+    }
+
+    pub fn credit(channel_id: &str, delta: u32) -> serde_json::Value {
+        serde_json::json!({ "channel_id": channel_id, "delta": delta })
+    }
+
+    pub fn data(channel_id: &str) -> serde_json::Value {
+        serde_json::json!({ "channel_id": channel_id, "payload": {} })
+    }
+
+    pub fn close(channel_id: &str, reason: &str) -> serde_json::Value {
+        serde_json::json!({ "channel_id": channel_id, "reason": reason })
+    }
+
+    pub fn error(channel_id: &str, code: ChannelErrorCode, reason: &str) -> serde_json::Value {
+        serde_json::json!({ "channel_id": channel_id, "code": code, "reason": reason })
+    }
+}
+
 /// 通道状态（§5「开 / 用 / 关」）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelState {
@@ -887,6 +922,51 @@ mod tests {
         );
         let back: ChannelReady = f.payload().unwrap();
         assert!(back.capabilities.is_null());
+    }
+
+    #[test]
+    fn every_fallback_shape_still_parses_into_its_own_payload_type() {
+        // 兜底形状漏一个必填字段，对端就解不开那一帧——`open_channel` 解不
+        // 开会让 node 结束整条连接，比丢一帧糟得多。
+        let f = Frame::push(types::OPEN_CHANNEL, 0, fallback::open("c1", "terminal"));
+        assert_eq!(f.payload::<OpenChannel>().unwrap().connector, "terminal");
+
+        let f = Frame::push(types::CHANNEL_READY, 0, fallback::ready("c1"));
+        assert_eq!(f.payload::<ChannelReady>().unwrap().channel_id, "c1");
+
+        let f = Frame::push(types::CHANNEL_DATA, 0, fallback::data("c1"));
+        assert!(f.payload::<ChannelData>().unwrap().payload.is_object());
+
+        let f = Frame::push(types::CHANNEL_CREDIT, 0, fallback::credit("c1", 32));
+        assert_eq!(f.payload::<ChannelCredit>().unwrap().delta, 32);
+
+        let f = Frame::push(types::CLOSE_CHANNEL, 0, fallback::close("c1", "closed"));
+        assert_eq!(f.payload::<CloseChannel>().unwrap().reason, "closed");
+
+        let f = Frame::push(
+            types::CHANNEL_ERROR,
+            0,
+            fallback::error("c1", ErrorCode::Unsupported, "nope"),
+        );
+        let e = f.payload::<ChannelErrorPayload>().unwrap();
+        assert_eq!(e.code, ErrorCode::Unsupported);
+        assert_eq!(e.reason, "nope");
+    }
+
+    #[test]
+    fn every_fallback_shape_carries_the_channel_id() {
+        // 对端按 channel_id 认领通道：少了它，帧会被当成「不属于任何通道」
+        // 丢掉——症状是通道卡住而两侧日志都干净。
+        for v in [
+            fallback::open("c1", "terminal"),
+            fallback::ready("c1"),
+            fallback::data("c1"),
+            fallback::credit("c1", 1),
+            fallback::close("c1", "closed"),
+            fallback::error("c1", ErrorCode::Unsupported, "nope"),
+        ] {
+            assert_eq!(v["channel_id"], "c1", "missing channel_id in {v}");
+        }
     }
 
     #[test]

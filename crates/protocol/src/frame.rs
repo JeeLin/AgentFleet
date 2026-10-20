@@ -85,6 +85,16 @@ pub fn exceeds_limit(bytes: usize) -> bool {
     bytes > MAX_FRAME_BYTES
 }
 
+/// 序列化一帧的载荷；失败时退回 `fallback`。
+///
+/// 生产代码禁 panic，而**少回一帧比回一帧兜底的更糟**：后者至少让对端知道
+/// 这一帧到了，于是错误停在该停的地方。兜底形状由协议层给
+/// （`channel::fallback`），不在调用点手写——手写的那份会漏掉必填字段，
+/// 于是兜底出来的帧对端解不开，比丢帧还糟。
+pub fn payload_or<T: Serialize>(value: &T, fallback: serde_json::Value) -> serde_json::Value {
+    serde_json::to_value(value).unwrap_or(fallback)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,6 +165,28 @@ mod tests {
         assert!(text.contains("\"node_id\":\"n_pi01\""), "got {text}");
         let back: Frame = serde_json::from_str(&text).unwrap();
         assert_eq!(back.node_id.as_deref(), Some("n_pi01"));
+    }
+
+    #[test]
+    fn payload_or_keeps_the_serialized_payload() {
+        let v = payload_or(&json!({"channel_id": "c1"}), json!({}));
+        assert_eq!(v["channel_id"], "c1");
+    }
+
+    #[test]
+    fn payload_or_falls_back_when_serialization_fails() {
+        // 通道载荷全是字符串与整数，结构上不会失败，所以兜底臂只能靠一个
+        // 故意报错的 `Serialize` 进来（`json!` 造不出这种输入）。
+        struct Fails;
+        impl Serialize for Fails {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("nope"))
+            }
+        }
+        assert_eq!(
+            payload_or(&Fails, json!({"channel_id": "c1"})),
+            json!({"channel_id": "c1"})
+        );
     }
 
     #[test]

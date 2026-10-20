@@ -376,7 +376,7 @@ fn unreported_connector(state: &AppState, node_id: &str, asked: &str) -> Option<
                 .map(str::to_string)
                 .collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_else(Vec::new);
     if reported.iter().any(|c| c == asked) {
         None
     } else {
@@ -490,15 +490,16 @@ pub async fn open_channel(
 
     let channel_id = identity::random_id();
     let params = params_with_workspace_root(body.params, &detail.workspace.path);
+    let open = protocol::channel::OpenChannel::with_params(
+        channel_id.clone(),
+        body.connector.clone(),
+        params,
+    );
+    let fallback = protocol::channel::fallback::open(&channel_id, &body.connector);
     let frame = Frame::push(
         types::OPEN_CHANNEL,
         0,
-        serde_json::to_value(protocol::channel::OpenChannel::with_params(
-            channel_id.clone(),
-            body.connector.clone(),
-            params,
-        ))
-        .unwrap_or_else(|_| json!({"channel_id": channel_id, "connector": body.connector})),
+        protocol::payload_or(&open, fallback),
     );
     // **先记账再下发**：设备回 ack 可能比 `send_to_device` 返回还快，而
     // `announce_ready` 要靠这张表找到会话与节点。反过来写的话，快设备会
@@ -642,14 +643,17 @@ pub async fn close_channel(
         state.bindings().bind(&channel_id, binding);
         return Err(ApiError::forbidden(err::FORBIDDEN));
     }
+    let closing = protocol::channel::CloseChannel {
+        channel_id: channel_id.clone(),
+        reason: "closed by the console".to_string(),
+    };
     let frame = Frame::push(
         types::CLOSE_CHANNEL,
         0,
-        serde_json::to_value(protocol::channel::CloseChannel {
-            channel_id: channel_id.clone(),
-            reason: "closed by the console".to_string(),
-        })
-        .unwrap_or_else(|_| json!({"channel_id": channel_id, "reason": "closed"})),
+        protocol::payload_or(
+            &closing,
+            protocol::channel::fallback::close(&channel_id, "closed"),
+        ),
     );
     // 设备已经不在 → 照样 204：Hub 侧的通道账本随连接一起清掉了（§7.1），
     // 没有需要通知的对象。
@@ -833,14 +837,17 @@ fn expire_unacked(state: &AppState, node_id: &str, channel_id: &str) {
         }),
     );
     // 设备可能只是慢：晚到的 open 会留下一个再也没人关的 PTY / 工作区句柄。
+    let closing = protocol::channel::CloseChannel {
+        channel_id: channel_id.to_string(),
+        reason: "open timed out".to_string(),
+    };
     let frame = Frame::push(
         types::CLOSE_CHANNEL,
         0,
-        serde_json::to_value(protocol::channel::CloseChannel {
-            channel_id: channel_id.to_string(),
-            reason: "open timed out".to_string(),
-        })
-        .unwrap_or_else(|_| json!({"channel_id": channel_id, "reason": "open timed out"})),
+        protocol::payload_or(
+            &closing,
+            protocol::channel::fallback::close(channel_id, "open timed out"),
+        ),
     );
     if let Err(e) = send_to_device(state, node_id, frame) {
         tracing::debug!(
@@ -899,14 +906,14 @@ fn send_channel_data(
     channel_id: &str,
     payload: serde_json::Value,
 ) -> Result<Response, ApiError> {
+    let data = protocol::channel::ChannelData {
+        channel_id: channel_id.to_string(),
+        payload,
+    };
     let frame = Frame::push(
         types::CHANNEL_DATA,
         0,
-        serde_json::to_value(protocol::channel::ChannelData {
-            channel_id: channel_id.to_string(),
-            payload,
-        })
-        .unwrap_or_else(|_| json!({"channel_id": channel_id, "payload": {}})),
+        protocol::payload_or(&data, protocol::channel::fallback::data(channel_id)),
     );
     send_to_device(state, node_id, frame)?;
     Ok(StatusCode::NO_CONTENT.into_response())

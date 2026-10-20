@@ -24,6 +24,7 @@ use protocol::channel::{
 };
 use protocol::frame::Frame;
 use protocol::message::types;
+pub use protocol::payload_or as frame_payload_or;
 
 use crate::connector::{self, BoxedConnector, ConnectorError, OpenReq};
 
@@ -368,13 +369,16 @@ impl ChannelTable {
     /// 可能还留着旧连接记的账），对不上号时唯一有意义的动作是「清掉」。
     fn close(&mut self, channel_id: &str, reason: &str) -> Vec<Frame> {
         self.release(channel_id);
+        let closing = CloseChannel {
+            channel_id: channel_id.to_string(),
+            reason: reason.to_string(),
+        };
         vec![push(
             types::CLOSE_CHANNEL,
-            serde_json::to_value(CloseChannel {
-                channel_id: channel_id.to_string(),
-                reason: reason.to_string(),
-            })
-            .unwrap_or_else(|_| serde_json::json!({})),
+            frame_payload_or(
+                &closing,
+                protocol::channel::fallback::close(channel_id, reason),
+            ),
         )]
     }
 
@@ -595,26 +599,29 @@ pub fn is_channel_type(msg_type: &str) -> bool {
 /// ——表现恰好是最难查的一种：`/send` 回 204、通道 `ready`、PTY 真的读到了
 /// 字节、**页面上一片空白**，而两侧日志都只有一行 DEBUG。
 fn data_frame(channel_id: &str, payload: serde_json::Value) -> Frame {
+    let data = ChannelData {
+        channel_id: channel_id.to_string(),
+        payload,
+    };
     push(
         types::CHANNEL_DATA,
-        serde_json::to_value(ChannelData {
-            channel_id: channel_id.to_string(),
-            payload,
-        })
-        .unwrap_or_else(|_| serde_json::json!({ "channel_id": channel_id, "payload": {} })),
+        frame_payload_or(&data, protocol::channel::fallback::data(channel_id)),
     )
 }
 
 /// 一条 `channel_error`。
 fn error_frame(channel_id: &str, code: ChannelErrorCode, reason: &str) -> Frame {
+    let err = ChannelErrorPayload {
+        channel_id: channel_id.to_string(),
+        code,
+        reason: reason.to_string(),
+    };
     push(
         types::CHANNEL_ERROR,
-        serde_json::to_value(ChannelErrorPayload {
-            channel_id: channel_id.to_string(),
-            code,
-            reason: reason.to_string(),
-        })
-        .unwrap_or_else(|_| serde_json::json!({})),
+        frame_payload_or(
+            &err,
+            protocol::channel::fallback::error(channel_id, code, reason),
+        ),
     )
 }
 
@@ -625,12 +632,12 @@ pub fn push(msg_type: &str, payload: serde_json::Value) -> Frame {
 
 /// `channel_ready` 帧（约束 14：能力声明靠协商，不靠版本号）。
 pub fn ready_frame(channel_id: &str, capabilities: serde_json::Value) -> Frame {
+    let ready = ChannelReady {
+        channel_id: channel_id.to_string(),
+        capabilities,
+    };
     push(
         types::CHANNEL_READY,
-        serde_json::to_value(ChannelReady {
-            channel_id: channel_id.to_string(),
-            capabilities,
-        })
-        .unwrap_or_else(|_| serde_json::json!({})),
+        frame_payload_or(&ready, protocol::channel::fallback::ready(channel_id)),
     )
 }
