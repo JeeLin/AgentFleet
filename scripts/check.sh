@@ -177,5 +177,24 @@ else
   echo "  ⏭️  无里程碑文档，跳过"
 fi
 
+echo "== C4 生产代码不得用 unwrap_or_default（clippy 没有这条规则，只能 grep）=="
+# 只扫生产代码：crates/*/src 下的 .rs，排除 #[cfg(test)] 无关的测试文件
+# 与 crates/*/tests/。测试里允许——那里失败就该炸，且 panic 消息更能定位。
+# 两处要放行：① 文档注释里提到这个写法（解释为什么禁它），那不是调用；
+# ② `src/` 内的 `#[cfg(test)]` 段——那里失败就该炸，且 panic 消息更能定位。
+# 对每个命中所在的文件，裁掉 `#[cfg(test)]` 之后的行
+hits=$(grep -rn 'unwrap_or_default' crates/*/src --include='*.rs' \
+  | grep -vE ':[0-9]+:[[:space:]]*(///|//!|//)' \
+  | while IFS=: read -r f ln rest; do
+      cut=$(grep -n '#\[cfg(test)\]' "$f" | head -1 | cut -d: -f1)
+      if [[ -z "$cut" || "$ln" -lt "$cut" ]]; then echo "$f:$ln:$rest"; fi
+    done)
+if [[ -z "$hits" ]]; then
+  ok "生产代码无 unwrap_or_default"
+else
+  bad "unwrap_or_default 把「取不到」静默变成空值，改成显式分支："
+  echo "$hits" | sed 's/^/      /'
+fi
+
 echo
 if [[ $fail -eq 0 ]]; then echo "门禁通过"; else echo "门禁未通过"; exit 1; fi

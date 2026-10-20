@@ -8,6 +8,7 @@
 //! - **防篡改靠签名**，不是加密：payload 是明文可读的，改动即验签失败。
 
 pub mod error;
+use crate::time;
 pub use error::SessionError;
 
 use hmac::{Hmac, Mac};
@@ -125,10 +126,7 @@ impl SessionStore {
 }
 
 fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    time::unix_secs()
 }
 
 /// base64url 无填充编码。

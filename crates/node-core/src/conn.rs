@@ -163,7 +163,7 @@ pub async fn connect_once(
         Frame::push(
             "hello",
             seq,
-            serde_json::to_value(&hello).unwrap_or_default(),
+            serde_json::to_value(&hello).unwrap_or_else(|_| serde_json::json!({})),
         ),
     )
     .await?;

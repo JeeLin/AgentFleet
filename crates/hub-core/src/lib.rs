@@ -11,6 +11,7 @@ pub mod limits;
 pub mod registry;
 pub mod reports;
 pub mod session;
+pub mod time;
 
 pub use auth::{HubAuth, SetupToken};
 pub use channels::HubChannels;

@@ -302,8 +302,8 @@ impl Files {
         items.sort_by(|a, b| {
             a["name"]
                 .as_str()
-                .unwrap_or_default()
-                .cmp(b["name"].as_str().unwrap_or_default())
+                .unwrap_or("")
+                .cmp(b["name"].as_str().unwrap_or(""))
         });
         Ok(vec![OutFrame::new(serde_json::json!({
             "op": "list",

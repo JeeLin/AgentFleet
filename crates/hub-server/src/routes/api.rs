@@ -179,7 +179,7 @@ fn device_summary(state: &AppState, device: &hub_storage::repo::Device) -> Devic
             .node_version
             .clone()
             .or_else(|| report.as_ref().map(|r| r.node_version.clone()))
-            .unwrap_or_default(),
+            .unwrap_or_else(String::new),
         status,
         last_seen: device.last_seen_at.clone(),
         cpu: report
@@ -192,7 +192,7 @@ fn device_summary(state: &AppState, device: &hub_storage::repo::Device) -> Devic
         agents: report
             .as_ref()
             .map(|r| agent_list(&r.capabilities))
-            .unwrap_or_default(),
+            .unwrap_or_else(Vec::new),
         derived: !matches!(presence, hub_core::Presence::Online),
         key_fingerprint: crate::routes::masked_fingerprint(&device.key_fingerprint),
     }

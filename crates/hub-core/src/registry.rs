@@ -6,8 +6,10 @@
 //!   导致已签发的 `node_id` 立即失效，而对方私钥已落盘，永远接不回来。
 //! - 重连两步：**只信库内指纹**，忽略请求里带来的任何公钥，失败绝不改写指纹。
 
+use crate::time;
 use ed25519_dalek::VerifyingKey;
 use hub_storage::repo::{Device, DeviceRepo, NewDevice};
+
 // `DeviceStatus` 只在测试断言里用；生产代码只写不读状态枚举。
 #[cfg(test)]
 use hub_storage::repo::DeviceStatus;
@@ -201,10 +203,7 @@ fn pubkey_from_fingerprint(device: &Device) -> Result<[u8; 32], CoreError> {
 /// 所以「稳定可比」就够了，而这正是前缀要写清格式的原因。
 pub fn now_stamp() -> String {
     // 不引 chrono：只需要一个稳定可比的时间戳
-    let d = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("unix:{}", d.as_secs())
+    format!("unix:{}", time::unix_secs())
 }
 
 /// 把上传的 base64url 公钥解析为 32 字节。

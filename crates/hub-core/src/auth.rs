@@ -9,6 +9,7 @@
 //!   **不用明文密码**（改密码会使全部会话失效）、**不用设备指纹派生**（死锁 + 公开值）。
 
 pub mod error;
+use crate::time;
 pub use error::AuthError;
 
 use std::collections::HashMap;
@@ -344,10 +345,7 @@ impl Default for LoginRateLimiter {
 }
 
 pub(crate) fn unix_secs() -> i64 {
-    let d = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    i64::try_from(d.as_secs()).unwrap_or(i64::MAX)
+    i64::try_from(time::unix_secs()).unwrap_or(i64::MAX)
 }
 
 pub(crate) fn now() -> String {

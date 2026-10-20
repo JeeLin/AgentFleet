@@ -109,9 +109,11 @@ strip = true
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
-# `unwrap_or_default` 也禁：它把「取不到」静默变成「空值」，
-# 掩盖了本该上报的错误（例：时钟回拨时 `duration_since` 失败）。
-unwrap_or_default = "deny"
+# ⚠️ 这里**不要**再写 `unwrap_or_default = "deny"`：clippy 根本没有这条规则
+# （`cargo clippy --explain unwrap_or_default` 查到的是「`unwrap_or(Default::default())`
+# 该写成 `unwrap_or_default()`」，方向正好相反）。它曾在这行躺了很久，让 8 处
+# 生产调用看起来「被门禁管着」而实际一个都没被拦。
+# 真正的门禁是 `scripts/check.sh` 的 C4：grep 生产代码里的 `unwrap_or_default`。
 # 索引越界 panic：一律用 get() + 错误分支。
 indexing_slicing = "deny"
 # ⚠️ `let_underscore_must_use` 已移除，且**没有**在 `clippy.toml` 里补回来。
