@@ -71,6 +71,7 @@
 
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
+import { cwdPathOf, isOutsideSeg } from '@/lib/files-path'
 import { attach, type ListboxHandle } from '@/lib/listbox'
 
 /* ---------------------------------------------------------------- 数据契约 */
@@ -207,7 +208,7 @@ function joinPath(base: string, name: string): string {
 }
 
 /** 当前目录的相对路径。 */
-const cwdPath = computed(() => props.cwd.filter((s) => s.length > 0).join('/'))
+const cwdPath = computed(() => cwdPathOf(props.cwd))
 
 /** 当前层的清单。**没列过是「还没问过设备」，不是「空目录」——渲染不同。 */
 const listing = computed<FileListing | null>(() => props.listings.get(cwdPath.value) ?? null)
@@ -218,22 +219,10 @@ const crumbs = computed<Crumb[]>(() => {
   let path = ''
   props.cwd.forEach((seg, i) => {
     path = joinPath(path, seg)
-    out.push({ label: seg, path, depth: i + 1, outside: isOutside(seg) })
+    out.push({ label: seg, path, depth: i + 1, outside: isOutsideSeg(seg) })
   })
   return out
 })
-
-/**
- * 层名 / 条目名里的越界写法。
- *
- * 真判据在 node 侧（`resolve_within`），这里**不是**第二份边界检查——它只
- * 负责把已经判出来的边界**画出来**（§7.4 ①②）。字符串判据只认两种
- * 明写在路径里的逃逸：`..` 与绝对路径。符号链接逃逸不看名字，所以链接行
- * 的越界由宿主在 `error` 里给。
- */
-function isOutside(seg: string): boolean {
-  return seg === '..' || seg.startsWith('/')
-}
 
 /* ---------------------------------------------------------------- 树 */
 
@@ -281,7 +270,7 @@ const rows = computed<Row[]>(() => {
         expanded: isDir && expanded.value.has(child),
         size: entry.size,
         target: entry.target ?? null,
-        outside: isOutside(entry.name),
+        outside: isOutsideSeg(entry.name),
         depth,
       })
       if (isDir && expanded.value.has(child)) walk(child, depth + 1)
@@ -532,7 +521,7 @@ const BOUNDARY_NOTE =
 function isOutsideError(e: FilesError | null): boolean {
   if (!e) return false
   if (e.code === 'path_outside_root' || e.code === 'outside_workspace') return true
-  return isOutside(e.path)
+  return isOutsideSeg(e.path)
 }
 
 /* ---------------------------------------------------------------- 空态 */

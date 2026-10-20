@@ -67,6 +67,7 @@ import {
   type ChannelHandle,
   type ChannelState,
 } from '@/lib/channel'
+import { cwdPathOf, isOutsideSeg } from '@/lib/files-path'
 import { relativeTime, sessionTitle } from '@/lib/format'
 import { ApiError, NetworkError, request } from '@/lib/http'
 import { dispatch, isTyping, register, unregister } from '@/lib/keynav'
@@ -612,11 +613,6 @@ function fileRequest(tab: TabMeta, op: 'list' | 'read' | 'write', payload: Recor
  */
 const pendingFiles = new Map<string, { op: 'list' | 'read'; path: string }>()
 
-/** 当前目录的相对路径。与 FilesPanel 里那份同口径（每层一个数组项）。 */
-function cwdPathOf(ws: TabWorkspace): string {
-  return ws.cwd.filter((s) => s.length > 0).join('/')
-}
-
 /**
  * 把一次取数送出去；通道还没 `ready` 就先记下并去建通道。
  *
@@ -696,7 +692,7 @@ function filesKick(tab: TabMeta): void {
       fileRequest(tab, pending.op, { path: pending.path })
       return
     }
-    const path = cwdPathOf(ws)
+    const path = cwdPathOf(ws.cwd)
     if (ws.listings.has(path)) return
     ws.loading.add(path)
     fileRequest(tab, 'list', { path })
@@ -805,16 +801,6 @@ function filesOpen(path: string): void {
   ws.cwd = seg
   ws.filesError = null
   fileList(path)
-}
-
-/**
- * 只认明写在路径里的两种逃逸：`..` 与绝对路径。
- *
- * **这不是第二份边界检查**——真判据在 node 侧的 `resolve_within`。这里只是
- * 把已经判出来的边界**画出来**（§7.4 ①②），与 FilesPanel 里那份同口径。
- */
-function isOutsideSeg(seg: string): boolean {
-  return seg === '..' || seg.startsWith('/')
 }
 
 /**
