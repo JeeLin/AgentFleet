@@ -33,7 +33,7 @@
 - 不需要 Hub 有到设备的入站访问（约束 1）：设备是主动外联到 `AFCLI_HUB_URL` 的，
   标准 7 专门核对这一点。
 - 不需要改仓库里的 `data/`：Hub 用 `AFHUB_DATA_DIR=<临时目录>/hub`，
-  设备用 `XDG_DATA_HOME=<临时目录>/node`，跑完（不带 `--keep`）整个临时目录删掉。
+  设备用 `AFCLI_DATA_DIR=<临时目录>/node`，跑完（不带 `--keep`）整个临时目录删掉。
 
 ### 角色说明（本夹具里三者都在同一台机器上）
 
@@ -80,7 +80,7 @@ TMPDIR=/tmp/opencode bash scripts/e2e-m1.sh   # 换临时目录根（默认 /tmp
 | 设密码 | `POST /setup` + `x-setup-token`（读 `<data>/setup-token.txt`） | `SetupPage.vue` |
 | 登录 | `POST /login` → `af_session` + `af_csrf` cookie | `LoginPage.vue` |
 | 订阅 | `GET /api/stream`（SSE） | `lib/channel.ts` 的 `EventSource` |
-| 接入设备 | `XDG_DATA_HOME=… AFCLI_HUB_URL=ws://…/ws afcli run` **一条命令** | 用户敲的那条命令 |
+| 接入设备 | `AFCLI_DATA_DIR=… AFCLI_HUB_URL=ws://…/ws afcli run` **一条命令** | 用户敲的那条命令 |
 | 建会话 | `POST /api/sessions {node_id, path}` | `SessionPage.vue` 新建会话 |
 | 开面板 | `POST /api/channels {session_id, connector, params}` | `lib/channel.ts::open` |
 | 敲键盘 | `POST /api/channels/{id}/send`（裸字节） | `TerminalPanel` → `channel.send` |

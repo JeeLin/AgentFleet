@@ -37,6 +37,12 @@ const IDENTITY_MODE: u32 = 0o600;
 /// 数据目录权限：owner rwx。
 const DATA_DIR_MODE: u32 = 0o700;
 
+/// 基目录下的子目录名。
+const APP_DIR: &str = "agentfleet";
+
+/// node 数据目录环境变量名。与 Hub 的 `AFHUB_DATA_DIR` 同一取向。
+const ENV_DATA_DIR: &str = "AFCLI_DATA_DIR";
+
 /// 落盘的身份文件内容。
 ///
 /// `private_key_pkcs8_b64` 是这个结构体里唯一敏感字段——它让 `Debug` 派生
@@ -364,6 +370,12 @@ fn set_dir_mode(dir: &Path) -> Result<(), IdentityError> {
     Ok(())
 }
 
+/// 确保目录存在且权限为 0700。
+fn ensure_dir(dir: &Path) -> Result<(), IdentityError> {
+    fs::create_dir_all(dir)?;
+    set_dir_mode(dir)
+}
+
 pub fn now_secs() -> String {
     // 秒级精度足够：created_at 只用于人工排查，不参与任何认证判定。
     let secs = std::time::SystemTime::now()
@@ -373,25 +385,30 @@ pub fn now_secs() -> String {
     secs.to_string()
 }
 
-/// 平台数据目录（§4.4）：
-/// Linux `$XDG_DATA_HOME/agentfleet` 或 `~/.local/share/agentfleet`；
-/// macOS `~/Library/Application Support/agentfleet`。
+/// 解析 node 数据目录。
+///
+/// 优先级与 Hub 侧一致（`AFHUB_DATA_DIR` 见 `hub-server/src/main.rs`）：
+/// `AFCLI_DATA_DIR` 优先，否则平台标准目录。
 pub fn data_dir() -> Result<PathBuf, IdentityError> {
-    data_dir_from(std::env::var("XDG_DATA_HOME").ok().as_deref())
+    match std::env::var_os(ENV_DATA_DIR) {
+        Some(raw) if !raw.is_empty() => Ok(PathBuf::from(raw).join(APP_DIR)),
+        _ => platform_data_dir(),
+    }
 }
 
-/// 纯拼接部分：`xdg` 非空即优先，否则退回平台目录。
-///
-/// 拆出来是为了不靠 `set_var` 改进程 env 来测（会与并行测试竞争）。
-/// `dirs::data_dir()` 拿不到时返回 [`IdentityError::NoDataDir`]。
-pub fn data_dir_from(xdg: Option<&str>) -> Result<PathBuf, IdentityError> {
-    if let Some(dir) = xdg {
-        if !dir.is_empty() {
-            return Ok(PathBuf::from(dir).join("agentfleet"));
-        }
-    }
+/// 平台标准数据目录：Linux `~/.local/share/agentfleet`、
+/// macOS `~/Library/Application Support/agentfleet`。
+pub fn platform_data_dir() -> Result<PathBuf, IdentityError> {
     let base = dirs::data_dir().ok_or(IdentityError::NoDataDir)?;
-    Ok(base.join("agentfleet"))
+    Ok(base.join(APP_DIR))
+}
+
+/// 在给定基目录下解析数据目录。抽出为独立函数便于测试（`dirs::data_dir()`
+/// 只能读进程环境变量，测它就得改 env）。
+pub fn data_dir_in(base: impl AsRef<Path>) -> Result<PathBuf, IdentityError> {
+    let dir = base.as_ref().join(APP_DIR);
+    ensure_dir(&dir)?;
+    Ok(dir)
 }
 
 #[cfg(test)]
@@ -614,26 +631,30 @@ mod tests {
         );
     }
 
-    /// `data_dir()`：XDG_DATA_HOME 非空时必须优先生效。
+    /// `AFCLI_DATA_DIR` 非空时必须优先生效，空串与缺省都退回平台目录。
     #[test]
-    fn data_dir_prefers_xdg_data_home() {
+    fn data_dir_prefers_afcli_data_dir() {
         // 只测纯拼接的那一半：不改进程 env（会与并行测试竞争）。
-        let base = std::path::Path::new("/xdg-should-win");
+        let base = std::path::Path::new("/afcli-should-win");
         assert_eq!(
-            data_dir_from(Some("/xdg-should-win")).unwrap(),
+            data_dir_in(base).unwrap(),
             base.join("agentfleet"),
-            "non-empty XDG_DATA_HOME must take priority"
+            "non-empty AFCLI_DATA_DIR must take priority"
         );
         assert_eq!(
-            data_dir_from(Some("")).unwrap(),
+            platform_data_dir().unwrap(),
             dirs::data_dir().unwrap().join("agentfleet"),
-            "empty XDG_DATA_HOME falls back to the platform dir"
+            "absent AFCLI_DATA_DIR falls back to the platform dir"
         );
-        assert_eq!(
-            data_dir_from(None).unwrap(),
-            dirs::data_dir().unwrap().join("agentfleet"),
-            "absent XDG_DATA_HOME falls back to the platform dir"
-        );
+    }
+
+    /// `AFCLI_DATA_DIR` 指向一个还不存在的目录时必须建出来，且权限 0700。
+    #[test]
+    fn data_dir_creates_the_directory() {
+        let d = tmpdir();
+        let target = d.path().join("nested").join("node");
+        assert_eq!(data_dir_in(&target).unwrap(), target.join("agentfleet"));
+        assert!(target.join("agentfleet").is_dir());
     }
 
     /// `key()` / `path()` / `public_key_b64()` 是 enroll 的直接输入，
@@ -653,7 +674,7 @@ mod tests {
         assert_eq!(v["public_key"], serde_json::json!(id.public_key_b64()));
     }
 
-    /// `data_dir()`：XDG_DATA_HOME 优先，否则退回平台目录；末尾必带 `agentfleet`。
+    /// `data_dir()` 末尾必带 `agentfleet`（无论走哪条优先级）。
     #[test]
     fn data_dir_ends_with_agentfleet() {
         let dir = data_dir().unwrap();

@@ -335,8 +335,8 @@ supervisor 根本不持有连接，所以它不会因升级而抖动。
 - **私钥永不出现在**：任何 WS 载荷、日志、错误信息、trajectory 事件
   （约束 13）。对 `Debug` 实现加断言，防止 `#[derive(Debug)]` 把它打进日志。
 - 文件名统一为 `identity.json`（`PRODUCT.md` / `workspace-and-sync.md` 中的旧称 `auth.json` 已同步修正）。
-- **`<data_dir>` 按平台解析**：Linux `$XDG_DATA_HOME/agentfleet` 或 `~/.local/share/agentfleet`；
-  macOS `~/Library/Application Support/agentfleet`；目录 0700。
+- **`<data_dir>` 按优先级解析**：`AFCLI_DATA_DIR` 优先，否则平台标准目录
+  （Linux `~/.local/share/agentfleet`、macOS `~/Library/Application Support/agentfleet`）；目录 0700。
 
 ---
 

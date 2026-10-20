@@ -66,34 +66,12 @@ run = "cd packages/web && bun run dev"
 
 # 跑设备侧二进制（开发调试用）：`mise run cli -- run` / `-- log -n 50`。
 #
-# `shell = "bash"`：mise 默认用 `sh` 执行 task，而 `sh` 没有数组，参数经
-# `usage_afcli_args` 进来时是一个已引用过的字符串，`eval` 才能还原成多个。
+# 不写 `usage`：写了 mise 的任务参数解析器会把 `--help` 认成自己的 flag，
+# `mise run cli -- --help` 就打不出 afcli 的用法。去掉它参数直接追加到命令后。
 [tasks.cli]
 description = "跑设备侧 afcli（debug 构建）：mise run cli -- run / -- log -n 50"
-shell = "bash"
-usage = '''
-arg "[afcli_args]" help="传给 afcli 的参数，如 run、log -n 50" var=#true
-'''
 env = { AFCLI_HUB_URL = "ws://127.0.0.1:8080/ws" }
-run = """
-#!/usr/bin/env bash
-set -euo pipefail
-# `:=` 而不是写进 task 的 `env`：后者会盖掉调用者设的值。
-# 缺省落仓库内：~/.local/share 里可能留着旧设备身份，连上新 Hub 反复被拒。
-: "${XDG_DATA_HOME:=${MISE_CONFIG_ROOT:-$(pwd)}/data/node}"
-export XDG_DATA_HOME
-eval "args=(${usage_afcli_args:-})"
-# exec：退出码与信号原样出去，Ctrl-C 直接作用于 afcli
-exec target/debug/afcli "${args[@]}"
-"""
-
-# `afcli --help` 经这个 task 到不了：mise 的任务参数解析器把 `--help` 认成自己的
-# flag，绕开它（`-- -- --help`）又撞上 afcli 把首位 `--` 当未知子命令。
-# 要看用法直接敲 `./target/debug/afcli --help`。
-
-# `afcli --help` 经这个 task 到不了：mise 的任务参数解析器会把 `--help` 认成
-# 自己的 flag，绕开它（`-- -- --help`）又会撞上 afcli 把首位 `--` 当未知子命令。
-# 要看用法直接敲 `./target/debug/afcli --help`。
+run = "exec target/debug/afcli"
 
 # 两个长驻进程并行：前端 3002 把 `/api` 与 `/ws` 转发到 Hub 8080。
 #

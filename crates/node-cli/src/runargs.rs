@@ -33,7 +33,7 @@ pub fn hub_url(env: Option<&str>) -> String {
 
 /// 当前进程的数据目录。
 ///
-/// 唯一权威来源是 `XDG_DATA_HOME` / 平台标准目录——**不接受 flag**。
+/// 唯一权威来源是 `AFCLI_DATA_DIR` / 平台标准目录——**不接受 flag**。
 /// supervisor 把自己的 argv 原样传给 worker，两边读到的目录必然相同；
 /// 而一个「用户可以在命令行上改数据目录」的开关，会让 `afcli log` 和
 /// `afcli run` 落在两个目录里，排障时看到的日志根本不是运行时的那个。

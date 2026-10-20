@@ -32,7 +32,7 @@
 #
 # 先决条件（真 afhub + 真 afcli + 浏览器；**不需要真树莓派**）见
 # `scripts/e2e-m1/README.md`。**不改仓库里的 `data/`**：Hub 与设备的数据目录
-# 都在本次运行的临时目录里（`AFHUB_DATA_DIR` / `XDG_DATA_HOME`）。
+# 都在本次运行的临时目录里（`AFHUB_DATA_DIR` / `AFCLI_DATA_DIR`）。
 set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
@@ -81,7 +81,7 @@ stray_pids() {
     [ -r "$p/environ" ] || continue
     envs=$(tr '\0' '\n' <"$p/environ" 2>/dev/null) || continue
     case "$envs" in
-      *"XDG_DATA_HOME=$TMP/node"*) ;;
+      *"AFCLI_DATA_DIR=$TMP/node"*) ;;
       *) continue ;;
     esac
     cmd=$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null) || continue
@@ -252,8 +252,8 @@ SSE_PID=$!
 # ---------------------------------------------------------------------------
 # 起设备（真 afcli，一条命令）
 # ---------------------------------------------------------------------------
-NODE_CMD="XDG_DATA_HOME=$TMP/node AFCLI_HUB_URL=ws://127.0.0.1:$PORT/ws $AFCLI_BIN run"
-XDG_DATA_HOME="$TMP/node" AFCLI_HUB_URL="ws://127.0.0.1:$PORT/ws" \
+NODE_CMD="AFCLI_DATA_DIR=$TMP/node AFCLI_HUB_URL=ws://127.0.0.1:$PORT/ws $AFCLI_BIN run"
+AFCLI_DATA_DIR="$TMP/node" AFCLI_HUB_URL="ws://127.0.0.1:$PORT/ws" \
   setsid "$AFCLI_BIN" run >>"$TMP/node.stdout" 2>&1 &
 NODE_PID=$!
 
