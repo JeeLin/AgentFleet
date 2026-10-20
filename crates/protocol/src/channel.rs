@@ -66,6 +66,36 @@ fn default_credit_start() -> u32 {
     CREDIT_START
 }
 
+impl OpenChannel {
+    /// 开一条新通道。初始信用取 [`CREDIT_START`]。
+    ///
+    /// **为什么要有这个构造点**：`credit_start` 有两份口径——本结构体的
+    /// `#[serde(default = ...)]`（node 侧漏填时兜底）与 Hub 侧下发时显式传的
+    /// 值。两处各写一个 `CREDIT_START` 时，改协议常量只改得动其中一处，另一种
+    /// 症状是「有的通道有输出、有的一个字节都不流」而两侧日志各只有 DEBUG。
+    /// 让「新通道 = CREDIT_START」这件事只在这里出现一次，调用方不再自己写常量。
+    pub fn new(channel_id: impl Into<String>, connector: impl Into<String>) -> Self {
+        Self {
+            channel_id: channel_id.into(),
+            connector: connector.into(),
+            params: serde_json::Value::Null,
+            credit_start: CREDIT_START,
+        }
+    }
+
+    /// 带 connector 私有参数的 [`Self::new`]。
+    pub fn with_params(
+        channel_id: impl Into<String>,
+        connector: impl Into<String>,
+        params: serde_json::Value,
+    ) -> Self {
+        Self {
+            params,
+            ..Self::new(channel_id, connector)
+        }
+    }
+}
+
 /// `channel_ready` 载荷（node→Hub，§4）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelReady {
@@ -795,6 +825,31 @@ mod tests {
         let f = Frame::push(types::CHANNEL_ERROR, 0, json);
         let back: ChannelErrorPayload = f.payload().unwrap();
         assert_eq!(back, p);
+    }
+
+    /// 构造点必须是初始信用的唯一来源：`new` 给的值与「漏填字段时 serde 兜的
+    /// 底」必须同一个数。两份口径一旦分叉，症状是「有的通道有输出、有的一个
+    /// 字节都不流」而两侧日志各只有 DEBUG——这条断言就是防那个。
+    #[test]
+    fn open_channel_new_matches_the_serde_default() {
+        let built = OpenChannel::new("c1", "terminal");
+        assert_eq!(built.credit_start, CREDIT_START);
+        assert!(built.params.is_null());
+
+        // 同一个载荷走 serde 缺省那条路（node 侧漏填），必须得到同一个数
+        let back: OpenChannel = Frame::push(
+            types::OPEN_CHANNEL,
+            0,
+            serde_json::to_value(&built).unwrap(),
+        )
+        .payload()
+        .unwrap();
+        assert_eq!(back.credit_start, built.credit_start);
+
+        // with_params 只改 params，不碰信用
+        let with = OpenChannel::with_params("c1", "files", serde_json::json!({"path": "."}));
+        assert_eq!(with.credit_start, CREDIT_START);
+        assert_eq!(with.params["path"], ".");
     }
 
     #[test]

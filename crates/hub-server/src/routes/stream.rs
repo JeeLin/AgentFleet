@@ -493,12 +493,11 @@ pub async fn open_channel(
     let frame = Frame::push(
         types::OPEN_CHANNEL,
         0,
-        serde_json::to_value(protocol::channel::OpenChannel {
-            channel_id: channel_id.clone(),
-            connector: body.connector.clone(),
+        serde_json::to_value(protocol::channel::OpenChannel::with_params(
+            channel_id.clone(),
+            body.connector.clone(),
             params,
-            credit_start: protocol::channel::CREDIT_START,
-        })
+        ))
         .unwrap_or_else(|_| json!({"channel_id": channel_id, "connector": body.connector})),
     );
     // **先记账再下发**：设备回 ack 可能比 `send_to_device` 返回还快，而
