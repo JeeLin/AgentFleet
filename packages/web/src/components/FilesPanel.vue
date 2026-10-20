@@ -297,6 +297,19 @@ function indentOf(depth: number): string {
   return `${12 + depth * 14}px`
 }
 
+/**
+ * 每一档的说法。`other` 与 `unknown` 由 node 侧真的产出：前者是管道 / socket
+ * 这类既非文件也非目录的东西，后者是列目录期间元数据读不到（竞态删除）。
+ * 两档都不当文件、也不当目录——猜错会让用户去点一个不存在的东西。
+ */
+const KIND_LABEL: Record<FileKind, string> = {
+  dir: '目录',
+  file: '文件',
+  link: '符号链接',
+  other: '其他',
+  unknown: '读不到类型',
+}
+
 function twistyOf(row: Row): string {
   if (row.kind === 'dir') return row.expanded ? '▾' : '▸'
   if (row.kind === 'link') return '→'
@@ -304,12 +317,11 @@ function twistyOf(row: Row): string {
 }
 
 function ariaLabelOf(row: Row): string {
-  const kind =
-    row.kind === 'dir' ? '目录' : row.kind === 'link' ? '符号链接' : row.kind === 'file' ? '文件' : '其他'
-  const bits = [row.name, kind]
+  const bits = [row.name, KIND_LABEL[row.kind]]
   if (row.kind === 'file') bits.push(humanBytes(row.size))
   if (row.outside) bits.push('工作区之外，不可进入')
   if (row.kind === 'link' && row.target) bits.push(`指向 ${row.target}`)
+  if (row.kind === 'unknown') bits.push('列目录时已读不到它的元数据')
   return bits.join('，')
 }
 
@@ -318,6 +330,7 @@ function metaOf(row: Row): string {
   if (row.outside) return '不可进入'
   if (row.kind === 'link') return row.target ? `→ ${row.target}` : '→ ?'
   if (row.kind === 'file') return humanBytes(row.size)
+  if (row.kind === 'unknown') return '类型未知'
   return ''
 }
 

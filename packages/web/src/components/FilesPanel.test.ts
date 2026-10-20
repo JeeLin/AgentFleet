@@ -619,3 +619,42 @@ describe('FilesPanel：无障碍', () => {
     expect(w.element.querySelector('[data-panel-focus]')).not.toBeNull()
   })
 })
+
+/* ==========================================================================
+   九、node 侧真的会发的两档 kind：other（管道 / socket）与 unknown（竞态删除）
+   ========================================================================== */
+
+describe('FilesPanel：other 与 unknown 两档', () => {
+  // `connector/files.rs` 的 ftyp 分支：既非文件也非目录 → "other"；
+  // 元数据读不到（列目录后该项被删）→ "unknown"。两档都不该被说成文件。
+  const MIXED = layer('', [
+    { name: 'pipe', kind: 'other', size: 0, mtime_ms: null },
+    { name: 'gone', kind: 'unknown', size: 0, mtime_ms: null },
+  ])
+
+  it('other 行说「其他」，不给大小——0 字节是编出来的事实', () => {
+    const w = mount({ listings: listings(MIXED) })
+    const row = treeRows(w).find((r) => r.dataset.path === 'pipe') as HTMLElement
+    expect(row.getAttribute('aria-label')).toContain('其他')
+    expect(row.getAttribute('aria-label')).not.toContain('文件')
+    expect(row.querySelector('.af-tree__meta')).toBeNull()
+  })
+
+  it('unknown 行说「读不到类型」，且 meta 写「类型未知」', () => {
+    const w = mount({ listings: listings(MIXED) })
+    const row = treeRows(w).find((r) => r.dataset.path === 'gone') as HTMLElement
+    expect(row.getAttribute('aria-label')).toContain('读不到类型')
+    expect(row.querySelector('.af-tree__meta')?.textContent).toContain('类型未知')
+  })
+
+  it('⏎ 在 other / unknown 行上报 open，不猜成 read（node 侧才有判定权）', () => {
+    const w = mount({ listings: listings(MIXED) })
+    for (const name of ['pipe', 'gone']) {
+      const row = treeRows(w).find((r) => r.dataset.path === name) as HTMLElement
+      row.focus()
+      press(row, 'Enter')
+    }
+    expect(w.emitted('open')).toEqual([['pipe'], ['gone']])
+    expect(w.emitted('read')).toBeUndefined()
+  })
+})
