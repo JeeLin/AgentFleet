@@ -271,7 +271,12 @@ done
 # 断言用的小工具（全部只读现场文件，不碰被测进程）
 # ---------------------------------------------------------------------------
 
-# `METHOD PATH [BODY]` → HTTP_CODE / BODY 两个全局量
+# `METHOD PATH [BODY]` → HTTP_CODE / BODY 两个全局量，**并打印 HTTP 码**
+#
+# 打印的那一句是给 `rcode=$(api POST ...)` 用的：`api()` 里给全局量赋值，
+# 而命令替换拿到的是 **stdout**。少了这一句，`$rcode` 恒为空字符串——
+# 于是「请求失败」那条分支永远不成立，而「成功」那条也永远不成立
+# （`[ "$rcode" = "204" ]` 恒假），一次坏掉的请求会被读成一次成功的请求。
 api() {
   local method=$1 path=$2 data=${3-}
   if [ -n "$data" ]; then
@@ -282,6 +287,7 @@ api() {
       -H "x-csrf-token: $CSRF" "$BASE$path")
   fi
   LAST_BODY=$(cat "$BODY" 2>/dev/null)
+  printf '%s' "$HTTP_CODE"
   return 0
 }
 
