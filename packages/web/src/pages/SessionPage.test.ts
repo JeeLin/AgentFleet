@@ -438,6 +438,22 @@ describe('面板正文是 13b / 13c 的真组件，不是 13a 的占位', () => 
     expect(w.element.querySelector('[data-tree-empty]')?.textContent).toContain('这一层是空的')
   })
 
+  it('帧里没给 size / total 时页面画「—」，不编一个 0（0 与「不知道」是两件事）', async () => {
+    const { w, src } = await mountWorkbench()
+    await openFiles(w)
+    await touchFiles(w)
+    await frame(w, src(), {
+      op: 'list',
+      path: '',
+      entries: [{ name: 'src', kind: 'dir', size: 0, mtime_ms: null }],
+      truncated: true,
+    })
+    expect(w.element.textContent).toContain('共 — 项')
+
+    await frame(w, src(), { op: 'read', path: 'README.md', kind: 'text', truncated: false, text: 'hi' })
+    expect(w.element.querySelector('.af-files__pvhead .af-badge')?.textContent?.trim()).toBe('—')
+  })
+
   it('`read` 回帧进 preview → 预览区给出结论（§3.14）', async () => {
     const { w, src } = await mountWorkbench()
     await openFiles(w)

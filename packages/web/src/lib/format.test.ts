@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { parseStamp, percent, relativeTime, sessionTitle, workspaceName } from './format'
+import { orDash, parseStamp, percent, relativeTime, sessionTitle, workspaceName } from './format'
 
 const NOW = 1_700_000_000_000
 
@@ -81,5 +81,13 @@ describe('workspaceName / sessionTitle', () => {
       workspace: { node_id: 'n_1', path: '/srv/agentfleet', path_locked: true },
     }
     expect(sessionTitle(session)).toBe('agentfleet')
+  })
+})
+
+describe('orDash', () => {
+  it('取不到是「—」，不是 0（0 是一个真值，不能拿来顶「不知道」）', () => {
+    expect(orDash(null)).toBe('—')
+    expect(orDash(0)).toBe('0')
+    expect(orDash(4821)).toBe('4821')
   })
 })

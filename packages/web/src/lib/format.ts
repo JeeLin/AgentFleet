@@ -60,3 +60,8 @@ export function sessionTitle(session: SessionSummary): string {
 export function percent(value: number | null): string {
   return value === null ? '—' : `${value}%`
 }
+
+/** 取不到的数字画成 `—`，与 `percent(null)` 同一口径（不拿 0 顶上）。 */
+export function orDash(value: number | null): string {
+  return value === null ? '—' : String(value)
+}

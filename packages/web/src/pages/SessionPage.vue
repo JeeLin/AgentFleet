@@ -749,7 +749,7 @@ function applyListing(ws: TabWorkspace, frame: Record<string, unknown>): void {
   ws.listings.set(String(listing.path ?? ''), {
     path: String(listing.path ?? ''),
     entries: Array.isArray(listing.entries) ? (listing.entries as FileListing['entries']) : [],
-    total: typeof listing.total === 'number' ? listing.total : 0,
+    total: numOrNull(listing.total),
     truncated: listing.truncated === true,
   })
   ws.filesError = null
@@ -761,7 +761,7 @@ function applyPreview(ws: TabWorkspace, frame: Record<string, unknown>): void {
   const preview = frame as Partial<FilePreview> & { path?: unknown }
   ws.preview = {
     path: String(preview.path ?? ''),
-    size: typeof preview.size === 'number' ? preview.size : 0,
+    size: numOrNull(preview.size),
     kind: preview.kind === 'binary' || preview.kind === 'truncated' ? preview.kind : 'text',
     truncated: preview.truncated === true,
     text: typeof preview.text === 'string' ? preview.text : undefined,
@@ -771,6 +771,17 @@ function applyPreview(ws: TabWorkspace, frame: Record<string, unknown>): void {
 
 function asRecord(v: unknown): Record<string, unknown> | null {
   return typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : null
+}
+
+/**
+ * 取不到就是 `null`，**不拿 0 顶上**。
+ *
+ * 大小缺省成 0 会编出一个事实：0 字节与「不知道多大」是两件事，而页面对
+ * 后者有 `—` 这个说法（`format.ts` 的 `percent(null)` 同口径）。编出来的
+ * 0 会被读成「这个空文件是空的」——而真相是「没人告诉我们」。
+ */
+function numOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
 }
 
 function errorOf(frame: Record<string, unknown>, path: string): FilesError {

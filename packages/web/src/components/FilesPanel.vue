@@ -72,6 +72,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { cwdPathOf, isOutsideSeg } from '@/lib/files-path'
+import { orDash } from '@/lib/format'
 import { attach, type ListboxHandle } from '@/lib/listbox'
 
 /* ---------------------------------------------------------------- 数据契约 */
@@ -82,8 +83,8 @@ export type FileKind = 'dir' | 'file' | 'link' | 'other' | 'unknown'
 export interface FileEntry {
   name: string
   kind: FileKind
-  /** 字节。目录恒为 0。 */
-  size: number
+  /** 字节。目录恒为 0；**帧里没给是 `null`**（0 与「不知道」是两件事）。 */
+  size: number | null
   /** Unix 毫秒；取不到是 `null`（时钟回拨等情形），不是 0。 */
   mtime_ms: number | null
   /** 仅 `kind === 'link'`。读不到目标时 `null`。 */
@@ -95,16 +96,16 @@ export interface FileListing {
   /** 这一层的**相对**路径。`''` = 工作区根。 */
   path: string
   entries: FileEntry[]
-  /** 目录里的实际条目数。`total > entries.length` 即被截断。 */
-  total: number
+  /** 目录里的实际条目数。`total > entries.length` 即被截断；帧里没给是 `null`。 */
+  total: number | null
   truncated: boolean
 }
 
 /** `read` 的回帧。三档结论由 `kind` 给出。 */
 export interface FilePreview {
   path: string
-  /** 文件总字节（截断时大于 `text` 的实际长度）。 */
-  size: number
+  /** 文件总字节（截断时大于 `text` 的实际长度）；帧里没给是 `null`。 */
+  size: number | null
   kind: 'text' | 'binary' | 'truncated'
   truncated: boolean
   /** `kind === 'text'` 时给。二进制不强行转 UTF-8。 */
@@ -234,7 +235,7 @@ interface Row {
   kind: FileKind
   /** 目录行：展开了吗。 */
   expanded: boolean
-  size: number
+  size: number | null
   target: string | null
   /** 越界节点照常显示，标记它（§7.4 ①）。 */
   outside: boolean
@@ -542,12 +543,14 @@ const treeEmptyText = computed(() => {
 /* ---------------------------------------------------------------- 字节 */
 
 /**
- * 人读的字节数。**0 是「0 B」不是「—」**：目录的大小恒为 0，而那一行显示的
- * 是文件，0 字节的空文件是真实存在的事实（`percent()` 那种「未上报才是 —」
- * 的口径不适用于大小——大小没有「未上报」这回事）。
+ * 人读的字节数。
+ *
+ * `null` 是「这一档没给大小」→ `—`；**0 是「0 B」不是 `—`**：0 字节的空文件
+ * 是真实存在的事实，而「不知道」不是。口径与 `format.ts` 的 `percent(null)`
+ * 一致：取不到字段一律画 `—`，不拿 0 顶上。
  */
-function humanBytes(n: number): string {
-  if (!Number.isFinite(n) || n < 0) return '—'
+function humanBytes(n: number | null): string {
+  if (n === null || !Number.isFinite(n) || n < 0) return '—'
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / (1024 * 1024)).toFixed(1)} MB`
@@ -647,7 +650,7 @@ function humanBytes(n: number): string {
       </p>
       <p v-if="listingLoading" class="af-files__more af-field__hint">正在读这一层…</p>
       <p v-if="listing?.truncated" class="af-files__more af-field__hint">
-        这一层只显示了前 {{ listing.entries.length }} 项（共 {{ listing.total }} 项）：
+        这一层只显示了前 {{ listing.entries.length }} 项（共 {{ orDash(listing.total) }} 项）：
         很大的目录按层截断，不是报错。
       </p>
     </div>

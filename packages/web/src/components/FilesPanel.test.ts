@@ -419,6 +419,30 @@ describe('FilesPanel：预览必须给结论（不许只显示「无法预览」
     expect(w.element.querySelector('[data-revert]')).toBeNull()
   })
 
+  it('大小没给时预览头是「—」，不是「0 B」（0 字节与不知道是两件事）', () => {
+    const w = mount({
+      listings: listings(ROOT),
+      preview: { path: 'a.txt', size: null, kind: 'text', truncated: false, text: 'abcd' },
+    })
+    const badge = w.element.querySelector('.af-files__pvhead .af-badge')
+    expect(badge?.textContent?.trim()).toBe('—')
+  })
+
+  it('0 字节的文件仍说「0 B」——0 是真实事实，不是「没上报」', () => {
+    const w = mount({
+      listings: listings(ROOT),
+      preview: { path: 'a.txt', size: 0, kind: 'text', truncated: false, text: '' },
+    })
+    expect(w.element.querySelector('.af-files__pvhead .af-badge')?.textContent?.trim()).toBe('0 B')
+  })
+
+  it('条目里的 size 没给时树的 meta 列是「—」', () => {
+    const w = mount({
+      listings: listings(layer('', [{ name: 'x.txt', kind: 'file', size: null, mtime_ms: null }])),
+    })
+    expect(treeRows(w)[0]?.querySelector('.af-tree__meta')?.textContent).toContain('—')
+  })
+
   it('截断档算不出中间行数时不编一个数字', () => {
     const w = mount({
       listings: listings(ROOT),
@@ -460,6 +484,12 @@ describe('FilesPanel：空态说的是为什么空', () => {
     const w = mount({ listings: listings(layer('', [dir('a')], { total: 4821, truncated: true })) })
     expect(w.element.textContent).toContain('4821')
     expect(w.element.textContent).toContain('截断')
+  })
+
+  it('`total` 没给时是「—」，不是「共 0 项」（编一个 0 等于说这一层是空的）', () => {
+    const w = mount({ listings: listings(layer('', [dir('a')], { total: null, truncated: true })) })
+    expect(w.element.textContent).toContain('共 — 项')
+    expect(w.element.textContent).not.toContain('共 0 项')
   })
 })
 
