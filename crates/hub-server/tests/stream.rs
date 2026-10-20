@@ -605,7 +605,8 @@ async fn opening_a_channel_for_an_unreported_connector_is_a_conflict() {
     // 而且**没有**下发 open_channel：门禁在写 socket 之前就拦住了。
     // 用「等一小段时间确认没有这一帧」而不是 drain 整个流——后者在
     // 「恰好没发」与「发了别的帧」之间分不清。
-    let got = next_frame_of_or_timeout(&mut est, types::OPEN_CHANNEL, Duration::from_millis(300)).await;
+    let got =
+        next_frame_of_or_timeout(&mut est, types::OPEN_CHANNEL, Duration::from_millis(300)).await;
     assert!(got.is_none(), "被拒的请求不得下发 open_channel");
 }
 

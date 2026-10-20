@@ -77,7 +77,10 @@ fn pump_once() -> String {
                 "channel_data 必须带 channel_id 信封：{}",
                 f.c
             );
-            if let Some(s) = f.c.get("payload").and_then(|p| p.get("bytes")).and_then(|b| b.as_str())
+            if let Some(s) =
+                f.c.get("payload")
+                    .and_then(|p| p.get("bytes"))
+                    .and_then(|b| b.as_str())
             {
                 text.push_str(s);
             }

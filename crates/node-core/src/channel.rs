@@ -291,9 +291,7 @@ impl ChannelTable {
                 ))));
             }
             entry.backlog_bytes += bytes;
-            entry
-                .backlog
-                .push_back(data_frame(channel_id, f.payload));
+            entry.backlog.push_back(data_frame(channel_id, f.payload));
         }
         Ok(())
     }

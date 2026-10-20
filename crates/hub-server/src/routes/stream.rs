@@ -449,9 +449,10 @@ pub async fn open_channel(
     // 下发一帧注定被 node 拒绝的 `open_channel` 会让页面拿到 `channel.ready`
     // 之后才知道失败——那时通道号已经发出去、面板已经显示「已连接」。
     if let Some(reported) = unreported_connector(&state, &node_id, &body.connector) {
-        return Err(ApiError::conflict_with(err::NOT_REPORTED, || {
-            json!({ "connector": body.connector, "reported": reported })
-        }));
+        return Err(ApiError::conflict_with(
+            err::NOT_REPORTED,
+            || json!({ "connector": body.connector, "reported": reported }),
+        ));
     }
 
     let channel_id = identity::random_id();
