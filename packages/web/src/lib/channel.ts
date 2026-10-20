@@ -81,7 +81,14 @@ export interface ChannelHandle {
   dropped(): number
   /** 建通道（幂等：已 ready 时直接返回）。 */
   open(): Promise<void>
-  /** 送一段文本。断线期间**丢弃**并计入 `dropped`。 */
+  /**
+   * 送一段文本。断线期间**丢弃**并计入 `dropped`；通道还没建好时**排队**，
+   * 建好后按原顺序补发。
+   *
+   * 两者的分野是「用户还能不能继续用」：断线时 PTY 那段连接已经不可信，
+   * 补发会把字符乱序灌进去；而未建通道只是「还没通」，等它通了再发就是
+   * 用户本来想要的顺序。
+   */
   send(text: string): void
   /** 终端尺寸。未建通道 / 断线时记为「待发」，建好或重连后补一次。 */
   resize(cols: number, rows: number): void
@@ -273,6 +280,14 @@ class ChannelHandleImpl implements ChannelHandle {
   /** 还没建通道时收到的尺寸，建好后补发一次。 */
   private pendingSize: { cols: number; rows: number } | null = null
 
+  /**
+   * 通道还没 ready 时敲进来的字符，建好后**按原顺序**补发。
+   *
+   * 与 `pendingSize` 分开存而不是复用它：尺寸「最新一次就是对的」，而字符
+   * 每一次都是用户做过的一件事，全得留下。合成一个字段就必然丢掉一边。
+   */
+  private readonly pendingText: string[] = []
+
   constructor(key: string, spec: ChannelSpec, hub: ChannelHub) {
     this.key = key
     this.spec = spec
@@ -312,13 +327,24 @@ class ChannelHandleImpl implements ChannelHandle {
       params: this.spec.params ?? {},
     })
       .then((res) => {
+        // 建好之前被关掉了（点开面板又立刻关）：这次 open 的成果作废，
+        // 否则一个刚 DELETE 掉的通道会被重新标成 ready 并 bind 回 Hub，
+        // 排队的字符也会发到它身上。
+        if (this.current === 'closed') return
         this.channelId = res.channel_id
         this.hub.bind(res.channel_id, this)
         this.set('ready')
+        // 先补尺寸再补字符：反过来会让先到的几个字符按上一次的宽度折行。
         if (this.pendingSize) {
           const size = this.pendingSize
           this.pendingSize = null
           this.resize(size.cols, size.rows)
+        }
+        // 按入队顺序逐条发，一条都不丢（`pendingText` 的注释）。
+        // 走 `postText` 而不是 `send()`：此刻 SSE 可能还没 online，而 `send()`
+        // 的 `canSend` 分支会把排过的字符丢掉并计数，排队就白排了。
+        while (this.pendingText.length > 0) {
+          this.postText(this.pendingText.shift() as string)
         }
       })
       .catch((err: unknown) => {
@@ -333,7 +359,14 @@ class ChannelHandleImpl implements ChannelHandle {
   }
 
   send(text: string): void {
-    if (!this.channelId || this.current !== 'ready') return
+    // 通道还没建好：排队，建好后按原顺序补发（见 `pendingText`）。
+    // **不丢**——用户刚点进终端敲第一个键时通道正在建，那是本产品最常见
+    // 的第一个动作，丢了它页面既收不到字符、`dropped()` 也仍是 0，用户
+    // 得不到任何信号。
+    if (!this.channelId || this.current !== 'ready') {
+      this.pendingText.push(text)
+      return
+    }
     if (!this.hub.canSend()) {
       // 断线：丢弃 + 计数。**不排队**——排队会在重连后把字符乱序灌进 PTY。
       // 计的是「几次输入」，不是字节数：UI 上「有 3 条已丢」比「丢了 41 字节」
@@ -342,6 +375,18 @@ class ChannelHandleImpl implements ChannelHandle {
       this.notifyState()
       return
     }
+    this.postText(text)
+  }
+
+  /**
+   * 真的把字符发出去。**不问 SSE 在不在线**——调用方负责判断该不该丢。
+   *
+   * 排队的字符补发时走这里而不是走 `send()`：补发的那一刻 SSE 可能还没
+   * `online`（点进终端 → 敲字 → 通道建好，这条路上 SSE 常常还在连），
+   * 而 `send()` 的 `canSend` 分支会把它们**丢弃并计数**，排队就白排了。
+   */
+  private postText(text: string): void {
+    if (!this.channelId) return
     // 不 await：键盘输入是「发出去就别挡着下一步」的动作。失败（通道刚被设备
     // 关掉、Hub 409）时只把状态改成 failed，让面板头显示出来。
     void request(`/api/channels/${encodeURIComponent(this.channelId)}/send`, {
@@ -385,6 +430,11 @@ class ChannelHandleImpl implements ChannelHandle {
   }
 
   async close(): Promise<void> {
+    // 两条路都要清：**早退那条更要清**——通道还没建好就关面板（点开又立刻
+    // 关）时，排着的字符仍在 `open()` 的 promise 里等着，promise 一 resolve
+    // 就会把它们发到一个刚被关掉的通道上。
+    this.pendingText.length = 0
+    this.pendingSize = null
     const id = this.channelId
     if (!id) {
       this.set('closed')

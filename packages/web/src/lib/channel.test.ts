@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ChannelHub, channelErrorLabel } from './channel'
 import { ApiError } from './http'
-import { stubFetch } from '@/test/http'
+import { settle, stubFetch } from '@/test/http'
 
 /** 一个能手动派发事件的假 EventSource：测试不碰真网络。 */
 class FakeEventSource {
@@ -187,6 +187,83 @@ describe('断线：丢弃并计数，不排队', () => {
     ch.send('x')
     source().emit('open')
     expect(ch.dropped()).toBe(1)
+  })
+})
+
+describe('通道还没建好：字符排队，不丢弃', () => {
+  /**
+   * 把 `POST /api/channels` 挂在一个门闩上，直到测试放行——那正是
+   * 「点了面板、通道还在建」的那个窗口。
+   */
+  function gatedOpen() {
+    let release: (() => void) | null = null
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input), 'http://hub.local').pathname
+      if (path === '/api/channels') {
+        await gate
+        return new Response(JSON.stringify({ channel_id: 'ch-1', node_id: 'n_1', session_id: 's_1' }), {
+          status: 201,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (path === '/api/channels/ch-1/send' || path === '/api/channels/ch-1') {
+        return new Response(null, { status: 204 })
+      }
+      return new Response(JSON.stringify({ error: 'unexpected_request' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    return { fetchMock, allow: () => release?.() }
+  }
+
+  it('建好前敲的字符一条不发也不计丢，建好后按原顺序补上', async () => {
+    const { fetchMock, allow } = gatedOpen()
+    const hub = makeHub()
+    const ch = hub.handle('a', { sessionId: 's_1', connector: 'terminal' })
+    const opening = ch.open()
+
+    // 用户点进终端就敲：通道还在建
+    ch.send('e')
+    ch.send('c')
+    ch.send('ho HELLO\r')
+    expect(ch.dropped()).toBe(0)
+    expect(sentCalls(fetchMock).filter((c) => c.url.endsWith('/send'))).toHaveLength(0)
+
+    allow()
+    await opening
+    await settle()
+
+    const sends = sentCalls(fetchMock).filter((c) => c.url.endsWith('/send'))
+    expect(sends.map((c) => c.init.body)).toEqual(['e', 'c', 'ho HELLO\r'])
+    expect(ch.dropped()).toBe(0)
+  })
+
+  it('未建通道时 send 不发请求，也不该把 dropped 抬起来', () => {
+    const fetchMock = stubFetch({})
+    const hub = makeHub()
+    const ch = hub.handle('a', { sessionId: 's_1', connector: 'terminal' })
+    ch.send('first')
+    expect(fetchMock.mock.calls).toHaveLength(0)
+    expect(ch.dropped()).toBe(0)
+  })
+
+  it('关面板时丢掉还没发出去的字符，不让它在别处被补发', async () => {
+    const { fetchMock, allow } = gatedOpen()
+    const hub = makeHub()
+    const ch = hub.handle('a', { sessionId: 's_1', connector: 'terminal' })
+    const opening = ch.open()
+    ch.send('never sent')
+    await ch.close()
+    allow()
+    await opening.catch(() => undefined)
+    await settle()
+
+    expect(sentCalls(fetchMock).filter((c) => c.url.endsWith('/send'))).toHaveLength(0)
   })
 })
 

@@ -487,8 +487,11 @@ function closeDock(): void {
  *
  * `interact` 在 `onData` 里已经由组件报过一次（它挂在 `onData` 而不是
  * `focusin` 上，理由见组件头），这里再报一次是**幂等**的：`open()` 在
- * `ready` 下直接返回，而 `send()` 在通道没建好时丢弃并计数——那正是
- * §7.3 要的「敲第一个键」的语义：通道在那时开始建，第一个字符不丢。
+ * `ready` 下直接返回。
+ *
+ * `send()` 在通道没建好时**排队**而不是丢弃（`channel.ts` 的 `pendingText`），
+ * 所以「点进终端就敲第一个键」这个最常见的第一个动作不丢字符：通道在那时
+ * 开始建，字符等它建好后按原顺序补发。
  */
 function terminalInput(text: string): void {
   const tab = activeTab.value
