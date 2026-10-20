@@ -194,7 +194,7 @@ fn dispatch<W: std::io::Write>(
                 BIN_NAME,
                 data_dir.display()
             ));
-            supervisor::Supervisor::new(full, data_dir).supervise()
+            supervisor::Supervisor::new(full, data_dir).supervise(out)
         }
     }
 }

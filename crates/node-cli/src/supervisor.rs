@@ -125,7 +125,7 @@ impl Supervisor {
 
     /// 阻塞循环：拉起 worker → 阻塞等它退出 → `decide` → 执行决策 → 再拉起。
     /// 返回进程退出码。
-    pub fn supervise(&self) -> std::process::ExitCode {
+    pub fn supervise<W: std::io::Write>(&self, mut out: W) -> std::process::ExitCode {
         self.rotate_log();
         self.say(&format!(
             "supervisor starting, argv: {}",
@@ -194,6 +194,17 @@ impl Supervisor {
                     // 设备表现为「连不上又不报错」——那是最难查的一种失联。
                     self.say(&format!("stopping, human intervention required: {reason}"));
                     self.say("the device will stay unreachable until it is fixed");
+                    // **同一句也要进 stdout**：supervisor 停下来后设备表现为
+                    // 「连不上又不报错」，而 `say` 只写日志文件——看终端的人
+                    // 只见到进程平静地退出（码 20），不知道该动哪边。
+                    // stdout 在 systemd 下进 journal，这条才是运维的第一落点。
+                    drop(writeln!(
+                        out,
+                        "afcli: stopping, human intervention required: {reason}\n\
+                         afcli: the device will stay unreachable until it is fixed; \
+                         see {}",
+                        node_core::log::log_path(&self.data_dir).display()
+                    ));
                     self.persist_state(&self.failed_state(state_ref, ""));
                     return stopped();
                 }
@@ -844,8 +855,15 @@ mod tests {
         std::fs::write(d.join("afcli.bak"), b"old").expect("bak");
         s.persist_state(&st);
 
-        let code = s.supervise();
+        let mut out = Vec::new();
+        let code = s.supervise(&mut out);
         assert_eq!(code, std::process::ExitCode::from(SUPERVISOR_STOPPED));
+
+        // 停下来这件事**必须同时进 stdout**：只看终端的人见到的就是进程
+        // 平静地退出（码 20），日志文件是第二落点而不是第一落点。
+        let stdout = String::from_utf8(out).expect("utf8");
+        assert!(stdout.contains("human intervention required"), "{stdout}");
+        assert!(stdout.contains("unreachable"), "{stdout}");
 
         let log = std::fs::read_to_string(log::log_path(&d)).expect("log");
         assert!(log.contains("human intervention required"), "{log}");
