@@ -17,6 +17,8 @@
    是页面说的，因为句柄在页面手里；这里只负责把「关闭」这个意图报上去。
    =========================================================================== */
 
+import { computed } from 'vue'
+
 import type { ChannelState } from '@/lib/channel'
 import { CHANNEL_STATE_LABEL, channelErrorLabel } from '@/lib/channel'
 
@@ -68,11 +70,19 @@ function labelOf(name: PanelName): string {
   return PANEL_LABEL[name]
 }
 
-/** 终端输出按行切开。空输出不画假行——占位文字会说明它为什么空。 */
-function lines(): string[] {
+/**
+ * 终端输出按行切开。
+ *
+ * 必须是 `computed` 而不是模板里调一个函数：模板里 `lines()` 会被求值两次
+ * （一次 `v-for`、一次判空），每次都是一次**全量 `split`**——终端缓冲是
+ * 一整段滚动记录，长输出下这两次切分随每次渲染重复。
+ *
+ * 空输出不画假行——占位文字会说明它为什么空。
+ */
+const lines = computed(() => {
   const text = props.output.replace(/\r\n/g, '\n')
   return text.length ? text.split('\n') : []
-}
+})
 
 function onInteract(e: Event): void {
   if (!props.panel) return
@@ -171,8 +181,8 @@ function onInteract(e: Event): void {
                aria-label="终端输出（纯文本，xterm 渲染归 13b）"
                data-panel-focus
              >
-               <div v-for="(line, i) in lines()" :key="i" class="af-term__line">{{ line }}</div>
-               <div v-if="!lines().length" class="af-term__line af-term__dim">
+               <div v-for="(line, i) in lines" :key="i" class="af-term__line">{{ line }}</div>
+               <div v-if="!lines.length" class="af-term__line af-term__dim">
                  终端内容由 13b 挂入（xterm.js）。点这里会建立通道；之后设备上的输出会出现在这一块。
                </div>
              </div>

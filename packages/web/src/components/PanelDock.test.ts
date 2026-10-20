@@ -49,6 +49,24 @@ describe('PanelDock：容器只做容器的事', () => {
     const lines = Array.from(w.element.querySelectorAll('.af-term__line')).map((el) => el.textContent)
     expect(lines).toEqual(['one', 'two', 'three'])
   })
+
+  it('同一份输出只切一次：模板里重复引用不重复 split', async () => {
+    // 缓冲是一整段滚动记录，模板里 `lines()` 调两次就是两次全量 split
+    const w = mount({ output: 'a\nb\nc' })
+    const rendered = Array.from(w.element.querySelectorAll('.af-term__line')).map(
+      (el) => el.textContent,
+    )
+    expect(rendered).toEqual(['a', 'b', 'c'])
+
+    // 改一次输出：computed 失效并重算，行数跟着变（不是第一次切完就冻住）
+    await w.setProps({ output: 'a\nb\nc\nd' })
+    expect(Array.from(w.element.querySelectorAll('.af-term__line')).map((el) => el.textContent)).toEqual([
+      'a',
+      'b',
+      'c',
+      'd',
+    ])
+  })
 })
 
 describe('PanelDock：通道状态可见', () => {
