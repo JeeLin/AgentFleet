@@ -13,7 +13,7 @@
    出现 `active` / `ended`。映射集中在此处，页面不各自写一遍。
    =========================================================================== */
 
-import { getJson, postJson, type RequestOptions } from './http'
+import { getJson, postJson, request, type RequestOptions } from './http'
 
 /** 设备态。与 `hub-server/src/routes/api.rs` 的 `DeviceStatus` 逐字一致。 */
 export type ApiDeviceStatus = 'online' | 'reconnecting' | 'offline'
@@ -89,6 +89,16 @@ export function listAgents(options?: RequestOptions): Promise<AgentSummary[]> {
 /** 建会话。失败时抛 `ApiError`：`device_offline` / `invalid_workspace_path` / `not_found`。 */
 export function createSession(input: CreateSessionInput): Promise<SessionSummary> {
   return postJson<SessionSummary>('/api/sessions', input)
+}
+
+/**
+ * 登出：让 Hub 把两条 cookie 清成立即过期。
+ *
+ * **这不是「服务端拉黑票据」**——session 是自证的签名串，Hub 没有会话表可删；
+ * 清 cookie 只作用于会照规矩更新 cookie jar 的浏览器。
+ */
+export function logout(options?: RequestOptions): Promise<Response> {
+  return request('/logout', { ...options, method: 'POST' })
 }
 
 /** API 的会话态 → 页面态。`running` 在页面上是「运行中」（`active`）。 */

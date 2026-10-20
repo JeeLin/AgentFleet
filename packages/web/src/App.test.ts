@@ -281,3 +281,45 @@ describe('App：401 之后', () => {
   })
 })
 
+describe('App：登出', () => {
+  /** 顶栏上那个「退出登录」按钮。 */
+  function logoutButton(w: ReturnType<typeof mountIn>): HTMLButtonElement | null {
+    const all = Array.from(w.element.querySelectorAll('button'))
+    return (all.find((b) => b.getAttribute('aria-label') === '退出登录') as
+      | HTMLButtonElement
+      | undefined) ?? null
+  }
+
+  it('顶栏有登出入口', async () => {
+    stubFetch(EMPTY_API)
+    const w = mountApp('/sessions')
+    await flush(w)
+
+    expect(logoutButton(w)).not.toBeNull()
+  })
+
+  it('点登出会先 POST /logout 再去登录页', async () => {
+    const fetchMock = stubFetch(EMPTY_API)
+    const w = mountApp('/sessions')
+    await flush(w)
+
+    logoutButton(w)?.click()
+    await flush(w)
+
+    const hit = fetchMock.mock.calls.find((c) => String(c[0]).includes('/logout'))
+    expect(hit, '登出前必须先通知 Hub 清 cookie').toBeTruthy()
+    expect((hit?.[1] as RequestInit | undefined)?.method).toBe('POST')
+  })
+
+  it('Hub 清 cookie 失败也要去登录页（否则人被困在一堆 401 弹框里）', async () => {
+    stubFetch({ ...EMPTY_API, '/logout': { status: 500 } })
+    const w = mountApp('/sessions')
+    await flush(w)
+
+    logoutButton(w)?.click()
+    await flush(w)
+
+    expect(location.pathname).toBe('/login')
+  })
+})
+

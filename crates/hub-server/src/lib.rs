@@ -513,6 +513,8 @@ pub fn build_app(state: AppState) -> Router {
         // `GET /login` 一起 403——首次部署时登录页自己打不开，而 `/sessions/abc`
         // 却因为走 fallback 能出外壳，症状看起来像「只有登录页坏了」。
         .route("/login", post(routes::setup::post_login))
+        // 登出与登录同构：都在 layer 之前，靠中间件判 session 与 CSRF。
+        .route("/logout", post(routes::setup::post_logout))
         .route("/ws", get(routes::ws::upgrade))
         // `/api/*`（子任务 5）：设备 / 会话 / agent 列表与建会话。
         // 必须落在下面那条 `.layer(...)` 之前。

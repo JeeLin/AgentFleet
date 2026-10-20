@@ -283,6 +283,31 @@ pub fn csrf_cookie_header(value: &str) -> String {
     format!("{CSRF_COOKIE}={value}; Path=/; SameSite=Strict; Max-Age={SESSION_TTL_SECS}")
 }
 
+/// 让一条 cookie 立即过期（同名同 Path 覆盖、`Max-Age=0`）。
+fn expired_cookie_header(name: &str) -> String {
+    format!("{name}=; Path=/; Max-Age=0")
+}
+
+/// `POST /logout`：作废当前登录态。
+///
+/// **只能靠清 cookie 作废**：session 是签名票据而不是服务端状态——Hub 没有
+/// 会话表可删，票据在 `exp` 之前一直自证有效（`session.rs` 的 `verify`）。
+/// 所以「清 cookie」不是省事，而是**无状态设计下唯一可行的注销手段**；
+/// 丢过 cookie 的人无法替自己签出，这一点决定了 30 天的 `SESSION_TTL_SECS`
+/// 需要一条人工出口。
+///
+/// **不进任何豁免表**：它既不在 `AUTH_EXEMPT_PATHS` 也不在
+/// `CSRF_EXEMPT_PATHS`，于是走中间件的规则 3+4——未登录是 401、已登录但没
+/// 带 CSRF 是 403。放进前者会让「没登录也能登出」，放进后者会让别的站能替
+/// 用户签出（CSRF 正是要挡这个）。
+pub async fn post_logout() -> Response {
+    let mut headers = HeaderMap::new();
+    append_set_cookie(&mut headers, &expired_cookie_header(SESSION_COOKIE));
+    append_set_cookie(&mut headers, &expired_cookie_header(CSRF_COOKIE));
+
+    (StatusCode::OK, headers, Json(json!({"ok": true}))).into_response()
+}
+
 /// 随机 token（base64url 无填充）。
 fn random_token(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];

@@ -91,7 +91,7 @@ export const ROUTES: readonly RouteDef[] = [
 /** 根路径落在会话列表：会话是入口（§7.0）。 */
 export const INDEX_PATH = '/sessions'
 
-/** 登录页路径。`http.ts` 的 401 与外壳的退出登录都指向它。 */
+/** 登录页路径。`http.ts` 的 401 与外壳的退出登录都指向它（`App.vue` 的 `onLogout`）。 */
 export const LOGIN_PATH = '/login'
 
 /** 首次 setup 的路径。`http.ts` 的 403 `hub_not_initialized` 指向它。 */

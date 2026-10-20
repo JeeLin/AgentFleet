@@ -25,6 +25,7 @@ import EmptyState from '@/components/EmptyState.vue'
 import LoginPrompt from '@/components/LoginPrompt.vue'
 import { pop, push } from '@/lib/focus'
 import { SCOPE_LABEL, KEYS, unimplemented } from '@/lib/keynav'
+import { logout } from '@/lib/api'
 import { loginPromptOpen, dismissLoginPrompt } from '@/lib/login-prompt'
 import { bindShell, installShellKeys } from '@/lib/shell-keys'
 import { interceptLink, navigate, route, startRouter, LOGIN_PATH } from '@/router'
@@ -133,6 +134,22 @@ const missing = computed(() => unimplemented())
  * 又一次 401 的页面，比「后退键失灵」诚实）。
  */
 function onLoginCancel(): void {
+  location.assign(LOGIN_PATH)
+}
+
+/**
+ * 主动登出：先让 Hub 清 cookie，再去 `/login`。
+ *
+ * **为什么必须整页跳转**：页面内存里还留着登出前拉到的数据，只换 `route`
+ * 的话它们原样在那儿——`onLoginCancel` 那条注释里写过同样的理由。
+ */
+async function onLogout(): Promise<void> {
+  try {
+    await logout()
+  } catch {
+    // 清不掉也要走：留在页面上的人只会看到一堆 401 弹框，而 `/login`
+    // 是唯一能重新拿凭据的地方。
+  }
   location.assign(LOGIN_PATH)
 }
 
@@ -309,6 +326,15 @@ watch(
         @click="openHelp"
       >
         <span aria-hidden="true">?</span>
+      </button>
+      <button
+        class="af-btn af-btn--ghost af-btn--sm af-btn--icon"
+        type="button"
+        aria-label="退出登录"
+        title="退出登录"
+        @click="onLogout"
+      >
+        <span aria-hidden="true">⏻</span>
       </button>
     </header>
 

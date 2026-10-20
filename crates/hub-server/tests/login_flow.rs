@@ -1084,6 +1084,108 @@ async fn corrupted_session_hmac_key_rejects_with_500() {
     assert_eq!(r.json()["error"], json!("internal_error"));
 }
 
+/// 登出把两条 cookie 都清成「立即过期」。
+///
+/// session 是签名票据、服务端没有会话表可删，所以**清 cookie 是无状态设计
+/// 下唯一的注销手段**。这条用例锁的是「两条都清、且是立即过期」这个对外
+/// 契约——只断言「有 Set-Cookie」会把「登出成功但票据还活着」放过去。
+#[tokio::test]
+async fn logout_expires_both_cookies() {
+    let h = Harness::new();
+    let (session, csrf) = h.initialized().await;
+    let app = hub_server::build_app(h.state.clone());
+
+    let before = call(
+        &app,
+        Request::builder()
+            .method("GET")
+            .uri("/api/devices")
+            .header("cookie", cookie_header(&[(SESSION_COOKIE, &session), (CSRF_COOKIE, &csrf)]))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(before.status, StatusCode::OK, "登出前应当是已认证");
+
+    let out = call(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/logout")
+            .header("cookie", cookie_header(&[(SESSION_COOKIE, &session), (CSRF_COOKIE, &csrf)]))
+            .header("x-csrf-token", &csrf)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(out.status, StatusCode::OK);
+
+    // 判据不是「回了两个 Set-Cookie」，而是**过期**：Max-Age=0 / 早于 epoch。
+    // 只断言有 Set-Cookie 会把「登出成功但票据还活着」放过去——那正是本条的 bug。
+    let set_cookies: Vec<&str> = out
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    for name in [SESSION_COOKIE, CSRF_COOKIE] {
+        let hit = set_cookies
+            .iter()
+            .find(|c| c.starts_with(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("{name} 没有被清掉：{set_cookies:?}"));
+        assert!(
+            hit.contains("Max-Age=0"),
+            "{name} 不是立即过期：{hit}"
+        );
+    }
+
+    // **这里不写「登出后同一组 cookie 变 401」**：票据是自证的签名串，
+    // 服务端没有会话表可删，把同一串手工塞回 `cookie` 头照样验得过——
+    // 清 cookie 只作用于**照规矩更新 cookie jar 的浏览器**。判据因此是
+    // 「两条 cookie 都被清成立即过期」，而不是「服务端把它拉黑了」。
+}
+
+/// 登出是状态变更：没带 CSRF 头就 403。
+///
+/// 放进 `CSRF_EXEMPT_PATHS` 会让别的站替用户签出——那正是双重提交要挡的。
+#[tokio::test]
+async fn logout_without_a_csrf_token_is_forbidden() {
+    let h = Harness::new();
+    let (session, csrf) = h.initialized().await;
+    let app = hub_server::build_app(h.state.clone());
+
+    let r = call(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/logout")
+            .header("cookie", cookie_header(&[(SESSION_COOKIE, &session), (CSRF_COOKIE, &csrf)]))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+}
+
+/// 没登录就登出是 401：登出端点**不**在 `AUTH_EXEMPT_PATHS` 里。
+#[tokio::test]
+async fn logout_without_a_session_is_unauthorized() {
+    let h = Harness::new();
+    let (_, _) = h.initialized().await;
+    let app = hub_server::build_app(h.state.clone());
+
+    let r = call(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/logout")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+}
+
 /// `AppState::auth()` 暴露的就是 hub-core 的 `HubAuth`，没有第二份状态。
 #[test]
 fn state_auth_is_the_single_source_of_truth() {
