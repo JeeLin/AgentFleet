@@ -75,6 +75,10 @@ mise install          # node 24 是硬需求（Vite 7 + plugin-vue 用到 node:c
 # 开发：Hub（8080 / 仅回环）+ 前端（3002 / 热更新），前端把 /api 与 /ws 转发给 Hub
 mise run dev
 
+# 同一台机器上起一台设备（debug 构建，连上面那个 Hub）
+mise run afcli -- run           # 另一个终端里跑
+mise run afcli -- log -n 50     # 看设备日志
+
 # 生产：前端先编译、产物嵌进二进制，然后单进程单端口
 mise run build && mise run start
 
