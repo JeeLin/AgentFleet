@@ -18,25 +18,17 @@ const props = withDefaults(
     state: string
     /** 状态是前端/Hub 内存推导值，不是落库事实。 */
     derived?: boolean
-    /** 短文案（表格里用）。缺省用完整 label。 */
-    compact?: boolean
   }>(),
-  { derived: false, compact: false },
+  { derived: false },
 )
 
 const spec = computed(() => describeStatus(props.state))
-
-/** 短文案只省掉「状态未知」这类长词的前缀，不改变语义。 */
-const label = computed(() => {
-  if (!props.compact) return spec.value.label
-  return spec.value.label
-})
 </script>
 
 <template>
   <span class="af-state" :data-state="spec.state" :title="spec.label">
     <span class="af-state__glyph" :data-glyph="spec.fill" aria-hidden="true">{{ spec.glyph }}</span>
-    <span>{{ label }}</span>
+    <span>{{ spec.label }}</span>
     <span v-if="derived" class="af-badge af-badge--off af-state__derived" title="推导值：不落库，由心跳年龄 / 连接状态算出">推</span>
   </span>
 </template>
