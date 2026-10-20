@@ -189,6 +189,33 @@ BASE="http://127.0.0.1:$PORT"
 echo "  现场：$TMP（Hub 端口 $PORT，工作区 $WS）"
 
 # ---------------------------------------------------------------------------
+# 从**被测代码**读终端初值，不在夹具里重写一遍
+#
+# 夹具自己写 `cols:80,rows:24` 再断言「页面给的 80x24 到了 PTY」是**自我实现**：
+# 前端哪天把初值改成 100x30，这条断言依然绿，而它声称验证的事情已经不成立。
+# 所以这里从 `SessionPage.vue` 的 `ensureChannel` 里把那两个数读出来，
+# 页面改了、夹具自动跟着改——断言才是真的在测页面。
+#
+# 读不到（页面重构、param 形状变了）→ **断言失败**，不给静默兜底：
+# 悄悄退回 80x24 会让这条断言退回自我实现的老路，而那正是它要防的事。
+# ---------------------------------------------------------------------------
+PAGE_PARAMS_SRC="$ROOT/packages/web/src/pages/SessionPage.vue"
+page_term_cols() {
+  grep -o 'cols: [0-9]\+' "$PAGE_PARAMS_SRC" | head -1 | grep -o '[0-9]\+'
+}
+page_term_rows() {
+  grep -o 'rows: [0-9]\+' "$PAGE_PARAMS_SRC" | head -1 | grep -o '[0-9]\+'
+}
+PAGE_COLS=$(page_term_cols)
+PAGE_ROWS=$(page_term_rows)
+if [ -z "$PAGE_COLS" ] || [ -z "$PAGE_ROWS" ]; then
+  echo "  ❌ 读不到页面的终端初值（$PAGE_PARAMS_SRC 的 cols:/rows:）——夹具拒绝猜。" >&2
+  echo "     前端重构了 params 形状的话，请同步改这里，不要退回写死数值。" >&2
+  exit 2
+fi
+echo "  页面终端初值（从 SessionPage.vue 读出）：${PAGE_COLS}x${PAGE_ROWS}"
+
+# ---------------------------------------------------------------------------
 # 起 Hub（真 afhub 进程）
 # ---------------------------------------------------------------------------
 AFHUB_ADDR="127.0.0.1:$PORT" AFHUB_DATA_DIR="$TMP/hub" RUST_LOG=${RUST_LOG:-info} \
@@ -311,7 +338,11 @@ wait_until() {
 # 都用「当轮设成全局」的通道号 / 标记：条件函数要传给 wait_until，参数只能走全局。
 terminal_has_frames() { [ "$(frames_of "$TCH" | wc -l)" -ge 1 ]; }
 stty_size_is() { bytes_of "$1" | grep -q "$2"; }
-stty_size_is_24_80() { stty_size_is "$TCH" '24 80'; }
+# 期望值取自页面源码（PAGE_ROWS/PAGE_COLS），不是夹具写死的。
+# 注意 `stty size` 的输出顺序是 `rows cols`，与 open 参数里的 cols/rows 相反。
+stty_size_is_page_default() { stty_size_is "$TCH" "$PAGE_ROWS $PAGE_COLS"; }
+# resize 后的期望值由**测试自己给定**（132x40 是这一步的输入，不是页面的初值），
+# 所以这里写死是对的：它验证的是「Hub 把 resize 转成 TIOCSWINSZ」这条链路。
 stty_size_is_40_132() { stty_size_is "$TCH" '40 132'; }
 # ≥2 次才说明「命令真跑了」：一次是 PTY 把敲进去的字符回显，第二次才是 echo 的输出。
 # 只断言「有输出」的话，设备侧预置一条命令就能过——那正是本标准的断点所在。
@@ -411,12 +442,12 @@ else
   # -------------------------------------------------------------------------
   echo
   echo "== 标准 3 终端面板：从页面敲 echo 有输出，stty size 验证 resize =="
-  TCH=$(open_channel terminal "{\"cwd\":\"$WS\",\"cols\":80,\"rows\":24}")
+  TCH=$(open_channel terminal "{\"cwd\":\"$WS\",\"cols\":$PAGE_COLS,\"rows\":$PAGE_ROWS}")
   if [ -z "$TCH" ]; then
     bad "POST /api/channels(terminal) 没拿到 channel_id：$HTTP_CODE $LAST_BODY"
     dump "终端通道建立失败"
   else
-    ok "终端通道已建立（channel_id=$TCH，params 与 SessionPage.vue 一致：cwd=工作区、80x24）"
+    ok "终端通道已建立（channel_id=$TCH，params 取自 SessionPage.vue：cwd=工作区、${PAGE_COLS}x${PAGE_ROWS}）"
     # 页面在 Hub 一发 `channel.ready` 就显示「已连接」，而设备此刻可能还没 open
     # （那一瞬间的 /send 会被设备当成未知通道静默丢弃）。等人能看到的第一个
     # 证据——提示符帧——再开始敲，与人手的速度一致。
@@ -429,15 +460,13 @@ else
     # 末尾那个换行必须是真字节：`$(printf '\n')` 会被命令替换吃掉，发过去就是
     # 一句没有回车的台词——PTY 回显了它，但 shell 永远等不到 Enter。
     send_bytes "$TCH" 'stty size'$'\n' >/dev/null
-    if wait_until 15 stty_size_is_24_80; then
-      ok "页面给的 80x24 到了 PTY：\`stty size\` → 24 80"
+    if wait_until 15 stty_size_is_page_default; then
+      ok "页面给的 ${PAGE_COLS}x${PAGE_ROWS} 到了 PTY：\`stty size\` → $PAGE_ROWS $PAGE_COLS（期望值从 SessionPage.vue 读出）"
     else
-      bad "没等到 \`stty size\` 的 24 80（页面给的尺寸没进 PTY？）"
+      bad "没等到 \`stty size\` 的 $PAGE_ROWS $PAGE_COLS（页面给的尺寸没进 PTY？）"
       dump "终端首帧"
     fi
-    rcode=$(curl -sS -o "$BODY" -w '%{http_code}' -b "$COOKIES" -H "x-csrf-token: $CSRF" \
-      -X POST "$BASE/api/channels/$TCH/resize" -H 'content-type: application/json' \
-      -d '{"cols":132,"rows":40}')
+    rcode=$(api POST "/api/channels/$TCH/resize" '{"cols":132,"rows":40}')
     if [ "$rcode" = "204" ]; then
       ok "POST /api/channels/$TCH/resize → 204"
     else
@@ -630,7 +659,7 @@ for i in 2 3; do
   OBS_SIDS="$OBS_SIDS $s"
   old=$SID
   SID=$s
-  ch=$(open_channel terminal "{\"cwd\":\"$WS\",\"cols\":80,\"rows\":24}")
+  ch=$(open_channel terminal "{\"cwd\":\"$WS\",\"cols\":$PAGE_COLS,\"rows\":$PAGE_ROWS}")
   SID=$old
   [ -n "$ch" ] || continue
   m="AF_TAB${i}_${RANDOM}"
