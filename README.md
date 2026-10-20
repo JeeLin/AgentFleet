@@ -32,13 +32,19 @@ node, run AI agent sessions, and route tasks to the node best suited to run them
 > 「第一版」指**首个可用版本（里程碑 M0–M4）**。M5 起为第二阶段。
 > "First release" = the first usable version (M0–M4). M5 onward is the next stage.
 
-- **设备接入**：一条 CLI 命令注册，单条 WebSocket 主动外联；心跳即能力上报。One CLI command, one outbound WebSocket, heartbeats carry capabilities.
-- **节点身份与状态**：Hub 签发 `node_id`，设备密钥对认证，不用静态共享 token。Hub-issued `node_id`, key-pair auth, no static shared token.
-- **AI agent 管理与对话**：各类 agent 统一配置、启动、对话。Configure, launch and chat with any agent in one place.
-- **对话与动作流**：dsh 式 Trajectory 逐条可查，列出本次改动的**文件**与 diff。A dsh-style trajectory, step by step, plus changed files and diffs.
-- **会话内面板**：终端 / 文件 / git 绑定会话工作区 `(node_id, path)`，进入才建立、退出即释放。Panels inside a session, bound to its workspace, attach on entry and release on exit.
-- **工作区供料与统一配置**：内容寻址仓库喂项目文件（git 只传 commit 引用），统一管理子 agent 与技能，**密钥永不上传**。A content-addressed store feeds project files, sub-agents and skills are managed centrally, **node keys never leave the device**.
-- **产物归档**：制品归档到 Hub，设备关机后仍可下载。Outputs archived on the Hub, downloadable after the device powers off.
+> **当前进度 / Current status：M0 与 M1 已完成，M2 起未开始。**
+> M1 交付的是**会话容器**（页面级：工作区 + 终端 / 文件 / exec 面板）与 Web 控制台。
+> 下面每项后面的 `Mx` 是它真正落地的里程碑——**清单描述的是第一版全貌，不是现在就能用的东西**。
+> Shipped today: M0 and M1. The `Mx` tag on each line is the milestone that actually delivers it.
+
+- **设备接入** `M0`：一条 CLI 命令注册，单条 WebSocket 主动外联；心跳即能力上报。One CLI command, one outbound WebSocket, heartbeats carry capabilities.
+- **节点身份与状态** `M0`：Hub 签发 `node_id`，设备密钥对认证，不用静态共享 token。Hub-issued `node_id`, key-pair auth, no static shared token.
+- **Web 控制台与会话面板** `M1`：设备 / 会话列表与工作台；终端（PTY，含 resize）/ 文件浏览 / 一次性 exec，全部绑定会话工作区 `(node_id, path)`，**零入站端口**。Devices and sessions, a workbench with terminal (PTY, resizable), file browser and one-shot exec—all bound to the session workspace, **zero inbound ports**.
+- **AI agent 管理与对话** `M3`：各类 agent 统一配置、启动、对话。Configure, launch and chat with any agent in one place.
+- **对话与动作流** `M3`：dsh 式 Trajectory 逐条可查，列出本次改动的**文件**与 diff。A dsh-style trajectory, step by step, plus changed files and diffs.
+- **会话内 git 面板** `M4`：完整面板集补齐第三个（终端 / 文件 / git）。The third panel (git) completes the set.
+- **工作区供料与统一配置** `M2`：内容寻址仓库喂项目文件（git 只传 commit 引用），统一管理子 agent 与技能，**密钥永不上传**。A content-addressed store feeds project files, sub-agents and skills are managed centrally, **node keys never leave the device**.
+- **产物归档** `M2`：制品归档到 Hub，设备关机后仍可下载。Outputs archived on the Hub, downloadable after the device powers off.
 
 > 完整范围与用户流程见 `docs/PRODUCT.md` §3。
 > Full scope and user flows: `docs/PRODUCT.md` §3.
@@ -58,6 +64,38 @@ node, run AI agent sessions, and route tasks to the node best suited to run them
 Rust 单二进制（Hub + node）、SQLite（WAL）、ACP 会话层、append-only 轨迹、开源推理内核、Vue 3 + Bun。
 Rust single binaries (Hub + node), SQLite (WAL), ACP sessions, append-only trajectories, open-source inference kernels, Vue 3 + Bun.
 详见 `docs/DEVELOPMENT.md` §1 / See `docs/DEVELOPMENT.md` §1.
+
+---
+
+## 跑起来 / Running It
+
+```bash
+mise install          # node 24 是硬需求（Vite 7 + plugin-vue 用到 node:crypto 的 hash）
+
+# 开发：Hub（8080 / 仅回环）+ 前端（3002 / 热更新），前端把 /api 与 /ws 转发给 Hub
+mise run dev
+
+# 生产：前端先编译、产物嵌进二进制，然后单进程单端口
+mise run build && mise run start
+
+# 设备接入（在设备上跑，不是 Hub 上）
+afcli run            # 默认连 ws://127.0.0.1:8080/ws；远程用 AFCLI_HUB_URL 指过去
+```
+
+首次启动 Hub 会在 stderr 打一行 setup token（同时写进 `<data>/setup-token.txt`，0600）。
+打开页面 → 用 token 完成首次 setup → 设密码 → 登录。**没有默认密码**。
+
+```bash
+# Development: Hub on 8080 (loopback only) + Vite on 3002 with hot reload, proxying /api and /ws
+# Production: one process, one port, the built console embedded in the binary
+```
+
+On first start the Hub prints a setup token to stderr (also written to `<data>/setup-token.txt`,
+mode 0600). Open the console, complete first-run setup with that token, then log in.
+**There is no default password.**
+
+数据目录默认是项目级 `data/`（`mise.toml` 的 `AFHUB_DATA_DIR`），不落 `~/.local/share/`。
+The data directory defaults to the project-local `data/`, not `~/.local/share/`.
 
 ---
 
