@@ -64,14 +64,24 @@ cargo watch -x 'run -p hub-server' -w crates/hub-server -w crates/hub-core -w cr
 description = "Vite 开发服务器（3002），文件改动即时热更新"
 run = "cd packages/web && bun run dev"
 
-# 跑设备侧二进制（开发调试用）：`mise run cli -- run` / `-- log -n 50`。
+# 跑设备侧二进制（开发调试用）：`mise run cli`，改 Rust 即重编重启。
 #
-# 不写 `usage`：写了 mise 的任务参数解析器会把 `--help` 认成自己的 flag，
-# `mise run cli -- --help` 就打不出 afcli 的用法。去掉它参数直接追加到命令后。
+# 与 `dev-hub` 同构。**不能带参数**：mise 把 `-- xxx` 字面追加到 run 的最后一行，
+# 而 cargo-watch 会把它当成 trail 命令（`log -n 50` 会被它当可执行文件跑）。
+# 一次性命令走 `cli-log`。
 [tasks.cli]
-description = "跑设备侧 afcli（debug 构建）：mise run cli -- run / -- log -n 50"
+description = "设备侧 afcli（watch）：改 crates/ 即重编重启，对齐 dev-hub"
 env = { AFCLI_HUB_URL = "ws://127.0.0.1:8080/ws", AFCLI_DATA_DIR = "{{config_root}}/data/node" }
-run = "exec target/debug/afcli"
+run = """
+command -v cargo-watch >/dev/null || { echo "缺少 cargo-watch：cargo install cargo-watch" >&2; exit 1; }
+exec cargo watch -x 'run -p node-cli -- run' -w crates/node-cli -w crates/node-core -w crates/protocol -w crates/identity
+"""
+
+# 一次性命令（不经 watch）：`mise run cli-log -- -n 50`。
+[tasks.cli-log]
+description = "设备侧 afcli 一次性命令（读日志等）：mise run cli-log -- -n 50"
+env = { AFCLI_HUB_URL = "ws://127.0.0.1:8080/ws", AFCLI_DATA_DIR = "{{config_root}}/data/node" }
+run = "exec target/debug/afcli log"
 
 # 两个长驻进程并行：前端 3002 把 `/api` 与 `/ws` 转发到 Hub 8080。
 #

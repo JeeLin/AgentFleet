@@ -76,8 +76,8 @@ mise install          # node 24 是硬需求（Vite 7 + plugin-vue 用到 node:c
 mise run dev
 
 # 同一台机器上起一台设备（debug 构建，连上面那个 Hub）
-mise run cli -- run             # 另一个终端里跑
-mise run cli -- log -n 50       # 看设备日志
+mise run cli                    # 另一个终端里跑；改 crates/ 即重编重启
+mise run cli-log -- -n 50       # 看设备日志（一次性命令，不经 watch）
 
 # 生产：前端先编译、产物嵌进二进制，然后单进程单端口
 mise run build && mise run start
@@ -98,8 +98,19 @@ On first start the Hub prints a setup token to stderr (also written to `<data>/s
 mode 0600). Open the console, complete first-run setup with that token, then log in.
 **There is no default password.**
 
-数据目录默认是项目级 `data/`（`mise.toml` 的 `AFHUB_DATA_DIR`），不落 `~/.local/share/`。
-The data directory defaults to the project-local `data/`, not `~/.local/share/`.
+**两侧的数据目录缺省不同，别混。**
+
+- **Hub** 缺省落项目级 `data/`（`mise.toml` 的 `AFHUB_DATA_DIR`），不落 `~/.local/share/`。
+- **设备（`afcli`）** 缺省落平台标准目录（Linux `~/.local/share/agentfleet`），
+  可用 `AFCLI_DATA_DIR` 覆盖；`mise run cli` 已把它指到 `data/node`。
+  不覆盖时的全局身份会被同一台机器上所有 Hub 共用。
+
+The two sides default differently — don't conflate them.
+
+- **Hub** defaults to the project-local `data/` (`AFHUB_DATA_DIR`), not `~/.local/share/`.
+- **Device (`afcli`)** defaults to the platform data dir (Linux `~/.local/share/agentfleet`),
+  overridable with `AFCLI_DATA_DIR`. `mise run cli` points it at `data/node`.
+  Without the override that global identity is shared by every Hub on the machine.
 
 ---
 

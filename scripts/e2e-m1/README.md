@@ -181,12 +181,14 @@ SIGCONT → 继续观察回到 online
 
 ---
 
-## 6. 已知缺口（本次运行暴露的产品缺陷，不是脚本问题）
+## 6. 本夹具暴露过的产品缺陷（**已全部修掉**，留档供追溯）
 
-截至本夹具落地时，自动断言在 **4、5、6** 上是红的。原因在**产品侧**，
-逐条可复现、可定位：
+本夹具落地时，自动断言在 **4、5、6** 上是红的，原因全在**产品侧**。
+四条已由 `0972220`（fix(hub): close the four gaps the real-device E2E run exposed）
+修掉，复跑全绿。留在这里是因为**「当时错在哪、后来怎么修的」比「现在是对的」更有信息量**：
+下面每条都写了「当时的现象」与「现在的代码位置」，可以直接对着读。
 
-### 6.1 files / exec 面板拿不到工作区根
+### 6.1 files / exec 面板拿不到工作区根（已修）
 
 - 里程碑 `M1-web-console.md:469` 写的是「会话工作区根目录在 `open_channel` 时由
   **Hub** 塞进 params（Hub 从 `session.workspace_id` 查出 `(node_id, path)`）」。
@@ -195,8 +197,10 @@ SIGCONT → 继续观察回到 online
 - 设备侧：`files` / `exec` 的 `open` 都要求 `OpenReq.workspace_root`
   （`connector/files.rs:171`、`connector/exec.rs:156`），缺了就直接回 `channel_error`。
 - 后果：文件面板永远是一棵空树；`exec` 面板提交命令后没有任何反应。
+- **现在**：`open_channel` 调 `params_with_workspace_root`（`routes/stream.rs:492`）
+  把会话工作区根注入 params，浏览器给什么都会被覆盖。
 
-### 6.2 files 的取数载荷在 Hub 就被改写成了终端载荷
+### 6.2 files 的取数载荷在 Hub 就被改写成了终端载荷（已修）
 
 - 页面取数走 `channel.send(JSON.stringify({op:"list",…}))`
   （`SessionPage.vue:565`）→ `POST /api/channels/{id}/send`。
@@ -207,16 +211,21 @@ SIGCONT → 继续观察回到 online
   在边界检查之前就已经走岔了。`routes/stream.rs:517` 的注释也明说
   「二进制通道（files 读写）走各自的 connector 载荷，不复用这条裸字节入口」——
   但**没有第二条入口**（`/api/channels` 只有 `send` / `resize` / `DELETE`）。
+- **现在**：`/send` 按 Content-Type 分派（`routes/stream.rs:710` 的 `payload_kind`）——
+  `application/json` 原样、`application/octet-stream` 包成 `{"bytes":…}`、
+  其余按内容判断。files 面板走 JSON，与 terminal 的裸字节入口分开。
 
-### 6.3 设备回的 `channel_error` 到不了页面
+### 6.3 设备回的 `channel_error` 到不了页面（已修）
 
 - `routes/ws.rs:736` 只把 `channel_data` 的载荷推给 SSE；`channel_error` 走
   `channels::on_channel_frame` 后落进 `_ => Reply::Nothing`，**不转发**。
 - 后果：即使 6.1 / 6.2 修好，标准 5 的「越界被拒且**错误可读**」在页面上仍然是
   一片空白——面板停在「已连接」，用户看不到「为什么进不去」。
   这与 `design-system.md` §7.4 的第 ③ 路（解释性错误面板）直接冲突。
+- **现在**：`routes/ws.rs:742` 识别 `CHANNEL_ERROR` 并调 `publish_channel_error`，
+  错误因此能到 SSE、到页面。
 
-### 6.4 面板在设备确认之前就显示「已连接」
+### 6.4 面板在设备确认之前就显示「已连接」（已修）
 
 - `POST /api/channels` 在把 `open_channel` 塞进设备出站队列之后**立刻**推
   `channel.ready`（`routes/stream.rs:480`），而页面把这条事件当成「通道可用了」
@@ -229,6 +238,8 @@ SIGCONT → 继续观察回到 online
   这不是绕过断言——标准 3 要验的是「从页面敲能出结果」，不是「设备打开前敲的字也不许丢」。
   但这条窗口本身是产品该修的（要么等设备 `channel_ready` 再翻 `ready`，
   要么把节点侧的 `channel_error`/丢帧反馈给页面）。
+- **现在**：Hub 只在设备回 `channel_ready` 之后才推 `channel.ready` 给页面
+  （`routes/stream.rs:767`），页面的 `ready` 因此是「设备已确认」而不是「已下发」。
 
 ### 怎么区分「脚本 bug」和「产品 bug」
 
@@ -261,14 +272,15 @@ SIGCONT → 继续观察回到 online
   ✅ 从页面敲的 echo 有输出：AF_E2E_… 出现 2 次（≥2 = 回显 + 命令真的跑了）
 == 标准 4 文件面板：浏览工作区目录树、读文件 ==
   ✅ 文件通道已建立（channel_id=…）
-  ❌ 列目录没有回帧（/send → 204；该通道共 0 条 channel.frame）——页面会一直是一棵空树
-  ❌ 读文件没有回帧（/send → 204；该通道共 0 条 channel.frame）
+  ✅ 列目录成功：README.md,a.txt,link-outside.txt,src
+  ✅ 读文件成功：a.txt → hello from the e2e workspace
 == 标准 5 越界路径被拒且错误可读 ==
-  ❌ 拒绝「../outside/secret.txt」在页面上看不见（/send → 204、错误信号 0 → 0）
-  ❌ 拒绝「/etc/hostname」在页面上看不见（/send → 204、错误信号 0 → 0）
-  ❌ 拒绝「link-outside.txt」在页面上看不见（/send → 204、错误信号 0 → 0）
+  ✅ 拒绝「../outside/secret.txt」且页面能看到：path outside the workspace: ../outside/secret.txt
+  ✅ 拒绝「/etc/hostname」且页面能看到：path outside the workspace: /etc/hostname
+  ✅ 拒绝「link-outside.txt」且页面能看到：path outside the workspace: link-outside.txt
 == 标准 6 exec 面板：一次性命令，退出码与输出正确 ==
-  ❌ exec 通道没有回帧（该通道共 0 条 channel.frame）——页面上「跑一条命令」不会有任何反应
+  ✅ exec 结果：{"duration_ms":1,"exit_code":7,"stderr_b64":"RVJSCg==","stdout_b64":"T1VUCg==",…}
+  ✅ 退出码 7、stdout=OUT、stderr=ERR 全对
 == 标准 7 零入站端口：设备侧不开放任何监听 ==
   ✅ afcli（supervisor=… worker=…）没有任何 LISTEN 套接字
   ✅ 设备只有主动外联（到 Hub 的 … 端口）
@@ -276,11 +288,11 @@ SIGCONT → 继续观察回到 online
   ✅ 上报的 connectors == 注册表：exec,files,terminal
   ✅ 没上报的 connector 「git」在 Hub 就被拒（409 connector_not_reported）
 ...
-  自动断言：✅ 22 项通过，❌ 6 项失败
+  自动断言：✅ 29 项通过，❌ 0 项失败
 ```
 
-红的那 6 项（标准 4 的两条、标准 5 的三条、标准 6 的一条）对应第 6 节的缺口；
-产品侧修好后重跑本脚本，同一条命令应当全绿。
+**这是当前基线**：第 6 节那四条产品缺口修掉后，同一条命令全绿。
+若看到 ❌，回去看第 6 节——那里记着每条断言当初为什么红、修在哪。
 
 ---
 
