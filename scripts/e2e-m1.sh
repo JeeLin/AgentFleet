@@ -271,12 +271,14 @@ done
 # 断言用的小工具（全部只读现场文件，不碰被测进程）
 # ---------------------------------------------------------------------------
 
-# `METHOD PATH [BODY]` → HTTP_CODE / BODY 两个全局量，**并打印 HTTP 码**
+# `METHOD PATH [BODY]` → HTTP_CODE / BODY 两个全局量
 #
-# 打印的那一句是给 `rcode=$(api POST ...)` 用的：`api()` 里给全局量赋值，
-# 而命令替换拿到的是 **stdout**。少了这一句，`$rcode` 恒为空字符串——
-# 于是「请求失败」那条分支永远不成立，而「成功」那条也永远不成立
-# （`[ "$rcode" = "204" ]` 恒假），一次坏掉的请求会被读成一次成功的请求。
+# **不打印 stdout**：`open_channel()` 靠「本函数只写全局量、stdout 干净」
+# 来输出 channel_id（它自己 `printf | jq`）。在这里加一句 `printf "$HTTP_CODE"`
+# 会把状态码送进 stdout，`$(open_channel ...)` 捕获成 `201<channel_id>`——
+# 于是 URL 里多一个 201 前缀，每个 `/send` 与 `/resize` 都变成 404。
+#
+# 要读返回码用 `api_code`（下面那个），它把状态码打到 stdout。
 api() {
   local method=$1 path=$2 data=${3-}
   if [ -n "$data" ]; then
@@ -287,8 +289,18 @@ api() {
       -H "x-csrf-token: $CSRF" "$BASE$path")
   fi
   LAST_BODY=$(cat "$BODY" 2>/dev/null)
-  printf '%s' "$HTTP_CODE"
   return 0
+}
+
+# 同 `api()`，但**把状态码打到 stdout**：给 `rcode=$(api_code POST ...)` 用。
+#
+# 为什么要有两个：命令替换拿到的是子 shell 的 stdout，而 `LAST_BODY` /
+# `HTTP_CODE` 的赋值发生在同一个子 shell 里——父 shell 的 `LAST_BODY`
+# **不会**被更新，它留着上一次的值。所以「打印响应体」那条失败分支
+# 看到的永远是陈旧内容，别拿它当本次请求的响应体。
+api_code() {
+  api "$@"
+  printf '%s' "$HTTP_CODE"
 }
 
 # SSE 里某个事件名的所有 `data:`（一行一条）：`<id><TAB><json>`
@@ -462,11 +474,13 @@ else
       bad "没等到 \`stty size\` 的 $PAGE_ROWS $PAGE_COLS（页面给的尺寸没进 PTY？）"
       dump "终端首帧"
     fi
-    rcode=$(api POST "/api/channels/$TCH/resize" '{"cols":132,"rows":40}')
+    rcode=$(api_code POST "/api/channels/$TCH/resize" '{"cols":132,"rows":40}')
     if [ "$rcode" = "204" ]; then
       ok "POST /api/channels/$TCH/resize → 204"
     else
-      bad "resize 请求失败：$rcode $LAST_BODY"
+      # 不打 $LAST_BODY：它在命令替换的子 shell 里赋值，父 shell 这份是
+      # 上一次的值（多半是 GET /api/sessions 的数组），印出来只会误导。
+      bad "resize 请求失败：HTTP $rcode（响应体见 $BODY）"
     fi
     # 末尾那个换行必须是真字节：`$(printf '\n')` 会被命令替换吃掉，发过去就是
     # 一句没有回车的台词——PTY 回显了它，但 shell 永远等不到 Enter。
