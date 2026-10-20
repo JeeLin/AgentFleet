@@ -505,10 +505,25 @@ impl Child {
                 if let Some(slot) = self.pipes.get_mut(stream) {
                     *slot = None;
                 }
+            } else if n < 0 {
+                // 只有「再来一轮有意义」的 errno 才继续。其余一律把这根管道
+                // 当成坏掉摘掉：留着它，`poll` 每轮立刻报可读而 `read` 每轮
+                // 立刻失败，主循环就变成一个烧 CPU 的热循环，命令只能等
+                // 超时才结束（用户看到的是「超时」而不是「读失败」）。
+                //
+                // `EBADF` 尤其必须摘：fd 号可能已被别处的 `open` 复用，
+                // 继续读它就读到别人那儿去了。
+                if !errno_is_retryable() {
+                    tracing::warn!(
+                        stream,
+                        errno = %std::io::Error::last_os_error(),
+                        "pipe read failed; dropping it"
+                    );
+                    if let Some(slot) = self.pipes.get_mut(stream) {
+                        *slot = None;
+                    }
+                }
             }
-            // `n < 0` 且 errno 为 `EAGAIN`：`poll` 说可读但那一瞬被别人
-            // 读走了；其余错误（`EINTR`）同样不值得当成失败——这一轮
-            // 没读到就再来一轮。
         }
         got_any
     }
@@ -556,6 +571,20 @@ impl Child {
         // 标志都没给，所以剩下的唯一分支就是「被信号杀掉」。
         128 + libc::WTERMSIG(status)
     }
+}
+
+/// 这次 `read` 失败值不值得再来一轮。
+///
+/// **契约**：返回 `true` 必须是「同一个 fd 上下一次 read 就可能成功」。
+/// 除此之外一律让调用方把那根管道摘掉（理由见 `read_into` 里的分支）。
+///
+/// - `EAGAIN`：`poll` 说可读、但那一瞬被别人读走了（我们设了 `O_NONBLOCK`）。
+/// - `EINTR`：被信号打断，数据没丢。
+fn errno_is_retryable() -> bool {
+    // **必须在别的操作覆盖 errno 之前读它**：中间插一句 IO 或日志就会读到
+    // 别的值，于是把 `EBADF` 判成 `EAGAIN`——那个热循环正是本函数要挡的。
+    let e = std::io::Error::last_os_error().raw_os_error();
+    matches!(e, Some(libc::EAGAIN) | Some(libc::EINTR))
 }
 
 /// 等两根管道里**任何一根**可读，最多 `budget` 毫秒。
@@ -629,6 +658,36 @@ mod tests {
             .pop()
             .ok_or_else(|| ConnectorError::internal("no frame"))?;
         Ok(frame.payload)
+    }
+
+    /// 测试用：把 errno 设成指定值（`errno_is_retryable` 读的就是它）。
+    fn set_errno(code: i32) {
+        unsafe { *libc::__errno_location() = code };
+    }
+
+    /// errno 的分类：能重试的只有 `EAGAIN` / `EINTR`。
+    ///
+    /// **反向保护**：`read_into` 曾对所有 `n < 0` 一律 `continue`，注释却声称
+    /// 判了 `EAGAIN`。于是 `EBADF`（fd 已关 / 被别人顶替）会让 `poll` 每轮
+    /// 立刻报可读、`read` 每轮立刻失败——一个 CPU 打满且命令永不返回的热
+    /// 循环。这条用例锁的就是「分类存在且边界正确」。
+    ///
+    /// **不去真的制造坏 fd**：那要动进程级 fd 表的生命周期，与其它用例并发
+    /// 跑时会撞上 Rust 的 IO safety 检查（fd 号复用 → double close abort）。
+    #[test]
+    fn only_eagain_and_eintr_are_treated_as_retryable() {
+        for expect_ok in [libc::EAGAIN, libc::EINTR] {
+            set_errno(expect_ok);
+            assert!(errno_is_retryable(), "errno {expect_ok} 必须判为可重试");
+        }
+        // 这几个是「同一个 fd 上再读也不会变好」的代表。
+        for expect_drop in [libc::EBADF, libc::EINVAL, libc::EIO, libc::EPIPE] {
+            set_errno(expect_drop);
+            assert!(
+                !errno_is_retryable(),
+                "errno {expect_drop} 必须判为不可重试：留着它就是热循环"
+            );
+        }
     }
 
     #[test]
@@ -967,5 +1026,56 @@ mod tests {
         e.close();
         e.close();
         assert!(!e.is_open());
+    }
+
+    /// 一根永久失败的管道必须被摘掉，而不是被无限重试。
+    ///
+    /// `EBADF` 下 `poll` 每轮立刻报可读、`read` 每轮立刻失败：若 `n < 0`
+    /// 一律重来，主循环就变成热循环，命令只能等 `timeout_ms` 到点才结束
+    /// ——那正是修复前的行为。这里用 `read_into` 而不是整条 `run`：
+    /// 判据是「这根管道被摘掉了」，不是「命令返回了」。
+    #[test]
+    fn a_pipe_that_fails_permanently_is_dropped_not_retried() {
+        // 一个**只写**的 fd：`read` 必给 `EBADF`（永久失败，不是「再来一轮
+        // 就有」），而它又是真的打开着的，所以 `OwnedFd` 关它不会触发
+        // IO-safety 中止——用未打开的 fd 号会让测试以 SIGABRT 结束。
+        let path = std::ffi::CString::new("/dev/null").expect("cstr");
+        let wfd = unsafe { libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
+        assert!(wfd >= 0, "open /dev/null");
+        let mut child = Child {
+            pid: 0,
+            pipes: vec![None, Some(unsafe { OwnedFd::from_raw_fd(wfd) })],
+        };
+        let mut out = Collector::new(MAX_OUTPUT_BYTES);
+        assert!(!child.read_into(&mut out));
+        assert!(
+            child.pipes.get(1).and_then(Option::as_ref).is_none(),
+            "永久失败的 errno 必须摘掉这根管道"
+        );
+    }
+
+    /// 反过来：`EAGAIN` 那种「再来一轮就有」的失败不许摘管道。
+    #[test]
+    fn a_retryable_read_error_keeps_the_pipe() {
+        let mut fds = [-1 as RawFd; 2];
+        // coverage: excluded — `pipe2` 失败需 fd 表耗尽。
+        assert_eq!(
+            unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) },
+            0
+        );
+        // **写端必须活着交出去**：留在本函数里被 `OwnedFd` 关掉的话，
+        // 读端立刻 EOF（`n == 0`），量的就不是 `EAGAIN` 那条路了。
+        let writer = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        let mut child = Child {
+            pid: 0,
+            pipes: vec![Some(unsafe { OwnedFd::from_raw_fd(fds[0]) }), None],
+        };
+        let mut out = Collector::new(MAX_OUTPUT_BYTES);
+        assert!(!child.read_into(&mut out));
+        assert!(
+            child.pipes.first().and_then(Option::as_ref).is_some(),
+            "`EAGAIN` 不得摘管道：写端还开着，输出还没来"
+        );
+        drop(writer);
     }
 }
