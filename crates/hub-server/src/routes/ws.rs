@@ -736,6 +736,12 @@ async fn relay(
             if frame.msg_type == types::CHANNEL_DATA {
                 publish_channel_data(state, &auth.node_id, &frame);
             }
+            // 设备的错误也是页面要看的输出（缺陷 3）：`channel_error` 若不
+            // 转发，越界被拒在页面上就是一片空白——面板停在「已连接」，
+            // 用户看不到「为什么进不去」（design-system §7.4 第 ③ 路）。
+            if frame.msg_type == types::CHANNEL_ERROR {
+                publish_channel_error(state, &auth.node_id, &frame);
+            }
             // 回帧**入数据面队列**（子任务 5b），不再直接写 socket：
             // 写 socket 会阻塞读循环，而那正是「设备不读时 Hub 的写缓冲无界」
             // 与「控制帧被数据帧拖住」两个问题的同一根源。
@@ -836,6 +842,46 @@ fn publish_channel_data(state: &AppState, node_id: &str, frame: &Frame) {
     state
         .streams()
         .channel_frame(node_id, &data.channel_id, data.payload);
+}
+
+/// 把一帧 `channel_error` 推给页面订阅者（缺陷 3）。
+///
+/// 形状是 `{"op":"error","code":…,"reason":…}`，**复用 `channel.frame`**：
+/// 前端已经按这个形状分派（`SessionPage.vue` 的 `applyFileFrame` 里
+/// `op === 'error'` 分支，`errorOf()` 读 `reason` 与 `code`），而 `code`
+/// 与 `reason` 正是 `ChannelErrorPayload` 的两个字段，不必另造事件名。
+///
+/// 解析不出来时不推、只记 debug——与 [`publish_channel_data`] 同一口径：
+/// 一帧 Hub 没法解释的 JSON 推给页面只会得到一个没有原因的空面板。
+fn publish_channel_error(state: &AppState, node_id: &str, frame: &Frame) {
+    let Ok(err) = frame.payload::<protocol::channel::ChannelErrorPayload>() else {
+        tracing::debug!(node_id = %node_id, "not forwarding an unparsable channel_error");
+        return;
+    };
+    state.streams().channel_frame(
+        node_id,
+        &err.channel_id,
+        serde_json::json!({
+            "op": "error",
+            "code": err.code,
+            "reason": err.reason,
+        }),
+    );
+    // **开通道就失败**（connector 拒绝 `open`）时，设备的这条 error 就是终局：
+    // 摘掉绑定，让 5s 的超时兜底变成空操作。不摘的话页面会在真实原因之后
+    // 再收到一条「设备没在 5s 内确认」，把唯一有用的那句话盖掉。
+    //
+    // 已确认的通道**不摘**：越界读只是这一次请求被拒，通道本身还能用
+    // （标准 5 的三次探测共用同一条通道）。
+    if state.bindings().take_unacked(&err.channel_id) {
+        // 这条绑定的确认期限随之消失（记录都没了），等确认的那条订阅
+        // 会得到「没什么可说的」而不是一条假的超时。
+        tracing::debug!(
+            node_id = %node_id,
+            channel_id = %err.channel_id,
+            "the device refused to open the channel"
+        );
+    }
 }
 
 /// 一条心跳：内存更新 + 落库。
@@ -1277,5 +1323,100 @@ mod tests {
     fn ws_error_response_is_forbidden_with_a_fixed_code() {
         let resp = ws_error();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// 设备侧的 `channel_error` 必须变成页面认得的形状（缺陷 3）。
+    ///
+    /// 断言 `op/code/reason` 三个键都在，因为它们正是 `SessionPage.vue` 的
+    /// `applyFileFrame` + `errorOf()` 读的那三个——少一个页面就只剩一句兜底文案。
+    #[test]
+    fn a_channel_error_is_republished_in_the_shape_the_page_reads() {
+        let (_state, _dir) = stream_state();
+        let state = _state;
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", true),
+        );
+        let frame = Frame::push(
+            types::CHANNEL_ERROR,
+            1,
+            serde_json::json!({
+                "channel_id": "ch-1",
+                "code": "internal",
+                "reason": "path outside the workspace: ..",
+            }),
+        );
+        publish_channel_error(&state, "n_a", &frame);
+
+        let events = state.streams().replay_since(Some(0));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, "channel.frame");
+        let event = serde_json::from_str::<serde_json::Value>(&events[0].data).unwrap();
+        assert_eq!(event["channel_id"], serde_json::json!("ch-1"));
+        assert_eq!(event["payload"]["op"], serde_json::json!("error"));
+        assert_eq!(event["payload"]["code"], serde_json::json!("internal"));
+        assert_eq!(
+            event["payload"]["reason"],
+            serde_json::json!("path outside the workspace: ..")
+        );
+        assert!(
+            state.bindings().get("ch-1").is_some(),
+            "已确认的通道只是这一次请求被拒，通道本身还能用"
+        );
+    }
+
+    /// 开通道就失败：错误照推，绑定摘掉（5s 超时兜底不能把真实原因盖掉）。
+    #[test]
+    fn a_channel_error_before_ready_also_drops_the_pending_binding() {
+        let (state, _dir) = stream_state();
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", false),
+        );
+        publish_channel_error(
+            &state,
+            "n_a",
+            &Frame::push(
+                types::CHANNEL_ERROR,
+                1,
+                serde_json::json!({
+                    "channel_id": "ch-1",
+                    "code": "internal",
+                    "reason": "workspace root is not available",
+                }),
+            ),
+        );
+        assert!(state.bindings().get("ch-1").is_none());
+        assert_eq!(state.streams().replay_since(Some(0)).len(), 1);
+    }
+
+    /// 载荷解不开的 `channel_error` 不推（与 `channel_data` 同一口径）。
+    #[test]
+    fn an_unparsable_channel_error_is_not_forwarded() {
+        let (state, _dir) = stream_state();
+        publish_channel_error(
+            &state,
+            "n_a",
+            &Frame::push(types::CHANNEL_ERROR, 1, serde_json::json!("nope")),
+        );
+        assert!(state.streams().replay_since(Some(0)).is_empty());
+    }
+
+    fn stream_state() -> (AppState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = hub_storage::db::open_in(dir.path()).unwrap().1;
+        let state = AppState::bootstrap_with(
+            pool,
+            dir.path(),
+            hub_core::auth::AuthParams {
+                m_cost: 8192,
+                t_cost: 1,
+                p_cost: 1,
+            },
+            std::time::Duration::from_millis(50),
+            hub_core::auth::LoginRateLimiter::new(10, 60),
+        )
+        .unwrap();
+        (state, dir)
     }
 }

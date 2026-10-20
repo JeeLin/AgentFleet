@@ -60,13 +60,29 @@ pub fn is_channel_type(msg_type: &str) -> bool {
 pub fn on_channel_frame(state: &AppState, node_id: &str, frame: &Frame) -> Reply {
     match frame.msg_type.as_str() {
         types::OPEN_CHANNEL => on_open(state, node_id, frame),
+        types::CHANNEL_READY => on_ready(state, frame),
         types::CHANNEL_DATA => on_data(state, node_id, frame),
         types::CLOSE_CHANNEL => on_close(state, node_id, frame),
-        // `channel_ready` 是 Hub 发出的方向；node 发来属于协议违例。
-        // `channel_credit` 同理（Hub 补信用，node 不该补）。
-        // 两者都按「未知类型」忽略（约束 14 前向兼容），不因此断开连接。
+        // `channel_credit` 是 Hub 发出的方向（Hub 补信用，node 不该补），
+        // node 发来属于协议违例。按「未知类型」忽略（约束 14 前向兼容），
+        // 不因此断开连接。
         _ => Reply::Nothing,
     }
+}
+
+/// `channel_ready` 是 **node → Hub** 的方向：`node-core/src/channel.rs` 的
+/// `open()` 第一个回帧就是它。Hub 收到它才把「通道可用了」告诉页面
+/// （[`crate::routes::stream::announce_ready`]），此前页面一直停在「建立中」。
+fn on_ready(state: &AppState, frame: &Frame) -> Reply {
+    let ready: protocol::channel::ChannelReady = match frame.payload() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!(error = %e, "dropping a malformed channel_ready");
+            return Reply::Nothing;
+        }
+    };
+    crate::routes::stream::announce_ready(state, &ready.channel_id);
+    Reply::Nothing
 }
 
 fn on_open(state: &AppState, node_id: &str, frame: &Frame) -> Reply {

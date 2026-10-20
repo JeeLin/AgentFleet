@@ -156,7 +156,7 @@ impl Streams {
     }
 
     /// 回放缓冲里序号 `> last` 的事件。
-    fn replay_since(&self, last: Option<u64>) -> Vec<Envelope> {
+    pub(crate) fn replay_since(&self, last: Option<u64>) -> Vec<Envelope> {
         let Some(last) = last else {
             return Vec::new();
         };
@@ -266,10 +266,16 @@ impl Streams {
 /// 而「谁开的」只在浏览器侧有意义——落库会让一个已经结束的会话留下
 /// 一条再也关不掉的通道记录。
 #[derive(Debug, Clone)]
-struct ChannelBinding {
+pub(crate) struct ChannelBinding {
     node_id: String,
     session_id: String,
     subject: String,
+    /// 设备回过 `channel_ready` 了吗。
+    ///
+    /// `channel.ready` 只在它为真之后才推给页面：设备侧 `open()` 的第一个
+    /// 回帧才是 ready（`node-core/src/channel.rs`），在它之前发下去的
+    /// `channel_data` 会被 node 当成未知通道**静默丢弃**。
+    acked: bool,
 }
 
 /// `channel_id → 绑定`。
@@ -281,7 +287,7 @@ impl Bindings {
         Self::default()
     }
 
-    fn bind(&self, channel_id: &str, b: ChannelBinding) {
+    pub(crate) fn bind(&self, channel_id: &str, b: ChannelBinding) {
         self.0.lock().insert(channel_id.to_string(), b);
     }
 
@@ -289,8 +295,35 @@ impl Bindings {
         self.0.lock().remove(channel_id)
     }
 
-    fn get(&self, channel_id: &str) -> Option<ChannelBinding> {
+    pub(crate) fn get(&self, channel_id: &str) -> Option<ChannelBinding> {
         self.0.lock().get(channel_id).cloned()
+    }
+
+    /// 设备确认了这条通道：置 `acked` 并回 `(node_id, session_id)`。
+    ///
+    /// 通道不在（超时已被摘掉）→ `None`。标记与读取在同一把锁里，超时任务
+    /// 与 ack 同时到达时只有一个能赢，不会出现「ack 刚记账就被超时摘掉」。
+    pub(crate) fn mark_acked(&self, channel_id: &str) -> Option<(String, String)> {
+        let mut map = self.0.lock();
+        let b = map.get_mut(channel_id)?;
+        b.acked = true;
+        Some((b.node_id.clone(), b.session_id.clone()))
+    }
+
+    /// 超时兜底：只摘**还没被设备确认**的通道。
+    ///
+    /// 返回 `true` 表示确实摘掉了一条（调用方据此推失败信号）；已确认的
+    /// 通道原样留着，交给正常的使用/关闭路径。
+    pub(crate) fn take_unacked(&self, channel_id: &str) -> bool {
+        let mut map = self.0.lock();
+        let Some(b) = map.get(channel_id) else {
+            return false;
+        };
+        if b.acked {
+            return false;
+        }
+        map.remove(channel_id);
+        true
     }
 
     /// 某个 node 上被 Hub 侧关掉的通道（关面板时整节点清账之外的补偿）。
@@ -456,31 +489,40 @@ pub async fn open_channel(
     }
 
     let channel_id = identity::random_id();
+    let params = params_with_workspace_root(body.params, &detail.workspace.path);
     let frame = Frame::push(
         types::OPEN_CHANNEL,
         0,
         serde_json::to_value(protocol::channel::OpenChannel {
             channel_id: channel_id.clone(),
             connector: body.connector.clone(),
-            params: body.params.clone(),
+            params,
             credit_start: protocol::channel::CREDIT_START,
         })
         .unwrap_or_else(|_| json!({"channel_id": channel_id, "connector": body.connector})),
     );
-    send_to_device(&state, &node_id, frame)?;
-
+    // **先记账再下发**：设备回 ack 可能比 `send_to_device` 返回还快，而
+    // `announce_ready` 要靠这张表找到会话与节点。反过来写的话，快设备会
+    // 撞上「Hub 不认识这条通道」，页面则永远等不到 `channel.ready`。
     state.bindings().bind(
         &channel_id,
         ChannelBinding {
             node_id: node_id.clone(),
             session_id: body.session_id.clone(),
             subject: auth.subject().to_string(),
+            acked: false,
         },
     );
-    state.streams().publish(
-        "channel.ready",
-        json!({"node_id": node_id, "channel_id": channel_id, "session_id": body.session_id})
-            .to_string(),
+    if let Err(e) = send_to_device(&state, &node_id, frame) {
+        // 下发失败：绑定跟着撤，别在 Hub 里留下一个只有页面知道的通道号。
+        state.bindings().unbind(&channel_id);
+        return Err(e);
+    }
+    spawn_ready_timeout(
+        state.clone(),
+        node_id.clone(),
+        channel_id.clone(),
+        protocol::channel::READY_TIMEOUT,
     );
     tracing::info!(
         node_id = %node_id,
@@ -505,30 +547,34 @@ pub async fn open_channel(
 // 上行 2/4：POST /api/channels/{id}/send
 // ---------------------------------------------------------------------------
 
-/// `POST /api/channels/{id}/send`：把浏览器发来的原始字节转成 `channel_data` 下发。
+/// `POST /api/channels/{id}/send`：把浏览器发来的请求体转成 `channel_data` 下发。
 ///
 /// **无状态裸字节**（模块注释的断线口径）：Hub 不排队、不重发。
 ///
-/// 字节以 **UTF-8 文本**转发（`{"bytes": "..."}`），与 node 侧 terminal
-/// connector 的载荷形状一致（`node-core/src/connector/terminal.rs`）。非法 UTF-8
-/// 直接 **400**：把 `�` 悄悄塞进用户的 keystroke 比报错难查得多，而键盘输入
-/// 本来就总是 UTF-8；二进制通道（files 读写）走各自的 connector 载荷，
-/// 不复用这条裸字节入口。
+/// 载荷形状由 **`Content-Type`** 决定（见 [`PayloadKind`]）：
+/// - `application/json` → 请求体原样作为 `payload`。`files` 的
+///   `{"op":"list"…}` 走这条——`channel_data.payload` 的 schema 本就是
+///   connector 定的、Hub 只透传（`protocol.md` §4），所以原样转发才是对的。
+/// - `application/octet-stream` → `{"bytes": <文本>}`，与 node 侧 terminal
+///   connector 的载荷形状一致（`node-core/src/connector/terminal.rs`）。
+///
+/// 声明了 JSON 却解析不出来 → **400**：把它悄悄降级成字节，会让一次写错的
+/// 文件请求变成一串打进 PTY 的字面文本，比报错难查得多。
 pub async fn send_bytes(
     State(state): State<AppState>,
     Extension(auth): Extension<Authenticated>,
     Path(channel_id): Path<String>,
     req: Request,
 ) -> Result<Response, ApiError> {
+    let kind = payload_kind(
+        req.headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+    );
     let body = read_body(req).await?;
-    let text = std::str::from_utf8(&body).map_err(|_| ApiError::bad_request(err::BAD_BODY))?;
+    let payload = payload_of(kind, &body)?;
     let binding = owned_channel(&state, &channel_id, auth.subject())?;
-    send_channel_data(
-        &state,
-        &binding.node_id,
-        &channel_id,
-        json!({"bytes": text}),
-    )
+    send_channel_data(&state, &binding.node_id, &channel_id, payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -643,6 +689,169 @@ async fn read_body(req: Request) -> Result<Vec<u8>, ApiError> {
         .map_err(|_| ApiError::bad_request(err::BAD_BODY))
 }
 
+/// `/send` 载荷的三种来源（见 [`send_bytes`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PayloadKind {
+    /// `application/json`：请求体就是 connector 的载荷。
+    Json,
+    /// `application/octet-stream`：请求体是 PTY 裸字节。
+    Bytes,
+    /// 旧客户端：没有 Content-Type，或是个无关的媒体类型。
+    ///
+    /// **不能一律当字节**：`scripts/e2e-m1.sh` 的 `/send` 用 curl
+    /// `--data-binary`（curl 给它补 `application/x-www-form-urlencoded`），
+    /// 而同一条路既要发终端裸字节，又要发 files 的 `{"op":…}`。把它当字节
+    /// 会让文件取数在到达 connector 之前就变成一串打进 PTY 的字面文本——
+    /// 那正是缺陷 2 最难查的形态。所以这一档按内容判断：JSON 对象原样转发，
+    /// 其余仍按字节。
+    Legacy,
+}
+
+/// 从 `Content-Type` 读载荷种类（媒体类型大小写不敏感，参数忽略）。
+fn payload_kind(content_type: Option<&str>) -> PayloadKind {
+    let Some(raw) = content_type else {
+        return PayloadKind::Legacy;
+    };
+    let mime = raw
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if mime == "application/json" || mime.ends_with("+json") {
+        PayloadKind::Json
+    } else if mime == "application/octet-stream" {
+        PayloadKind::Bytes
+    } else {
+        PayloadKind::Legacy
+    }
+}
+
+/// 把请求体落成 `channel_data.payload`。
+fn payload_of(kind: PayloadKind, body: &[u8]) -> Result<serde_json::Value, ApiError> {
+    match kind {
+        PayloadKind::Json => {
+            serde_json::from_slice(body).map_err(|_| ApiError::bad_request(err::BAD_BODY))
+        }
+        PayloadKind::Bytes => Ok(json!({ "bytes": utf8_body(body)? })),
+        PayloadKind::Legacy => match serde_json::from_slice::<serde_json::Value>(body) {
+            Ok(value @ serde_json::Value::Object(_)) => Ok(value),
+            _ => Ok(json!({ "bytes": utf8_body(body)? })),
+        },
+    }
+}
+
+/// 字节载荷必须是 UTF-8：把 `�` 悄悄塞进用户的 keystroke 比报错难查得多。
+fn utf8_body(body: &[u8]) -> Result<&str, ApiError> {
+    std::str::from_utf8(body).map_err(|_| ApiError::bad_request(err::BAD_BODY))
+}
+
+/// 把会话的工作区根写进 `open_channel.params`（**覆盖**同名字段）。
+///
+/// 覆盖而不是「缺省才补」：node 侧的越界强制（`connector/files.rs` 的
+/// `resolve_within`）只认这个 root 做判据。允许页面自带就等于让页面传
+/// `"/"` 取消边界，约束 3 的「边界强制在 node 侧」会变成一句空话。
+/// 真相源是会话的只读工作区（`path_locked` 恒 true），不是请求体。
+///
+/// `params` 不是对象（缺省 / 字符串 / 数组）时落成只含根的对象：
+/// `OpenReq` 的 `#[serde(flatten)]` 要的是对象，留下原值只会让 node
+/// 解析失败并回落成「没有工作区」。
+fn params_with_workspace_root(params: serde_json::Value, root: &str) -> serde_json::Value {
+    let mut map = match params {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    map.insert("workspace_root".to_string(), json!(root));
+    serde_json::Value::Object(map)
+}
+
+/// 设备确认了通道（`channel_ready` 到达）：这一条才是页面可以开始发数据的信号。
+///
+/// `channel.ready` 在这里发而不是在 `open_channel` 返回时发——设备侧的
+/// `open()` 第一个回帧就是 `channel_ready`（`node-core/src/channel.rs`），
+/// 在它之前发下去的 `channel_data` 会被 node 当成未知通道静默丢弃。
+pub(crate) fn announce_ready(state: &AppState, channel_id: &str) {
+    let Some((node_id, session_id)) = state.bindings().mark_acked(channel_id) else {
+        // 超时已被摘掉，或设备在一个 Hub 没记过账的 id 上回 ack：忽略。
+        tracing::debug!(
+            channel_id = %channel_id,
+            "channel_ready for an unknown or already expired channel"
+        );
+        return;
+    };
+    state.streams().publish(
+        "channel.ready",
+        json!({
+            "node_id": node_id,
+            "channel_id": channel_id,
+            "session_id": session_id,
+        })
+        .to_string(),
+    );
+    tracing::debug!(channel_id = %channel_id, "device confirmed the channel");
+}
+
+/// `READY_TIMEOUT` 到点后清掉还没 ack 的通道（协议 §5：`open` 必须 5s 内有结果）。
+///
+/// **判据是「此刻还没被确认」，不是「5s 前没能确认」**：定时器醒来时那条
+/// 通道可能早就 ack 了、或者被正常关闭 / 设备掉线摘掉了。`take_unacked`
+/// 在同一把锁里做这个判断，所以迟到的定时器只会变成空操作——不会给一个
+/// 用得好好的面板推一条假的「设备没确认」。
+fn spawn_ready_timeout(
+    state: AppState,
+    node_id: String,
+    channel_id: String,
+    after: std::time::Duration,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(after).await;
+        expire_unacked(&state, &node_id, &channel_id);
+    });
+}
+
+/// 设备没在 5s 内确认通道：**在页面上说清楚**，然后解绑。
+///
+/// 什么都不推的话，面板会永远停在「建立中」——而 Hub 明明知道出事了。
+/// 这条失败信号与设备侧的错误走同一条路（`channel_frame` 的
+/// `{"op":"error"}`），前端已经按这个形状渲染（`SessionPage.vue` 的
+/// `applyFileFrame`），不必为「Hub 自己判的超时」再造一种事件。
+fn expire_unacked(state: &AppState, node_id: &str, channel_id: &str) {
+    if !state.bindings().take_unacked(channel_id) {
+        return;
+    }
+    tracing::warn!(
+        node_id = %node_id,
+        channel_id = %channel_id,
+        "the device did not confirm the channel in time"
+    );
+    state.streams().channel_frame(
+        node_id,
+        channel_id,
+        json!({
+            "op": "error",
+            "code": "timeout",
+            "reason": "the device did not confirm the channel within 5s",
+        }),
+    );
+    // 设备可能只是慢：晚到的 open 会留下一个再也没人关的 PTY / 工作区句柄。
+    let frame = Frame::push(
+        types::CLOSE_CHANNEL,
+        0,
+        serde_json::to_value(protocol::channel::CloseChannel {
+            channel_id: channel_id.to_string(),
+            reason: "open timed out".to_string(),
+        })
+        .unwrap_or_else(|_| json!({"channel_id": channel_id, "reason": "open timed out"})),
+    );
+    if let Err(e) = send_to_device(state, node_id, frame) {
+        tracing::debug!(
+            channel_id = %channel_id,
+            code = %e.code(),
+            "could not tell the device to drop a timed-out channel"
+        );
+    }
+}
+
 /// 取通道绑定并校验归属。
 ///
 /// **404 与 403 的分界**：id 根本不存在（含设备掉线后被整节点清掉）→ 404；
@@ -702,6 +911,17 @@ fn send_channel_data(
     );
     send_to_device(state, node_id, frame)?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// 测试用：跨模块造一条通道绑定（`ws.rs` 的转发用例）。
+#[cfg(test)]
+pub(crate) fn test_binding(node_id: &str, subject: &str, acked: bool) -> ChannelBinding {
+    ChannelBinding {
+        node_id: node_id.to_string(),
+        session_id: "s_1".into(),
+        subject: subject.into(),
+        acked,
+    }
 }
 
 #[cfg(test)]
@@ -790,11 +1010,7 @@ mod tests {
     }
 
     fn binding(node: &str, subject: &str) -> ChannelBinding {
-        ChannelBinding {
-            node_id: node.to_string(),
-            session_id: "s_1".into(),
-            subject: subject.into(),
-        }
+        test_binding(node, subject, false)
     }
 
     /// 当前有几条活跃订阅（测试用来确认「造出来的局面真的是那个局面」）。
@@ -1074,5 +1290,164 @@ mod tests {
         .expect_err("must fail");
         assert_eq!(e.status(), StatusCode::CONFLICT);
         assert_eq!(e.code(), err::OFFLINE);
+    }
+
+    /// 工作区根**覆盖**页面自带的值（约束 3：边界强制在 node 侧）。
+    #[test]
+    fn the_workspace_root_overrides_whatever_the_page_sent() {
+        let v = params_with_workspace_root(json!({"cwd": "/tmp", "workspace_root": "/"}), "/w");
+        assert_eq!(
+            v["workspace_root"],
+            json!("/w"),
+            "页面传的 root 不得生效，否则传 \"/\" 就等于取消边界"
+        );
+        assert_eq!(v["cwd"], json!("/tmp"), "其余参数照旧透传");
+
+        // 非对象 / 缺失也要落成对象：`OpenReq` 的 flatten 只接受对象
+        for p in [json!(null), json!("nope"), json!([1, 2])] {
+            assert_eq!(
+                params_with_workspace_root(p, "/w"),
+                json!({"workspace_root": "/w"})
+            );
+        }
+    }
+
+    /// `/send` 的载荷形状由 Content-Type 决定（缺陷 2）。
+    #[test]
+    fn the_send_body_is_dispatched_by_content_type() {
+        assert_eq!(payload_kind(Some("application/json")), PayloadKind::Json);
+        assert_eq!(
+            payload_kind(Some("application/json; charset=utf-8")),
+            PayloadKind::Json
+        );
+        assert_eq!(
+            payload_kind(Some("application/vnd.x+json")),
+            PayloadKind::Json
+        );
+        assert_eq!(
+            payload_kind(Some("application/octet-stream")),
+            PayloadKind::Bytes
+        );
+        assert_eq!(
+            payload_kind(Some("application/x-www-form-urlencoded")),
+            PayloadKind::Legacy
+        );
+        assert_eq!(payload_kind(None), PayloadKind::Legacy);
+
+        assert_eq!(
+            payload_of(PayloadKind::Json, br#"{"op":"list"}"#).unwrap(),
+            json!({"op":"list"})
+        );
+        assert_eq!(
+            payload_of(PayloadKind::Bytes, b"ls\n").unwrap(),
+            json!({"bytes":"ls\n"})
+        );
+        // 旧客户端（e2e 夹具的 curl 就是 form Content-Type）带 JSON 体：
+        // 原样转发，文件取数才不至于变成打进 PTY 的字面文本
+        assert_eq!(
+            payload_of(PayloadKind::Legacy, br#"{"op":"read","path":"a.txt"}"#).unwrap(),
+            json!({"op":"read","path":"a.txt"})
+        );
+        // 旧客户端带裸字节：仍是 bytes，终端不受影响
+        assert_eq!(
+            payload_of(PayloadKind::Legacy, b"stty size\n").unwrap(),
+            json!({"bytes":"stty size\n"})
+        );
+
+        // 声明了 JSON 却解析不出来 → 400，不降级成 bytes
+        let e = payload_of(PayloadKind::Json, b"not json").expect_err("must reject");
+        assert_eq!(e.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(e.code(), err::BAD_BODY);
+        // 非 UTF-8 的两条字节路都 400（不是把 `�` 塞进 keystroke）
+        for kind in [PayloadKind::Bytes, PayloadKind::Legacy] {
+            let e = payload_of(kind, &[0xff, 0xfe]).expect_err("must reject");
+            assert_eq!(e.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(e.code(), err::BAD_BODY);
+        }
+    }
+
+    /// `channel.ready` 只在设备确认后发（缺陷 4），且已确认的通道不被超时误杀。
+    #[test]
+    fn a_channel_becomes_ready_only_when_the_device_confirms_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = bootstrap(dir.path());
+        state.bindings().bind("ch-1", binding("n_a", "admin"));
+
+        announce_ready(&state, "ch-1");
+        let events = state.streams().replay_since(Some(0));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, "channel.ready");
+        assert!(events[0].data.contains(r#""channel_id":"ch-1""#));
+
+        assert!(!state.bindings().take_unacked("ch-1"), "已确认的不许被摘");
+        assert!(state.bindings().get("ch-1").is_some());
+
+        // 不认识的 id 不推事件（设备在一个 Hub 没记过账的 id 上回 ack）
+        announce_ready(&state, "ch-ghost");
+        assert_eq!(state.streams().replay_since(Some(0)).len(), 1);
+    }
+
+    /// 设备不 ack：页面上要看得见一条带原因的失败，且通道要解绑。
+    #[test]
+    fn an_unconfirmed_channel_times_out_visibly_and_is_forgotten() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = bootstrap(dir.path());
+        state.bindings().bind("ch-1", binding("n_a", "admin"));
+
+        expire_unacked(&state, "n_a", "ch-1");
+        let events = state.streams().replay_since(Some(0));
+        assert_eq!(events.len(), 1, "超时必须在页面上说出来");
+        assert_eq!(events[0].name, "channel.frame");
+        let event = serde_json::from_str::<serde_json::Value>(&events[0].data).unwrap();
+        assert_eq!(event["channel_id"], json!("ch-1"));
+        assert_eq!(event["payload"]["op"], json!("error"));
+        assert_eq!(event["payload"]["code"], json!("timeout"));
+        assert!(
+            event["payload"]["reason"].is_string(),
+            "页面要拿到一句人话：{event}"
+        );
+        assert!(state.bindings().get("ch-1").is_none(), "超时要解绑");
+
+        expire_unacked(&state, "n_a", "ch-1");
+        assert_eq!(
+            state.streams().replay_since(Some(0)).len(),
+            1,
+            "同一个超时不得推两遍"
+        );
+    }
+
+    /// 已确认的通道**不会**被超时误杀（迟到的定时器只能是空操作）。
+    #[test]
+    fn a_confirmed_channel_never_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = bootstrap(dir.path());
+        state.bindings().bind("ch-1", binding("n_a", "admin"));
+        announce_ready(&state, "ch-1");
+
+        expire_unacked(&state, "n_a", "ch-1");
+        assert!(state.bindings().get("ch-1").is_some(), "确认过的通道还在");
+        let events = state.streams().replay_since(Some(0));
+        assert_eq!(events.len(), 1, "只该有那一条 channel.ready");
+        assert_eq!(events[0].name, "channel.ready");
+    }
+
+    /// 超时任务真的会在到点后执行（不是只有直接调 `expire_unacked` 的那条路）。
+    ///
+    /// 这条钉的是「接线」：`open_channel` 里那个 `spawn` 一旦被删掉，
+    /// 失败信号就再也不会出现，而所有直接调 `expire_unacked` 的用例照旧全绿。
+    #[tokio::test]
+    async fn the_ready_timeout_task_actually_fires() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = bootstrap(dir.path());
+        state.bindings().bind("ch-1", binding("n_a", "admin"));
+        spawn_ready_timeout(
+            state.clone(),
+            "n_a".into(),
+            "ch-1".into(),
+            std::time::Duration::from_millis(5),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(state.bindings().get("ch-1").is_none());
+        assert_eq!(state.streams().replay_since(Some(0)).len(), 1);
     }
 }

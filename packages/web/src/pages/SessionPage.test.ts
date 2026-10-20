@@ -78,6 +78,7 @@ async function mountWorkbench(seed: TabMeta[] = TWO_TABS, id = 's_1'): Promise<C
     '/api/devices': { body: DEVICES },
     '/api/channels': { status: 201, body: { channel_id: 'ch-1', node_id: 'n_1', session_id: 's_1' } },
     '/api/channels/ch-1': { empty: true },
+    '/api/channels/ch-1/send': { empty: true },
   })
   const w = mountIn(SessionPage)
   await flush(w)
@@ -487,6 +488,75 @@ describe('面板正文是 13b / 13c 的真组件，不是 13a 的占位', () => 
 
     expect(w.element.querySelector('[data-nav-error]')).not.toBeNull()
     expect(w.element.querySelector('[data-write-error]')).toBeNull()
+  })
+
+  it('取数按 files 的契约发 application/json，op/字段与 node 侧 files.rs 逐字一致', async () => {
+    const { w, fetchMock, src } = await mountWorkbench()
+    await openFiles(w)
+    await touchFiles(w)
+
+    const sends = () =>
+      fetchMock.mock.calls
+        .map(([url, init]) => ({ path: new URL(String(url), 'http://hub.local').pathname, init }))
+        .filter((c) => c.path === '/api/channels/ch-1/send')
+        .map((c) => ({
+          type: new Headers(c.init?.headers).get('Content-Type'),
+          body: JSON.parse(String(c.init?.body)),
+        }))
+
+    // 第一次交互问的是当前这一层（根）
+    expect(sends()[0]).toEqual({ type: 'application/json', body: { op: 'list', path: '' } })
+
+    // 设备回了根这一层之后，进入 src → 再发一次 list（路径相对工作区根）
+    await frame(w, src(), {
+      op: 'list',
+      path: '',
+      entries: [{ name: 'src', kind: 'dir', size: 0, mtime_ms: null }],
+      total: 1,
+      truncated: false,
+    })
+    const row = w.element.querySelector<HTMLElement>('[data-row][data-path="src"]')
+    if (!row) throw new Error('no src row')
+    row.focus()
+    row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flush(w)
+
+    expect(sends().at(-1)).toEqual({ type: 'application/json', body: { op: 'list', path: 'src' } })
+  })
+
+  it('取数被 Hub 拒（400/404）时页面说话，而不是一棵永远不动的空树', async () => {
+    const { w, fetchMock, src } = await mountWorkbench()
+    await openFiles(w)
+    await touchFiles(w)
+    await frame(w, src(), {
+      op: 'list',
+      path: '',
+      entries: [{ name: 'src', kind: 'dir', size: 0, mtime_ms: null }],
+      total: 1,
+      truncated: false,
+    })
+
+    const before = fetchMock.mock.calls.length
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input), 'http://hub.local').pathname
+      const body =
+        path === '/api/channels/ch-1/send'
+          ? { error: 'invalid_request_body' }
+          : { error: 'unexpected_request' }
+      return new Response(JSON.stringify(body), {
+        status: path === '/api/channels/ch-1/send' ? 400 : 500,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    })
+
+    const row = w.element.querySelector<HTMLElement>('[data-row][data-path="src"]')
+    if (!row) throw new Error('no src row')
+    row.focus()
+    row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flush(w)
+
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(before)
+    expect(w.element.querySelector('[data-nav-error]')?.textContent).toContain('invalid_request_body')
   })
 
   it('已结束的会话：面板只读的文本在场且「打开面板」入口禁用', async () => {

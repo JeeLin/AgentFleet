@@ -68,7 +68,7 @@ import {
   type ChannelState,
 } from '@/lib/channel'
 import { relativeTime, sessionTitle } from '@/lib/format'
-import { ApiError, NetworkError } from '@/lib/http'
+import { ApiError, NetworkError, request } from '@/lib/http'
 import { dispatch, isTyping, register, unregister } from '@/lib/keynav'
 import { SPLIT_DEFAULT } from '@/lib/split'
 import {
@@ -552,17 +552,48 @@ function closeTraj(): void {
  * 在页面：把意图包成通道数据帧送下去。
  *
  * 意图 → op 的对应关系与 node 侧 `files.rs` 的入帧（`op = "list" | "read" |
- * "write"`）逐字一致。将来换成别的搬运方式只改这里，面板不知道。
+ * "write"`）逐字一致（`crates/node-core/src/connector/files.rs` 的
+ * `on_data` 只认**顶层** `op`）。将来换成别的搬运方式只改这里，面板不知道。
  *
- * **只应对已 `ready` 的通道**：`send()` 在未 ready / 断线时丢弃并计数——
- * 那是终端敲击的正确语义，不是取数的（一次 `list` 被丢就再也没人回应它，
- * 而用户也看不到「丢了一条」这个提示是在说取数）。未 ready 的那一次由
- * `pendingFiles` 记下，等通道 ready 时补发。
+ * **必须发 `application/json`**：Hub 的 `/send` 按 Content-Type 分派
+ * （`crates/hub-server/src/routes/stream.rs`），只有 JSON 会原样成为
+ * `channel_data.payload`；终端的 `application/octet-stream` 会被包成
+ * `{"bytes":…}`，files connector 收不到 `op`。
+ *
+ * 不走 `ChannelHandle.send()`：那条路的语义是「终端敲击」——断线时丢弃并
+ * 计数。一次 `list` 被丢就再也没人回应它，而「有 N 条已丢」那个徽标在说
+ * 取数这件事时用户根本读不懂（见 `pendingFiles`）；所以取数自己发请求，
+ * 失败时把原因写进 `ws.filesError`（§7.4 第 ③ 路）。
+ *
+ * **只应对已 `ready` 的通道**：未 ready 的那一次由 `pendingFiles` 记下，
+ * 等通道 ready 时补发。
  */
 function fileRequest(tab: TabMeta, op: 'list' | 'read' | 'write', payload: Record<string, unknown>): void {
   const handle = channels.get(channelKey(tab.id, 'files'))
   if (!handle || handle.state() !== 'ready') return
-  handle.send(JSON.stringify({ op, ...payload }))
+  const id = handle.id()
+  if (!id) return
+  void request(`/api/channels/${encodeURIComponent(id)}/send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ op, ...payload }),
+  }).catch((err: unknown) => {
+    // 取数被 Hub 拒（404 通道没了 / 400 载荷不合法 / 403 CSRF）时页面必须
+    // 说话：文件面板没有第二条反馈路径，静默失败就是一棵永远不动的空树。
+    const ws = workspaces.get(tab.id)
+    if (!ws) return
+    ws.loading.clear()
+    ws.readingPath = null
+    ws.saving = false
+    ws.filesError = {
+      path: typeof payload.path === 'string' ? payload.path : '',
+      reason:
+        err instanceof ApiError
+          ? `Hub 拒绝了这次文件请求（${err.code}）。`
+          : '文件请求没能送到 Hub，面板内容可能已经过期。',
+      code: err instanceof ApiError ? err.code : err instanceof NetworkError ? 'network' : null,
+    }
+  })
 }
 
 /**
