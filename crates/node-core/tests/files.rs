@@ -55,10 +55,22 @@ fn after_data(channel_id: &str, payload: serde_json::Value) -> Vec<Frame> {
 }
 
 fn payload_of(frames: &[Frame]) -> serde_json::Value {
-    frames
+    let env = frames
         .last()
         .map(|f| f.c.clone())
-        .unwrap_or_else(|| serde_json::json!({ "__no_frame__": true }))
+        .unwrap_or_else(|| serde_json::json!({ "__no_frame__": true }));
+    // `channel_data` 的 `c` 是 `ChannelData{channel_id, payload}` 信封。
+    // 漏掉信封时 Hub 会把帧当无法解释的 JSON 静默丢掉——锁住它在这里，
+    // 免得又一次「通道 ready、请求 204、页面空白」。
+    assert!(
+        env["channel_id"].is_string() || env["__no_frame__"].is_boolean(),
+        "channel_data 的 c 必须带 channel_id 信封：{env}"
+    );
+    if env["payload"].is_object() {
+        env["payload"].clone()
+    } else {
+        env
+    }
 }
 
 fn is_error(frame: &Frame) -> bool {

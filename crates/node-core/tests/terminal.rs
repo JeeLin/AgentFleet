@@ -65,12 +65,20 @@ fn credit_frame(channel_id: &str, delta: u32) -> Frame {
 /// 一轮 `pump`：把所有通道产出的字节拼成一段文本。
 fn pump_once() -> String {
     let mut text = String::new();
-    for (_id, frames) in channel::pump() {
+    for (id, frames) in channel::pump() {
         for f in frames {
-            // 通道层把 connector 的 payload **原样**放在帧的 `c` 上
-            // （`protocol.md` §4「本层只透传」），所以这里已经就是
-            // `{"bytes": ...}`，不需要再剥一层 `payload`。
-            if let Some(s) = f.c.get("bytes").and_then(|b| b.as_str()) {
+            // `channel_data` 的 `c` 是 `ChannelData{channel_id, payload}`
+            // 信封（`protocol.md` §4）：connector 的载荷在 **`payload` 里**，
+            // 不是 `c` 本身。曾经这里是 `f.c.get("bytes")`——那正是
+            // 「通道 ready、输出真的产生了、页面却一片空白」那个 bug 的写法。
+            assert_eq!(
+                f.c.get("channel_id").and_then(|v| v.as_str()),
+                Some(id.as_str()),
+                "channel_data 必须带 channel_id 信封：{}",
+                f.c
+            );
+            if let Some(s) = f.c.get("payload").and_then(|p| p.get("bytes")).and_then(|b| b.as_str())
+            {
                 text.push_str(s);
             }
         }

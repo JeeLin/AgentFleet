@@ -19,8 +19,8 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use protocol::channel::{
-    reason as channel_reason, ChannelErrorCode, ChannelErrorPayload, ChannelReady, CloseChannel,
-    OpenChannel,
+    reason as channel_reason, ChannelData, ChannelErrorCode, ChannelErrorPayload, ChannelReady,
+    CloseChannel, OpenChannel,
 };
 use protocol::frame::Frame;
 use protocol::message::types;
@@ -237,7 +237,7 @@ impl ChannelTable {
         frames.extend(
             first
                 .into_iter()
-                .map(|f| push(types::CHANNEL_DATA, f.payload)),
+                .map(|f| data_frame(&spec.channel_id, f.payload)),
         );
         Ok(frames)
     }
@@ -293,7 +293,7 @@ impl ChannelTable {
             entry.backlog_bytes += bytes;
             entry
                 .backlog
-                .push_back(push(types::CHANNEL_DATA, f.payload));
+                .push_back(data_frame(channel_id, f.payload));
         }
         Ok(())
     }
@@ -584,6 +584,26 @@ pub fn is_channel_type(msg_type: &str) -> bool {
     matches!(
         msg_type,
         types::OPEN_CHANNEL | types::CHANNEL_DATA | types::CLOSE_CHANNEL | types::CHANNEL_CREDIT
+    )
+}
+
+/// 一条上行 `channel_data`。
+///
+/// **`c` 必须是 `ChannelData{channel_id, payload}`，不是 connector 的裸载荷**。
+/// 协议（`protocol.md` §4）把这个信封定为双向：Hub 下发时包了
+/// `channel_id`（`routes/stream.rs` 的 `send_channel_data`），node 上行时
+/// 也必须包。裸载荷在 Hub 侧 `frame.payload::<ChannelData>()` 会因缺字段
+/// 解析失败，被 `publish_channel_data` 当成「Hub 没法解释的 JSON」静默丢掉
+/// ——表现恰好是最难查的一种：`/send` 回 204、通道 `ready`、PTY 真的读到了
+/// 字节、**页面上一片空白**，而两侧日志都只有一行 DEBUG。
+fn data_frame(channel_id: &str, payload: serde_json::Value) -> Frame {
+    push(
+        types::CHANNEL_DATA,
+        serde_json::to_value(ChannelData {
+            channel_id: channel_id.to_string(),
+            payload,
+        })
+        .unwrap_or_else(|_| serde_json::json!({ "channel_id": channel_id, "payload": {} })),
     )
 }
 

@@ -69,8 +69,18 @@ fn run(channel_id: &str, root: &std::path::Path, params: serde_json::Value) -> V
     frames
 }
 
+/// 取 `channel_data` 帧的业务载荷。
+///
+/// 帧的 `c` 是 `ChannelData{channel_id, payload}` 信封，不是裸载荷——
+/// **这里逐帧断言 `channel_id` 确实在信封里**：漏了它 Hub 会把帧当成
+/// 无法解释的 JSON 静默丢掉（页面一片空白，`/send` 却回 204）。
 fn payload(frames: &[Frame]) -> serde_json::Value {
-    frames[1].c.clone()
+    let env = &frames[1].c;
+    assert!(
+        env["channel_id"].is_string(),
+        "channel_data 的 c 必须带 channel_id 信封：{env}"
+    );
+    env["payload"].clone()
 }
 
 fn decode(field: &serde_json::Value) -> Vec<u8> {
