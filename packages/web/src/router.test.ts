@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { INDEX_PATH, ROUTES, interceptLink, matchRoute, navigate, route, startRouter } from '@/router'
+import { INDEX_PATH, ROUTES, AUTH_ROUTES, interceptLink, matchRoute, navigate, route, startRouter } from '@/router'
 
 describe('路由表：就是 §5.2 的表格', () => {
-  it('六条具名路由，没有工作区路由', () => {
+  it('八条具名路由：六条导航页 + 两条认证流程，没有工作区路由', () => {
+    // 顺序即匹配语义。`/login` 与 `/setup` 在 §5.2 的表格里「导航」一列
+    // 写的是「认证流程」而不是 ✅——它们在这里，但不进 §5.1 的 5 项一级导航。
+    // 这两条曾经缺失，后果是 401/403 的落点变成 404 空态（登录页打不开）。
     expect(ROUTES.map((r) => `${r.name} ${r.pattern}`)).toEqual([
       'sessions /sessions',
       'new-session /sessions/new',
@@ -11,7 +14,20 @@ describe('路由表：就是 §5.2 的表格', () => {
       'devices /devices',
       'agents /agents',
       'settings /settings',
+      'login /login',
+      'setup /setup',
     ])
+  })
+
+  it('/login 与 /setup 匹配成认证路由，且被标进 AUTH_ROUTES', () => {
+    expect(matchRoute('/login').name).toBe('login')
+    expect(matchRoute('/setup').name).toBe('setup')
+    expect(AUTH_ROUTES.has('login')).toBe(true)
+    expect(AUTH_ROUTES.has('setup')).toBe(true)
+    // 导航页一个都不在认证集合里：误加会让某个页面凭空失去外壳
+    for (const name of ['sessions', 'new-session', 'session', 'devices', 'agents', 'settings'] as const) {
+      expect(AUTH_ROUTES.has(name)).toBe(false)
+    }
   })
 
   it('没有任何能长出 /w/:nodeId/*path 或 /workspace 的占位', () => {

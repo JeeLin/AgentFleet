@@ -6,8 +6,27 @@
      ① 错误形态统一 —— 服务端错误一律 `{ "error": "<code>" }`
         （`crates/hub-server` 的 `ApiError`），这里收敛成同一个 `ApiError`
         类，页面只判一个形状。
-     ② 401 跳登录 —— session 过期不是某个端点的事，任何一次请求都可能撞上。
+     ② **401 跳登录 / 403 `hub_not_initialized` 跳 setup** —— 这两个都不是
+       某个端点的事，任何一次请求都可能撞上。后者见下方「为什么 403
+       `hub_not_initialized` 必须单独认」。
      ③ **CSRF 双重提交** —— 从 `af_csrf` cookie 读出值回填 `X-CSRF-Token` 头。
+
+   ── 为什么 403 `hub_not_initialized` 必须单独认 ─────────────────────
+   全新部署第一次打开控制台时，Hub 还停在初始化模式：
+   `middleware_auth.rs:33-36` 的规则 1 把**除 `/healthz` `/setup` `/ws`
+   之外的一切**都挡成 **403 `hub_not_initialized`**（不是 401——那时 Hub
+   根本还不存在「用户」，401 会误导成「你没登录」）。
+
+   前端只认 401 的年代，这一条会落到页面的通用错误分支里，显示成
+   「读设备列表失败（hub_not_initialized）」之类——用户看到一句权限错误，
+   而正确的下一步是**去 setup 设密码**。于是没有任何路径能走到 `/setup`。
+   这就是「全新部署打不开控制台」那条 bug 的根因，正面修复在这里：
+   认这个码、跳 `SETUP_PATH`、仍然照常抛 `ApiError` 让页面停下。
+
+   判据是 **(403 且 code === 'hub_not_initialized')**，不是「403 就跳」：
+   403 还可能是 `setup_token_mismatch`（setup 页自己要就地显示的）、
+   `csrf_token_missing_or_mismatch`（不该把人从页面上赶走）。
+   把它们一并跳走，会把「表单填错了」变成「跳到一个同样填不对的页面」。
 
    ── 为什么 CSRF 在这一层，而不是某个端点里 ──────────────────────────
    `crates/hub-server/src/middleware_auth.rs:24` 的
@@ -45,6 +64,23 @@ const STATE_CHANGING_METHODS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PAT
 
 /** 401 之后跳去的页面。 */
 const LOGIN_PATH = '/login'
+
+/**
+ * 「Hub 还没设密码」时跳去的页面。
+ *
+ * 与 `LOGIN_PATH` 并列而不是二选一：401 与 403 `hub_not_initialized`
+ * 说的是两件完全不同的事（「你有身份但没登录」/「Hub 还没有用户」），
+ * 跳错一个就是死循环——未初始化时 `/login` 的 POST 也是 403。
+ */
+const SETUP_PATH = '/setup'
+
+/**
+ * 中间件在初始化模式下给的错误码（`middleware_auth.rs:36`）。
+ *
+ * 写成常量而不是就地写字面量：它是**协议的一部分**（后端测试
+ * `login_flow.rs:255` 锁着它），散在各处拼字符串就会漂。
+ */
+export const HUB_NOT_INITIALIZED = 'hub_not_initialized'
 
 /** 服务端错误响应体的形状：`crates/hub-server` 的 `ApiError` 序列化结果。 */
 export interface ApiErrorBody {
@@ -105,6 +141,17 @@ let onUnauthorized: (path: string) => void = (path) => {
 }
 
 /**
+ * 「Hub 未初始化」的处理（403 `hub_not_initialized`）。
+ *
+ * 与 `onUnauthorized` **分成两个槽位**而不是共用一个回调：两条路径的去处
+ * 不同（`/login` vs `/setup`），共用一个槽位就意味着「跳哪儿」这件事被
+ * 塞进了 path 参数里——下一个读代码的人会以为两者可以互换。
+ */
+let onNotInitialized: (path: string) => void = (path) => {
+  if (typeof location !== 'undefined') location.assign(path)
+}
+
+/**
  * 覆盖 401 的处理（测试用）。
  *
  * 返回一个**还原函数**而不是旧实现：后者逼着每个测试在 `afterEach` 里写一遍
@@ -115,6 +162,15 @@ export function setUnauthorizedHandler(fn: (path: string) => void): () => void {
   onUnauthorized = fn
   return () => {
     onUnauthorized = prev
+  }
+}
+
+/** 覆盖「Hub 未初始化」的处理（测试用）。返回还原函数，理由同上。 */
+export function setNotInitializedHandler(fn: (path: string) => void): () => void {
+  const prev = onNotInitialized
+  onNotInitialized = fn
+  return () => {
+    onNotInitialized = prev
   }
 }
 
@@ -182,7 +238,17 @@ export async function request(path: string, options: RequestOptions = {}): Promi
     onUnauthorized(LOGIN_PATH)
     throw new ApiError(401, 'session_expired')
   }
-  if (!res.ok) throw new ApiError(res.status, await errorCode(res))
+  if (!res.ok) {
+    const code = await errorCode(res)
+    if (res.status === 403 && code === HUB_NOT_INITIALIZED) {
+      // Hub 还没有用户（初始化模式）：这不是权限错误，是「该去设密码」。
+      // 跳到 /setup 之后仍然抛出去——调用方必须停下，而不是在没有凭据的
+      // 状态里继续渲染一屏「读不到的列表」。
+      onNotInitialized(SETUP_PATH)
+      throw new ApiError(403, code)
+    }
+    throw new ApiError(res.status, code)
+  }
   return res
 }
 

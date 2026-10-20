@@ -94,9 +94,9 @@
 ```text
 Hub 首次启动  → secret 表无 hub.password → 进入「初始化模式」
                 生成 16 字节 setup_token，只写 stderr 与 <data>/setup-token.txt（0600）
-                仅暴露 /setup：设置用户名 + 密码
+                只服务 setup：页面 /setup（SPA 外壳）与端点 POST /setup
                 设置完成 → 写 password 后进入正常模式，setup_token 失效并删除
-此后每次启动  → 已有密码 → 正常模式，/setup 返回 409
+此后每次启动  → 已有密码 → 正常模式，GET /api/setup 返回 409
 ```
 
 - **没有默认密码**，不存在「忘了默认密码」这回事。
@@ -106,8 +106,13 @@ Hub 首次启动  → secret 表无 hub.password → 进入「初始化模式」
   用户还没打开浏览器，同网段另一台机器
   `curl -X POST /setup -d '{"username":"me","password":"me"}'` 就拿到了 admin。
   token 只落 stderr 与数据目录文件，攻击者拿不到。
-- **setup_token 失败 10 次即失效**，需 `afhub reset-setup` 重出（防爆破）。
-- **初始化模式除 `/setup` 外一律 403**——设置密码前不能读设备、不能开会话。
+- **setup_token 失败 10 次即失效**，需**重启 Hub** 重出（防爆破）：
+  启动时未初始化就生成新 token 并写回 `<data>/setup-token.txt`，失败计数随之清零，
+  所以「重启 Hub」已经是完整且准确的恢复路径（不另设恢复命令）。
+- **`/setup` 与 `/api/setup` 是一件事的两半**：`/setup` 是页面与初始化端点
+  （`POST`），`/api/setup` 是初始化状态探针（`GET`）。一条路径不能既回 HTML
+  又回 JSON，硬加载 `/setup` 必须拿到页面。
+- **初始化模式除 `/setup` 与 `/api/setup` 外一律 403**——设置密码前不能读设备、不能开会话。
 - 请求体里的 `username` 字段**收下但不落库**：M0 只有一个操作者，
   `username` 无处可存（多用户是 M1 的范围选择，见 §2.4.4）。
 - **密码哈希用 Argon2id**（不是 SHA-256：快哈希能被 GPU 暴力破解）。
@@ -150,11 +155,13 @@ session 一旦签发，**所有**状态变更都要双重提交。
 
 `/ws` **在初始化模式与正常模式下均豁免 session 认证**——
 node 不是浏览器、没有 session cookie，它走 §3 的 challenge/签名认证。
-没有这张表，「除 `/setup` 外全部要求 session」会把**所有设备挡在门外**。
+没有这张表，「除 `/setup` 与 `/api/setup` 外全部要求 session」会把**所有设备挡在门外**。
 
 | 路由 | 初始化模式 | 正常模式（无 cookie） | 正常模式（有 cookie） |
 |---|---|---|---|
-| `/setup` | 需 `X-Setup-Token` | 409 | 409 |
+| `/setup`（页面） | 豁免（SPA 外壳） | 豁免 | 豁免 |
+| `/api/setup`（探针） | 200 `{initialized:false}` | 409 | 409 |
+| `POST /setup`（端点） | 需 `X-Setup-Token` | 409 | 409 |
 | `/login` | 403 | 可用 | — |
 | `/ws` | **豁免**（走 §3 认证） | **豁免** | **豁免** |
 | `/healthz` | 豁免（无敏感信息） | 豁免 | 豁免 |

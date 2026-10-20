@@ -474,10 +474,11 @@ async fn healthz() -> Json<serde_json::Value> {
 /// 所以这里分成三段，顺序是安全边界：
 ///
 /// 1. **受保护的路由**（`require_auth` 之前）：`/api/*`、`/ws`、
-///    `/setup`、`/healthz`、`POST /login`。它们被 `require_auth` 覆盖；
+///    `POST /setup`、`/healthz`、`POST /login`。它们被 `require_auth` 覆盖；
 ///    `/api/{*rest}` 是认证后的 404 兜底（未认证时先 401）。
 /// 2. `.layer(require_auth)`。
-/// 3. **免认证的静态资产**（之后）：`/`、`GET /login`、`/assets/*`、SPA fallback。
+/// 3. **免认证的静态资产**（之后）：`/`、`GET /login`、`GET /setup`、
+///    `/assets/*`、SPA fallback。
 ///    登录页自己得能加载 JS/CSS，而它们不含任何设备数据。
 ///
 /// 第 3 段的路由**绝不**放进 [`routes::AUTH_EXEMPT_PATHS`]：那张表是精确匹配，
@@ -486,10 +487,23 @@ async fn healthz() -> Json<serde_json::Value> {
 pub fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
-        .route(
-            "/setup",
-            get(routes::setup::get_setup).post(routes::setup::post_setup),
-        )
+        // 这里只注册 `post(...)`——初始化**端点**本身，它要落在下面那条
+        // `.layer(...)` 之前受中间件管。`GET /setup` 是**页面**，注册在静态
+        // 资产段（见下面 `/login` 那一段）。
+        //
+        // **为什么 `/setup` 必须拆、探针为什么叫 `/api/setup`**：
+        // `design-system.md` §5.2 的路由表里 `/setup` 是「首次 setup」**页面**，
+        // 而 M0 成文验收标准③（`tests/login_flow.rs`）锁的是**探针的语义**
+        // ——已初始化 → 409——**不是它的路径**。一条路径不能兼两职：硬加载
+        // `/setup` 时浏览器拿到的要么是页面、要么是 JSON 文本，二者不可兼得，
+        // 于是「刷新 setup 页得到一坨 JSON」。
+        // 拆法与仓库里已有的 `/login` 同构（`POST /login` 端点、`GET /login`
+        // 页面）：端点留在 layer 之前，页面挂在 layer 之后。
+        .route("/setup", post(routes::setup::post_setup))
+        // JSON 探针另起路径。放在 `/api/*` 这一段而不是跟着上面那条，是因为
+        // 它与其余 `/api/*` 同属受控的 JSON 接口；`INIT_MODE_PATHS` 与
+        // `AUTH_EXEMPT_PATHS` 两处都放行它——初始化模式下正是要问它「设过密码没」。
+        .route("/api/setup", get(routes::setup::get_setup))
         // 这里只注册 `post(...)`——认证端点。`GET /login` 是**页面**（SPA 外壳），
         // 注册在下面 `.layer` 之后（见静态资产段）。
         //
@@ -538,6 +552,11 @@ pub fn build_app(state: AppState) -> Router {
         // 同一个 `MethodRouter`，而只有 POST 那一半被 `.layer` 包过——
         // 这正是「页面公开、端点受控」的落点。
         .route("/login", get(routes::assets::index))
+        // `GET /setup` 同理是**页面**：首次部署时用户可能是直接输入 `/setup`
+        // 或从登录页的提示里过来的，硬加载（整页刷新）必须拿到 SPA 外壳。
+        // 与上面那条 `POST /setup` **同路径不同方法**：只有 POST 那一半被
+        // `.layer` 包过，GET 这一半是公开的页面。
+        .route("/setup", get(routes::assets::index))
         .route(
             "/assets/{*path}",
             get(routes::assets::asset).layer(routes::assets::asset_cache_layer()),

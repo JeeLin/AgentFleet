@@ -58,10 +58,13 @@ pub struct LoginBody {
     pub password: String,
 }
 
-/// `GET /setup` —— 问「设过密码没有」。
+/// `GET /api/setup` —— 问「设过密码没有」。
 ///
 /// 未初始化 200 + `{"initialized": false}`；已初始化 **409**。
 /// 只回布尔值，**不回任何哈希、token 或 salt**。
+///
+/// 路径是 `/api/setup` 而不是 `/setup`：后者是页面（SPA 外壳）。一条路径
+/// 不能既回 HTML 又回 JSON，挂载点见 `crate::build_app`。
 pub async fn get_setup(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
     match state.is_initialized() {
         Ok(true) => Err(ApiError::conflict("already_initialized")),
@@ -96,7 +99,7 @@ pub async fn post_setup(
     match state.check_setup_token(candidate) {
         Ok(()) => {}
         Err(AuthError::SetupTokenLocked) => {
-            tracing::warn!("setup token locked; restart hub or run `afhub reset-setup`");
+            tracing::warn!("setup token locked; restart hub to issue a fresh token");
             return Err(ApiError::forbidden("setup_token_locked"));
         }
         // `check_setup_token` 只会产生 Locked / Mismatch 两种错误，

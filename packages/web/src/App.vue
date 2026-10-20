@@ -25,10 +25,13 @@ import { interceptLink, navigate, route, startRouter } from '@/router'
 
 import AgentsPage from '@/pages/AgentsPage.vue'
 import DevicesPage from '@/pages/DevicesPage.vue'
+import LoginPage from '@/pages/LoginPage.vue'
 import NewSessionPage from '@/pages/NewSessionPage.vue'
 import SessionPage from '@/pages/SessionPage.vue'
 import SessionsPage from '@/pages/SessionsPage.vue'
 import SettingsPage from '@/pages/SettingsPage.vue'
+import SetupPage from '@/pages/SetupPage.vue'
+import { AUTH_ROUTES } from '@/router'
 
 const PAGES = {
   sessions: SessionsPage,
@@ -37,10 +40,27 @@ const PAGES = {
   devices: DevicesPage,
   agents: AgentsPage,
   settings: SettingsPage,
+  login: LoginPage,
+  setup: SetupPage,
 } as const
 
 const page = computed(() => (route.value.name === 'not-found' ? null : PAGES[route.value.name]))
 const pageKey = computed(() => `${route.value.name}:${route.value.params.id ?? ''}`)
+
+/* ---------------------------------------------------------------- 认证页 */
+
+/**
+ * 当前是不是「认证流程」页（`/login` / `/setup`）。
+ *
+ * 判据是 `router.ts` 的 `AUTH_ROUTES`，不是在这里写一遍
+ * `name === 'login' || name === 'setup'`：那样加第三个认证页时会漏改一处，
+ * 症状是「登录页里出现了侧栏导航」——而那时用户还没登录。
+ *
+ * 认证页**不带外壳**（§5.1 最后一条「登录前没有导航可言」）：图标轨、
+ * 侧栏、顶栏、状态条全部不渲染。状态条尤其不能留——它写着「Hub 已连接」，
+ * 而此刻 Hub 可能正回着 403 `hub_not_initialized`。
+ */
+const isAuthPage = computed(() => AUTH_ROUTES.has(route.value.name))
 
 /* ---------------------------------------------------------------- 侧栏 */
 
@@ -185,6 +205,10 @@ const docTitle = computed(() => {
       return 'Agent 目录'
     case 'settings':
       return '设置'
+    case 'login':
+      return '登录'
+    case 'setup':
+      return '首次 setup'
     default:
       return '找不到页面'
   }
@@ -200,7 +224,12 @@ watch(
 </script>
 
 <template>
-  <div class="af-app" :data-rail="rail">
+  <!-- 认证流程页：只有页面本身，没有任何外壳 chrome。`main` 由页面自己给
+       （`.af-auth` 就是页面根节点），所以这里不套一层 main——两层 main
+       会让 `focusMain()` 的 `main[tabindex="-1"]` 选择器命中外层那个空壳。 -->
+  <component :is="page" v-if="isAuthPage && page" :key="pageKey" />
+
+  <div v-else class="af-app" :data-rail="rail">
     <div class="af-brand">
       <span class="af-brand__mark" aria-hidden="true"></span>
       <span class="af-brand__name">AGENTFLEET</span>

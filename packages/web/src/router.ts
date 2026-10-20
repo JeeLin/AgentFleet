@@ -10,6 +10,12 @@
    `/sessions/:id` 只表达「**激活**这个会话 tab」，不表达「第 3 个 tab」
    （§5.5.6：tab 集合本身不可深链接）。
 
+   ── `/login` 与 `/setup` 是「认证流程」，不是导航项 ────────────────
+   §5.2 的表格里这两行的「导航」列写的是「认证流程」而不是 ✅：
+   它们出现在路由表里，但**不进 §5.1 的 5 项一级导航**，也不带外壳渲染
+   （`AUTH_ROUTES`，见 `App.vue`）。缺了这两条路由的后果不是「少两个页面」，
+   而是 401/403 的落点变成 404 空态——登录页本身打不开，等于没有登录流程。
+
    **没有工作区路由**：`/w/:nodeId/*path` 与 `/workspace` 在架构上不存在
    （§5.2 否决项、§7.0）。所以这张表里连一个能长出它们的占位都没有。
 
@@ -35,7 +41,19 @@ export type RouteName =
   | 'devices'
   | 'agents'
   | 'settings'
+  | 'login'
+  | 'setup'
   | 'not-found'
+
+/**
+ * §5.2 里标「认证流程」的那两条路由。
+ *
+ * 它们**不在 §5.1 的 5 项一级导航里**，也不该在：登录前没有导航可言
+ * （§5.1 最后一条）。外壳据此决定「不带 chrome 渲染」——判据是这个集合，
+ * 不是在模板里写 `name === 'login' || name === 'setup'`：后者会在加第三个
+ * 认证页时被漏掉一处。
+ */
+export const AUTH_ROUTES: ReadonlySet<RouteName> = new Set<RouteName>(['login', 'setup'])
 
 /** 一次匹配的结果。`params` 只含这张表里的具名段（目前只有 `:id`）。 */
 export interface Route {
@@ -54,6 +72,10 @@ interface RouteDef {
 /**
  * 路由表。**顺序有意义**：`/sessions/new` 必须排在 `/sessions/:id` 之前，
  * 否则「新建会话」会被匹配成 id 为 `new` 的会话。
+ *
+ * 两条认证路由排在最后：它们与其余路径没有前缀关系（`/login` / `/setup`
+ * 都是单段字面量），顺序对匹配结果没有影响，放末尾是为了让
+ * 「一级导航的六条」连成一片、一眼看全 §5.2 的两张名单。
  */
 export const ROUTES: readonly RouteDef[] = [
   { name: 'sessions', pattern: '/sessions' },
@@ -62,10 +84,18 @@ export const ROUTES: readonly RouteDef[] = [
   { name: 'devices', pattern: '/devices' },
   { name: 'agents', pattern: '/agents' },
   { name: 'settings', pattern: '/settings' },
+  { name: 'login', pattern: '/login' },
+  { name: 'setup', pattern: '/setup' },
 ]
 
 /** 根路径落在会话列表：会话是入口（§7.0）。 */
 export const INDEX_PATH = '/sessions'
+
+/** 登录页路径。`http.ts` 的 401 与外壳的退出登录都指向它。 */
+export const LOGIN_PATH = '/login'
+
+/** 首次 setup 的路径。`http.ts` 的 403 `hub_not_initialized` 指向它。 */
+export const SETUP_PATH = '/setup'
 
 /** 一条路径按表匹配。都不中就是 `not-found`。 */
 export function matchRoute(input: string): Route {

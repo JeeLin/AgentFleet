@@ -239,18 +239,23 @@ fn login_req(password: &str, ip: Option<&str>) -> Request<Body> {
 async fn standard_01_first_start_is_uninitialized_and_blocks_the_rest() {
     let h = Harness::new();
 
-    let r = h.get("/setup").await;
+    let r = h.get("/api/setup").await;
     assert_eq!(r.status, StatusCode::OK);
     assert_eq!(r.json()["initialized"], json!(false));
 
     // 初始化模式下「一切除豁免表外都是 403」，**不是 401**
     assert_eq!(h.get("/api/devices").await.status, StatusCode::FORBIDDEN);
-    // `GET /login` 是**页面**（SPA 外壳），与 `/` 同属免认证静态资产，
-    // 未初始化时也要能打开——否则首次部署时登录页自己加载不出来。
+    // `GET /login` 与 `GET /setup` 都是**页面**（SPA 外壳），与 `/` 同属
+    // 免认证静态资产，未初始化时也要能打开——否则首次部署时登录页 /
+    // setup 页自己加载不出来，而用户手里正拿着一个必须粘进页面的 token。
     assert_eq!(h.get("/login").await.status, StatusCode::OK);
+    assert_eq!(h.get("/setup").await.status, StatusCode::OK);
     // `POST /login` 才是认证端点：它在豁免表内（登录前没有 session），
     // 但**不豁免初始化模式门禁**——没有密码可验，403。
-    assert_eq!(h.post_login("whatever", None).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        h.post_login("whatever", None).await.status,
+        StatusCode::FORBIDDEN
+    );
     let login = h.post_login("whatever", None).await;
     assert_eq!(login.json()["error"], json!("hub_not_initialized"));
 
@@ -291,7 +296,12 @@ async fn standard_02_setup_without_token_is_forbidden() {
 }
 
 // ---------------------------------------------------------------------------
-// 标准③：设完密码后 GET /setup → 409
+// 标准③：设完密码后 GET /api/setup → 409
+//
+// 路径自 M1 起是 `/api/setup`：`/setup` 让给了**页面**（见
+// `get_setup_serves_the_spa_shell_and_the_probe_lives_at_api_setup`）。
+// 标准锁的是探针的**语义**（已初始化 → 409 `already_initialized`），
+// 不是它的路径——断言值一个没改。
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn standard_03_setup_conflicts_once_initialized() {
@@ -299,7 +309,7 @@ async fn standard_03_setup_conflicts_once_initialized() {
     let token = h.setup_token();
     let (session, _csrf) = h.initialized().await;
 
-    let r = h.get("/setup").await;
+    let r = h.get("/api/setup").await;
     assert_eq!(r.status, StatusCode::CONFLICT);
     assert_eq!(r.json()["error"], json!("already_initialized"));
 
@@ -318,6 +328,39 @@ async fn standard_03_setup_conflicts_once_initialized() {
         StatusCode::OK
     );
     let _ = session;
+}
+
+// ---------------------------------------------------------------------------
+// M1 契约：`GET /setup` 是**页面**，JSON 探针在 `GET /api/setup`
+//
+// 这条是 M1 起的新契约（M0 时两者同路径）。`design-system.md` §5.2 的路由表里
+// `/setup` 是「首次 setup」页面；而一条路径不能既回 HTML 又回 JSON——
+// 硬加载（整页刷新 / 直接输地址）时浏览器只会拿到其中一种。
+// 同构的拆分仓库里早有一份：`POST /login` 是端点、`GET /login` 是页面。
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn get_setup_serves_the_spa_shell_and_the_probe_lives_at_api_setup() {
+    let h = Harness::new();
+
+    let page = h.get("/setup").await;
+    assert_eq!(
+        page.status,
+        StatusCode::OK,
+        "硬加载 /setup 必须是页面，不是 JSON 探针"
+    );
+    assert_eq!(
+        page.headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("text/html; charset=utf-8"),
+        "/setup 必须回 SPA 外壳（HTML），而不是探针的 JSON"
+    );
+
+    // 同一个 Harness 上探针仍照旧：初始化状态下 200 + initialized:false
+    let probe = h.get("/api/setup").await;
+    assert_eq!(probe.status, StatusCode::OK);
+    assert_eq!(probe.json()["initialized"], json!(false));
+    assert!(h.dir.path().join("setup-token.txt").exists());
 }
 
 // ---------------------------------------------------------------------------
@@ -886,9 +929,9 @@ async fn restart_in_normal_mode_does_not_issue_a_new_setup_token() {
     assert!(state2.is_initialized().unwrap());
     assert!(!stale.exists(), "正常模式重启必须清掉残留 token 文件");
     assert!(state2.check_setup_token("left-over-token").is_err());
-    // 正常模式下 /setup 一律 409
+    // 正常模式下探针一律 409
     let app = hub_server::build_app(state2);
-    let r = call(&app, get_req("/setup", None)).await;
+    let r = call(&app, get_req("/api/setup", None)).await;
     assert_eq!(r.status, StatusCode::CONFLICT);
 }
 
@@ -1002,12 +1045,12 @@ async fn setup_with_unhashable_params_fails_without_storing_password() {
     assert!(token_path.exists());
 }
 
-/// `GET /setup` 在存储层出错时返回 500（驱动 get_setup 里的错误分支）。
+/// `GET /api/setup` 在存储层出错时返回 500（驱动 get_setup 里的错误分支）。
 #[tokio::test]
 async fn get_setup_returns_500_on_storage_error() {
     let (_d, state) = state_with_broken_secret_table();
     let app = hub_server::build_app(state);
-    let r = Reply::new(app.oneshot(get_req("/setup", None)).await.unwrap()).await;
+    let r = Reply::new(app.oneshot(get_req("/api/setup", None)).await.unwrap()).await;
     assert_eq!(r.status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(r.json()["error"], json!("internal_error"));
 }
