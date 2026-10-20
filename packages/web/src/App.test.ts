@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from '@/App.vue'
 import { KEYS, actCount } from '@/lib/keynav'
@@ -181,3 +181,103 @@ describe('App：文档标题', () => {
     expect(document.title).toBe('Agent 目录 · AgentFleet')
   })
 })
+
+/* ===========================================================================
+   session 过期 → 弹框，不是整页跳走
+   ---------------------------------------------------------------------------
+   这一组测的是**接在一起的两半**：`http.ts` 的 401 分支弹框（`promptLogin`），
+   外壳把框挂出来、并在取消时跳 `/login`。两半各自有单测，但「401 之后用户
+   眼前是什么」只有合起来才存在——所以这里从一次真实的 `request()` 出发。
+   =========================================================================== */
+
+describe('App：401 之后', () => {
+  it('页面里的请求撞 401 → 弹出密码框，地址没动、页面没重建', async () => {
+    const fetchMock = stubFetch({ ...EMPTY_API, '/api/devices': { status: 401, body: { error: 'session_expired' } } })
+    const w = mountApp('/devices')
+    await flush(w)
+
+    const shell = w.element.querySelector('.af-app')
+    expect(fetchMock.mock.calls.map(([u]) => String(u))).toContain('/api/devices')
+
+    const box = document.querySelector<HTMLElement>('[data-loginprompt]')
+    expect(box).not.toBeNull()
+    // 整页跳转会重建整个 JS 上下文；这里外壳还是原来那个 DOM 节点
+    expect(w.element.querySelector('.af-app')).toBe(shell)
+    expect(location.pathname).toBe('/devices')
+    // 401 仍然照常抛给页面（页面停在错误态，不继续渲染一屏读不到的列表）
+    await flush(w)
+    expect(document.querySelector('[data-loginprompt]')).not.toBeNull()
+  })
+
+  it('输对密码 → 关框并留在原页面（不导航、不刷新）', async () => {
+    stubFetch({
+      ...EMPTY_API,
+      '/api/devices': { status: 401, body: { error: 'session_expired' } },
+      '/login': { body: { ok: true } },
+    })
+    const w = mountApp('/devices')
+    await flush(w)
+    const before = w.element.querySelector('.af-app')
+    expect(document.querySelector('[data-loginprompt]')).not.toBeNull()
+
+    const input = document.querySelector<HTMLInputElement>('#login-prompt-password')
+    expect(input).not.toBeNull()
+    input!.value = 'correct horse battery'
+    input!.dispatchEvent(new Event('input'))
+    await flush(w)
+    document.querySelector<HTMLFormElement>('#login-prompt-password')!.closest('form')!.dispatchEvent(
+      new Event('submit', { bubbles: true, cancelable: true }),
+    )
+    await flush(w)
+
+    expect(document.querySelector('[data-loginprompt]')).toBeNull()
+    // 「不导航」不是只看地址：外壳 DOM 必须是同一个实例
+    expect(location.pathname).toBe('/devices')
+    expect(w.element.querySelector('.af-app')).toBe(before)
+  })
+
+  it('点「取消」→ 那一下才整页跳去 /login', async () => {
+    const assign = vi.spyOn(location, 'assign').mockImplementation(() => {})
+    stubFetch({ ...EMPTY_API, '/api/devices': { status: 401, body: { error: 'session_expired' } } })
+    const w = mountApp('/devices')
+    await flush(w)
+    expect(document.querySelector('[data-loginprompt]')).not.toBeNull()
+
+    Array.from(document.querySelectorAll<HTMLButtonElement>('[data-loginprompt] button'))
+      .filter((b) => b.textContent?.includes('取消'))
+      .forEach((b) => void b.click())
+    await flush(w)
+
+    expect(assign).toHaveBeenCalledWith('/login')
+    // 关框与跳转都发生了：框不该留在屏幕上
+    expect(document.querySelector('[data-loginprompt]')).toBeNull()
+  })
+
+  it('/login 上不挂这个框（那一页自己的 401 是密码错，不是过期）', async () => {
+    stubFetch({})
+    const w = mountApp('/login')
+    await flush(w)
+
+    // `/login` 是认证页：不带外壳（§5.1），自然也没有这个框
+    expect(w.element.querySelector('.af-app')).toBeNull()
+    expect(document.querySelector('[data-loginprompt]')).toBeNull()
+  })
+
+  it('硬开 /login 仍然渲染完整的登录页（不是只留一个弹框）', async () => {
+    // 弹框是「 session 过期」的出路，不是它的**唯一**出路：用户主动退出、
+    // 或直接敲地址进 /login 时，要看到的是一页完整的登录表单。
+    // 少了这一条，401 处置就会变成「永远弹框、登录页再也打不开」。
+    stubFetch({})
+    const w = mountApp('/login')
+    await flush(w)
+
+    const page = w.element.querySelector('.af-auth')
+    expect(page).not.toBeNull()
+    expect(page?.querySelector('input[type="password"]')).not.toBeNull()
+    expect(page?.querySelector('button[type="submit"]')?.textContent).toContain('进入控制台')
+    // 仍然没有外壳 chrome：认证页不带导航（§5.1）
+    expect(w.element.querySelector('.af-sidebar')).toBeNull()
+    expect(document.querySelector('[data-loginprompt]')).toBeNull()
+  })
+})
+

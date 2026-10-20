@@ -6,10 +6,30 @@
      ① 错误形态统一 —— 服务端错误一律 `{ "error": "<code>" }`
         （`crates/hub-server` 的 `ApiError`），这里收敛成同一个 `ApiError`
         类，页面只判一个形状。
-     ② **401 跳登录 / 403 `hub_not_initialized` 跳 setup** —— 这两个都不是
-       某个端点的事，任何一次请求都可能撞上。后者见下方「为什么 403
-       `hub_not_initialized` 必须单独认」。
-     ③ **CSRF 双重提交** —— 从 `af_csrf` cookie 读出值回填 `X-CSRF-Token` 头。
+      ② **401 弹重新登录框 / 403 `hub_not_initialized` 跳 setup** —— 这两个
+         都不是某个端点的事，任何一次请求都可能撞上。后者见下方「为什么 403
+         `hub_not_initialized` 必须单独认」，前者见「为什么 401 不再整页跳转」。
+      ③ **CSRF 双重提交** —— 从 `af_csrf` cookie 读出值回填 `X-CSRF-Token` 头。
+
+    ── 为什么 401 不再整页跳转 ──────────────────────────────────────
+    401（session 过期）撞上的那一刻，用户正在某个页面做一件事：扫设备列表、
+    在会话里敲终端、新建会话表单填了一半。`location.assign('/login')` 是一次
+    **整页跳转**：它把正在做的事、正在填的表、连同地址栏里那个会话 id 一起丢掉，
+    用户回来还得自己导航回去——而重新登录本来只需要一个密码。
+
+    所以现在这里只**弹一个密码框**（`lib/login-prompt.ts` 的 `promptLogin`），
+    背后的页面原样活着。输对密码 → 关框，原地继续；点「取消」→ 那一下才真的去
+    `/login`（`App.vue` 的 `go-login`，见那里为什么跳转住在外壳）。
+
+    仍然照常抛 `ApiError(401, 'session_expired')`：调用方必须**停下**，
+    而不是在没有凭据的状态里继续渲染一屏「读不到的列表」。
+
+    ── `POST /login` 的 401 不是 session 过期 ─────────────────────────
+    `middleware_auth.rs:53/64` 只对**非豁免路径**发 401；`POST /login` 自己在
+    `AUTH_EXEMPT_PATHS` 里，它的 401 是 `invalid_credentials`——**密码错**。
+    把那个 401 也当成「session 过期」会变成死循环（弹框 → 密码错 401 → 再弹框），
+    所以登录请求一律直接 `fetch('/login')`、**不走本模块**（`LoginPage.vue`
+    与 `components/LoginPrompt.vue` 各有一份 `postLogin`，这是有意的分叉）。
 
    ── 为什么 403 `hub_not_initialized` 必须单独认 ─────────────────────
    全新部署第一次打开控制台时，Hub 还停在初始化模式：
@@ -53,6 +73,8 @@
    `middleware_auth.rs:96` 手工解析 cookie 是同一条理由。
    =========================================================================== */
 
+import { promptLogin } from './login-prompt'
+
 /** CSRF cookie 名。必须与 `crates/hub-server/src/lib.rs:37` 的 `CSRF_COOKIE` 一致。 */
 export const CSRF_COOKIE = 'af_csrf'
 
@@ -62,7 +84,17 @@ export const CSRF_HEADER = 'X-CSRF-Token'
 /** 会触发 CSRF 双重提交的 HTTP 方法。必须与 `STATE_CHANGING_METHODS` 一致。 */
 const STATE_CHANGING_METHODS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 
-/** 401 之后跳去的页面。 */
+/**
+ * 401 时**弹的框**用的那个登录页路径。
+ *
+ * 401 现在不跳它（见文件头「为什么 401 不再整页跳转」），只有用户在弹框里
+ * 点「取消」时才真的去这里——那一下的跳转在 `App.vue`，这里只是把同一个
+ * 字符串留在出事的那一层，免得「401 想去哪儿」这件事要在两个文件里读。
+ *
+ * 与 `SETUP_PATH` 并列而不是二选一：401 与 403 `hub_not_initialized` 说的是
+ * 两件完全不同的事（「你有身份但没登录」/「Hub 还没有用户」），混为一谈就是
+ * 死循环——未初始化时 `/login` 的 POST 也是 403。
+ */
 const LOGIN_PATH = '/login'
 
 /**
@@ -135,9 +167,20 @@ export function readCsrfToken(): string | null {
   return cookieValue(CSRF_COOKIE, document.cookie)
 }
 
-/** 401 的处理：生产是 `location.assign`，测试里换成计数。 */
-let onUnauthorized: (path: string) => void = (path) => {
-  if (typeof location !== 'undefined') location.assign(path)
+/**
+ * 401 的处理：**弹重新登录框**（不是跳转，见文件头「为什么 401 不再整页跳转」）。
+ *
+ * 它**不读 `path`**：弹框不需要知道来的是哪个端点（401 是横切事实），
+ * 而跳转是用户在框里点取消之后的事，那一刀在 `App.vue`（见那里为什么
+ * 它必须住在外壳）。`LOGIN_PATH` 仍然由调用方传下来——`setUnauthorizedHandler`
+ * 的签名有测试锁着，且「401 想去哪儿」这件事该留在出事的那一层。
+ *
+ * 所以这里声明成零参箭头函数（而不是 `(_path: string) =>`）：TS 允许用
+ * 参数更少的函数去满足参数更多的类型，而反过来不行。写一个 `_path` 再
+ * 不读它只会撞 `no-unused-vars`。
+ */
+let onUnauthorized: (path: string) => void = () => {
+  promptLogin()
 }
 
 /**
@@ -234,8 +277,11 @@ export async function request(path: string, options: RequestOptions = {}): Promi
   }
 
   if (res.status === 401) {
-    // session 失效是横切事实：任何端点都可能撞上，统一在这里跳。
+    // session 失效是横切事实：任何端点都可能撞上。**不跳转**——弹一个密码框，
+    // 背后那页还活着（理由见文件头「为什么 401 不再整页跳转」）。
     onUnauthorized(LOGIN_PATH)
+    // 仍然抛：调用方必须停下，而不是在没有凭据的状态里继续渲染一屏
+    // 「读不到的列表」（与下面 403 那条同一个理由）。
     throw new ApiError(401, 'session_expired')
   }
   if (!res.ok) {

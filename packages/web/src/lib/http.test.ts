@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { loginPromptOpen } from './login-prompt'
 import {
   ApiError,
   CSRF_COOKIE,
   CSRF_HEADER,
+  HUB_NOT_INITIALIZED,
   NetworkError,
   cookieValue,
   del,
@@ -11,6 +13,7 @@ import {
   postJson,
   readCsrfToken,
   request,
+  setNotInitializedHandler,
   setUnauthorizedHandler,
   withCsrf,
   withQuery,
@@ -146,6 +149,9 @@ describe('request', () => {
     restore()
     globalThis.fetch = original
     document.cookie = `${CSRF_COOKIE}=; Path=/; Max-Age=0`
+    // 401 用例会置位这个模块级 ref；不还原的话下一个用例一进来就看见一个
+    // 「已经开着」的框（而它自己什么都没做）。
+    loginPromptOpen.value = false
   })
 
   it('GET 默认 same-origin，且不带 CSRF 头', async () => {
@@ -171,10 +177,14 @@ describe('request', () => {
     expect(lastCall(fetchMock).init.body).toBe(bytes)
   })
 
-  it('401 跳 /login 并抛 ApiError', async () => {
+  it('401 抛 ApiError，且不再整页跳走（跳转是取消时才发生的事）', async () => {
     fetchMock.mockResolvedValue(jsonResponse(401, { error: 'missing_session' }))
     await expect(request('/api/devices')).rejects.toBeInstanceOf(ApiError)
+    // 槽位照旧被调用：`setUnauthorizedHandler` 的签名不许变，测试锁着它。
     expect(redirected).toEqual(['/login'])
+    // 但**页面没有被跳走**——这一条就是这次改动要的那件事。
+    // 跳转发生在用户在框里点「取消」之后，那一刀在 `App.vue`。
+    expect(location.pathname).toBe('/sessions')
   })
 
   it('非 2xx 取服务端 error 码', async () => {
@@ -198,6 +208,112 @@ describe('request', () => {
   it('fetch 抛异常 → NetworkError，不伪装成服务端错误', async () => {
     fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
     await expect(request('/api/x')).rejects.toBeInstanceOf(NetworkError)
+  })
+})
+
+/*
+  401 的**缺省**处理单独一个 describe：上面的 `beforeEach` 把槽位换成了计数器，
+  而「401 到底弹不弹框」必须有一条不换槽位的用例，否则那条断言永远是
+  「计数 +1」——测试绿着，而用户眼前什么都不弹。
+*/
+describe('request：401 的缺省处理是弹框，不是跳页', () => {
+  const fetchMock = vi.fn()
+  const original = globalThis.fetch
+
+  beforeEach(() => {
+    fetchMock.mockReset()
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    setCsrfCookie('tok')
+    loginPromptOpen.value = false
+  })
+
+  afterEach(() => {
+    globalThis.fetch = original
+    document.cookie = `${CSRF_COOKIE}=; Path=/; Max-Age=0`
+    loginPromptOpen.value = false
+  })
+
+  it('401 → 弹重新登录框，且页面没有跳走', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(401, { error: 'missing_session' }))
+    await expect(request('/api/devices')).rejects.toBeInstanceOf(ApiError)
+    expect(loginPromptOpen.value).toBe(true)
+    // 这就是整件事：背后的页面还活着，用户只需要一个密码
+    expect(location.pathname).toBe('/sessions')
+  })
+
+  it('连撞多个 401 只弹一个框（并发请求共用一条 401 路径）', async () => {
+    // 设备页一次就打两个端点，两个都会 401。布尔值而不是计数器就是为这个：
+    // 计数会让第二个框叠上去，而少关一个就永远关不掉。
+    fetchMock.mockResolvedValue(jsonResponse(401, { error: 'missing_session' }))
+    const results = await Promise.allSettled([request('/api/devices'), request('/api/sessions')])
+    expect(results.every((r) => r.status === 'rejected')).toBe(true)
+    expect(loginPromptOpen.value).toBe(true)
+    expect(location.pathname).toBe('/sessions')
+  })
+
+  it('再下一次成功的请求不会把框收掉（关它只能靠登录成功或取消）', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(401, { error: 'missing_session' }))
+    await expect(request('/api/devices')).rejects.toBeInstanceOf(ApiError)
+    expect(loginPromptOpen.value).toBe(true)
+    // 401 之后页面自己重试、或用户切了个 tab 又发一次请求：框不该自己消失，
+    // 否则用户被扔在一个「没有凭据也看不见原因」的页面上。
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true }))
+    await request('/api/devices')
+    expect(loginPromptOpen.value).toBe(true)
+  })
+})
+
+describe('request：403 的判据是「且 code === hub_not_initialized」，不是「403 就跳」', () => {
+  const fetchMock = vi.fn()
+  const original = globalThis.fetch
+  let went: string[] = []
+  let restore: () => void
+
+  beforeEach(() => {
+    fetchMock.mockReset()
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    setCsrfCookie('tok')
+    went = []
+    restore = setNotInitializedHandler((path) => {
+      went.push(path)
+    })
+  })
+
+  afterEach(() => {
+    restore()
+    globalThis.fetch = original
+    document.cookie = `${CSRF_COOKIE}=; Path=/; Max-Age=0`
+  })
+
+  it('403 hub_not_initialized → 跳 /setup，且照常抛 ApiError', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(403, { error: HUB_NOT_INITIALIZED }))
+    await expect(request('/api/devices')).rejects.toMatchObject({ status: 403, code: HUB_NOT_INITIALIZED })
+    expect(went).toEqual(['/setup'])
+  })
+
+  it('403 setup_token_mismatch 不跳：那是 setup 页自己就地显示的错误', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(403, { error: 'setup_token_mismatch' }))
+    await expect(request('/setup', { method: 'POST' })).rejects.toMatchObject({
+      status: 403,
+      code: 'setup_token_mismatch',
+    })
+    expect(went).toEqual([])
+  })
+
+  it('403 csrf_token_mismatch 不跳：把人从页面上赶走只会让表单重填', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(403, { error: 'csrf_token_missing_or_mismatch' }))
+    await expect(request('/api/sessions', { method: 'POST' })).rejects.toMatchObject({
+      status: 403,
+      code: 'csrf_token_missing_or_mismatch',
+    })
+    expect(went).toEqual([])
+  })
+
+  it('401 不触发 setup 跳转：两件事说的是不同的事', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(401, { error: 'missing_session' }))
+    restore()
+    await expect(request('/api/devices')).rejects.toBeInstanceOf(ApiError)
+    expect(went).toEqual([])
   })
 })
 

@@ -9,6 +9,10 @@
    ③ **跳转后的焦点落点**：`main` 每次换页都拿一次焦点（§4.3）。
    页面自己不管外壳，也不重新声明 `main`。
 
+   ④ **session 过期时的重新登录框**（`LoginPrompt`）：401 由 `lib/http.ts`
+   弹框、由这里挂载与「取消时跳 /login」。这是外壳而不是页面的事——跳转是
+   一个策略（见 `onLoginCancel` 的注释）。
+
    ── 折叠态为什么不是「藏起来」 ───────────────────────────────────
    `⌃B` 把侧栏收成 44px 图标轨，导航项仍在（`aria-label` 补偿被
    `display:none` 掉的名字）。折叠是省空间，不是删功能——所以没有
@@ -18,10 +22,12 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import EmptyState from '@/components/EmptyState.vue'
+import LoginPrompt from '@/components/LoginPrompt.vue'
 import { pop, push } from '@/lib/focus'
 import { SCOPE_LABEL, KEYS, unimplemented } from '@/lib/keynav'
+import { loginPromptOpen, dismissLoginPrompt } from '@/lib/login-prompt'
 import { bindShell, installShellKeys } from '@/lib/shell-keys'
-import { interceptLink, navigate, route, startRouter } from '@/router'
+import { interceptLink, navigate, route, startRouter, LOGIN_PATH } from '@/router'
 
 import AgentsPage from '@/pages/AgentsPage.vue'
 import DevicesPage from '@/pages/DevicesPage.vue'
@@ -106,6 +112,29 @@ const helpOpen = ref(false)
 const helpEl = ref<HTMLElement | null>(null)
 const helpColumns = computed(() => KEYS)
 const missing = computed(() => unimplemented())
+
+/* ------------------------------------------------- session 过期重新登录 */
+
+/**
+ * 用户在重新登录框里点「取消」：**这一条**才真的去 `/login`。
+ *
+ * 为什么是 `location.assign` 而不是 `navigate()`：`navigate` 只换 `route`
+ * （`history.pushState` + 一个 ref），JS 上下文和内存里的东西全都留着。而
+ * cancel 的语义正是「这一页我不要了」——session 刚过期过，SAP 里那个
+ * `LoginPage` 还会接着用它自己那份过期前的状态。一次真正的换页把这些
+ * 一次清干净，`/login` 从零开始读 cookie。
+ *
+ * 为什么跳转住在外壳，而 `http.ts` 只管弹框：整页跳转是一个**策略**，
+ * 不是「401 的技术后果」——技术后果只是「接下来没有凭据可用」，那只需要
+ * 一个框。把跳转放在唯一有「外壳」这个概念的地方，`lib/` 里就不会再有
+ * 第二个会整页跳转的地方（要找「哪里有跳转」时只消看这里）。
+ *
+ * `replace` 不用：用户是**主动放弃**当前页面的，按后退该能回到它（回到一个
+ * 又一次 401 的页面，比「后退键失灵」诚实）。
+ */
+function onLoginCancel(): void {
+  location.assign(LOGIN_PATH)
+}
 
 function openHelp(): void {
   // 不能在这里判 `helpEl`：面板是 `v-if`，第一次调用时它还没渲染，
@@ -305,6 +334,16 @@ watch(
       <span class="af-statusbar__item af-statusbar__key"><kbd>g</kbd> 跳转</span>
       <span class="af-statusbar__item af-statusbar__key"><kbd>⌃B</kbd> 侧栏</span>
     </footer>
+
+    <!-- session 过期时弹出的密码框（§4.7「需要别的动作」那一列）。401 的一条
+         出路是「填个密码继续」，不是「整页跳走」。它由 `lib/http.ts` 开，
+         由这里挂载；取消时跳 /login 是外壳的策略（见 `onLoginCancel`）。
+
+         它待在 `af-app` 里面而不是与它平级：外壳那个 `v-else` 的配对是 `<component
+         :is="page" v-if="isAuthPage && page">`，在中间插一个 `v-if` 会抢走
+         配对、整个外壳就再也不渲染了。而它自己 Teleport 到 body（焦点栈的
+         「背后 inert」才成立），所以放这儿与放在外面在 DOM 上完全一样。 -->
+    <LoginPrompt :open="loginPromptOpen" @close="dismissLoginPrompt" @go-login="onLoginCancel" />
 
     <!-- 键位帮助：最高层级，它解释其他所有。由 KEYS 渲染，不手写第二份。 -->
     <div
