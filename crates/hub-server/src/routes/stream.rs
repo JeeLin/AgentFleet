@@ -370,11 +370,12 @@ impl Bindings {
     }
 
     /// 某个 node 上被 Hub 侧关掉的通道（关面板时整节点清账之外的补偿）。
+    ///
+    /// 与 `HubChannels::drop_node` 是同一件事的两个形状，共用
+    /// [`hub_core::channels::retain_other_nodes`] 免得两处各写一遍 `retain`。
     pub fn drop_node(&self, node_id: &str) -> usize {
         let mut map = self.0.lock();
-        let before = map.len();
-        map.retain(|_, b| b.node_id != node_id);
-        before - map.len()
+        hub_core::channels::retain_other_nodes(&mut map, |_, b| b.node_id == node_id)
     }
 }
 

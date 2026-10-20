@@ -42,10 +42,32 @@ impl HubChannels {
 
     /// 丢弃某节点的全部通道记录（连接断开/被顶替，§7.1）。
     ///
-    /// 返回被清掉的记录条数。这是重连后信用从零重算的唯一入口。
+    /// 返回被清掉的**通道**条数（不是「删了几个 `node_id` 键」：一个节点
+    /// 的那张表里有几条，就报几条）。这是重连后信用从零重算的唯一入口。
     pub fn drop_node(&mut self, node_id: &str) -> usize {
         self.per_node.remove(node_id).map_or(0, |reg| reg.len())
     }
+}
+
+/// 从一张扁平账本里摘掉属于 `node_id` 的记录，返回摘掉条数。
+///
+/// **「按 node 清账」的第二张表必须走这里**（第一张是 [`HubChannels::drop_node`]，
+/// 它按 `node_id` 分表所以不需要筛）。两处各写一遍 `retain` 时，「新增第三张
+/// 按 node 索引的表」就会漏掉其中一张——漏的那张留着一台已下线设备的记录，
+/// 于是 `close_channel` 会对一条设备侧早已不存在的通道走完归属校验。
+///
+/// **返回值口径**：这里是「几条记录」，而 `HubChannels::drop_node` 是「几条
+/// 通道」。两者不必一致——各表的调用方只看自己那张表。
+pub fn retain_other_nodes<K, V>(
+    map: &mut HashMap<K, V>,
+    belongs_to_node: impl Fn(&K, &V) -> bool,
+) -> usize
+where
+    K: Eq + std::hash::Hash,
+{
+    let before = map.len();
+    map.retain(|k, v| !belongs_to_node(k, v));
+    before - map.len()
 }
 
 #[cfg(test)]
@@ -92,6 +114,15 @@ mod tests {
             Some(CREDIT_START),
             "§6：信用不跨节点共享"
         );
+    }
+
+    /// 清账的判据只看 node，不看表的形状——这条锁的是那个共用实现。
+    #[test]
+    fn retain_other_nodes_drops_only_the_named_node_and_counts_what_it_dropped() {
+        let mut flat: HashMap<&str, &str> = HashMap::from([("ch_a", "n_1"), ("ch_b", "n_2")]);
+        assert_eq!(retain_other_nodes(&mut flat, |_, node| *node == "n_1"), 1);
+        assert_eq!(flat.len(), 1);
+        assert_eq!(retain_other_nodes(&mut flat, |_, node| *node == "n_1"), 0);
     }
 
     #[test]
