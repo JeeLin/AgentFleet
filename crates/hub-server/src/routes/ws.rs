@@ -172,10 +172,17 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
             // ——改 status 的只有 `on_heartbeat`，且只往 online 改。所以
             // 「旧连接把 status 改回 offline、盖掉新连接的 online」不可能发生。
             state.outbound().remove(&conn_id);
-            // 通道账本**整节点丢弃**（§7.1）。这不是内存回收，而是信用重置的
-            // 唯一入口：只要旧记录还在，重连后按 channel_id 记账就会累积出
-            // 一个恒 > 0 的余额，等于没有流控（§6 末条）。
+            // 账本结算：设备断开时按 node 一次性清干净。**将来新增任何按
+            // node 记账的东西都要落进这份清单**——漏掉一份的症状是「Hub 认
+            // 为通道已清、对方还在发帧」，而两份账本相隔两个 crate，改一处
+            // 不会让另一处的测试变红（这也是它们原先分在两处各自的隐患）。
+            //
+            // 两个 `drop_node` 各清各的账本，不是重复实现：前者是每条通道的
+            // 信用（`Map<node, Registry>`，直接 remove key），后者是页面归属
+            // （`Map<channel, Binding>`，只能按字段 retain）。数据形状不同，
+            // 硬凑一个跨 crate 的共同抽象只会把两者都写坏。
             let dropped = state.channels().write().drop_node(&auth.node_id);
+            let orphaned = state.bindings().drop_node(&auth.node_id);
             if dropped > 0 {
                 tracing::debug!(
                     node_id = %auth.node_id,
@@ -195,7 +202,6 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
             if removed {
                 state.streams().device_status(&auth.node_id, "offline");
             }
-            let orphaned = state.bindings().drop_node(&auth.node_id);
             if orphaned > 0 {
                 tracing::debug!(
                     node_id = %auth.node_id,

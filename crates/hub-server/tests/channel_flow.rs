@@ -121,6 +121,41 @@ async fn exhausting_credit_makes_the_hub_issue_more() {
     assert!(c.delta > 0, "补的信用必须是正数: {}", c.delta);
 }
 
+/// 设备掉线后那条**信用**账本必须清干净。
+///
+/// 留着它，重连后按 channel_id 记账会累积出一个恒 > 0 的余额，等于没有
+/// 流控（§6 末条）。**这是两份按 node 记账的账本里的其中一份**（另一份是
+/// 页面归属 `Bindings`，由 `stream.rs` 的
+/// `a_channel_of_a_disconnected_device_is_forgotten` 验）：两份分处两个
+/// crate、数据形状也不同（`Map<node, Registry>` vs `Map<channel, Binding>`），
+/// 所以是两个各自的调用，改动一处不会让另一处的测试变红——这正是把它们
+/// 收进 `ws.rs` 同一处「账本结算」清单的理由。
+#[tokio::test]
+async fn disconnecting_drops_the_credit_book() {
+    let hub = Hub::boot().await;
+    let (mut est, node_id, _kp) = connect_enrolled(&hub).await;
+
+    est.send(&open_channel("ch-0", "terminal", Some(4)))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(hub.credit(&node_id, "ch-0"), Some(4), "先记上信用");
+
+    drop(est);
+    common::wait_until(Duration::from_secs(3), || {
+        hub.state.connections().get(&node_id).is_none()
+    })
+    .await;
+
+    // 信用账本：留着它，重连后按 channel_id 记账会累积旧余额，
+    // 等于没有流控（§6 末条）。
+    assert_eq!(
+        hub.credit(&node_id, "ch-0"),
+        None,
+        "设备断开后这份按 node 的信用账本必须清掉"
+    );
+}
+
 /// 标准③：关掉一条通道，另一条照常可用。
 #[tokio::test]
 async fn closing_one_channel_leaves_the_others_working() {
