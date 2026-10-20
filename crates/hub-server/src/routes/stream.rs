@@ -291,10 +291,53 @@ impl Bindings {
         self.0.lock().insert(channel_id.to_string(), b);
     }
 
+    /// 无条件摘表。**只给「刚亲手 `bind` 过、现在要撤」的回滚路径用**
+    /// （`open_channel` 下发失败）——`channel_id` 是本请求刚生成的，不存在
+    /// 归属争议。其余地方的摘表一律走 [`unbind_if_owned`]，那里才要验是谁的。
+    /// 测试用：多句柄指向**同一张表**。`Bindings` 本身不 `Clone`（那会拷表单，
+    /// 生产代码里「另一个结点是一份拷贝」是灾难），这里只在测试里拆开 `Arc`。
+    #[cfg(test)]
+    fn clone_arc_for_test_only(&self) -> Self {
+        Self(self.0.clone())
+    }
+
     fn unbind(&self, channel_id: &str) -> Option<ChannelBinding> {
         self.0.lock().remove(channel_id)
     }
 
+    /// 摘表，**但只摘归属 `subject` 的**。
+    ///
+    /// **归属校验与摘表在同一把锁里**：拆成「先 `unbind`、不符再 `bind` 放回去」
+    /// 会开一个窗口——非 owner 的并发请求在那瞬间 `get` 不到这条通道，被当成
+    /// 「已经关了」返回 204；放回去这一步还可能覆盖掉期间别人真的 `bind`。
+    /// 「不是你的就别动表」才是原子语义该有的形态。
+    pub(crate) fn unbind_if_owned(&self, channel_id: &str, subject: &str) -> UnbindOutcome {
+        let mut map = self.0.lock();
+        let Some(b) = map.get(channel_id) else {
+            return UnbindOutcome::NotFound;
+        };
+        if b.subject != subject {
+            return UnbindOutcome::NotYours;
+        }
+        // 锁没放过，上面 `get` 又刚命中，所以 `remove` 必给出记录；取不到就
+        // 当作 NotFound，不为一个不可能的情形 `unwrap`。
+        let Some(b) = map.remove(channel_id) else {
+            return UnbindOutcome::NotFound;
+        };
+        UnbindOutcome::Removed(b)
+    }
+}
+
+/// `unbind_if_owned` 的三种结局。**「不存在」与「不是你的」必须分开**：
+/// 前者是幂等的成功（面板早就关过），后者是 403——混成一个 `None` 会让
+/// 越权关闭看起来像「关过了」。
+pub(crate) enum UnbindOutcome {
+    Removed(ChannelBinding),
+    NotFound,
+    NotYours,
+}
+
+impl Bindings {
     pub(crate) fn get(&self, channel_id: &str) -> Option<ChannelBinding> {
         self.0.lock().get(channel_id).cloned()
     }
@@ -634,15 +677,15 @@ pub async fn close_channel(
     Extension(auth): Extension<Authenticated>,
     Path(channel_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let Some(binding) = state.bindings().unbind(&channel_id) else {
+    let binding = match state
+        .bindings()
+        .unbind_if_owned(&channel_id, auth.subject())
+    {
         // 幂等：Hub 侧已经没有了（面板早就关过，或设备掉线时整节点清掉了）
-        return Ok(StatusCode::NO_CONTENT.into_response());
+        UnbindOutcome::NotFound => return Ok(StatusCode::NO_CONTENT.into_response()),
+        UnbindOutcome::NotYours => return Err(ApiError::forbidden(err::FORBIDDEN)),
+        UnbindOutcome::Removed(b) => b,
     };
-    // 归属检查放在摘表**之后**：必须先确认是谁，才能动手删；不是本人的要放回去。
-    if binding.subject != auth.subject() {
-        state.bindings().bind(&channel_id, binding);
-        return Err(ApiError::forbidden(err::FORBIDDEN));
-    }
     let closing = protocol::channel::CloseChannel {
         channel_id: channel_id.clone(),
         reason: "closed by the console".to_string(),
@@ -933,6 +976,91 @@ pub(crate) fn test_binding(node_id: &str, subject: &str, acked: bool) -> Channel
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bound(subject: &str) -> ChannelBinding {
+        test_binding("n_1", subject, true)
+    }
+
+    /// 不是自己的通道：403，且**表里那条原样还在**。
+    ///
+    /// 旧实现是「先 `unbind`、不符再 `bind` 放回去」，中间存在一个窗口，回头
+    /// 并发的 owner 请求会 `get` 不到、被当成「已经关了」。这条用例锁的是
+    /// 「摘不到就别动表」——它是 TOCTOU 修复唯一可观测的不变式。
+    #[test]
+    fn unbinding_someone_elses_channel_leaves_it_alone() {
+        let b = Bindings::new();
+        b.bind("ch_1", bound("alice"));
+
+        assert!(matches!(
+            b.unbind_if_owned("ch_1", "bob"),
+            UnbindOutcome::NotYours
+        ));
+
+        let back = b.get("ch_1").expect("非 owner 的摘表不该碰到表里的记录");
+        assert_eq!(back.subject, "alice");
+    }
+
+    /// 「不存在」与「不是你的」必须是两种结局：前者 204（幂等），后者 403。
+    ///
+    /// 混成一个 `None` 会让越权关闭看起来像「关过了」。
+    #[test]
+    fn a_non_owner_cannot_make_the_binding_briefly_disappear() {
+        let b = Bindings::new();
+        b.bind("ch_1", bound("alice"));
+
+        let attacker = b.clone_arc_for_test_only();
+        let observer = b.clone_arc_for_test_only();
+        const ROUNDS: usize = 200_000;
+
+        let attack = std::thread::spawn(move || {
+            for _ in 0..ROUNDS {
+                // 非 owner：结果必须是 NotYours，且**不许碰到表**
+                assert!(matches!(
+                    attacker.unbind_if_owned("ch_1", "bob"),
+                    UnbindOutcome::NotYours
+                ));
+            }
+        });
+        let watch = std::thread::spawn(move || {
+            for _ in 0..ROUNDS {
+                assert!(
+                    observer.get("ch_1").is_some(),
+                    "非 owner 的尝试期间，绑定短暂消失了"
+                );
+            }
+        });
+        attack.join().expect("panic");
+        watch.join().expect("panic");
+    }
+
+    /// 不存在、不是你的、是你的 —— 三种结局互不相同。
+    #[test]
+    fn missing_and_not_yours_are_different_outcomes() {
+        let b = Bindings::new();
+        assert!(matches!(
+            b.unbind_if_owned("ch_gone", "alice"),
+            UnbindOutcome::NotFound
+        ));
+
+        b.bind("ch_1", bound("alice"));
+        assert!(matches!(
+            b.unbind_if_owned("ch_1", "bob"),
+            UnbindOutcome::NotYours
+        ));
+    }
+
+    /// owner 本人摘得到，且真的从表里消失。
+    #[test]
+    fn the_owner_unbinds_and_the_record_is_gone() {
+        let b = Bindings::new();
+        b.bind("ch_1", bound("alice"));
+
+        assert!(matches!(
+            b.unbind_if_owned("ch_1", "alice"),
+            UnbindOutcome::Removed(_)
+        ));
+        assert!(b.get("ch_1").is_none());
+    }
 
     /// 把一条订阅流渲染成 SSE 线上字节，读够 `want` 条事件就停。
     ///
