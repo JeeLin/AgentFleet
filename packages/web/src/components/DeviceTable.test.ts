@@ -1,3 +1,7 @@
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import { describe, expect, it, vi } from 'vitest'
 
 import DeviceTable from '@/components/DeviceTable.vue'
@@ -165,5 +169,22 @@ describe('DeviceTable：未上报与推值', () => {
       },
     })
     expect(w.element.textContent).toContain('推')
+  })
+})
+
+describe('DeviceTable：设备名与指纹这一格的竖向对齐', () => {
+  // jsdom 不布局，断言 getComputedStyle 的 align-items 会是假测试——
+  // 所以从组件源码取证：这一格必须是视觉居中，且名字必须可收缩。
+  const src = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), './DeviceTable.vue'),
+    'utf8',
+  )
+
+  it('设备名格用视觉居中对齐，不用 baseline（两个 span 不同字号）', () => {
+    expect(src).toMatch(/\.af-dev-name\s*\{[^}]*align-items:\s*center/)
+  })
+
+  it('名字可收缩：长名字走省略号，不把整列撑宽去挤别的列', () => {
+    expect(src).toMatch(/\.af-dev-name__name\s*\{[^}]*min-width:\s*0/)
   })
 })

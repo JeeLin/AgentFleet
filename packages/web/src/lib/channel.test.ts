@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath, URL as NodeUrl } from 'node:url'
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ChannelHub, channelErrorLabel } from './channel'
@@ -505,5 +508,25 @@ describe('CSRF 只在三个上行端点上', () => {
     expect(headers.get('X-CSRF-Token')).toBe('tok-123')
     vi.restoreAllMocks()
     document.cookie = 'af_csrf=; Max-Age=0; Path=/'
+  })
+})
+
+describe('resize 与 flushPending 的守卫同源', () => {
+  // 两个函数各写一遍判据的后果是形状会漂：曾一个写成三条件合并、另一个拆成
+  // 两条。jsdom 读不到 private 方法，所以从源码取证两者都走 canPush()。
+  const src = readFileSync(fileURLToPath(new NodeUrl('./channel.ts', import.meta.url)), 'utf8')
+
+  function body(name: string): string {
+    const m = src.match(new RegExp(`${name}\\([^)]*\\): void \\{([\\s\\S]*?)\\n  \\}`))
+    expect(m, `${name} 没找到`).not.toBeNull()
+    return m?.[1] ?? ''
+  }
+
+  it('两边都调 canPush()，不自己拼判据', () => {
+    expect(body('resize')).toContain('canPush()')
+    expect(body('flushPending')).toContain('canPush()')
+    // 自己拼判据的两个信号：channelId / canSend 直接出现在函数体里
+    expect(body('resize')).not.toMatch(/this\.channelId|hub\.canSend\(\)/)
+    expect(body('flushPending')).not.toMatch(/this\.channelId|hub\.canSend\(\)/)
   })
 })

@@ -400,7 +400,7 @@ class ChannelHandleImpl implements ChannelHandle {
   }
 
   resize(cols: number, rows: number): void {
-    if (!this.channelId || this.current !== 'ready' || !this.hub.canSend()) {
+    if (!this.canPush()) {
       // 尺寸与按键不同：**最新一次就是对的**，没有乱序风险，所以断线期间
       // 记下来、重连后补发一次。丢掉它只会让 PTY 一直按旧宽度折行。
       this.pendingSize = { cols, rows }
@@ -412,10 +412,18 @@ class ChannelHandleImpl implements ChannelHandle {
   /** 补发待定的尺寸。流恢复在线时由 Hub 调。 */
   flushPending(): void {
     const size = this.pendingSize
-    if (!size || !this.channelId || this.current !== 'ready') return
-    if (!this.hub.canSend()) return
+    if (!size || !this.canPush()) return
     this.pendingSize = null
     this.postResize(size.cols, size.rows)
+  }
+
+  /**
+   * 「现在能不能往上推一帧」的唯一判据。`resize` 与 `flushPending` 共用它——
+   * 两边各写一遍的后果是形状会漂（曾一个写成三条件合并、另一个拆成两条），
+   * 而漂移的那一项正是最难复现的那种：只在「刚连上就发尺寸」时出现。
+   */
+  private canPush(): boolean {
+    return Boolean(this.channelId) && this.current === 'ready' && this.hub.canSend()
   }
 
   private postResize(cols: number, rows: number): void {

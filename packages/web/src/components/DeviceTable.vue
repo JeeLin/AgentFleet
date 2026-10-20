@@ -103,7 +103,7 @@ function offlineReason(device: DeviceSummary): string {
         >
           <td><StateBadge :state="d.status" :derived="d.derived" /></td>
           <td class="af-dev-name">
-            <span class="af-truncate">{{ d.name }}</span>
+            <span class="af-truncate af-dev-name__name">{{ d.name }}</span>
             <span class="af-fp af-t-mute af-dev-id" :title="d.id">{{ d.key_fingerprint }}</span>
           </td>
           <td class="af-t-mute">{{ d.platform || '—' }}</td>
@@ -143,9 +143,11 @@ function offlineReason(device: DeviceSummary): string {
   border-radius: var(--af-radius-md);
   overflow: auto;
 }
+/* 竖向居中而不是基线对齐：两个 span 不同字号（名字 13px / 指纹 10px），
+   baseline 对齐时基线与视觉中心不重合，指纹会偏离格子中心。 */
 .af-dev-name {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--af-space-3);
   color: var(--af-fg-primary);
   min-width: 0;
@@ -153,6 +155,11 @@ function offlineReason(device: DeviceSummary): string {
 .af-dev-id {
   font-size: var(--af-text-2xs);
   letter-spacing: 0.01em;
+}
+/* flex 子项默认 min-width:auto，长名字不会收缩、会把整列撑宽去挤别的列。
+   置 0 才让 .af-truncate 的省略号真正起作用。 */
+.af-dev-name__name {
+  min-width: 0;
 }
 .af-caps {
   display: flex;
