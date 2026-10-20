@@ -545,6 +545,35 @@ describe('FilesPanel：panel 域的两个键', () => {
     expect(w.emitted('goto')).toBeUndefined()
   })
 
+  it('焦点在本面板之外时三个键都不生效（一个处理器、一次焦点判定）', () => {
+    const w = mount({ cwd: ['src'], listings: listings(ROOT, SRC), preview: TEXT })
+    const ta = w.element.querySelector<HTMLTextAreaElement>('.af-files__edit')!
+    ta.value = 'zzz'
+    ta.dispatchEvent(new Event('input'))
+
+    const outside = document.createElement('div')
+    document.body.appendChild(outside)
+    try {
+      for (const e of [
+        new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true }),
+        new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true, cancelable: true }),
+      ]) {
+        outside.dispatchEvent(e)
+        expect(e.defaultPrevented).toBe(false)
+      }
+      expect(w.emitted('goto')).toBeUndefined()
+      expect(w.emitted('save')).toBeUndefined()
+
+      // 面板外的 Space 也不展开任何一行（cwd 是 src，所以这一层里的目录是 src/lib）
+      const row = treeRows(w).find((r) => r.dataset.path === 'src/lib') as HTMLElement
+      outside.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true }))
+      expect(row.getAttribute('aria-expanded')).toBe('false')
+      expect(w.emitted('list')).toBeUndefined()
+    } finally {
+      outside.remove()
+    }
+  })
+
   it('已经在根上时 Backspace 不动（没有上一级）', () => {
     const w = mount({ cwd: [], listings: listings(ROOT) })
     w.element

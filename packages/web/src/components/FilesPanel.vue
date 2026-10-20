@@ -32,7 +32,7 @@
    把「谁抢到 `file:save`」变成挂载顺序问题。panel 域的键本来就只在焦点位于
    本面板时有意义——局部监听器的作用域恰好就是这个域，不需要全局表参与。
    **宿主若改为在 SessionPage 里注册 `file:save` / `file:up`，请删掉
-   `onPanelKeydown`，否则会存两次。**
+   `onKeydown`，否则会存两次。**
 
    **Space 是本组件自己接的（唯一一处偏离 listbox，注释在下）**：
    `listbox.ts` 的 `toggle()` 见到行上有 `aria-expanded` 就**自己翻 DOM 属性
@@ -330,34 +330,10 @@ const treeEl = ref<HTMLElement | null>(null)
 const hostEl = ref<HTMLElement | null>(null)
 let handle: ListboxHandle | null = null
 
-/**
- * Space 自己接（理由见文件头）。
- *
- * 用**捕获阶段**而不是「先注册一个冒泡监听器」：同一元素上的两个冒泡监听
- * 器按注册顺序调用，那会让「谁先拿到 Space」取决于 `onMounted` 里的语句
- * 顺序——改一行就换一个行为。捕获阶段在语义上就是「比导航层更早」。
- */
-function onSpaceCapture(e: KeyboardEvent): void {
-  if (e.key !== ' ' || e.isComposing) return
-  const el = treeEl.value
-  if (!el) return
-  const target = e.target
-  if (!(target instanceof HTMLElement) || !el.contains(target)) return
-  const row = target.closest<HTMLElement>('[data-row]')
-  if (!row || row.dataset.kind !== 'dir') return
-  // 越界目录不展开：它没有「里面有什么」这回事（§7.4 ①）
-  if (row.dataset.outside === 'true') return
-  const path = row.dataset.path ?? ''
-  if (!path) return
-  e.preventDefault()
-  e.stopPropagation()
-  toggleDir(path)
-}
-
 onMounted(() => {
+  hostEl.value?.addEventListener('keydown', onKeydown, true)
   const el = treeEl.value
   if (!el) return
-  el.addEventListener('keydown', onSpaceCapture, true)
   handle = attach(el, {
     role: 'tree',
     // ↑↓ 到头不绕回：树不是转盘，绕回会让「到底了」这件事看不出来
@@ -390,29 +366,58 @@ onMounted(() => {
 })
 
 /**
- * panel 域的两个键：`⌃S` 保存 / `Backspace` 上一级（§4.2 键位表）。
+ * 面板的键盘入口：一个捕获阶段挂在**根元素**上的处理器，按焦点落在哪个区
+ * 域分派（树 / 编辑区）。
  *
- * **只在焦点落在本面板内时生效**（`contains(e.target)`）：`Backspace` 在
- * 编辑区里是「删一个字符」——不判焦点的话，用户在编辑区里退格会变成
- * 「跳到上一级目录」，而那一次跳走还会丢掉未保存的改动。
+ * **必须是捕获阶段**：Space 要抢在 `listbox.ts` 的导航处理器之前，而那个
+ * 处理器挂在树上（根的后代）——冒泡阶段里后代永远比根先拿到键。同一元素
+ * 上挂两个冒泡监听器也不行：那会让「谁先拿到 Space」取决于 `onMounted`
+ * 里的语句顺序，改一行就换一个行为。
  *
- * `⌃S` 一律 `preventDefault`：浏览器的「保存网页」在文件面板里永远不是用户
- * 想要的那件事。
+ * **三个键只挂一处、只判一次焦点**：分三个监听器写就得在三处各判一次
+ * 「焦点在不在本面板里」，而漏判那一处的后果是面板外的退格被吃掉。
  */
-function onPanelKeydown(e: KeyboardEvent): void {
-  if (!(e.target instanceof HTMLElement) || !hostEl.value?.contains(e.target)) return
+function onKeydown(e: KeyboardEvent): void {
+  const target = e.target instanceof HTMLElement ? e.target : null
+  if (!target || !hostEl.value?.contains(target)) return
+  if (e.isComposing) return
+
+  if (e.key === ' ') {
+    toggleRowOnSpace(e, target)
+    return
+  }
   if (e.key === 's' && (e.ctrlKey || e.metaKey)) {
+    // 浏览器的「保存网页」在文件面板里永远不是用户想要的那件事
     e.preventDefault()
     if (canEdit.value && dirty.value && !props.ended) onSave()
     return
   }
   // 输入区内不抢 Backspace：那是在删字符（§4.2「单键在输入区内不抢」）
-  if (e.key === 'Backspace' && !isTypingTarget(e.target)) {
+  if (e.key === 'Backspace' && !isTypingTarget(target)) {
     const depth = props.cwd.length
     if (depth === 0) return
     e.preventDefault()
     emit('goto', depth - 1)
   }
+}
+
+/**
+ * Space 展开 / 收起焦点所在的目录行（自己接的理由见文件头）。
+ *
+ * 只认树内的目录行：别处的 Space 该干什么还干什么（按钮的「按下」）。
+ */
+function toggleRowOnSpace(e: KeyboardEvent, target: HTMLElement): void {
+  const el = treeEl.value
+  if (!el || !el.contains(target)) return
+  const row = target.closest<HTMLElement>('[data-row]')
+  if (!row || row.dataset.kind !== 'dir') return
+  // 越界目录不展开：它没有「里面有什么」这回事（§7.4 ①）
+  if (row.dataset.outside === 'true') return
+  const path = row.dataset.path ?? ''
+  if (!path) return
+  e.preventDefault()
+  e.stopPropagation()
+  toggleDir(path)
 }
 
 function isTypingTarget(el: HTMLElement): boolean {
@@ -421,7 +426,7 @@ function isTypingTarget(el: HTMLElement): boolean {
 }
 
 onBeforeUnmount(() => {
-  treeEl.value?.removeEventListener('keydown', onSpaceCapture, true)
+  hostEl.value?.removeEventListener('keydown', onKeydown, true)
   handle?.detach()
   handle = null
 })
@@ -558,7 +563,7 @@ function humanBytes(n: number | null): string {
 </script>
 
 <template>
-  <div ref="hostEl" class="af-fpane af-files" @keydown="onPanelKeydown">
+  <div ref="hostEl" class="af-fpane af-files">
     <!-- ② 面包屑：每一层都可见，越界那一层标红 -->
     <div class="af-files__crumbs" role="navigation" aria-label="工作区路径">
       <template v-for="(c, i) in crumbs" :key="`${c.depth}:${c.path}`">
