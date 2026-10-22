@@ -285,6 +285,15 @@ function ensureChannel(tab: TabMeta, panel: PanelName): ChannelHandle {
     ws.views[panel].state = state
     ws.views[panel].error = handle.errorCode()
     ws.views[panel].dropped = handle.dropped()
+    // 会话结束 / 断连把这条通道标成 `closed`（`ChannelHub.onSessionState`）。
+    // 此时若还有一次保存在飞，它的 `write` 回帧永远不会来——通道都关了。
+    // 不复位 `saving` 的话保存按钮永久禁用（`:disabled="dirty || saving || ended"`），
+    // 而用户能看到的唯一线索是「⌃S 按了没反应」。静默的按钮比一条错更难查。
+    if (state === 'closed') {
+      ws.saving = false
+      ws.loading.clear()
+      ws.readingPath = null
+    }
     // 通道刚建好：把想问而没问成的那一层补上（files 的取数不走 `send` 的
     // 丢弃语义，见 `pendingFiles` 头注释）。终端不需要这一步——它没有
     // 「打开时该问的第一件事」，输出是设备自己推的。

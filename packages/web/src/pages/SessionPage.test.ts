@@ -558,6 +558,41 @@ describe('面板正文是 13b / 13c 的真组件，不是 13a 的占位', () => 
     expect(w.element.querySelector('[data-write-error]')).toBeNull()
   })
 
+  it('会话结束时飞着的保存必须复位 saving，否则保存按钮永久禁用', async () => {
+    const { w, src } = await mountWorkbench()
+    await openFiles(w)
+    await touchFiles(w)
+    await frame(w, src(), {
+      op: 'read',
+      path: 'a.txt',
+      size: 2,
+      kind: 'text',
+      truncated: false,
+      text: 'ab',
+    })
+    // 弄出改动，让保存按钮可点（`:disabled="!dirty || saving || ended"`）
+    const area = w.element.querySelector<HTMLTextAreaElement>('.af-files__edit')
+    if (!area) throw new Error('no editor')
+    area.value = 'abc'
+    area.dispatchEvent(new Event('input'))
+    await flush(w)
+
+    const save = () => w.element.querySelector<HTMLButtonElement>('[data-save]')
+    expect(save()?.disabled).toBe(false)
+    save()?.click()
+    await flush(w)
+    // 保存在飞：`write` 回帧还没来，按钮此时确实该禁用
+    expect(save()?.disabled).toBe(true)
+
+    // 会话结束了（`ChannelHub.onSessionState` 把该会话的通道标成 closed）：
+    // `write` 回帧永远不会来，但按钮必须重新可点。
+    src()?.emit('session.state', { session_id: 's_1', state: 'ended' })
+    await flush(w)
+
+    expect(save()?.disabled).toBe(false)
+    expect(w.element.querySelector('[data-write-error]')).toBeNull()
+  })
+
   it('`write` 回帧只有失败那一次进④：ok 为 true 或缺失都不过错（清错归发送方）', async () => {
     const { w, src } = await mountWorkbench()
     await openFiles(w)
