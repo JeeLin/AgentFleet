@@ -116,6 +116,22 @@ def read_lines(path):
         return f.read().split('\n')
 
 
+def is_marker(line):
+    """这一行是不是一条**标注本身**，而不是「在散文里提到这个词」。
+
+    文档注释（`//!`）里常常写「已就地标注 `coverage: excluded`」这类说明——
+    那是**关于标注的说明**，不是标注。把它当标注会凭空造出孤儿条目。
+    判据：`//`（或行尾 `//`）之后紧跟 `coverage: excluded`。
+    """
+    idx = line.find('//')
+    while idx >= 0:
+        rest = line[idx + 2:].lstrip()
+        if rest.startswith('coverage: excluded'):
+            return True
+        idx = line.find('//', idx + 2)
+    return False
+
+
 def comment_blocks(lines):
     """标注所在的注释段 -> [(start1, end1)]（1-based，闭区间）。
 
@@ -126,7 +142,7 @@ def comment_blocks(lines):
     blocks = []
     n = len(lines)
     for i, l in enumerate(lines):
-        if 'coverage: excluded' not in l:
+        if 'coverage: excluded' not in l or not is_marker(l):
             continue
         j = i
         while j - 1 >= 0 and lines[j - 1].lstrip().startswith('//') \
@@ -312,16 +328,23 @@ for path, line, reason in rows:
 # 反向：就地标注 → 清单。一条标注如果没有对应的登记行，就是孤儿标注：
 # 它声称「这里无法触达」，却没有任何一行真的因此被豁免——要么理由不成立
 # （那几行其实已被覆盖），要么登记漏了。两者都是门禁该拦住的。
+#
+# 例外：`#[cfg(test)]` 块内的标注不参与孤儿判定。测试代码里写
+# 「这个 assert 只在 pipe2 失败时有意义」是**解释性说明**，不是申请豁免——
+# 测试模块压根不需要登记例外（它本来就不在「 coverage 必须100% 」的生产口径里）。
+# 要求它们每条都对应一行登记，只会逼人在之后删掉这些有用的解释。
 orphans = []
 by_path = {}
 for path, line, reason in rows:
     by_path.setdefault(path, []).append(line)
 mf = marker_files()
 for path in mf:
-    markers, _ = info_for(path)
+    markers, regions = info_for(path)
     claimed = by_path.get(path, [])
     used = {owner_marker(markers, line) for line in claimed}
     for marker_line, text in markers:
+        if marker_line in regions:
+            continue
         if marker_line not in used:
             orphans.append((path, marker_line, text))
 
