@@ -311,7 +311,10 @@ cargo llvm-cov --workspace --all-targets                  # 明细（找未覆�
   `// coverage: excluded — <理由>` 注明，并在 step6 报告中逐条列出。
   例外是少数，不是常规手段。
 - **例外登记在 `coverage-exceptions.txt`，由 `scripts/check-coverage.sh` 强制核对。**
-  该文件**由就地标注机械重建**（表头写了重建口径），所以清单与代码不会各说各话。
+  该文件管的是**行集合**（未覆盖行必须登记、登记必须仍有效）；
+  每条登记的**理由**锚在源码里就近的 `// coverage: excluded — …` 就地标注上，
+  由 `scripts/coverage-exceptions.sh --check` 核对（不跑 cargo，秒级）。
+  清单里的理由可以是人工精修过的更具体版本，`--check` 会把它们列出来。
 
   > 为什么不直接让工具跳过：`cargo-llvm-cov` 没有行级排除能力
   > （`#[coverage(off)]` 在 rustc 1.99 仍是实验特性），而唯一可用的
@@ -319,7 +322,9 @@ cargo llvm-cov --workspace --all-targets                  # 明细（找未覆�
   > 所以例外只能**显式登记 + 脚本强制比对**，而不是让工具静默跳过。
 
   ```bash
-  scripts/check-coverage.sh   # 覆盖率门禁（含例外双向核对）
+  scripts/check-coverage.sh          # 覆盖率门禁：例外行集合双向核对
+  scripts/coverage-exceptions.sh --check   # 例外理由的锚点核对（秒级，可进 CI）
+  scripts/coverage-exceptions.sh --rebuild # 从就地标注重建整张表（需一次 llvm-cov）
   ```
 
   **别拿汇总表的 `Lines` 百分比当门禁口径**：`TOTAL` 的 `Missed Lines`

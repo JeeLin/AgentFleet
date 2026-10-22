@@ -13,7 +13,7 @@ for arg in "$@"; do
   case "$arg" in
     --strict-anchors) STRICT_ANCHORS=1 ;;
     -h | --help)
-      sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+      awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
       exit 0 ;;
     *)
       echo "未知参数：$arg（--help 看用法）" >&2
@@ -97,14 +97,18 @@ ALIASES = {
     'ai-gateway': 'docs/architecture/ai-gateway.md',
     'inference': 'docs/architecture/inference.md',
 }
-# 中文简称：歧义较大的（协议/产品/开发/决策）逐一显式钉死，不做猜测
+# 中文简称。值是 (路径, 匹配方式)：
+#   'bare'     正文里可以裸匹配（`协议`、`设计规范`）；
+#   'anchored' 必须带「:行号」才认（`产品:92`）——裸词「产品」「开发」「决策」
+#              是正文里的普通词（开发环境、产品决策），裸匹配会把散文误判成
+#              文档提及，进而让 § 锚点解析到错的文档。
 ZH_ALIASES = {
-    '设计规范': 'docs/design-system.md',
-    '规范': 'docs/design-system.md',
-    '协议': 'docs/architecture/protocol.md',
-    '产品': 'docs/PRODUCT.md',
-    '开发': 'docs/DEVELOPMENT.md',
-    '决策': 'docs/DECISIONS.md',
+    '设计规范': ('docs/design-system.md', 'bare'),
+    '规范': ('docs/design-system.md', 'bare'),
+    '协议': ('docs/architecture/protocol.md', 'bare'),
+    '产品': ('docs/PRODUCT.md', 'anchored'),
+    '开发': ('docs/DEVELOPMENT.md', 'anchored'),
+    '决策': ('docs/DECISIONS.md', 'anchored'),
 }
 # A 轨的 §N.N 若紧跟在这些扩展名之后（tokens.css §13 / app.js §x），指的是
 # 原型资产或代码文件自己的编号系统，不是 docs 的节号，按测试标准明示除外。
@@ -121,10 +125,12 @@ def resolve(tok):
         base = os.path.basename(t)
         if base.endswith('.md'):
             base = base[:-3]
-        if base in ALIASES and os.path.exists(ALIASES[base]):
-            return ALIASES[base]
-        if base in ZH_ALIASES:
-            return ZH_ALIASES[base]
+        # 中文别名的「锚定写法」带行号（`产品:92`）：先按别名查，再按去掉行号查。
+        for cand_base in (base, base.rsplit(':', 1)[0] if base.rsplit(':', 1)[-1].isdigit() else base):
+            if cand_base in ALIASES and os.path.exists(ALIASES[cand_base]):
+                return ALIASES[cand_base]
+            if cand_base in ZH_ALIASES:
+                return ZH_ALIASES[cand_base][0]
     for cand in (t, 'docs/' + t, 'docs/architecture/' + t, '.mdflow/milestones/' + t):
         if os.path.exists(cand):
             return cand
@@ -160,11 +166,18 @@ def headings(path):
 
 # 带 .md 的文档标识（允许路径前缀与前导 .）：`docs/x.md` / `x.md` / `.mdflow/…/x.md`
 MD_PATH = r'\.?[A-Za-z0-9_][A-Za-z0-9_\-/\.]*\.md'
-# 裸别名（不含 .md）：design-system / protocol / 设计规范 / 规范 / …
-BARE_ALIAS = (r'(?:design-system|protocol|PRODUCT|DEVELOPMENT|DECISIONS|BUGS|AGENTS|README'
-              r'|security|scheduling|session-and-trajectory|task-continuity'
-              r'|workspace-and-sync|ai-gateway|inference|设计规范|规范|协议)')
-MENTION = re.compile(r'`?((?:' + MD_PATH + r')|(?:' + BARE_ALIAS + r')):?(?:\d+(?:-\d+)?)?`?')
+# 裸别名（不含 .md）：由上面两张表**派生**，不另抄一份。
+# 抄一份的后果已经发生过：ZH_ALIASES 里的「产品/开发/决策」当初没抄进
+# BARE_ALIAS，扫描根本匹配不到它们，resolve() 的中文分支成了死代码。
+_BARE = sorted(set(ALIASES) | {k for k, (_, m) in ZH_ALIASES.items() if m == 'bare'},
+               key=len, reverse=True)
+BARE_ALIAS = '(?:' + '|'.join(re.escape(k) for k in _BARE) + ')'
+# 必须带「:行号」的中文别名
+_ZH_ANCHORED = sorted((k for k, (_, m) in ZH_ALIASES.items() if m == 'anchored'),
+                       key=len, reverse=True)
+ZH_ANCHORED = '(?:' + '|'.join(re.escape(k) for k in _ZH_ANCHORED) + r')\:\d+'
+MENTION = re.compile(r'`?((?:' + MD_PATH + r')|(?:' + BARE_ALIAS + r')):?(?:\d+(?:-\d+)?)?`?'
+                    r'|`?(' + ZH_ANCHORED + r')`?')
 SECTION = re.compile(r'§\s*(\d+(?:\.\d+)*)')
 LINEANCHOR = re.compile(r'`?(' + MD_PATH + r'):(\d+)`?')
 # 「原 `x.md:N`」= 指向历史版本的行号（文件已改过），只查文件存在。
@@ -209,9 +222,10 @@ def collect_mentions(lines):
     out = []
     for i, line in enumerate(lines, 1):
         for m in MENTION.finditer(line):
-            rp = resolve(m.group(1))
+            tok = m.group(1) if m.group(1) is not None else m.group(2)
+            rp = resolve(tok)
             if rp:
-                out.append((i, m.start(), rp, m.group(1)))
+                out.append((i, m.start(), rp, tok))
     return out
 
 
