@@ -46,9 +46,14 @@ packages/
 ### 门禁（已有）
 
 `.github/workflows/ci.yml` 跑**门禁**，与本地 `mise run ci` 是同一串：
-check → fmt → lint → test → **cov-gate**（覆盖率 100% 阻塞）→ web-check / web-test / web-build。
+check → fmt → lint → test → **cov-gate**（覆盖率 100% 阻塞）→ **cov-anchors**（例外理由的锚点核对）
+→ web-check / web-test / web-build。
 工具链版本只写在 `mise.toml` 的 `[tools]` 一处，workflow 从那里读——
 覆盖率数值跨工具链不可比，版本写两处迟早只改一处。
+
+**门禁清单写两处（`mise.toml` 的 `[tasks.ci].depends` 与 `ci.yml` 的 steps），改一边必须改另一边**：
+漏改的那份会让 CI 少跑一道门禁而没人发现——少跑的那一道不会红，它只是不存在。
+新增门禁时先加进 `mise.toml`，再把同一条抄进 `ci.yml`。
 
 **只在推 tag（`v*`）时触发**：全量插桩的覆盖率是最贵的一步，
 每个 push / PR 都跑一遍等于把 runner 时间烧在没定稿的提交上。
