@@ -1,8 +1,8 @@
 # 本地全量门禁的 CI 版。
 #
 # 步骤与 `mise.toml` 的 `[tasks.ci]` 一一对应（check / fmt / lint / test /
-# cov-gate / web-ci）。**改一边必须改另一边**：两份清单各写一遍时，漏改的
-# 那份会让 CI 少跑一道门禁而没人发现。
+# cov-gate / cov-anchors / web-ci）。**改一边必须改另一边**：两份清单各写一遍时，
+# 漏改的那份会让 CI 少跑一道门禁而没人发现。
 #
 # 工具链版本只写在 `mise.toml` 的 `[tools]` 一处，本文件从那里读——
 # 覆盖率数值跨工具链不可比，版本写两处迟早只改一处。
@@ -82,6 +82,9 @@ jobs:
 
       - name: cov-gate（mise run cov-gate）
         run: scripts/check-coverage.sh
+
+      - name: cov-anchors（mise run cov-anchors）
+        run: scripts/coverage-exceptions.sh --check
 
       - name: web-check（mise run web-check）
         working-directory: packages/web
