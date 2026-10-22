@@ -201,10 +201,12 @@ JSON 写进无界 `Vec` → **Hub OOM，一台设备打垮整个 Hub（连带所
 
 #### 6.1.1 落地情况（M0 子任务 8）
 
-- Hub 是通道的**被动方**：`open_channel` 由 node 发，Hub 记账后立刻回
-  `channel_ready`。M0 没有 connector 协商，所以不存在「等 Ready」的窗口；
-  即便如此仍保留 5s 超时扫描（`expired_ready`），将来引入协商后卡住也不会
-  退化成「node 干等、用户看终端卡住却没一句人话」。
+- Hub 是通道的**主动方**：`open_channel` 由 **Hub 发**（页面 `POST /api/channels`
+  → Hub 生成 `channel_id` 并下发），设备收下后回 `channel_ready` + 首帧。
+  Hub 侧账本的建表入口就在同一条路径上（`routes/stream.rs::open_ledger`），
+  建表与下发在同一把写锁的同一段里完成。M0 没有 connector 协商，所以不存在
+  「等 Ready」的窗口；即便如此仍保留 5s 超时扫描（`expired_ready`），将来
+  引入协商后卡住也不会退化成「node 干等、用户看终端卡住却没一句人话」。
 - **开通道即置 Ready** 是必需的，不是简化：信用账本只对 Ready 的通道记账，
   停在 `Opening` 的话 node 发来的数据全部回 `NotReady`，而 node 还在等
   `channel_ready`——两边互等。
