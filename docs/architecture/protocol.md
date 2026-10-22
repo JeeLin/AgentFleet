@@ -132,7 +132,7 @@ Hub 未初始化（`secret` 表无 `hub.password`）时，**拒绝所有 enroll*
 | `channel_data` | 双向 | 通道内数据（PTY 字节、文件读写结果等） |
 | `channel_credit` | Hub→node | 信用补充 `{ channel_id, delta }`（**独立于 `channel_data`**，见 §6） |
 | `close_channel` | 双向 | `{ channel_id, reason }` |
-| `exec_request` / `exec_result` | Hub→node→Hub | 一次性命令（无 PTY） |
+| exec（**无独立消息类型**） | Hub→node→Hub | 一次性命令（无 PTY）：`open_channel{connector:"exec"}` 发起，结果随 `channel_data` 回来（`{ stdout_b64, stderr_b64, timed_out }`）。协议里**没有** `exec_request` / `exec_result` 这两个类型 |
 | `err` | 双向 | 通用错误 `{ code, message }` |
 
 > 通道类型（terminal/files/git）各自的 payload schema 随 M1 定义；本里程碑先立框架。

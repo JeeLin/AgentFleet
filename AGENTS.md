@@ -113,10 +113,14 @@ match T.get(idx) { Some(&c) => out.push(c as char), None => break }
 |---|---|---|
 | `unwrap_used` / `expect_used` / `panic` | deny | 进程级退出 |
 | `indexing_slicing` | deny | 越界 panic |
-| `unwrap_or_default` | deny | 把「取不到」静默变成空值 |
 | `arithmetic_side_effects` | **不开** | 连 `i += 1` / `len() * 2` 都命中，开只会得到满屏 allow；溢出靠 `overflow-checks` + 测试 |
 
 `clippy --all-targets` 必须**零 warning**，所以上面每条都是 deny 而非 warn。
+
+**`unwrap_or_default` 不在这张表里**：clippy 没有这条规则，它由
+`scripts/check.sh` 的 **C4** 承担（扫 `crates/*/src/**`，按每个 `#[cfg(test)]`
+块分别划生产/测试分界——块内放行，块外即生产代码）。改那条规则要改 `check.sh`，
+不是改 `Cargo.toml`。
 
 **测试代码豁免由根目录 `clippy.toml` 的 `allow-*-in-tests` 承担，不要手写
 `#[allow]` 豁免头**——测试里 `unwrap` 失败就该炸，panic 消息比 `match`
@@ -249,7 +253,7 @@ scripts/check.sh                                  # grep 门禁（依赖收敛/�
 cargo fmt --check
 cargo clippy --workspace --all-targets
 cargo test --workspace
-cargo llvm-cov --workspace --all-targets          # 覆盖率，见下
+scripts/check-coverage.sh                         # 覆盖率门禁（100% 阻塞 + 例外双向核对），见下
 ```
 
 Web（`packages/web`，Vue 3 + Bun + Vite）：
@@ -269,7 +273,8 @@ Vite 7 的 `engines` 是 `^20.19.0 || >=22.12.0`，且 `@vitejs/plugin-vue` 用
 实则是工具链版本问题。
 
 四道门禁的 mise 入口是 `mise run web-ci`（`web-check` + `web-test` +
-`web-build`），`mise run ci` 已 depends 它。
+`web-build`）。**本地全量门禁是 `mise run ci`**（check + fmt + lint + test +
+`cov-gate` + web-ci），CI 跑的是同一串（见 `.github/workflows/ci.yml`）。
 
 **前端不设行覆盖率阈值**——这是**度量工具不适用**，不是放水：Rust 侧 100% 依赖
 「行覆盖率」这个度量，而 Vue SFC 模板 / 脚本 / 样式混排无法按行表达执行与否，
@@ -282,28 +287,31 @@ xterm.js 这类第三方渲染库的内部逻辑也不归我们测。前端替�
 不得记为通过；也不要把「环境因素导致失败」写成「环境限制」——
 磁盘、工具链这类**可修复因素**应先排除再下结论。
 
-### 覆盖率门禁：100%（阻塞）
+### 覆盖率门禁：零未登记未覆盖行（阻塞）
 
-**行覆盖率 100% 是硬性门禁**，不是报告项：
+**「每一行没测到的代码都有名字」是硬性门禁**，不是报告项：
 
 ```bash
 cargo llvm-cov --workspace --all-targets --summary-only   # 汇总
 cargo llvm-cov --workspace --all-targets                  # 明细（找未覆盖行）
 ```
 
-- **阈值 100%**：`TOTAL` 行的 `Lines` 必须为 `100.00%`。
-  少一行即不通过，步骤 3 不得进入 MARK。
-- 未覆盖的代码只有两种合法出路：**补测试**，或**删掉**（死代码不该存在）。
+- **判定口径是集合相等，不是百分比**：门禁取
+  `cargo llvm-cov --show-missing-lines` 的 **Uncovered 段**
+  （整行一次都没执行到的行），与 `coverage-exceptions.txt` 的登记行集合
+  **逐行双向比对**：
+  - 未覆盖但没登记 → **失败**（有一行代码默默没被测到）；
+  - 登记了但已被覆盖 → **失败**（例外清单退化成永久豁免）。
+- 未覆盖的代码只有三条合法出路：**补测试**、**删掉**（死代码不该存在）、
+  **显式登记例外并给出理由**。
   **禁止**用 `#[cfg(test)]` 之外的 `#[allow]`、`--ignore-tests`、
   排除文件等手段"做"出 100%——那是伪造。
-- **不可覆盖的例外必须显式标注并说明理由**：确实无法触达的分支
+- **例外必须就地标注并说明理由**：确实无法触达的分支
   （如 `unreachable!()` 兜底、平台专属路径）用
   `// coverage: excluded — <理由>` 注明，并在 step6 报告中逐条列出。
   例外是少数，不是常规手段。
 - **例外登记在 `coverage-exceptions.txt`，由 `scripts/check-coverage.sh` 强制核对。**
-  该脚本比对 `cargo llvm-cov --show-missing-lines`：每条未覆盖行都必须在
-  清单里登记，且清单里的行必须**确实仍未覆盖**——双向核对，
-  防止例外清单退化成永久豁免。
+  该文件**由就地标注机械重建**（表头写了重建口径），所以清单与代码不会各说各话。
 
   > 为什么不直接让工具跳过：`cargo-llvm-cov` 没有行级排除能力
   > （`#[coverage(off)]` 在 rustc 1.99 仍是实验特性），而唯一可用的
@@ -314,9 +322,22 @@ cargo llvm-cov --workspace --all-targets                  # 明细（找未覆�
   scripts/check-coverage.sh   # 覆盖率门禁（含例外双向核对）
   ```
 
-  当前全部例外都是**防御性兜底分支**（无法创建 OS 线程、ROLLBACK 必然成功、
-  `?` 的 Err 传播 region 等），**不含任何业务逻辑**。
-- **每轮审查都重跑**：步骤 5（代码审查）后新写的代码同样要满足 100%。
+  **别拿汇总表的 `Lines` 百分比当门禁口径**：`TOTAL` 的 `Missed Lines`
+  把「行执行了、但行内某个区域没走到」也算进去，所以它永远大于 Uncovered 段。
+  当前实测：`TOTAL` 的 `Lines` 覆盖 **97.89%**（16437 行 / 347 miss），
+  其中 Uncovered 段 **248 行**——差的 99 行是行内部分区域未命中
+  （`?` 的 Err 路径、宏的多行参数行这类分支变体），不是整行没测。
+  门禁只管后者。
+- 当前 248 条例外的构成：**生产 220 + 测试 28**（测试段内 `expect` / `assert!`
+  的消息行，绿的时候永远不执行）。生产的 220 条理由分属几个族：
+  **结构性不可达**（ROLLBACK 必然成功、闭锁信号量的 `AcquireError`、
+  serde 结构上不会失败的字段）、**资源耗尽型兜底**
+  （`pipe2` / `fcntl(F_DUPFD)` / `fork` 需 fd 表或进程表耗尽）、
+  **工具插桩限制**（`fork` 后的子进程没有 llvm-cov 计数器，
+  以及多行 `tracing!` / `format!` 的参数行、`%method()` 字段行的已知漏记）、
+  **依赖外部条件无法构造**（对端在收帧前消失）。
+  **不含任何业务逻辑。**
+- **每轮审查都重跑**：步骤 5（代码审查）后新写的代码同样要满足这个口径。
 
 ---
 

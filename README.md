@@ -76,7 +76,7 @@ mise install          # node 24 是硬需求（Vite 7 + plugin-vue 用到 node:c
 mise run dev
 
 # 同一台机器上起一台设备（debug 构建，连上面那个 Hub）
-mise run cli                    # 另一个终端里跑；改 crates/ 即重编重启
+mise run cli                    # 另一个终端里跑；改 crates/ 即重编重启；设备数据落在 data/node
 mise run cli-log -- -n 50       # 看设备日志（一次性命令，不经 watch）
 
 # 生产：前端先编译、产物嵌进二进制，然后单进程单端口
@@ -92,6 +92,7 @@ afcli run            # 默认连 ws://127.0.0.1:8080/ws；远程用 AFCLI_HUB_UR
 ```bash
 # Development: Hub on 8080 (loopback only) + Vite on 3002 with hot reload, proxying /api and /ws
 # Production: one process, one port, the built console embedded in the binary
+# Device: `mise run cli` starts afcli; its data dir is `data/node` (not the platform default)
 ```
 
 On first start the Hub prints a setup token to stderr (also written to `<data>/setup-token.txt`,

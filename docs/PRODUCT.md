@@ -77,7 +77,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 - **connector 插件化**：把 SSH / SFTP / MySQL / PostgreSQL / Redis / SQLite / S3 等协议做成插件按需加载；额外提供**网络抓包插件**与**端口转发插件**
 - **社交软件接入**：各 IM 作为 agent 的输入输出通道
 - **原生客户端**：客户端本身也是一个操作本机/服务器的 agent，可包裹开源软件实现
-- **AI Gateway**：把各平台（免费 + 付费）的模型 API 收敛成统一网关（见 §5.2 与 `docs/architecture/ai-gateway.md`）；本地模型推理**后置**，触发条件见该文 §4.6
+- **AI Gateway**：把各平台（免费 + 付费）的模型 API 收敛成统一网关（见 §5.2 与 `docs/architecture/ai-gateway.md`）；本地模型推理**后置**，触发条件见该文 §4 第 6 条
 
 ### 3.2.1 原「推后」项，现纳入第一版 / Now in the first release
 
@@ -156,7 +156,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 - **主线改为 AI Gateway**：把各平台（免费 + 付费）的模型 API 收敛成一个统一网关——
   统一端点 + 密钥托管 + 按 model/价格/延迟/可用性路由 + 故障转移 + 额度统计。
   上游先用现成 API；`Provider` trait 为将来的本地推理留口。
-- **本地推理不实现**，但保留为「触发条件满足时再做」的待办（见 `ai-gateway.md` §4.6）。
+- **本地推理不实现**，但保留为「触发条件满足时再做」的待办（见 `ai-gateway.md` §4 第 6 条）。
 - **理由**：Gateway 不需要 GPU、不需要等设备上线，部署当天可用；而分布式推理需要多台强设备
   在线且同 build。且 Gateway 路线下 Hub 只做「选上游并转发」，不再触碰约束 7 的红线。
 

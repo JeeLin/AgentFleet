@@ -3,7 +3,8 @@
 > AgentFleet Web 控制台的设计语言。**这是最高优先级产出**——原型会变，规范不该变。
 > M1 实现阶段（Vue 组件）照 §3 的组件契约写，前端照 §4 的交互范式接线。
 >
-> 规范正文只讲**是什么与为什么**；具体取值在 `prototype/assets/tokens.css`，
+> 规范正文只讲**是什么与为什么**；具体取值在 `packages/web/src/styles/tokens.css`
+> （原型那份 `prototype/assets/tokens.css` 只是转发 shim），
 > 可视化核对在 `prototype/components.html`，双击即可打开，零依赖零构建零网络请求。
 >
 > 决策背景见 `PRODUCT.md`（功能边界）与 `docs/architecture/`（协议与数据模型）。
@@ -58,7 +59,8 @@
 
 ## 2. 设计 token
 
-全部定义在 `prototype/assets/tokens.css`（129 个变量），那是被 grep 检查的唯一真相源。
+全部定义在 `packages/web/src/styles/tokens.css`（129 个变量），那是被 grep 检查的唯一真相源；
+原型那份 `prototype/assets/tokens.css` 只是转发 shim（`@import` 生产副本），不再抄一份内容。
 下面只写**判断依据**。
 
 ### 2.0 三条纪律
@@ -217,7 +219,8 @@
 
 ## 3. 基础组件契约
 
-22 组组件，全部在 `prototype/assets/components.css`（22 节：§0 复位 + §1–21 组件）。
+22 组组件，全部在 `packages/web/src/styles/components.css`（22 节：§0 复位 + §1–21 组件）；
+原型那份 `prototype/assets/components.css` 同样是转发 shim。
 状态一律用 `data-*` 属性表达（`data-state` / `data-open` / `data-inert` / `data-tone` /
 `data-level`），**不用 JS 加 class**——class 是样式实现，`data-*` 是契约。
 
@@ -1146,27 +1149,27 @@ Mock 形状 = 将来 API 的形状。前端只读。
 
 `prototype/index.html` 是入口。全部零依赖、双击即开、无网络请求。
 
-| 文件 | 内容 |
-|------|------|
-| `docs/design-system.md` | 本文件 |
-| `prototype/index.html` | 总览：IA、四条交互规则、色板、页面索引 |
-| `prototype/components.html` | **组件陈列页**：组件四态 + 尺寸档 + 禁用场景 |
-| `prototype/assets/tokens.css` | token 定义（129 个变量，每个带理由注释） |
-| `prototype/assets/components.css` | 组件样式（22 节，所有原型页共用） |
-| `prototype/assets/keynav.js` | **焦点栈 + 键位表**（`?` 面板由它渲染）——交互模型的唯一真相源 |
-| `prototype/assets/app.js` | 外壳注入、全站唯一一份 mock、Toast / Modal / 越界反馈 |
-| `prototype/session.html` | **会话工作台（重心）**——焦点栈、面板坞、轨迹抽屉、状态模拟 |
-| `prototype/sessions.html` | 会话列表：进行中 + 历史 |
-| `prototype/new-session.html` | 三步建会话，路径锁定 |
-| `prototype/devices.html` | 设备列表：三态、能力、资源余量、抽屉详情 |
-| `prototype/agents.html` | Agent 目录：只读聚合，与会话的区别 |
-| `prototype/settings.html` | 设置（M2，控件全禁用） |
-| `prototype/login.html` / `setup.html` | 认证：五种 / 三种错误态分开呈现 |
-| `prototype/panels/terminal.html` | terminal 面板：四态、尺寸协商、丢帧、断线不冻结 |
-| `prototype/panels/files.html` | files 面板：越界四路证据、大文件结论、键盘操作整棵树 |
-| ~~workspace.html~~ | **已删除**（本仓库无此文件）——见 §7.0 的否决项 |
-| ~~device.html~~ | **已删除**（本仓库无此文件）——M2，不留占位页（§5.2） |
-| ~~artifacts.html~~ | **已删除**（本仓库无此文件）——M2，不留占位页（§5.2） |
+| 文件 | 内容 | 实现侧对应文件 |
+|------|------|------|
+| `docs/design-system.md` | 本文件 | —（规范本体） |
+| `prototype/index.html` | 总览：IA、四条交互规则、色板、页面索引 | —（总览页，实现侧无对应页面） |
+| `prototype/components.html` | **组件陈列页**：组件四态 + 尺寸档 + 禁用场景 | 逐个组件在 `packages/web/src/components/` |
+| `prototype/assets/tokens.css` | token 定义（129 个变量，每个带理由注释） | `packages/web/src/styles/tokens.css`（**真相源**；原型这份是转发 shim） |
+| `prototype/assets/components.css` | 组件样式（22 节，所有原型页共用） | `packages/web/src/styles/components.css`（**真相源**；原型这份是转发 shim） |
+| `prototype/assets/keynav.js` | **焦点栈 + 键位表**（`?` 面板由它渲染）——交互模型的唯一真相源 | `packages/web/src/lib/keynav.ts`（+ `lib/shell-keys.ts`、`lib/focus.ts`） |
+| `prototype/assets/app.js` | 外壳注入、全站唯一一份 mock、Toast / Modal / 越界反馈 | `packages/web/src/App.vue`（外壳与导航）、`packages/web/src/page-chrome.css`（页面级样式）；数据改走 `packages/web/src/lib/api.ts` |
+| `prototype/session.html` | **会话工作台（重心）**——焦点栈、面板坞、轨迹抽屉、状态模拟 | `packages/web/src/pages/SessionPage.vue` + `components/PanelDock.vue` / `TerminalPanel.vue` / `FilesPanel.vue` / `TrajDrawer.vue` / `TabBar.vue` |
+| `prototype/sessions.html` | 会话列表：进行中 + 历史 | `packages/web/src/pages/SessionsPage.vue` + `components/SessionTable.vue` |
+| `prototype/new-session.html` | 三步建会话，路径锁定 | `packages/web/src/pages/NewSessionPage.vue` |
+| `prototype/devices.html` | 设备列表：三态、能力、资源余量、抽屉详情 | `packages/web/src/pages/DevicesPage.vue` + `components/DeviceTable.vue` |
+| `prototype/agents.html` | Agent 目录：只读聚合，与会话的区别 | `packages/web/src/pages/AgentsPage.vue` |
+| `prototype/settings.html` | 设置（M2，控件全禁用） | `packages/web/src/pages/SettingsPage.vue` |
+| `prototype/login.html` / `setup.html` | 认证：五种 / 三种错误态分开呈现 | `packages/web/src/pages/LoginPage.vue` / `SetupPage.vue` + `components/LoginPrompt.vue` |
+| `prototype/panels/terminal.html` | terminal 面板：四态、尺寸协商、丢帧、断线不冻结 | `packages/web/src/components/TerminalPanel.vue` + `lib/channel.ts` |
+| `prototype/panels/files.html` | files 面板：越界四路证据、大文件结论、键盘操作整棵树 | `packages/web/src/components/FilesPanel.vue` + `lib/files-path.ts` |
+| ~~workspace.html~~ | **已删除**（本仓库无此文件）——见 §7.0 的否决项 | — |
+| ~~device.html~~ | **已删除**（本仓库无此文件）——M2，不留占位页（§5.2） | — |
+| ~~artifacts.html~~ | **已删除**（本仓库无此文件）——M2，不留占位页（§5.2） | — |
 
 ### 9.1 焦点栈是本规范的核心机制
 
