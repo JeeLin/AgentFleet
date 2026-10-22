@@ -76,7 +76,7 @@ function createSession(device: DeviceSummary): void {
       <span class="af-t-mute"><span class="af-dot" style="color: var(--af-warn)"></span> 重连中 {{ reconnecting.length }}</span>
       <span class="af-t-mute"><span class="af-dot" style="color: var(--af-danger)"></span> 离线 {{ offline.length }}</span>
       <span class="af-spacer"></span>
-      <span class="af-t-mute af-t-num" style="font-size: var(--af-text-2xs)">共 {{ devices.length }} 台</span>
+      <span class="af-t-mute af-t-num" style="font-size: var(--af-text-sm)">共 {{ devices.length }} 台</span>
     </div>
 
     <div v-if="error" class="af-inline-error" role="alert">
@@ -136,7 +136,7 @@ function createSession(device: DeviceSummary): void {
 <style scoped>
 .af-dev-summary {
   margin-bottom: var(--af-space-5);
-  font-size: var(--af-text-xs);
+  font-size: var(--af-text-sm);
 }
 .af-inspect {
   margin-top: var(--af-space-5);
@@ -152,13 +152,13 @@ function createSession(device: DeviceSummary): void {
   display: grid;
   grid-template-columns: 88px 1fr;
   gap: var(--af-space-2) var(--af-space-4);
-  font-size: var(--af-text-xs);
+  font-size: var(--af-text-sm);
 }
 .af-kv__k {
   color: var(--af-fg-tertiary);
   text-transform: uppercase;
   letter-spacing: var(--af-tracking-label);
-  font-size: var(--af-text-2xs);
+  font-size: var(--af-text-sm);
   padding-top: 1px;
 }
 .af-kv__v {

@@ -1374,7 +1374,7 @@ onBeforeUnmount(() => {
   background: var(--af-surface-1);
   border-bottom: 1px solid var(--af-border-subtle);
   color: var(--af-fg-tertiary);
-  font-size: var(--af-text-xs);
+  font-size: var(--af-text-sm);
   line-height: var(--af-leading-snug);
 }
 /* 对话列获得焦点时不要画一个「整块被选中」的环：它是容器，不是控件 */
@@ -1396,7 +1396,7 @@ onBeforeUnmount(() => {
 .af-wb__convtxt {
   margin: 0;
   max-width: 68ch;
-  font-size: var(--af-text-sm);
+  font-size: var(--af-text-md);
   line-height: var(--af-leading-base);
   color: var(--af-fg-secondary);
 }

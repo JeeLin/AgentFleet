@@ -125,7 +125,7 @@ async function load(): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: var(--af-space-2);
-  font-size: var(--af-text-sm);
+  font-size: var(--af-text-md);
   line-height: var(--af-leading-base);
   color: var(--af-fg-secondary);
 }
@@ -154,6 +154,6 @@ async function load(): Promise<void> {
 }
 .af-foot {
   margin-top: var(--af-space-4);
-  font-size: var(--af-text-xs);
+  font-size: var(--af-text-sm);
 }
 </style>

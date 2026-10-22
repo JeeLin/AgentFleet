@@ -330,7 +330,7 @@ const PW_HINT_ID = 'setup-pw-hint'
   display: flex;
   flex-direction: column;
   gap: var(--af-space-2);
-  font-size: var(--af-text-xs);
+  font-size: var(--af-text-sm);
   color: var(--af-fg-tertiary);
   line-height: var(--af-leading-base);
 }
@@ -354,7 +354,7 @@ const PW_HINT_ID = 'setup-pw-hint'
   border-radius: var(--af-radius-md);
   background: var(--af-info-bg);
   color: var(--af-fg-secondary);
-  font-size: var(--af-text-sm);
+  font-size: var(--af-text-md);
   line-height: var(--af-leading-base);
 }
 .af-auth__note--warn {

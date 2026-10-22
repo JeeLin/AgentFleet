@@ -130,7 +130,7 @@ const ROWS: readonly Row[] = [
 }
 .af-settings__title {
   margin: 0;
-  font-size: var(--af-text-sm);
+  font-size: var(--af-text-md);
   font-weight: var(--af-weight-medium);
   color: var(--af-fg-primary);
 }

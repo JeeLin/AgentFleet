@@ -486,7 +486,7 @@ watch(
       <div class="af-help__box">
         <div class="af-help__head">
           <span class="af-panel__title">键位</span>
-          <span class="af-t-mute" style="font-size: var(--af-text-2xs)">
+          <span class="af-t-mute" style="font-size: var(--af-text-sm)">
             这张表就是键位实现本身——表里有的键才有 handler
           </span>
           <span class="af-spacer"></span>

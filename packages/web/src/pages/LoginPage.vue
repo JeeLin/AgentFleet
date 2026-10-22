@@ -184,7 +184,7 @@ const ERR_ID = 'login-error'
   border-radius: var(--af-radius-md);
   background: var(--af-info-bg);
   color: var(--af-fg-secondary);
-  font-size: var(--af-text-sm);
+  font-size: var(--af-text-md);
   line-height: var(--af-leading-base);
 }
 /* 未初始化是「去别处」而不是「这里填错了」：warn，不是 danger（§4.7） */

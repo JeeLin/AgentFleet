@@ -35,7 +35,7 @@
   background: var(--af-danger-bg);
   color: var(--af-danger-fg);
   border-radius: var(--af-radius-md);
-  font-size: var(--af-text-sm);
+  font-size: var(--af-text-md);
 }
 
 /** 把按钮画成链接。 */

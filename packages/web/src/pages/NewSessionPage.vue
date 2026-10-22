@@ -322,7 +322,7 @@ async function submit(): Promise<void> {
   margin-bottom: var(--af-space-4);
 }
 .af-keyhint {
-  font-size: var(--af-text-2xs);
+  font-size: var(--af-text-sm);
 }
 .af-opts {
   display: flex;
@@ -343,7 +343,7 @@ async function submit(): Promise<void> {
   border-left: 2px solid var(--af-border-default);
   border-radius: var(--af-radius-md);
   font-family: inherit;
-  font-size: var(--af-text-sm);
+  font-size: var(--af-text-md);
   color: var(--af-fg-secondary);
   cursor: pointer;
   transition: background-color var(--af-dur-instant) linear, border-color var(--af-dur-instant) linear;
@@ -379,12 +379,12 @@ async function submit(): Promise<void> {
   font-weight: var(--af-weight-medium);
 }
 .af-opt__meta {
-  font-size: var(--af-text-2xs);
+  font-size: var(--af-text-sm);
 }
 .af-opt__why {
   flex: 0 0 auto;
   align-self: center;
-  font-size: var(--af-text-xs);
+  font-size: var(--af-text-sm);
   color: var(--af-danger-fg);
 }
 .af-agentnote {
@@ -393,7 +393,7 @@ async function submit(): Promise<void> {
   border: 1px solid var(--af-border-default);
   border-left: 2px solid var(--af-border-strong);
   border-radius: var(--af-radius-md);
-  font-size: var(--af-text-sm);
+  font-size: var(--af-text-md);
   line-height: var(--af-leading-base);
   color: var(--af-fg-secondary);
   display: flex;
@@ -427,11 +427,11 @@ async function submit(): Promise<void> {
   display: flex;
   align-items: baseline;
   gap: var(--af-space-3);
-  font-size: var(--af-text-sm);
+  font-size: var(--af-text-md);
 }
 .af-sum__k {
   flex: 0 0 46px;
-  font-size: var(--af-text-2xs);
+  font-size: var(--af-text-sm);
   letter-spacing: var(--af-tracking-label);
   text-transform: uppercase;
   color: var(--af-fg-disabled);

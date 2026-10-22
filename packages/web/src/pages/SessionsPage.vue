@@ -183,7 +183,7 @@ function clearQuery(): void {
   width: 260px;
 }
 .af-keyhint {
-  font-size: var(--af-text-2xs);
+  font-size: var(--af-text-sm);
 }
 .af-sectionhead {
   display: flex;
@@ -192,7 +192,7 @@ function clearQuery(): void {
   margin-bottom: var(--af-space-3);
 }
 .af-hint {
-  font-size: var(--af-text-2xs);
+  font-size: var(--af-text-sm);
 }
 .af-gap {
   margin-top: var(--af-space-11);
