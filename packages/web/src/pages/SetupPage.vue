@@ -391,15 +391,4 @@ const PW_HINT_ID = 'setup-pw-hint'
 .af-auth__state {
   color: var(--af-warn-fg);
 }
-.af-link {
-  background: none;
-  border: 0;
-  padding: 0;
-  font-family: inherit;
-  font-size: inherit;
-  color: var(--af-accent-fg);
-  cursor: pointer;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
 </style>

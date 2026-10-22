@@ -19,7 +19,7 @@ import SessionTable from '@/components/SessionTable.vue'
 import type { DeviceSummary, SessionSummary } from '@/lib/api'
 import { listDevices, listSessions } from '@/lib/api'
 import { sessionTitle } from '@/lib/format'
-import { ApiError, NetworkError } from '@/lib/http'
+import { describeReadFailure } from '@/lib/http'
 import { navigate } from '@/router'
 
 const sessions = ref<SessionSummary[]>([])
@@ -51,14 +51,6 @@ const hasAny = computed(() => sessions.value.length > 0)
 
 onMounted(load)
 
-function errorLabel(err: unknown): string {
-  if (err instanceof ApiError) {
-    return err.code === 'session_expired' ? '登录已失效，请重新登录。' : `读会话列表失败（${err.code}）。`
-  }
-  if (err instanceof NetworkError) return 'Hub 连不上。检查 Hub 进程是否还在。'
-  return '读会话列表失败。'
-}
-
 async function load(): Promise<void> {
   loading.value = true
   error.value = null
@@ -68,7 +60,7 @@ async function load(): Promise<void> {
     sessions.value = list
     devices.value = devs
   } catch (err) {
-    error.value = errorLabel(err)
+    error.value = describeReadFailure(err, '会话列表')
   } finally {
     loading.value = false
   }
@@ -204,24 +196,5 @@ function clearQuery(): void {
 }
 .af-gap {
   margin-top: var(--af-space-11);
-}
-.af-skel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--af-space-2);
-}
-.af-skel .af-skeleton {
-  height: var(--af-row-compact);
-}
-.af-inline-error {
-  display: flex;
-  align-items: center;
-  gap: var(--af-space-4);
-  padding: var(--af-space-3) var(--af-space-4);
-  border: 1px solid var(--af-danger-line);
-  background: var(--af-danger-bg);
-  color: var(--af-danger-fg);
-  border-radius: var(--af-radius-md);
-  font-size: var(--af-text-sm);
 }
 </style>

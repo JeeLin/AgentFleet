@@ -81,7 +81,7 @@ onBeforeUnmount(() => {
           @focus="selectedId = s.id"
         >
           <td>
-            <button class="af-link" type="button" @click.stop="onOpen(s)">
+            <button class="af-link af-sess-title" type="button" @click.stop="onOpen(s)">
               {{ sessionTitle(s) }}
             </button>
             <span class="af-t-mute af-fp af-sess-id">{{ s.id }}</span>
@@ -110,22 +110,15 @@ onBeforeUnmount(() => {
   overflow: auto;
 }
 /* 标题是真按钮：Enter 的语义属于行，但「点标题进会话」是用户最自然的手势，
-   而且按钮天然键盘可达，不必再给行内造一条不可见的点击热区。 */
-.af-link {
-  background: none;
-  border: 0;
-  padding: 0;
+   而且按钮天然键盘可达，不必再给行内造一条不可见的点击热区。
+
+   「画成链接」的那份样式在 `src/page-chrome.css`（全局 `.af-link`）——
+   认证页与这里此前各写一份，而且已经分叉成两种外观。这里只留**布局**上
+   与表格单元格有关的那几条。 */
+.af-sess-title {
   margin-right: var(--af-space-3);
-  font-family: inherit;
   font-size: var(--af-text-sm);
-  color: var(--af-fg-primary);
-  cursor: pointer;
   text-align: left;
-}
-.af-link:hover {
-  color: var(--af-accent-fg);
-  text-decoration: underline;
-  text-underline-offset: 2px;
 }
 .af-sess-id {
   font-size: var(--af-text-2xs);

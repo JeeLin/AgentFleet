@@ -9,6 +9,7 @@ import {
   NetworkError,
   cookieValue,
   del,
+  describeReadFailure,
   getJson,
   postJson,
   readCsrfToken,
@@ -311,8 +312,9 @@ describe('request：403 的判据是「且 code === hub_not_initialized」，不
 
   it('401 不触发 setup 跳转：两件事说的是不同的事', async () => {
     fetchMock.mockResolvedValue(jsonResponse(401, { error: 'missing_session' }))
-    restore()
     await expect(request('/api/devices')).rejects.toBeInstanceOf(ApiError)
+    // 断言必须在 handler **仍然装着**时做：先 restore 再断言的话，
+    // 「没跳」是因为回调被摘掉了，而不是因为 401 不会触发它。
     expect(went).toEqual([])
   })
 })
@@ -378,5 +380,34 @@ describe('getJson / postJson / del', () => {
     const { init } = lastCall(fetchMock)
     expect(init.method).toBe('DELETE')
     expect(new Headers(init.headers).get(CSRF_HEADER)).toBe('tok')
+  })
+})
+describe('describeReadFailure（错误 → 用户可见文案）', () => {
+  it('session_expired 只有一种下一步：重新登录', () => {
+    expect(describeReadFailure(new ApiError(401, 'session_expired'), '设备列表')).toBe(
+      '登录已失效，请重新登录。',
+    )
+  })
+
+  it('同一个 session_expired 在不同名词下也是同一句话（只有名词在变）', () => {
+    const a = describeReadFailure(new ApiError(401, 'session_expired'), '设备列表')
+    const b = describeReadFailure(new ApiError(401, 'session_expired'), '会话列表')
+    expect(a).toBe(b)
+  })
+
+  it('别的错误码带上码字，便于排障', () => {
+    expect(describeReadFailure(new ApiError(403, 'forbidden'), '设备列表')).toBe(
+      '读设备列表失败（forbidden）。',
+    )
+  })
+
+  it('网络失败给的是「Hub 连不上」而不是「读 X 失败」', () => {
+    expect(describeReadFailure(new NetworkError(new Error('boom')), '设备列表')).toBe(
+      'Hub 连不上。检查 Hub 进程是否还在。',
+    )
+  })
+
+  it('不认识的错误给兜底文案', () => {
+    expect(describeReadFailure(new Error('boom'), '设备列表')).toBe('读设备列表失败。')
   })
 })

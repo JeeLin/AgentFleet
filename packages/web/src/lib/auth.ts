@@ -41,7 +41,7 @@
    任何人可请求的资源，setup token 的全部意义就没了。
    =========================================================================== */
 
-import { ApiError, getJson, postJson } from './http'
+import { ApiError, NetworkError, getJson, postJson } from './http'
 
 /**
  * `GET /api/setup` 的响应体。只在**未初始化**时拿到（已初始化是 409）。
@@ -66,12 +66,6 @@ export interface LoginResult {
 
 /** `POST /setup` 的请求体。`username` 后端收下但忽略（单用户）。 */
 export interface SetupInput {
-  password: string
-  username?: string
-}
-
-/** `POST /login` 的请求体。 */
-export interface LoginInput {
   password: string
   username?: string
 }
@@ -107,9 +101,40 @@ export function submitSetup(token: string, input: SetupInput): Promise<SetupResu
   })
 }
 
-/** 换 session + CSRF cookie。成功由浏览器落到 `af_session` / `af_csrf` 上。 */
-export function submitLogin(input: LoginInput): Promise<LoginResult> {
-  return postJson<LoginResult>('/login', input)
+/**
+ * 换 session + CSRF cookie。成功由浏览器落到 `af_session` / `af_csrf` 上。
+ *
+ * **不走 `http.ts`**：那一层把每一个 401 都算作「session 过期」并弹重新
+ * 登录框，而 `POST /login` 自己的 401 是 `invalid_credentials`——**密码错**。
+ * 两者混在一起就是死循环（弹框 → 密码错 → 再弹框，弹框盖住登录框）。
+ * 所以这里直接 `fetch`，并把非 2xx 转成同一个 `ApiError`。
+ *
+ * 登录页与过期弹框共用这一份：两份等价的 `postLogin` 分布两处时，
+ * 「错误码怎么读」迟早会漂。
+ */
+export async function postLogin(password: string): Promise<LoginResult> {
+  let res: Response
+  try {
+    res = await fetch('/login', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    })
+  } catch (cause) {
+    throw new NetworkError(cause)
+  }
+  if (!res.ok) {
+    let code = `http_${res.status}`
+    try {
+      const body = (await res.json()) as { error?: unknown }
+      if (typeof body.error === 'string' && body.error.length > 0) code = body.error
+    } catch {
+      // 非 JSON 错误体（反代错误页、空 502）→ 保留 `http_<status>` 兜底
+    }
+    throw new ApiError(res.status, code)
+  }
+  return (await res.json()) as LoginResult
 }
 
 /** 一条可呈现的错误：一句话主文 + 可选的「下一步」。 */
@@ -158,7 +183,8 @@ export function describeLoginFailure(err: unknown): AuthFailure {
         goTo: '/setup',
       }
     case 'session_expired':
-      // `http.ts` 在 401 上统一抛这个：它已经跳了一次 /login，这里只解释原因。
+      // `http.ts` 在 401 上统一抛这个：那一下它已经**弹了重新登录框**
+      // （不是整页跳转，见 `http.ts` 的文件头），这里只解释原因。
       return {
         code: err.code,
         next: '登录态已失效（cookie 过期或签名不匹配）。重新登录即可。',

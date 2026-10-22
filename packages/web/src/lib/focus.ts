@@ -6,16 +6,23 @@
 
    ── 为什么「关闭只有一条路」是纪律 ──────────────────────────────────
    Esc、点遮罩、点关闭按钮、路由跳转前——四条路四条实现，只要有一条忘了
-   还焦点，键盘用户就「丢了」。所以任何浮层组件都**只**调 `focusPop`，
+   还焦点，键盘用户就「丢了」。所以任何浮层组件都**只**调 `pop`，
    自己不许调 `el.focus()`。
 
-   ── 与原型 keynav.js 的差异 ─────────────────────────────────────────
-   原型用一个模块级 `stack` 装浮层，而 `help:toggle`、`list:*` 等 handler
-   挂在同一个 `AF` 上，于是「关掉一个浮层」需要它知道是哪一个容器
-   （`focusPop(stack[stack.length - 1].container)`）。本模块把它拆开：
-   栈只管容器，键位派发在 `keynav.ts`。子任务 13d 的轨迹抽屉注册
-   `list` 之外的键位时不必碰栈，两者互不知情。
+   ── 与 keynav.ts 的分工 ─────────────────────────────────────────────
+   键位派发在 `keynav.ts`，本模块只管**容器**：栈、inert、焦点落点。
+   两者互不知情，于是轨迹抽屉注册 `list` 之外的键位时不必碰栈。
+
+   本模块实现了 `focus:next` / `focus:prev`（浮层开着时 Tab 在浮层内循环），
+   但它们**不住在 keynav 的全局 handler 表里**——那一表只放「全局单键」，
+   而 Tab 的语义取决于当前最内层容器。所以这里声明一次实现，让 `?` 面板
+   不把它们标成「（未实现）」。
    =========================================================================== */
+
+import { declareImplemented } from './keynav'
+
+declareImplemented('focus:next')
+declareImplemented('focus:prev')
 
 interface FocusLayer {
   container: HTMLElement

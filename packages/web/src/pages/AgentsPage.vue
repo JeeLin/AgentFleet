@@ -18,7 +18,7 @@ import { onMounted, ref } from 'vue'
 import EmptyState from '@/components/EmptyState.vue'
 import type { AgentSummary, DeviceSummary } from '@/lib/api'
 import { listAgents, listDevices } from '@/lib/api'
-import { ApiError, NetworkError } from '@/lib/http'
+import { describeReadFailure } from '@/lib/http'
 import { navigate } from '@/router'
 
 const agents = ref<AgentSummary[]>([])
@@ -36,9 +36,7 @@ async function load(): Promise<void> {
     agents.value = ags
     devices.value = devs
   } catch (err) {
-    if (err instanceof NetworkError) error.value = 'Hub 连不上。检查 Hub 进程是否还在。'
-    else if (err instanceof ApiError) error.value = `读 Agent 目录失败（${err.code}）。`
-    else error.value = '读 Agent 目录失败。'
+    error.value = describeReadFailure(err, 'Agent 目录')
   } finally {
     loading.value = false
   }
@@ -157,24 +155,5 @@ async function load(): Promise<void> {
 .af-foot {
   margin-top: var(--af-space-4);
   font-size: var(--af-text-xs);
-}
-.af-skel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--af-space-2);
-}
-.af-skel .af-skeleton {
-  height: var(--af-row-compact);
-}
-.af-inline-error {
-  display: flex;
-  align-items: center;
-  gap: var(--af-space-4);
-  padding: var(--af-space-3) var(--af-space-4);
-  border: 1px solid var(--af-danger-line);
-  background: var(--af-danger-bg);
-  color: var(--af-danger-fg);
-  border-radius: var(--af-radius-md);
-  font-size: var(--af-text-sm);
 }
 </style>

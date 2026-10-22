@@ -16,7 +16,7 @@ import EmptyState from '@/components/EmptyState.vue'
 import DeviceTable from '@/components/DeviceTable.vue'
 import type { DeviceSummary } from '@/lib/api'
 import { listDevices } from '@/lib/api'
-import { ApiError, NetworkError } from '@/lib/http'
+import { describeReadFailure } from '@/lib/http'
 import { percent, relativeTime } from '@/lib/format'
 import { navigate } from '@/router'
 
@@ -31,26 +31,13 @@ const offline = computed(() => devices.value.filter((d) => d.status === 'offline
 
 onMounted(load)
 
-function errorLabel(err: unknown): string {
-  if (err instanceof ApiError) {
-    switch (err.code) {
-      case 'session_expired':
-        return '登录已失效。刷新后重新登录。'
-      default:
-        return `读设备列表失败（${err.code}）。`
-    }
-  }
-  if (err instanceof NetworkError) return 'Hub 连不上。检查 Hub 进程是否还在。'
-  return '读设备列表失败。'
-}
-
 async function load(): Promise<void> {
   loading.value = true
   error.value = null
   try {
     devices.value = await listDevices()
   } catch (err) {
-    error.value = errorLabel(err)
+    error.value = describeReadFailure(err, '设备列表')
   } finally {
     loading.value = false
   }
@@ -150,26 +137,6 @@ function createSession(device: DeviceSummary): void {
 .af-dev-summary {
   margin-bottom: var(--af-space-5);
   font-size: var(--af-text-xs);
-}
-.af-skel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--af-space-2);
-}
-.af-skel .af-skeleton {
-  height: var(--af-row-compact);
-}
-.af-inline-error {
-  display: flex;
-  align-items: center;
-  gap: var(--af-space-4);
-  padding: var(--af-space-3) var(--af-space-4);
-  margin-bottom: var(--af-space-5);
-  border: 1px solid var(--af-danger-line);
-  background: var(--af-danger-bg);
-  color: var(--af-danger-fg);
-  border-radius: var(--af-radius-md);
-  font-size: var(--af-text-sm);
 }
 .af-inspect {
   margin-top: var(--af-space-5);

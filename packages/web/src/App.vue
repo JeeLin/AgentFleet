@@ -13,6 +13,10 @@
    弹框、由这里挂载与「取消时跳 /login」。这是外壳而不是页面的事——跳转是
    一个策略（见 `onLoginCancel` 的注释）。
 
+   ⑤ **整页跳转的唯一出口**（`fullPageNavigate`）：403 `hub_not_initialized`
+   的跳转也住在这里（`setNotInitializedHandler`），所以 `lib/` 里没有第二个
+   会整页跳转的地方。
+
    ── 折叠态为什么不是「藏起来」 ───────────────────────────────────
    `⌃B` 把侧栏收成 44px 图标轨，导航项仍在（`aria-label` 补偿被
    `display:none` 掉的名字）。折叠是省空间，不是删功能——所以没有
@@ -23,10 +27,12 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import EmptyState from '@/components/EmptyState.vue'
 import LoginPrompt from '@/components/LoginPrompt.vue'
-import { pop, push } from '@/lib/focus'
-import { SCOPE_LABEL, KEYS, unimplemented } from '@/lib/keynav'
+import { pop, push, topContainer, trapTab } from '@/lib/focus'
+import { SCOPE_LABEL, KEYS, hintOf, missingActs, onHandlersChanged, PREFIX_LEAD } from '@/lib/keynav'
 import { logout } from '@/lib/api'
+import { setNotInitializedHandler } from '@/lib/http'
 import { loginPromptOpen, dismissLoginPrompt } from '@/lib/login-prompt'
+import { pageTitle } from '@/lib/page-titles'
 import { bindShell, installShellKeys } from '@/lib/shell-keys'
 import { interceptLink, navigate, route, startRouter, LOGIN_PATH } from '@/router'
 
@@ -71,26 +77,63 @@ const isAuthPage = computed(() => AUTH_ROUTES.has(route.value.name))
 
 /* ---------------------------------------------------------------- 侧栏 */
 
+/**
+ * 一级导航。**标签与键位提示都从 `keynav.ts` / `page-titles.ts` 读**：
+ * 手抄一份的话，改了键位表而忘了改这里，侧栏就会显示一个按了没反应的键
+ *（症状与「改了 `PREFIX` 而侧栏没跟着变」完全一样）。
+ */
 const NAV = [
   {
     group: '会话',
     items: [
-      { to: '/sessions', label: '会话', icon: '◈', hint: 'g s', match: ['sessions', 'session'] },
-      { to: '/sessions/new', label: '新建会话', icon: '✚', hint: 'g n', match: ['new-session'] },
+      {
+        to: '/sessions',
+        label: pageTitle('sessions'),
+        icon: '◈',
+        act: 'nav:sessions',
+        match: ['sessions', 'session'],
+      },
+      {
+        to: '/sessions/new',
+        label: pageTitle('new-session'),
+        icon: '✚',
+        act: 'nav:new-session',
+        match: ['new-session'],
+      },
     ],
   },
   {
     group: '环境',
     items: [
-      { to: '/devices', label: '设备', icon: '▣', hint: 'g d', match: ['devices'] },
-      { to: '/agents', label: 'Agent 目录', icon: '☰', hint: 'g a', match: ['agents'] },
+      {
+        to: '/devices',
+        label: pageTitle('devices'),
+        icon: '▣',
+        act: 'nav:devices',
+        match: ['devices'],
+      },
+      {
+        to: '/agents',
+        label: pageTitle('agents'),
+        icon: '☰',
+        act: 'nav:agents',
+        match: ['agents'],
+      },
     ],
   },
   {
     group: '系统',
-    items: [{ to: '/settings', label: '设置', icon: '⚙', hint: 'g ,', match: ['settings'] }],
+    items: [
+      {
+        to: '/settings',
+        label: pageTitle('settings'),
+        icon: '⚙',
+        act: 'nav:settings',
+        match: ['settings'],
+      },
+    ],
   },
-] as const
+]
 
 const rail = ref<'open' | 'collapsed'>('open')
 
@@ -111,30 +154,81 @@ function onNavClick(e: MouseEvent, anchor: HTMLAnchorElement): void {
 
 const helpOpen = ref(false)
 const helpEl = ref<HTMLElement | null>(null)
-const helpColumns = computed(() => KEYS)
-const missing = computed(() => unimplemented())
+
+/**
+ * 「（未实现）」的 act 清单。
+ *
+ * **必须随 handler 表变化**：注册发生在组件挂载期——晚于首屏渲染。
+ * 一个只读模块级 Map 的 `computed` 会在第一次求值后把结论冻住，于是
+ * 后注册的 act 永远标着「（未实现）」，而用户按下去是有反应的。
+ *
+ * 所以这里用 `onHandlersChanged` 把「表变了」这件事接进响应式状态：
+ * 表是模块级可变状态，它自己不会触发 Vue 的更新。
+ */
+const missing = ref<string[]>(missingActs())
+
+/**
+ * 订阅「handler 表变了」。
+ *
+ * **必须在这里订阅**（而不是 `onMounted`）：注册发生在子组件的挂载期，
+ * 而子组件的 `onMounted` 先于父组件的 `onMounted` 跑——晚一步就漏掉了
+ * 第一次注册，「（未实现）」的标记会停在首屏那一刻的结论上。
+ */
+const stopHandlers = onHandlersChanged(() => {
+  missing.value = missingActs()
+})
+
+/**
+ * Esc 与 Tab。**只在帮助是栈顶时生效**——`pop()` 按栈顶语义工作，
+ * 而键盘事件是全站共用的：不判栈顶的话，帮助盖在轨迹抽屉上时一次 Esc
+ * 会关掉两层。
+ */
+function onHelpKeydown(e: KeyboardEvent): void {
+  if (e.isComposing) return
+  const root = helpEl.value
+  if (!root || topContainer() !== root) return
+  if (e.key === 'Tab') trapTab(e, root)
+}
 
 /* ------------------------------------------------- session 过期重新登录 */
 
 /**
+ * 整页跳转的**唯一**出口。
+ *
+ * 整页跳转（而不是 `navigate()`）的语义是「这一页我不要了」——JS 上下文和
+ * 内存里的东西全都清掉。`navigate` 只换 `route`（`history.pushState` +
+ * 一个 ref），那些东西原样留在那儿。
+ *
+ * **为什么住在外壳**：整页跳转是一个**策略**，不是某个错误码的技术后果。
+ * 401 的技术后果只是「接下来没有凭据可用」，那只需要一个框（`http.ts`
+ * 弹框）；403 `hub_not_initialized` 的技术后果是「Hub 还没有用户」，那需要
+ * 一整页 setup。两条路都归到同一个出口，于是「哪里会整页跳走」只有一处答案。
+ */
+function fullPageNavigate(path: string): void {
+  location.assign(path)
+}
+
+/**
+ * 403 `hub_not_initialized` 的跳转策略住在外壳。
+ *
+ * `http.ts` 只报事实（这是哪个错），「跳到哪」是策略——与 401 弹框同一个
+ * 模式。它在 setup 体里注册（不是 `onMounted`）：首屏的请求就可能撞上
+ * 403，而子组件的 `onMounted` 早于父组件的。
+ */
+const stopNotInitialized = setNotInitializedHandler(fullPageNavigate)
+
+/**
  * 用户在重新登录框里点「取消」：**这一条**才真的去 `/login`。
  *
- * 为什么是 `location.assign` 而不是 `navigate()`：`navigate` 只换 `route`
- * （`history.pushState` + 一个 ref），JS 上下文和内存里的东西全都留着。而
- * cancel 的语义正是「这一页我不要了」——session 刚过期过，SAP 里那个
+ * 取消的语义正是「这一页我不要了」——session 刚过期过，SPA 里那个
  * `LoginPage` 还会接着用它自己那份过期前的状态。一次真正的换页把这些
  * 一次清干净，`/login` 从零开始读 cookie。
- *
- * 为什么跳转住在外壳，而 `http.ts` 只管弹框：整页跳转是一个**策略**，
- * 不是「401 的技术后果」——技术后果只是「接下来没有凭据可用」，那只需要
- * 一个框。把跳转放在唯一有「外壳」这个概念的地方，`lib/` 里就不会再有
- * 第二个会整页跳转的地方（要找「哪里有跳转」时只消看这里）。
  *
  * `replace` 不用：用户是**主动放弃**当前页面的，按后退该能回到它（回到一个
  * 又一次 401 的页面，比「后退键失灵」诚实）。
  */
 function onLoginCancel(): void {
-  location.assign(LOGIN_PATH)
+  fullPageNavigate(LOGIN_PATH)
 }
 
 /**
@@ -150,7 +244,7 @@ async function onLogout(): Promise<void> {
     // 清不掉也要走：留在页面上的人只会看到一堆 401 弹框，而 `/login`
     // 是唯一能重新拿凭据的地方。
   }
-  location.assign(LOGIN_PATH)
+  fullPageNavigate(LOGIN_PATH)
 }
 
 function openHelp(): void {
@@ -165,9 +259,19 @@ function openHelp(): void {
 
 function closeHelp(): boolean {
   if (!helpOpen.value) return false
+  const el = helpEl.value
+  // **只在帮助是栈顶时才由它响应 Esc**：`layer:escape` 的契约是「关掉最上
+  // 层，返回是否真的关了一层」，而键盘事件是全站共用的——不判栈顶的话，
+  // `?` → `t` → `Esc` 会在这里关一层、又在轨迹抽屉自己的 handler 里关一层，
+  // 一次按键关掉两个浮层。抽屉自己会接住属于它的那次 Esc。
+  if (el && topContainer() !== el) return false
   helpOpen.value = false
-  // 关闭只有一条路：`pop()` 负责还焦点。这里不许自己 `el.focus()`。
-  pop()
+  // 关闭只有一条路：`pop(el)` 负责还焦点。这里不许自己 `el.focus()`。
+  //
+  // **必须带上这一层**：无参 `pop()` 关的是**栈顶**，而栈顶可能不是帮助
+  // （`?` → `t` → `Esc` 时栈顶是轨迹抽屉）——那会把别人的层弹出焦点栈，
+  // 留下一层指向已移除元素的空壳，之后 Esc 再也关不掉任何浮层。
+  if (el) pop(el)
   return true
 }
 
@@ -212,6 +316,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   stopKeys?.()
   stopRouter?.()
+  stopHandlers()
+  stopNotInitialized()
   if (helpOpen.value) closeHelp()
 })
 
@@ -237,28 +343,12 @@ watch(
 
 /* ---------------------------------------------------------------- 标题 */
 
-const docTitle = computed(() => {
-  switch (route.value.name) {
-    case 'sessions':
-      return '会话'
-    case 'new-session':
-      return '新建会话'
-    case 'session':
-      return '会话工作台'
-    case 'devices':
-      return '设备'
-    case 'agents':
-      return 'Agent 目录'
-    case 'settings':
-      return '设置'
-    case 'login':
-      return '登录'
-    case 'setup':
-      return '首次 setup'
-    default:
-      return '找不到页面'
-  }
-})
+/**
+ * 浏览器标题。**页面名从 `page-titles.ts` 读**——侧栏、帮助面板、浏览器
+ * 标题说的是同一批页面名，各抄一份时改一处要改三处，漏一处的症状是
+ * 「侧栏叫『Agent』、浏览器标题还叫『Agent 目录』」。
+ */
+const docTitle = computed(() => pageTitle(route.value.name))
 
 watch(
   docTitle,
@@ -291,12 +381,12 @@ watch(
           :href="item.to"
           :aria-current="isCurrent(item.match) ? 'page' : undefined"
           :aria-label="item.label"
-          :title="`${item.label}（${item.hint}）`"
+          :title="`${item.label}（${hintOf(item.act)}）`"
           @click="onNavClick($event, $event.currentTarget as HTMLAnchorElement)"
         >
           <span class="af-sidebar__icon" aria-hidden="true">{{ item.icon }}</span>
           <span class="af-sidebar__item-text">{{ item.label }}</span>
-          <span class="af-sidebar__hint" aria-hidden="true">{{ item.hint }}</span>
+          <span class="af-sidebar__hint" aria-hidden="true">{{ hintOf(item.act) }}</span>
         </a>
       </div>
       <span class="af-spacer"></span>
@@ -356,9 +446,9 @@ watch(
       <span class="af-statusbar__item"><span class="af-dot" style="color: var(--af-ok)"></span>Hub 已连接</span>
       <span class="af-statusbar__item af-t-mute">单用户 · 自托管</span>
       <span class="af-spacer"></span>
-      <span class="af-statusbar__item af-statusbar__key"><kbd>?</kbd> 键位</span>
-      <span class="af-statusbar__item af-statusbar__key"><kbd>g</kbd> 跳转</span>
-      <span class="af-statusbar__item af-statusbar__key"><kbd>⌃B</kbd> 侧栏</span>
+      <span class="af-statusbar__item af-statusbar__key"><kbd>{{ hintOf('help:toggle') }}</kbd> 键位</span>
+      <span class="af-statusbar__item af-statusbar__key"><kbd>{{ PREFIX_LEAD }}</kbd> 跳转</span>
+      <span class="af-statusbar__item af-statusbar__key"><kbd>{{ hintOf('rail:toggle') }}</kbd> 侧栏</span>
     </footer>
 
     <!-- session 过期时弹出的密码框（§4.7「需要别的动作」那一列）。401 的一条
@@ -370,8 +460,18 @@ watch(
          配对、整个外壳就再也不渲染了。而它自己 Teleport 到 body（焦点栈的
          「背后 inert」才成立），所以放这儿与放在外面在 DOM 上完全一样。 -->
     <LoginPrompt :open="loginPromptOpen" @close="dismissLoginPrompt" @go-login="onLoginCancel" />
+  </div>
 
-    <!-- 键位帮助：最高层级，它解释其他所有。由 KEYS 渲染，不手写第二份。 -->
+  <!-- 键位帮助：最高层级，它解释其他所有。由 KEYS 渲染，不手写第二份。
+
+       **必须 Teleport 到 body**：`focus.push` 的 `inertOthers` 只把「body 的
+       直接子节点里、不含浮层容器的那几个」置 inert。帮助面板留在 `#app` 里
+       时，它所在的那棵子树就是整个 `#app`——而 `#app` 是 body 唯一的子节点，
+       于是「背后全部 inert」退化成「一个都没 inert」：遮罩盖住了视觉，背后的
+       侧栏项仍然可 Tab、可点（`aria-modal` 与「焦点归最内层容器」都不成立）。
+
+       它放在 `af-app` 之外，所以 `v-else` 的配对不受影响。 -->
+  <Teleport to="body">
     <div
       v-if="helpOpen"
       ref="helpEl"
@@ -381,6 +481,7 @@ watch(
       aria-label="键位帮助"
       tabindex="-1"
       @click="onHelpBackdrop"
+      @keydown="onHelpKeydown"
     >
       <div class="af-help__box">
         <div class="af-help__head">
@@ -394,7 +495,7 @@ watch(
           </button>
         </div>
         <div class="af-help__body">
-          <section v-for="g in helpColumns" :key="g.group">
+          <section v-for="g in KEYS" :key="g.group">
             <div class="help__gh">
               <span>{{ g.group }}</span>
               <span class="af-t-mute">{{ SCOPE_LABEL[g.scope] }}</span>
@@ -413,5 +514,5 @@ watch(
         </div>
       </div>
     </div>
-  </div>
+  </Teleport>
 </template>

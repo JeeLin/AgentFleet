@@ -34,6 +34,7 @@ import TerminalPanel, {
   type TerminalChannel,
   type TerminalConn,
 } from '@/components/TerminalPanel.vue'
+import { cssRuleOf, readRepoFile } from '@/test/css'
 import { mountIn } from '@/test/mount'
 
 /* ---------------------------------------------------------------- 环境补齐 */
@@ -117,6 +118,9 @@ afterAll(() => {
 })
 
 /* ---------------------------------------------------------------- 挂载 */
+
+/** 组件源文件——样式规则的断言读的是它（vitest 不注入 SFC 的 `<style>`）。 */
+const TERMINAL_PANEL_SOURCE = readRepoFile('packages/web/src/components/TerminalPanel.vue')
 
 const READY: TerminalChannel = { state: 'ready', error: null, dropped: 0 }
 
@@ -495,10 +499,11 @@ describe('TerminalPanel：断线三态——只有 offline 冻结', () => {
     const w = mount({ conn: 'offline' })
     await flush()
     const overlay = w.element.querySelector<HTMLElement>('[data-frozen]')
-    // `getComputedStyle` 在 happy-dom 里读不到 scoped 样式，所以断言的是
-    // 样式表里写死的那一条：遮罩必须 `pointer-events: none`。
-    const css = Array.from(document.styleSheets).length
-    expect(css).toBeGreaterThanOrEqual(0)
+    // happy-dom 不做排版、vitest 默认不注入 SFC 的 `<style>`，所以
+    // `getComputedStyle` 读不到这条规则——那就直接读**样式源**：
+    // 断言「遮罩不吃指针事件」这件事本身，而不是「样式表有若干条规则」。
+    const rule = cssRuleOf(TERMINAL_PANEL_SOURCE, '.af-termx__frozen')
+    expect(rule).toMatch(/pointer-events:\s*none/)
     expect(overlay?.className ?? '').toContain('af-termx__frozen')
     // 内容与遮罩同在：遮罩是兄弟节点，不是把它盖住的那块内容替换掉
     expect(hostOf(w).querySelector('.xterm-rows')).not.toBeNull()

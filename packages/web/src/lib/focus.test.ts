@@ -104,31 +104,18 @@ describe('focus stack', () => {
     expect(wrap.inert).toBe(false)
   })
 
-  it('Esc 路径：pop 之后焦点回到 opener', () => {
+  it('三条关闭路径（Esc / 点遮罩 / 点关闭按钮）落回同一个 pop', () => {
     const s = scaffold()
     s.opener?.focus()
     push(s.layer as HTMLElement, { opener: s.opener as HTMLElement })
+    // 点遮罩与点关闭按钮**本身不带关闭动作**——关闭由 `pop` 统一负责。
+    // 这两下点击只用来确认「它们不会顺手把焦点栈改坏」。
+    ;(s.layer as HTMLElement).click()
+    ;(s['close'] as HTMLElement).click()
+    expect(depth()).toBe(1)
     expect(pop(s.layer as HTMLElement)).toBe(true)
     expect(document.activeElement).toBe(s.opener)
     expect((s['behind'] as HTMLElement).inert).toBe(false)
-  })
-
-  it('点遮罩路径：pop 之后焦点回到 opener', () => {
-    const s = scaffold()
-    s.opener?.focus()
-    push(s.layer as HTMLElement, { opener: s.opener as HTMLElement })
-    ;(s.layer as HTMLElement).click() // 遮罩上的点击走同一条 pop
-    pop(s.layer as HTMLElement)
-    expect(document.activeElement).toBe(s.opener)
-  })
-
-  it('点关闭按钮路径：pop 之后焦点回到 opener', () => {
-    const s = scaffold()
-    s.opener?.focus()
-    push(s.layer as HTMLElement, { opener: s.opener as HTMLElement })
-    ;(s['close'] as HTMLElement).click()
-    pop(s.layer as HTMLElement)
-    expect(document.activeElement).toBe(s.opener)
   })
 
   it('默认 opener 是当前焦点元素', () => {

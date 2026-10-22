@@ -19,7 +19,7 @@
 
     所以现在这里只**弹一个密码框**（`lib/login-prompt.ts` 的 `promptLogin`），
     背后的页面原样活着。输对密码 → 关框，原地继续；点「取消」→ 那一下才真的去
-    `/login`（`App.vue` 的 `go-login`，见那里为什么跳转住在外壳）。
+    `/login`（`App.vue` 的 `onLoginCancel`，见那里为什么跳转住在外壳）。
 
     仍然照常抛 `ApiError(401, 'session_expired')`：调用方必须**停下**，
     而不是在没有凭据的状态里继续渲染一屏「读不到的列表」。
@@ -28,8 +28,8 @@
     `middleware_auth.rs:53/64` 只对**非豁免路径**发 401；`POST /login` 自己在
     `AUTH_EXEMPT_PATHS` 里，它的 401 是 `invalid_credentials`——**密码错**。
     把那个 401 也当成「session 过期」会变成死循环（弹框 → 密码错 401 → 再弹框），
-    所以登录请求一律直接 `fetch('/login')`、**不走本模块**（`LoginPage.vue`
-    与 `components/LoginPrompt.vue` 各有一份 `postLogin`，这是有意的分叉）。
+    所以登录请求走 `lib/auth.ts` 的 `postLogin`——它**直接 `fetch`**，
+    不经过本模块（本模块的 401 分支正是那个会弹框的分支）。
 
    ── 为什么 403 `hub_not_initialized` 必须单独认 ─────────────────────
    全新部署第一次打开控制台时，Hub 还停在初始化模式：
@@ -189,6 +189,12 @@ let onUnauthorized: (path: string) => void = () => {
  * 与 `onUnauthorized` **分成两个槽位**而不是共用一个回调：两条路径的去处
  * 不同（`/login` vs `/setup`），共用一个槽位就意味着「跳哪儿」这件事被
  * 塞进了 path 参数里——下一个读代码的人会以为两者可以互换。
+ *
+ * **默认值只是兜底**：外壳（`App.vue`）用 `setNotInitializedHandler` 注册
+ * 自己的 `fullPageNavigate`，于是「整页跳转住在外壳」这件事成立；这一行只保证
+ * `http.ts` 单独被用时（单测、将来的别的宿主）不会静默地什么都不做。
+ * 因此**它不是**「第二个会整页跳转的地方」——没有外壳时它替代外壳，
+ * 有外壳时它一次也不执行（`App.vue` 在 setup 体里就注册掉了）。
  */
 let onNotInitialized: (path: string) => void = (path) => {
   if (typeof location !== 'undefined') location.assign(path)
@@ -319,4 +325,25 @@ export function postJson<T>(path: string, body?: unknown, options?: RequestOptio
 /** DELETE，不解析响应体（关通道等场景服务端可能回 204）。 */
 export function del(path: string, options?: RequestOptions): Promise<void> {
   return request(path, { ...options, method: 'DELETE' }).then(() => undefined)
+}
+
+/**
+ * 读路径的失败 → 一句用户能看懂的话。
+ *
+ * 三个页面此前各抄了一份（设备列表 / 会话列表 / Agent 目录），而同一份
+ * `session_expired` 在其中一处给出了「刷新后重新登录」、另一处给出了
+ * 「请重新登录」——两种下一步让用户不知道该做哪个。收成一份之后，
+ * `noun`（被读的东西）是唯一的变量。
+ *
+ * `session_expired` 的下一步**只有一种**：重新登录。`http.ts` 已经弹了
+ * 重新登录框，而「刷新页面」会把用户正在做的事（填了一半的表单、终端里
+ * 的输出）一起丢掉——那不是「下一步」，是「重来」。
+ */
+export function describeReadFailure(err: unknown, noun: string): string {
+  if (err instanceof ApiError) {
+    if (err.code === 'session_expired') return '登录已失效，请重新登录。'
+    return `读${noun}失败（${err.code}）。`
+  }
+  if (err instanceof NetworkError) return 'Hub 连不上。检查 Hub 进程是否还在。'
+  return `读${noun}失败。`
 }

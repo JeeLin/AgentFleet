@@ -7,16 +7,23 @@
      ① `register` 拒绝表外 act —— 一个 `?` 里查不到的键位，对键盘用户等于不存在
      ② `register` 拒绝重复注册 —— 一个动作只能有一个主人，否则行为取决于
         加载顺序且没有任何提示
-     ③ `unimplemented()` 列出「表里有、没人实现」的 act —— 开发期在控制台报警，
-        而不是等用户按到死键
+     ③ `unimplemented(act)` 回答「这个 act 有没有实现」——`?` 面板据此标注
+        「（未实现）」，而不是等用户按到死键
 
-   ── 与原型 keynav.js 的差异（不是搬，是纠正）───────────────────────
-   原型把 `traj:toggle` 写进了「会话工作台」组，而 `g g` 这个键位在**该组没有
-   scope**，`g a` 的 `g` 按前缀语义被指到了 `nav:agents`。两处都是笔误：
-   规范 §4.2 的表里 `t` 与 `g g` 归在「会话工作台」（scope=session）。
-   本表按规范抄，并给「跳转」组补上 scope=global——它的五个键位里，
-   `g s` 那个 `s` 在会话工作台上正是 list:enter 的键位，没有 scope 就必然打架。
+   ── 实现可以不住在 `handlers` 表里 ────────────────────────────────
+   `list:*` 由 `lib/listbox.ts` 的容器级监听器处理、`focus:*` 由
+   `lib/focus.ts` 的 `trapTab` 处理、`file:*` 由 `components/FilesPanel.vue`
+   的根元素监听器处理——它们都不适合进全局表（一个页面可能同时持有多个
+   文件面板，而 `register` 拒绝重复注册）。这类 act 由实现处调
+   `declareImplemented(act)` 声明，于是键位表仍然是「承诺」的唯一出处。
+
+   ── 与原型 keynav.js 的关系 ──────────────────────────────────────
+   生产实现是真相源；`prototype/assets/keynav.js` 里的同一张表由
+   `packages/web/scripts/gen-prototype-keynav.ts` 从本文件生成
+   （`bun run gen:prototype-keynav`；`--check` 校验是否已同步）。
    =========================================================================== */
+
+import { pageTitle } from './page-titles'
 
 /** 键位生效范围。 */
 export type KeyScope = 'global' | 'list' | 'session' | 'panel'
@@ -69,11 +76,16 @@ export const KEYS: readonly KeyGroup[] = [
     group: '跳转',
     scope: 'global',
     keys: [
-      { keys: ['g', 's'], act: 'nav:sessions', label: '会话列表', scope: 'global' },
-      { keys: ['g', 'n'], act: 'nav:new-session', label: '新建会话', scope: 'global' },
-      { keys: ['g', 'd'], act: 'nav:devices', label: '设备列表', scope: 'global' },
-      { keys: ['g', 'a'], act: 'nav:agents', label: 'Agent 目录', scope: 'global' },
-      { keys: ['g', ','], act: 'nav:settings', label: '设置', scope: 'global' },
+      { keys: ['g', 's'], act: 'nav:sessions', label: pageTitle('sessions'), scope: 'global' },
+      {
+        keys: ['g', 'n'],
+        act: 'nav:new-session',
+        label: pageTitle('new-session'),
+        scope: 'global',
+      },
+      { keys: ['g', 'd'], act: 'nav:devices', label: pageTitle('devices'), scope: 'global' },
+      { keys: ['g', 'a'], act: 'nav:agents', label: pageTitle('agents'), scope: 'global' },
+      { keys: ['g', ','], act: 'nav:settings', label: pageTitle('settings'), scope: 'global' },
     ],
   },
   {
@@ -123,10 +135,7 @@ export const KEYS: readonly KeyGroup[] = [
  *
  * 校验的是规范 §4.2 的 `g` 序列纪律：*两个 act 共用一个键位描述*抛错。
  * 同一个 act 有两个不同键位（`t` 与 `g g` 同为 `traj:toggle`）是 alias，
- * 合法。反过来的原型 keynav.js:95 恰好把这两件事写颠倒了——它对「同一 act
- * 两个键位」抛错、对「两个 act 共用键位」放行，于是 `t` 与 `g g` 进表时
- * 整个模块加载即抛，而两个 act 抢同一个键位（`g s` 与 list:enter 的 `s`）
- * 反而悄悄通过。搬代码时照搬这条会连表都载入不进来。
+ * 合法。
  */
 const ACTS: ReadonlyMap<string, KeyBinding> = (() => {
   const out = new Map<string, KeyBinding>()
@@ -143,6 +152,25 @@ const ACTS: ReadonlyMap<string, KeyBinding> = (() => {
       }
       ownerOfKey.set(desc, k.act)
       if (!out.has(k.act)) out.set(k.act, k)
+    }
+  }
+  return out
+})()
+
+/**
+ * 键位描述 → act 的反查表。
+ *
+ * 与 `ACTS` 走的是**同一份 `KEYS`**，但方向相反：`ACTS` 是 act → 定义，
+ * 这张是「用户按了哪个键」→ 「该做什么」。页面据此判断「我按的这个键在
+ * 表里属于哪个 act、那个 act 归不归我管」——会话工作台据此只认 `scope:
+ * 'session'` 的那几条，而不必再抄一份反向表。
+ */
+const ACT_BY_KEY: ReadonlyMap<string, string> = (() => {
+  const out = new Map<string, string>()
+  for (const g of KEYS) {
+    for (const k of g.keys) {
+      const desc = k.keys.join(' ')
+      if (!out.has(desc)) out.set(desc, k.act)
     }
   }
   return out
@@ -169,17 +197,53 @@ export function bindingOf(act: string): KeyBinding | undefined {
 }
 
 /**
+ * 一个键位描述对应哪个 act。不在表里返回 `undefined`。
+ *
+ * 描述的形状是 `keys.join(' ')`：单键是 `'o'`，`g` 序列是 `'g s'`。
+ */
+export function actForKey(key: string): string | undefined {
+  return ACT_BY_KEY.get(key)
+}
+
+/**
+ * 一个 act 的键位提示（侧栏角标、状态条 `<kbd>` 用）。
+ *
+ * 从表里读，不另抄一份：抄一份的话，改了 `KEYS` 的键位而忘了改提示，
+ * 界面上就会同时出现两个「g s」。
+ */
+export function hintOf(act: string): string {
+  const b = bindingOf(act)
+  return b ? b.keys.join(' ') : ''
+}
+
+/**
+ * `g` 序列的前缀键。
+ *
+ * 单独写出来而不是散在各处：状态条要显示「`<kbd>g</kbd> 跳转」，
+ * `shell-keys.ts` 要判「用户是不是在按前缀」——两处说的是同一个键。
+ */
+export const PREFIX_LEAD = 'g'
+
+/**
  * `g` 序列的目标：按下 `g` 后的第二个键决定去向。
+ *
+ * **从 `KEYS` 推导**而不是另抄一张表：抄的那张表与 `KEYS` 漂了时，
+ * `g s` 会跳到一个 `?` 面板里查不到的 act，而 `?` 面板显示的键位仍然
+ * 是对的——用户按了没反应，却查不出为什么。
+ *
  * 800ms 窗口内没配上**不吞键**——用户只是在打一段以 `g` 开头的字。
  */
-export const PREFIX: ReadonlyMap<string, string> = new Map([
-  ['s', 'nav:sessions'],
-  ['n', 'nav:new-session'],
-  ['d', 'nav:devices'],
-  ['a', 'nav:agents'],
-  [',', 'nav:settings'],
-  ['g', 'traj:toggle'],
-])
+export const PREFIX: ReadonlyMap<string, string> = (() => {
+  const out = new Map<string, string>()
+  for (const g of KEYS) {
+    for (const k of g.keys) {
+      if (k.keys.length !== 2 || k.keys[0] !== PREFIX_LEAD) continue
+      const second = k.keys[1] as string
+      if (!out.has(second)) out.set(second, k.act)
+    }
+  }
+  return out
+})()
 
 /** `g` 序列的窗口。 */
 export const PREFIX_MS = 800
@@ -188,6 +252,41 @@ export const PREFIX_MS = 800
 export type KeyHandler = (e: KeyboardEvent, data?: unknown) => boolean | undefined
 
 const handlers = new Map<string, KeyHandler>()
+
+/**
+ * 不在全局表里的实现：`list:*` / `focus:*` / `file:*`。
+ *
+ * 这些 act 由各自的模块处理（容器级监听器 / 焦点栈 / 面板根元素），
+ * 放进全局表会让「谁抢到这个键」取决于挂载顺序。声明之后，`?` 面板
+ * 就不再把它们标成「（未实现）」。
+ */
+const declared = new Set<string>()
+
+/**
+ * handler 表变化的版本号 + 订阅者。
+ *
+ * 「表里有、谁实现了」是一个**模块级可变状态**，而 `?` 面板要按它重画。
+ * 页面侧靠 `onHandlersChanged` 订阅，把这个变化接到自己的响应式状态上——
+ * 否则 `computed` 会在第一次求值后把结论冻住（注册发生在挂载期，晚于首屏渲染）。
+ */
+const handlerListeners = new Set<() => void>()
+
+function bumpHandlers(): void {
+  for (const fn of handlerListeners) fn()
+}
+
+/**
+ * 订阅「handler 表变了」。返回退订函数。
+ *
+ * 存在的理由：`register` 发生在组件挂载期，而首屏渲染早于它——不订阅的话，
+ * `?` 面板会永远停在首屏那一刻的结论上（那时一个 handler 都还没注册）。
+ */
+export function onHandlersChanged(fn: () => void): () => void {
+  handlerListeners.add(fn)
+  return () => {
+    handlerListeners.delete(fn)
+  }
+}
 
 /**
  * 注册一个 act 的 handler。
@@ -208,6 +307,7 @@ export function register(act: string, fn: KeyHandler): void {
     throw new Error(`keynav: act "${act}" 被注册了两次 —— 一个动作只能有一个主人`)
   }
   handlers.set(act, fn)
+  bumpHandlers()
 }
 
 /**
@@ -224,6 +324,7 @@ export function register(act: string, fn: KeyHandler): void {
  */
 export function unregister(act: string): void {
   handlers.delete(act)
+  bumpHandlers()
 }
 
 /**
@@ -236,6 +337,28 @@ export function unregister(act: string): void {
  */
 export function registerInternal(act: string, fn: KeyHandler): void {
   handlers.set(act, fn)
+  bumpHandlers()
+}
+
+/**
+ * 声明「这个 act 已实现，但实现不住在全局 handler 表里」。
+ *
+ * 用它的地方：`list:*`（容器级监听器）、`focus:*`（焦点栈的 `trapTab`）、
+ * `file:*`（文件面板根元素）。它们不进 `register` 是因为全局表只允许一个
+ * 主人，而一个页面可能同时持有多个文件面板。
+ *
+ * 表外 act 抛错：声明一个用户查不到的 act，等于在表外偷偷加了一个承诺。
+ */
+export function declareImplemented(act: string): void {
+  if (!ACTS.has(act)) {
+    throw new Error(
+      `keynav: 声明的 act "${act}" 不在 KEYS 表里。` +
+        '  先把它加进 keynav.ts 的 KEYS，再声明实现。',
+    )
+  }
+  if (declared.has(act)) return
+  declared.add(act)
+  bumpHandlers()
 }
 
 /** 是否已有 handler。 */
@@ -243,9 +366,21 @@ export function hasHandler(act: string): boolean {
   return handlers.has(act)
 }
 
-/** 表里有、但没人实现的 act。`?` 面板与控制台报警共用它。 */
-export function unimplemented(): string[] {
-  return [...ACTS.keys()].filter((a) => !handlers.has(a))
+/**
+ * 这个 act 是不是**没有**实现。
+ *
+ * 签名按规格：`unimplemented(act: string)`——「这个 act 实现了吗」是一个
+ * 可以逐条问的问题，而「返回全部未实现 act 的数组」是另一个问题
+ * （`missingActs()`）。合成一个函数会让调用方自己写
+ * `list.includes(act)`——那正是易错的那一步。
+ */
+export function unimplemented(act: string): boolean {
+  return !handlers.has(act) && !declared.has(act)
+}
+
+/** 表里有、但没人实现的 act 清单。`?` 面板与控制台报警共用它。 */
+export function missingActs(): string[] {
+  return [...ACTS.keys()].filter((a) => unimplemented(a))
 }
 
 /**

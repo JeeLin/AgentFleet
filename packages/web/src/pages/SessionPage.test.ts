@@ -48,10 +48,24 @@ const SESSIONS = [
 
 const DEVICES = [device({ id: 'n_1', name: 'mbp.local' })]
 
+/** 一帧。happy-dom 的 rAF 真的排队，xterm 的渲染帧能被它带出来。 */
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()))
+}
+
+/** 一个宏任务。xterm 的 `WriteBuffer` 解析排在这上面。 */
+function nextTask(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
+}
+
 async function flush(w: ReturnType<typeof mountIn>): Promise<void> {
   for (let i = 0; i < 8; i++) {
     await w.vm.$nextTick()
     await settle(1)
+    // 宏任务与帧也要泵：xterm 的字节解析排在宏任务上、渲染排在帧上，
+    // 只泵微任务的话「帧到了但画面上还没有」——而那正是要抓的东西。
+    await nextTask()
+    await nextFrame()
   }
 }
 
@@ -108,6 +122,26 @@ function panelHost(w: ReturnType<typeof mountIn>): HTMLElement {
 async function interact(w: ReturnType<typeof mountIn>): Promise<void> {
   panelHost(w).dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
   await flush(w)
+}
+
+/**
+ * 往终端里敲一个字。
+ *
+ * 走 xterm 自己的输入事件（`input` + `data`）而不是直接调组件方法：xterm
+ * 就是这么把按键变成 `onData` 的，中间任何一层被改掉（换了事件源、换了
+ * 编码）这条用例都会跟着红。
+ */
+function typeIntoTerminal(w: ReturnType<typeof mountIn>, data: string): void {
+  const ta = w.element.querySelector<HTMLTextAreaElement>('.xterm textarea')
+  if (!ta) throw new Error('terminal textarea is missing')
+  ta.dispatchEvent(new InputEvent('input', { data, inputType: 'insertText', bubbles: true }))
+}
+
+/** 终端画面上的文字（`.xterm-rows` 拼起来）。 */
+function terminalText(w: ReturnType<typeof mountIn>): string {
+  return Array.from(w.element.querySelectorAll<HTMLElement>('.xterm-rows > div'))
+    .map((el) => el.textContent ?? '')
+    .join('\n')
 }
 
 function tabLabel(w: ReturnType<typeof mountIn>, id: string): HTMLElement {
@@ -246,11 +280,22 @@ describe('通道生命周期：懒建立', () => {
     await w.element.querySelector<HTMLElement>('.af-wb__head button')?.click()
     await flush(w)
     await interact(w)
-
-    // 坞里只有一个面板（terminal），所以没有可切的第二个
-    const tabs = w.element.querySelectorAll('.af-docktabs__b')
-    expect(tabs).toHaveLength(1)
     expect(posts()).toBe(1)
+
+    // 把文件面板拉进坞：**拉进来本身不建通道**（懒建立）。
+    await openFiles(w)
+    expect(posts()).toBe(1)
+
+    // 碰文件面板正文才建它那一条——终端与文件各一条。
+    await touchFiles(w)
+    expect(posts()).toBe(2)
+
+    // 在两个面板之间来回切：不该再多建通道（切面板 ≠ 建通道）。
+    await w.element.querySelector<HTMLElement>('[data-panel="terminal"]')?.click()
+    await flush(w)
+    await w.element.querySelector<HTMLElement>('[data-panel="files"]')?.click()
+    await flush(w)
+    expect(posts()).toBe(2)
   })
 })
 
@@ -279,18 +324,19 @@ describe('通道生命周期：切 tab 不释放', () => {
     await flush(w)
     await interact(w)
 
-    FakeEventSource.instances[0]?.emit('channel.frame', {
-      node_id: 'n_1',
-      channel_id: 'ch-1',
-      payload: { bytes: 'hello from pty' },
-    })
-    await flush(w)
-    // 13a 的正文是占位，不渲染字节流：这里断言的是「帧到了句柄，没有崩」
+    await frame(w, FakeEventSource.instances[0], { bytes: 'hello from pty' })
+    expect(terminalText(w)).toContain('hello from pty')
+
     await tabLabel(w, 's_2').click()
     await flush(w)
+    expect(w.element.querySelector('[data-panelhost]')).toBeNull()
+
     await tabLabel(w, 's_1').click()
     await flush(w)
-    expect(w.element.querySelector('[data-panelhost]')).not.toBeNull()
+
+    // 缓冲挂在 tab 上：切回来时 xterm 重新挂载并回放同一份字节，
+    // 所以「画面上还有那行输出」才是这条用例的承诺。
+    expect(terminalText(w)).toContain('hello from pty')
   })
 
   it('关掉面板坞才发 close_channel（退出即释放）', async () => {
@@ -321,7 +367,7 @@ describe('通道生命周期：切 tab 不释放', () => {
 
 describe('通道生命周期：断线丢弃不排队', () => {
   it('流断开时 send 只计数，面板头显示「有 N 条已丢」', async () => {
-    const { w } = await mountWorkbench()
+    const { w, fetchMock } = await mountWorkbench()
     await w.element.querySelector<HTMLElement>('.af-wb__head button')?.click()
     await flush(w)
     await interact(w)
@@ -331,9 +377,15 @@ describe('通道生命周期：断线丢弃不排队', () => {
     src?.emit('error')
     await flush(w)
 
-    // 面板正文（13a 占位）不持有输入通道，所以这里直接断言「断线态下没有已丢」
-    // 之外的形态：一旦 13b 挂上输入，这条会变成「有 1 条已丢」。
-    expect(w.element.textContent).not.toContain('条已丢')
+    // 断线之后敲一个字：这一下**只计数**，不排队、也不发出去。
+    typeIntoTerminal(w, 'x')
+    await flush(w)
+
+    expect(w.element.textContent).toContain('有 1 条已丢')
+    const sent = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes('/api/channels/ch-1/send'),
+    )
+    expect(sent).toHaveLength(0)
   })
 })
 

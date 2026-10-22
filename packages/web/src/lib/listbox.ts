@@ -17,7 +17,17 @@
    而 `AF.currentRow()` 也靠它判断，所以它不是装饰。
    =========================================================================== */
 
-import { isActivatable } from './keynav'
+import { declareImplemented, isActivatable } from './keynav'
+
+/**
+ * `list:*` 由本模块实现（容器级监听器），不住在 keynav 的全局 handler 表里。
+ *
+ * 那一表只放「全局单键」，而 ↑↓ / ⏎ / Space 的语义取决于「焦点在哪一棵树
+ * 里」——放进全局表就等于让「谁抢到这个键」取决于挂载顺序。
+ */
+declareImplemented('list:move')
+declareImplemented('list:enter')
+declareImplemented('list:toggle')
 
 /** 容器角色：`list` 是列表，`tree` 是树（目录行另有 `aria-expanded`）。 */
 export type ListRole = 'list' | 'tree'
@@ -51,6 +61,14 @@ export interface ListboxOptions {
   onEnter?: (row: HTMLElement, e: KeyboardEvent) => boolean
   /** Space 的兜底。目录行自己切 `aria-expanded`，不调它。 */
   onToggle?: (row: HTMLElement, e: KeyboardEvent) => boolean
+  /**
+   * 行有 `data-href` 时去哪里。缺省整页跳转。
+   *
+   * 做成可注入的**是为了让它可断言**：happy-dom 的 `location.assign` 不可
+   * spy，于是「data-href 分支有没有跑」只能靠「`af:enter` 事件有没有发」
+   * 这种间接信号——而删掉 href 分支之后那条用例仍然绿。
+   */
+  navigate?: (href: string) => void
 }
 
 export interface ListboxHandle {
@@ -169,10 +187,16 @@ export function attach(el: HTMLElement, opts: ListboxOptions = {}): ListboxHandl
     // 不该决定 ⏎ 的含义（见 ListboxOptions.rowEnter）。
     if (!opts.rowEnter) {
       const href = row.dataset.href
-      const win = row.ownerDocument.defaultView
-      if (href && win) {
-        win.location.assign(href)
-        return true
+      if (href) {
+        if (opts.navigate) {
+          opts.navigate(href)
+          return true
+        }
+        const win = row.ownerDocument.defaultView
+        if (win) {
+          win.location.assign(href)
+          return true
+        }
       }
       const inner = row.querySelector<HTMLElement>('a[href], button')
       if (inner) {

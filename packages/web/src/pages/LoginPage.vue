@@ -33,40 +33,13 @@
 
 import { computed, ref } from 'vue'
 
-import { PASSWORD_MIN_LENGTH, describeLoginFailure, type AuthFailure, type LoginResult } from '@/lib/auth'
-import { ApiError, NetworkError } from '@/lib/http'
+import {
+  PASSWORD_MIN_LENGTH,
+  describeLoginFailure,
+  postLogin,
+  type AuthFailure,
+} from '@/lib/auth'
 import { navigate, INDEX_PATH, SETUP_PATH } from '@/router'
-
-/**
- * `POST /login`。
- *
- * 只做封装该做的事：带 JSON 头、同源凭据、把非 2xx 转成 `ApiError`。
- * **不碰 401 的跳转**（见文件头的理由）。
- */
-async function postLogin(password: string): Promise<LoginResult> {
-  let res: Response
-  try {
-    res = await fetch('/login', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password }),
-    })
-  } catch (cause) {
-    throw new NetworkError(cause)
-  }
-  if (!res.ok) {
-    let code = `http_${res.status}`
-    try {
-      const body = (await res.json()) as { error?: unknown }
-      if (typeof body.error === 'string' && body.error.length > 0) code = body.error
-    } catch {
-      // 非 JSON 错误体（反代错误页、空 502）→ 保留 `http_<status>` 兜底
-    }
-    throw new ApiError(res.status, code)
-  }
-  return (await res.json()) as LoginResult
-}
 
 const password = ref('')
 const submitting = ref(false)
@@ -75,9 +48,9 @@ const failure = ref<AuthFailure | null>(null)
 /**
  * 会话失效是**被送过来的**，不是用户按出来的。
  *
- * `http.ts` 在 401 上跳 `/login`，用户落地时页面什么都不说，看起来像
- * 「页面自己刷新了一下」。所以这里认一下来源（`?expired=1`）并显示一句
- * 说明——它属于 §4.7 的那五种之一，不该靠用户猜。
+ * `http.ts` 在 401 上弹重新登录框（不是跳 `/login`），所以这一页落地时
+ * 页面什么都不说，看起来像「页面自己刷新了一下」。所以这里认一下来源
+ * （`?expired=1`）并显示一句说明——它属于 §4.7 的那五种之一，不该靠用户猜。
  */
 const expired = computed(() => new URLSearchParams(window.location.search).get('expired') === '1')
 
@@ -238,16 +211,5 @@ const ERR_ID = 'login-error'
 .af-auth__foot code {
   font-family: var(--af-font-mono);
   color: var(--af-fg-secondary);
-}
-.af-link {
-  background: none;
-  border: 0;
-  padding: 0;
-  font-family: inherit;
-  font-size: inherit;
-  color: var(--af-accent-fg);
-  cursor: pointer;
-  text-decoration: underline;
-  text-underline-offset: 2px;
 }
 </style>

@@ -1,0 +1,52 @@
+/* ===========================================================================
+   page-chrome.css —— 页面级共享类（跨组件复用，不属于任何一个组件）
+   ---------------------------------------------------------------------------
+   `.af-skel` / `.af-inline-error` / `.af-link` 这三个类此前在**四个页面的
+   scoped 块里各写一份**，而且已经分叉：`.af-link` 在认证页是「强调色 + 下划线」，
+   在会话表格里是「主色 + 右边距 + hover 才下划线」。同一份 UI 语言里
+   「链接样式的按钮」有两种外观且互不知情——调其中一种只改一处，登录页与
+   表格里的可点文本会在同一屏内看起来像两种控件。
+
+   放在全局而不是某个组件的 scoped 块里：它们是**跨页面复用的语言**，
+   scoped 的意义（样式不外泄）在这里恰好相反——要的就是所有页面共用一份。
+
+   `src/styles/` 下是设计系统的 token 与组件层；这里放的是**页面层**的
+   那几个共享类，两者分属不同层，不互相覆盖。
+   =========================================================================== */
+
+/** 加载中的骨架容器。 */
+.af-skel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-2);
+}
+.af-skel .af-skeleton {
+  height: var(--af-row-compact);
+}
+
+/** 行内错误块。 */
+.af-inline-error {
+  display: flex;
+  align-items: center;
+  gap: var(--af-space-4);
+  padding: var(--af-space-3) var(--af-space-4);
+  margin-bottom: var(--af-space-5);
+  border: 1px solid var(--af-danger-line);
+  background: var(--af-danger-bg);
+  color: var(--af-danger-fg);
+  border-radius: var(--af-radius-md);
+  font-size: var(--af-text-sm);
+}
+
+/** 把按钮画成链接。 */
+.af-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--af-accent-fg);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

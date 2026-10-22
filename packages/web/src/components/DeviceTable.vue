@@ -96,7 +96,6 @@ function offlineReason(device: DeviceSummary): string {
           tabindex="-1"
           role="option"
           :aria-selected="selectedId === d.id"
-          :data-id="d.id"
           :data-device-id="d.id"
           :data-inert="d.status === 'offline' ? 'true' : undefined"
           @focus="onRowFocus(d.id)"

@@ -63,14 +63,16 @@ import type { DeviceSummary, SessionSummary } from '@/lib/api'
 import { listDevices, listSessions } from '@/lib/api'
 import {
   ChannelHub,
+  DEFAULT_COLS,
+  DEFAULT_ROWS,
   type ChannelFrame,
   type ChannelHandle,
   type ChannelState,
 } from '@/lib/channel'
-import { cwdPathOf, isOutsideSeg } from '@/lib/files-path'
-import { relativeTime, sessionTitle } from '@/lib/format'
-import { ApiError, NetworkError, request } from '@/lib/http'
-import { dispatch, isTyping, register, unregister } from '@/lib/keynav'
+import { cwdPathOf, isOutsideSeg, splitPath } from '@/lib/files-path'
+import { deviceLabel as deviceLabelOf, relativeTime, sessionTitle } from '@/lib/format'
+import { ApiError, NetworkError, describeReadFailure, request } from '@/lib/http'
+import { actForKey, bindingOf, dispatch, isTyping, register, unregister } from '@/lib/keynav'
 import { SPLIT_DEFAULT } from '@/lib/split'
 import {
   activateTab as activateTabState,
@@ -100,10 +102,6 @@ const ended = computed(() => current.value?.state === 'ended')
 
 function deviceOf(nodeId: string): DeviceSummary | null {
   return devicesById.value.get(nodeId) ?? null
-}
-
-function deviceName(nodeId: string): string {
-  return deviceOf(nodeId)?.name ?? nodeId
 }
 
 function connOf(nodeId: string): TabConn {
@@ -276,8 +274,10 @@ function ensureChannel(tab: TabMeta, panel: PanelName): ChannelHandle {
     sessionId: tab.id,
     connector: panel,
     // terminal 的 cwd 跟着会话走（约束 3）：Hub 只透传 params，node 不会替
-    // 页面猜一个工作区根。
-    params: panel === 'terminal' ? { cwd: tab.path, cols: 80, rows: 24 } : {},
+    // 页面猜一个工作区根。尺寸用 `lib/channel.ts` 的那一份常量——面板量不到
+    // 尺寸时用它当 xterm 初值，这里用它当下发值，两处各写一份必然漂。
+    params:
+      panel === 'terminal' ? { cwd: tab.path, cols: DEFAULT_COLS, rows: DEFAULT_ROWS } : {},
   })
   channels.set(key, handle)
   const ws = workspaceOf(tab.id)
@@ -722,7 +722,7 @@ function applyFileFrame(ws: TabWorkspace, payload: unknown): void {
       return
     case 'write':
       ws.saving = false
-      if (frame.ok === false) ws.writeError = errorOf(frame, String(frame.path ?? ''))
+      if (frame.ok === false) ws.writeError = errorOf(frame, pathOf(frame) ?? '')
       return
     case 'error':
       ws.loading.clear()
@@ -730,10 +730,10 @@ function applyFileFrame(ws: TabWorkspace, payload: unknown): void {
       // 保存中出的错归④（写失败），其余归③（导航 / 读失败）：下一步不同
       if (ws.saving) {
         ws.saving = false
-        ws.writeError = errorOf(frame, String(frame.path ?? ''))
+        ws.writeError = errorOf(frame, pathOf(frame) ?? '')
         return
       }
-      ws.filesError = errorOf(frame, String(frame.path ?? ''))
+      ws.filesError = errorOf(frame, pathOf(frame) ?? '')
       return
     default:
       // 不认识的 op 一律不动状态：node 侧新增 op 时旧页面不该把它解成
@@ -742,12 +742,27 @@ function applyFileFrame(ws: TabWorkspace, payload: unknown): void {
   }
 }
 
+/**
+ * 一帧里的路径。
+ *
+ * **`''` 是工作区根目录**（`cwdPathOf([])` 就是它），而**缺 `path` 是坏帧**——
+ * 两者不是一回事。缺 `path` 的帧必须丢掉：当成根目录的话，一帧空清单就会
+ * 覆盖掉根目录的真清单，用户看到根目录「空了」而没有任何错误提示。
+ */
+function pathOf(frame: Record<string, unknown>): string | null {
+  const p = frame.path
+  return typeof p === 'string' ? p : null
+}
+
 /** `op:"list"`：一层清单进表，并清掉「正在列这一层」。 */
 function applyListing(ws: TabWorkspace, frame: Record<string, unknown>): void {
-  const listing = frame as Partial<FileListing> & { path?: unknown }
-  ws.loading.delete(String(listing.path ?? ''))
-  ws.listings.set(String(listing.path ?? ''), {
-    path: String(listing.path ?? ''),
+  const path = pathOf(frame)
+  // 坏帧（缺 path）：丢掉。见 `pathOf` 的注释——把它当成根目录会覆盖真清单。
+  if (path === null) return
+  const listing = frame as Partial<FileListing>
+  ws.loading.delete(path)
+  ws.listings.set(path, {
+    path,
     entries: Array.isArray(listing.entries) ? (listing.entries as FileListing['entries']) : [],
     total: numOrNull(listing.total),
     truncated: listing.truncated === true,
@@ -758,9 +773,12 @@ function applyListing(ws: TabWorkspace, frame: Record<string, unknown>): void {
 /** `op:"read"`：预览结论进状态，并清掉「正在读这个文件」。 */
 function applyPreview(ws: TabWorkspace, frame: Record<string, unknown>): void {
   ws.readingPath = null
-  const preview = frame as Partial<FilePreview> & { path?: unknown }
+  const path = pathOf(frame)
+  // 坏帧（缺 path）：丢掉，理由同 `applyListing`。
+  if (path === null) return
+  const preview = frame as Partial<FilePreview>
   ws.preview = {
-    path: String(preview.path ?? ''),
+    path,
     size: numOrNull(preview.size),
     kind: preview.kind === 'binary' || preview.kind === 'truncated' ? preview.kind : 'text',
     truncated: preview.truncated === true,
@@ -811,7 +829,7 @@ function filesGoto(depth: number): void {
 function filesOpen(path: string): void {
   const ws = activeWs.value
   if (!ws) return
-  const seg = path.split('/').filter((s) => s.length > 0)
+  const seg = splitPath(path)
   const last = seg[seg.length - 1] ?? ''
   if (isOutsideSeg(last)) {
     ws.filesError = {
@@ -871,6 +889,11 @@ function runCommand(req: ConvExecRequest): void {
   })
   execHandles.add(handle)
   // 第一帧就是全部（exec 一次性、没有「等第二帧」这回事）：收完即关。
+  //
+  // **关通道是幂等的**：`ChannelHandle.close()` 自己吞掉 DELETE 的失败
+  // （404 = 通道已经不在了，409 = 设备那边先关的），而且第二次 `close()`
+  // 因为 `channelId` 已经清空而不会再发 DELETE。所以 node 侧「跑完就关」
+  // 与页面这里「收到结果就关」撞在一起时，谁先谁后都不会报错、也不会双关。
   handle.onFrame(() => {
     execHandles.delete(handle)
     void handle.close()
@@ -883,8 +906,13 @@ function runCommand(req: ConvExecRequest): void {
 /* ---------------------------------------------------------------- 工作台头 */
 
 const title = computed(() => (current.value ? sessionTitle(current.value) : '会话工作台'))
+/**
+ * 设备名。**共用 `lib/format.ts` 的那一份**：本页与会话列表页此前各写一遍
+ * `devicesById.get(id)?.name ?? id`，改兜底策略要改两处，漏一处则同一个
+ * 设备在两页显示不同的名字。
+ */
 const deviceLabel = computed(() =>
-  current.value ? deviceName(current.value.workspace.node_id) : '—',
+  current.value ? deviceLabelOf(devicesById.value, current.value.workspace.node_id) : '—',
 )
 const startedLabel = computed(() =>
   current.value ? `${relativeTime(current.value.created_at)}开始` : '',
@@ -994,13 +1022,6 @@ function storage(): Storage | null {
 
 /* ---------------------------------------------------------------- 键盘 */
 
-const KEY_ACTS: Readonly<Record<string, string>> = {
-  o: 'panel:open',
-  '[': 'panel:prev',
-  ']': 'panel:next',
-  '\\': 'dock:toggle',
-  t: 'traj:toggle',
-}
 const HANDLERS: Readonly<Record<string, () => boolean>> = {
   'panel:open': () => {
     if (!activeTab.value) return false
@@ -1043,8 +1064,13 @@ function onKeydown(e: KeyboardEvent): void {
   if (e.ctrlKey || e.metaKey || e.altKey) return
   // 单键在输入区内不抢（§4.2）：终端 / 对话输入框里按 o 是在打字
   if (isTyping(e.target)) return
-  const act = KEY_ACTS[e.key]
+  // 键位 → act **从 `keynav.ts` 反查**，不自己抄一份：抄的那份与 `KEYS`
+  // 漂了时，`?` 面板写着一个键、页面认着另一个键（按面板上的提示没反应）。
+  const act = actForKey(e.key)
   if (!act) return
+  // 只有会话工作台域的键归本页管：`list:*` / `focus:*` / `file:*` 由各自的
+  // 模块处理，全局键由外壳处理。判据是表里的 scope，不是一份另抄的清单。
+  if (bindingOf(act)?.scope !== 'session') return
   dispatch(act, e)
 }
 
@@ -1074,20 +1100,10 @@ async function load(): Promise<void> {
     }
     saveTabs(storage(), tabs.value)
   } catch (err) {
-    loadError.value = errorLabel(err)
+    loadError.value = describeReadFailure(err, '会话')
   } finally {
     loading.value = false
   }
-}
-
-function errorLabel(err: unknown): string {
-  if (err instanceof ApiError) {
-    return err.code === 'session_expired'
-      ? '登录已失效，请重新登录。'
-      : `读会话失败（${err.code}）。`
-  }
-  if (err instanceof NetworkError) return 'Hub 连不上。检查 Hub 进程是否还在。'
-  return '读会话失败。'
 }
 
 /**

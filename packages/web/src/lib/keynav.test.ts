@@ -7,17 +7,23 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   KEYS,
   PREFIX,
+  PREFIX_LEAD,
   PREFIX_MS,
   SCOPE_LABEL,
   actCount,
+  actForKey,
   acts,
   bindingOf,
+  declareImplemented,
   dispatch,
   flatKeys,
   hasAct,
   hasHandler,
+  hintOf,
   isActivatable,
   isTyping,
+  missingActs,
+  onHandlersChanged,
   register,
   registerInternal,
   unimplemented,
@@ -153,14 +159,44 @@ describe('register', () => {
 })
 
 describe('unimplemented', () => {
-  it('列出表里有、没人实现的 act', () => {
-    expect(unimplemented().length).toBeGreaterThan(0)
-    for (const act of unimplemented()) expect(hasAct(act)).toBe(true)
+  it('missingActs 只列表里有、没人实现的 act', () => {
+    const missing = missingActs()
+    expect(missing.length).toBeGreaterThan(0)
+    for (const act of missing) expect(hasAct(act)).toBe(true)
   })
 
   it('注册过的 act 从名单里消失', () => {
     registerInternal('search:focus', () => true)
-    expect(unimplemented()).not.toContain('search:focus')
+    expect(missingActs()).not.toContain('search:focus')
+    expect(unimplemented('search:focus')).toBe(false)
+  })
+
+  it('unimplemented 逐条回答「这个 act 实现了吗」', () => {
+    expect(unimplemented('search:focus')).toBe(false)
+    expect(unimplemented('nav:sessions')).toBe(true)
+  })
+
+  it('声明为已实现（实现不住在全局表里）的 act 不算缺失', () => {
+    declareImplemented('list:move')
+    expect(unimplemented('list:move')).toBe(false)
+    expect(missingActs()).not.toContain('list:move')
+  })
+
+  it('声明表外 act 抛错（不许有用户查不到的承诺）', () => {
+    expect(() => declareImplemented('nope:nope')).toThrow(/不在 KEYS 表里/)
+  })
+
+  it('handler 表变化时通知订阅者（? 面板据此重画）', () => {
+    let notified = 0
+    const off = onHandlersChanged(() => {
+      notified += 1
+    })
+    registerInternal('panel:prev', () => true)
+    expect(notified).toBeGreaterThan(0)
+    off()
+    const seen = notified
+    registerInternal('panel:next', () => true)
+    expect(notified).toBe(seen)
   })
 })
 
@@ -246,5 +282,34 @@ describe('g 序列', () => {
   it('g g 指向 traj:toggle，与键位表一致', () => {
     expect(PREFIX.get('g')).toBe('traj:toggle')
     expect(bindingOf('traj:toggle')?.keys).toEqual(['t'])
+  })
+})
+
+describe('actForKey / hintOf（键位 → act 的反查）', () => {
+  it('单键描述反查到 act', () => {
+    expect(actForKey('o')).toBe('panel:open')
+    expect(actForKey('?')).toBe('help:toggle')
+  })
+
+  it('g 序列用空格连接两个键', () => {
+    expect(actForKey('g s')).toBe('nav:sessions')
+    expect(actForKey('g g')).toBe('traj:toggle')
+  })
+
+  it('表外的键位描述返回 undefined', () => {
+    expect(actForKey('z')).toBeUndefined()
+    expect(actForKey('g z')).toBeUndefined()
+  })
+
+  it('hintOf 给出键位提示，act 不在表里时是空串', () => {
+    expect(hintOf('panel:open')).toBe('o')
+    expect(hintOf('nav:sessions')).toBe('g s')
+    expect(hintOf('nope:nope')).toBe('')
+  })
+
+  it('PREFIX_LEAD 是 g，且 PREFIX 覆盖所有 g 开头的键位', () => {
+    expect(PREFIX_LEAD).toBe('g')
+    const expected = flatKeys().filter((k) => k.keys.length === 2 && k.keys[0] === 'g')
+    expect(PREFIX.size).toBe(expected.length)
   })
 })

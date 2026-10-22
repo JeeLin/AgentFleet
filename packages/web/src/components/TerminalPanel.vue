@@ -75,6 +75,7 @@ import { Terminal } from '@xterm/xterm'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import type { ChannelState } from '@/lib/channel'
+import { DEFAULT_COLS, DEFAULT_ROWS } from '@/lib/channel'
 
 // xterm 的样式必须显式引入：它把 `.xterm` 的定位、光标层、滚动条都写在
 // 自己的 CSS 里，漏掉这份 CSS 的表现是「终端有内容但全部叠在左上角」。
@@ -141,9 +142,10 @@ const emit = defineEmits<{
  * 80×24 是所有终端的出厂默认，也是「还没量到尺寸」时唯一站得住的值。
  * 它只是 `open_channel` 的 `params` 与 xterm 的初值——第一次 fit 成功后
  * 立刻被真值覆盖。
+ *
+ * **常量在 `lib/channel.ts`**：页面下发 `params` 时用的是同一个值，两处
+ * 各写一份必然漂——漂出来的症状是「PTY 按 80×24 开、屏幕却按别的宽度折行」。
  */
-const DEFAULT_COLS = 80
-const DEFAULT_ROWS = 24
 
 /** 下限 1×1，与 node 侧 `MIN_DIM` 同源：0 会被 `TIOCSWINSZ` 当成「未设置」。 */
 const MIN_COLS = 1
@@ -327,7 +329,17 @@ function syncFit(): void {
   emit('resize', { cols, rows })
 }
 
-/** 让宿主能显式重量一次（比如面板从折叠里展开时）。 */
+/**
+ * 显式重量一次。
+ *
+ * **只服务测试**：宿主从不调它（宿主的尺寸入口是 `ResizeObserver` 与
+ * `emit('resize')`）。留着是因为测试要断言「协商出的尺寸是多少」，而
+ * happy-dom 量不到字符尺寸——测试要的是一次确定的测量。
+ *
+ * 注释里**不写**「比如面板从折叠里展开时」：没有这样的调用方，而照着
+ * 注释去加一次宿主 `ref.fit()` 会与 `ResizeObserver` 的 `scheduleFit`
+ * 叠加成两次测量 / 两条 `resize`，设备侧 PTY 会连着收两条。
+ */
 function fit(): void {
   syncFit()
 }
@@ -383,12 +395,14 @@ watch(frozen, applyFrozen)
 
 /* ---------------------------------------------------------------- 暴露 */
 
-/** 把焦点交给终端（宿主调它，而不是自己 `querySelector` 一个 div）。 */
-function focus(): void {
-  term?.focus()
-}
-
-defineExpose({ focus, fit })
+/**
+ * 只暴露 `fit`。
+ *
+ * **不暴露 `focus`**：宿主的 `focusPanelBody()` 走的是 `[data-panel-focus]`
+ * 选择器（xterm 自己创建的 textarea），不碰 `defineExpose`——多一个
+ * 出口就多一条「谁负责还焦点」的路径。
+ */
+defineExpose({ fit })
 </script>
 
 <template>

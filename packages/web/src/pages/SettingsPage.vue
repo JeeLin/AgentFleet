@@ -154,17 +154,6 @@ const ROWS: readonly Row[] = [
 .af-settings__foot p {
   margin: 0;
 }
-.af-link {
-  background: none;
-  border: 0;
-  padding: 0;
-  font-family: inherit;
-  font-size: inherit;
-  color: var(--af-accent-fg);
-  cursor: pointer;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
 @media (max-width: 900px) {
   .af-settings__row {
     flex-direction: column;

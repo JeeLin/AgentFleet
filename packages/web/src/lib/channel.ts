@@ -46,6 +46,20 @@ export interface ChannelFrame {
   payload: unknown
 }
 
+/**
+ * 建通道时的默认尺寸。
+ *
+ * 与 node 侧 `terminal.rs` 的 `DEFAULT_COLS/ROWS` 同一个值、同一个理由：
+ * 80×24 是所有终端的出厂默认，也是「还没量到尺寸」时唯一站得住的值。
+ * 它只是 `open_channel` 的 `params` 与 xterm 的初值——第一次 fit 成功后
+ * 立刻被真值覆盖。
+ *
+ * 放在这里而不是 `TerminalPanel.vue`：面板与页面都要用它（面板量不到尺寸时
+ * 用它当 xterm 初值，页面建通道时用它当下发值），两处各写一份必然漂。
+ */
+export const DEFAULT_COLS = 80
+export const DEFAULT_ROWS = 24
+
 /** 开一条通道所需的全部输入。 */
 export interface ChannelSpec {
   sessionId: string
@@ -117,8 +131,13 @@ export const CHANNEL_STATE_LABEL: Readonly<Record<ChannelState, string>> = {
 }
 
 /**
- * 一个页面共用一个 `ChannelHub`：一条 SSE 订阅、一张 `channel_id → 通道`
- * 的分派表。**不是每条通道一条 SSE**——那会把「N 个 tab 的代价」再乘一次。
+ * 一个页面共用一个 `ChannelHub`：一条 SSE 订阅、一张
+ * `(node_id, channel_id) → 通道` 的分派表。**不是每条通道一条 SSE**——
+ * 那会把「N 个 tab 的代价」再乘一次。
+ *
+ * 分派键是**二元组**而不是 `channel_id` 单值：协议侧的通道键就是
+ * `(node_id, channel_id)`（约束 4），两台设备各开一条 `channel_id` 相同的
+ * 通道时，单值键会让帧串到对方的终端里，而接收侧没有任何机制能发现。
  */
 export class ChannelHub {
   private readonly createEventSource: (url: string) => EventSource
@@ -126,10 +145,9 @@ export class ChannelHub {
 
   private source: EventSource | null = null
   private streamState: StreamState = 'connecting'
-  private readonly byId = new Map<string, ChannelHandleImpl>()
+  private readonly byChannel = new Map<string, ChannelHandleImpl>()
   private readonly byKey = new Map<string, ChannelHandleImpl>()
   private readonly streamListeners = new Set<(s: StreamState) => void>()
-  private streamTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(opts: HubOptions = {}) {
     this.streamPath = opts.streamPath ?? '/api/stream'
@@ -162,7 +180,6 @@ export class ChannelHub {
       this.source = src
       src.addEventListener('open', () => this.setStream('online'))
       src.addEventListener('error', () => this.setStream('offline'))
-      src.addEventListener('device.status', () => undefined)
       src.addEventListener('session.state', (ev) => this.onSessionState(ev))
       src.addEventListener('channel.frame', (ev) => this.onFrame(ev))
     } catch {
@@ -174,12 +191,8 @@ export class ChannelHub {
 
   /** 断开 SSE 并释放全部通道。只在页面卸载时调（切 tab **不调**）。 */
   dispose(): void {
-    if (this.streamTimer) {
-      clearTimeout(this.streamTimer)
-      this.streamTimer = null
-    }
-    for (const ch of [...this.byId.values()]) void ch.close()
-    this.byId.clear()
+    for (const ch of [...this.byChannel.values()]) void ch.close()
+    this.byChannel.clear()
     this.byKey.clear()
     this.source?.close()
     this.source = null
@@ -202,13 +215,13 @@ export class ChannelHub {
 
   // ---- 内部 ----------------------------------------------------------------
 
-  /** 通道句柄在 `open()` 成功后登记，好让帧能按 `channel_id` 找到它。 */
-  bind(channelId: string, ch: ChannelHandleImpl): void {
-    this.byId.set(channelId, ch)
+  /** 通道句柄在 `open()` 成功后登记，好让帧能按 `(node_id, channel_id)` 找到它。 */
+  bind(nodeId: string, channelId: string, ch: ChannelHandleImpl): void {
+    this.byChannel.set(channelKeyOf(nodeId, channelId), ch)
   }
 
-  unbind(channelId: string): void {
-    this.byId.delete(channelId)
+  unbind(nodeId: string, channelId: string): void {
+    this.byChannel.delete(channelKeyOf(nodeId, channelId))
   }
 
   /** 断线或未连接时 `send` 该丢弃。 */
@@ -236,8 +249,11 @@ export class ChannelHub {
       // 不是 JSON 的帧是 Hub 的 bug，不是页面的；丢掉这一条，不要整条流崩
       return
     }
-    if (!frame || typeof frame.channel_id !== 'string') return
-    this.byId.get(frame.channel_id)?.deliver(frame)
+    // 两个字段都必须齐：缺 `node_id` 的帧无法定位通道（协议侧的通道键是
+    // 二元组），缺 `channel_id` 同理。宁可丢掉这条，也不能把它塞进
+    // 「可能属于某条通道」的猜测里。
+    if (!frame || typeof frame.channel_id !== 'string' || typeof frame.node_id !== 'string') return
+    this.byChannel.get(channelKeyOf(frame.node_id, frame.channel_id))?.deliver(frame)
   }
 
   private onSessionState(ev: Event): void {
@@ -251,13 +267,21 @@ export class ChannelHub {
     if (payload.state !== 'ended' || typeof payload.session_id !== 'string') return
     // 会话结束了，属于它的通道不会再有任何输出：主动关掉并把状态标成 released。
     // 不这么做的话，面板会一直显示「已连接」，而设备那边已经没有这条通道了。
-    for (const [id, ch] of [...this.byId.entries()]) {
+    for (const [key, ch] of [...this.byChannel.entries()]) {
       if (ch.sessionId() === payload.session_id) {
-        this.byId.delete(id)
+        this.byChannel.delete(key)
         ch.markEnded()
       }
     }
   }
+}
+
+/**
+ * 通道的二元键。`node_id` 与 `channel_id` 都不含 `\u0000`，
+ * 所以拼接出来仍然是可逆的——`split` 一下就能拿回两段。
+ */
+function channelKeyOf(nodeId: string, channelId: string): string {
+  return `${nodeId}\u0000${channelId}`
 }
 
 /** 每个键一条，实现放在这里而不是导出：调用方只该通过 `ChannelHub.handle` 拿到它。 */
@@ -268,6 +292,8 @@ class ChannelHandleImpl implements ChannelHandle {
 
   private current: ChannelState = 'idle'
   private channelId: string | null = null
+  /** 通道所属设备。`open()` 成功时从 Hub 的响应里取——分派键要用它。 */
+  private nodeId: string | null = null
   private failure: string | null = null
   private inflight: Promise<void> | null = null
 
@@ -332,7 +358,8 @@ class ChannelHandleImpl implements ChannelHandle {
         // 排队的字符也会发到它身上。
         if (this.current === 'closed') return
         this.channelId = res.channel_id
-        this.hub.bind(res.channel_id, this)
+        this.nodeId = res.node_id
+        this.hub.bind(res.node_id, res.channel_id, this)
         this.set('ready')
         // 先补尺寸再补字符：反过来会让先到的几个字符按上一次的宽度折行。
         if (this.pendingSize) {
@@ -444,12 +471,14 @@ class ChannelHandleImpl implements ChannelHandle {
     this.pendingText.length = 0
     this.pendingSize = null
     const id = this.channelId
+    const nodeId = this.nodeId
     if (!id) {
       this.set('closed')
       return
     }
-    this.hub.unbind(id)
+    if (nodeId) this.hub.unbind(nodeId, id)
     this.channelId = null
+    this.nodeId = null
     this.set('closed')
     try {
       await del(`/api/channels/${encodeURIComponent(id)}`)
@@ -475,6 +504,7 @@ class ChannelHandleImpl implements ChannelHandle {
 
   markEnded(): void {
     this.channelId = null
+    this.nodeId = null
     this.set('closed')
   }
 

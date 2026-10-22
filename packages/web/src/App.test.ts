@@ -2,8 +2,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from '@/App.vue'
 import { KEYS, actCount } from '@/lib/keynav'
+import { depth, isTabbable } from '@/lib/focus'
 import { matchRoute, route } from '@/router'
-import { mountIn } from '@/test/mount'
+import { device, mountIn, session } from '@/test/mount'
 import { settle, stubFetch } from '@/test/http'
 
 async function flush(w: ReturnType<typeof mountIn>): Promise<void> {
@@ -116,6 +117,11 @@ describe('App：跳转后焦点落在 main', () => {
 })
 
 describe('App：键位帮助由 KEYS 渲染', () => {
+  /** 帮助面板 Teleport 到 body，所以只能在 document 上找（不在外壳子树里）。 */
+  function helpEl(): HTMLElement | null {
+    return document.querySelector<HTMLElement>('.af-help')
+  }
+
   it('打开帮助后列出 KEYS 的全部组与条目（不手写第二份表）', async () => {
     stubFetch(EMPTY_API)
     const w = mountApp('/sessions')
@@ -124,7 +130,7 @@ describe('App：键位帮助由 KEYS 渲染', () => {
     await w.element.querySelector<HTMLElement>('[title^="键位帮助"]')?.click()
     await flush(w)
 
-    const help = w.element.querySelector('.af-help')
+    const help = helpEl()
     expect(help).not.toBeNull()
     // 一行一个键位条目；同一个 act 的 alias（`t` 与 `g g`）各占一行，
     // 所以行数是「条目数」而不是 act 数——表里有多少条，面板里就有多少条。
@@ -145,7 +151,7 @@ describe('App：键位帮助由 KEYS 渲染', () => {
     await w.element.querySelector<HTMLElement>('[title^="键位帮助"]')?.click()
     await flush(w)
 
-    expect(w.element.querySelector('.af-help')?.textContent).toContain('这张表就是键位实现本身')
+    expect(helpEl()?.textContent).toContain('这张表就是键位实现本身')
   })
 
   it('点帮助面板里的关闭按钮能关掉它', async () => {
@@ -155,10 +161,83 @@ describe('App：键位帮助由 KEYS 渲染', () => {
 
     await w.element.querySelector<HTMLElement>('[title^="键位帮助"]')?.click()
     await flush(w)
-    await w.element.querySelector<HTMLElement>('.af-help__head button')?.click()
+    await helpEl()?.querySelector<HTMLElement>('.af-help__head button')?.click()
     await flush(w)
 
-    expect(w.element.querySelector('.af-help')).toBeNull()
+    expect(helpEl()).toBeNull()
+  })
+
+  it('帮助开着时把外壳置 inert——背后不是「还能 Tab 过去」的', async () => {
+    stubFetch(EMPTY_API)
+    const w = mountApp('/sessions')
+    await flush(w)
+    const sidebar = w.element.querySelector<HTMLElement>('.af-sidebar')
+
+    await w.element.querySelector<HTMLElement>('[title^="键位帮助"]')?.click()
+    await flush(w)
+
+    // `inertOthers` 把「body 的直接子节点里、不含浮层容器的那几个」置 inert，
+    // 所以**外壳的挂载根**（测试里的 host div，真浏览器里的 `#app`）才带上这个
+    // 属性——`inert` 不继承，断言子树里某个元素自己是白费。
+    // 帮助面板留在 `#app` 里时，`#app` 是 body 唯一的子节点且 `contains` 命中
+    // 宿主 → 一个节点都不会被 inert。所以它必须 Teleport 到 body。
+    const host = sidebar?.closest<HTMLElement>('body > *')
+    expect(host?.inert, '背后那一棵必须整棵 inert').toBe(true)
+    expect(host?.getAttribute('aria-hidden')).toBe('true')
+    // 侧栏里的可聚焦项因此也不再可 Tab（`isTabbable` 读的正是 `inert`）
+    expect(isTabbable(sidebar as Element)).toBe(false)
+    expect(helpEl()).not.toBeNull()
+  })
+})
+
+describe('App：帮助面板的 Esc / 焦点栈', () => {
+  function helpEl(): HTMLElement | null {
+    return document.querySelector<HTMLElement>('.af-help')
+  }
+
+  /** 会话工作台的路由：轨迹抽屉只在那页上注册 `traj:toggle`。 */
+  function mountWorkbench(): ReturnType<typeof mountIn> {
+    return mountApp('/sessions/s_1')
+  }
+
+  it('? → t → Esc：关掉的是栈顶那一层，另一层不动，栈也不残留', async () => {
+    stubFetch({
+      '/api/sessions': {
+        body: [
+          session({ id: 's_1', workspace: { node_id: 'n_1', path: '/srv/app', path_locked: true } }),
+        ],
+      },
+      '/api/devices': { body: [device()] },
+    })
+    const w = mountWorkbench()
+    await flush(w)
+
+    // `?` 打开帮助（进焦点栈）
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }))
+    await flush(w)
+    expect(helpEl()).not.toBeNull()
+
+    // `t` 打开轨迹抽屉（第二层）——**它才是栈顶**
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 't', bubbles: true, cancelable: true }))
+    await flush(w)
+    expect(document.querySelector<HTMLElement>('[data-traj]')).not.toBeNull()
+
+    // 第一次 Esc 关**栈顶**（抽屉），不是帮助：
+    // `KEYS` 里 `layer:escape` 的 label 就是「关闭最上层浮层」，而
+    // `TrajDrawer.vue` 与 `App.vue` 的 `onHelpKeydown` 都写着「只在本层是
+    // 栈顶时生效」——两个 document 级监听靠这条互斥，否则一次 Esc 关两层。
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flush(w)
+
+    expect(document.querySelector<HTMLElement>('[data-traj]')).toBeNull()
+    expect(helpEl(), '帮助在栈底，不该被这一次 Esc 带走').not.toBeNull()
+
+    // 第二次 Esc 关剩下的那一层
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flush(w)
+    expect(helpEl()).toBeNull()
+    // 栈真的空了：没有指向已移除元素的空壳层
+    expect(depth()).toBe(0)
   })
 })
 
@@ -299,6 +378,7 @@ describe('App：登出', () => {
   })
 
   it('点登出会先 POST /logout 再去登录页', async () => {
+    const assign = vi.spyOn(location, 'assign').mockImplementation(() => {})
     const fetchMock = stubFetch(EMPTY_API)
     const w = mountApp('/sessions')
     await flush(w)
@@ -309,6 +389,11 @@ describe('App：登出', () => {
     const hit = fetchMock.mock.calls.find((c) => String(c[0]).includes('/logout'))
     expect(hit, '登出前必须先通知 Hub 清 cookie').toBeTruthy()
     expect((hit?.[1] as RequestInit | undefined)?.method).toBe('POST')
+    // 「再去登录页」是这条用例名里的承诺：只通知了 Hub 而不跳转的话，
+    // 人留在原地，接下来每一个请求都是 401。
+    expect(assign).toHaveBeenCalledWith('/login')
+    // 还原：下一条用例断言的是真实跳转，留着这个 spy 会让它恒真
+    assign.mockRestore()
   })
 
   it('Hub 清 cookie 失败也要去登录页（否则人被困在一堆 401 弹框里）', async () => {

@@ -198,20 +198,42 @@ describe('Home / End', () => {
 })
 
 describe('Enter：语义属于行', () => {
-  it('行有 data-href 时跳转', () => {
+  it('行有 data-href 时跳到那个地址', () => {
     document.body.innerHTML =
       '<div id="list" data-role="list" tabindex="0"><button data-row id="r1" tabindex="-1" data-href="/sessions/s1">一</button></div>'
     const list = document.getElementById('list') as HTMLElement
-    const assign = vi.spyOn(window, 'location', 'get')
-    void assign
-    attach(list, { onEnter: () => false })
+    // `navigate` 是可注入的跳转口：happy-dom 的 `location.assign` 不可 spy，
+    // 而「href 分支有没有跑」必须能被否定——否则删掉该分支用例仍然绿。
+    const navigate = vi.fn()
+    attach(list, { navigate })
     row('r1').focus()
-    // happy-dom 的 location.assign 不可 spy，所以改判「走没走 href 路径」：
-    // 未给 onEnter 时也不应抛 af:enter（说明它被 href 分支接住了）
+    press(row('r1'), 'Enter')
+    expect(navigate).toHaveBeenCalledWith('/sessions/s1')
+  })
+
+  it('data-href 被接住时不再抛 af:enter（两条路不能都走）', () => {
+    document.body.innerHTML =
+      '<div id="list" data-role="list" tabindex="0"><button data-row id="r1" tabindex="-1" data-href="/sessions/s1">一</button></div>'
+    const list = document.getElementById('list') as HTMLElement
+    attach(list, { navigate: vi.fn() })
     const spy = vi.fn()
-    row('r1').addEventListener(ENTER_EVENT, spy)
+    list.addEventListener(ENTER_EVENT, spy)
+    row('r1').focus()
     press(row('r1'), 'Enter')
     expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('rowEnter 的行不走 data-href（Enter 归行自己）', () => {
+    document.body.innerHTML =
+      '<div id="list" data-role="list" tabindex="0"><button data-row id="r1" tabindex="-1" data-href="/sessions/s1">一</button></div>'
+    const list = document.getElementById('list') as HTMLElement
+    const navigate = vi.fn()
+    const onEnter = vi.fn(() => true)
+    attach(list, { navigate, onEnter, rowEnter: true })
+    row('r1').focus()
+    press(row('r1'), 'Enter')
+    expect(navigate).not.toHaveBeenCalled()
+    expect(onEnter).toHaveBeenCalled()
   })
 
   it('行内含 button 时点它', () => {

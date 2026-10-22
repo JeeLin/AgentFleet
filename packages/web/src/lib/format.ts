@@ -9,7 +9,7 @@
    服务端/页面共享的时间约定，猜错一个前缀就会把每台设备都显示成「—」。
    =========================================================================== */
 
-import type { SessionSummary } from './api'
+import type { DeviceSummary, SessionSummary } from './api'
 
 /** 解析 `unix:<秒>`。认不出的格式返回 `null`。 */
 export function parseStamp(stamp: string | null | undefined): number | null {
@@ -64,4 +64,17 @@ export function percent(value: number | null): string {
 /** 取不到的数字画成 `—`，与 `percent(null)` 同一口径（不拿 0 顶上）。 */
 export function orDash(value: number | null): string {
   return value === null ? '—' : String(value)
+}
+
+/**
+ * 设备名。
+ *
+ * 取不到时**回显 `node_id`**：设备列表还没回来时显示「设备」会让人以为
+ * 列表里没有这台设备，而 `n_xxx` 至少还能拿去搜。
+ *
+ * 列表页与工作台各写一份时，改兜底策略要改两处——漏一处则同一台设备在
+ * 两处显示不同的名字。
+ */
+export function deviceLabel(devices: ReadonlyMap<string, DeviceSummary>, nodeId: string): string {
+  return devices.get(nodeId)?.name ?? nodeId
 }

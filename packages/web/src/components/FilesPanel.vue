@@ -1,3 +1,23 @@
+<script lang="ts">
+/* ===========================================================================
+   非 setup 块：`file:*` 的实现声明。
+   ---------------------------------------------------------------------------
+   `⌃S`（保存）与 `Backspace`（上一级）是 `scope: 'panel'` 的两个键，它们由
+   本组件根元素上的局部监听器处理，**不进 keynav 的全局 handler 表**：
+   `register` 拒绝重复注册，而一个宿主可能同时持有多个文件面板（N 个 tab），
+   组件级注册等于把「谁抢到 `file:save`」变成挂载顺序问题。
+
+   声明放在**模块加载时**（而不是 `setup` 里）：`?` 面板读的是「表里有、
+   谁实现了」，而组件可能根本没被挂载过——声明是「这个 act 有实现」这件事
+   的事实，与有没有实例无关。
+   =========================================================================== */
+
+import { declareImplemented } from '@/lib/keynav'
+
+declareImplemented('file:save')
+declareImplemented('file:up')
+</script>
+
 <script setup lang="ts">
 /* ===========================================================================
    FilesPanel —— 文件面板：树 + 面包屑 + 预览（规范 §5.4 / §3.14 / §7.4）
@@ -71,8 +91,9 @@
 
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
-import { cwdPathOf, isOutsideSeg } from '@/lib/files-path'
+import { cwdPathOf, isOutsideSeg, splitPath } from '@/lib/files-path'
 import { orDash } from '@/lib/format'
+import { isTyping } from '@/lib/keynav'
 import { attach, type ListboxHandle } from '@/lib/listbox'
 
 /* ---------------------------------------------------------------- 数据契约 */
@@ -201,9 +222,12 @@ interface Crumb {
 /**
  * 相对路径的拼接。**空段不进栈**：`['a', '', 'b']` 会拼出 `a//b`，而那一层
  * 列不出来（node 侧按 `a//b` 去找是另一个目录）。
+ *
+ * 切分规则来自 `lib/files-path.ts`——页面与面板各写一份 `split('/')` 时，
+ * 同一路径会在一处算出 2 段、另一处算出 1 段，面包屑与树高亮对不上。
  */
 function joinPath(base: string, name: string): string {
-  const parts = base.split('/').filter((s) => s.length > 0)
+  const parts = splitPath(base)
   if (name.length > 0) parts.push(name)
   return parts.join('/')
 }
@@ -240,6 +264,14 @@ interface Row {
   /** 越界节点照常显示，标记它（§7.4 ①）。 */
   outside: boolean
   depth: number
+  /**
+   * meta 列的文案（越界给「不可进入」，链接给目标，文件给大小）。
+   *
+   * **算一次存下来**：模板里 `v-if="metaOf(row)"` 与 `{{ metaOf(row) }}`
+   * 各调一次，而 `metaOf` 内部要调 `humanBytes` 组装字符串——每帧对可见行
+   * 做两遍同样的组装。
+   */
+  meta: string
 }
 
 /** 已展开的目录（相对路径集合）。折叠**不**清已列的条目——再展开不用重取。 */
@@ -264,6 +296,7 @@ const rows = computed<Row[]>(() => {
     for (const entry of layer.entries) {
       const child = joinPath(path, entry.name)
       const isDir = entry.kind === 'dir'
+      const outside = isOutsideSeg(entry.name)
       out.push({
         path: child,
         name: entry.name,
@@ -271,8 +304,9 @@ const rows = computed<Row[]>(() => {
         expanded: isDir && expanded.value.has(child),
         size: entry.size,
         target: entry.target ?? null,
-        outside: isOutsideSeg(entry.name),
+        outside,
         depth,
+        meta: metaOf(entry, outside),
       })
       if (isDir && expanded.value.has(child)) walk(child, depth + 1)
     }
@@ -316,11 +350,11 @@ function ariaLabelOf(row: Row): string {
 }
 
 /** 行的 meta 列：越界给「不可进入」，链接给目标，文件给大小。 */
-function metaOf(row: Row): string {
-  if (row.outside) return '不可进入'
-  if (row.kind === 'link') return row.target ? `→ ${row.target}` : '→ ?'
-  if (row.kind === 'file') return humanBytes(row.size)
-  if (row.kind === 'unknown') return '类型未知'
+function metaOf(entry: FileEntry, outside: boolean): string {
+  if (outside) return '不可进入'
+  if (entry.kind === 'link') return entry.target ? `→ ${entry.target}` : '→ ?'
+  if (entry.kind === 'file') return humanBytes(entry.size)
+  if (entry.kind === 'unknown') return '类型未知'
   return ''
 }
 
@@ -393,7 +427,7 @@ function onKeydown(e: KeyboardEvent): void {
     return
   }
   // 输入区内不抢 Backspace：那是在删字符（§4.2「单键在输入区内不抢」）
-  if (e.key === 'Backspace' && !isTypingTarget(target)) {
+  if (e.key === 'Backspace' && !isTyping(target)) {
     const depth = props.cwd.length
     if (depth === 0) return
     e.preventDefault()
@@ -418,11 +452,6 @@ function toggleRowOnSpace(e: KeyboardEvent, target: HTMLElement): void {
   e.preventDefault()
   e.stopPropagation()
   toggleDir(path)
-}
-
-function isTypingTarget(el: HTMLElement): boolean {
-  const tag = el.tagName.toUpperCase()
-  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable === true
 }
 
 onBeforeUnmount(() => {
@@ -645,7 +674,7 @@ function humanBytes(n: number | null): string {
         >
           <span class="af-tree__twisty" aria-hidden="true">{{ twistyOf(row) }}</span>
           <span class="af-tree__name">{{ row.name }}</span>
-          <span v-if="metaOf(row)" class="af-tree__meta">{{ metaOf(row) }}</span>
+          <span v-if="row.meta" class="af-tree__meta">{{ row.meta }}</span>
         </button>
       </div>
 

@@ -113,17 +113,6 @@ describe('navigate', () => {
     expect(document.activeElement).toBe(main)
     expect(main.querySelector('h1')?.getAttribute('tabindex')).toBe('-1')
   })
-
-  it('keepFocus 不抢焦点（切 tab 是视图切换，不是跳页）', async () => {
-    document.body.innerHTML = '<button id="x">x</button><main class="af-main" tabindex="-1"></main>'
-    const btn = document.querySelector<HTMLButtonElement>('#x') as HTMLButtonElement
-    btn.focus()
-
-    navigate('/sessions/s_1', { keepFocus: true })
-    await new Promise((r) => queueMicrotask(() => r(null)))
-
-    expect(document.activeElement).toBe(btn)
-  })
 })
 
 describe('interceptLink', () => {

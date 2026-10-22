@@ -15,9 +15,9 @@
    `invalid_credentials`（**密码错**）。两者绝不能混：把「密码错」当成
    「session 过期」会变成一个死循环（弹框 → 401 → 再弹框）。
 
-   所以这里跟 `LoginPage.vue` 一样直接 `fetch('/login')`。代价是两份等价的
-   `postLogin` 分布两处，而 `lib/auth.ts` 的 `submitLogin` 恰恰用不了
-   （它走 http.ts）。这是**有意**的分叉，不是漏抽。
+   所以登录请求走 `lib/auth.ts` 的 `postLogin`——它**直接 `fetch`**，不经过
+   `http.ts`（那一层的 401 分支正是会弹框的那个分支）。登录页与这个框共用
+   这一份：两份等价的 `postLogin` 分布两处时，「错误码怎么读」迟早会漂。
 
    ── 五种错误分开呈现 ────────────────────────────────────────────────
    文案一律来自 `lib/auth.ts` 的 `describeLoginFailure`，这里**只负责呈现**。
@@ -36,9 +36,8 @@
 
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
-import { describeLoginFailure, type AuthFailure } from '@/lib/auth'
+import { describeLoginFailure, postLogin, type AuthFailure } from '@/lib/auth'
 import { pop, push, topContainer, trapTab } from '@/lib/focus'
-import { ApiError, NetworkError } from '@/lib/http'
 import { SETUP_PATH, navigate } from '@/router'
 
 const props = defineProps<{
@@ -113,36 +112,6 @@ function onKeydown(e: KeyboardEvent): void {
 /** 点遮罩：只有点在遮罩自己上才算（点在框里不该关）。 */
 function onScrim(e: MouseEvent): void {
   if (e.target === e.currentTarget) close()
-}
-
-/**
- * `POST /login`。
- *
- * **不碰 `http.ts` 的 401 语义**（理由见文件头）：那层把 401 一律算作
- * session 过期，而这里要区分的正是「密码错」与「过期」。
- */
-async function postLogin(pw: string): Promise<void> {
-  let res: Response
-  try {
-    res = await fetch('/login', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: pw }),
-    })
-  } catch (cause) {
-    throw new NetworkError(cause)
-  }
-  if (!res.ok) {
-    let code = `http_${res.status}`
-    try {
-      const body = (await res.json()) as { error?: unknown }
-      if (typeof body.error === 'string' && body.error.length > 0) code = body.error
-    } catch {
-      // 非 JSON 错误体（反代错误页、空 502）→ 保留 `http_<status>` 兜底
-    }
-    throw new ApiError(res.status, code)
-  }
 }
 
 async function submit(): Promise<void> {

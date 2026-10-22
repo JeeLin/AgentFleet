@@ -122,22 +122,29 @@ function onKeydown(e: KeyboardEvent): void {
       if (dispatch('search:focus', e)) return
       return
     }
+    // 序列的第二个键优先于「重新武装前缀」：否则 `g g` 永远触发不了——
+    // 第二键 `g` 会命中下面那个分支，把窗口续期一遍再 return。
+    // `PREFIX` 里有 `g`（`g g` = traj:toggle）时，这里必须是序列命中路径。
+    if (prefixAt && Date.now() - prefixAt <= PREFIX_MS) {
+      const act = PREFIX.get(e.key)
+      clearPrefix()
+      // **第二键也要判 typing**：第一键判过不代表第二键安全——用户在搜索框
+      // 里敲「g」再敲「t」，第二键落在输入区里，不该被解释成
+      // 「跳到 /trajectory」并把那两个字符吃掉。
+      if (typing) return
+      if (act) {
+        dispatch(act, e)
+        return
+      }
+      // 没配上：不吞，用户可能只是在打一段以 g 开头的字
+      return
+    }
     if (!typing && e.key === 'g') {
       // 前缀本身不吞键以外的任何东西：它只是在等第二个键
       e.preventDefault()
       clearPrefix()
       prefixAt = Date.now()
       prefixTimer = setTimeout(clearPrefix, PREFIX_MS)
-      return
-    }
-    if (prefixAt && Date.now() - prefixAt <= PREFIX_MS) {
-      const act = PREFIX.get(e.key)
-      clearPrefix()
-      if (act) {
-        dispatch(act, e)
-        return
-      }
-      // 没配上：不吞，用户可能只是在打一段以 g 开头的字
       return
     }
     if (e.key === 'Escape') {

@@ -25,7 +25,7 @@ import StateBadge from '@/components/StateBadge.vue'
 import type { AgentSummary, DeviceSummary } from '@/lib/api'
 import { canCreateSession, createSession, createSessionErrorLabel, listAgents, listDevices } from '@/lib/api'
 import { relativeTime } from '@/lib/format'
-import { ApiError, NetworkError } from '@/lib/http'
+import { ApiError, describeReadFailure } from '@/lib/http'
 import { attach, type ListboxHandle } from '@/lib/listbox'
 import { navigate, route } from '@/router'
 
@@ -86,9 +86,7 @@ async function load(): Promise<void> {
     devices.value = devs
     agents.value = ags
   } catch (err) {
-    if (err instanceof NetworkError) loadError.value = 'Hub 连不上。检查 Hub 进程是否还在。'
-    else if (err instanceof ApiError) loadError.value = `读设备列表失败（${err.code}）。`
-    else loadError.value = '读设备列表失败。'
+    loadError.value = describeReadFailure(err, '设备列表')
   } finally {
     loading.value = false
   }
@@ -445,25 +443,6 @@ async function submit(): Promise<void> {
 }
 .af-sum__v[data-empty='true'] {
   color: var(--af-fg-disabled);
-}
-.af-skel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--af-space-2);
-}
-.af-skel .af-skeleton {
-  height: var(--af-row-compact);
-}
-.af-inline-error {
-  display: flex;
-  align-items: center;
-  gap: var(--af-space-4);
-  padding: var(--af-space-3) var(--af-space-4);
-  border: 1px solid var(--af-danger-line);
-  background: var(--af-danger-bg);
-  color: var(--af-danger-fg);
-  border-radius: var(--af-radius-md);
-  font-size: var(--af-text-sm);
 }
 @media (max-width: 900px) {
   .af-picker {
