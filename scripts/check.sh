@@ -1,34 +1,85 @@
 #!/usr/bin/env bash
 # 本仓库的 grep 门禁。新增规则按 C 序号追加。
+#
+# 用法：scripts/check.sh [--strict-anchors]
+#
+#   --strict-anchors  把「里程碑文档里待迁移的裸行号锚点」也算失败。
+#                     默认只报不红——那些锚点归主线迁移（见 M1 里程碑 Bugs 表 910 条）。
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+STRICT_ANCHORS=0
+for arg in "$@"; do
+  case "$arg" in
+    --strict-anchors) STRICT_ANCHORS=1 ;;
+    -h | --help)
+      sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *)
+      echo "未知参数：$arg（--help 看用法）" >&2
+      exit 2 ;;
+  esac
+done
+
 fail=0
-ok()   { echo "  ✅ $1"; }
-bad()  { echo "  ❌ $1"; fail=1; }
+ok() { echo "  ✅ $1"; }
+bad() { echo "  ❌ $1"; fail=1; }
 
 echo "== C1 子 crate 不得手写依赖版本号（必须收敛到 [workspace.dependencies]）=="
-hits=$(grep -nE '^[[:space:]]*[a-zA-Z0-9_-]+[[:space:]]*=[[:space:]]*"[0-9]' crates/*/Cargo.toml || true)
+# 只看依赖表（`[dependencies]` / `[dev-dependencies]` / `[build-dependencies]` /
+# `[target.*.dependencies]`），两种写法都要拦：
+#   裸字符串    `tokio = "1"`
+#   内联表      `serde = { version = "1.0", features = [...] }`
+# 收敛后的正确写法 `xxx.workspace = true` 与 `xxx = { workspace = true }` 放行。
+hits=$(awk '
+  FNR == 1 { sect = "" }
+  /^[[:space:]]*\[/ { sect = $0; next }
+  {
+    if (sect !~ /dependencies/) next
+    if (match($0, /^[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*=/)) {
+      p = RSTART + RLENGTH
+      val = substr($0, p)
+      if (val ~ /^[[:space:]]*"/) {
+        v = val
+        sub(/^[[:space:]]*"/, "", v)
+        if (v ~ /^[0-9]/) print FILENAME ":" FNR ":" $0
+      } else if (val ~ /^[[:space:]]*\{/) {
+        if (val ~ /version[[:space:]]*=[[:space:]]*"[0-9]/) print FILENAME ":" FNR ":" $0
+      }
+    }
+  }
+' crates/*/Cargo.toml)
 if [[ -z "$hits" ]]; then ok "无手写版本号"; else bad "子 crate 出现手写版本号："; echo "$hits" | sed 's/^/      /'; fi
 
 echo "== C2 设备二进制不得被称作 agent（约束 2）=="
-# 与 C3 同口径排除 `-reports/`：审查报告为了证明「某模式零命中」会把正则
-# 本身写进正文，那不是规格在把设备叫 agent。
+# 与 C3 同口径排除审查报告目录：报告为了证明「某模式零命中」会把正则本身写进正文，
+# 那不是规格在把设备叫 agent。目录名带里程碑号（`M0-reports/` / `M1-reports/`），
+# 所以排除写成 `-reports/` 通配，不写死当前里程碑名。
 hits=$(grep -rnE 'Dockerfile\.agent|agentfleet-agent|agent-binaries|docker-agent|agent 镜像' --include='*.md' docs/ .mdflow/ 2>/dev/null \
-  | grep -v '/M1-reports/' || true)
+  | grep -v -- '-reports/' || true)
 if [[ -z "$hits" ]]; then ok "命名合规"; else bad "出现把设备二进制叫 agent 的用法："; echo "$hits" | sed 's/^/      /'; fi
 
-echo "== C3 里程碑文档的 docs/ 锚点必须有效（A 轨 §N.N 解析到小节标题；B 轨 file.md:N 行号有效）=="
-if compgen -G ".mdflow/milestones/*.md" > /dev/null; then
-  python3 - <<'PYEOF'
+echo "== C3 文档锚点必须有效（A 轨 §N.N 解析到小节标题；B 轨 file.md:N 指向稳定锚点行）=="
+CHECK_STRICT_ANCHORS=$STRICT_ANCHORS python3 - <<'PYEOF'
 import re, os, sys, glob
 
-# 遍历 .mdflow/milestones/*.md，排除 -reports/ 子目录（审查报告不是被门禁的规格）
-FILES = [p for p in sorted(glob.glob('.mdflow/milestones/*.md'))
-         if not os.path.basename(p).startswith('-')]
+STRICT = os.environ.get('CHECK_STRICT_ANCHORS') == '1'
 
-# 已知的「别名 → 真文件名」映射。规范允许前缀省略（「设计规范」= design-system.md、
-# 「protocol.md」= docs/architecture/protocol.md），故此处做前缀匹配而非全等。
+# ---- 扫描范围 -------------------------------------------------------------
+# 里程碑文档：.mdflow/milestones/*.md（不含 -reports/ 下的审查报告）
+MILESTONE = [p for p in sorted(glob.glob('.mdflow/milestones/*.md'))
+             if not os.path.basename(p).startswith('-')]
+# 仓库自有文档：对外文档 + 根文件 + 夹具说明（这些的锚点归本仓库自己维护）
+OWN = sorted(glob.glob('docs/**/*.md', recursive=True)) + [
+    'README.md', 'AGENTS.md', 'CHANGELOG.md', 'scripts/e2e-m1/README.md']
+OWN = [p for p in OWN if os.path.exists(p)]
+
+# ---- 别名表 ---------------------------------------------------------------
+# 规范允许前缀省略（「设计规范」= design-system.md、「protocol.md」=
+# docs/architecture/protocol.md），故此处做前缀匹配而非全等。
+#
+# `README` 指**仓库根**那份：仓库里对架构目录那份的引用本来就都写全路径
+# （`docs/architecture/README.md`），只有根那份常用裸名。
 ALIASES = {
     'design-system': 'docs/design-system.md',
     'protocol': 'docs/architecture/protocol.md',
@@ -37,7 +88,7 @@ ALIASES = {
     'DECISIONS': 'docs/DECISIONS.md',
     'BUGS': 'docs/BUGS.md',
     'AGENTS': 'AGENTS.md',
-    'README': 'docs/architecture/README.md',
+    'README': 'README.md',
     'security': 'docs/architecture/security-and-lifecycle.md',
     'scheduling': 'docs/architecture/scheduling.md',
     'session-and-trajectory': 'docs/architecture/session-and-trajectory.md',
@@ -55,7 +106,6 @@ ZH_ALIASES = {
     '开发': 'docs/DEVELOPMENT.md',
     '决策': 'docs/DECISIONS.md',
 }
-
 # A 轨的 §N.N 若紧跟在这些扩展名之后（tokens.css §13 / app.js §x），指的是
 # 原型资产或代码文件自己的编号系统，不是 docs 的节号，按测试标准明示除外。
 EXTERNAL_SUFFIX = ('.css', '.js', '.ts', '.rs', '.json', '.sql')
@@ -64,9 +114,7 @@ EXTERNAL_SUFFIX = ('.css', '.js', '.ts', '.rs', '.json', '.sql')
 def resolve(tok):
     """把一个文档标识（裸名 / 别名 / 路径）解析成仓库内路径；解析不出返回 None。
 
-    裸名（不含 `/`）先查别名表：`README.md` 指 `docs/architecture/README.md` 而不是
-    仓库根那个同名的 README——这是本仓库的既有用法（M0 文档 `README.md:41`「status 只有
-    online/offline」说的就是数据模型那一行）。带路径的标识按存在性解析。
+    裸名（不含 `/`）先查别名表；带路径的标识按存在性解析。
     """
     t = tok.strip('`').rstrip('.,;:、)）')
     if '/' not in t:
@@ -77,7 +125,7 @@ def resolve(tok):
             return ALIASES[base]
         if base in ZH_ALIASES:
             return ZH_ALIASES[base]
-    for cand in (t, 'docs/' + t, 'docs/architecture/' + t):
+    for cand in (t, 'docs/' + t, 'docs/architecture/' + t, '.mdflow/milestones/' + t):
         if os.path.exists(cand):
             return cand
     base = os.path.basename(t)
@@ -90,6 +138,8 @@ def resolve(tok):
 
 
 _HEAD_CACHE = {}
+
+
 def headings(path):
     """{节号: 行号}。节号取自标题行首的数字编号（'### 5.2 路由与深链接' → 5.2）。"""
     if path in _HEAD_CACHE:
@@ -100,7 +150,7 @@ def headings(path):
     except OSError:
         _HEAD_CACHE[path] = out
         return out
-    for i, line in enumerate(lines):
+    for i, line in enumerate(lines, 1):
         m = re.match(r'^#{1,6}\s+(\d+(?:\.\d+)*)[.\s、]', line)
         if m:
             out.setdefault(m.group(1), i + 1)
@@ -111,25 +161,114 @@ def headings(path):
 # 带 .md 的文档标识（允许路径前缀与前导 .）：`docs/x.md` / `x.md` / `.mdflow/…/x.md`
 MD_PATH = r'\.?[A-Za-z0-9_][A-Za-z0-9_\-/\.]*\.md'
 # 裸别名（不含 .md）：design-system / protocol / 设计规范 / 规范 / …
-BARE_ALIAS = r'(?:design-system|protocol|PRODUCT|DEVELOPMENT|DECISIONS|BUGS|AGENTS|README|security|scheduling|设计规范|规范|协议)'
+BARE_ALIAS = (r'(?:design-system|protocol|PRODUCT|DEVELOPMENT|DECISIONS|BUGS|AGENTS|README'
+              r'|security|scheduling|session-and-trajectory|task-continuity'
+              r'|workspace-and-sync|ai-gateway|inference|设计规范|规范|协议)')
 MENTION = re.compile(r'`?((?:' + MD_PATH + r')|(?:' + BARE_ALIAS + r')):?(?:\d+(?:-\d+)?)?`?')
 SECTION = re.compile(r'§\s*(\d+(?:\.\d+)*)')
 LINEANCHOR = re.compile(r'`?(' + MD_PATH + r'):(\d+)`?')
+# 「原 `x.md:N`」= 指向历史版本的行号（文件已改过），只查文件存在。
+# 「原文锚点」/「历史锚点」是本仓库在缺陷池里声明同一件事的写法。
+HISTORICAL = re.compile(r'(原\s*[`（(]?[^`）)]*\.md:\d+|原文锚点|历史锚点|原锚点)')
+# 稳定锚点行：标题，或含反引号代码标识符的行。裸行号只有落在这种行上，
+# 插一行才不会指错——指向散文行的行号是「迟早指错」的引用。
+BACKTICK = re.compile(r'`[^`]+`')
+HEADING_LINE = re.compile(r'^#{1,6}\s')
 
-bad_a, bad_b = [], []
+LIST_ITEM = re.compile(r'^\s*([-*+]|\d+[.)])\s')
+
+
+def block_span(lines, i):
+    """§ 锚点的上下文块：表格行 = 该行；列表项 = 该项（含续行）；否则 = 段落。"""
+    line = lines[i]
+    if line.lstrip().startswith('|'):
+        return i, i
+    if LIST_ITEM.match(line):
+        j = i - 1
+        while j >= 0 and lines[j].strip() and not LIST_ITEM.match(lines[j]) \
+                and not lines[j].lstrip().startswith('|'):
+            j -= 1
+        start = j + 1
+        j = i + 1
+        while j < len(lines) and lines[j].strip() and not LIST_ITEM.match(lines[j]) \
+                and not lines[j].lstrip().startswith('|'):
+            j += 1
+        return start, j - 1
+    j = i - 1
+    while j >= 0 and lines[j].strip():
+        j -= 1
+    start = j + 1
+    j = i + 1
+    while j < len(lines) and lines[j].strip():
+        j += 1
+    return start, j - 1
+
+
+def collect_mentions(lines):
+    """全文的文件提及，按 (行号, 列号) 排序。"""
+    out = []
+    for i, line in enumerate(lines, 1):
+        for m in MENTION.finditer(line):
+            rp = resolve(m.group(1))
+            if rp:
+                out.append((i, m.start(), rp, m.group(1)))
+    return out
+
+
+bad_a, bad_b, pending = [], [], []
 n_a = n_b = n_hist = 0
 
-for path in FILES:
-    for lineno, line in enumerate(open(path, encoding='utf-8').read().split('\n'), 1):
-        # ---- B 轨：`xxx.md:N` 裸行号 ----
-        # 只校验行号在文件行数范围内且该行非空。行号是本仓库已造成过漂移的引用形式
-        # （DEVELOPMENT.md 是表格，插一行就全错位），不配当强校验。
-        # 「原 `xxx.md:N`」指**历史上那一版**的行号（文件已改过），只查文件存在。
-        historical = bool(re.search(r'原\s*`[^`]*\.md:\d+', line))
+
+def check_a(path, lines, all_mentions):
+    """A 轨：§N.N 必须能解析到某个候选归属文件的小节标题。
+
+    归属口径 = **该 § 之前最近出现的显式文件名**（跨行也算，规格原意如此）；
+    归属文件里没有该小节时，再退一步看同一上下文块里的其它提及、上一处提及
+    与本文档自身——规格文本里的「§8.1」有时指的是设计规范而不是紧邻的协议文档。
+    """
+    global n_a
+    for lineno, line in enumerate(lines, 1):
+        bs, be = block_span(lines, lineno - 1)
+        block = [m for m in all_mentions if bs + 1 <= m[0] <= be + 1]
+        for m in SECTION.finditer(line):
+            if line[:m.start()].rstrip().endswith(EXTERNAL_SUFFIX):
+                continue
+            sec = m.group(1)
+            before = [x for x in block if (x[0], x[1]) < (lineno, m.start())]
+            after = [x for x in block if (x[0], x[1]) > (lineno, m.start())]
+            earlier = [x for x in all_mentions if (x[0], x[1]) < (lineno, m.start())]
+            cands = []
+            for group in (before, after, earlier[-1:] if earlier else []):
+                for x in group:
+                    if x[2] not in cands:
+                        cands.append(x[2])
+            if path not in cands:
+                cands.append(path)
+            if not cands:
+                continue
+            n_a += 1
+            if not any(sec in headings(c) for c in cands):
+                bad_a.append((path, lineno, cands[0], sec))
+
+
+def check_b(path, lines, own):
+    """B 轨：`xxx.md:N` 裸行号必须落在目标文件的稳定锚点行上。
+
+    只查「行号在范围内且非空」拦不住表格插行：插一行后行号仍然合法，
+    指向的却是另一行。所以额外要求目标是**稳定锚点行**（标题 / 含代码标识符的行）。
+
+    **仓库自有文档不满足即判红**；里程碑文档里的裸行号锚点只报不红
+    （`--strict-anchors` 才判红）——那批锚点归主线迁移（见 M1 里程碑 Bugs 表
+    910 条），门禁在这里只负责「把漂移摆出来」，不负责替主线改文档。
+    """
+    global n_b, n_hist
+    for lineno, line in enumerate(lines, 1):
+        historical = bool(HISTORICAL.search(line))
         for m in LINEANCHOR.finditer(line):
             rp = resolve(m.group(1))
             if rp is None:
-                bad_b.append((path, lineno, m.group(1), int(m.group(2)), 'FILE MISSING'))
+                item = (path, lineno, m.group(1), int(m.group(2)), 'FILE MISSING')
+                (bad_b if own else pending).append(item)
                 continue
             if historical:
                 n_hist += 1
@@ -137,35 +276,38 @@ for path in FILES:
             fl = open(rp, encoding='utf-8').read().split('\n')
             n = int(m.group(2))
             if n < 1 or n > len(fl) or not fl[n - 1].strip():
-                bad_b.append((path, lineno, m.group(1), n, 'LINE EMPTY OR OUT OF RANGE'))
-            else:
-                n_b += 1
-        # ---- A 轨：`§N.N` 必须解析到小节标题 ----
-        # 归属 = 该 § 之前**同一行内**最近的显式文件名（允许前缀省略与中文简称）。
-        # 同一行内没有可归属的文件名时不判（不误红）：跨行继承会把列表里更早出现的
-        # 别的文件名误认成归属，实测会造成 12 处误报。
-        # 指向原型资产/外部编号系统的 `§`（tokens.css §13 等）按测试标准明示除外。
-        mentions = [(m.start(), resolve(m.group(1))) for m in MENTION.finditer(line)]
-        mentions = [(pos, rp) for pos, rp in mentions if rp]
-        for m in SECTION.finditer(line):
-            # 该 § 紧跟在一个非 md 标识（原型资产 / 代码文件）之后 → 外部编号系统，跳过
-            if line[:m.start()].rstrip().endswith(EXTERNAL_SUFFIX):
+                item = (path, lineno, m.group(1), n, 'LINE EMPTY OR OUT OF RANGE')
+                (bad_b if own else pending).append(item)
                 continue
-            sec = m.group(1)
-            prev = [rp for pos, rp in mentions if pos < m.start()]
-            if not prev:
-                continue  # 无法判定归属 → 不误红
-            owner = prev[-1]
-            n_a += 1
-            if sec not in headings(owner):
-                bad_a.append((path, lineno, owner, sec, 'NOT A SECTION HEADING'))
+            if not (HEADING_LINE.match(fl[n - 1]) or BACKTICK.search(fl[n - 1])):
+                item = (path, lineno, m.group(1), n, 'NOT A STABLE ANCHOR LINE')
+                (bad_b if own else pending).append(item)
+                continue
+            n_b += 1
+
+
+for path in MILESTONE + OWN:
+    lines = open(path, encoding='utf-8').read().split('\n')
+    mentions = collect_mentions(lines)
+    check_a(path, lines, mentions)
+    check_b(path, lines, own=path in OWN)
+
+# --strict-anchors：把「待主线迁移的裸行号锚点」也算失败（主线迁移完就该关掉这个口子）
+if STRICT:
+    bad_b.extend(pending)
+    pending = []
 
 print(f"  A 轨（§N.N 稳定锚）：{n_a} 处待解析，{'全部解析到小节标题' if not bad_a else str(len(bad_a)) + ' 处悬空'}")
-print(f"  B 轨（file.md:N 裸行号）：{n_b + n_hist} 处（含 {n_hist} 处历史锚点仅查文件存在），"
+print(f"  B 轨（file.md:N 裸行号）：{n_b + n_hist + len(pending)} 处（含 {n_hist} 处历史锚点仅查文件存在），"
       f"{'无失效' if not bad_b else str(len(bad_b)) + ' 处失效'}")
+if pending:
+    print(f"  ⚠️  里程碑文档待迁移的裸行号锚点：{len(pending)} 处（指向非稳定锚点行 / 行号已越界，"
+          f"插一行即指错；迁移清单见 M1 里程碑 Bugs 表 910 条）")
+    for p, ln, f, n, why in pending:
+        print(f"     · {p}:{ln} {f}:{n} {why}")
 if bad_a:
-    for p, ln, owner, sec, why in bad_a:
-        print(f"  ❌ {p}:{ln} {owner} §{sec} {why}")
+    for p, ln, owner, sec in bad_a:
+        print(f"  ❌ {p}:{ln} {owner} §{sec} NOT A SECTION HEADING")
 if bad_b:
     for p, ln, f, n, why in bad_b:
         print(f"  ❌ {p}:{ln} {f}:{n} {why}")
@@ -173,27 +315,182 @@ if bad_a or bad_b:
     sys.exit(1)
 PYEOF
   [[ $? -ne 0 ]] && fail=1
-else
-  echo "  ⏭️  无里程碑文档，跳过"
-fi
 
 echo "== C4 生产代码不得用 unwrap_or_default（clippy 没有这条规则，只能 grep）=="
-# 只扫生产代码：crates/*/src 下的 .rs，排除 #[cfg(test)] 无关的测试文件
-# 与 crates/*/tests/。测试里允许——那里失败就该炸，且 panic 消息更能定位。
-# 两处要放行：① 文档注释里提到这个写法（解释为什么禁它），那不是调用；
-# ② `src/` 内的 `#[cfg(test)]` 段——那里失败就该炸，且 panic 消息更能定位。
-# 对每个命中所在的文件，裁掉 `#[cfg(test)]` 之后的行
-hits=$(grep -rn 'unwrap_or_default' crates/*/src --include='*.rs' \
-  | grep -vE ':[0-9]+:[[:space:]]*(///|//!|//)' \
-  | while IFS=: read -r f ln rest; do
-      cut=$(grep -n '#\[cfg(test)\]' "$f" | head -1 | cut -d: -f1)
-      if [[ -z "$cut" || "$ln" -lt "$cut" ]]; then echo "$f:$ln:$rest"; fi
-    done)
-if [[ -z "$hits" ]]; then
-  ok "生产代码无 unwrap_or_default"
+# 只扫生产代码：crates/*/src 下的 .rs（crates/*/tests/ 不在范围内）。
+# 测试里允许——那里失败就该炸，且 panic 消息更能定位。
+#
+# **分界按每个 `#[cfg(test)]` 块分别判**：块内 = 测试，块外 = 生产。
+# 早先的写法拿「文件内首个 `#[cfg(test)]`」当分界，于是该行之后的**生产代码**
+# 全被豁免（如 hub-server/src/routes/stream.rs 与 node-core/src/pty.rs 的测试块
+# 后面都还有生产代码）。
+python3 - <<'PYEOF'
+import re, os, sys, glob
+
+FILES = sorted(glob.glob('crates/*/src/**/*.rs', recursive=True))
+ATTR = re.compile(r'#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]')
+
+
+def mask(src):
+    """把注释与字符串/字符字面量的内容抹成空格（长度不变）。
+
+    数花括号时不被字符串里的 '{' 骗，扫 `unwrap_or_default` 时也不把
+    文档注释里的写法算成调用。
+    """
+    out = list(src)
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        if c == '/' and src.startswith('//', i):
+            while i < n and src[i] != '\n':
+                out[i] = ' '
+                i += 1
+        elif c == '/' and src.startswith('/*', i):
+            depth = 0
+            while i < n:
+                if src.startswith('/*', i):
+                    depth += 1
+                    out[i] = out[i + 1] = ' '
+                    i += 2
+                elif src.startswith('*/', i):
+                    depth -= 1
+                    out[i] = out[i + 1] = ' '
+                    i += 2
+                    if depth == 0:
+                        break
+                else:
+                    if src[i] != '\n':
+                        out[i] = ' '
+                    i += 1
+        elif c == 'r' and i + 1 < n and (src[i + 1] == '"' or src[i + 1] == '#'):
+            j = i + 1
+            hashes = 0
+            while j < n and src[j] == '#':
+                hashes += 1
+                j += 1
+            if j < n and src[j] == '"':
+                close = '"' + '#' * hashes
+                end = src.find(close, j + 1)
+                end = n if end < 0 else end + len(close)
+                for k in range(i, end):
+                    if src[k] != '\n':
+                        out[k] = ' '
+                i = end
+            else:
+                i += 1
+        elif c == '"':
+            j = i + 1
+            while j < n:
+                if src[j] == '\\':
+                    j += 2
+                    continue
+                if src[j] == '"':
+                    j += 1
+                    break
+                if src[j] == '\n':
+                    break
+                j += 1
+            for k in range(i, min(j, n)):
+                if src[k] != '\n':
+                    out[k] = ' '
+            i = j
+        elif c == "'":
+            m = re.match(r"'(\\.|[^'\\\n])'", src[i:])
+            if m:
+                for k in range(i, i + m.end()):
+                    if src[k] != '\n':
+                        out[k] = ' '
+                i += m.end()
+            else:
+                i += 1  # 生命周期 'a，不是字符字面量
+        else:
+            i += 1
+    return ''.join(out)
+
+
+def test_spans(masked):
+    """每个 `#[cfg(test)]` 覆盖的闭区间 [起始行, 结束行]（1-based）。"""
+    spans = []
+    for m in ATTR.finditer(masked):
+        start_line = masked.count('\n', 0, m.start()) + 1
+        j = m.end()
+        end_off = None
+        while j < len(masked):
+            ch = masked[j]
+            if ch == '{':
+                depth = 0
+                k = j
+                while k < len(masked):
+                    if masked[k] == '{':
+                        depth += 1
+                    elif masked[k] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    k += 1
+                end_off = k
+                break
+            if ch == ';':
+                end_off = j
+                break
+            j += 1
+        if end_off is None:
+            end_off = m.end()
+        end_line = masked.count('\n', 0, end_off) + 1
+        spans.append((start_line, end_line))
+    return spans
+
+
+hits = []
+for path in FILES:
+    src = open(path, encoding='utf-8').read()
+    masked = mask(src)
+    spans = test_spans(masked)
+    for m in re.finditer(r'unwrap_or_default', masked):
+        line = masked.count('\n', 0, m.start()) + 1
+        if any(lo <= line <= hi for lo, hi in spans):
+            continue  # #[cfg(test)] 块内 = 测试代码，放行
+        hits.append(f"{path}:{line}:{src.splitlines()[line - 1].strip()}")
+
+if hits:
+    bad_msg = "unwrap_or_default 把「取不到」静默变成空值，改成显式分支："
+    print(f"  ❌ {bad_msg}")
+    for h in hits:
+        print(f"      {h}")
+    sys.exit(1)
+print("  ✅ 生产代码无 unwrap_or_default")
+PYEOF
+  [[ $? -ne 0 ]] && fail=1
+
+echo "== C5 原型 CSS 资产只能是转发 shim，不得再存第二份（真相源 = 生产副本）=="
+# 真相源是 `packages/web/src/styles/*.css`；原型同名文件只做一次 @import。
+# 两份逐字相同的文件会各说各话：改原型那份生产页面不变，改生产那份原型展示旧值，
+# 而两份文件头都自称「唯一真相源」——读者无从判断该改哪一份。
+shim_hits=""
+for name in tokens.css components.css; do
+  shim="prototype/assets/$name"
+  prod="packages/web/src/styles/$name"
+  if [ ! -f "$shim" ]; then
+    shim_hits="$shim_hits 缺失 $shim\n"
+    continue
+  fi
+  if [ ! -f "$prod" ]; then
+    shim_hits="$shim_hits 缺失 $prod\n"
+    continue
+  fi
+  if ! grep -qF "@import url(\"../../$prod\")" "$shim"; then
+    shim_hits="$shim_hits $shim 没有 @import 到 $prod\n"
+  fi
+  # shim 里再定义一次 token 变量 = 第二份真相源
+  if grep -qE '^[[:space:]]*--af-' "$shim"; then
+    shim_hits="$shim_hits $shim 仍定义 --af-* 变量（=第二份真相源）\n"
+  fi
+done
+if [[ -z "$shim_hits" ]]; then
+  ok "原型 CSS 是转发 shim，真相源在 packages/web/src/styles/"
 else
-  bad "unwrap_or_default 把「取不到」静默变成空值，改成显式分支："
-  echo "$hits" | sed 's/^/      /'
+  bad "原型 CSS 不是转发 shim："
+  printf '%b' "$shim_hits" | sed 's/^/      /'
 fi
 
 echo

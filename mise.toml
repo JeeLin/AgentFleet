@@ -9,7 +9,7 @@
 # 不可比（覆盖率门禁要求可复现）。
 node = "24.21.0"
 bun = "1.4.3"
-# 与 CI 保持一致；升级时同步改 .github/workflows/ci.yml 与 README
+# 与 CI 保持一致；升级时同步改 .github/workflows/ci.yml（那里钉的是同一个版本）
 rust = "1.99.0"
 
 # 数据目录钉在仓库内，不落 `~/.local/share/agentfleet/`（`dirs::data_dir()` 的缺省）。
@@ -40,16 +40,25 @@ description = "全部测试"
 run = "cargo test --workspace"
 
 [tasks.cov]
-description = "覆盖率汇总（阈值 100%，见 AGENTS.md 覆盖率门禁）"
+description = "覆盖率汇总（只打印数值，不阻塞；阻塞门禁见 cov-gate）"
 run = "cargo llvm-cov --workspace --all-targets --summary-only"
 
 [tasks.cov-detail]
 description = "覆盖率明细：找出未覆盖的行"
 run = "cargo llvm-cov --workspace --all-targets"
 
+# 覆盖率门禁：唯一**有阻塞力**的覆盖率检查。
+# `cov` 只是打印数值（`--summary-only` 不带 `--fail-under-lines`，退出码与覆盖率无关），
+# 真正把「100% 行覆盖率」当门禁的是这个任务：它跑 `cargo llvm-cov --show-missing-lines`
+# 并与 coverage-exceptions.txt 双向核对（未覆盖未登记 = 失败；登记了已覆盖 = 过期例外 = 失败）。
+# 需要 ≥6 GiB 空闲磁盘（脚本自己会 FATAL 提示）。
+[tasks.cov-gate]
+description = "覆盖率门禁：100% 阻塞 + 例外双向核对（AGENTS.md 覆盖率门禁）"
+run = "scripts/check-coverage.sh"
+
 [tasks.ci]
-description = "本地全量门禁 = check + fmt + lint + test + cov + web-ci"
-depends = ["check", "fmt", "lint", "test", "cov", "web-ci"]
+description = "本地全量门禁 = check + fmt + lint + test + cov-gate + web-ci"
+depends = ["check", "fmt", "lint", "test", "cov-gate", "web-ci"]
 
 # ---- 开发环境 ---------------------------------------------------------------
 

@@ -101,12 +101,12 @@ TMPDIR=/tmp/opencode bash scripts/e2e-m1.sh   # 换临时目录根（默认 /tmp
 |---|---|---|
 | 1 `afcli run` 一条命令接入 | `/api/devices` 出现该设备且 `status=online`；supervisor + `run --worker` 两层进程都在；API 只回 `key_fingerprint`、无密钥字段 | 自动 |
 | 2 建会话 | `POST /api/sessions` → 201，`workspace={node_id,path}`、`state=running`；`GET /api/sessions` 里能看到 | 自动 |
-| 3 终端：从页面敲 echo / resize | ①`stty size` → `24 80`（初值从 `SessionPage.vue` 读出，页面改了夹具跟着改）②`POST /resize 132x40` 后 `stty size` → `40 132` ③`/send` 敲 `echo <marker>` 后，该通道字节流里 marker 出现 **≥2 次** | 自动 |
+| 3 终端：从页面敲 echo / resize | ①`stty size` → `24 80`（初值从**前端源码**读出——常量 `DEFAULT_COLS/DEFAULT_ROWS`（`packages/web/src/lib/channel.ts`）或页面里的 `cols:/rows:`，读不到就拒绝运行）②`POST /resize 132x40` 后 `stty size` → `40 132` ③`/send` 敲 `echo <marker>` 后，该通道字节流里 marker 出现 **≥2 次** | 自动 |
 | 4 文件：浏览目录树、读文件 | 开 files 通道后 `send {"op":"list","path":"."}`，SSE 上出现 `op=list` 且 `entries` 含 `a.txt`/`src`；`{"op":"read","path":"a.txt"}` 回 `text` 含文件内容 | 自动 |
 | 5 越界被拒且错误可读 | 三种构造各发一次 `{"op":"read"}`：`../outside/secret.txt`、`/etc/hostname`、`link-outside.txt`（真符号链接指向界外）——每种都要求页面上出现一条**带原因**的拒绝信号（`channel.frame` 的 `error/code/reason`，或 `channel.error` 事件） | 自动 |
 | 6 exec：一次性命令 | `{"command":"sh","args":["-c","echo OUT; echo ERR >&2; exit 7"],"cwd":""}` → 回帧 `exit_code=7`、`stdout_b64` 解码为 `OUT`、`stderr_b64` 解码为 `ERR` | 自动 |
 | 7 零入站端口 | `ss -tlnp`：`afcli`（supervisor + worker 两个 pid）没有任何 `LISTEN`；只有一条到 Hub 的 `ESTAB`；Hub 自己只监听 `127.0.0.1:<port>` | 自动 |
-| 10 心跳能力表 == 注册表 | `sqlite3 <hub>/agentfleet.db "select capabilities from device"` 的 `connectors` == `exec,files,terminal`；`agents` 为空；三个**已上报**的 connector 都能被 Hub 下发，未上报的 `git` 被 409 `connector_not_reported` 挡在 Hub | 自动 |
+| 10 心跳能力表 == 注册表 | `sqlite3 <hub>/<库文件名> "select capabilities from device"` 的 `connectors` == `exec,files,terminal`；库文件名从 `crates/hub-storage/src/db.rs` 的生产取值读出，夹具不写死；`agents` 为空；三个**已上报**的 connector 都能被 Hub 下发，未上报的 `git` 被 409 `connector_not_reported` 挡在 Hub | 自动 |
 | 8 多会话 tab | 开 3 个会话各一条终端通道，敲各自 marker；打印每通道帧数、marker 次数、`channel.ready`/`channel.closed` 增量 | **半自动** |
 | 9 拔网线 → 离线 → 恢复 | 打印 `device.status` 时间线 + `/api/devices.status` 采样；`--offline-drill` 可用 SIGSTOP/SIGCONT 代跑「设备不再回应」 | **半自动** |
 
@@ -147,8 +147,8 @@ marker 第一次出现是 PTY 把**敲进去的字符回显**，第二次才是 
 人工走查（3 分钟）：
 
 1. `bash scripts/e2e-m1.sh --hold`：跑完自动断言后**不清理**，打印 `http://127.0.0.1:<port>/`
-   与密码（`correct horse battery`），等你在浏览器里走查，回车后才收进程
-   （`--hold` 结束时现场目录也会保留）。
+   与密码（脚本里的 `PW` 变量，默认 `correct horse battery`），等你在浏览器里走查，
+   回车后才收进程（`--hold` 结束时现场目录也会保留）。
 2. 打开上面那个地址登录，用同一台设备、同一个路径建 3 个会话（tab）。
 3. 每个 tab 里：开终端敲点东西 → 开文件面板展开两层 → 切到别的 tab 再切回来。
 4. 要看到：**通道数不减**（面板头一直是「已连接」，不回退到「建立中」/「建立失败」）、
@@ -190,7 +190,7 @@ SIGCONT → 继续观察回到 online
 
 ### 6.1 files / exec 面板拿不到工作区根（已修）
 
-- 里程碑 `M1-web-console.md:469` 写的是「会话工作区根目录在 `open_channel` 时由
+- 里程碑 `M1-web-console.md` §9 写的是「会话工作区根目录在 `open_channel` 时由
   **Hub** 塞进 params（Hub 从 `session.workspace_id` 查出 `(node_id, path)`）」。
 - 实际：`crates/hub-server/src/routes/stream.rs:465` 原样转发浏览器给的 `params`，
   从不注入 `workspace_root`；前端 files 面板发的就是 `{}`（`SessionPage.vue:279`）。
@@ -304,5 +304,6 @@ SIGCONT → 继续观察回到 online
   - `sse.log` — 页面订阅到的**全部** SSE 事件（`id/event/data` 原样）
   - `node/agentfleet/logs/afcli.log` — 设备日志
   - `node/agentfleet/identity.json` — 本次设备的身份（临时密钥，跑完就没用了）
-  - `hub/agentfleet.db` — Hub 库（标准 10 就是读它的 `device.capabilities`）
+  - `hub/<库文件名>` — Hub 库（标准 10 就是读它的 `device.capabilities`；文件名取自
+    `crates/hub-storage/src/db.rs` 的生产取值，不是夹具写死的）
 - `trap` 收进程的顺序：SSE 订阅 → `afcli` 进程组（`TERM`，等 2s，再 `KILL`）→ `afhub`（`TERM`，走优雅关闭）。

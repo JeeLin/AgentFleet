@@ -15,6 +15,21 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
+# 不接受任何参数：输入全由仓库固定（coverage-exceptions.txt + 当前源码树）。
+# 能传参就意味着「可以少查一部分」，那条路走下去门禁会被悄悄放松。
+for arg in "$@"; do
+  case "$arg" in
+    -h | --help)
+      sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *)
+      echo "未知参数：$arg（--help 看用法）" >&2
+      exit 2
+      ;;
+  esac
+done
+
 EXCEPTIONS="coverage-exceptions.txt"
 
 if [ ! -f "$EXCEPTIONS" ]; then
@@ -36,10 +51,20 @@ if [ "$avail_kb" -lt 6291456 ]; then
 fi
 
 echo "==> collecting uncovered lines"
-raw="$(cargo llvm-cov --workspace --all-targets --show-missing-lines 2>/dev/null)" || {
-    echo "FATAL: cargo llvm-cov failed" >&2
+# 诊断不吞：编译错误 / 缺 llvm-tools / 参数错误全在 stderr 里，
+# 丢掉它只剩一句 "FATAL: cargo llvm-cov failed"，排障者无从下手。
+# 成功时把 stderr 收进临时文件（llvm-cov 的正常输出很吵），失败时原样转发。
+llvm_cov_err="$(mktemp)"
+trap 'rm -f "$llvm_cov_err"' EXIT
+raw="$(cargo llvm-cov --workspace --all-targets --show-missing-lines 2>"$llvm_cov_err")"
+llvm_cov_status=$?
+if [ "$llvm_cov_status" -ne 0 ]; then
+    echo "FATAL: cargo llvm-cov failed (exit $llvm_cov_status)" >&2
+    echo "----- cargo llvm-cov stderr -----" >&2
+    cat "$llvm_cov_err" >&2
+    echo "--------------------------------" >&2
     exit 1
-}
+fi
 
 # 抽取 "src/x.rs: 1, 2-3, 5" 形式，展开成 "path:line" 每行一条
 actual="$(printf '%s\n' "$raw" \

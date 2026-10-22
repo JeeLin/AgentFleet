@@ -68,6 +68,10 @@ ok() { echo "  ✅ $1"; pass=$((pass + 1)); }
 bad() { echo "  ❌ $1"; fail=$((fail + 1)); }
 info() { echo "     $1"; }
 
+# 夹具口令只此一处。改密码漏改一处 → setup 与 login 用的不是同一个 →
+# 登录 401 → 拿不到 af_csrf → 脚本报「CSRF 实现坏了」，把口令问题说成实现问题。
+PW='correct horse battery'
+
 # ---------------------------------------------------------------------------
 # 现场清理：无论正常结束、断言失败还是 Ctrl-C，都不留 afhub / afcli 僵尸
 # ---------------------------------------------------------------------------
@@ -191,21 +195,31 @@ echo "  现场：$TMP（Hub 端口 $PORT，工作区 $WS）"
 # ---------------------------------------------------------------------------
 # 终端初值从被测代码读，夹具不重写一遍：自己写死再断言「页面给的尺寸到了 PTY」
 # 是自我实现。读不到就退出，不退回写死的值——那正是要防的事。
+#
+# 初值可能写在两处：页面直接写数字（`cols: 80`），或提到共享常量
+# （`DEFAULT_COLS = 80`，见 packages/web/src/lib/channel.ts）。两处都找，
+# 先找常量；读不到就退出——**不许**退回写死的 80x24。
 # ---------------------------------------------------------------------------
-PAGE_PARAMS_SRC="$ROOT/packages/web/src/pages/SessionPage.vue"
+WEB_SRC="$ROOT/packages/web/src"
 page_term_cols() {
-  grep -o 'cols: [0-9]\+' "$PAGE_PARAMS_SRC" | head -1 | grep -o '[0-9]\+'
+  local n
+  n=$(grep -rhoE 'DEFAULT_COLS[^0-9]{0,24}[0-9]+' "$WEB_SRC" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+  [ -n "$n" ] || n=$(grep -oE 'cols:[[:space:]]*[0-9]+' "$WEB_SRC/pages/SessionPage.vue" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+  printf '%s' "$n"
 }
 page_term_rows() {
-  grep -o 'rows: [0-9]\+' "$PAGE_PARAMS_SRC" | head -1 | grep -o '[0-9]\+'
+  local n
+  n=$(grep -rhoE 'DEFAULT_ROWS[^0-9]{0,24}[0-9]+' "$WEB_SRC" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+  [ -n "$n" ] || n=$(grep -oE 'rows:[[:space:]]*[0-9]+' "$WEB_SRC/pages/SessionPage.vue" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+  printf '%s' "$n"
 }
 PAGE_COLS=$(page_term_cols)
 PAGE_ROWS=$(page_term_rows)
 if [ -z "$PAGE_COLS" ] || [ -z "$PAGE_ROWS" ]; then
-  echo "  ❌ 读不到页面的终端初值（$PAGE_PARAMS_SRC 的 cols:/rows:）" >&2
+  echo "  ❌ 读不到页面的终端初值（$WEB_SRC 里的 DEFAULT_COLS/DEFAULT_ROWS 或 SessionPage.vue 的 cols:/rows:）" >&2
   exit 2
 fi
-echo "  页面终端初值（从 SessionPage.vue 读出）：${PAGE_COLS}x${PAGE_ROWS}"
+echo "  页面终端初值（从前端源码读出）：${PAGE_COLS}x${PAGE_ROWS}"
 
 # ---------------------------------------------------------------------------
 # 起 Hub（真 afhub 进程）
@@ -231,9 +245,9 @@ fi
 # 首启：设密码 → 登录拿 cookie（`af_session` + `af_csrf`）
 SETUP_TOKEN=$(tr -d '\n' <"$TMP/hub/setup-token.txt")
 curl -sS -o "$BODY" -X POST "$BASE/setup" -H "x-setup-token: $SETUP_TOKEN" \
-  -H 'content-type: application/json' -d '{"password":"correct horse battery"}' >/dev/null
+  -H 'content-type: application/json' -d "{\"password\":\"$PW\"}" >/dev/null
 curl -sS -o "$BODY" -c "$COOKIES" -X POST "$BASE/login" -H 'content-type: application/json' \
-  -d '{"password":"correct horse battery"}' >/dev/null
+  -d "{\"password\":\"$PW\"}" >/dev/null
 CSRF=$(awk '$6 == "af_csrf" {print $7}' "$COOKIES")
 if [ -z "$CSRF" ]; then
   echo "  ❌ 登录没拿到 af_csrf（Hub 日志见 $HUB_LOG）" >&2
@@ -243,10 +257,21 @@ fi
 echo "  ✅ afhub 就绪（${BASE}），已登录（CSRF 已拿到）"
 
 # ---------------------------------------------------------------------------
+# 认证口径只此一处：cookie jar 与 CSRF 头名都从这里出。
+#
+# 散在多处各写一遍时，改 CSRF 头名或 cookie 名只改得了一处 → 另一半静默失效
+# （写侧 403，读侧拿着旧 cookie 静默拿回未登录响应），现象是「部分接口通、个别不通」，
+# 排障时看不出是同一处配置漂移。
+# ---------------------------------------------------------------------------
+curl_auth() {
+  curl -sS -b "$COOKIES" -H "x-csrf-token: $CSRF" "$@"
+}
+
+# ---------------------------------------------------------------------------
 # 页面侧数据面：SSE 订阅（浏览器 EventSource 的那条）
 # ---------------------------------------------------------------------------
 : >"$SSE_LOG"
-curl -N -s -b "$COOKIES" "$BASE/api/stream" >>"$SSE_LOG" 2>&1 &
+curl_auth -N "$BASE/api/stream" >>"$SSE_LOG" 2>&1 &
 SSE_PID=$!
 
 # ---------------------------------------------------------------------------
@@ -260,7 +285,7 @@ NODE_PID=$!
 NODE_ID=""
 DEVICE_STATUS=""
 for _ in $(seq 1 200); do
-  DEVICES=$(curl -s -b "$COOKIES" "$BASE/api/devices")
+  DEVICES=$(curl_auth "$BASE/api/devices")
   NODE_ID=$(printf '%s' "$DEVICES" | jq -r '.[0].id // empty' 2>/dev/null)
   DEVICE_STATUS=$(printf '%s' "$DEVICES" | jq -r '.[0].status // empty' 2>/dev/null)
   [ -n "$NODE_ID" ] && [ "$DEVICE_STATUS" = "online" ] && break
@@ -273,20 +298,15 @@ done
 
 # `METHOD PATH [BODY]` → HTTP_CODE / BODY 两个全局量
 #
-# **不打印 stdout**：`open_channel()` 靠「本函数只写全局量、stdout 干净」
-# 来输出 channel_id（它自己 `printf | jq`）。在这里加一句 `printf "$HTTP_CODE"`
-# 会把状态码送进 stdout，`$(open_channel ...)` 捕获成 `201<channel_id>`——
-# 于是 URL 里多一个 201 前缀，每个 `/send` 与 `/resize` 都变成 404。
-#
-# 要读返回码用 `api_code`（下面那个），它把状态码打到 stdout。
+# **不打印 stdout**：结果只经全局量读。要读返回码用 `api_code`（下面那个），
+# 它把状态码打到 stdout。
 api() {
   local method=$1 path=$2 data=${3-}
   if [ -n "$data" ]; then
-    HTTP_CODE=$(curl -sS -o "$BODY" -w '%{http_code}' -X "$method" -b "$COOKIES" \
-      -H "x-csrf-token: $CSRF" -H 'content-type: application/json' "$BASE$path" --data-binary "$data")
+    HTTP_CODE=$(curl_auth -o "$BODY" -w '%{http_code}' -X "$method" \
+      -H 'content-type: application/json' "$BASE$path" --data-binary "$data")
   else
-    HTTP_CODE=$(curl -sS -o "$BODY" -w '%{http_code}' -X "$method" -b "$COOKIES" \
-      -H "x-csrf-token: $CSRF" "$BASE$path")
+    HTTP_CODE=$(curl_auth -o "$BODY" -w '%{http_code}' -X "$method" "$BASE$path")
   fi
   LAST_BODY=$(cat "$BODY" 2>/dev/null)
   return 0
@@ -322,15 +342,20 @@ bytes_of() {
   frames_of "$1" | jq -r 'select(.bytes != null) | .bytes' 2>/dev/null
 }
 
-# `POST /api/channels`（与 SessionPage.vue 的 ensureChannel 逐字一致）→ 打印 channel_id
+# `POST /api/channels`（与 SessionPage.vue 的 ensureChannel 逐字一致）
+#
+# 结果写全局量（CHANNEL_ID / HTTP_CODE / LAST_BODY），**不靠 stdout 传递**：
+# 早先靠 `printf channel_id` 让调用方写 `XCH=$(open_channel ...)`，而命令替换
+# 在子 shell 里执行——里面的 HTTP_CODE / LAST_BODY 赋值出不来，父 shell 留着的
+# 是上一次请求的残留值，于是失败分支打印的是「上一次的响应」而不是这次的。
 open_channel() {
   api POST /api/channels "{\"session_id\":\"$SID\",\"connector\":\"$1\",\"params\":$2}"
-  printf '%s' "$LAST_BODY" | jq -r '.channel_id // empty' 2>/dev/null
+  CHANNEL_ID=$(printf '%s' "$LAST_BODY" | jq -r '.channel_id // empty' 2>/dev/null)
 }
 
 # `/send`：裸字节上行（页面键盘输入 / files 取数都走这条）
 send_bytes() {
-  curl -sS -o "$BODY" -w '%{http_code}' -b "$COOKIES" -H "x-csrf-token: $CSRF" \
+  curl_auth -o "$BODY" -w '%{http_code}' \
     -X POST "$BASE/api/channels/$1/send" --data-binary "$2"
 }
 
@@ -347,7 +372,9 @@ wait_until() {
 # ---- 断言判据（wait_until 的条件函数）------------------------------------
 # 都用「当轮设成全局」的通道号 / 标记：条件函数要传给 wait_until，参数只能走全局。
 terminal_has_frames() { [ "$(frames_of "$TCH" | wc -l)" -ge 1 ]; }
-stty_size_is() { bytes_of "$1" | grep -q "$2"; }
+# 整行相等才算命中：子串匹配会让 `124 80` 命中 `24 80`。
+# PTY 行尾是 CRLF，先去掉 \r 再比整行。
+stty_size_is() { bytes_of "$1" | tr -d '\r' | grep -qxF "$2"; }
 # `stty size` 输出的是 `rows cols`，与 open 参数的 cols/rows 顺序相反。
 stty_size_is_page_default() { stty_size_is "$TCH" "$PAGE_ROWS $PAGE_COLS"; }
 # 132x40 是这一步自己的输入，写死是对的：它验的是 Hub 把 resize 转成 TIOCSWINSZ。
@@ -411,6 +438,10 @@ if [ -n "$NODE_ID" ] && [ "$DEVICE_STATUS" = "online" ]; then
     else
       ok "响应里没有密钥材料（约束 13）"
     fi
+  else
+    # 字段缺失时不能「安静地少两条断言」——那样汇总照样报通过，
+    # 一条安全约束的检查就这么消失了。缺字段本身就是失败。
+    bad "响应缺 key_fingerprint（约束 13 无从核对）：$(printf '%s' "$DEVICES" | jq -c '.[0]')"
   fi
 else
   bad "设备没在 30s 内变成 online（status=${DEVICE_STATUS:-<无>}）"
@@ -450,7 +481,8 @@ else
   # -------------------------------------------------------------------------
   echo
   echo "== 标准 3 终端面板：从页面敲 echo 有输出，stty size 验证 resize =="
-  TCH=$(open_channel terminal "{\"cwd\":\"$WS\",\"cols\":$PAGE_COLS,\"rows\":$PAGE_ROWS}")
+  open_channel terminal "{\"cwd\":\"$WS\",\"cols\":$PAGE_COLS,\"rows\":$PAGE_ROWS}"
+  TCH=$CHANNEL_ID
   if [ -z "$TCH" ]; then
     bad "POST /api/channels(terminal) 没拿到 channel_id：$HTTP_CODE $LAST_BODY"
     dump "终端通道建立失败"
@@ -508,7 +540,8 @@ if [ -n "$SID" ]; then
   echo
   echo "== 标准 4 文件面板：浏览工作区目录树、读文件 =="
   info "通道参数与 SessionPage.vue 的 ensureChannel 逐字一致：files → params={}（工作区根由 Hub 按会话补）"
-  FCH=$(open_channel files '{}')
+  open_channel files '{}'
+  FCH=$CHANNEL_ID
   if [ -z "$FCH" ]; then
     bad "POST /api/channels(files) 没拿到 channel_id：$HTTP_CODE $LAST_BODY"
     dump "文件通道建立失败"
@@ -548,8 +581,8 @@ if [ -n "$SID" ]; then
       fi
     done
     if [ "$rej_fail" -gt 0 ]; then
-      info "取数与错误全走 POST /api/channels/{id}/send，而该端点把请求体包成 {\"bytes\":…}（terminal 载荷）；"
-      info "files connector 只认顶层 {\"op\":…}，所以在设备的边界检查之前就已经走岔了。详见 README「已知缺口」。"
+      info "成因见 scripts/e2e-m1/README.md §6.2（files 取数载荷在 Hub 被改写成终端载荷）——"
+      info "该缺陷已修，这里再出现即属回归。"
     fi
   fi
 
@@ -557,7 +590,8 @@ if [ -n "$SID" ]; then
   echo
   echo "== 标准 6 exec 面板：一次性命令，退出码与输出正确 =="
   info "通道参数与 SessionPage.vue 的 runCommand 逐字一致：{command,args,cwd:\"\"}（工作区根由 Hub 按会话补）"
-  ECH=$(open_channel exec '{"command":"sh","args":["-c","echo OUT; echo ERR >&2; exit 7"],"cwd":""}')
+  open_channel exec '{"command":"sh","args":["-c","echo OUT; echo ERR >&2; exit 7"],"cwd":""}'
+  ECH=$CHANNEL_ID
   if [ -z "$ECH" ]; then
     bad "POST /api/channels(exec) 没拿到 channel_id：$HTTP_CODE $LAST_BODY"
     dump "exec 通道建立失败"
@@ -618,9 +652,22 @@ esac
 # ---------------------------------------------------------------------------
 echo
 echo "== 标准 10 心跳能力表与 node 实际实现的 connector 完全一致 =="
-REPORTED=$(sqlite3 "$TMP/hub/agentfleet.db" "select capabilities from device where id='$NODE_ID';" 2>/dev/null)
+# 库文件名从生产取值里读，不在夹具里重写一遍：写死的话，Hub 改名后
+# sqlite3 读不到表 → REPORTED 空 → 这里报「读不到 device.capabilities」，
+# 读起来像设备能力上报坏了，而真实原因只是文件名变了。
+# 读不到就退出，不退回写死的名字——那正是要防的事。
+DB_SRC="$ROOT/crates/hub-storage/src/db.rs"
+# 只看生产段（`#[cfg(test)]` 之前）：测试里也有一堆 `join("x.db")`，取第一条会取错。
+DB_NAME=$(awk '/^#\[cfg\(test\)\]/ { exit } { print }' "$DB_SRC" |
+  grep -oE 'dir\.join\("[^"]+"\)' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+if [ -z "$DB_NAME" ]; then
+  echo "  ❌ 从 $DB_SRC 读不出数据库文件名（夹具必须与生产取值同源）" >&2
+  exit 2
+fi
+DB_PATH="$TMP/hub/$DB_NAME"
+REPORTED=$(sqlite3 "$DB_PATH" "select capabilities from device where id='$NODE_ID';" 2>/dev/null)
 if [ -z "$REPORTED" ]; then
-  bad "读不到 device.capabilities（sqlite3 $TMP/hub/agentfleet.db）"
+  bad "读不到 device.capabilities（sqlite3 $DB_PATH）"
   dump "capabilities"
 else
   info "上报值（device.capabilities）：$REPORTED"
@@ -669,7 +716,8 @@ for i in 2 3; do
   OBS_SIDS="$OBS_SIDS $s"
   old=$SID
   SID=$s
-  ch=$(open_channel terminal "{\"cwd\":\"$WS\",\"cols\":$PAGE_COLS,\"rows\":$PAGE_ROWS}")
+  open_channel terminal "{\"cwd\":\"$WS\",\"cols\":$PAGE_COLS,\"rows\":$PAGE_ROWS}"
+  ch=$CHANNEL_ID
   SID=$old
   [ -n "$ch" ] || continue
   m="AF_TAB${i}_${RANDOM}"
@@ -694,7 +742,7 @@ if [ "$OFFLINE_DRILL" -eq 1 ]; then
     kill -STOP "$drill_pid"
     t0=$SECONDS
     while [ $((SECONDS - t0)) -lt 60 ]; do
-      st=$(curl -s -b "$COOKIES" "$BASE/api/devices" | jq -r '.[0].status')
+      st=$(curl_auth "$BASE/api/devices" | jq -r '.[0].status')
       info "  t+$((SECONDS - t0))s status=$st"
       [ "$st" = "online" ] || break
       sleep 2
@@ -703,7 +751,7 @@ if [ "$OFFLINE_DRILL" -eq 1 ]; then
     kill -CONT "$drill_pid"
     t1=$SECONDS
     while [ $((SECONDS - t1)) -lt 60 ]; do
-      st=$(curl -s -b "$COOKIES" "$BASE/api/devices" | jq -r '.[0].status')
+      st=$(curl_auth "$BASE/api/devices" | jq -r '.[0].status')
       info "  t+$((SECONDS - t1))s status=$st"
       [ "$st" = "online" ] && break
       sleep 2
@@ -720,7 +768,7 @@ info "                   恢复后自动重连、不用刷新页面（对照 doc
 if [ "$HOLD" -eq 1 ]; then
   echo
   echo "== 现场保持运行（--hold）=="
-  info "浏览器打开：$BASE    密码：correct horse battery"
+  info "浏览器打开：$BASE    密码：$PW"
   info "Hub 数据目录：$TMP/hub；设备数据目录：$TMP/node"
   info "在上面把标准 8（3 个 tab 来回切）与标准 9（拔网线）走一遍，然后按回车清理；"
   info "Ctrl-C 也可以——trap 一样会收进程。"

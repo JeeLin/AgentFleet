@@ -1,0 +1,96 @@
+# 本地全量门禁的 CI 版。
+#
+# 步骤与 `mise.toml` 的 `[tasks.ci]` 一一对应（check / fmt / lint / test /
+# cov-gate / web-ci）。**改一边必须改另一边**：两份清单各写一遍时，漏改的
+# 那份会让 CI 少跑一道门禁而没人发现。
+#
+# 工具链版本只写在 `mise.toml` 的 `[tools]` 一处，本文件从那里读——
+# 覆盖率数值跨工具链不可比，版本写两处迟早只改一处。
+# **只在推 tag 时跑**：这一串门禁里有全量插桩的覆盖率（最贵的一步），
+# 每个 push / PR 都跑一遍会把 runner 时间烧在还没定稿的提交上。
+# 资源有限，所以 CI 的定位是「发布前的最后一道闸」，不是「每次提交的反馈」。
+# 本地反馈用 `mise run ci`（同一串命令，代价是自己的机器）。
+name: CI
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读工具链版本（mise.toml [tools] 是唯一出处）
+        id: tools
+        run: |
+          set -euo pipefail
+          for t in node bun rust; do
+            v=$(sed -nE "s/^${t} = \"([^\"]+)\".*/\1/p" mise.toml | head -1)
+            [ -n "$v" ] || { echo "mise.toml 里读不到 $t 的版本" >&2; exit 1; }
+            echo "$t=$v" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: 装 Rust ${{ steps.tools.outputs.rust }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.tools.outputs.rust }}
+          # cargo llvm-cov 靠 llvm-tools 出插桩与报告，缺它门禁直接 FATAL
+          components: llvm-tools-preview
+
+      - name: 装 Node ${{ steps.tools.outputs.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.tools.outputs.node }}
+
+      - name: 装 Bun ${{ steps.tools.outputs.bun }}
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.tools.outputs.bun }}
+
+      - name: 装 cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      # 覆盖率门禁要全量插桩 + 链接峰值，脚本要求 ≥6 GiB 空闲磁盘，
+      # runner 默认镜像里的 .NET / GHC 体积大，先清掉。
+      - name: 腾磁盘
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
+          df -h /
+
+      - name: 前端依赖
+        working-directory: packages/web
+        run: bun install --frozen-lockfile
+
+      # ---- 以下每步 = mise.toml 的一个 task，顺序一致 ----------------------
+
+      - name: check（mise run check）
+        run: scripts/check.sh
+
+      - name: fmt（mise run fmt）
+        run: cargo fmt --check
+
+      - name: lint（mise run lint）
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test（mise run test）
+        run: cargo test --workspace
+
+      - name: cov-gate（mise run cov-gate）
+        run: scripts/check-coverage.sh
+
+      - name: web-check（mise run web-check）
+        working-directory: packages/web
+        run: bun run type-check && bun run lint
+
+      - name: web-test（mise run web-test）
+        working-directory: packages/web
+        run: bun run test
+
+      - name: web-build（mise run web-build）
+        working-directory: packages/web
+        run: bun run build
