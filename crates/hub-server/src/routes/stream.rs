@@ -41,6 +41,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::extract::{Path, Request, State};
 use axum::http::StatusCode;
@@ -585,9 +586,25 @@ pub async fn open_channel(
         0,
         protocol::payload_or(&open, fallback),
     );
-    // **先记账再下发**：设备回 ack 可能比 `send_to_device` 返回还快，而
-    // `announce_ready` 要靠这张表找到会话与节点。反过来写的话，快设备会
-    // 撞上「Hub 不认识这条通道」，页面则永远等不到 `channel.ready`。
+    // **先记账再下发**：两本账都要在这之前建好，理由不同但同样致命——
+    // 1. 绑定表：设备回 ack 可能比 `send_to_device` 返回还快，而
+    //    `announce_ready` 要靠这张表找到会话与节点。反过来写的话，快设备会
+    //    撞上「Hub 不认识这条通道」，页面则永远等不到 `channel.ready`。
+    // 2. 信用账本：设备从 `channel_ready` 的下一帧起就会推 `channel_data`，
+    //    而 Hub 侧每帧上行都要在账本里扣一格信用（`channels::on_data`）。
+    //    账本没建的话每帧都判「未知通道」，回一帧 `channel_error` 且
+    //    **永不回 `channel_credit`**——设备侧信用扣到 0 之后输出在
+    //    ~32 帧后永久冻结，而 Hub 静默无痕。
+    // 置 `Ready` 是 M0 的口径（Hub 侧没有 connector 协商）：不置的话账本是
+    // 死的——`on_data_received` 只对 Ready 的通道记账（协议层 `ready_mut`），
+    // 于是设备发来的数据全部回 `NotReady`，两边互等。
+    open_ledger(
+        &state,
+        &node_id,
+        &channel_id,
+        &body.connector,
+        open.credit_start,
+    )?;
     state.bindings().bind(
         &channel_id,
         ChannelBinding {
@@ -889,6 +906,34 @@ pub(crate) fn announce_ready(state: &AppState, channel_id: &str) {
     tracing::debug!(channel_id = %channel_id, "device confirmed the channel");
 }
 
+/// 在 Hub 侧信用账本里开一条通道并置 `Ready`（`protocol.md` §5–§6）。
+///
+/// **这是账本的唯一建表入口**：`channels.rs` 只做「收到一帧 → 该回什么」，
+/// 不建表。写在这里是因为开通道的生产路径就是本函数——设备永不发
+/// `open_channel`（那是 Hub→node 的方向），所以建表点放别处就等于
+/// 建在一段生产上不可达的代码里。
+///
+/// 失败回 **500**：这不是页面的错，也不是设备的错，是 Hub 自己记不上账。
+/// 此刻帧还没下发（调用方紧接着才 `bind` + `send_to_device`），所以撤掉绑定
+/// 就够，不留半个通道。
+fn open_ledger(
+    state: &AppState,
+    node_id: &str,
+    channel_id: &str,
+    connector: &str,
+    credit_start: u32,
+) -> Result<(), ApiError> {
+    let mut channels = state.channels().write();
+    let registry = channels.registry(node_id);
+    if let Err(e) = registry.open(channel_id, connector, credit_start, Instant::now()) {
+        return Err(ApiError::internal_with("cannot open the channel ledger", e));
+    }
+    if let Err(e) = registry.mark_ready(channel_id) {
+        return Err(ApiError::internal_with("cannot mark the channel ready", e));
+    }
+    Ok(())
+}
+
 /// `READY_TIMEOUT` 到点后清掉还没 ack 的通道（协议 §5：`open` 必须 5s 内有结果）。
 ///
 /// **判据是「此刻还没被确认」，不是「5s 前没能确认」**：定时器醒来时那条
@@ -931,6 +976,25 @@ fn expire_unacked(state: &AppState, node_id: &str, channel_id: &str) {
             "reason": "the device did not confirm the channel within 5s",
         }),
     );
+    // 账本也要撤：只撤绑定表的话，这条通道在信用账本里永远停在 `Ready`。
+    // 设备此后重连（node_id 不变）并复用同一 `channel_id` 时，`on_data` 会
+    // 先在账本里命中这条残留记录——错误从「未知通道」变成「静默扣一个
+    // 不存在的账」，而 Hub 的日志里什么都不会出现。
+    if let Err(e) = state
+        .channels()
+        .write()
+        .registry(node_id)
+        .mark_closed(channel_id)
+    {
+        // 撤不掉不是异常：设备掉线时 `drop_node` 已经整表清过，这里只是
+        // 空操作。记 debug 是因为真正要关心的是「没清掉而设备还在线」。
+        tracing::debug!(
+            node_id = %node_id,
+            channel_id = %channel_id,
+            error = %e,
+            "could not clear the ledger of a timed-out channel"
+        );
+    }
     // 设备可能只是慢：晚到的 open 会留下一个再也没人关的 PTY / 工作区句柄。
     let closing = protocol::channel::CloseChannel {
         channel_id: channel_id.to_string(),

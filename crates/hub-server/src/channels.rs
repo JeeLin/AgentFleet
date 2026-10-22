@@ -1,14 +1,13 @@
 //! Hub 侧对通道帧的应答（子任务 8，`protocol.md` §5–§6）。
 //!
-//! **Hub 是通道的被动方**：`open_channel` 由 node 发，Hub 只记账并回
-//! `channel_ready` / `channel_error`。信用账本与状态机在
-//! `protocol::channel`（两侧共用的纯逻辑），这里只做「收到一帧 → 该回什么」。
+//! **Hub 是通道的主动方**：`open_channel` 由 **Hub 发**（`routes/stream.rs` 的
+//! `POST /api/channels`），设备收下后回 `channel_ready` + 首帧。本模块只做
+//! 「收到一帧 → 该回什么」；**账本的建表入口不在本模块**，在 `stream.rs`
+//! 的 `open_ledger`——放这里的后果见那里的注释。
 //!
 //! 一个方向要分清：`channel_data` 的主流量是 **node → Hub**（PTY 输出），
 //! Hub 收到后按信用记账并适时补 `channel_credit`。反向（用户输入）量小，
 //! 走 WS 自身背压即可，不占用这套账本。
-
-use std::time::Instant;
 
 use protocol::channel::{ChannelError, ChannelErrorCode, CreditStatus};
 use protocol::frame::Frame;
@@ -52,9 +51,13 @@ pub fn is_channel_type(msg_type: &str) -> bool {
 }
 
 /// 分发一帧通道帧。
+///
+/// **没有 `open_channel` 臂是刻意的**：那一帧只由 Hub 发（`protocol.md` §4
+/// 的消息表），设备侧发来属于协议违例，按「未知类型」忽略（约束 14 前向
+/// 兼容），不因此断开连接。给它留一条臂的后果更糟：账本的建表入口会
+/// 落在一段生产不可达的代码里，于是每帧上行都判「未知通道」而 Hub 静默无痕。
 pub fn on_channel_frame(state: &AppState, node_id: &str, frame: &Frame) -> Reply {
     match frame.msg_type.as_str() {
-        types::OPEN_CHANNEL => on_open(state, node_id, frame),
         types::CHANNEL_READY => on_ready(state, frame),
         types::CHANNEL_DATA => on_data(state, node_id, frame),
         types::CLOSE_CHANNEL => on_close(state, node_id, frame),
@@ -78,64 +81,6 @@ fn on_ready(state: &AppState, frame: &Frame) -> Reply {
     };
     crate::routes::stream::announce_ready(state, &ready.channel_id);
     Reply::Nothing
-}
-
-fn on_open(state: &AppState, node_id: &str, frame: &Frame) -> Reply {
-    let spec: protocol::channel::OpenChannel = match frame.payload() {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::debug!(error = %e, "dropping a malformed open_channel");
-            return Reply::Nothing;
-        }
-    };
-    // `credit_start` 的缺省由协议层的 `#[serde(default = ...)]` 兜住，
-    // 这里直接用。不自己再兜一次：两处默认值不一致是最难查的配置漂移
-    // （协议是 `CREDIT_START`，这里漏填就变 0 → 通道一开余额就是 0，
-    // 双方互等，死锁）。
-    let credit_start = spec.credit_start;
-
-    let mut channels = state.channels().write();
-    let registry = channels.registry(node_id);
-    match registry.open(
-        &spec.channel_id,
-        &spec.connector,
-        credit_start,
-        Instant::now(),
-    ) {
-        Ok(()) => {}
-        Err(e) => {
-            // 开失败要**显式回错**（§4），不能静默丢弃——否则 node 那边
-            // 一直等 `channel_ready`，直到 5s 超时才知道出了问题，
-            // 而用户看到的是「终端卡了 5 秒」而不是一句人话。
-            return Reply::Frame(error_frame(&spec.channel_id, &e));
-        }
-    }
-    // M0 的 Hub 侧没有 connector 协商：`open_channel` 一到就置 Ready 并回
-    // `channel_ready`。
-    //
-    // 不置 Ready 的话账本是死的——`on_data_received` 只对 Ready 的通道记账
-    // （协议层 `ready_mut`），于是 node 发来的数据全部回 `NotReady`，
-    // 而 node 那边还在等 `channel_ready`，两边互等。
-    // coverage: excluded — mark_ready 失败需同一把锁内出现第二个写入者，
-    // 而 Hub 在 open 成功后的下一行就 mark_ready，构造不出来。
-    if let Err(e) = registry.mark_ready(&spec.channel_id) {
-        return Reply::Frame(error_frame(&spec.channel_id, &e));
-    }
-    tracing::debug!(
-        node_id = %node_id,
-        channel_id = %spec.channel_id,
-        connector = %spec.connector,
-        credit_start = credit_start,
-        "channel ready"
-    );
-    Reply::Frame(push(
-        types::CHANNEL_READY,
-        protocol::channel::ChannelReady {
-            channel_id: spec.channel_id.clone(),
-            capabilities: serde_json::json!({}),
-        },
-        protocol::channel::fallback::ready(&spec.channel_id),
-    ))
 }
 
 fn on_data(state: &AppState, node_id: &str, frame: &Frame) -> Reply {

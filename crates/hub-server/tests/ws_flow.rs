@@ -1145,13 +1145,19 @@ async fn a_challenge_that_cannot_be_sent_ends_the_connection() {
     assert_eq!(kp.public_key_bytes().len(), 32, "sanity check");
 }
 
-/// 业务期的 `open_channel` 真的会收到 `channel_ready` 回帧，且连接不断。
+/// 设备侧自发 `open_channel` 被**安全忽略**，连接不断、数据面不受污染。
 ///
-/// M0 的 Hub 侧**没有 connector 协商**（`on_open` 开完立刻置 Ready）：先回
-/// `channel_ready` 是让账本活起来的唯一办法，否则 node 发来的数据全部回
-/// `NotReady`、node 又在等 ready，两边互等成死锁。
+/// 那一帧只由 Hub 发（`protocol.md` §4 的消息表，`POST /api/channels` →
+/// Hub 生成 `channel_id` 后下发）。设备侧发来属于协议违例，按「未知类型」忽略
+/// （约束 14 前向兼容）——**不断开连接**是这一条要守的东西：一次坏帧就让设备
+/// 重连，比忽略它糟得多。
+///
+/// 曾经的形状是「Hub 回 `channel_ready`」（`channels.rs::on_open`），而那条路径
+/// 在真实部署里不可达：设备从不发这一帧，于是 Hub 侧账本从未被建立，每帧上行都
+/// 判「未知通道」，终端输出 ~32 帧后永久冻结。现在账本的建表入口在
+/// `stream.rs::open_ledger`，本用例随之改成断言「违例帧被忽略」。
 #[tokio::test]
-async fn a_business_open_channel_is_answered_with_channel_ready() {
+async fn a_device_initiated_open_channel_is_ignored_without_closing() {
     let hub = Hub::boot().await;
     let (kp, node_id) = enroll_node(&hub).await;
     let mut ws = dial(&hub.ws_url()).await;
@@ -1177,21 +1183,27 @@ async fn a_business_open_channel_is_answered_with_channel_ready() {
         r#"{"v":1,"seq":2,"t":"open_channel","c":{"channel_id":"ch-1","connector":"terminal"}}"#,
     )
     .await;
-    let reply = next_frame(&mut ws).await;
-    assert_eq!(reply.msg_type, "channel_ready", "M0 开完即就绪");
-    assert_eq!(reply.c["channel_id"], "ch-1");
+    // 被忽略的判定是「Hub 不回任何帧」——这里**不能**用 `next_frame`：它永久
+    // 阻塞，而那正是本条要断言的性质。用带超时的读：超时即「什么都没回」。
+    let silence =
+        tokio::time::timeout(Duration::from_millis(300), common::next_text(&mut ws)).await;
+    assert!(
+        silence.is_err(),
+        "设备侧自发的 open_channel 不该得到任何回帧，却收到 {:?}",
+        silence.ok()
+    );
 
-    // 就绪之后数据面才走得通（§5：先 ready 后 data）
-    send_text(
-        &mut ws,
-        r#"{"v":1,"seq":3,"t":"channel_data","c":{"channel_id":"ch-1","payload":"x"}}"#,
-    )
-    .await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // 连接仍然活着，且**没有在 Hub 侧留下任何账本记录**——留着一条设备
+    // 永远不用的通道记录，会让后来的真通道撞上「id 已存在」。
     wait_until(Duration::from_secs(5), || {
         hub.state.connections().get(&node_id).is_some()
     })
     .await;
+    assert_eq!(
+        hub.state.channels().read().credit(&node_id, "ch-1"),
+        None,
+        "设备侧自发开通道不得在 Hub 账本里留记录"
+    );
 }
 
 /// 业务帧里的心跳被收到（此时**只是记一行**，落库是子任务 5），

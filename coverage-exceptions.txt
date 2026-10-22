@@ -6,17 +6,23 @@
 # 双向核对：未覆盖而未登记 → 门禁失败；已登记却被覆盖 → 门禁失败
 # （防止例外清单变成永久豁免）。因此本文件随代码改动必须同步更新。
 #
-# 每条例外的理由同时以 `// coverage: excluded — …` 就地写在该行上方
-# （AGENTS.md 的 100% 覆盖率门禁要求就地标注，不靠本表单点维护）。
+# 每条例外的理由同时以 `// coverage: excluded — …` 就地写在该行就近处
+# （AGENTS.md 的覆盖率门禁要求就地标注，不靠本表单点维护）。
 #
 # 三条合法出路是「补测试」「删掉」「登记」，而每一条登记都必须落在
 # 「无法触达的兜底分支 / 进程入口 / 结构性不可达」三类里，不含业务逻辑。
 # 补得了测试的（例：`flood_frame` 的应答帧映射）一律补测试，不登记。
 #
-# 本文件由 `coverage: excluded` 就地标注机械重建（**一行一个行号**）。
-# 重建口径：先在未覆盖行上下找最近的 `coverage: excluded` 标注；找不到且
-# 该行落在 `#[cfg(test)]` 块内的，记为「测试自身的失败分支」；两者都不是
-# 的必须人工判定。
+# 理由的锚点由 `scripts/coverage-exceptions.sh --check` 核对（秒级，不跑 cargo）：
+# 每条登记的理由必须落在同一文件里就近的 `// coverage: excluded` 标注上，
+# 或该行落在 `#[cfg(test)]` 块内（测试自身的失败分支）。两者都不是的，
+# 说明这条理由没有出处，登记它等于让门禁接受一条无法复核的理由。
+#
+# 重建口径：`scripts/coverage-exceptions.sh --rebuild` 能从就地标注重建整张表
+# （先在未覆盖行上下找最近的 `coverage: excluded` 标注；找不到且该行落在
+# `#[cfg(test)]` 块内的，记为「测试自身的失败分支」；两者都不是的必须人工判定）。
+# 本文件的行集合由 `scripts/check-coverage.sh` 双向核对强制对齐；理由里
+# 有 27 条是人工精修过的更具体版本（重建时按原行号带回）。
 crates/hub-core/src/registry.rs:155: Err(e) 主体由 enroll_inner_statement_error_rolls_back_and_propagates 覆盖。 下面的 `if let Err(rb)` 不可达：只要闭包返回 Err 事务仍活跃，SQLite 的 ROLLBACK 必然成功；该分支仅防御连接级 故障，无可控测试手段。而「回滚失败」这条本身也不该被覆盖—— 原错误才是调用方要的，它只负责留痕。
 crates/hub-core/src/reports.rs:103: 锁中毒意味着另一个持锁者 panic 了， 而 workspace lint 把 panic 禁成 deny（生产代码无 panic 路径）； 那种情况下进程的状态已不可信，静默丢弃这次上报不会更糟。
 crates/hub-core/src/reports.rs:114: 同 record：锁中毒只在别的持锁者 panic 时出现。
