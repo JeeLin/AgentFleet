@@ -167,6 +167,18 @@ impl ConnectorError {
 /// （协议 §5：超时 5s，Hub 回 `channel_error{reason:"unsupported"}`），
 /// 所以它只能是「建起本地资源」这种微秒级的事，不能在里面等 IO。
 ///
+/// ## 三个方法都不许做阻塞 IO
+///
+/// `open` / `poll` / `on_data` 全部在 worker 的 `select!` 里被调用
+/// （`worker::session` 的 `next_text` 臂与 pump 臂）。**这里堵住的就是心跳
+/// 那一臂**：Hub 判离站靠收不到心跳，于是一条 `sleep 60` 会让设备在 Hub
+/// 眼里掉线，而本地毫无异常。
+///
+/// 所以需要等待的工作必须交给专用线程，结果用 `poll` 逐轮取走——这正是
+/// `poll` 存在的理由，exec connector 是这条规则的样板。反过来，`close`
+/// 可能被反复调用，它自己必须能安全地扔下那个线程（发送端没了，
+/// 线程自然收尾）。
+///
 /// **这份 trait 就是契约本身**：规格正文里抄的那份签名早就与代码不一致
 /// （少了 `poll`、`on_data` 的参数类型也不同），照规格实现第三个 connector
 /// 会编不过。加新 connector 时以这里的签名为准。

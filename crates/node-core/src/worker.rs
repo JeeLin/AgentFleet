@@ -1273,7 +1273,17 @@ mod tests {
     /// **它必须一直读**：worker 的通道帧与心跳走同一条连接，Hub 不读时
     /// TCP 发送缓冲会满，于是测到的会是「socket 堵了」而不是
     /// 「心跳臂被饿死了」——那是两回事。
-    fn fake_hub_recording_heartbeats(interval_ms: u64) -> (String, Arc<Mutex<Vec<Instant>>>) {
+    ///
+    /// `connector` / `open_params` / `input` 描述「这条通道有多忙」：
+    /// terminal 是一条持续输出的 PTY，exec 是一条跑不完的一次性命令。
+    /// 两者走的是同一条 worker 循环，但对「忙」的定义完全不同——
+    /// 一个堵在读线程，一个堵在 `open` 的同步执行上。
+    fn fake_hub_recording_heartbeats(
+        interval_ms: u64,
+        connector: String,
+        open_params: serde_json::Value,
+        input: Option<String>,
+    ) -> (String, Arc<Mutex<Vec<Instant>>>) {
         let arrivals: Arc<Mutex<Vec<Instant>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&arrivals);
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1299,9 +1309,11 @@ mod tests {
                 let _ = send(&mut ws, challenge()).await;
                 let _ = ws.next().await;
                 let _ = send(&mut ws, auth_ok_with_interval(interval_ms)).await;
-                // 开一条终端通道并让它持续产出——「通道繁忙」正是本用例的前提。
-                let _ = send(&mut ws, open_terminal_channel()).await;
-                let _ = send(&mut ws, terminal_input(BUSY_COMMAND)).await;
+                // 开一条通道并让它忙碌——「通道繁忙」正是本用例的前提。
+                let _ = send(&mut ws, open_channel_frame(&connector, open_params)).await;
+                if let Some(input) = input {
+                    let _ = send(&mut ws, channel_input(&input)).await;
+                }
                 while let Some(msg) = ws.next().await {
                     let Ok(tokio_tungstenite::tungstenite::Message::Text(text)) = msg else {
                         continue;
@@ -1330,18 +1342,19 @@ mod tests {
         }})
     }
 
-    /// 开一条终端通道。**信用给得很大**：这条用例要量的是心跳节奏，
+    /// 开一条通道。**信用给得很大**：这条用例要量的是心跳节奏，
     /// 不是信用流控。
-    fn open_terminal_channel() -> serde_json::Value {
+    fn open_channel_frame(connector: &str, params: serde_json::Value) -> serde_json::Value {
         serde_json::json!({"v":1,"seq":3,"t":"open_channel","c":{
             "channel_id":"ch-hb",
-            "connector":"terminal",
-            "params":{"shell":"/bin/sh"},
+            "connector": connector,
+            "params": params,
             "credit_start":100000
         }})
     }
 
-    fn terminal_input(cmd: &str) -> serde_json::Value {
+    /// 通道内一帧输入（只 terminal 用：exec 的命令随 `open` 一起来）。
+    fn channel_input(cmd: &str) -> serde_json::Value {
         serde_json::json!({"v":1,"seq":4,"t":"channel_data","c":{
             "channel_id":"ch-hb",
             "payload":{"bytes": cmd}
@@ -1635,7 +1648,12 @@ mod tests {
     async fn a_heartbeat_on_a_live_connection_is_sent() {
         let (d, _w) = worker("hb-live");
         let mut id = Identity::load_or_create(&d).expect("identity");
-        let (url, arrivals) = fake_hub_recording_heartbeats(15_000);
+        let (url, arrivals) = fake_hub_recording_heartbeats(
+            15_000,
+            "terminal".to_string(),
+            serde_json::json!({}),
+            None,
+        );
         let mut w = Worker::new(d.clone(), url);
         let h = tokio::spawn(async move { w.connect_loop(&mut id, None, std::io::sink()).await });
         let log = wait_for_log(&d, "authed as n_x", std::time::Duration::from_secs(5)).await;
@@ -1718,7 +1736,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// **通道繁忙时心跳仍按时发出**。
+    /// **通道繁忙时心跳仍按时发出**（terminal：一条持续输出的 PTY）。
     ///
     /// 心跳 ticker 与通道 pump 是 `select!` 的两条独立臂，PTY 的读另在
     /// 独立线程——但那只是**结构**上的保证。这条用例把它变成**行为**上
@@ -1728,9 +1746,14 @@ mod tests {
     /// 退化形态（把 pump 臂改成串行 `await`、或在这一臂里做阻塞 IO）
     /// 会让心跳迟到甚至停摆——那正是这条用例要挡住的。
     #[tokio::test]
-    async fn a_busy_channel_does_not_starve_the_heartbeat() {
+    async fn a_busy_terminal_channel_does_not_starve_the_heartbeat() {
         let (d, _w) = worker("hb-busy");
-        let (url, arrivals) = fake_hub_recording_heartbeats(300);
+        let (url, arrivals) = fake_hub_recording_heartbeats(
+            300,
+            "terminal".to_string(),
+            serde_json::json!({ "shell": "/bin/sh" }),
+            Some(BUSY_COMMAND.to_string()),
+        );
         let mut w = Worker::new(d.clone(), url);
         let mut id = Identity::load_or_create(&d).expect("identity");
         let h = tokio::spawn(async move { w.connect_loop(&mut id, None, std::io::sink()).await });
@@ -1745,6 +1768,51 @@ mod tests {
         assert!(
             seen.len() >= 5,
             "4 秒里只收到 {} 次心跳（周期 300ms）：心跳被通道饿死了",
+            seen.len()
+        );
+        let mut max_gap = std::time::Duration::ZERO;
+        for pair in seen.windows(2) {
+            max_gap = max_gap.max(pair[1].saturating_duration_since(pair[0]));
+        }
+        assert!(
+            max_gap < std::time::Duration::from_millis(1500),
+            "心跳最大间隔 {max_gap:?} 远超周期 300ms"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 同上，但繁忙的是 **exec**：一条跑不完的一次性命令。
+    ///
+    /// 这条与上面那条不是重复——它们的「忙」堵在不同地方。terminal 堵在
+    /// pump 臂（PTY 输出由子进程写出），exec 堵在 `open` 的同步执行上
+    /// （旧实现把整条命令跑在 `on_channel_frame` 里）。同一条 `select!`
+    /// 要同时扛住这两种形状，而第二种曾经真的让设备变成哑的：
+    /// 默认超时 30 秒、`timeout_ms = 0` 无限，期间心跳一帧都发不出去。
+    #[tokio::test]
+    async fn a_slow_exec_channel_does_not_starve_the_heartbeat() {
+        let (d, _w) = worker("hb-exec");
+        let (url, arrivals) = fake_hub_recording_heartbeats(
+            300,
+            "exec".to_string(),
+            serde_json::json!({
+                "command": "/bin/sh",
+                "args": ["-c", "sleep 30; printf done"],
+                "timeout_ms": 0,
+            }),
+            None,
+        );
+        let mut w = Worker::new(d.clone(), url);
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        let h = tokio::spawn(async move { w.connect_loop(&mut id, None, std::io::sink()).await });
+        // 命令要跑 30 秒，这里只取 4 秒的心跳节奏——够看出堵不堵。
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        h.abort();
+        crate::channel::on_disconnect();
+
+        let seen = arrivals.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert!(
+            seen.len() >= 5,
+            "4 秒里只收到 {} 次心跳（周期 300ms）：exec 把 open 堵死了",
             seen.len()
         );
         let mut max_gap = std::time::Duration::ZERO;

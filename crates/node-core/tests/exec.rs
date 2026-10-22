@@ -74,15 +74,36 @@ fn workspace() -> tempfile::TempDir {
 ///
 /// 顺序本身就是判据——结果必须落在 ready 之后，而「这条通道结束了」必须
 /// 落在结果之后（页面先看到结果，才知道通道为什么结束）。
+///
+/// **这些帧不是一次 `on_channel_frame` 交出来的**：命令跑在专用线程上
+/// （见 `connector/exec.rs` 的模块注释），`open_channel` 只回 `channel_ready`，
+/// 结果与关闭由 `channel::pump` 在后续轮次交出。所以这里要把它泵干——
+/// 判据没变，变的是「谁在第几轮说」。
 fn run(channel_id: &str, root: &std::path::Path, params: serde_json::Value) -> Vec<Frame> {
     let action = channel::on_channel_frame(&open_exec_frame(channel_id, root, params));
-    let frames = frames_of(&action).to_vec();
+    let mut frames = frames_of(&action).to_vec();
     assert_eq!(
         frames.first().map(|f| f.msg_type.as_str()),
         Some(types::CHANNEL_READY),
         "第一帧必须是 channel_ready：{:?}",
         frames.iter().map(|f| &f.msg_type).collect::<Vec<_>>()
     );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !frames.iter().any(|f| f.msg_type == types::CLOSE_CHANNEL) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "60 秒都没等到 close_channel：{:?}",
+            frames.iter().map(|f| &f.msg_type).collect::<Vec<_>>()
+        );
+        for (id, produced) in channel::pump() {
+            if id == channel_id {
+                frames.extend(produced);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
     assert_eq!(
         frames.len(),
         3,
@@ -343,4 +364,62 @@ fn there_is_no_way_to_enumerate_or_invoke_connectors_for_a_local_agent() {
     // 而那个函数是 Hub 下发 `open_channel` 时走的路。
     assert_eq!(node_core::connector::registered_count(), 3);
     assert!(node_core::connector::create("agent-bridge").is_none());
+}
+
+/// **`open_channel` 不等命令跑完**：一条 `sleep 3` 的开通道必须毫秒级返回。
+///
+/// 这条锁的是 worker 的心跳不被堵住。`on_channel_frame` 是在 worker 的
+/// `select!` 里被调的（`next_text` 臂），它一旦同步等 IO，心跳那条臂就
+/// 一起停摆——而 Hub 判离站靠的正是收不到心跳。于是「页面上跑一条
+/// `sleep 60`」会让设备在 Hub 眼里掉线，本地却什么错都不报。
+///
+/// 旧实现在 `open` 里同步跑完命令，默认超时 30 秒、`timeout_ms = 0`
+/// 更是无限。判据取 3 秒而不是 60 秒：够长到「同步执行一定来不及」，
+/// 又不至于让这条用例真的等满一个超时。
+///
+/// **顺带断言通道当时还活着**：开跑的那一瞬通道必须在表里，否则
+/// 「返回得快」只是因为什么都没建。
+#[test]
+fn opening_a_slow_channel_returns_before_the_command_finishes() {
+    let _guard = exclusive();
+    channel::reset_for_tests();
+    let ws = workspace();
+    let started = std::time::Instant::now();
+    let action = channel::on_channel_frame(&open_exec_frame(
+        "ch-slow",
+        ws.path(),
+        serde_json::json!({
+            "command": "/bin/sh",
+            "args": ["-c", "sleep 3; printf done"],
+            "timeout_ms": 0,
+        }),
+    ));
+    let elapsed = started.elapsed();
+    let frames = frames_of(&action);
+    assert_eq!(
+        frames.first().map(|f| f.msg_type.as_str()),
+        Some(types::CHANNEL_READY),
+        "起跑即就绪：{frames:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "开通道花了 {elapsed:?}——命令是在 open 里同步跑的"
+    );
+    assert!(
+        channel::has_channel("ch-slow"),
+        "起跑后通道必须还在表里：{frames:?}"
+    );
+    assert_eq!(
+        channel::live_count(),
+        1,
+        "起跑后这条通道是活的（还没跑完，不能自称结束）"
+    );
+
+    // 命令仍在跑：此刻泵一轮**什么也拿不到**。这不是「没实现」，而是
+    // `poll` 的契约——空队列就是「还在跑」的唯一说法。
+    assert!(
+        channel::pump().iter().all(|(id, _)| id != "ch-slow"),
+        "命令还没跑完，pump 不该为它产出任何帧"
+    );
+    channel::on_disconnect();
 }

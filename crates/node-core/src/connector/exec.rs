@@ -2,11 +2,22 @@
 //!
 //! ## 与 terminal 的区别就是「没有交互」
 //!
-//! 跑完就结束、通道随即关闭。所以这里**不挂读线程、不做流控、不碰信用**：
-//! 输出是一次性的一帧（受协议 1 MiB 上限约束），采集是一次同步的
-//! 请求-响应。复用 terminal 的 PTY 会有两个害处：PTY 会把输出折成
-//! 带回显的行（`cat` 一个二进制文件会被改写），而一个跑不完的命令会在
-//! 通道里永久挂着。
+//! 跑完就结束、通道随即关闭。所以这里**不做流控、不碰信用**：输出是一次性
+//! 的一帧（受协议 1 MiB 上限约束）。复用 terminal 的 PTY 会有两个害处：
+//! PTY 会把输出折成带回显的行（`cat` 一个二进制文件会被改写），而一个跑不
+//! 完的命令会在通道里永久挂着。
+//!
+//! ## 执行必须交给专用线程，`open` 只负责起跑
+//!
+//! `open` 是在 worker 的 `select!` 里被调用的（`worker::session` 的
+//! `next_text` 臂 → `channel::on_channel_frame` → 本模块）。它一旦在这里等
+//! IO，**心跳那条臂就一起被堵住**：一条 `sleep 60` 会让设备在 Hub 眼里掉线，
+//! 而设备自己什么错都不报。旧实现在 `open` 里同步跑完命令，`DEFAULT_TIMEOUT_MS`
+//! 是 30 秒、`timeout_ms = 0` 更是无限——那期间设备是哑的。
+//!
+//! 所以 `open` 只做「校验 + 起线程」，结果由 `poll` 逐轮取走——这正是
+//! [`Connector::poll`] 存在的理由。跑完的那一轮 `poll` 交出结果帧，随后
+//! `finished()` 变真，通道层按既有路径发 `close_channel` 并释放资源。
 //!
 //! ## 超时与输出上限都是**必须**的
 //!
@@ -34,6 +45,8 @@
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::Duration;
 
 use base64ct::{Base64, Encoding};
 use serde::Deserialize;
@@ -85,7 +98,7 @@ struct Plan {
     args: Vec<String>,
     /// 真实文件系统上的绝对工作目录（界内）。
     cwd: Option<PathBuf>,
-    timeout: std::time::Duration,
+    timeout: Duration,
     max_output: usize,
 }
 
@@ -117,7 +130,7 @@ impl ExecParams {
             command,
             args: self.args,
             cwd,
-            timeout: std::time::Duration::from_millis(u64::from(timeout_ms)),
+            timeout: Duration::from_millis(u64::from(timeout_ms)),
             max_output: self
                 .max_output_bytes
                 .map_or(MAX_OUTPUT_BYTES, |n| n as usize)
@@ -132,6 +145,8 @@ impl ExecParams {
 #[derive(Debug)]
 pub struct Exec {
     root: Option<PathBuf>,
+    /// 跑完后结果的回传通道。`None` = 还没起跑，或已经收过结果。
+    result: Option<Receiver<Outcome>>,
     /// 已跑完过一次。第二次 `on_data` 说的是「这条通道是一次性的」，
     /// 而不是「跑第二条命令」。
     spent: bool,
@@ -141,6 +156,7 @@ impl Exec {
     pub fn new() -> Self {
         Self {
             root: None,
+            result: None,
             spent: false,
         }
     }
@@ -156,11 +172,17 @@ impl Exec {
 }
 
 impl Connector for Exec {
-    /// **`open` 就是执行**：一次性命令没有「先开再发」两步，所以命令
-    /// 放在 `open_channel.params` 里而不是 `channel_data` 里。
+    /// **只起跑，不等结果**：命令放在 `open_channel.params` 里而不是
+    /// `channel_data` 里（一次性命令没有「先开再发」两步），但执行本身在
+    /// 专用线程上跑，结果由 [`Exec::poll`] 取回。
     ///
-    /// 这不违反协议里 `open` 必须 5s 内返回的约定（§5）：[`Plan::timeout`]
-    /// 有硬上限，而 [`DEFAULT_TIMEOUT_MS`] 就是那个上限的默认值。
+    /// 这里同步跑完命令曾让整台设备变成哑的：`open` 是在 worker 的
+    /// `select!` 里调的，而它在里面等 IO 就会连心跳那条臂一起堵住。
+    /// 30 秒的默认超时、以及 `timeout_ms = 0` 的无限，都会变成「设备
+    /// 在 Hub 眼里掉线，而本地毫无异常」。
+    ///
+    /// 这不违反协议里 `open` 必须 5s 内返回的约定（§5）：本函数只做
+    /// 路径校验与一次 `thread::spawn`，微秒级。
     fn open(&mut self, req: OpenReq) -> Result<Vec<OutFrame>, ConnectorError> {
         let root = req.root().ok_or_else(|| ConnectorError::WorkspaceRoot {
             detail: "no workspace root was given for this channel".to_string(),
@@ -179,11 +201,61 @@ impl Connector for Exec {
             .parse("exec")
             .map_err(|e| ConnectorError::Invalid { detail: e })?;
         let plan = params.into_plan(&real)?;
-        let result = run(&plan)?;
+        // **NUL 检查留在这里，不进线程**：参数装不下 C 字符串是调用方的错误，
+        // 得让 `open_channel` 的应答当场说清楚（`channel_error{internal}`）。
+        // 进了线程就只剩 `poll` 的 `Err`，而 `poll_all` 对 `Err` 是「跳过、
+        // 下一轮再试」——错误会变成一条自己关掉的空通道。
+        let strings = c_strings(&plan)?;
+
         self.close();
         self.root = Some(real);
         self.spent = true;
-        Ok(vec![OutFrame::new(result_payload(&result))])
+        // 通道容量 1：只会有**一次**结果。线程发完就结束，接收端若已不在
+        // （通道被释放、进程要退了），`send` 失败我们也不关心——那是
+        // 「没人要这个结果」，不是错误。
+        let (tx, rx) = mpsc::sync_channel::<Outcome>(1);
+        // coverage: excluded — `spawn` 失败需线程数达上限或内存耗尽，
+        // 测试环境无可控构造手段。
+        std::thread::Builder::new()
+            .name("afcli-exec".to_string())
+            .spawn(move || {
+                if let Ok(result) = run(&plan, &strings) {
+                    let _ = tx.send(result);
+                }
+            })
+            .map_err(|e| ConnectorError::internal(format!("cannot start the exec runner: {e}")))?;
+        self.result = Some(rx);
+        // 第一帧结果由下一轮 `poll` 交出：那时 `channel_ready` 早已发过，
+        // 页面不会把结果帧当成「通道还没就绪」。
+        Ok(Vec::new())
+    }
+
+    /// 取一次执行的结果。**没跑完就返回空**——这一轮没有可发的帧。
+    ///
+    /// 这不再是「空闲 connector 的默认空实现」：exec 的全部产出都走这里。
+    fn poll(&mut self) -> Result<Vec<OutFrame>, ConnectorError> {
+        let Some(rx) = self.result.as_ref() else {
+            return Ok(Vec::new());
+        };
+        match rx.try_recv() {
+            Ok(outcome) => {
+                // 收完就撒手：线程已经结束，留着发送端只会让下一次
+                // `try_recv` 走 `Disconnected` 那条分支。
+                self.result = None;
+                Ok(vec![OutFrame::new(result_payload(&outcome))])
+            }
+            // 还在跑。**空队列不是结束**：`sleep 60` 的 59 秒里都是空的。
+            Err(TryRecvError::Empty) => Ok(Vec::new()),
+            // 发送端没了而结果没来：跑不起来（`run` 自己报了错）。
+            // 报成 `channel_error` 而不是静默——否则页面上「跑一条命令」
+            // 永远没有任何反应。
+            Err(TryRecvError::Disconnected) => {
+                self.result = None;
+                Err(ConnectorError::internal(
+                    "the command could not be run (see the device log)",
+                ))
+            }
+        }
     }
 
     /// 一次性通道：**除了报「这是一次性的」，什么都不做**。
@@ -205,6 +277,7 @@ impl Connector for Exec {
     fn close(&mut self) {
         self.root = None;
         self.spent = false;
+        self.result = None;
     }
 
     /// **一次性通道跑完就是结束了**（子任务 10：「跑完就结束、通道随即关闭」）。
@@ -212,8 +285,12 @@ impl Connector for Exec {
     /// 由 connector 自己声明，通道层据此发 `close_channel` 并释放资源——
     /// 不再指望页面记得关通道：非页面调用方（Hub 自己开的通道）不会去关，
     /// 而 node 侧那条通道与 `spent` 状态会一直挂着。
+    ///
+    /// **`spent` 之外还要 `result` 为空**：线程还在跑的时候这条通道远没结束。
+    /// 只判 `spent` 会让通道层在命令开跑的那一轮就发 `close_channel`——
+    /// 结果帧还没交出来，用户看到的是一个空面板和一条已经关掉的通道。
     fn finished(&self) -> bool {
-        self.spent
+        self.spent && self.result.is_none()
     }
 }
 
@@ -223,7 +300,7 @@ struct Outcome {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     truncated: bool,
-    duration: std::time::Duration,
+    duration: Duration,
     timed_out: bool,
 }
 
@@ -247,9 +324,12 @@ fn result_payload(o: &Outcome) -> serde_json::Value {
 /// [`POLL_SLICE_MS`]，所以「超时」这件事在一片管道数据里也照样被看见。
 /// 直接 `read` 到 EOF 的写法在一条不产生输出的命令上会一路等到超时，
 /// 而一条 `sleep 60` 的输出量是 0——那一路下超时会失效。
-fn run(plan: &Plan) -> Result<Outcome, ConnectorError> {
+///
+/// `strings` 由 [`Exec::open`] 备好并带进来：参数装不下 C 字符串要在
+/// `open` 那一侧报，不能等到进了线程才炸。
+fn run(plan: &Plan, strings: &ExecStrings) -> Result<Outcome, ConnectorError> {
     let started = std::time::Instant::now();
-    let mut child = Child::spawn(plan)?;
+    let mut child = Child::spawn(strings)?;
 
     let mut collected = Collector::new(plan.max_output);
     let mut timed_out = false;
@@ -477,9 +557,8 @@ impl Child {
     ///
     /// **不建 PTY**：PTY 会把输出折成带回显的行，一个 `cat` 出来的二进制
     /// 文件会被改写，而一次性命令要的是**原样字节**。
-    fn spawn(plan: &Plan) -> Result<Self, ConnectorError> {
+    fn spawn(strings: &ExecStrings) -> Result<Self, ConnectorError> {
         let [out_r, out_w, err_r, err_w] = make_pipes()?;
-        let strings = c_strings(plan)?;
 
         let mut argv: Vec<*const libc::c_char> = Vec::with_capacity(strings.args.len() + 2);
         argv.push(strings.program.as_ptr());
@@ -498,7 +577,7 @@ impl Child {
 
         if pid == 0 {
             // ---- 子进程 ----
-            child_exec(&strings, &argv, out_w, err_w);
+            child_exec(strings, &argv, out_w, err_w);
         }
 
         // ---- 父进程 ----
@@ -712,17 +791,30 @@ mod tests {
         format!("i=0; while [ $i -lt {rows} ]; do printf '0123456789'; i=$((i+1)); done")
     }
 
+    /// 开通道并**等到结果**。`open` 只起跑，结果由 `poll` 逐轮交回——
+    /// 这里轮询到收到为止，把「执行在另一线程上」这件事对上面的用例藏起来。
+    ///
+    /// 上限给得比 [`DEFAULT_TIMEOUT_MS`] 宽：被测命令自己可以跑到那个超时，
+    /// 而这个循环只是跟着等。真的等不到时 `ConnectorError::internal` 会说明白，
+    /// 不会变成一条挂死的测试。
     fn run_plan(
         root: &Path,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, ConnectorError> {
         let mut e = Exec::new();
-        let frames = e.open(OpenReq::new(root.to_string_lossy().into_owned(), params))?;
-        let mut frames = frames;
-        let frame = frames
-            .pop()
-            .ok_or_else(|| ConnectorError::internal("no frame"))?;
-        Ok(frame.payload)
+        e.open(OpenReq::new(root.to_string_lossy().into_owned(), params))?;
+        let deadline = std::time::Instant::now()
+            + Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MS) + 5_000);
+        loop {
+            let mut frames = e.poll()?;
+            if let Some(frame) = frames.pop() {
+                return Ok(frame.payload);
+            }
+            if !e.is_open() || std::time::Instant::now() >= deadline {
+                return Err(ConnectorError::internal("the exec runner never answered"));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -1050,6 +1142,9 @@ mod tests {
             e.root(),
             Some(second.path().canonicalize().expect("canonical").as_path())
         );
+        // **重开必须换掉旧线程的结果通道**：旧的 `run` 线程还攥着上一次
+        // 的输出，收在这里会让「第二次的结果」变成第一次的。
+        e.poll().expect("poll after reopen");
         e.close();
         e.close();
         assert!(!e.is_open());
@@ -1263,6 +1358,23 @@ mod tests {
             serde_json::json!({ "command": "/bin/true" }),
         ))
         .expect("run");
+        // **起跑之后还不能自称跑完**：线程还在跑，此刻发 `close_channel`
+        // 会把结果帧关在门外。跑完的一轮由 `poll` 交出结果，之后
+        // `finished()` 才为真——这个顺序就是「结果先于结束」的落地。
+        assert!(
+            !e.finished(),
+            "起跑 ≠ 跑完：此刻 finished() 为真会让通道层过早关通道"
+        );
+        assert!(e.poll().expect("poll").is_empty(), "第一轮 poll 还没有结果");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !e.finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "/bin/true 5 秒都没跑完：执行线程没有推进"
+            );
+            let _ = e.poll();
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert!(e.finished(), "跑完就该自称跑完，让通道层收尾");
         let err = e
             .on_data(&serde_json::json!({}))
