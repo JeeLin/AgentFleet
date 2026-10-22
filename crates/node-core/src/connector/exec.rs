@@ -11,10 +11,18 @@
 //! ## 超时与输出上限都是**必须**的
 //!
 //! 没有超时，一条 `tail -f` 就能把通道永久占住；没有输出上限，同一条命令
-//! 能把内存吃光。所以这两项都在参数里（[`protocol::message::ExecRequest`]
-//! 的 `timeout_ms` / `max_output_bytes`），且本模块自己兜一层上限：
-//! 调用方可以写 `0` 表示不限（那是它明确的选择），但**我们自己的内存上限
-//! 不能由它决定**。
+//! 能把内存吃光。所以这两项都在参数里——`timeout_ms` / `max_output_bytes`
+//! 随 `open_channel.params` 一起进来（一次性命令的命令也随 `open` 来），
+//! 且本模块自己兜一层上限：调用方可以写 `0` 表示不限（那是它明确的选择），
+//! 但**我们自己的内存上限不能由它决定**。
+//!
+//! ## 载荷形状
+//!
+//! 结果不走独立的 `exec_result` 消息类型，而是随 `channel_data` 帧回来：
+//! 信封是 `ChannelData{channel_id, payload}`，`payload` 里是
+//! `exit_code` / `stdout_b64` / `stderr_b64` / `truncated` / `duration_ms` /
+//! `timed_out`。**stdout 与 stderr 都是 base64**：JSON 只能装文本，而一条
+//! `grep` 打到二进制文件上就会产出非法 UTF-8。
 //!
 //! ## 工作区边界
 //!
@@ -198,6 +206,15 @@ impl Connector for Exec {
         self.root = None;
         self.spent = false;
     }
+
+    /// **一次性通道跑完就是结束了**（子任务 10：「跑完就结束、通道随即关闭」）。
+    ///
+    /// 由 connector 自己声明，通道层据此发 `close_channel` 并释放资源——
+    /// 不再指望页面记得关通道：非页面调用方（Hub 自己开的通道）不会去关，
+    /// 而 node 侧那条通道与 `spent` 状态会一直挂着。
+    fn finished(&self) -> bool {
+        self.spent
+    }
 }
 
 /// 一次执行的产出。
@@ -210,9 +227,9 @@ struct Outcome {
     timed_out: bool,
 }
 
-/// `exec_result` 载荷。**stdout / stderr 都是 base64**：`protocol.md` §4
-/// 的同一条理由——JSON 只能装文本，而一条 `grep` 打到二进制文件上就会
-/// 产出非法 UTF-8。
+/// 结果的 `channel_data` 载荷。**stdout / stderr 都是 base64**：
+/// `protocol.md` §4 的同一条理由——JSON 只能装文本，而一条 `grep` 打到
+/// 二进制文件上就会产出非法 UTF-8。
 fn result_payload(o: &Outcome) -> serde_json::Value {
     serde_json::json!({
         "exit_code": o.exit_code,
@@ -263,18 +280,17 @@ fn run(plan: &Plan) -> Result<Outcome, ConnectorError> {
             // 区分靠下一轮的「两个 fd 都关了」。
             continue;
         }
-        let got = child.read_into(&mut collected);
+        child.read_into(&mut collected);
         if !child.any_open() {
             // 两个写端都关上了：这就是 EOF。管道缓冲里的字节可能还在，
             // 所以顺序是「先读到没得读，再判 EOF」。
-            let _ = got;
             break;
         }
     }
     // 收尾：把管道里剩下的都读干净（超时也读，因为剩下的部分正是用户要的）。
-    while child.any_open() && child.read_into(&mut collected) {
-        // 读到没得读为止
-    }
+    // 空循环体写在同一行是有意的：多行空块的收尾 `}` 会被 llvm-cov 记成未覆盖
+    // （已知现象），而这里「读到没得读为止」本来就是空体。
+    while child.any_open() && child.read_into(&mut collected) {}
 
     let exit_code = child.wait();
     Ok(Outcome {
@@ -338,63 +354,136 @@ struct Child {
     pipes: Vec<Option<OwnedFd>>,
 }
 
+/// fork 之前备好的 C 字符串。
+///
+/// **必须在 fork 之前备齐**：fork 出来的子进程与父进程共享同一份堆，
+/// 此刻任何分配都可能带着别的线程正持有的锁出去。
+struct ExecStrings {
+    program: CString,
+    args: Vec<CString>,
+    cwd: Option<CString>,
+}
+
+/// 两根管道的四个 fd：`[stdout 读, stdout 写, stderr 读, stderr 写]`。
+type PipeFds = [RawFd; 4];
+
+/// 建两根管道。**`O_NONBLOCK` 是必须的，不是优化**：两根管道依次读，
+/// 而第一根有数据、第二根什么都没有时，一次阻塞 `read` 会永远等下去——
+/// 那条命令明明早就跑完了。而 `poll` 已经先告诉过我们「至少有一根可读」，
+/// 所以非阻塞读立刻返回 `EAGAIN` 就是正确回答。
+///
+/// `O_CLOEXEC` 让 fork 出来的子进程不会额外继承不属于它的写端。
+fn make_pipes() -> Result<PipeFds, ConnectorError> {
+    let mut out_pipe = [0 as RawFd; 2];
+    let mut err_pipe = [0 as RawFd; 2];
+    // coverage: excluded — `pipe2` 失败需 fd 表耗尽，测试环境无可控构造
+    // 手段（防御性兜底）。
+    for p in [&mut out_pipe, &mut err_pipe] {
+        if unsafe { libc::pipe2(p.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
+            return Err(ConnectorError::Failed {
+                op: "run command".to_string(),
+                detail: format!("pipe2 failed: {}", std::io::Error::last_os_error()),
+            });
+        }
+    }
+    Ok([out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1]])
+}
+
+/// 把命令、参数、cwd 备成 C 字符串。
+fn c_strings(plan: &Plan) -> Result<ExecStrings, ConnectorError> {
+    let program = CString::new(plan.command.as_str()).map_err(|_| ConnectorError::Invalid {
+        detail: "command name contains a NUL".to_string(),
+    })?;
+    let args: Vec<CString> = plan
+        .args
+        .iter()
+        .map(|a| {
+            CString::new(a.as_str()).map_err(|_| ConnectorError::Invalid {
+                detail: "an argument contains a NUL".to_string(),
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    let cwd: Option<CString> = plan
+        .cwd
+        .as_ref()
+        .map(|p| {
+            p.to_str()
+                .ok_or_else(|| ConnectorError::Invalid {
+                    detail: "cwd is not valid UTF-8".to_string(),
+                })
+                .and_then(|t| {
+                    CString::new(t).map_err(|_| ConnectorError::Invalid {
+                        detail: "cwd contains a NUL".to_string(),
+                    })
+                })
+        })
+        .transpose()?;
+    Ok(ExecStrings { program, args, cwd })
+}
+
+/// 子进程那一侧。**永不返回**。
+///
+/// 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时
+/// （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个
+/// 锁状态不确定的世界里调析构。
+// coverage: excluded — 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的
+// **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里
+// 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的
+// `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败，
+// 正常测试环境构造不出来（防御性兜底）。
+fn child_exec(
+    strings: &ExecStrings,
+    argv: &[*const libc::c_char],
+    out_w: RawFd,
+    err_w: RawFd,
+) -> ! {
+    unsafe {
+        if let Some(dir) = strings.cwd.as_ref() {
+            if libc::chdir(dir.as_ptr()) != 0 {
+                libc::_exit(126);
+            }
+        }
+        // stdin 关掉：**这不是终端**。留着继承来的 stdin 会让一条
+        // `cat` 永远等输入，于是「一次性命令」变成一个挂住的通道。
+        let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY);
+        if null < 0 || libc::dup2(null, 0) < 0 {
+            libc::_exit(126);
+        }
+        if libc::dup2(out_w, 1) < 0 || libc::dup2(err_w, 2) < 0 {
+            libc::_exit(126);
+        }
+        // 父进程那份写端必须关掉，否则 `read` 永远等不到 EOF。
+        libc::close(out_w);
+        libc::close(err_w);
+        // **子进程这边的 1/2 必须是阻塞的**：`dup2` 会连同 `O_NONBLOCK`
+        // 一起复制过去，于是被执行的程序会拿到一根「没数据就立刻报错」
+        // 的 stdout——`yes`、`jq`、任何自己 `write` 的工具全都会在
+        // `EAGAIN` 上崩掉或丢行。
+        let flags = libc::fcntl(1, libc::F_GETFL, 0);
+        if flags < 0 || libc::fcntl(1, libc::F_SETFL, flags & !libc::O_NONBLOCK) < 0 {
+            libc::_exit(126);
+        }
+        let flags = libc::fcntl(2, libc::F_GETFL, 0);
+        if flags < 0 || libc::fcntl(2, libc::F_SETFL, flags & !libc::O_NONBLOCK) < 0 {
+            libc::_exit(126);
+        }
+        libc::execvp(strings.program.as_ptr(), argv.as_ptr());
+        libc::_exit(127);
+    }
+}
+
 impl Child {
     /// `pipe2` 两根管道 → `fork` → 子进程 `dup2` + `chdir` + `execvp`。
     ///
     /// **不建 PTY**：PTY 会把输出折成带回显的行，一个 `cat` 出来的二进制
     /// 文件会被改写，而一次性命令要的是**原样字节**。
     fn spawn(plan: &Plan) -> Result<Self, ConnectorError> {
-        let mut out_pipe = [0 as RawFd; 2];
-        let mut err_pipe = [0 as RawFd; 2];
-        // **`O_NONBLOCK` 是必须的，不是优化**：两根管道依次读，而第一根
-        // 有数据、第二根什么都没有时，一次阻塞 `read` 会永远等下去——
-        // 那条命令明明早就跑完了。而 `poll` 已经先告诉过我们「至少有一根
-        // 可读」，所以非阻塞读立刻返回 `EAGAIN` 就是正确回答。
-        // `O_CLOEXEC` 让 fork 出来的子进程不会额外继承不属于它的写端。
-        // coverage: excluded — `pipe2` 失败需 fd 表耗尽，测试环境无可控构造
-        // 手段（防御性兜底）。
-        for p in [&mut out_pipe, &mut err_pipe] {
-            if unsafe { libc::pipe2(p.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
-                return Err(ConnectorError::Failed {
-                    op: "run command".to_string(),
-                    detail: format!("pipe2 failed: {}", std::io::Error::last_os_error()),
-                });
-            }
-        }
+        let [out_r, out_w, err_r, err_w] = make_pipes()?;
+        let strings = c_strings(plan)?;
 
-        // fork 之前把所有字符串备成 C 字符串：fork 出来的子进程与父进程
-        // 共享同一份堆，此刻任何分配都可能带着别的线程正持有的锁出去。
-        let program = CString::new(plan.command.as_str()).map_err(|_| ConnectorError::Invalid {
-            detail: "command name contains a NUL".to_string(),
-        })?;
-        let args_owned: Vec<CString> = plan
-            .args
-            .iter()
-            .map(|a| {
-                CString::new(a.as_str()).map_err(|_| ConnectorError::Invalid {
-                    detail: "an argument contains a NUL".to_string(),
-                })
-            })
-            .collect::<Result<_, _>>()?;
-        let cwd_owned: Option<CString> = plan
-            .cwd
-            .as_ref()
-            .map(|p| {
-                p.to_str()
-                    .ok_or_else(|| ConnectorError::Invalid {
-                        detail: "cwd is not valid UTF-8".to_string(),
-                    })
-                    .and_then(|t| {
-                        CString::new(t).map_err(|_| ConnectorError::Invalid {
-                            detail: "cwd contains a NUL".to_string(),
-                        })
-                    })
-            })
-            .transpose()?;
-
-        let mut argv: Vec<*const libc::c_char> = Vec::with_capacity(args_owned.len() + 2);
-        argv.push(program.as_ptr());
-        argv.extend(args_owned.iter().map(|a| a.as_ptr()));
+        let mut argv: Vec<*const libc::c_char> = Vec::with_capacity(strings.args.len() + 2);
+        argv.push(strings.program.as_ptr());
+        argv.extend(strings.args.iter().map(|a| a.as_ptr()));
         argv.push(std::ptr::null());
 
         // coverage: excluded — `fork` 失败需进程表耗尽，测试环境无可控构造
@@ -409,54 +498,20 @@ impl Child {
 
         if pid == 0 {
             // ---- 子进程 ----
-            // 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的
-            // 运行时（栈展开、析构、锁状态全是 fork 时刻的快照）。
-            unsafe {
-                if let Some(dir) = cwd_owned.as_ref() {
-                    if libc::chdir(dir.as_ptr()) != 0 {
-                        libc::_exit(126);
-                    }
-                }
-                // stdin 关掉：**这不是终端**。留着继承来的 stdin 会让一条
-                // `cat` 永远等输入，于是「一次性命令」变成一个挂住的通道。
-                let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY);
-                if null < 0 || libc::dup2(null, 0) < 0 {
-                    libc::_exit(126);
-                }
-                if libc::dup2(out_pipe[1], 1) < 0 || libc::dup2(err_pipe[1], 2) < 0 {
-                    libc::_exit(126);
-                }
-                // 父进程那份写端必须关掉，否则 `read` 永远等不到 EOF。
-                libc::close(out_pipe[1]);
-                libc::close(err_pipe[1]);
-                // **子进程这边的 1/2 必须是阻塞的**：`dup2` 会连同
-                // `O_NONBLOCK` 一起复制过去，于是被执行的程序会拿到一根
-                // 「没数据就立刻报错」的 stdout——`yes`、`jq`、任何自己
-                // `write` 的工具全都会在 `EAGAIN` 上崩掉或丢行。
-                let flags = libc::fcntl(1, libc::F_GETFL, 0);
-                if flags < 0 || libc::fcntl(1, libc::F_SETFL, flags & !libc::O_NONBLOCK) < 0 {
-                    libc::_exit(126);
-                }
-                let flags = libc::fcntl(2, libc::F_GETFL, 0);
-                if flags < 0 || libc::fcntl(2, libc::F_SETFL, flags & !libc::O_NONBLOCK) < 0 {
-                    libc::_exit(126);
-                }
-                libc::execvp(program.as_ptr(), argv.as_ptr());
-                libc::_exit(127);
-            }
+            child_exec(&strings, &argv, out_w, err_w);
         }
 
         // ---- 父进程 ----
         // 关掉写端：读端的 EOF 取决于**所有**写端都关上了。
         unsafe {
-            libc::close(out_pipe[1]);
-            libc::close(err_pipe[1]);
+            libc::close(out_w);
+            libc::close(err_w);
         }
         // coverage: excluded — `from_raw_fd` 在 fd < 0 时即崩，而这两个 fd
         // 来自刚成功的 `pipe2`。
         let pipes = vec![
-            Some(unsafe { OwnedFd::from_raw_fd(out_pipe[0]) }),
-            Some(unsafe { OwnedFd::from_raw_fd(err_pipe[0]) }),
+            Some(unsafe { OwnedFd::from_raw_fd(out_r) }),
+            Some(unsafe { OwnedFd::from_raw_fd(err_r) }),
         ];
         Ok(Self { pid, pipes })
     }
@@ -478,8 +533,8 @@ impl Child {
 
     /// 从仍然开着的那些读端各读一次。**返回有没有真的读到字节**。
     ///
-    /// 读端会从 `pipes` 里被移除（`fd = -1`）——那才是 EOF 的记录方式，
-    /// 用一个 `Vec<Option<OwnedFd>>` 会让每一处都要判 `Option`。
+    /// 读端会从 `pipes` 里被移除（置 `None`）——那才是 EOF 的记录方式，
+    /// 而 `any_open` 正是靠 `is_some()` 判的。
     fn read_into(&mut self, out: &mut Collector) -> bool {
         let mut buf = vec![0u8; READ_CHUNK];
         let mut got_any = false;
@@ -495,37 +550,47 @@ impl Child {
                 )
             };
             if n > 0 {
-                let Some(chunk) = buf.get(..n as usize) else {
-                    continue;
-                };
-                out.push(stream, chunk);
-                got_any = true;
-            } else if n == 0 {
-                // 真正的 EOF：这根管道的写端全关上了。
-                if let Some(slot) = self.pipes.get_mut(stream) {
-                    *slot = None;
+                // `read(2)` 的返回值恒 ≤ `buf.len()`，所以这里取不到只是
+                // 防御性兜底——不写 `else` 分支，那里没有可做的事。
+                if let Some(chunk) = buf.get(..n as usize) {
+                    out.push(stream, chunk);
+                    got_any = true;
                 }
-            } else if n < 0 {
-                // 只有「再来一轮有意义」的 errno 才继续。其余一律把这根管道
-                // 当成坏掉摘掉：留着它，`poll` 每轮立刻报可读而 `read` 每轮
-                // 立刻失败，主循环就变成一个烧 CPU 的热循环，命令只能等
-                // 超时才结束（用户看到的是「超时」而不是「读失败」）。
-                //
-                // `EBADF` 尤其必须摘：fd 号可能已被别处的 `open` 复用，
-                // 继续读它就读到别人那儿去了。
-                if !errno_is_retryable() {
-                    tracing::warn!(
-                        stream,
-                        errno = %std::io::Error::last_os_error(),
-                        "pipe read failed; dropping it"
-                    );
-                    if let Some(slot) = self.pipes.get_mut(stream) {
-                        *slot = None;
-                    }
-                }
+                continue;
             }
+            if n == 0 {
+                // 真正的 EOF：这根管道的写端全关上了。
+                self.drop_pipe(stream);
+                continue;
+            }
+            // 只有「再来一轮有意义」的 errno 才继续。其余一律把这根管道
+            // 当成坏掉摘掉：留着它，`poll` 每轮立刻报可读而 `read` 每轮
+            // 立刻失败，主循环就变成一个烧 CPU 的热循环，命令只能等
+            // 超时才结束（用户看到的是「超时」而不是「读失败」）。
+            //
+            // `EBADF` 尤其必须摘：fd 号可能已被别处的 `open` 复用，
+            // 继续读它就读到别人那儿去了。
+            if errno_is_retryable() {
+                continue;
+            }
+            // coverage: excluded — 多行 `tracing!` 的参数行被 llvm-cov 记为
+            // miss（已知现象）；这条日志本身由
+            // `a_pipe_that_fails_permanently_is_dropped_not_retried` 走到。
+            tracing::warn!(
+                stream,
+                errno = %std::io::Error::last_os_error(),
+                "pipe read failed; dropping it"
+            );
+            self.drop_pipe(stream);
         }
         got_any
+    }
+
+    /// 把这根管道从表里摘掉。**EOF 与永久读失败都走这里**。
+    fn drop_pipe(&mut self, stream: usize) {
+        if let Some(slot) = self.pipes.get_mut(stream) {
+            *slot = None;
+        }
     }
 
     /// 超时后杀掉子进程。**先 `SIGKILL` 再等**：不杀的话一条 `tail -f`
@@ -702,13 +767,9 @@ mod tests {
         assert!(out["truncated"].as_bool().expect("truncated"), "{out}");
         let stdout = Base64::decode_vec(out["stdout_b64"].as_str().expect("b64")).expect("b64");
         let stderr = Base64::decode_vec(out["stderr_b64"].as_str().expect("b64")).expect("b64");
-        assert_eq!(
-            stdout.len() + stderr.len(),
-            10,
-            "合计必须是上限 10，而不是各 10（stdout={} stderr={}）",
-            stdout.len(),
-            stderr.len()
-        );
+        let total = stdout.len() + stderr.len();
+        let split = format!("stdout={} stderr={}", stdout.len(), stderr.len());
+        assert_eq!(total, 10, "合计必须是上限 10，而不是各 10（{split}）");
     }
 
     /// 超时被杀掉**并且被说出来**：一条 `tail -f` 挂住通道是这一整节存在的理由。
@@ -745,12 +806,8 @@ mod tests {
         .expect("run");
         assert!(out["truncated"].as_bool().expect("truncated"), "{out}");
         let stdout = Base64::decode_vec(out["stdout_b64"].as_str().expect("b64")).expect("b64");
-        assert_eq!(
-            stdout.len(),
-            1000,
-            "收到 {stdout_len} 字节，应该正好是上限",
-            stdout_len = stdout.len()
-        );
+        let seen = stdout.len();
+        assert_eq!(seen, 1000, "收到 {seen} 字节，应该正好是上限");
     }
 
     /// 缺省上限**不是不限**：一条 `yes` 在调用方什么都没填时也不能把内存吃光。
@@ -1047,5 +1104,173 @@ mod tests {
             "`EAGAIN` 不得摘管道：写端还开着，输出还没来"
         );
         drop(writer);
+    }
+
+    /// `timeout_ms = 0` 是**明确要不限**，不是「立刻超时」。
+    ///
+    /// 这两者的混淆很致命：`Instant + Duration::ZERO` 就是「现在」，于是
+    /// 「不限」会退化成第一轮就判超时——一条 `sleep 1` 会被当成超时杀掉，
+    /// 而用户从没要求过超时。判据是「一条 1 秒的命令跑完且 `timed_out` 为假」。
+    #[test]
+    fn a_zero_timeout_means_unlimited_not_instant() {
+        let ws = workspace();
+        let out = run_plan(
+            ws.path(),
+            serde_json::json!({
+                "command": "/bin/sh",
+                "args": ["-c", "sleep 1; echo done-later"],
+                "timeout_ms": 0,
+            }),
+        )
+        .expect("run");
+        assert!(
+            !out["timed_out"].as_bool().expect("timed_out"),
+            "0 表示不限，不该被判超时：{out}"
+        );
+        let stdout = Base64::decode_vec(out["stdout_b64"].as_str().expect("b64")).expect("b64");
+        assert!(
+            String::from_utf8_lossy(&stdout).contains("done-later"),
+            "命令该被允许跑完：{out}"
+        );
+    }
+
+    /// `Default` 必须能造出一个**未使用**的实例：注册表按名造 connector 时
+    /// 走的就是它（`connector::create`），而一个只能 `new()` 的类型进不了那张表。
+    #[test]
+    fn the_default_exec_is_unused_and_closed() {
+        let mut e = Exec::default();
+        assert!(!e.is_open(), "默认实例还没开过通道");
+        assert!(e.root().is_none(), "默认实例没有工作区根");
+        assert!(!e.finished(), "没跑过就不能自称跑完了");
+        // 未开通道时的 `on_data` 要说「没开」，而不是「已经跑过一次」
+        let err = e
+            .on_data(&serde_json::json!({}))
+            .expect_err("未开通道必须报错");
+        let text = err.to_string();
+        assert!(
+            matches!(err, ConnectorError::Invalid { .. }) && text.contains("not open"),
+            "未开通道的错误要指向「没开」：{text}"
+        );
+    }
+
+    /// 参数里带一个 NUL → 说清是哪一个参数的问题，而不是 `execvp` 静默截断。
+    ///
+    /// C 字符串装不下 NUL，而 `execvp` 会在它那里把命令名切掉一截——
+    /// 那会让「执行了另一个程序」看起来像「这个程序行为不对」。
+    #[test]
+    fn an_argument_carrying_a_nul_is_refused_by_name() {
+        let ws = workspace();
+        let mut nul = String::from("ar");
+        nul.push('\0');
+        nul.push('g');
+        let err = run_plan(
+            ws.path(),
+            serde_json::json!({ "command": "/bin/echo", "args": [nul] }),
+        )
+        .expect_err("NUL 参数必须被拒");
+        let text = err.to_string();
+        assert!(
+            matches!(err, ConnectorError::Invalid { .. }) && text.contains("argument"),
+            "错误该点名是参数的问题：{text}"
+        );
+    }
+
+    /// 命令名自己带 NUL 同上。
+    #[test]
+    fn a_command_name_carrying_a_nul_is_refused_by_name() {
+        let ws = workspace();
+        let mut nul = String::from("/bin/ec");
+        nul.push('\0');
+        nul.push_str("ho");
+        let err = run_plan(ws.path(), serde_json::json!({ "command": nul }))
+            .expect_err("NUL 命令名必须被拒");
+        let text = err.to_string();
+        assert!(
+            matches!(err, ConnectorError::Invalid { .. }) && text.contains("command"),
+            "错误该点名是命令名的问题：{text}"
+        );
+    }
+
+    /// `cwd` 不是合法 UTF-8 / 带 NUL：都在 **fork 之前**被拒。
+    ///
+    /// 这两条只能在 `c_strings` 这一层验：`ExecParams.cwd` 是 `String`，
+    /// 非 UTF-8 与 NUL 都从那一层进不来，只能直接构造 `Plan`。
+    #[test]
+    fn a_cwd_that_cannot_be_a_c_string_is_refused_before_forking() {
+        use std::os::unix::ffi::OsStringExt;
+        fn plan(cwd: PathBuf) -> Plan {
+            Plan {
+                command: "/bin/true".to_string(),
+                args: Vec::new(),
+                cwd: Some(cwd),
+                timeout: std::time::Duration::from_secs(1),
+                max_output: MAX_OUTPUT_BYTES,
+            }
+        }
+        let weird = PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/\xff\xfe".to_vec()));
+        let err = c_strings(&plan(weird))
+            .err()
+            .expect("非 UTF-8 的 cwd 必须被拒");
+        assert!(err.to_string().contains("UTF-8"), "got {err}");
+
+        let nul = PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/ba\0d".to_vec()));
+        let err = c_strings(&plan(nul)).err().expect("带 NUL 的 cwd 必须被拒");
+        assert!(err.to_string().contains("NUL"), "got {err}");
+    }
+
+    /// **超时杀掉命令之后，已经产出的输出照样回来**。
+    ///
+    /// 收尾那一轮（`run` 末尾的 drain）存在的理由是「超时也读」：杀死子进程
+    /// 走的是 `kill` 然后 `break`，那一跳跳过了收尾，于是超时那一刻还躺在
+    /// 管道缓冲里的字节全靠它才被读出来。少了它，「超时」就附带变成
+    /// 「已产出的输出也一起丢了」，而用户要的恰恰是超时之前那一段。
+    ///
+    /// **这条断言的是不变式，不是收尾那一轮的增量**：收尾的输入是「缓冲里
+    /// 还剩多少」，而它由内核的调度决定，测试里造不出一个确定性的非零值
+    /// ——所以拿它当判据的测试会随机假红。这里钉住的是「超时之后输出**没丢**」
+    /// 这件用户看得见的事。
+    #[test]
+    fn output_already_written_before_the_deadline_is_still_collected() {
+        let ws = workspace();
+        let out = run_plan(
+            ws.path(),
+            serde_json::json!({
+                "command": "/bin/sh",
+                "args": ["-c", "printf 'before-timeout'; sleep 30"],
+                "timeout_ms": 300,
+            }),
+        )
+        .expect("run");
+        assert!(
+            out["timed_out"].as_bool().expect("timed_out"),
+            "这条必须走到超时：{out}"
+        );
+        let stdout = Base64::decode_vec(out["stdout_b64"].as_str().expect("b64")).expect("b64");
+        assert!(
+            String::from_utf8_lossy(&stdout).contains("before-timeout"),
+            "超时杀掉命令不该丢掉它已经写出的输出：{out}"
+        );
+    }
+
+    /// **跑过一次之后这条通道就是一次性的**：第二次 `on_data` 说的是
+    /// 「重新开一条」，而不是悄悄再跑一遍。
+    #[test]
+    fn a_spent_channel_says_to_open_a_new_one() {
+        let ws = workspace();
+        let mut e = Exec::new();
+        e.open(OpenReq::new(
+            ws.path().to_string_lossy().into_owned(),
+            serde_json::json!({ "command": "/bin/true" }),
+        ))
+        .expect("run");
+        assert!(e.finished(), "跑完就该自称跑完，让通道层收尾");
+        let err = e
+            .on_data(&serde_json::json!({}))
+            .expect_err("第二次必须被拒");
+        let text = err.to_string();
+        assert!(
+            matches!(err, ConnectorError::Invalid { .. }) && text.contains("once per channel"),
+            "第二次的错误要指向「开一条新的」：{text}"
+        );
     }
 }

@@ -80,11 +80,6 @@ impl Frame {
     }
 }
 
-/// 帧是否超限。
-pub fn exceeds_limit(bytes: usize) -> bool {
-    bytes > MAX_FRAME_BYTES
-}
-
 /// 序列化一帧的载荷；失败时退回 `fallback`。
 ///
 /// 生产代码禁 panic，而**少回一帧比回一帧兜底的更糟**：后者至少让对端知道
@@ -139,19 +134,6 @@ mod tests {
         );
         let h: Hello = f.payload().unwrap();
         assert_eq!(h.arch, "aarch64");
-    }
-
-    #[test]
-    fn frame_size_limit() {
-        assert!(!exceeds_limit(MAX_FRAME_BYTES));
-        assert!(exceeds_limit(MAX_FRAME_BYTES + 1));
-    }
-
-    #[test]
-    fn oversized_frame_is_rejected_before_parse() {
-        // 1 MiB + 1 字节的载荷必须被拒，而不是喂给 serde
-        let big = "x".repeat(MAX_FRAME_BYTES + 1);
-        assert!(exceeds_limit(big.len()));
     }
 
     #[test]

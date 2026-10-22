@@ -16,13 +16,32 @@ use std::time::{Duration, Instant};
 
 use common::{connect_enrolled, device_info, Hub};
 use node_core::conn::connect_once;
-use protocol::channel::{ChannelCredit, ChannelData, CloseChannel};
+use protocol::channel::{ChannelCredit, ChannelData, CloseChannel, CREDIT_DELTA};
 use protocol::frame::Frame;
 use protocol::message::types;
 
 impl Hub {
     fn credit(&self, node_id: &str, channel_id: &str) -> Option<u32> {
         self.state.channels().read().credit(node_id, channel_id)
+    }
+}
+
+/// 等 Hub 侧账本落到期望值（超时即失败）。
+///
+/// 补信用与回填是同一把写锁里的一对动作，但本测试是从 WebSocket 外面观测的，
+/// 只能轮询等它落地。
+async fn wait_for_credit(hub: &Hub, node_id: &str, channel_id: &str, want: u32) -> u32 {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let c = hub.credit(node_id, channel_id);
+        if c == Some(want) {
+            return want;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Hub 侧账本 3s 内没回填到 {want}（最后一次读到 {c:?}）"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -103,8 +122,11 @@ async fn exhausting_credit_makes_the_hub_issue_more() {
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(hub.credit(&node_id, "ch-0"), Some(1));
     est.send(&channel_data("ch-0", 3)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_eq!(hub.credit(&node_id, "ch-0"), Some(0), "两帧吃光");
+
+    // 归零的那一帧同时触发「补发」与「回填」：Hub 侧账本回到 CREDIT_DELTA。
+    // 补发而不回填的话余额会停在 0，于是**每帧**都补一次信用。
+    let balance = wait_for_credit(&hub, &node_id, "ch-0", CREDIT_DELTA).await;
+    assert_eq!(balance, CREDIT_DELTA, "两帧吃光后应被回填");
 
     // Hub 应当回一帧 channel_credit（余额归零时补）
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -119,6 +141,54 @@ async fn exhausting_credit_makes_the_hub_issue_more() {
     let c: ChannelCredit = credit_frame.payload().unwrap();
     assert_eq!(c.channel_id, "ch-0");
     assert!(c.delta > 0, "补的信用必须是正数: {}", c.delta);
+}
+
+/// 补信用必须**回填 Hub 侧账本**，否则每帧都在补、node 侧余额无限滚。
+///
+/// 症状（未修复时）：Hub 侧 `credit` 恒为 0——余额归零后不再回填，下一帧
+/// 又立刻归零，于是**每帧**都发一帧 `channel_credit`，node 侧的可用余额
+/// 越滚越大（约束 4 的「每通道独立流控」实际失效）。
+///
+/// 断言三件事：补完之后 Hub 侧余额**恢复为非零**且等于补发的那一帧；
+/// 补发出去的增量与回填的量一致；下一帧只是减 1，而不是又归零。
+#[tokio::test]
+async fn granting_credit_also_refills_the_hub_side_ledger() {
+    let hub = Hub::boot().await;
+    let (mut est, node_id, _kp) = connect_enrolled(&hub).await;
+
+    est.send(&open_channel("ch-0", "terminal", Some(1)))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(hub.credit(&node_id, "ch-0"), Some(1));
+
+    // 吃掉最后一格 → Hub 回一帧 channel_credit，并把 Hub 侧账本回填
+    est.send(&channel_data("ch-0", 2)).await.unwrap();
+    let after = wait_for_credit(&hub, &node_id, "ch-0", CREDIT_DELTA).await;
+    assert_eq!(after, CREDIT_DELTA, "补信用必须同时回填 Hub 侧账本");
+
+    // 补发出去的那一帧，增量必须与回填的量一致
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let credit_frame = loop {
+        let text = est.next_text().await.unwrap().expect("hub must reply");
+        let f: Frame = serde_json::from_str(&text).unwrap();
+        if f.msg_type == types::CHANNEL_CREDIT {
+            break f;
+        }
+        assert!(Instant::now() < deadline, "3s 内没收到 channel_credit");
+    };
+    let c: ChannelCredit = credit_frame.payload().unwrap();
+    assert_eq!(c.channel_id, "ch-0");
+    assert_eq!(c.delta, after, "补发出去的增量必须与回填的量一致");
+
+    // 再吃一格：余额减 1，**不是**立刻又归零（那正是「每帧都补」的形状）
+    est.send(&channel_data("ch-0", 3)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        hub.credit(&node_id, "ch-0"),
+        Some(after - 1),
+        "回填之后要按新余额继续记账，而不是每帧都归零"
+    );
 }
 
 /// 设备掉线后那条**信用**账本必须清干净。

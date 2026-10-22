@@ -3,8 +3,11 @@
 //! 必需集 / 可选集的划分见 `protocol.md` §2：
 //! - **必需集**（`hello/challenge/auth/auth_ok/auth_fail/heartbeat/err`）缺失或未知 →
 //!   握手 10s 超时关闭并 `err{handshake_timeout}`；节点侧收到未知必需消息断开重连。
-//! - **可选集**（`open_channel/channel_*/exec_*/disconnect`）必须忽略；
+//! - **可选集**（`open_channel/channel_*/disconnect`）必须忽略；
 //!   通道请求 `channel_ready` 超时 5s 显式回 `channel_error{reason:"unsupported"}`。
+//!
+//! **一次性命令不走独立消息类型**：exec 的结果随 `channel_data` 帧回来
+//! （`stdout_b64` / `stderr_b64` / `timed_out`），协议层不为它定义类型。
 
 use serde::{Deserialize, Serialize};
 
@@ -25,8 +28,6 @@ pub mod types {
     pub const CHANNEL_DATA: &str = "channel_data";
     pub const CHANNEL_CREDIT: &str = "channel_credit";
     pub const CLOSE_CHANNEL: &str = "close_channel";
-    pub const EXEC_REQUEST: &str = "exec_request";
-    pub const EXEC_RESULT: &str = "exec_result";
     pub const ERR: &str = "err";
 
     /// 必需集：缺失或未知即握手失败。
@@ -170,44 +171,6 @@ pub struct DeviceInfo {
     pub node_version: String,
 }
 
-/// `exec_request` 载荷（Hub→node，`protocol.md` §4）。
-///
-/// 一次性命令、**无 PTY**：跑完就结束，通道随即关闭（里程碑子任务 10）。
-/// `timeout_ms` 与 `max_output_bytes` **都是必填**：没有超时，一条
-/// `tail -f` 就能把通道永久占住；没有输出上限，同一条命令能让内存爆掉。
-/// 两者给 `0` 表示「不限」——但那是**调用方明确写下来的选择**，
-/// 而不是「字段没填就当 0」这两种默认值会漂移的地方。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecRequest {
-    pub channel_id: String,
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// 工作目录。**相对工作区根解析**，绝对路径会被拒绝（约束 3 的边界强制）。
-    #[serde(default)]
-    pub cwd: String,
-    pub timeout_ms: u32,
-    pub max_output_bytes: u32,
-}
-
-/// `exec_result` 载荷（node→Hub，`protocol.md` §4）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecResult {
-    pub channel_id: String,
-    pub exit_code: i32,
-    /// 二进制安全：stdout / stderr 都是 **base64** 的字节串而不是文本。
-    /// 一条 `grep` 打到二进制文件上就会产出非法 UTF-8，而 JSON 只能装文本——
-    /// 换成 base64 之后「原样字节」才成立。
-    #[serde(default)]
-    pub stdout: String,
-    #[serde(default)]
-    pub stderr: String,
-    /// 输出是否被 `max_output_bytes` 截断。
-    #[serde(default)]
-    pub truncated: bool,
-    pub duration_ms: u64,
-}
-
 /// 消息类型枚举（用于 match 分发；未知类型走 `Unknown`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageType {
@@ -226,8 +189,6 @@ pub enum MessageType {
     ChannelData,
     ChannelCredit,
     CloseChannel,
-    ExecRequest,
-    ExecResult,
     Err,
     Unknown,
 }
@@ -255,8 +216,6 @@ impl std::str::FromStr for MessageType {
             CHANNEL_DATA => Self::ChannelData,
             CHANNEL_CREDIT => Self::ChannelCredit,
             CLOSE_CHANNEL => Self::CloseChannel,
-            EXEC_REQUEST => Self::ExecRequest,
-            EXEC_RESULT => Self::ExecResult,
             ERR => Self::Err,
             _ => Self::Unknown,
         })
@@ -309,28 +268,44 @@ mod tests {
         }
     }
 
+    /// 判定口径：**只有必需集才断开**，其余一律忽略（约束 14 前向兼容）。
+    ///
+    /// 三处断言合成一条：必需集逐个列全（漏一个 = 那个类型被静默忽略，
+    /// 握手会卡到超时），可选集逐个列全（漏一个 = 那个类型被当成非法帧
+    /// 而断连），两个集合之外的新类型名一律忽略。
     #[test]
-    fn unknown_optional_is_ignored() {
+    fn only_the_required_set_disconnects() {
+        for &t in types::REQUIRED {
+            assert_eq!(
+                MessageType::unknown_action(t),
+                UnknownAction::Disconnect,
+                "{t} is required"
+            );
+        }
+        for t in [
+            types::HUB_HELLO,
+            types::HEARTBEAT_ACK,
+            types::DISCONNECT,
+            types::OPEN_CHANNEL,
+            types::CHANNEL_READY,
+            types::CHANNEL_ERROR,
+            types::CHANNEL_DATA,
+            types::CHANNEL_CREDIT,
+            types::CLOSE_CHANNEL,
+        ] {
+            assert_eq!(
+                MessageType::unknown_action(t),
+                UnknownAction::Ignore,
+                "{t} must stay ignorable"
+            );
+        }
+        // 不属于必需集的（含将来新增的类型名）→ 可忽略，这是约束 14 的
+        // 前向兼容：老 node 遇到新 Hub 的新消息类型必须忽略而不是崩。
+        // 早期实现写成 `OPTIONAL.contains(t)`，那会让一个新增的类型名算成
+        // 「不可忽略」——本条锁住这个坑不再回来。
         assert_eq!(
-            MessageType::unknown_action("channel_quantum_teleport"),
+            MessageType::unknown_action("teleport_channel"),
             UnknownAction::Ignore
-        );
-        assert_eq!(
-            MessageType::unknown_action("open_channel"),
-            UnknownAction::Ignore
-        );
-    }
-
-    #[test]
-    fn unknown_required_disconnects() {
-        // 缺 auth 与缺 heartbeat 是两种最贵的失败，必须断而不是静默
-        assert_eq!(
-            MessageType::unknown_action("auth"),
-            UnknownAction::Disconnect
-        );
-        assert_eq!(
-            MessageType::unknown_action("heartbeat"),
-            UnknownAction::Disconnect
         );
     }
 
@@ -427,107 +402,6 @@ mod tests {
     }
 
     #[test]
-    fn unknown_types_are_ignorable_unless_they_are_required() {
-        // 判定口径：**只有必需集才断开**，其余一律忽略（约束 14 前向兼容）
-        assert_eq!(
-            MessageType::unknown_action(types::HEARTBEAT),
-            UnknownAction::Disconnect,
-            "heartbeat is required"
-        );
-        assert_eq!(
-            MessageType::unknown_action(types::CHANNEL_DATA),
-            UnknownAction::Ignore,
-            "optional type must be ignorable"
-        );
-        // 不属于必需集的（含将来新增的类型名）→ 可忽略，这是约束 14 的
-        // 前向兼容：老 node 遇到新 Hub 的新消息类型必须忽略而不是崩。
-        // 早期实现写成 `OPTIONAL.contains(t)`，那会让一个新增的类型名算成
-        // 「不可忽略」——本条锁住这个坑不再回来。
-        assert_eq!(
-            MessageType::unknown_action("teleport_channel"),
-            UnknownAction::Ignore
-        );
-    }
-
-    #[test]
-    fn exec_result_carries_bytes_and_truncation() {
-        // 子任务 7 补的载荷：M0 的 `exec_*` 是没有 payload 的空壳。
-        let f = crate::frame::Frame::push(
-            types::EXEC_RESULT,
-            0,
-            serde_json::json!({
-                "channel_id": "ch-1",
-                "exit_code": 0,
-                "stdout": "aGk=",
-                "stderr": "",
-                "truncated": true,
-                "duration_ms": 12,
-            }),
-        );
-        let got: ExecResult = f.payload().unwrap();
-        assert_eq!(got.channel_id, "ch-1");
-        assert_eq!(got.exit_code, 0);
-        assert_eq!(got.stdout, "aGk=");
-        assert!(got.truncated);
-        assert_eq!(got.duration_ms, 12);
-        // stdout 缺省即空串而不是解码失败：Hub 侧只用它做展示
-        let f = crate::frame::Frame::push(
-            types::EXEC_RESULT,
-            0,
-            serde_json::json!({"channel_id":"ch-1","exit_code":1,"duration_ms":1}),
-        );
-        let got: ExecResult = f.payload().unwrap();
-        assert_eq!(got.stdout, "");
-        assert!(!got.truncated);
-    }
-
-    #[test]
-    fn exec_request_requires_command_and_both_limits() {
-        // 超时与输出上限是**必填**：没有它们，一条 `tail -f` 就能把通道
-        // 永久占住（里程碑子任务 10 的接口设计）。
-        let missing_limits = crate::frame::Frame::push(
-            types::EXEC_REQUEST,
-            0,
-            serde_json::json!({
-                "channel_id": "ch-1",
-                "command": "echo",
-                "timeout_ms": 1000,
-            }),
-        );
-        assert!(
-            missing_limits.payload::<ExecRequest>().is_err(),
-            "max_output_bytes must be required"
-        );
-        let missing_command = crate::frame::Frame::push(
-            types::EXEC_REQUEST,
-            0,
-            serde_json::json!({
-                "channel_id": "ch-1",
-                "timeout_ms": 1000,
-                "max_output_bytes": 1024,
-            }),
-        );
-        assert!(missing_command.payload::<ExecRequest>().is_err());
-
-        let f = crate::frame::Frame::push(
-            types::EXEC_REQUEST,
-            0,
-            serde_json::json!({
-                "channel_id": "ch-1",
-                "command": "ls",
-                "args": ["-la"],
-                "cwd": "sub",
-                "timeout_ms": 0,
-                "max_output_bytes": 0,
-            }),
-        );
-        let got: ExecRequest = f.payload().unwrap();
-        assert_eq!(got.args, vec!["-la".to_string()]);
-        assert_eq!(got.cwd, "sub");
-        assert_eq!(got.timeout_ms, 0, "0 = 不限，是调用方写下来的选择");
-    }
-
-    #[test]
     fn message_type_from_str_maps_every_known_type() {
         // 逐个验证分派表：漏一个分支 = 线上某个消息被误判成 Unknown
         use MessageType::*;
@@ -547,8 +421,6 @@ mod tests {
             ("channel_data", ChannelData),
             ("channel_credit", ChannelCredit),
             ("close_channel", CloseChannel),
-            ("exec_request", ExecRequest),
-            ("exec_result", ExecResult),
             ("err", Err),
         ] {
             assert_eq!(s.parse::<MessageType>().unwrap(), want, "type {s}");

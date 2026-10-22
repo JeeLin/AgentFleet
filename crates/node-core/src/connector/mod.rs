@@ -84,7 +84,7 @@ impl OpenReq {
 /// **只有一个自由载荷字段**：schema 随 connector 走，通道层不解释
 /// （`protocol.md` §4「`channel_data` 的 payload 本层只透传」）。M1 的三种
 /// 分别是 terminal 的「一坨字节」、files 的「操作 + 结果」、exec 的
-/// 「`exec_result` 载荷」。
+/// 「`exit_code` + `stdout_b64` / `stderr_b64`」。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutFrame {
     pub payload: serde_json::Value,
@@ -166,6 +166,10 @@ impl ConnectorError {
 /// `open` 必须在 [`READY_TIMEOUT`](protocol::channel::READY_TIMEOUT) 内返回
 /// （协议 §5：超时 5s，Hub 回 `channel_error{reason:"unsupported"}`），
 /// 所以它只能是「建起本地资源」这种微秒级的事，不能在里面等 IO。
+///
+/// **这份 trait 就是契约本身**：规格正文里抄的那份签名早就与代码不一致
+/// （少了 `poll`、`on_data` 的参数类型也不同），照规格实现第三个 connector
+/// 会编不过。加新 connector 时以这里的签名为准。
 pub trait Connector: Send {
     /// 建起通道资源。**成功即回 `channel_ready`**。
     fn open(&mut self, req: OpenReq) -> Result<Vec<OutFrame>, ConnectorError>;
@@ -184,6 +188,18 @@ pub trait Connector: Send {
 
     /// 释放资源。**必须能重复调用**：断连重连与 `close_channel` 可能各来一次。
     fn close(&mut self);
+
+    /// 这个 connector 是否**已经跑完、且不会再产出任何东西**。
+    ///
+    /// 通道层据此收尾：返回 `true` 时它会发一帧 `close_channel` 并释放资源。
+    /// 于是「一次性命令跑完就结束」这条规格（子任务 10）由 connector 自己
+    /// 声明，而不是靠页面记得去关通道。
+    ///
+    /// **契约**：返回 `true` 之后 `poll` 必须返回空、`on_data` 不该再被调用。
+    /// 默认 `false`：多数 connector 是长驻的（terminal / files）。
+    fn finished(&self) -> bool {
+        false
+    }
 }
 
 /// 一个 connector **实例**。（协议文档里的泛称是 `ConnectorMsg`，
@@ -364,6 +380,34 @@ mod tests {
         assert!(OutFrame::bytes(big).is_err());
         let exact = vec![b'x'; protocol::frame::MAX_FRAME_BYTES];
         assert!(OutFrame::bytes(exact).is_ok());
+    }
+
+    /// 空闲 connector 的默认契约：`poll` 空、`finished` 永假。
+    ///
+    /// files 与 exec 都不覆写这两条（前者等请求，后者靠 `on_data` 推着跑），
+    /// 所以走的是这里的默认实现。契约的要点是 `poll` **不报错**：通道层
+    /// 每轮都会调它，一次 `Err` 会把整条通道拆掉，而「现在没东西要发」
+    /// 不是错误。
+    #[test]
+    fn an_idle_connector_polls_empty_and_never_finishes() {
+        let mut files = create(names::FILES).expect("files 建得出来");
+        assert!(
+            files
+                .poll()
+                .expect("空闲 connector 的 poll 不该报错")
+                .is_empty(),
+            "空闲的 files 没有待发帧"
+        );
+        assert!(!files.finished(), "files 是长驻的：不能自称跑完");
+
+        let mut exec = create(names::EXEC).expect("exec 建得出来");
+        assert!(
+            exec.poll()
+                .expect("空闲 connector 的 poll 不该报错")
+                .is_empty(),
+            "空闲的 exec 没有待发帧"
+        );
+        assert!(!exec.finished(), "exec 未开始时不能自称跑完");
     }
 
     /// 越界与「这台设备不支持」是两回事，混成同一档会让人以为终端坏了。

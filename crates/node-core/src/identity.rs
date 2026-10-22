@@ -234,9 +234,10 @@ impl Identity {
     }
 
     /// 被顶替了吗（§7.1 终态）。
+    ///
+    /// **读不出来按「未被顶替」处理**：方向不是随便选的——判成被顶替，
+    /// 设备会就此永久停摆且无自愈路径。
     pub fn is_superseded(&self) -> bool {
-        // coverage: excluded — 读失败臂：需身份文件在 `is_superseded` 读取中途
-        // 消失。
         let Some(raw) = fs::read_to_string(&self.path).ok() else {
             return false;
         };
@@ -743,11 +744,27 @@ mod tests {
     #[test]
     fn an_unreadable_identity_is_not_treated_as_superseded() {
         let d = tmpdir();
-        let id = Identity::load_or_create(d.path()).unwrap();
+        let mut id = Identity::load_or_create(d.path()).unwrap();
         let p = id.path().to_path_buf();
-        std::fs::write(&p, "not json at all").unwrap();
-        assert!(!id.is_superseded(), "读不出来按未被顶替处理");
+
+        // 反向对照必须先做：写一个标记并确认**读得出真**。缺了它，
+        // 「一律返回 false」的实现会被下面两条同时放行。
+        //
+        // 它得赶在文件被弄坏之前：`mark_superseded` 走「读-改-写」，
+        // 文件已经坏了的话它自己就会先报错。
+        id.mark_superseded("1700000000").unwrap();
+        assert!(id.is_superseded(), "写了标记就必须读得出来");
+
+        // 文件整个没了（卸载了磁盘 / 有人 rm 了数据目录）：走
+        // `read_to_string` 失败那条路。
+        std::fs::remove_file(&p).unwrap();
+        assert!(!id.is_superseded(), "文件没了按未被顶替处理");
         assert_eq!(id.last_seen_gen(), None);
+
+        // 有文件但解不开：走 `serde_json` 失败那条路。与上面不是一回事——
+        // 这里读到的是「有文件但不是身份」。
+        std::fs::write(&p, "not json at all").unwrap();
+        assert!(!id.is_superseded(), "解不开按未被顶替处理");
     }
 
     /// `set_node_id` 走原子写：中途失败不留半个文件。

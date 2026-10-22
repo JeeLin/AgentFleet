@@ -203,7 +203,7 @@ pub async fn post_login(State(state): State<AppState>, req: Request) -> Result<R
         return Err(ApiError::too_many_requests("rate_limited"));
     }
 
-    // 登录是未认证端点：body 上限收得比默认的 2 MiB 紧得多，
+    // 登录是未认证端点：body 上限收得比 `/api/*` 紧得多（8 KiB vs 1 MiB），
     // 免得有人拿一个巨型 body 把 Hub 的内存吃掉。
     let password = read_password(req).await?;
 
@@ -214,16 +214,14 @@ pub async fn post_login(State(state): State<AppState>, req: Request) -> Result<R
         Ok(Ok(permit)) => permit,
         // 排队超时 = 「现在忙」→ 429，这是可预期的背压。
         Err(_elapsed) => return Err(ApiError::too_many_requests("login_busy")),
-        // coverage: excluded —— 闭锁的信号量会永远等不到 permit。
-        // coverage: excluded —— 闸门与 `AppState` 同生命周期，本 workspace
-        // 从不调用 `tokio::sync::Semaphore::close()`（已 grep 确认零调用点），
-        // 所以 `AcquireError` 在本 crate 不可达。注意这是**约定性**不可达
+        // coverage: excluded —— 闭锁的信号量会永远等不到 permit。闸门与
+        // `AppState` 同生命周期，本 workspace 从不调用
+        // `tokio::sync::Semaphore::close()`（已 grep 确认零调用点），所以
+        // `AcquireError` 在本 crate 不可达。注意这是**约定性**不可达
         // （我们选择不调用），不是结构性的——`close()` 是 pub。
         // 闭锁不是「忙」，必须 500 而不是 429：否则一次内部事故会被伪装成
         // 「服务繁忙」，把真正的根因（有人闭锁了闸门）藏起来。
         Ok(Err(e)) => {
-            // coverage: excluded — 同 167：tracing::error! 参数行被 llvm-cov
-            // 记为 miss（多行宏已知现象），该臂本身见 :214 就地标注。
             tracing::error!(error = %e, "login semaphore closed");
             return Err(ApiError::internal());
         }
@@ -426,8 +424,6 @@ fn login_failure(outcome: &LoginOutcome) -> Option<ApiError> {
     }
 }
 
-/// 给一条自己拼的 cookie 串做「能否成为 header 值」的体检。
-///
 /// 追加一条 `Set-Cookie`。
 ///
 /// 非法值**只记录、不返回错误**：cookie 由本模块用固定模板拼成，取值是

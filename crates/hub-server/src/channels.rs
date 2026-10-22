@@ -153,14 +153,35 @@ fn on_data(state: &AppState, node_id: &str, frame: &Frame) -> Reply {
     {
         Ok(CreditStatus::Granted) => Reply::Nothing,
         // 余额归零：按 §6 补一轮信用。信用只增不减，补的是协议常量。
-        Ok(CreditStatus::Exhausted) => Reply::Frame(push(
-            types::CHANNEL_CREDIT,
-            protocol::channel::ChannelCredit {
-                channel_id: data.channel_id.clone(),
-                delta: protocol::channel::CREDIT_DELTA,
-            },
-            protocol::channel::fallback::credit(&data.channel_id, protocol::channel::CREDIT_DELTA),
-        )),
+        Ok(CreditStatus::Exhausted) => {
+            // **回填 Hub 侧账本**：只发 `channel_credit` 而不记账，Hub 侧余额
+            // 恒为 0——下一帧又立刻归零，于是**每帧都补一次信用**，node 侧的
+            // 余额越滚越大（约束 4 的「每通道独立流控」就此失效）。
+            //
+            // 补的量与发出去的那一帧一致：Hub 说「再给你 32 格」，它自己的
+            // 账本也得有那 32 格。
+            //
+            // coverage: excluded — `on_credit` 只在通道不存在时失败，而这条通道
+            // 刚在同一把锁里被 `on_data_received` 成功记过账：两者之间没有能改
+            // 这张表的代码路径（同一把写锁）。
+            if let Err(e) = channels
+                .registry(node_id)
+                .on_credit(&data.channel_id, protocol::channel::CREDIT_DELTA)
+            {
+                return Reply::Frame(error_frame(&data.channel_id, &e));
+            }
+            Reply::Frame(push(
+                types::CHANNEL_CREDIT,
+                protocol::channel::ChannelCredit {
+                    channel_id: data.channel_id.clone(),
+                    delta: protocol::channel::CREDIT_DELTA,
+                },
+                protocol::channel::fallback::credit(
+                    &data.channel_id,
+                    protocol::channel::CREDIT_DELTA,
+                ),
+            ))
+        }
         Err(e) => Reply::Frame(error_frame(&data.channel_id, &e)),
     }
 }
@@ -262,6 +283,11 @@ mod tests {
             &state,
             "n_a",
             &frame(types::CLOSE_CHANNEL, serde_json::json!([1, 2]))
+        )));
+        assert!(is_nothing(on_channel_frame(
+            &state,
+            "n_a",
+            &frame(types::CHANNEL_READY, serde_json::json!({"oops": 1}))
         )));
     }
 

@@ -94,6 +94,34 @@ pub fn last_event_id(headers: &axum::http::HeaderMap) -> Option<u64> {
         .and_then(|v| v.parse::<u64>().ok())
 }
 
+/// 读请求体（上限 1 MiB，与 WS 帧上限同值）。**`/api/*` 的唯一一份实现**。
+///
+/// 放在这里而不是各路由模块里：读不出来 / 超上限的错误码只有一处定义
+/// （[`crate::ApiError::bad_request_body`]）。两个模块各写一份时，改了错误码
+/// 另一份不会报错——而前端是**按 code 分支**的，那一侧会静默落到默认分支，
+/// 页面只显示一句「建会话没有成功」而不说清哪里不对。
+///
+/// 读出错与超上限都归成 400：「你发来的东西我没法处理」。**错误串不进响应体**
+/// （约束 13），所以这两种情况在页面看来是同一件事——它们确实是。
+pub(crate) async fn read_body(req: axum::extract::Request) -> Result<Vec<u8>, crate::ApiError> {
+    axum::body::to_bytes(req.into_body(), crate::WS_MAX_MESSAGE_BYTES)
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|_| crate::ApiError::bad_request_body())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::masked_fingerprint;
+
+    /// 指纹太短时整串打码：不足 6 个字符的串不可能是真的 Ed25519 指纹。
+    #[test]
+    fn a_short_fingerprint_is_masked_whole() {
+        assert_eq!(masked_fingerprint("abc"), "***");
+        assert_eq!(masked_fingerprint("abcdef"), "abc***def");
+    }
+}
+
 pub mod api;
 pub mod assets;
 pub mod setup;

@@ -175,9 +175,12 @@ mod tests {
         insert(&c, "n_a").unwrap();
         // 同指纹不同 node_id 必须被 UNIQUE 挡住
         let e = insert(&c, "n_b").unwrap_err();
-        assert!(
-            matches!(e, rusqlite::Error::SqliteFailure(_, _)),
-            "expected constraint violation, got {e:?}"
+        // 判据必须是**约束冲突**本身：`matches!(e, SqliteFailure(_, _))`
+        // 只说明「SQLite 报了错」，把列名写错成 `key_fingerprints` 也照样绿。
+        assert_eq!(
+            e.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ConstraintViolation),
+            "expected a UNIQUE constraint violation, got {e:?}"
         );
     }
 
@@ -193,9 +196,10 @@ mod tests {
             )
             .unwrap_err();
         // 「重连中」只存在于内存，不落库（security §5）
-        assert!(
-            matches!(e, rusqlite::Error::SqliteFailure(_, _)),
-            "got {e:?}"
+        assert_eq!(
+            e.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ConstraintViolation),
+            "expected a CHECK constraint violation, got {e:?}"
         );
     }
 
@@ -209,23 +213,46 @@ mod tests {
         assert!(matches!(e, StorageError::SchemaTooNew { .. }), "got {e:?}");
     }
 
+    /// 失败的那条迁移必须**整体回滚**，而已经跑过的版本号与数据一个字都不动。
+    ///
+    /// 起点是一个**已经迁到 v2** 的库：失败发生在「还有后续版本要迁」的路上，
+    /// 而不是「第一条迁移就失败」的路上——后者由
+    /// `apply_reports_failing_migration_and_leaves_version_intact` 覆盖。
+    ///
+    /// 走 `apply` 注入失败迁移，而不是自己手搓一个事务：那才是本仓真正的
+    /// 迁移路径（`apply` 负责开事务、`execute_batch`、写 `user_version`）。
     #[test]
     fn failed_migration_rolls_back() {
-        // 注入一个会失败的迁移，验证回滚后 user_version 与表都不变
         let mut c = memory();
         run(&mut c).unwrap();
+        c.execute(
+            "INSERT INTO device (id, name, key_fingerprint, enrolled_at)
+             VALUES ('n_a', 'pi', 'fp_a', 'unix:0')",
+            [],
+        )
+        .unwrap();
         let before: i64 = c
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
+        assert_eq!(before, SCHEMA_VERSION, "precondition: a migrated database");
 
-        let tx = c.transaction().unwrap();
-        let _ = tx.execute_batch("CREATE TABLE boom (x); THIS IS NOT SQL;");
-        drop(tx); // 未 commit，事务回滚
+        // 注入一条会失败的 v3 迁移：第一条语句成功、第二条语法错
+        let bad = Migration {
+            version: SCHEMA_VERSION + 1,
+            sql: "CREATE TABLE boom (x); THIS IS NOT SQL;",
+        };
+        let e = apply(&mut c, &[bad], SCHEMA_VERSION + 1).unwrap_err();
+        assert!(
+            matches!(e, StorageError::Migration { version, .. } if version == SCHEMA_VERSION + 1),
+            "got {e:?}"
+        );
 
+        // 版本号不前进
         let after: i64 = c
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(before, after, "user_version changed on failed migration");
+        // 迁移里已执行的那条语句不留痕迹
         let n: i64 = c
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='boom'",
@@ -234,6 +261,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 0, "failed migration left a table behind");
+        // 既有数据一个字都没动
+        let name: String = c
+            .query_row("SELECT name FROM device WHERE id = 'n_a'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "pi", "failed migration must not touch existing rows");
         // 库仍可用
         c.query_row("SELECT 1", [], |r| r.get::<_, i64>(0)).unwrap();
     }

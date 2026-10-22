@@ -205,6 +205,40 @@ async fn a_malformed_heartbeat_payload_is_dropped_without_dropping_the_link() {
     );
 }
 
+/// 标准④（**内存侧**）：只含 `node_version` 的心跳不得把**内存里**的能力清空。
+///
+/// 落库侧由上面那条覆盖；内存侧是另一条路径（`Reports::record`）。两侧口径
+/// 必须一致——不一致时页面显示「这台设备不支持这个 connector」而库里还在，
+/// 两边现象互相矛盾。
+#[tokio::test]
+async fn a_minimal_heartbeat_keeps_the_in_memory_capabilities() {
+    let hub = Hub::boot().await;
+    let (mut est, node_id, _kp) = connect_enrolled(&hub).await;
+
+    send_heartbeat(&mut est, full_heartbeat()).await;
+    wait_for_report(&hub, &node_id, Duration::from_secs(3)).await;
+
+    // 第二份：只有 node_version，三项可选载荷全缺。
+    send_heartbeat(&mut est, serde_json::json!({"node_version": "0.2.0"})).await;
+    // 等它被处理完：node_version 变成 0.2.0 就是「这一份已落地」的信号
+    wait_until(Duration::from_secs(3), || {
+        hub.state
+            .reports()
+            .get(&node_id)
+            .is_some_and(|r| r.node_version == "0.2.0")
+    })
+    .await;
+
+    let r = hub.state.reports().get(&node_id).expect("must be present");
+    assert_eq!(r.capabilities["connectors"][0], "terminal", "能力必须保留");
+    assert_eq!(r.resources["load"]["load1"], 1.8, "负载必须保留");
+    assert_eq!(
+        r.workspace_roots,
+        vec!["/w".to_string()],
+        "工作区根必须保留"
+    );
+}
+
 /// 标准⑤：设备离线后 `device.capabilities` **仍可读**（直接 SQL，不经内存）。
 ///
 /// 断开 → 内存上报被清掉（与连接同生命周期）→ 但库里那行还在。

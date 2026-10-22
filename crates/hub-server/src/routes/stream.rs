@@ -40,7 +40,6 @@
 //! `/send` 是裸字节，排队重发会让字符乱序灌进 PTY（见里程碑子任务 5a 的口径）。
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::{Path, Request, State};
@@ -56,7 +55,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::routes::api::Authenticated;
-use crate::{ApiError, AppState};
+use crate::{err, ApiError, AppState};
 
 /// 回放缓冲与 broadcast 通道的容量（事件条数）。
 ///
@@ -95,8 +94,19 @@ impl Envelope {
 
 struct Inner {
     tx: tokio::sync::broadcast::Sender<Envelope>,
-    next_id: AtomicU64,
-    replay: Mutex<VecDeque<Envelope>>,
+    /// 回放缓冲与下一个事件序号。**同一把锁**。
+    ///
+    /// 序号分配、入回放、投递必须是一个整体：否则「已发布的最大序号」与
+    /// 「缓冲里实际有什么」可能对不上——订阅者据此算出的续收窗口就会漏事件。
+    bus: Mutex<Bus>,
+}
+
+/// 事件总线的可变部分。
+struct Bus {
+    /// 下一个要分配的序号（从 1 起）。
+    next_id: u64,
+    /// 有界回放缓冲。
+    replay: VecDeque<Envelope>,
 }
 
 /// SSE 事件总线。
@@ -121,9 +131,11 @@ impl Streams {
         Self {
             inner: Arc::new(Inner {
                 tx,
-                // 序号从 1 开始：`Last-Event-ID: 0` 与「没有这个头」同义。
-                next_id: AtomicU64::new(1),
-                replay: Mutex::new(VecDeque::new()),
+                bus: Mutex::new(Bus {
+                    // 序号从 1 开始：`Last-Event-ID: 0` 与「没有这个头」同义。
+                    next_id: 1,
+                    replay: VecDeque::new(),
+                }),
             }),
         }
     }
@@ -134,44 +146,43 @@ impl Streams {
     /// （`ws.rs` 那几处）手里已经是 `Frame`，序列化给它比在这里重新拼一个
     /// JSON 对象更不容易出错，也让本模块不必知道任何协议形状。
     pub fn publish(&self, name: &'static str, data: impl Into<String>) -> u64 {
-        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        // **「分配序号 + 入回放 + 投递」在同一把锁里做完**：`subscribe` 在锁内
+        // 做「读快照 + 订阅实时流」，两条临界区因此互斥。分开做的话，
+        // 发布方在两步之间被切走时，新订阅者会在快照与实时流**各收一次**
+        // （终端把同一段输出画两遍），反向交错时该事件**永久丢失**且不产生
+        // `resync` 注释帧（那条只在 `Lagged` 时发）。
+        let mut bus = self.inner.bus.lock();
+        let id = bus.next_id;
+        bus.next_id += 1;
         let env = Envelope {
             id,
             name,
             data: data.into(),
         };
-        self.push_to_replay(&env);
+        while bus.replay.len() >= REPLAY_CAPACITY {
+            bus.replay.pop_front();
+        }
+        bus.replay.push_back(env.clone());
         // `send` 失败只说明「此刻一个订阅者都没有」——那是常态（页面没开着），
         // 不是错误，更不该让发布方（ws 读循环）因此中断。
         let _ = self.inner.tx.send(env);
+        drop(bus);
         id
     }
 
-    fn push_to_replay(&self, env: &Envelope) {
-        let mut buf = self.inner.replay.lock();
-        while buf.len() >= REPLAY_CAPACITY {
-            buf.pop_front();
-        }
-        buf.push_back(env.clone());
-    }
-
     /// 回放缓冲里序号 `> last` 的事件。
+    ///
+    /// **只服务测试**：生产路径的快照由 [`Streams::subscribe_parts`] 在锁内
+    /// 一次取走（分两步做会重发或漏事件），所以这里没有生产调用点。
+    #[cfg(test)]
     pub(crate) fn replay_since(&self, last: Option<u64>) -> Vec<Envelope> {
-        let Some(last) = last else {
-            return Vec::new();
-        };
-        self.inner
-            .replay
-            .lock()
-            .iter()
-            .filter(|e| e.id > last)
-            .cloned()
-            .collect()
+        backlog_since(&self.inner.bus.lock().replay, last)
     }
 
     /// 当前已用掉的最大事件序号。测试与运维用它核对「续收窗口从哪开始」。
     pub fn last_event_id(&self) -> u64 {
-        self.inner.next_id.load(Ordering::Relaxed).saturating_sub(1)
+        let bus = self.inner.bus.lock();
+        bus.next_id.saturating_sub(1)
     }
 
     /// 订阅一条事件流。
@@ -191,8 +202,8 @@ impl Streams {
         &self,
         last: Option<u64>,
     ) -> futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>> {
-        let backlog = self.replay_since(last).into_iter();
-        let rx = self.inner.tx.subscribe();
+        let (backlog, rx) = self.subscribe_parts(last);
+        let backlog = backlog.into_iter();
         // `BoxStream` 而不是裸 `impl Stream`：`unfold` 的那个 async 块不是
         // `Unpin` 的（它 `await` 在 `rx.recv()` 上），而 `Sse` 的写出路径
         // 与测试里的逐条读取都要一个能 `Box::pin` 的流。装箱还顺带把
@@ -219,8 +230,26 @@ impl Streams {
         .boxed()
     }
 
-    // ---- 事件构造（形状集中在这里，别在调用点各拼一个） ------------------------
+    /// 「读回放快照」与「订阅实时流」这一对，**必须在同一把锁里做完**。
+    ///
+    /// `publish` 在**同一把锁**里完成「入回放 + 投递」，所以任何一次发布
+    /// 要么整体落在本次临界区之前（事件在快照里，且广播投递发生在订阅之前，
+    /// 不会再来一遍），要么整体落在之后（不在快照里，只走实时流）。
+    /// 两条都不重发、不丢。分开做的话，发布方在两步之间被切走时两个方向
+    /// 都会出错：新订阅者在快照与实时流**各收一次**（终端把同一段输出画两遍），
+    /// 或者该事件**永久丢失**——而 `Lagged` 没发生，页面连一条 `resync`
+    /// 注释帧都收不到。
+    fn subscribe_parts(
+        &self,
+        last: Option<u64>,
+    ) -> (Vec<Envelope>, tokio::sync::broadcast::Receiver<Envelope>) {
+        let bus = self.inner.bus.lock();
+        let backlog = backlog_since(&bus.replay, last);
+        let rx = self.inner.tx.subscribe();
+        (backlog, rx)
+    }
 
+    // ---- 事件构造（形状集中在这里，别在调用点各拼一个） ------------------------
     /// `device.status`：设备在线态变化（连接建立 / 断开）。
     pub fn device_status(&self, node_id: &str, status: &str) -> u64 {
         self.publish(
@@ -260,6 +289,18 @@ impl Streams {
     }
 }
 
+/// 回放缓冲里序号 `> last` 的事件。
+///
+/// 单独一个函数（而不是写两遍 `filter`）是因为它有两个调用点：
+/// `Streams::replay_since`（测试查询）与 `Streams::subscribe_parts`
+/// （锁内快照）。两处写两份过滤条件是同一个语义两个实现，改一处不会提醒另一处。
+fn backlog_since(buf: &VecDeque<Envelope>, last: Option<u64>) -> Vec<Envelope> {
+    let Some(last) = last else {
+        return Vec::new();
+    };
+    buf.iter().filter(|e| e.id > last).cloned().collect()
+}
+
 /// 一条通道的绑定：**谁**（subject）在**哪台设备**上开的。
 ///
 /// **Hub 侧内存，不落库**：通道本来就是连接生命周期内的东西（§7.1 断开即清），
@@ -279,6 +320,9 @@ pub(crate) struct ChannelBinding {
 }
 
 /// `channel_id → 绑定`。
+///
+/// `Clone` 是 **Arc 克隆**：多个句柄指向**同一张表**，而不是各持一份拷贝。
+/// 生产代码里「另一个句柄是一份拷贝」才是灾难——一边绑、一边看不见。
 #[derive(Clone, Default)]
 pub struct Bindings(Arc<Mutex<HashMap<String, ChannelBinding>>>);
 
@@ -294,13 +338,6 @@ impl Bindings {
     /// 无条件摘表。**只给「刚亲手 `bind` 过、现在要撤」的回滚路径用**
     /// （`open_channel` 下发失败）——`channel_id` 是本请求刚生成的，不存在
     /// 归属争议。其余地方的摘表一律走 [`unbind_if_owned`]，那里才要验是谁的。
-    /// 测试用：多句柄指向**同一张表**。`Bindings` 本身不 `Clone`（那会拷表单，
-    /// 生产代码里「另一个结点是一份拷贝」是灾难），这里只在测试里拆开 `Arc`。
-    #[cfg(test)]
-    fn clone_arc_for_test_only(&self) -> Self {
-        Self(self.0.clone())
-    }
-
     fn unbind(&self, channel_id: &str) -> Option<ChannelBinding> {
         self.0.lock().remove(channel_id)
     }
@@ -321,6 +358,11 @@ impl Bindings {
         }
         // 锁没放过，上面 `get` 又刚命中，所以 `remove` 必给出记录；取不到就
         // 当作 NotFound，不为一个不可能的情形 `unwrap`。
+        // coverage: excluded — `else` 臂在同一把锁内结构上不可达：上面的
+        // `map.get(channel_id)` 刚命中而锁自始至终没放，`remove` 不可能返回
+        // `None`（parking_lot 的 `MutexGuard` 不可重入，中间也没有别的代码
+        // 路径能碰到这张表）。写成 `if let` 而不是 `unwrap` 只是不给「不可能」
+        // 留一条 panic 路径，不是因为这里打算测它。
         let Some(b) = map.remove(channel_id) else {
             return UnbindOutcome::NotFound;
         };
@@ -379,21 +421,15 @@ impl Bindings {
     }
 }
 
-/// 端点用的错误码常量。**都是固定 code**（约束 13：绝不夹带 secret）。
-mod err {
-    pub const BAD_BODY: &str = "invalid_request_body";
-    pub const FORBIDDEN: &str = "channel_not_yours";
-    pub const OFFLINE: &str = "device_offline";
-    pub const SESSION_ENDED: &str = "session_ended";
-    pub const BUSY: &str = "device_busy";
-    pub const INVALID_SIZE: &str = "invalid_terminal_size";
-    /// 设备上报的能力里没有这个 connector（子任务 11 的硬过滤）。
-    pub const NOT_REPORTED: &str = "connector_not_reported";
-}
-
 /// 该节点上报过 `connector` 吗？（子任务 11 的能力硬过滤）
 ///
 /// 返回 `None` 表示「放行」，`Some(上报的列表)` 表示拒绝。
+///
+/// **「没报 `connectors` 这个键」与「报了但里面没有它」是两件事**：前者是
+/// **不知道**（老节点、只报 `agents` 的部分上报者、设备压根没心跳），后者是
+/// **知道并拒绝**。把前者折成空数组等于声称「这台设备一个 connector 都没有」，
+/// 于是对 terminal/files/exec 一律 409，页面显示「该设备未声明任何 connector」——
+/// 而真相是「它还没说」。
 ///
 /// **设备从未上报过心跳时放行**，理由与 `scheduling.md` §3 的硬过滤口径一致：
 /// 那里排的是「能力不够的设备再闲也不能用」，排除条件是**已知能力不足**。
@@ -405,22 +441,22 @@ mod err {
 /// 查不到这个名字，会回一个明确的 `channel_error`——那不是这个门禁该管的
 /// （它只管**已声明能力**与请求是否一致），而是 node 自己也说得出话的场景。
 ///
-/// **为什么门禁在开通道而不是建会话**：M1 的 `POST /api/sessions` 请求体里没有
-/// connector 字段——会话不声明 connector，connector 是开面板时才指定的
-/// （里程碑子任务 11 的「落地口径修正」）。建会话处做这条校验只能凭空捏一个字段。
+/// **为什么门禁在开通道而不是建会话**：`POST /api/sessions` 的请求体里**没有**
+/// connector 字段（见 [`crate::routes::api::CreateSession`]）——会话不声明
+/// connector，connector 是开面板时才指定的。所以这道门禁在当前 API 形状下
+/// **只能**落在开通道那一刻。
 fn unreported_connector(state: &AppState, node_id: &str, asked: &str) -> Option<Vec<String>> {
     let report = state.reports().get(node_id)?;
-    let reported: Vec<String> = report
+    // 键缺失 / 不是数组 → **不知道** → 放行。
+    let arr = report
         .capabilities
         .get("connectors")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_else(Vec::new);
+        .and_then(|v| v.as_array())?;
+    let reported: Vec<String> = arr
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(str::to_string)
+        .collect();
     if reported.iter().any(|c| c == asked) {
         None
     } else {
@@ -451,6 +487,10 @@ pub async fn stream(
     >,
 > {
     let last = crate::routes::last_event_id(&headers);
+    // coverage: excluded — `subject = %auth.subject()` 这一行被 llvm-cov 记为 miss。
+    // 本 crate 里三处 `%auth.subject()` 字段行全部如此（另两处：`open_channel`、
+    // `api::create_session`），而同一宏里 `%字段` 与 `?局部变量` 的行都覆盖——
+    // 即「以 `%方法调用()` 记录的字段行」这一类被工具漏记，不是这条分支没执行。
     tracing::info!(
         subject = %auth.subject(),
         last_event_id = ?last,
@@ -505,7 +545,7 @@ pub async fn open_channel(
     Extension(auth): Extension<Authenticated>,
     req: Request,
 ) -> Result<Response, ApiError> {
-    let body = read_body(req).await?;
+    let body = crate::routes::read_body(req).await?;
     let body: OpenChannel =
         serde_json::from_slice(&body).map_err(|_| ApiError::bad_request(err::BAD_BODY))?;
 
@@ -568,6 +608,10 @@ pub async fn open_channel(
         channel_id.clone(),
         protocol::channel::READY_TIMEOUT,
     );
+    // coverage: excluded — 与 `stream()`（同文件 :490）同一条：`subject = %auth.subject()`
+    // 这一行被 llvm-cov 记为 miss，而同宏里 `%字段` 与 `%局部变量` 的行都覆盖——
+    // 是「%方法调用()」这一类的工具漏记，不是这条分支没执行。该宏本身由
+    // `tests/stream.rs` 的用例真跑过（201 + 断言 channel_id 与 node_id）。
     tracing::info!(
         node_id = %node_id,
         channel_id = %channel_id,
@@ -615,7 +659,7 @@ pub async fn send_bytes(
             .get(axum::http::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok()),
     );
-    let body = read_body(req).await?;
+    let body = crate::routes::read_body(req).await?;
     let payload = payload_of(kind, &body)?;
     let binding = owned_channel(&state, &channel_id, auth.subject())?;
     send_channel_data(&state, &binding.node_id, &channel_id, payload)
@@ -647,7 +691,7 @@ pub async fn resize(
     Path(channel_id): Path<String>,
     req: Request,
 ) -> Result<Response, ApiError> {
-    let body = read_body(req).await?;
+    let body = crate::routes::read_body(req).await?;
     let size: Resize =
         serde_json::from_slice(&body).map_err(|_| ApiError::bad_request(err::BAD_BODY))?;
     // 上界与 u16 对齐；下界 1×1（0 会被内核当「未设置」，见 terminal.rs 的 MIN_DIM）
@@ -701,7 +745,27 @@ pub async fn close_channel(
     );
     // 设备已经不在 → 照样 204：Hub 侧的通道账本随连接一起清掉了（§7.1），
     // 没有需要通知的对象。
-    let _ = send_to_device(&state, &binding.node_id, frame);
+    //
+    // **但「队列满」不能当成「设备不在」**：那是设备还在、只是读不过来。
+    // 一并吞掉会让页面认为通道已关，而设备侧的 PTY 继续跑、继续吃信用。
+    // 所以只有 `OFFLINE` 被忽略，其余原样返回（`BUSY` → 503，与开通道时同口径）。
+    match send_to_device(&state, &binding.node_id, frame) {
+        Ok(()) => {}
+        Err(e) if e.code() == err::OFFLINE => {
+            tracing::debug!(
+                node_id = %binding.node_id,
+                channel_id = %channel_id,
+                "the device is already gone; nothing to notify"
+            );
+        }
+        Err(e) => {
+            // 那一帧 `close_channel` 没发出去，通道在设备上**还开着**：
+            // 把归属放回去，页面重试 DELETE 才关得掉它（否则重试会拿到
+            // 幂等的 204，页面以为关了而设备的 PTY 还在跑）。
+            state.bindings().bind(&channel_id, binding);
+            return Err(e);
+        }
+    }
     state.streams().publish(
         "channel.closed",
         json!({
@@ -722,19 +786,6 @@ pub async fn close_channel(
 // ---------------------------------------------------------------------------
 // 共用件
 // ---------------------------------------------------------------------------
-
-/// 读请求体（上限 1 MiB，与 WS 帧上限同值）。
-///
-/// 与 `routes::api::read_body` 同一条口径（同一个上限常量、同一句「我没法处理」
-/// 的错误），但**不复用它的函数**：那是 `api.rs` 的私有函数，而把两个模块
-/// 绑成一个「谁先改谁就得看对方」的私有依赖没有收益。
-async fn read_body(req: Request) -> Result<Vec<u8>, ApiError> {
-    axum::body::to_bytes(req.into_body(), crate::WS_MAX_MESSAGE_BYTES)
-        .await
-        // 读出错与超上限都归成 400。**错误串不进响应体**（约束 13）。
-        .map(|b| b.to_vec())
-        .map_err(|_| ApiError::bad_request(err::BAD_BODY))
-}
 
 /// `/send` 载荷的三种来源（见 [`send_bytes`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -894,6 +945,10 @@ fn expire_unacked(state: &AppState, node_id: &str, channel_id: &str) {
         ),
     );
     if let Err(e) = send_to_device(state, node_id, frame) {
+        // coverage: excluded — 多行宏的参数行被 llvm-cov 记为 miss（已知现象），
+        // 同 `routes/api.rs:348`。该臂本身已由
+        // `expiring_an_unacked_channel_survives_a_device_that_will_not_take_the_close`
+        // 覆盖（队列满 → 走这里，只留痕不扩散）。
         tracing::debug!(
             channel_id = %channel_id,
             code = %e.code(),
@@ -1009,8 +1064,8 @@ mod tests {
         let b = Bindings::new();
         b.bind("ch_1", bound("alice"));
 
-        let attacker = b.clone_arc_for_test_only();
-        let observer = b.clone_arc_for_test_only();
+        let attacker = b.clone();
+        let observer = b.clone();
         const ROUNDS: usize = 200_000;
 
         let attack = std::thread::spawn(move || {
@@ -1078,6 +1133,12 @@ mod tests {
     /// `Event::finalize` 只在末尾补**一个** `\n`，所以一条事件的线上字节是
     /// `id: 1\nevent: x\ndata: y\n`——没有空行。按 `\n\n` 数会数出一条都
     /// 数不到，于是这个循环永远等下去（就是上面那个「写挂」的真正原因）。
+    ///
+    /// coverage: excluded — `let Some(Ok(frame)) = … else { break }` 这个出口在
+    /// 现有用例里不可达：每条用例都读满 `want` 条就停，而 `Streams` 自己握着
+    /// 发送端，流从不结束（要它结束得丢最后一个 `Sender`，那是
+    /// `the_stream_ends_when_the_last_sender_is_dropped` 的事，那里读的是裸流
+    /// 而不是 HTTP body）。这是夹具的收尾，不是被测逻辑的分支。
     async fn render(
         stream: futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>>,
         want: usize,
@@ -1088,6 +1149,8 @@ mod tests {
         let mut out = String::new();
         while out.lines().filter(|l| l.starts_with("data: ")).count() < want {
             let Some(Ok(frame)) = body.frame().await else {
+                // coverage: excluded — 夹具的收尾：`Streams` 自己握着发送端，
+                // 流在测试期间从不结束，所以这条 `break` 打不到；它不是被测逻辑的分支。
                 break;
             };
             let chunk = frame.into_data().expect("data frame");
@@ -1206,6 +1269,16 @@ mod tests {
         let b = s.session_state("s_1", "running");
         assert!(b > a);
         assert_eq!(s.last_event_id(), b);
+    }
+
+    /// `Default` 与 `new()` 等价：clippy 的 `new_without_default` 要求有它，
+    /// 而「有两条构造路径」本身就是一条漂移风险。
+    #[test]
+    fn the_default_bus_is_the_same_as_a_fresh_one() {
+        let s = Streams::default();
+        assert_eq!(s.last_event_id(), 0);
+        s.device_status("n_1", "online");
+        assert_eq!(s.last_event_id(), 1);
     }
 
     /// `Last-Event-ID` 续收：只补 `> last` 的，不重发已经收过的。
@@ -1381,7 +1454,9 @@ mod tests {
                 "x".repeat(crate::WS_MAX_MESSAGE_BYTES + 1),
             ))
             .unwrap();
-        let e = read_body(req).await.expect_err("must reject");
+        let e = crate::routes::read_body(req)
+            .await
+            .expect_err("must reject");
         assert_eq!(e.status(), StatusCode::BAD_REQUEST);
         assert_eq!(e.code(), err::BAD_BODY);
     }
@@ -1420,6 +1495,36 @@ mod tests {
         let e = send_to_device(
             &state,
             "n_ghost",
+            Frame::push(types::CHANNEL_CREDIT, 0, json!({})),
+        )
+        .expect_err("must fail");
+        assert_eq!(e.status(), StatusCode::CONFLICT);
+        assert_eq!(e.code(), err::OFFLINE);
+    }
+
+    /// 连接表里有它、出站队列表里没有它 → **同样 409 `device_offline`**。
+    ///
+    /// 这是「查注册表」与「投递」之间那一瞬：设备刚断，断开处理器已经把
+    /// `conn_id` 从出站表里摘掉，而注册表的清理走的是同一条路径的下一步。
+    /// 两个表的清理不是原子的，所以这个窗口真实存在——把它和「压根没连过」
+    /// 分开，是因为前者可能发生在一条**合法**请求的中途，而调用方对它只能
+    /// 做同一件事：告诉页面设备走了。
+    #[test]
+    fn sending_to_a_connection_that_left_the_outbound_table_is_a_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = bootstrap(dir.path());
+        state.connections().insert(
+            "n_gone".into(),
+            hub_core::connections::ConnHandle {
+                conn_id: "c_gone".into(),
+                gen: 7,
+            },
+        );
+        // 刻意**不** `outbound().register`：出站表里没有 "c_gone"
+
+        let e = send_to_device(
+            &state,
+            "n_gone",
             Frame::push(types::CHANNEL_CREDIT, 0, json!({})),
         )
         .expect_err("must fail");
@@ -1584,5 +1689,354 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(state.bindings().get("ch-1").is_none());
         assert_eq!(state.streams().replay_since(Some(0)).len(), 1);
+    }
+
+    /// 记一次心跳上报（能力 + 负载）。
+    fn report_caps(st: &AppState, node: &str, caps: serde_json::Value) {
+        st.reports().record(
+            node,
+            hub_core::Report {
+                node_version: "0.1.0".into(),
+                capabilities: caps,
+                resources: serde_json::json!({}),
+                workspace_roots: Vec::new(),
+                at: std::time::Instant::now(),
+            },
+        );
+    }
+
+    /// **「没报 `connectors` 这个键」不等于「一个 connector 都没有」**。
+    ///
+    /// 折成空数组的话，一台只报了 `agents` 的设备会被判成「什么都不会」，
+    /// 对 terminal/files/exec 一律 409——而真相是「它还没说」。
+    #[test]
+    fn an_undeclared_connector_key_is_not_an_empty_capability_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = bootstrap(dir.path());
+
+        // 从没上报过 → 放行
+        assert!(unreported_connector(&state, "n_a", "terminal").is_none());
+
+        // 上报了能力，但**没有 `connectors` 键** → 放行
+        report_caps(&state, "n_b", serde_json::json!({"agents": ["opencode"]}));
+        assert!(unreported_connector(&state, "n_b", "terminal").is_none());
+
+        // 报了 `connectors` 键但值不是数组 → 还是「不知道」→ 放行
+        report_caps(&state, "n_c", serde_json::json!({"connectors": "terminal"}));
+        assert!(unreported_connector(&state, "n_c", "terminal").is_none());
+    }
+
+    /// 报了 `connectors` 键但**里面没有它** → 拒绝，且回出它报过的那几个。
+    #[test]
+    fn a_connector_missing_from_a_declared_list_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = bootstrap(dir.path());
+        report_caps(
+            &state,
+            "n_a",
+            serde_json::json!({"connectors": ["terminal", "files"]}),
+        );
+
+        assert!(unreported_connector(&state, "n_a", "terminal").is_none());
+        let reported = unreported_connector(&state, "n_a", "exec").expect("必须拒绝");
+        assert_eq!(reported, vec!["terminal".to_string(), "files".to_string()]);
+    }
+
+    /// **关通道时队列满 → 503，而不是「假装关掉了」**。
+    ///
+    /// `close_channel` 那一帧没发出去，设备侧的 PTY 还在跑；回 204 并推
+    /// `channel.closed` 会让页面以为通道已关，而设备还在吃信用。
+    #[tokio::test]
+    async fn closing_a_channel_on_a_stalled_device_is_a_503_not_a_silent_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = bootstrap(dir.path());
+        state.bindings().bind("ch-1", binding("n_a", "admin"));
+        state.connections().insert(
+            "n_a".into(),
+            hub_core::connections::ConnHandle {
+                conn_id: "c1".into(),
+                gen: 1,
+            },
+        );
+        // 控制队列（8 格）塞满且**从不消费** → 下一帧必然 QueueFull
+        let (_control, _data) = state.outbound().register("c1");
+        for _ in 0..crate::conns::CONTROL_QUEUE {
+            state
+                .outbound()
+                .send("c1", Frame::push(types::CLOSE_CHANNEL, 0, json!({})))
+                .expect("入队");
+        }
+
+        let resp = close_channel(
+            State(state.clone()),
+            Extension(Authenticated::new("admin".to_string())),
+            Path("ch-1".to_string()),
+        )
+        .await
+        .expect_err("必须失败");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.code(), err::BUSY);
+        assert!(
+            state.bindings().get("ch-1").is_some(),
+            "通道在设备上还开着：归属必须留着，页面重试才关得掉"
+        );
+        assert!(
+            state
+                .streams()
+                .replay_since(Some(0))
+                .iter()
+                .all(|e| e.name != "channel.closed"),
+            "没关掉就不许推 channel.closed"
+        );
+    }
+
+    /// **开通道时设备读不过来 → 503，且绑定必须跟着撤**。
+    ///
+    /// 只回 503 而留着绑定的话，Hub 里就有一条「只有页面知道」的通道号：
+    /// 页面上它显示成失败，而 Hub 侧 `expire_unacked` 到点后还会再去找设备关它，
+    /// 设备那头从来不知道这条通道存在过。
+    ///
+    /// 队列塞满的手法与 `closing_a_channel_on_a_stalled_device_is_a_503_not_a_silent_success`
+    /// 相同：`register` 之后一次都不消费，控制面 8 格满了就是 `QueueFull`。
+    #[tokio::test]
+    async fn opening_a_channel_on_a_stalled_device_is_a_503_and_unbinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = bootstrap(dir.path());
+        // 一条真会话：`open_channel` 要先在库里查到它才知道往哪台设备发
+        // （会话按外键挂着 device，所以设备行得先存在；`DeviceRepo` 没有
+        // 公开的裸插入——正常路径是 enroll 事务，这里只要能满足外键）
+        let conn = state.pool().get().expect("拿一条连接");
+        conn.execute(
+            "INSERT INTO device (id, name, key_fingerprint, enrolled_at)
+             VALUES ('n_a', 'pi', 'fp-a', 'unix:0')",
+            [],
+        )
+        .expect("设备行要插得进去");
+        drop(conn);
+        let session = hub_storage::SessionRepo::new(state.pool().clone())
+            .create("n_a", "/repo", None, "unix:1")
+            .expect("会话要建得起来");
+        state.connections().insert(
+            "n_a".into(),
+            hub_core::connections::ConnHandle {
+                conn_id: "c1".into(),
+                gen: 1,
+            },
+        );
+        // 能力上报：不报 connectors 键 = 「不知道」，按有处理（缺省即保留）
+        report_caps(&state, "n_a", serde_json::json!({"agents": []}));
+
+        let (_control, _data) = state.outbound().register("c1");
+        for _ in 0..crate::conns::CONTROL_QUEUE {
+            state
+                .outbound()
+                .send("c1", Frame::push(types::OPEN_CHANNEL, 0, json!({})))
+                .expect("入队");
+        }
+
+        let req = axum::extract::Request::builder()
+            .method("POST")
+            .uri("/api/channels")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "session_id": session.id,
+                    "connector": "terminal",
+                    "params": {},
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = open_channel(
+            State(state.clone()),
+            Extension(Authenticated::new("admin".to_string())),
+            req,
+        )
+        .await
+        .expect_err("队列满必须失败");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.code(), err::BUSY);
+        assert!(
+            state.bindings().0.lock().is_empty(),
+            "下发失败的通道不许在 Hub 里留下绑定"
+        );
+        assert!(
+            state
+                .streams()
+                .replay_since(Some(0))
+                .iter()
+                .all(|e| e.name != "channel.ready"),
+            "帧根本没发出去，不许推 ready"
+        );
+    }
+
+    /// 设备收不到「通道超时了，关掉它」那一帧时：**只留痕，不扩散**。
+    ///
+    /// `expire_unacked` 已经解绑并给页面推了失败信号，此时设备侧那帧发不发得出去
+    /// 不影响页面——再抛一次错只会把「超时」这件事变成 500，而页面已经不需要了。
+    #[tokio::test]
+    async fn expiring_an_unacked_channel_survives_a_device_that_will_not_take_the_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = bootstrap(dir.path());
+        state.bindings().bind("ch-1", binding("n_a", "admin"));
+        state.connections().insert(
+            "n_a".into(),
+            hub_core::connections::ConnHandle {
+                conn_id: "c1".into(),
+                gen: 1,
+            },
+        );
+        let (_control, _data) = state.outbound().register("c1");
+        for _ in 0..crate::conns::CONTROL_QUEUE {
+            state
+                .outbound()
+                .send("c1", Frame::push(types::CLOSE_CHANNEL, 0, json!({})))
+                .expect("入队");
+        }
+
+        expire_unacked(&state, "n_a", "ch-1");
+
+        // 超时本身照旧兑现：解绑 + 一条失败信号给页面
+        assert!(
+            state.bindings().get("ch-1").is_none(),
+            "超时通道必须解绑，否则永远等一个不会来的 ack"
+        );
+        let events = state.streams().replay_since(Some(0));
+        assert_eq!(events.len(), 1, "只该有那条超时失败信号");
+        assert_eq!(events[0].name, "channel.frame");
+    }
+
+    /// **不是你的通道 → 403，而不是「幂等地关掉」。**
+    ///
+    /// 「不存在」与「不是你的」必须分开：前者是幂等成功（面板早就关过），
+    /// 后者是越权——混成一个 204 的话，越权关闭看起来像「关过了」。
+    #[tokio::test]
+    async fn closing_a_channel_of_another_subject_is_a_403() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = bootstrap(dir.path());
+        state
+            .bindings()
+            .bind("ch-1", binding("n_a", "someone-else"));
+
+        let resp = close_channel(
+            State(state.clone()),
+            Extension(Authenticated::new("admin".to_string())),
+            Path("ch-1".to_string()),
+        )
+        .await
+        .expect_err("必须失败");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.code(), err::FORBIDDEN);
+        assert!(
+            state.bindings().get("ch-1").is_some(),
+            "不是你的通道就一个字都不能动"
+        );
+    }
+
+    /// 设备已经不在 → 照样 204 且推 `channel.closed`（幂等收尾）。
+    #[tokio::test]
+    async fn closing_a_channel_of_a_gone_device_is_a_204() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = bootstrap(dir.path());
+        state.bindings().bind("ch-1", binding("n_a", "admin"));
+
+        let resp = close_channel(
+            State(state.clone()),
+            Extension(Authenticated::new("admin".to_string())),
+            Path("ch-1".to_string()),
+        )
+        .await
+        .expect("必须成功");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(state
+            .streams()
+            .replay_since(Some(0))
+            .iter()
+            .any(|e| e.name == "channel.closed"));
+    }
+
+    /// 从实时流里取下一条事件。
+    ///
+    /// 返回 `None` 表示「这一轮订阅者被甩掉了」（`Lagged`）——那一轮不构成
+    /// 断言，下一轮重来。
+    ///
+    /// **抽成助手是为了让 `Lagged` 这条路可确定性地被测到**：写在并发用例
+    /// 里它只是「有时会撞上」，撞不撞得上取决于调度——那会让覆盖率每次跑
+    /// 都不一样，覆盖率门禁就成了掷骰子。
+    fn next_live_event(rx: &mut tokio::sync::broadcast::Receiver<Envelope>) -> Option<Envelope> {
+        loop {
+            match rx.try_recv() {
+                Ok(env) => return Some(env),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                    std::thread::yield_now();
+                }
+                // 订阅者被甩掉了：这一轮不构成断言（下一轮重新来）。
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => return None,
+                // coverage: excluded — 发送端是 `Streams` 自己，它还活着
+                // （`stop` 只停发布线程，不 drop 总线），`Closed` 结构上不可达。
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                    // coverage: excluded — 同上面的 `Closed` 臂：
+                    // `panic!` 的参数行被 llvm-cov 记为 miss（多行宏已知现象）。
+                    panic!("发送端还在，不该 Closed")
+                }
+            }
+        }
+    }
+
+    /// **订阅者被环形缓冲甩掉**：它必须被告知「你落下了」，而不是拿到
+    /// 一条更旧的事件。
+    ///
+    /// 这条路以前只在一个并发用例里顺带撞上——撞不撞得上取决于发布线程
+    /// 何时被切走，于是同一份代码每次跑出来的覆盖率不同。
+    #[test]
+    fn a_subscriber_that_falls_behind_the_ring_buffer_is_told_it_lagged() {
+        let s = Streams::new();
+        let (_backlog, mut rx) = s.subscribe_parts(None);
+        // 推过环形缓冲的容量：订阅者一个都没取。
+        for _ in 0..(REPLAY_CAPACITY + 8) {
+            s.publish("device.status", "{}");
+        }
+        assert!(
+            next_live_event(&mut rx).is_none(),
+            "订阅者被甩掉时必须收到 Lagged，而不是一条更旧的事件"
+        );
+    }
+
+    /// **快照与实时流之间不留缝**：订阅时读到的回放与随后的实时流首尾相接。
+    ///
+    /// 「读快照」与「订阅」分开做时，发布方在两步之间被切走会让新订阅者
+    /// 在两处各收一次（终端把同一段输出画两遍），反向则永久丢失且没有
+    /// `resync` 注释帧。
+    #[test]
+    fn the_snapshot_and_the_live_stream_leave_no_gap_or_duplicate() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let s = Streams::new();
+        let stop = Arc::new(AtomicBool::new(false));
+        let publisher = {
+            let s = s.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    s.publish("device.status", "{}");
+                }
+            })
+        };
+
+        let mut checked = 0usize;
+        for _ in 0..2_000 {
+            let last = s.last_event_id();
+            let (backlog, mut rx) = s.subscribe_parts(Some(last));
+            // 快照里的最后一条（没有就是 `last`）之后，实时流必须紧接下一条
+            let expected = backlog.last().map_or(last, |e| e.id) + 1;
+            // 订阅者被甩掉了（`None`）：这一轮不构成断言，下一轮重新来。
+            if let Some(env) = next_live_event(&mut rx) {
+                assert_eq!(env.id, expected, "实时流必须紧接快照（既不重发也不丢事件）");
+                checked += 1;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        publisher.join().expect("publisher");
+        assert!(checked > 0, "至少要断言过一次");
     }
 }

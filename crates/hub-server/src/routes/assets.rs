@@ -8,6 +8,9 @@
 //! 里最常漏的就是这一步。`build.rs` 把目录树位置写进 `AF_WEB_DIST`（产物缺失
 //! 时指向占位页），本模块用 `include_dir!` 把它编进来。
 //!
+//! 里程碑的静态资产小节仍写着 `tower-http` 的 `ServeDir`——**那段规格文本
+//! 尚未与实现同步**，按实现为准。
+//!
 //! ## 为什么仍然 `use tower_http`
 //!
 //! `tower-http` 原本是「引了不用」的死依赖（`docs/BUGS.md`）。它的
@@ -92,6 +95,8 @@ fn serve_index() -> Response {
         // 构造上不可达：`build.rs` 在 dist 缺失时写的就是 index.html。
         // 真走到这里（有人手工改 AF_WEB_DIST）也不该 panic——那是一台
         // 活着但页面打不开的 Hub，比进程退出好排查。
+        //
+        // coverage: excluded — 上面三行已说明：这条分支结构上不可达。
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             "web console is not built",
@@ -167,26 +172,39 @@ mod tests {
         );
     }
 
-    /// `/assets/*` 真的能从嵌入目录里取到**带内容哈希**的构建产物，
-    /// 且带上长期缓存头。
+    /// `/assets/*` 真的能从嵌入目录里取到构建产物，且带上长期缓存头。
     ///
     /// 不手写文件名：哈希随每次 `vite build` 变，写死会让「跑过一次前端构建」
     /// 变成测试的隐含前提——而 CI 里 Rust job 未必有 dist。
     #[tokio::test]
     async fn a_hashed_asset_is_served_with_long_lived_cache_headers() {
-        let dir = WEB_DIST
+        // 干净检出里 `packages/web/dist` 被 .gitignore 忽略，`build.rs` 只写一个
+        // 占位 `index.html`——那时没有 `assets/` 可取。所以这里钉两条：
+        // **一定有**的那条（index.html）与**构建产物在时**的那条（带哈希的
+        // 文件名）。断言是同一条：「嵌进去的文件能被取到、并带长缓存头」。
+        let index = WEB_DIST
+            .get_file("index.html")
+            .expect("build.rs always writes one");
+        assert_served_with_long_cache("index.html", index.contents()).await;
+
+        if let Some(file) = WEB_DIST
             .get_dir("assets")
-            .expect("the built dist must contain assets/");
-        let Some(file) = dir.files().next() else {
-            return; // 占位页没有 assets/ 内容：构造不出一条「读得到」的断言
-        };
-        let name = file
-            .path()
-            .file_name()
-            .and_then(|n| n.to_str())
-            .expect("asset file name");
-        let resp = asset(Path(format!("assets/{name}"))).await;
-        assert_eq!(resp.status(), StatusCode::OK);
+            .and_then(|dir| dir.files().next())
+        {
+            let name = file
+                .path()
+                .file_name()
+                .and_then(|n| n.to_str())
+                .expect("asset file name");
+            assert_served_with_long_cache(&format!("assets/{name}"), file.contents()).await;
+        }
+    }
+
+    /// 「嵌进去的文件能被取到、带长缓存头、字节原样」——这个 handler 的全部
+    /// 契约，三条断言合成一处，免得两个用例各写一遍。
+    async fn assert_served_with_long_cache(path: &str, contents: &[u8]) {
+        let resp = asset(Path(path.to_string())).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{path} 必须取得到");
         assert_eq!(
             resp.headers()
                 .get(header::CACHE_CONTROL)
@@ -197,7 +215,7 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .expect("body");
-        assert_eq!(body.as_ref(), file.contents(), "字节必须原样");
+        assert_eq!(body.as_ref(), contents, "字节必须原样");
     }
 
     /// 缺失的资产 → 404，**不回落到 index.html**。

@@ -5,9 +5,9 @@
 //! 派发、`channel::pump()` 主动问、信用放行。这段是 M1 第一个演示能否跑起来的
 //! 全部依赖，而它在单元测试里是看不见的。
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use node_core::channel;
+use node_core::channel::{self, Action};
 use node_core::connector::names;
 use protocol::channel::{ChannelCredit, ChannelData, OpenChannel};
 use protocol::frame::Frame;
@@ -62,6 +62,17 @@ fn credit_frame(channel_id: &str, delta: u32) -> Frame {
     )
 }
 
+/// `Action` 里的帧。
+///
+/// **不提供 `.frames()` 便捷方法**：它会把「没有应答」（`Action::None`）
+/// 与「连接该结束了」（`Action::End`）都变成一个空切片。
+fn frames_of(action: &Action) -> &[Frame] {
+    match action {
+        Action::Send(frames) => frames,
+        other => panic!("expected frames, got {other:?}"),
+    }
+}
+
 /// 一轮 `pump`：把所有通道产出的字节拼成一段文本。
 fn pump_once() -> String {
     let mut text = String::new();
@@ -109,7 +120,10 @@ fn a_typed_command_comes_back_as_channel_data_with_no_further_downlink() {
     let _guard = exclusive();
     channel::reset_for_tests();
     let action = channel::on_channel_frame(&open_frame("ch-e2e", names::TERMINAL, 16));
-    assert!(!action.frames().is_empty(), "开通道至少要回 channel_ready");
+    assert!(
+        !frames_of(&action).is_empty(),
+        "开通道至少要回 channel_ready"
+    );
 
     channel::on_channel_frame(&data_frame(
         "ch-e2e",
@@ -125,6 +139,13 @@ fn a_typed_command_comes_back_as_channel_data_with_no_further_downlink() {
     );
 }
 
+/// shell 退出后**通道自己被释放**，并回一帧 `close_channel`。
+///
+/// 判据是「活通道数降下来」+「有一帧 `close_channel`」两件事都发生：
+/// PTY 退出后资源留着就是一台设备上没人读、也拿不到信用的僵尸通道，
+/// 而页面若收不到 `close_channel`，就不知道这条通道已经结束。
+///
+/// **不是「输出停了」**：那只能证明 shell 不再产出，证明不了资源被释放。
 #[test]
 fn the_channel_is_released_once_the_shell_exits() {
     let _guard = exclusive();
@@ -137,31 +158,23 @@ fn the_channel_is_released_once_the_shell_exits() {
         serde_json::json!({ "bytes": "exit\n" }),
     ));
 
-    // shell 退出之后终端不再产出，通道最终由断连/close 释放。
-    // **判据是「输出停了」而不是「活通道数降了」**：后者要等到 Hub 发
-    // `close_channel` 或连接断开才发生，而本测试里没有那一步——拿它当判据
-    // 就只能写成「等到超时也算过」的恒真断言。
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    let mut quiet_from: Option<std::time::Instant> = None;
+    let mut saw_close = false;
     while std::time::Instant::now() < deadline {
-        let chunk = pump_once();
-        let now = std::time::Instant::now();
-        match (chunk.is_empty(), &quiet_from) {
-            (false, _) => quiet_from = None,
-            (true, None) => quiet_from = Some(now),
-            // 连着 1s 什么都没产出来 —— shell 确实退了。
-            (true, Some(from)) if now.duration_since(*from) > std::time::Duration::from_secs(3) => {
-                assert!(
-                    pump_once().is_empty(),
-                    "shell 退出之后还在持续产出，它没真的退出"
-                );
-                return;
+        for (_, frames) in channel::pump() {
+            if frames.iter().any(|f| f.msg_type == types::CLOSE_CHANNEL) {
+                saw_close = true;
             }
-            (true, Some(_)) => {}
+        }
+        if saw_close && channel::live_count() == 0 {
+            return;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    panic!("shell 在 20s 内没有退出");
+    panic!(
+        "shell 退出后通道没有被释放（close={saw_close} live={}）",
+        channel::live_count()
+    );
 }
 
 /// 输出超过信用额度时**不丢字节**：信用归零后剩下的进 backlog，

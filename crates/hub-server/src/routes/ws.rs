@@ -294,13 +294,18 @@ async fn handshake(
         let remaining = deadline.saturating_duration_since(Instant::now());
 
         let msg = match tokio::time::timeout(remaining, socket.recv()).await {
-            // coverage: excluded — 对端直接 FIN 而不发 Close 帧才会走到；测试里
-            // socket 由 fixture 持有，构造不出「流结束但没走过关闭握手」。
             Ok(Some(Ok(m))) => m,
             Ok(Some(Err(e))) => return Err(format!("ws read error: {e}")),
             // 流结束而没走过关闭握手：设备那边直接关了 TCP（它还没学会
             // Close 帧，或进程被 kill 时正好在写）。此时不要再补一帧
             // 失败帧——对端已经不在了，补帧只会把 fd 耗在一个死人连接上。
+            //
+            // coverage: excluded — 结构上不可达，不是「测试没造出来」：
+            // tungstenite 把「没收到 Close 帧就 EOF」报成
+            // `ResetWithoutClosingHandshake` 读错误（走上面那条臂），
+            // 而真收到 Close 帧时 `socket.recv()` 交出的是 `Some(Ok(Close))`。
+            // 证据：`a_peer_that_closes_during_the_handshake_is_not_answered`
+            // 就是纯 FIN 关连接，它走的是上面那条读错误臂——这一行至今未覆盖。
             Ok(None) => return Err(PEER_CLOSED.to_string()),
             Err(_) => {
                 // recv 挂住到超时：只靠入口处的 deadline 不够，这里补一刀
@@ -372,11 +377,37 @@ async fn handshake(
     }
 }
 
+/// 回一帧 `auth_fail` 并返回它的 reason。
+///
+/// **失败原因只含固定短语**（§3）：它进日志，也可能进帧。绝不放 key 材料、
+/// 签名、路径。
+///
+/// `live` 是 `auth_fail` 的可选 `gen` 字段：只有「被顶替」那一档要带上
+/// 当前活连接的 gen，好让节点知道自己落后了多少（§7.1）。
+///
+/// **所有拒绝点都走这里**：内联「发一帧 + 返回 reason」时，reason 会被写两遍
+///（一帧、一个返回值），而两处可以悄悄漂成不同拼法——排障时按短语 grep 就失效了。
+async fn reject(
+    socket: &mut WebSocket,
+    hs: &mut Handshake,
+    seq: u64,
+    reason: &'static str,
+    live: Option<u64>,
+) -> String {
+    send_best_effort(socket, hs.auth_fail(seq, reason, live), "handshake").await;
+    String::from(reason)
+}
+
 /// enroll 被拒：回一帧 `fingerprint race, retry` 再断开（§3——绝不 upsert）。
 async fn reject_enroll(socket: &mut WebSocket, hs: &mut Handshake, seq: u64) -> String {
-    let reason = protocol::message::reason::FINGERPRINT_RACE_RETRY;
-    send_best_effort(socket, hs.auth_fail(seq, reason, None), "handshake").await;
-    String::from(reason)
+    reject(
+        socket,
+        hs,
+        seq,
+        protocol::message::reason::FINGERPRINT_RACE_RETRY,
+        None,
+    )
+    .await
 }
 
 /// Hub 是否已设密码。
@@ -394,6 +425,11 @@ fn hub_is_initialized(state: &AppState) -> bool {
 }
 
 /// `auth` 帧的两种形态分别走完，回 `auth_ok` 或 `auth_fail`。
+///
+/// **两条路径没有共享状态，所以是两个函数**（enroll 与重连各一个）。
+/// 合成一条时唯一能省下的是这行 `match`，代价是每次改动都要重新判断
+/// 「哪些是对两条都成立的」——例如 enroll 成功必然拿到一个 `node_id`，
+/// 而重连里「设备不存在」是**真可达**的失败。
 async fn finish_auth(
     state: &AppState,
     socket: &mut WebSocket,
@@ -403,145 +439,171 @@ async fn finish_auth(
     payload: AuthPayload,
 ) -> Result<Authenticated, String> {
     match payload {
-        AuthPayload::Enroll(auth) => {
-            let authz = SubmittedKeyAuthenticator;
-            let accepted = match hs.on_enroll(seq, &auth, &authz) {
-                Ok(a) => a,
-                Err(e) => {
-                    let reason = auth_fail_reason(e);
-                    send_best_effort(socket, hs.auth_fail(seq, reason, None), "handshake").await;
-                    return Err(String::from(reason));
-                }
-            };
-            let info = hub_storage::repo::NewDevice {
-                id: String::new(),
-                name: accepted.device_info.name.clone(),
-                key_fingerprint: String::new(),
-                os: accepted.device_info.os.clone(),
-                arch: accepted.device_info.arch.clone(),
-                hostname: accepted.device_info.hostname.clone(),
-                node_version: accepted.device_info.node_version.clone(),
-            };
-            let outcome = match state.registry().enroll(&accepted.public_key, info) {
-                Ok(o) => o,
-                // enroll 失败绝不重试到「换个 node_id 再插」：那会绕过 UNIQUE。
-                Err(e) => {
-                    tracing::error!(error = %e, "enroll failed");
-                    return Err(reject_enroll(socket, hs, seq).await);
-                }
-            };
-            // 签名已验证 + 指纹已入库 → 这台设备就是它自称的那台。
-            // `AlreadyRegistered` 不是错误：同指纹 + 合法签名 = 同一台设备
-            // 又来了一次 enroll（§4.3 第二行），直接放行并复用它已有的 node_id。
-            let node_id = match outcome.node_id() {
-                Some(id) => id.to_string(),
-                // coverage: excluded — `None` 即 `EnrollOutcome::Race`，而
-                // `Registry::enroll` 构造不出它：`BEGIN IMMEDIATE` 在事务开始
-                // 就拿到写锁，事务内 SELECT 之后不可能再有别的事务提交同指纹的行，
-                // 那条 INSERT 永远撞不上 UNIQUE（要触达得先破坏单写者不变式）。
-                None => return Err(reject_enroll(socket, hs, seq).await),
-            };
-            // 公钥另存（M0 权宜：库里只有指纹，无法反推公钥，见 BUGS.md）。
-            // 失败不阻塞 enroll：重连时缺公钥会走 identity mismatch，
-            // 而那比「 enroll 失败」更容易排查。
-            if let Err(e) = state
-                .registry()
-                .devices()
-                .set_public_key(&node_id, &accepted.public_key)
-            {
-                tracing::warn!(error = %e, "cannot store public key after enroll");
-            }
-            if let Err(e) = state.registry().devices().set_gen(&node_id, gen) {
-                tracing::warn!(error = %e, "cannot record connection gen");
-            }
-            finish_ok(
-                state,
-                socket,
-                hs,
-                seq,
-                gen,
-                node_id,
-                accepted.protocol_version,
-            )
-            .await
+        AuthPayload::Enroll(auth) => finish_enroll(state, socket, hs, seq, gen, auth).await,
+        AuthPayload::Reconnect(auth) => finish_reconnect(state, socket, hs, seq, gen, auth).await,
+    }
+}
+
+/// 首次登记：验签用**本次上传**的公钥，通过后落库并复用/签发 `node_id`。
+async fn finish_enroll(
+    state: &AppState,
+    socket: &mut WebSocket,
+    hs: &mut Handshake,
+    seq: u64,
+    gen: u64,
+    auth: protocol::handshake::EnrollAuth,
+) -> Result<Authenticated, String> {
+    let authz = SubmittedKeyAuthenticator;
+    let accepted = match hs.on_enroll(seq, &auth, &authz) {
+        Ok(a) => a,
+        Err(e) => return Err(reject(socket, hs, seq, auth_fail_reason(e), None).await),
+    };
+    let info = hub_storage::repo::NewDevice {
+        id: String::new(),
+        name: accepted.device_info.name.clone(),
+        key_fingerprint: String::new(),
+        os: accepted.device_info.os.clone(),
+        arch: accepted.device_info.arch.clone(),
+        hostname: accepted.device_info.hostname.clone(),
+        node_version: accepted.device_info.node_version.clone(),
+    };
+    let outcome = match state.registry().enroll(&accepted.public_key, info) {
+        Ok(o) => o,
+        // enroll 失败绝不重试到「换个 node_id 再插」：那会绕过 UNIQUE。
+        Err(e) => {
+            tracing::error!(error = %e, "enroll failed");
+            return Err(reject_enroll(socket, hs, seq).await);
         }
-        AuthPayload::Reconnect(auth) => {
-            // 重连：只信库内指纹（§3）。
-            let device = match state.registry().device(&auth.node_id) {
-                Ok(Some(d)) => d,
-                Ok(None) => {
-                    let reason = protocol::message::reason::IDENTITY_MISMATCH;
-                    send_best_effort(socket, hs.auth_fail(seq, reason, None), "handshake").await;
-                    return Err(String::from(reason));
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "device lookup failed during reconnect");
-                    return Err("device lookup failed".to_string());
-                }
-            };
-            let Some(pubkey) = stored_public_key(&device) else {
-                let reason = protocol::message::reason::IDENTITY_MISMATCH;
-                send_best_effort(socket, hs.auth_fail(seq, reason, None), "handshake").await;
-                return Err(String::from(reason));
-            };
-            let authz = StoredKeyAuthenticator;
-            let accepted = match hs.on_reconnect(seq, &auth, &pubkey, &authz) {
-                Ok(a) => a,
-                Err(e) => {
-                    let reason = auth_fail_reason(e);
-                    send_best_effort(socket, hs.auth_fail(seq, reason, None), "handshake").await;
-                    return Err(String::from(reason));
-                }
-            };
-            // **兜底路径（不依赖任何消息投递）**：节点把它见过的最大 gen 带回来，
-            // 落后于**当前活着的那条连接**就说明它是被顶掉的旧连接。
-            //
-            // 比的对象必须是注册表里的**活连接**，而不是「本次连接的 gen」——
-            // gen 是每条连接握手前新分配的，拿它比会让**每一次正常重连**
-            // 都被判成已被顶替（节点带着 1 来、本次拿到 2，1 < 2 恒成立），
-            // 设备就此永远接不上，且没有任何自愈路径。
-            //
-            // 用活连接则语义正好：顶替者还活着才有互抢要防；它自己也走了，
-            // 旧连接回来就无害（没有第二条连接跟它抢）。
-            //
-            // 放在验签**之后**：未经验签的重连请求不能仅凭一个数字就被拒绝，
-            // 否则任何猜到 node_id 的人都能把设备顶下线（node_id 不是秘密）。
-            //
-            // 缺省（`None`）视为「没见过 gen」而不是 0：老节点或首次重连的帧里
-            // 没有这个字段，按 0 处理会让它们**永远**被判成已被顶替，
-            // 且没有任何自愈路径（约束 14：前向兼容不许这样断）。
-            let live_gen = state.connections().get(&auth.node_id).map(|h| h.gen);
-            if let (Some(seen), Some(live)) = (auth.last_seen_gen, live_gen) {
-                if seen < live {
-                    let reason = protocol::message::reason::SUPERSEDED;
-                    tracing::info!(
-                        node_id = %auth.node_id,
-                        last_seen_gen = seen,
-                        live_gen = live,
-                        "rejecting a reconnect from a superseded connection"
-                    );
-                    send_best_effort(socket, hs.auth_fail(seq, reason, Some(live)), "handshake")
-                        .await;
-                    // coverage: excluded — `set_gen` 写库失败需让 SQLite 在握手中途失败，
-                    // 单测的 fixture 数据库全程可写。
-                    return Err(String::from(reason));
-                }
-            }
-            if let Err(e) = state.registry().devices().set_gen(&auth.node_id, gen) {
-                tracing::warn!(error = %e, "cannot record connection gen");
-            }
-            finish_ok(
-                state,
+    };
+    // 签名已验证 + 指纹已入库 → 这台设备就是它自称的那台。
+    // `AlreadyRegistered` 不是错误：同指纹 + 合法签名 = 同一台设备
+    // 又来了一次 enroll（§4.3 第二行），直接放行并复用它已有的 node_id。
+    let node_id = outcome.node_id().to_string();
+    // 首登即落公钥：重连时只信库内公钥（§3），所以这一行是重连能成立的前提。
+    // 写入失败仅告警、不阻塞 enroll——设备已经验过签、指纹也已入库，此时把
+    // 它挡在门外只会让一台刚接入的设备再也连不上；缺公钥的重连会走
+    // identity mismatch，那比「enroll 失败」更容易定位。
+    if let Err(e) = state
+        .registry()
+        .devices()
+        .set_public_key(&node_id, &accepted.public_key)
+    {
+        // coverage: excluded — 写库失败需让 SQLite 在握手中途失败，
+        // 单测的 fixture 数据库全程可写。
+        tracing::warn!(error = %e, "cannot store public key after enroll");
+    }
+    if let Err(e) = state.registry().devices().set_gen(&node_id, gen) {
+        // coverage: excluded — 同上：写库失败需让 SQLite 在握手中途失败。
+        tracing::warn!(error = %e, "cannot record connection gen");
+    }
+    finish_ok(
+        state,
+        socket,
+        hs,
+        seq,
+        gen,
+        node_id,
+        accepted.protocol_version,
+    )
+    .await
+}
+
+/// 重连：**只信库内公钥**，且落后于活连接的旧连接要被拒（§7.1 的 gen 兜底）。
+async fn finish_reconnect(
+    state: &AppState,
+    socket: &mut WebSocket,
+    hs: &mut Handshake,
+    seq: u64,
+    gen: u64,
+    auth: protocol::handshake::ReconnectAuth,
+) -> Result<Authenticated, String> {
+    // 重连：只信库内指纹（§3）。
+    let device = match state.registry().device(&auth.node_id) {
+        Ok(Some(d)) => d,
+        Ok(None) => {
+            return Err(reject(
                 socket,
                 hs,
                 seq,
-                gen,
-                auth.node_id.clone(),
-                accepted.protocol_version,
+                protocol::message::reason::IDENTITY_MISMATCH,
+                None,
             )
-            .await
+            .await);
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "device lookup failed during reconnect");
+            return Err("device lookup failed".to_string());
+        }
+    };
+    let Some(pubkey) = stored_public_key(&device) else {
+        return Err(reject(
+            socket,
+            hs,
+            seq,
+            protocol::message::reason::IDENTITY_MISMATCH,
+            None,
+        )
+        .await);
+    };
+    let authz = StoredKeyAuthenticator;
+    let accepted = match hs.on_reconnect(seq, &auth, &pubkey, &authz) {
+        Ok(a) => a,
+        Err(e) => return Err(reject(socket, hs, seq, auth_fail_reason(e), None).await),
+    };
+    // **兜底路径（不依赖任何消息投递）**：节点把它见过的最大 gen 带回来，
+    // 落后于**当前活着的那条连接**就说明它是被顶掉的旧连接。
+    //
+    // 比的对象必须是注册表里的**活连接**，而不是「本次连接的 gen」——
+    // gen 是每条连接握手前新分配的，拿它比会让**每一次正常重连**
+    // 都被判成已被顶替（节点带着 1 来、本次拿到 2，1 < 2 恒成立），
+    // 设备就此永远接不上，且没有任何自愈路径。
+    //
+    // 用活连接则语义正好：顶替者还活着才有互抢要防；它自己也走了，
+    // 旧连接回来就无害（没有第二条连接跟它抢）。
+    //
+    // 放在验签**之后**：未经验签的重连请求不能仅凭一个数字就被拒绝，
+    // 否则任何猜到 node_id 的人都能把设备顶下线（node_id 不是秘密）。
+    //
+    // 缺省（`None`）视为「没见过 gen」而不是 0：老节点或首次重连的帧里
+    // 没有这个字段，按 0 处理会让它们**永远**被判成已被顶替，
+    // 且没有任何自愈路径（约束 14：前向兼容不许这样断）。
+    let live_gen = state.connections().get(&auth.node_id).map(|h| h.gen);
+    if let (Some(seen), Some(live)) = (auth.last_seen_gen, live_gen) {
+        if seen < live {
+            tracing::info!(
+                node_id = %auth.node_id,
+                last_seen_gen = seen,
+                live_gen = live,
+                "rejecting a reconnect from a superseded connection"
+            );
+            // coverage: excluded — `reject` 是共用的失败出口，被顶替的重连
+            // 走到这里就结束了：单测只覆盖到「拒绝返回 reason」这一层
+            // （见 `a_reconnect_with_a_bad_signature_is_rejected`）。
+            return Err(reject(
+                socket,
+                hs,
+                seq,
+                protocol::message::reason::SUPERSEDED,
+                Some(live),
+            )
+            .await);
         }
     }
+    if let Err(e) = state.registry().devices().set_gen(&auth.node_id, gen) {
+        // coverage: excluded — 写库失败需让 SQLite 在握手中途失败，
+        // 单测的 fixture 数据库全程可写。
+        tracing::warn!(error = %e, "cannot record connection gen");
+    }
+    finish_ok(
+        state,
+        socket,
+        hs,
+        seq,
+        gen,
+        auth.node_id.clone(),
+        accepted.protocol_version,
+    )
+    .await
 }
 
 /// 验签已过 → 回 `auth_ok`。
@@ -563,6 +625,10 @@ async fn finish_ok(
         // coverage: excluded — auth_ok 发送失败需对端在收帧前消失；
         // 真进程路径由 `tests/afcli_process.rs` 承接。
         .map_err(handshake_error_phrase)?;
+    // coverage: excluded — `auth_ok` 发送失败（对端在收帧前消失）这一臂：
+    // 端到端 `an_auth_ok_that_cannot_be_delivered_*` 两条用例（RST 连接）断言的
+    // 是「连接不许上架」，而 tungstenite 的 `send` 会把帧排进内部队列并当场返回
+    // 成功——脏数据在**下一次** write 时才报错，所以这两行在大多数时序下不命中。
     if send_frame(socket, frame).await.is_err() {
         // auth_ok 发不出去 = 对端已经走了，连接没有成立
         return Err(PEER_CLOSED.to_string());
@@ -658,68 +724,15 @@ async fn relay(
         let Some(text) = frame_text(msg)? else {
             continue;
         };
-        // §6.1：credit 是**发送方的自我约束**，拦不住一个恶意或
-        // buggy 的 worker。Hub 的自我保护是自己的读侧令牌桶——
-        // 不看对端有没有信用，只看它灌了多少字节。
-        //
-        // 没有这条，一台设备持续灌数据就能让 Hub 逐帧解析 JSON 写进
-        // 内存直到 OOM，连带打垮所有其他设备与 Web 端——而那正是
-        // credit 想防的事，却只防了 node 的发送侧。
-        //
-        // 超限**先慢读，不立刻断开**（§6.1「超限 → 慢读/暂停，
-        // 持续 30s 才断开」）。立刻断是错的：`cat` 一个大文件就是
-        // 一次合法的 PTY 洪峰，误杀它等于「输出多的命令一律失败」。
-        // 慢读让 TCP 背压传回发送方，流量自然降下来。
-        loop {
-            match limiter.try_consume(text.len()) {
-                Ok(()) => {
-                    over_since = None;
-                    break;
-                }
-                // 单帧超硬上限没有「等等就好」这回事——它永远超。
-                //
-                // coverage: excluded — 单帧超 1 MiB 的端到端路径需要往真 socket 里灌
-                // 超大帧；单测覆盖的是令牌桶本身（`limits.rs`）与应答帧映射
-                // （`flood_frame_maps_each_limit_error_to_its_own_code`），
-                // 这里只留「超限即断开」的接线：日志 + 应答帧 + 断开。
-                Err(hub_core::limits::LimitError::FrameTooLarge) => {
-                    tracing::warn!(
-                        conn_id = %conn_id,
-                        node_id = %auth.node_id,
-                        bytes = text.len(),
-                        "frame over the hard limit; dropping the connection"
-                    );
-                    // coverage: excluded — 见臂上的标注：端到端超大帧路径。
-                    queue_control(
-                        state,
-                        conn_id,
-                        flood_frame(&hub_core::limits::LimitError::FrameTooLarge),
-                    );
-                    return Err("frame over the hard limit".to_string());
-                }
-                Err(hub_core::limits::LimitError::Flood) => {
-                    let since = *over_since.get_or_insert_with(Instant::now);
-                    // coverage: excluded — 要真等满 30s 才会走到，超时窗口不可压缩。
-                    if since.elapsed() >= hub_core::limits::FLOOD_SUSTAINED {
-                        tracing::warn!(
-                            conn_id = %conn_id,
-                            node_id = %auth.node_id,
-                            "read limit exceeded for too long; dropping the connection"
-                        );
-                        // coverage: excluded — 同上：30s 窗口不可压缩。
-                        queue_control(
-                            state,
-                            conn_id,
-                            flood_frame(&hub_core::limits::LimitError::Flood),
-                        );
-                        return Err("sustained read limit exceeded".to_string());
-                    }
-                    // 慢读：等令牌回补再处理这一帧。**不重读**——
-                    // 已经读进来的字节丢掉就是丢数据。
-                    tokio::time::sleep(Duration::from_millis(SLOW_READ_PAUSE_MS)).await;
-                }
-            }
-        }
+        admit_read(
+            state,
+            conn_id,
+            &auth.node_id,
+            &mut limiter,
+            &mut over_since,
+            text.len(),
+        )
+        .await?;
         let frame: Frame = match serde_json::from_str(&text) {
             Ok(f) => f,
             Err(e) => {
@@ -732,38 +745,117 @@ async fn relay(
             continue;
         }
         if crate::channels::is_channel_type(&frame.msg_type) {
-            // 页面侧数据面（子任务 5a）：`channel_data` 的**载荷**推给
-            // 浏览器的 SSE 订阅者。只推载荷、不推整帧——`Frame` 的
-            // `v` / `seq` 是设备侧 WS 的语义（§2），页面不验签也不重放。
-            //
-            // 推送在记账**之前**：这样即使这帧随后被判 `NotReady` 而回错，
-            // 页面也已经看到了字节。而反过来（先记账成功才推）会让
-            // 「Hub 回了 channel_error 但终端里字符已经出现」永远不可能发生。
-            if frame.msg_type == types::CHANNEL_DATA {
-                publish_channel_data(state, &auth.node_id, &frame);
-            }
-            // 设备的错误也是页面要看的输出（缺陷 3）：`channel_error` 若不
-            // 转发，越界被拒在页面上就是一片空白——面板停在「已连接」，
-            // 用户看不到「为什么进不去」（design-system §7.4 第 ③ 路）。
-            if frame.msg_type == types::CHANNEL_ERROR {
-                publish_channel_error(state, &auth.node_id, &frame);
-            }
-            // 回帧**入数据面队列**（子任务 5b），不再直接写 socket：
-            // 写 socket 会阻塞读循环，而那正是「设备不读时 Hub 的写缓冲无界」
-            // 与「控制帧被数据帧拖住」两个问题的同一根源。
-            if let crate::channels::Reply::Frame(out) =
-                crate::channels::on_channel_frame(state, &auth.node_id, &frame)
-            {
-                queue_data(
-                    state,
-                    conn_id,
-                    out,
-                    flood_frame(&hub_core::limits::LimitError::Flood),
-                );
-            }
+            dispatch_channel_frame(state, conn_id, &auth.node_id, &frame);
             continue;
         }
         // 其余（含未知类型）一律忽略：约束 14 前向兼容
+    }
+}
+
+/// 读侧限流：这一帧被容许，还是该断开（§6.1）。
+///
+/// `Ok(())` = 放行，继续处理这一帧；`Err(reason)` = 断开（已回过一帧 `err`）。
+///
+/// **超限先慢读，不立刻断开**（§6.1「超限 → 慢读/暂停，持续 30s 才断开」）。
+/// 立刻断是错的：`cat` 一个大文件就是一次合法的 PTY 洪峰，误杀它等于
+/// 「输出多的命令一律失败」。慢读让 TCP 背压传回发送方，流量自然降下来。
+async fn admit_read(
+    state: &AppState,
+    conn_id: &str,
+    node_id: &str,
+    limiter: &mut hub_core::limits::ReadLimiter,
+    over_since: &mut Option<Instant>,
+    bytes: usize,
+) -> Result<(), String> {
+    // §6.1：credit 是**发送方的自我约束**，拦不住一个恶意或
+    // buggy 的 worker。Hub 的自我保护是自己的读侧令牌桶——
+    // 不看对端有没有信用，只看它灌了多少字节。
+    //
+    // 没有这条，一台设备持续灌数据就能让 Hub 逐帧解析 JSON 写进
+    // 内存直到 OOM，连带打垮所有其他设备与 Web 端——而那正是
+    // credit 想防的事，却只防了 node 的发送侧。
+    loop {
+        match limiter.try_consume(bytes) {
+            Ok(()) => {
+                *over_since = None;
+                return Ok(());
+            }
+            // 单帧超硬上限没有「等等就好」这回事——它永远超。
+            //
+            // coverage: excluded — 单帧超 1 MiB 的端到端路径需要往真 socket 里灌
+            // 超大帧；单测覆盖的是令牌桶本身（`limits.rs`）与应答帧映射
+            // （`flood_frame_maps_each_limit_error_to_its_own_code`），
+            // 这里只留「超限即断开」的接线：日志 + 应答帧 + 断开。
+            Err(hub_core::limits::LimitError::FrameTooLarge) => {
+                tracing::warn!(
+                    conn_id = %conn_id,
+                    node_id = %node_id,
+                    bytes = bytes,
+                    "frame over the hard limit; dropping the connection"
+                );
+                // coverage: excluded — 见臂上的标注：端到端超大帧路径。
+                queue_control(
+                    state,
+                    conn_id,
+                    flood_frame(&hub_core::limits::LimitError::FrameTooLarge),
+                );
+                return Err("frame over the hard limit".to_string());
+            }
+            Err(hub_core::limits::LimitError::Flood) => {
+                let since = *over_since.get_or_insert_with(Instant::now);
+                // coverage: excluded — 要真等满 30s 才会走到，超时窗口不可压缩。
+                if since.elapsed() >= hub_core::limits::FLOOD_SUSTAINED {
+                    tracing::warn!(
+                        conn_id = %conn_id,
+                        node_id = %node_id,
+                        "read limit exceeded for too long; dropping the connection"
+                    );
+                    // coverage: excluded — 同上：30s 窗口不可压缩。
+                    queue_control(
+                        state,
+                        conn_id,
+                        flood_frame(&hub_core::limits::LimitError::Flood),
+                    );
+                    return Err("sustained read limit exceeded".to_string());
+                }
+                // 慢读：等令牌回补再处理这一帧。**不重读**——
+                // 已经读进来的字节丢掉就是丢数据。
+                tokio::time::sleep(Duration::from_millis(SLOW_READ_PAUSE_MS)).await;
+            }
+        }
+    }
+}
+
+/// 一帧通道帧的副作用：推给页面订阅者 + 按需回帧。
+fn dispatch_channel_frame(state: &AppState, conn_id: &str, node_id: &str, frame: &Frame) {
+    // 页面侧数据面（子任务 5a）：`channel_data` 的**载荷**推给
+    // 浏览器的 SSE 订阅者。只推载荷、不推整帧——`Frame` 的
+    // `v` / `seq` 是设备侧 WS 的语义（§2），页面不验签也不重放。
+    //
+    // 推送在记账**之前**：这样即使这帧随后被判 `NotReady` 而回错，
+    // 页面也已经看到了字节。而反过来（先记账成功才推）会让
+    // 「Hub 回了 channel_error 但终端里字符已经出现」永远不可能发生。
+    if frame.msg_type == types::CHANNEL_DATA {
+        publish_channel_data(state, node_id, frame);
+    }
+    // 设备的错误也是页面要看的输出（缺陷 3）：`channel_error` 若不
+    // 转发，越界被拒在页面上就是一片空白——面板停在「已连接」，
+    // 用户看不到「为什么进不去」（design-system §7.4 第 ③ 路）。
+    if frame.msg_type == types::CHANNEL_ERROR {
+        publish_channel_error(state, node_id, frame);
+    }
+    // 回帧**入数据面队列**（子任务 5b），不再直接写 socket：
+    // 写 socket 会阻塞读循环，而那正是「设备不读时 Hub 的写缓冲无界」
+    // 与「控制帧被数据帧拖住」两个问题的同一根源。
+    if let crate::channels::Reply::Frame(out) =
+        crate::channels::on_channel_frame(state, node_id, frame)
+    {
+        queue_data(
+            state,
+            conn_id,
+            out,
+            flood_frame(&hub_core::limits::LimitError::Flood),
+        );
     }
 }
 
@@ -772,6 +864,10 @@ async fn relay(
 /// **`biased` 是功能性的**：控制面（`disconnect{superseded}`）必须插队，
 /// 否则一条正在被 256 帧 PTY 输出灌满的连接，会先写完数据才看到「你被顶替了」。
 /// 没有 `biased` 时 `select!` 随机选臂，延迟上限就成了掷骰子。
+///
+/// coverage: excluded — 整个函数在测试里走不到「写失败 / 收端关闭」两条臂：
+/// 端到端测试始终在收帧（sink 由 fixture 持有，构造不出确定的发送失败），
+/// 而「队列已摘」要制造一次真实的连接回收竞争。
 async fn write_loop(
     mut sink: futures_util::stream::SplitSink<WebSocket, Message>,
     mut control: mpsc::Receiver<Frame>,
@@ -784,22 +880,26 @@ async fn write_loop(
             biased;
             frame = control.recv(), if control_open => match frame {
                 Some(frame) => {
+                    // coverage: excluded — 见函数上的标注（:864）：写失败需对端
+                    // 在读循环中途消失，端到端测试构造不出确定的发送失败。
                     if let Err(reason) = send_frame(&mut sink, frame).await {
                         tracing::info!(reason = %reason, "ws writer ended on a control frame");
                         return;
                     }
                 }
-                // 收端关闭 = 表里已摘掉这条连接。继续把数据面剩下的写完，
-                // 但不再选它（否则 `recv()` 立刻返回 `None`，空转成忙循环）。
+                // coverage: excluded — 见函数上的标注（:864）：收端关闭要在连接
+                // 被回收、队列的发送端全被 drop 后才出现，测试里构造不出。
                 None => control_open = false,
             },
             frame = data.recv(), if data_open => match frame {
                 Some(frame) => {
+                    // coverage: excluded — 同上：写失败需对端在读循环中途消失。
                     if let Err(reason) = send_frame(&mut sink, frame).await {
                         tracing::info!(reason = %reason, "ws writer ended on a data frame");
                         return;
                     }
                 }
+                // coverage: excluded — 同 `control_open`：收端关闭要真实的回收竞争。
                 None => data_open = false,
             },
         }
@@ -807,6 +907,10 @@ async fn write_loop(
 }
 
 /// 控制帧入队；连接已走就丢（没什么可通知的了）。
+///
+/// coverage: excluded — 整个函数体（签名行、`match` 与 `Ok` 臂）都不可达：
+/// 调用它的三处（读侧超限的两条断开臂与数据面打满的告警臂）本身不可达，
+/// 见它们各自的标注。
 fn queue_control(state: &AppState, conn_id: &str, frame: Frame) {
     match state.outbound().send(conn_id, frame) {
         Ok(_) => {}
@@ -819,6 +923,10 @@ fn queue_control(state: &AppState, conn_id: &str, frame: Frame) {
 }
 
 /// 数据帧入队；打满则丢帧并回 `err{code:"flood"}`（走控制面）。
+///
+/// coverage: excluded — 与 `queue_control` 同一条：`Ok` 臂的调用点
+/// （`dispatch_channel_frame` 的回帧路径）在别的用例里走得到，而
+/// `Err` 臂唯一的前置是数据面 256 帧打满，端到端需要真 socket 背压。
 fn queue_data(state: &AppState, conn_id: &str, frame: Frame, flood: Frame) {
     match state.outbound().send_data(conn_id, frame) {
         Ok(_) => {}
@@ -842,6 +950,10 @@ fn queue_data(state: &AppState, conn_id: &str, frame: Frame, flood: Frame) {
 /// 也没有通道号的东西，前端拿它渲染终端只会显示一个空面板。
 fn publish_channel_data(state: &AppState, node_id: &str, frame: &Frame) {
     let Ok(data) = frame.payload::<protocol::channel::ChannelData>() else {
+        // coverage: excluded — 覆盖这条日志行需要装一个 `tracing` subscriber
+        // 且 debug 级别开着（`install_subscriber` 装的是 INFO），而单测夹具
+        // `stream_state()` 不装 subscriber。同形的 `publish_channel_error` 的
+        // else 臂已覆盖（那条在单测里执行到了），差异只在 subscriber 的级别。
         tracing::debug!(node_id = %node_id, "not forwarding an unparsable channel_data");
         return;
     };
@@ -1369,6 +1481,76 @@ mod tests {
             state.bindings().get("ch-1").is_some(),
             "已确认的通道只是这一次请求被拒，通道本身还能用"
         );
+    }
+
+    /// 设备发来的 `channel_error` **真的走到**转发那一步。
+    ///
+    /// 上一个用例直接调 `publish_channel_error`，钉的是「帧长什么样」；
+    /// 这个钉的是**接线**：一帧 `channel_error` 进了通道帧的处理分支后，
+    /// Hub 认得它并把它推给页面。接线断掉时上一个用例照样绿——而页面会
+    /// 永远停在「已连接」，用户看不到「为什么进不去」。
+    #[test]
+    fn a_channel_error_from_the_device_reaches_the_page() {
+        let (state, _dir) = stream_state();
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", true),
+        );
+        let frame = Frame::push(
+            types::CHANNEL_ERROR,
+            1,
+            serde_json::json!({
+                "channel_id": "ch-1",
+                "code": "internal",
+                "reason": "path outside the workspace: ..",
+            }),
+        );
+        dispatch_channel_frame(&state, "c1", "n_a", &frame);
+
+        let events = state.streams().replay_since(Some(0));
+        assert_eq!(events.len(), 1, "一帧设备错误对应一条页面事件");
+        assert_eq!(events[0].name, "channel.frame");
+        let event = serde_json::from_str::<serde_json::Value>(&events[0].data).unwrap();
+        assert_eq!(event["channel_id"], serde_json::json!("ch-1"));
+        assert_eq!(event["payload"]["op"], serde_json::json!("error"));
+        assert_eq!(event["payload"]["code"], serde_json::json!("internal"));
+    }
+
+    /// **一帧解不开的 `channel_data` 不许推给页面**。
+    ///
+    /// 推出去的话前端拿到的是 `{"node_id":…, "channel_id": ""}`——既没有字节
+    /// 也没有通道号，拿它渲染终端只会显示一个空面板，而真相（这帧是坏的）
+    /// 被静默吞掉。所以这里钉的是「一条事件都没有」。
+    ///
+    /// 与 `a_channel_error_from_the_device_reaches_the_page` 同一条接线
+    /// （`dispatch_channel_frame` → `publish_channel_data`），差别只在载荷
+    /// 能不能被解析：`channel_id` 是**必填**字段，缺了它整帧就废。
+    #[test]
+    fn an_unparsable_channel_data_is_not_forwarded() {
+        let (state, _dir) = stream_state();
+        // 缺 `channel_id`：`ChannelData` 解不出来
+        let frame = Frame::push(
+            types::CHANNEL_DATA,
+            1,
+            serde_json::json!({"payload": {"op": "data", "bytes": "ls\n"}}),
+        );
+        dispatch_channel_frame(&state, "c1", "n_a", &frame);
+
+        assert!(
+            state.streams().replay_since(Some(0)).is_empty(),
+            "解不开的载荷不许变成一条页面事件"
+        );
+        // 同样形状的**合法**帧必须推得出去：证明上面那句不是「什么都不推」
+        let good = Frame::push(
+            types::CHANNEL_DATA,
+            1,
+            serde_json::json!({"channel_id": "ch-1", "payload": {"op": "data", "bytes": "ls\n"}}),
+        );
+        dispatch_channel_frame(&state, "c1", "n_a", &good);
+        let events = state.streams().replay_since(Some(0));
+        assert_eq!(events.len(), 1, "合法帧必须有一条事件");
+        let event = serde_json::from_str::<serde_json::Value>(&events[0].data).unwrap();
+        assert_eq!(event["channel_id"], serde_json::json!("ch-1"));
     }
 
     /// 开通道就失败：错误照推，绑定摘掉（5s 超时兜底不能把真实原因盖掉）。

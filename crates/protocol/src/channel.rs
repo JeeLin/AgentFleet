@@ -10,8 +10,14 @@
 //! 载荷改了状态机没改会在编译期就露出来。
 //!
 //! 信用语义（§6）：**发送方**每发一帧 `channel_data` 扣 1，归零即暂停；
-//! 接收方补 `channel_credit` 且**只增不减**。两侧共用同一张账本，
-//! 但入口按角色分开命名（[`ChannelRegistry::on_data`] 是发送方，
+//! 接收方补 `channel_credit` 且**只增不减**。
+//!
+//! **两侧各有一本账，不是一本**：Hub 侧是本模块的 [`ChannelRegistry`]，
+//! node 侧是 `node_core::channel::ChannelTable`（自己的 `credit` / `backlog`
+//! / `flush` / `on_credit`）。两者遵守同一套 §6 语义，但**不是同一份状态**——
+//! 本模块的账本只描述「Hub 记的账」，改它改不到 node 侧那份。
+//!
+//! 入口按角色分开命名（[`ChannelRegistry::on_data`] 是发送方，
 //! [`ChannelRegistry::on_data_received`] 是接收方的镜像），避免调用方
 //! 在 Hub 与 node 两侧搞混「Suspend 到底该停读还是该补信用」。
 
@@ -412,27 +418,15 @@ impl ChannelRegistry {
     }
 
     /// 单条通道的 `channel_ready` 超时判定（§5）。
+    ///
+    /// **当前没有生产调用点**：超时的实际判定走 `expire_unacked` 的批量扫描
+    /// （Hub 侧一次扫全表比逐条问更快，且 `ready_expired` 本就是它的判据）。
+    /// 这条留着是给「按通道查」这类排障查询用的单点入口，语义与批量路径同源。
     pub fn ready_timed_out(&self, channel_id: &str, now: Instant) -> bool {
         match self.channels.get(channel_id) {
             Some(ch) => ch.ready_expired(now),
             None => false,
         }
-    }
-
-    /// 所有已超时的 `Opening` 通道，**按 `channel_id` 排序**保证输出稳定。
-    ///
-    /// M0 的 Hub 在 `open_channel` 到达的同一刻就置 Ready，所以这条恒返回空：
-    /// 它是 `reject` 的兜底调用点，M1 引入 connector 协商（`open_channel` 要先
-    /// 问 connector）之后才会有「开了没 Ready」的通道可扫。
-    pub fn expired_ready(&self, now: Instant) -> Vec<String> {
-        let mut ids: Vec<String> = self
-            .channels
-            .iter()
-            .filter(|(_, ch)| ch.ready_expired(now))
-            .map(|(id, _)| id.clone())
-            .collect();
-        ids.sort();
-        ids
     }
 
     pub fn get(&self, channel_id: &str) -> Option<&Channel> {
@@ -757,7 +751,6 @@ mod tests {
         let mut reg = ChannelRegistry::new();
         assert!(!reg.ready_timed_out("nope", t + READY_TIMEOUT));
         // 未知通道不是超时，是「没有这条通道」——两者都必须不发 channel_error
-        assert!(reg.expired_ready(t + READY_TIMEOUT).is_empty());
 
         reg.open("c1", "terminal", 1, t).unwrap();
         assert!(!reg.ready_timed_out("c1", t));
@@ -766,44 +759,6 @@ mod tests {
 
         reg.mark_ready("c1").unwrap();
         assert!(!reg.ready_timed_out("c1", t + READY_TIMEOUT * 10));
-        assert!(reg.expired_ready(t + READY_TIMEOUT * 10).is_empty());
-    }
-
-    #[test]
-    fn expired_ready_lists_only_timed_out_channels_sorted() {
-        let t = t0();
-        let mut reg = ChannelRegistry::new();
-        reg.open("c3", "terminal", 1, t).unwrap();
-        reg.open("c1", "files", 1, t).unwrap();
-        // c2 晚开 4s，所以 t+5s 时它还没到点
-        reg.open("c2", "git", 1, t + Duration::from_secs(4))
-            .unwrap();
-
-        // 到 5s：c1/c3 恰好到点，c2 只开了 1s 不在内
-        assert_eq!(
-            reg.expired_ready(t + READY_TIMEOUT),
-            vec!["c1".to_string(), "c3".to_string()]
-        );
-        assert_eq!(
-            reg.expired_ready(t + Duration::from_secs(60)),
-            vec!["c1".to_string(), "c2".to_string(), "c3".to_string()]
-        );
-    }
-
-    /// 状态机对「超时判定只看 `Opening`」的另一个推论：Ready 通道**永远不会**
-    /// 出现在 `expired_ready` 里，无论过多久。两条混在一起会让一次慢 connector
-    /// 的重连把一条已经就绪的通道掐断。
-    #[test]
-    fn a_ready_channel_is_never_expired() {
-        let t = t0();
-        let mut reg = ChannelRegistry::new();
-        reg.open("c1", "terminal", CREDIT_START, t).unwrap();
-        assert!(reg.expired_ready(t).is_empty());
-
-        reg.mark_ready("c1").unwrap();
-        assert!(reg
-            .expired_ready(t + READY_TIMEOUT + Duration::from_secs(86_400))
-            .is_empty());
     }
 
     /// 重开一个**已经 Ready 过**的 `channel_id` 会把它打回 `Opening`：
@@ -813,15 +768,15 @@ mod tests {
     fn reopening_a_ready_channel_puts_it_back_into_opening() {
         let t = t0();
         let mut reg = ready_registry("c1", "terminal", 4);
-        assert!(reg.expired_ready(t).is_empty());
+        assert!(!reg.ready_timed_out("c1", t));
 
         reg.open("c1", "files", CREDIT_START, t).unwrap();
         assert_eq!(reg.state("c1"), Some(ChannelState::Opening));
         assert_eq!(reg.credit("c1"), Some(CREDIT_START));
         assert_eq!(reg.connector("c1"), Some("files"));
         // 回到 Opening 就重新开始算 5s：刚才那份 Ready 不能让它一开局就超时
-        assert!(reg.expired_ready(t).is_empty());
-        assert_eq!(reg.expired_ready(t + READY_TIMEOUT), vec!["c1".to_string()]);
+        assert!(!reg.ready_timed_out("c1", t));
+        assert!(reg.ready_timed_out("c1", t + READY_TIMEOUT));
     }
 
     /// 数据面在 `Opening` 期间必须**一条都收不到**（§5：先 `channel_ready`）。

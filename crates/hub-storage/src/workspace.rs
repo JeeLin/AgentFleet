@@ -93,18 +93,6 @@ impl WorkspaceRepo {
         .map_err(StorageError::from)
     }
 
-    /// 按 id 取工作区。
-    pub fn by_id(&self, id: &str) -> Result<Option<Workspace>> {
-        let conn = self.pool.get()?;
-        conn.query_row(
-            "SELECT id, node_id, path, created_at FROM workspace WHERE id = ?1",
-            params![id],
-            row_to_workspace,
-        )
-        .optional()
-        .map_err(StorageError::from)
-    }
-
     /// 某台设备上的全部工作区。
     pub fn list_for_node(&self, node_id: &str) -> Result<Vec<Workspace>> {
         let conn = self.pool.get()?;
@@ -174,7 +162,13 @@ impl WorkspaceRepo {
         Ok(())
     }
 
-    /// 字面路径 + 子路径的组合判据（开通道时 Hub 塞进 params 的根就是前一半）。
+    /// 字面路径 + 子路径的组合判据。
+    ///
+    /// **当前没有生产调用点**：`open_channel` 的工作区根由 `params` 直接给出、
+    /// 由 `connector/files` 自己 `resolve`，Hub 不重复校验一次。这条留着是因为
+    /// 它是「根 + 相对子路径」这套语义的**唯一完整判据**，而 M1 之后 Hub 侧
+    /// 要接系统调用时（见 `docs/architecture/README.md` §4.1）第一件事就是它。
+    /// 删掉它等于把判据从仓库里抹掉，只留分散在 connector 里的两次 `validate_path`。
     pub fn validate_workspace_path(root: &str, rel: &str) -> Result<()> {
         Self::validate_path(root)?;
         Self::validate_relative(rel)
@@ -387,7 +381,7 @@ mod tests {
                 .unwrap();
         }
         assert!(
-            wr.by_id(&first.workspace_id).unwrap().is_some(),
+            wr.find("n_a", "/srv/app").unwrap().is_some(),
             "删会话不得连带删工作区"
         );
         // 而且它还在下一次建会话时被复用，而不是变成第二行
@@ -402,7 +396,7 @@ mod tests {
         let s = create(&sr, "n_a", "/srv/app", TS);
         let e = wr.delete(&s.workspace_id).unwrap_err();
         assert!(matches!(e, StorageError::WorkspaceInUse(_)), "got {e:?}");
-        assert!(wr.by_id(&s.workspace_id).unwrap().is_some());
+        assert!(wr.find("n_a", "/srv/app").unwrap().is_some());
     }
 
     /// 已结束但仍占位的会话同样挡着删除：它还在列表里（`ended` 不是消失）。
@@ -428,7 +422,7 @@ mod tests {
                 .unwrap();
         }
         wr.delete(&s.workspace_id).unwrap();
-        assert!(wr.by_id(&s.workspace_id).unwrap().is_none());
+        assert!(wr.find("n_a", "/srv/app").unwrap().is_none());
         wr.delete(&s.workspace_id).unwrap();
         wr.delete("ws_missing").unwrap();
     }
@@ -455,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn find_by_node_and_path_and_by_id() {
+    fn find_by_node_and_path() {
         let (_d, wr, sr) = setup();
         let s = create(&sr, "n_a", "~/src/app", TS);
         assert_eq!(
@@ -464,8 +458,6 @@ mod tests {
         );
         assert!(wr.find("n_a", "/other").unwrap().is_none());
         assert!(wr.find("n_b", "~/src/app").unwrap().is_none());
-        assert!(wr.by_id("ws_missing").unwrap().is_none());
-        assert!(wr.by_id(&s.workspace_id).unwrap().is_some());
     }
 
     /// 列表按创建时间排序：同一毫秒建的两行用 id 兜底，

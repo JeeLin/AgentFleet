@@ -1713,6 +1713,55 @@ async fn an_auth_ok_that_cannot_be_sent_ends_the_connection() {
     wait_closed(&mut ws).await;
 }
 
+/// `auth_ok` 发不出去（对端已 RST）→ 连接不成立，Hub 不 panic。
+///
+/// 与 `an_auth_ok_that_cannot_be_sent_ends_the_connection` 的分工：那条压的是
+/// 发送缓冲，只能让**挑战之后的某一帧**发不出去；而 `finish_ok` 里回
+/// `auth_ok` 那一帧必须赶在 TCP 还活着的时候写完——所以这里改用 RST
+/// （`SO_LINGER=0`），让「写的时候对端已经没了」这件事真的发生。
+///
+/// 覆盖 `finish_ok` 的 `send_frame(...).is_err()` → `PEER_CLOSED`：认证全过、
+/// 只差最后一步回帧。此时**不能**把连接注册进表——设备以为自己没连上。
+#[tokio::test]
+async fn an_auth_ok_that_cannot_be_delivered_leaves_no_registration() {
+    let hub = Hub::boot().await;
+    let kp = KeyPair::generate();
+    let mut ws = dial(&hub.ws_url()).await;
+    let nonce = challenge_nonce(&mut ws).await;
+    let sig = kp.sign(&identity::signature_message(1, "", 1, "auth", &nonce));
+    send_text(
+        &mut ws,
+        &serde_json::json!({
+            "v": 1, "seq": 1, "t": "auth",
+            "c": {
+                "public_key": identity::base64url(&kp.public_key_bytes()),
+                "signature": identity::base64url(&sig),
+                "device_info": info(),
+            },
+        })
+        .to_string(),
+    )
+    .await;
+    // 发完 auth 立刻 RST：Hub 回 auth_ok 时这条 TCP 已经死了
+    rst(ws);
+
+    // 注册表必须一直是空的：auth_ok 没送达 = 连接没有成立
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if hub.state.connections().is_empty() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "auth_ok 没送达却注册了连接");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // 设备行也没有：enroll 的事务随握手失败一起回滚了
+    let devices = hub.state.devices().list().unwrap();
+    assert!(
+        devices.is_empty(),
+        "auth_ok 没送达时 enroll 也不该留下痕迹: {devices:?}"
+    );
+}
+
 /// 握手失败帧也发不出去 → Hub 不能 panic，且不能尝试补救第二次。
 ///
 /// 覆盖 `send_best_effort` 的 `Err` 臂。与上面那条的差别是失败帧走

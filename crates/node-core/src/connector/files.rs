@@ -36,18 +36,36 @@ use super::{Connector, ConnectorError, OpenReq, OutFrame};
 /// 工作区坏了。截断时带 `truncated:true`，页面可以自己说「还有更多」。
 const MAX_LIST_ENTRIES: usize = 1000;
 
+/// 一帧的体积上限。**唯一真相源在协议层**（`protocol::frame::MAX_FRAME_BYTES`）：
+/// node-core 已依赖 protocol，另立一份 1 MiB 字面量只会在协议改动时漂移一次。
+///
+/// Hub 侧在 tungstenite 层按同一个数判 `Capacity`，而读循环遇错即结束那条
+/// 连接——**一帧超限的代价是这台设备上所有通道一起断**，不是「这一个面板
+/// 打不开」。
+const FRAME_BUDGET: usize = protocol::frame::MAX_FRAME_BYTES;
+
+/// 信封的余量：`channel_data` 的 `c` 是 `ChannelData{channel_id, payload}`
+/// 信封，帧本身还有 `v` / `seq` / `t` 等字段。
+const ENVELOPE_MARGIN: usize = 1024;
+
+/// 载荷预算：留给 `payload` 的字节数。
+const PAYLOAD_BUDGET: usize = FRAME_BUDGET - ENVELOPE_MARGIN;
+
 /// 超过这个字节数的文件**不整份载入**（`design-system.md` §3.14）。
 ///
-/// 1 MiB 意味着 WebSocket 上的一个整帧（约束 4：每通道独立流控），而且在
-/// 浏览器里编辑一兆文件没有意义——本项目的执行主体是 agent。
-const MAX_READ_BYTES: u64 = 1024 * 1024;
+/// 它由帧预算推出来而不是另写一份 1 MiB：载荷里既有 base64（4/3 膨胀）
+/// 又有一份等长的 `text`，原始字节数必须比帧预算更小才有意义。
+/// 而**原始字节数不是最终判据**——真正的判据是编码后的载荷大小。
+const MAX_READ_BYTES: u64 = PAYLOAD_BUDGET as u64;
 
 /// 超大文件的预览策略：只取头尾各这么多字节。
 const PREVIEW_EDGES: u64 = 4 * 1024;
 
-/// `write` 的单次上限。与 [`MAX_READ_BYTES`] 同量级：写入没有「预览」
-/// 这层缓冲，超大内容会一路进内存与落盘。
-const MAX_WRITE_BYTES: usize = 1024 * 1024;
+/// `write` 的单次上限（**原始字节**）。
+///
+/// 请求帧里放的是 base64（4/3 膨胀）或文本，内容本身必须比载荷预算小
+/// 3/4 才装得下——否则 Hub 在 tungstenite 层就把这条连接摘了。
+const MAX_WRITE_BYTES: usize = PAYLOAD_BUDGET * 3 / 4;
 
 /// Files connector。开通道时 Hub 把会话工作区根塞进来，此后**不可变**。
 ///
@@ -84,6 +102,10 @@ pub fn resolve_within(root: &Path, shown: &str) -> Result<PathBuf, ConnectorErro
     let mut stack: Vec<std::ffi::OsString> = Vec::new();
     for part in asked.components() {
         match part {
+            // coverage: excluded — Unix 上 `RootDir` 必然让
+            // `asked.is_absolute()` 为真、在 :97 就已经返回；`Prefix` 只在
+            // Windows 出现（盘符 / UNC），本 crate 只在 Unix 目标上构建。
+            // 留着这一臂是为了「将来若支持 Windows，越界判定不会漏掉盘符」。
             Component::Prefix(_) | Component::RootDir => return Err(outside()),
             Component::CurDir => {}
             Component::ParentDir => {
@@ -236,12 +258,27 @@ impl InFrame {
 
 #[derive(Debug, Deserialize)]
 struct WriteArgs {
+    /// 相对工作区根。缺省按根本身处理（不是「空目录」）。
+    #[serde(default)]
+    path: String,
     /// 二进制内容。**与 [`WriteArgs::text`] 二选一**，都不给 = 写空文件。
     #[serde(default)]
     content_b64: Option<String>,
     /// UTF-8 文本。页面上的编辑器给文本，命令行工具给 base64。
     #[serde(default)]
     text: Option<String>,
+}
+
+impl WriteArgs {
+    /// **一次解完**：`path` 与内容在同一个结构里。
+    ///
+    /// 分两次解（一次要 `path`、一次要内容）会得到两套不同的错误前缀，
+    /// 而同一份坏载荷到底该报哪一句，取决于调用方先解了哪个。
+    fn parse(data: &serde_json::Value) -> Result<Self, ConnectorError> {
+        serde_json::from_value(data.clone()).map_err(|e| ConnectorError::Invalid {
+            detail: format!("bad files write data: {e}"),
+        })
+    }
 }
 
 impl Files {
@@ -316,6 +353,11 @@ impl Files {
 
     /// 读一个文件。**三种结论都要给**（§3.14：不许只显示「无法预览」）：
     /// 文本 / 二进制 / 超大只给头尾。
+    ///
+    /// **上限按编码后的载荷判**：载荷里有一份 base64（4/3 膨胀）加一份等长的
+    /// `text`，原始字节数装得下不代表这一帧装得下。按原始字节判的形状是：
+    /// 打开一个 500 KiB 的文本文件 → 单帧约 1.17 MiB → Hub 在 tungstenite
+    /// 层摘掉这台设备的 WS → 它上面所有终端与文件面板一起断。
     fn read(&mut self, data: &serde_json::Value) -> Result<Vec<OutFrame>, ConnectorError> {
         let frame = InFrame::parse(data)?;
         let path = self.resolve(&frame.path)?;
@@ -329,34 +371,31 @@ impl Files {
                 detail: format!("{} is a directory", frame.path),
             });
         }
-        let (bytes, truncated) = if md.len() > MAX_READ_BYTES {
-            (preview(&path, &md), true)
+        let mut truncated = md.len() > MAX_READ_BYTES;
+        let mut bytes = if truncated {
+            preview(&path, &md)
         } else {
-            (
-                std::fs::read(&path).map_err(|e| ConnectorError::Failed {
-                    op: "read file".to_string(),
-                    detail: format!("{}: {e}", frame.path),
-                })?,
-                false,
-            )
+            std::fs::read(&path).map_err(|e| ConnectorError::Failed {
+                op: "read file".to_string(),
+                detail: format!("{}: {e}", frame.path),
+            })?
         };
-        Ok(vec![OutFrame::new(preview_frame(
-            &frame.path,
-            &bytes,
-            md.len(),
-            truncated,
-        ))])
+        let mut payload = preview_frame(&frame.path, &bytes, md.len(), truncated);
+        if payload.to_string().len() > PAYLOAD_BUDGET {
+            // 装不下就退回头尾预览：**截断必须说出来**，不能让用户以为
+            // 读到的就是全文。
+            truncated = true;
+            bytes = preview(&path, &md);
+            payload = preview_frame(&frame.path, &bytes, md.len(), truncated);
+        }
+        Ok(vec![OutFrame::new(payload)])
     }
 
     /// 写一个文件。**父目录必须已存在**：自动建目录链会让一次打错的
     /// 路径在磁盘上造出一整条用户没要求过的树。
     fn write(&mut self, data: &serde_json::Value) -> Result<Vec<OutFrame>, ConnectorError> {
-        let frame = InFrame::parse(data)?;
-        let args: WriteArgs =
-            serde_json::from_value(data.clone()).map_err(|e| ConnectorError::Invalid {
-                detail: format!("bad files write data: {e}"),
-            })?;
-        let path = self.resolve(&frame.path)?;
+        let args = WriteArgs::parse(data)?;
+        let path = self.resolve(&args.path)?;
         let content = match (args.content_b64, args.text) {
             (Some(b64), _) => {
                 Base64::decode_vec(b64.as_str()).map_err(|e| ConnectorError::Invalid {
@@ -377,16 +416,16 @@ impl Files {
         if path.is_dir() {
             return Err(ConnectorError::Failed {
                 op: "write file".to_string(),
-                detail: format!("{} is a directory", frame.path),
+                detail: format!("{} is a directory", args.path),
             });
         }
         std::fs::write(&path, &content).map_err(|e| ConnectorError::Failed {
             op: "write file".to_string(),
-            detail: format!("{}: {e}", frame.path),
+            detail: format!("{}: {e}", args.path),
         })?;
         Ok(vec![OutFrame::new(serde_json::json!({
             "op": "write",
-            "path": frame.path,
+            "path": args.path,
             "written": content.len(),
         }))])
     }
@@ -440,7 +479,7 @@ fn preview(path: &Path, md: &std::fs::Metadata) -> Vec<u8> {
 
 /// 读结果的载荷。**文本给 `text`，二进制给 `content_b64`**——JSON 只能装
 /// 文本，而一次 `grep` 打到二进制文件上就会产出非法 UTF-8，强行转换会让
-/// 「原样字节」不成立（`protocol.md` §4 对 `exec_result` 是同一条理由）。
+/// 「原样字节」不成立（exec 结果的 `stdout_b64` 是同一条理由）。
 ///
 /// `kind` 是**结论**而不是猜测：页面照它选预览样式，不用自己嗅探。
 fn preview_frame(shown: &str, bytes: &[u8], total: u64, truncated: bool) -> serde_json::Value {
@@ -640,6 +679,35 @@ mod tests {
             bytes.len()
         );
         assert!(bytes.iter().all(|b| *b == b'H'), "头尾都该是文件本体");
+    }
+
+    /// **上限按编码后的载荷判**：一个原始大小在预算之内、但编码后装不下的
+    /// 文件，必须退回头尾预览。
+    ///
+    /// 形状就是那个真实故障：点开一个 500 KiB 的文本文件 → 一帧约 1.17 MiB
+    /// → Hub 在 tungstenite 层摘掉这台设备的 WS → 它上面所有 terminal /
+    /// files / exec 通道一起断。按原始字节判的形状里，这个文件**装得下**，
+    /// 于是它被整份读出来、整份发出去。
+    #[test]
+    fn a_file_that_fits_by_bytes_but_not_after_encoding_is_previewed() {
+        let base = sandbox();
+        let ws = workspace(&base);
+        // 原始大小在 `MAX_READ_BYTES` 之内，但 base64（4/3）加一份等长的
+        // `text` 装不下载荷预算。
+        let body = "x".repeat((MAX_READ_BYTES - 4096) as usize);
+        std::fs::write(ws.join("fat.txt"), body.as_bytes()).expect("write");
+        let mut f = open(&ws);
+        let out = call(
+            &mut f,
+            serde_json::json!({ "op": "read", "path": "fat.txt" }),
+        );
+        assert_eq!(out["kind"], "truncated", "装不下就必须截断并说出来");
+        assert!(out["truncated"].as_bool().expect("truncated"));
+        let encoded = out.to_string().len();
+        assert!(
+            encoded <= PAYLOAD_BUDGET,
+            "编码后仍有 {encoded} 字节，超出载荷预算 {PAYLOAD_BUDGET}"
+        );
     }
 
     #[test]
@@ -1083,6 +1151,198 @@ mod tests {
         assert!(
             matches!(err, ConnectorError::OutsideWorkspace { .. }),
             "got {err}"
+        );
+    }
+
+    /// 列一个目录失败要说清**是哪一步**：`read_dir` 拿 `ENOTDIR` / `EACCES`
+    /// 回来时，一句 `list directory` 加用户自己写的那个路径就够了定位。
+    #[test]
+    fn listing_a_path_that_is_not_a_directory_says_so_by_name() {
+        let base = sandbox();
+        let ws = workspace(&base);
+        let mut f = open(&ws);
+        let err = f
+            .on_data(&serde_json::json!({ "op": "list", "path": "README.md" }))
+            .expect_err("must fail");
+        assert!(err.to_string().contains("list directory"), "got {err}");
+        assert!(
+            err.to_string().contains("README.md"),
+            "要说清是哪个路径：{err}"
+        );
+    }
+
+    /// `read` 失败要指名 `read file`：与 `list directory` 分开，用户才知道
+    /// 是哪一步塌的。
+    #[test]
+    fn reading_an_unreadable_path_names_the_read_step() {
+        let base = sandbox();
+        let ws = workspace(&base);
+        let mut f = open(&ws);
+        let err = f
+            .on_data(&serde_json::json!({ "op": "read", "path": "src" }))
+            .expect_err("must fail");
+        assert!(err.to_string().contains("read file"), "got {err}");
+    }
+
+    /// 载荷解不开时要说出**是 files 的数据坏了**：同一个坏 JSON 在
+    /// terminal / exec 下含义完全不同，serde 自己的错误不含「这是给谁的」。
+    #[test]
+    fn a_payload_of_the_wrong_shape_names_the_files_connector() {
+        let base = sandbox();
+        let ws = workspace(&base);
+        let mut f = open(&ws);
+        let err = f
+            .on_data(&serde_json::json!({ "op": "read", "path": 42 }))
+            .expect_err("must refuse");
+        assert!(err.to_string().contains("bad files data"), "got {err}");
+    }
+
+    /// `write` 的解错误要有自己的前缀：与 `read` 分开，否则同一份坏载荷
+    /// 报哪一句取决于调用方先解了哪个。
+    #[test]
+    fn a_write_payload_of_the_wrong_shape_names_the_write_step() {
+        let base = sandbox();
+        let ws = workspace(&base);
+        let mut f = open(&ws);
+        let err = f
+            .on_data(&serde_json::json!({ "op": "write", "path": "a.txt", "content_b64": 7 }))
+            .expect_err("must refuse");
+        assert!(
+            err.to_string().contains("bad files write data"),
+            "got {err}"
+        );
+    }
+
+    /// `Default` 是注册表按名造 connector 时走的那条路（`create` → `new`）。
+    /// 一个只能 `new()` 的类型进不了那张表，所以默认值必须真的给出
+    /// 一个「没开但能开」的实例。
+    #[test]
+    fn the_default_files_connector_is_closed_and_openable() {
+        let mut f = Files::default();
+        assert!(!f.is_open(), "默认实例不该凭空占一个工作区");
+        assert!(f.root().is_none());
+        // 没开着就发数据：错误要指向「通道没开」，而不是 panic
+        let err = f
+            .on_data(&serde_json::json!({ "op": "list" }))
+            .expect_err("must refuse");
+        assert!(err.to_string().contains("not open"), "got {err}");
+    }
+
+    /// mtime 取不到就是 `null`，**不编一个 0 出来**。
+    ///
+    /// 编 0 会让「这个文件改过没有」永远显示成「1970-01-01，没改过」，
+    /// 而真相是「读不到」——那是两回事，页面给的结论也该不一样。
+    #[test]
+    fn an_unreadable_mtime_is_null_not_a_fabricated_epoch() {
+        // `None` 元数据 → 直接 `null`（`mtime_ms` 的第一条臂）。
+        assert_eq!(mtime_ms(None), serde_json::Value::Null);
+        // 有元数据但 `modified()` 失败同样落 `null`——这里用一份真实
+        // 元数据走成功那条路，确认「取得到时给的是数字而不是 null」，
+        // 否则这条断言会在两条臂都返回 null 时照样是绿的。
+        let base = sandbox();
+        let ws = workspace(&base);
+        let md = std::fs::metadata(ws.join("README.md")).expect("metadata");
+        assert!(
+            mtime_ms(Some(&md)).is_u64(),
+            "取得到 mtime 时必须给数字：{:?}",
+            mtime_ms(Some(&md))
+        );
+    }
+
+    /// `read` 只对**目录**做豁免：其余「元数据有、但字节读不出来」的
+    /// 情况必须把 `read file` 说清楚，并带上**用户写的那个路径**。
+    ///
+    /// 这条覆盖 `std::fs::read` 的失败臂。触发物选的是 `AF_UNIX`
+    /// **监听套接字**：
+    ///   - `stat` 成功（所以绕开前面「路径不在」那一条）、是常规项而不是
+    ///     目录（所以绕开 `is_dir` 豁免）——两个前置都满足才可能走到这里；
+    ///   - `open` 却以 `ENXIO` 失败，因为内核拒绝给 socket 的 inode 一个
+    ///     字节流。**这与 uid 无关**：`chmod 000` 在 root 下形同虚设
+    ///     （root 读得穿），那样这条测试会在 CI 的 root 容器里静默变成
+    ///     空转，却仍然显示绿色。
+    ///
+    /// 判据是「错误归属读这一步且指名文件」，而不是「errno 是几」。
+    #[test]
+    fn reading_a_path_that_has_no_bytes_names_the_read_step() {
+        let base = sandbox();
+        let ws = workspace(&base);
+        let path = ws.join("sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        // 先自证两个前置：可 stat、且不是目录。任何一条不成立，下面
+        // 的错误就会来自更早的分支，这条测试就测错了地方。
+        let md = std::fs::metadata(&path).expect("metadata");
+        assert!(!md.is_dir(), "socket 不是目录");
+        assert!(
+            std::fs::read(&path).is_err(),
+            "前提是「字节读不出来」，否则测不到这条臂"
+        );
+
+        let mut f = open(&ws);
+        let err = f
+            .on_data(&serde_json::json!({ "op": "read", "path": "sock" }))
+            .expect_err("must fail");
+        assert!(err.to_string().contains("read file"), "got {err}");
+        assert!(err.to_string().contains("sock"), "要说清是哪个文件：{err}");
+        drop(listener);
+    }
+
+    /// mtime 早于 Unix 纪元 → `null`，**不编一个 0 出来**。
+    ///
+    /// 编 0 会让「改过没有」永远显示成「1970-01-01」，而真相是「这个
+    /// 时间戳说不出来」——那是两回事。时钟回拨 / 挂载点给出负时间戳时
+    /// 会落到这条臂。
+    #[test]
+    fn an_mtime_before_the_epoch_is_null_not_a_fabricated_zero() {
+        let base = sandbox();
+        let ws = workspace(&base);
+        let path = ws.join("README.md");
+        // `utimensat` 是把 mtime 设成任意值（含负数）的唯一手段：
+        // `File::set_times` 只接受 `SystemTime`，而 `UNIX_EPOCH - 1s`
+        // 在 `SystemTime` 的算术里构造不出来。
+        let c = std::ffi::CString::new(path.to_string_lossy().as_bytes()).expect("cstring");
+        let times = [
+            libc::timespec {
+                tv_sec: -1,
+                tv_nsec: 0,
+            },
+            libc::timespec {
+                tv_sec: -1,
+                tv_nsec: 0,
+            },
+        ];
+        let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) };
+        assert_eq!(
+            rc,
+            0,
+            "utimensat 失败：{:?}",
+            std::io::Error::last_os_error()
+        );
+
+        let md = std::fs::metadata(&path).expect("metadata");
+        assert!(
+            md.modified().is_ok(),
+            "前提是「modified() 拿得到」，否则测的是另一条臂"
+        );
+        assert_eq!(mtime_ms(Some(&md)), serde_json::Value::Null);
+    }
+
+    /// `preview` 读不到就**少给而不报错**：它是「尽力给一个结论」，
+    /// 而读失败只说明文件正在被改——那是下一次读取的事。
+    #[test]
+    fn preview_of_a_file_that_is_gone_comes_back_empty_not_failed() {
+        let base = sandbox();
+        let ws = workspace(&base);
+        let path = ws.join("README.md");
+        let md = std::fs::metadata(&path).expect("metadata");
+        // 先确认「文件在」时给得出字节：否则「空」可能是别的原因造成的。
+        assert!(
+            !preview(&path, &md).is_empty(),
+            "文件在的时候 preview 必须给出字节"
+        );
+        std::fs::remove_file(&path).expect("remove");
+        assert!(
+            preview(&path, &md).is_empty(),
+            "文件没了要返回空，而不是报错"
         );
     }
 }

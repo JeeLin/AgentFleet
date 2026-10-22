@@ -87,9 +87,19 @@ impl Reports {
     }
 
     /// 心跳到达时更新。**只在心跳时调用**——路由路径不写这里。
+    ///
+    /// **缺省即保留**：这次上报里 `capabilities` / `resources` 是 `null`、
+    /// `workspace_roots` 是空时，沿用上一次的值；`node_version` 与 `at`
+    /// 永远取这次的。一次只含 `node_version` 的心跳是一次纯粹的在线确认，
+    /// 不得把设备的能力清空（落库侧由 `merge_into_stored` 做同一件事，
+    /// 两侧口径必须一致——不一致时页面显示「没这个 connector」而库里还在）。
     pub fn record(&self, node_id: &str, report: Report) {
         if let Ok(mut m) = self.0.write() {
-            m.insert(node_id.to_string(), report);
+            let merged = match m.get(node_id) {
+                Some(prev) => merge_report(prev, &report),
+                None => report,
+            };
+            m.insert(node_id.to_string(), merged);
         }
         // coverage: excluded — 锁中毒意味着另一个持锁者 panic 了，
         // 而 workspace lint 把 panic 禁成 deny（生产代码无 panic 路径）；
@@ -109,6 +119,32 @@ impl Reports {
     // 心跳还没超时的窗口里会被判成「没有上报」，而那正是
     // `Presence::Reconnecting` 存在的理由（`ws.rs` 的断开处理器也不清它）。
     // 判离线只认心跳年龄（`OFFLINE_AFTER`），不需要断开时主动删。
+}
+
+/// 把一次上报合并进上一次的上报。
+///
+/// 缺省即保留：`capabilities` / `resources` 为 `null`、`workspace_roots` 为空
+/// 时沿用旧值；真报了新值才覆盖。`node_version` 与 `at` 永远取新的——
+/// 前者是「设备现在是什么版本」，后者是「心跳什么时候到的」，两者都不该
+/// 被一次缺省心跳拖回旧值。
+fn merge_report(prev: &Report, next: &Report) -> Report {
+    Report {
+        node_version: next.node_version.clone(),
+        capabilities: match non_null(&next.capabilities) {
+            Some(v) => v,
+            None => prev.capabilities.clone(),
+        },
+        resources: match non_null(&next.resources) {
+            Some(v) => v,
+            None => prev.resources.clone(),
+        },
+        workspace_roots: if next.workspace_roots.is_empty() {
+            prev.workspace_roots.clone()
+        } else {
+            next.workspace_roots.clone()
+        },
+        at: next.at,
+    }
 }
 
 /// 判在线状态。`connected` 是「WS 现在是否连着」，与心跳新鲜度**分开看**。
@@ -361,6 +397,64 @@ mod tests {
         let load = r.resources.get("load").expect("resources");
         assert!(caps.is_array(), "capabilities 是硬过滤输入");
         assert!(load.is_object(), "load 是打分输入");
+    }
+
+    /// 内存侧也要「缺省即保留」：一次只含 `node_version` 的心跳不得清空
+    /// 设备的能力。
+    ///
+    /// 落库侧由 `merge_into_stored` 负责，两侧口径必须一致——不一致时
+    /// 页面显示「没这个 connector」而库里还在，两侧现象互相矛盾。
+    #[test]
+    fn a_minimal_heartbeat_keeps_the_reported_capabilities_in_memory() {
+        let r = Reports::new();
+        let now = Instant::now();
+        r.record("n_1", report(now));
+        r.record(
+            "n_1",
+            Report {
+                node_version: "0.1.0".into(),
+                capabilities: serde_json::Value::Null,
+                resources: serde_json::Value::Null,
+                workspace_roots: Vec::new(),
+                at: now,
+            },
+        );
+        let got = r.get("n_1").expect("must be present");
+        assert_eq!(
+            got.capabilities["connectors"][0], "terminal",
+            "能力必须保留"
+        );
+        assert_eq!(got.resources["load"]["load1"], 1.8, "负载必须保留");
+        assert_eq!(
+            got.workspace_roots,
+            vec!["/w".to_string()],
+            "工作区根必须保留"
+        );
+    }
+
+    /// 真报了新值就覆盖；而 `at` 永远取新的——`at` 是「心跳什么时候到的」，
+    /// 一次缺省心跳不该把设备的心跳年龄拖回旧值（那会让在线判定失准）。
+    #[test]
+    fn a_real_report_overrides_the_previous_one_in_memory() {
+        let r = Reports::new();
+        let now = Instant::now();
+        r.record("n_1", at(now, 30));
+        r.record(
+            "n_1",
+            Report {
+                node_version: "0.2.0".into(),
+                capabilities: serde_json::json!({"connectors": ["git"]}),
+                resources: serde_json::json!({"load": {"load1": 0.5}}),
+                workspace_roots: vec!["/other".into()],
+                at: now,
+            },
+        );
+        let got = r.get("n_1").expect("must be present");
+        assert_eq!(got.node_version, "0.2.0");
+        assert_eq!(got.capabilities["connectors"][0], "git");
+        assert_eq!(got.resources["load"]["load1"], 0.5);
+        assert_eq!(got.workspace_roots, vec!["/other".to_string()]);
+        assert_eq!(got.age(now), Duration::ZERO, "at 必须取新值");
     }
 
     fn heartbeat(caps: serde_json::Value, res: serde_json::Value) -> Heartbeat {

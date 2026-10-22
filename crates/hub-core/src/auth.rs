@@ -302,14 +302,14 @@ impl LoginRateLimiter {
 
     /// 该 IP 当前是否已被锁定。
     pub fn is_blocked(&self, ip: &IpAddr) -> bool {
-        let now = unix_secs();
+        let now = time::unix_secs();
         let attempts = self.attempts.lock();
         attempts.get(ip).is_some_and(|a| a.is_locked(now))
     }
 
     /// 记录一次失败。达到上限即锁定 `lockout_secs`。
     pub fn record_failure(&self, ip: &IpAddr) {
-        let now = unix_secs();
+        let now = time::unix_secs();
         let mut attempts = self.attempts.lock();
         // 顺带剪掉已过期的条目：这张表只由「失败」触发，
         // 不剪的话攻击者轮换来源 IP 能把内存吃光。
@@ -344,12 +344,8 @@ impl Default for LoginRateLimiter {
     }
 }
 
-pub(crate) fn unix_secs() -> i64 {
-    i64::try_from(time::unix_secs()).unwrap_or(i64::MAX)
-}
-
 pub(crate) fn now() -> String {
-    format!("unix:{}", unix_secs())
+    format!("unix:{}", time::unix_secs())
 }
 
 #[cfg(test)]

@@ -4,10 +4,15 @@
 //! 走的那条路：`open_channel` 一到就**执行**（一次性命令没有「先开再发」
 //! 两步），结果随 `channel_ready` 之后的那一帧 `channel_data` 回来。
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use base64ct::{Base64, Encoding};
-use node_core::channel;
+use node_core::channel::{self, Action};
 use node_core::connector::names;
 use protocol::channel::OpenChannel;
 use protocol::frame::Frame;
@@ -47,25 +52,48 @@ fn is_error(frame: &Frame) -> bool {
     frame.msg_type == types::CHANNEL_ERROR
 }
 
+/// `Action` 里的帧。
+///
+/// **不提供 `.frames()` 便捷方法**：它会把「没有应答」（`Action::None`）
+/// 与「连接该结束了」（`Action::End`）都变成一个空切片。
+fn frames_of(action: &Action) -> &[Frame] {
+    match action {
+        Action::Send(frames) => frames,
+        other => panic!("expected frames, got {other:?}"),
+    }
+}
+
 fn workspace() -> tempfile::TempDir {
     let base = tempfile::tempdir().expect("tempdir");
     std::fs::write(base.path().join("in-ws.txt"), b"inside\n").expect("write");
     base
 }
 
-/// 一次执行：**第一帧是 `channel_ready`，第二帧是 `exec_result`**。
-/// 顺序本身就是判据——结果必须落在 ready 之后。
+/// 一次执行：**第一帧是 `channel_ready`，第二帧是 `channel_data`（结果），
+/// 第三帧是 `close_channel`**。
+///
+/// 顺序本身就是判据——结果必须落在 ready 之后，而「这条通道结束了」必须
+/// 落在结果之后（页面先看到结果，才知道通道为什么结束）。
 fn run(channel_id: &str, root: &std::path::Path, params: serde_json::Value) -> Vec<Frame> {
     let action = channel::on_channel_frame(&open_exec_frame(channel_id, root, params));
-    let frames = action.frames().to_vec();
+    let frames = frames_of(&action).to_vec();
     assert_eq!(
         frames.first().map(|f| f.msg_type.as_str()),
         Some(types::CHANNEL_READY),
         "第一帧必须是 channel_ready：{:?}",
         frames.iter().map(|f| &f.msg_type).collect::<Vec<_>>()
     );
-    assert_eq!(frames.len(), 2, "一次性命令只产出一帧结果：{frames:?}");
+    assert_eq!(
+        frames.len(),
+        3,
+        "一次性命令只产出一帧结果加一帧关闭：{frames:?}"
+    );
     assert!(!is_error(&frames[1]), "不该是错误：{:?}", frames[1]);
+    assert_eq!(
+        frames[2].msg_type,
+        types::CLOSE_CHANNEL,
+        "跑完的通道必须自己关掉：{frames:?}"
+    );
     frames
 }
 
@@ -130,9 +158,15 @@ fn a_command_that_never_finishes_is_killed_and_reported() {
         elapsed < std::time::Duration::from_secs(10),
         "超时没有真的杀掉子进程：跑了 {elapsed:?}"
     );
-    // 通道确实关得掉——一个「杀不掉」的 exec 会让这台设备上每一条
-    // 同名通道都再也开不了。
-    assert_eq!(channel::on_disconnect(), 1, "超时的通道仍然要被释放");
+    // **通道自己关掉了**：一次性命令跑完就是结束了，node 侧据此发
+    // `close_channel` 并释放资源——不指望页面记得关通道（非页面调用方
+    // 根本不会去关）。所以断连时**没有**活通道要释放。
+    assert_eq!(
+        channel::live_count(),
+        0,
+        "跑完的 exec 通道必须自己释放：{frames:?}"
+    );
+    assert_eq!(channel::on_disconnect(), 0, "没有活通道可释放");
 }
 
 /// 输出超限被截断，`truncated` 为真。
@@ -172,7 +206,7 @@ fn a_cwd_outside_the_workspace_is_refused() {
                 "cwd": asked,
             }),
         ));
-        let frames = action.frames();
+        let frames = frames_of(&action);
         assert_eq!(frames.len(), 1, "{asked}: {frames:?}");
         assert!(is_error(&frames[0]), "{asked} 必须被拒：{:?}", frames[0]);
         let reason = frames[0].c["reason"].as_str().expect("reason").to_string();
@@ -205,26 +239,43 @@ fn opening_exec_without_a_workspace_root_fails_the_open() {
         serde_json::to_value(&spec).expect("open spec"),
     );
     let action = channel::on_channel_frame(&frame);
-    assert!(is_error(&action.frames()[0]), "{:?}", action.frames());
+    let frames = frames_of(&action);
+    assert!(is_error(&frames[0]), "{frames:?}");
     assert!(!channel::has_channel("ch-noroot"));
 }
 
 /// 一次性通道**不接受第二帧**。这是「exec 只面向页面与 Hub」的形状：
 /// 连重跑都要新开通道，于是每一次执行都必带一份自己的超时与输出上限。
+///
+/// **通道层上是静默的**：exec 跑完就把这条通道关了，页面已经收到
+/// `close_channel`；再往一条已关的通道发数据，与「往一条不存在的通道
+/// 发数据」同属一类——回错反而会让 Hub 以为这条通道死了。
 #[test]
-fn a_spent_exec_channel_refuses_a_second_command() {
+fn a_spent_exec_channel_ignores_a_second_command_in_silence() {
     let _guard = exclusive();
     channel::reset_for_tests();
     let ws = workspace();
     run(
         "ch-once",
         ws.path(),
-        serde_json::json!({ "command": "/bin/true" }),
+        serde_json::json!({
+            "command": "/bin/sh",
+            "args": ["-c", "touch first.txt"],
+            "cwd": ".",
+        }),
+    );
+    assert!(
+        ws.path().join("first.txt").exists(),
+        "第一条命令必须真的跑了——否则「第二条没跑」什么也证明不了"
     );
 
     let spec = protocol::channel::ChannelData {
         channel_id: "ch-once".to_string(),
-        payload: serde_json::json!({ "command": "/bin/false" }),
+        payload: serde_json::json!({
+            "command": "/bin/sh",
+            "args": ["-c", "touch second.txt"],
+            "cwd": ".",
+        }),
     };
     let frame = Frame::push(
         types::CHANNEL_DATA,
@@ -232,10 +283,54 @@ fn a_spent_exec_channel_refuses_a_second_command() {
         serde_json::to_value(&spec).expect("data spec"),
     );
     let action = channel::on_channel_frame(&frame);
-    assert!(is_error(&action.frames()[0]), "{:?}", action.frames());
-    let reason = action.frames()[0].c["reason"].as_str().expect("reason");
-    assert!(reason.contains("once per channel"), "{reason}");
+    assert!(
+        matches!(action, Action::None),
+        "已关的通道不该有应答：{action:?}"
+    );
+    assert!(
+        !ws.path().join("second.txt").exists(),
+        "第二条命令不该被执行——exec 只跑一次"
+    );
     channel::on_disconnect();
+}
+
+/// **一次性命令跑完，node 侧自己把通道关掉**。
+///
+/// 判据是「**恰好一帧** `close_channel`」+「活通道数归零」两件事：
+/// - 「恰好一帧」：重复的关闭帧会让 Hub 那边把一条通道关两次；
+/// - 「活通道数归零」：资源没释放就是一台设备上没人读、也拿不到信用的
+///   僵尸通道，而 Hub 自己开的通道根本不会去关它。
+///
+/// 规格说「exec 只跑一次」，但**没人记得关通道**——所以「跑完就地收尾」
+/// 必须是通道层的行为，不是页面的义务。
+#[test]
+fn an_exec_channel_closes_itself_once_when_the_command_is_done() {
+    let _guard = exclusive();
+    channel::reset_for_tests();
+    let ws = workspace();
+    let frames = run(
+        "ch-selfclose",
+        ws.path(),
+        serde_json::json!({
+            "command": "/bin/sh",
+            "args": ["-c", "printf done"],
+        }),
+    );
+    let closes: Vec<&Frame> = frames
+        .iter()
+        .filter(|f| f.msg_type == types::CLOSE_CHANNEL)
+        .collect();
+    assert_eq!(closes.len(), 1, "关闭帧只能有一帧：{frames:?}");
+    assert_eq!(
+        closes[0].c["channel_id"], "ch-selfclose",
+        "关的必须是这条通道：{frames:?}"
+    );
+    assert_eq!(
+        channel::live_count(),
+        0,
+        "跑完的通道必须自己释放：{frames:?}"
+    );
+    assert_eq!(channel::on_disconnect(), 0, "没有活通道可释放");
 }
 
 /// exec **不向 agent 暴露**（约束 3）：node 侧不提供任何「枚举 / 调用

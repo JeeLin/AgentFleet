@@ -301,7 +301,6 @@ async fn a_device_that_never_heartbeated_is_offline() {
         )
         .expect("enroll")
         .node_id()
-        .expect("fresh key")
         .to_string();
 
     let h = Harness::from_hub(hub).await;
@@ -426,7 +425,6 @@ async fn creating_a_session_on_an_offline_device_is_a_conflict_with_the_status()
         )
         .expect("enroll")
         .node_id()
-        .expect("fresh key")
         .to_string();
 
     let h = Harness::from_hub(hub).await;

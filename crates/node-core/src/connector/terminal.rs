@@ -203,9 +203,14 @@ impl Connector for Terminal {
         let p: TerminalParams = req
             .parse("terminal")
             .map_err(|e| ConnectorError::Invalid { detail: e })?;
-        // **0 视作「没给」**：页面刚挂载、还没量到尺寸时会发 0，
+        // 0 视作「没给」：页面刚挂载、还没量到尺寸时会发 0，
         // 而 0 对内核是「未设置」，`stty size` 会报 `0 0`。回落到默认比
         // 报错更接近用户要的——他要的是一个能看见提示符的终端。
+        //
+        // `?` 的那条 Err 因此**结构上不可达**：`non_zero` 只放行 ≥1，而
+        // `MIN_DIM` 也是 1，两个入口都不会让 `checked` 失败。下面的 `?`
+        // 留着是因为「以后若把 MIN_DIM 调大，这里要立刻跟着拒绝」。
+        // coverage: excluded — 理由见上：`checked` 在 `open` 里恒成功。
         let size = checked(
             non_zero(p.cols).unwrap_or(DEFAULT_COLS),
             non_zero(p.rows).unwrap_or(DEFAULT_ROWS),
@@ -260,6 +265,9 @@ impl Connector for Terminal {
             }
             InFrame::Resize { cols, rows } => {
                 let size = checked(cols, rows)?;
+                // coverage: excluded — 上面 `self.pty()?` 已经确认开着，同一
+                // 函数里 `self.pty` 不可能从 Some 变成 None（改它的 `close` /
+                // `detach` 都是别的入口），所以这个 None 臂结构上不可达。
                 let pty = self.pty.as_mut().ok_or_else(|| ConnectorError::Invalid {
                     detail: "terminal is not open".to_string(),
                 })?;
@@ -310,14 +318,27 @@ impl Connector for Terminal {
         // 问「这个终端结束了吗」的地方都要自己再写一遍这个判断。
         self.done = true;
     }
+
+    /// **shell 退出、且攒着的输出都排空了**才算跑完。
+    ///
+    /// 两个条件缺一不可：shell 退了但队列里还有字节时，那点字节仍然要发给
+    /// 页面——此时判「跑完」会让终端的最后几行永远发不出去。
+    fn finished(&self) -> bool {
+        self.done && self.pending.is_empty()
+    }
 }
 
 impl Terminal {
     /// 起读线程。**PTY 建不起来就不该有线程**，所以它在 `open` 末尾调。
+    // coverage: excluded — 下面 `self.pty` 的 None 臂：`open` 在设好
+    // `self.pty = Some(pty)` 之后才调这里，同一个 `Terminal` 实例上没有
+    // 别的路径能在调用前把它摘掉（`detach` 只被 `close` 调）。
     fn start_reader(&mut self) -> Result<(), ConnectorError> {
         let Some(pty) = self.pty.as_ref() else {
             return Err(ConnectorError::internal("terminal is not open"));
         };
+        // coverage: excluded — `dup_master` 走 `fcntl(F_DUPFD)`，失败需 fd
+        // 表耗尽（约 1M 个打开的描述符），测试环境无可控构造手段。
         let dup = pty.dup_master().map_err(|e| ConnectorError::Failed {
             op: "attach to terminal".to_string(),
             detail: e.to_string(),
@@ -328,6 +349,8 @@ impl Terminal {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         // `tx` 只交给读线程：本类型不保留它（见字段注释）。
+        // coverage: excluded — `spawn` 失败需线程数达上限或内存耗尽，
+        // 测试环境无可控构造手段。
         std::thread::Builder::new()
             .name("afcli-pty".to_string())
             .spawn(move || read_loop(dup, tx, counter, flag))
@@ -368,16 +391,23 @@ impl Terminal {
             }
         }
     }
-
-    /// 子进程是否已经退出。
-    pub fn finished(&self) -> bool {
-        self.done && self.pending.is_empty()
-    }
 }
 
 /// 队列槽位数。**按 64 KiB 一槽算**：与 [`READ_CHUNK`] 配套，读线程每次
 /// 正好填满一槽，槽数也就是队列的字节上限（`READ_QUEUE_BYTES`）。
 const QUEUE_SLOTS: usize = READ_QUEUE_BYTES / READ_CHUNK;
+
+/// 等到队列账上的字节数掉回 `budget` 以下。
+///
+/// **抽成函数是为了能测**：写在 `read_loop` 里就只能靠「真把 1 MiB 灌满
+/// 再停住消费端」来撞，那是个时序测试，慢且偶发；这里直接喂一个已经
+/// 越线的账就能验「它会等、等到了会走」。
+fn wait_for_budget(queued: &QueueBytes, budget: usize) {
+    use std::sync::atomic::Ordering::Relaxed;
+    while queued.load(Relaxed) >= budget {
+        std::thread::yield_now();
+    }
+}
 
 /// 读线程。**只做「读 byte → 交出去」**：不碰连接、不碰信用、不看协议。
 ///
@@ -413,13 +443,14 @@ fn read_loop(
             Ok(n) => n,
         };
         let Some(chunk) = buf.get(..n) else {
+            // coverage: excluded — `read_fd` 最多读 `buf.len()` 字节，
+            // 所以 `buf.get(..n)` 恒为 Some（`n <= buf.len()`）。留着手写
+            // 是因为裸切片会被 workspace lint 拒掉。
             break;
         };
         // **先记账再发**：`sync_channel` 的槽位只管个数、不管字节数，
         // 而这里要卡的是字节数（一条 `yes` 一次能产出几十 MiB）。
-        while queued.load(Relaxed) >= READ_QUEUE_BYTES {
-            std::thread::yield_now();
-        }
+        wait_for_budget(&queued, READ_QUEUE_BYTES);
         let len = chunk.len();
         queued.fetch_add(len, Relaxed);
         if tx.send(chunk.to_vec()).is_err() {
@@ -515,6 +546,64 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// **关掉之后** `pty`/`rx` 都被摘掉，于是「终端没开」那三条路
+    /// （`start_reader` 的 :327、resize 的 :264）各自说得清原因。
+    ///
+    /// 这三条路的错误必须是「没开」而不是「帧格式不对」：真实原因常常是
+    /// 这条通道早关了，而用户要看到的是后者。
+    #[test]
+    fn a_closed_terminal_refuses_work_by_saying_it_is_not_open() {
+        let mut t = Terminal::new();
+        t.open(req(serde_json::json!({ "shell": "/bin/sh" })))
+            .expect("open");
+        assert!(t.is_open(), "开着");
+        t.close();
+        assert!(!t.is_open(), "关掉之后不该还开着");
+
+        // resize 走 `self.pty()` 那条「没开」的臂
+        let err = t
+            .on_data(&serde_json::json!({"resize":{"cols":80,"rows":24}}))
+            .expect_err("关掉的终端不能 resize");
+        assert!(
+            err.to_string().contains("not open"),
+            "错误要指向「没开」而不是帧格式：{err}"
+        );
+        // 写字节同样
+        let err = t
+            .on_data(&serde_json::json!({"bytes":"ls\n"}))
+            .expect_err("关掉的终端不能写");
+        assert!(
+            err.to_string().contains("not open"),
+            "错误要指向「没开」而不是帧格式：{err}"
+        );
+        // 关掉的终端永远不会再有输出：`finished` 必须为真
+        assert!(t.finished(), "关掉的面板不会再产出任何东西");
+        assert!(t.poll().expect("poll").is_empty(), "关掉之后泵不出字节");
+    }
+
+    /// 尺寸下限：**拖窄窗口不该让终端打不开**。
+    ///
+    /// 判据是「1x1 也开得出来」而不是「某个具体尺寸被拒」——上限容易随
+    /// 设计改动漂移，而「极窄也要能用」是那条不变量本身。
+    #[test]
+    fn a_very_small_size_is_still_allowed_but_zero_is_not() {
+        let mut t = Terminal::new();
+        t.open(req(serde_json::json!({
+            "shell": "/bin/sh", "cols": 1, "rows": 1
+        })))
+        .expect("1x1 必须开得出来");
+        t.close();
+
+        let t2 = Terminal::new();
+        // 0 与「没给」同义 → 回落到默认尺寸，所以直接构造 `checked` 来验下限。
+        let err = checked(0, 0).expect_err("0x0 必须被拒");
+        assert!(
+            err.to_string().contains("at least"),
+            "错误要说清下限是多少：{err}"
+        );
+        let _ = t2;
     }
 
     /// 扫出文本里所有**恰好 8 位**的十进制串，按出现顺序返回。
@@ -719,6 +808,68 @@ mod tests {
         assert!(t.finished(), "关掉的面板不该还在读");
     }
 
+    /// 读线程在 stop 标志**已经置位**时立刻退出，不去读那一侧的 fd。
+    ///
+    /// 为什么单独测这一条：面板被关掉时 `close` 只置标志，真正的 `break`
+    /// 发生在读线程下一轮循环的顶部。断言「线程退出了」还不足以说明它
+    /// 走的是 stop 这条路——它也可能是读到了 EOF 才退的。
+    #[test]
+    fn the_reader_thread_returns_immediately_when_stop_is_already_set() {
+        let mut fds = [-1 as std::os::fd::RawFd; 2];
+        // coverage: excluded — `pipe2` 失败需 fd 表耗尽。
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        let read_end =
+            unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fds[0]) };
+        // 写端留着不关：这样这一侧永远等不到 EOF，读线程若不是被 stop
+        // 唤醒的，就只能靠「stop 已置位」这一条路退出。
+        let _write_end =
+            unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fds[1]) };
+
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(4);
+        let queued: QueueBytes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        read_loop(read_end, tx, std::sync::Arc::clone(&queued), stop);
+
+        // 它退出了：发送端随之析构，接收端拿到 Disconnected。
+        assert!(
+            rx.recv().is_err(),
+            "stop 已置位时读线程必须退出，而不是留在 read 上"
+        );
+    }
+
+    /// 字节闸：账越过限额时**必须等**，等它掉回限额以下才放行。
+    ///
+    /// 这条闸失守的后果是「一条 `yes` 顶爆整台设备的内存」，所以它得
+    /// 真的等，而不是「看一眼超了就当没超」。
+    #[test]
+    fn the_byte_budget_waits_until_the_queue_drops_below_the_limit() {
+        let queued: QueueBytes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let budget = 16usize;
+        // 账已经越线：闸必须拦住。
+        queued.store(budget * 2, std::sync::atomic::Ordering::Relaxed);
+
+        let q = std::sync::Arc::clone(&queued);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            q.store(budget - 1, std::sync::atomic::Ordering::Relaxed);
+        });
+
+        let started = std::time::Instant::now();
+        wait_for_budget(&queued, budget);
+        let waited = started.elapsed();
+
+        releaser.join().expect("放行线程");
+        assert!(
+            waited >= std::time::Duration::from_millis(40),
+            "闸必须等账掉下来，实际只等了 {waited:?}"
+        );
+        assert!(
+            queued.load(std::sync::atomic::Ordering::Relaxed) < budget,
+            "放行时账必须在限额以下"
+        );
+    }
+
     #[test]
     fn an_empty_size_field_falls_back_to_the_default() {
         let mut t = Terminal::new();
@@ -787,6 +938,45 @@ mod tests {
         assert!(err.to_string().contains("terminal"), "got {err}");
     }
 
+    /// 载荷解不开时错误要带上 connector 名：同一个 `params` 在不同
+    /// connector 下含义完全不同，serde 自己的错误不含「这是给谁的」。
+    #[test]
+    fn a_payload_of_the_wrong_shape_names_the_terminal() {
+        let mut t = Terminal::new();
+        t.open(req(serde_json::json!({}))).expect("open");
+        // `bytes` 必须是字符串；给个数字解不出来。
+        let err = t
+            .on_data(&serde_json::json!({ "bytes": 42 }))
+            .expect_err("must refuse");
+        assert!(err.to_string().contains("bad terminal data"), "got {err}");
+    }
+
+    /// 往一个**从端已关**的 PTY 写：内核回 `EIO`，这里必须变成一句
+    /// `write to terminal` 而不是 panic 或静默吞掉。
+    ///
+    /// 触发方式是直接关掉 master 再写——`Pty::write` 的 `Closed` 臂在
+    /// `pty.rs` 里已单独测过，这里测的是**上层把 `PtyError` 翻成人话**
+    /// 这一段接线（`terminal.rs` 自己那一层）。
+    ///
+    /// 不用「让 shell 退出」来构造：shell 退出后 master 仍可写（内核
+    /// 只是把读到的那一侧报成 EIO），写会**成功**——那是一条假绿。
+    #[test]
+    fn a_write_error_is_reported_as_a_write_failure_not_swallowed() {
+        let mut t = Terminal::new();
+        t.open(req(serde_json::json!({ "shell": "/bin/sh" })))
+            .expect("open");
+        // 直接拆掉 master：`on_data` 的 `self.pty()?` 仍通过（`pty` 是
+        // `Some`，只是里面的 fd 没了），于是走到 `write` 的 `Closed` 臂。
+        if let Some(pty) = t.pty.as_mut() {
+            pty.close();
+        }
+        let err = t
+            .on_data(&serde_json::json!({ "bytes": "ls\n" }))
+            .expect_err("writing to a closed pty must fail");
+        assert!(err.to_string().contains("write to terminal"), "got {err}");
+        t.close();
+    }
+
     #[test]
     fn closing_twice_is_allowed() {
         let mut t = Terminal::new();
@@ -796,5 +986,36 @@ mod tests {
         assert!(!t.is_open());
         // 关完之后 poll 不该报错：断连与 close_channel 可能各来一次。
         assert!(t.poll().expect("poll after close").is_empty());
+    }
+
+    /// **两个都给**必须被拒，而且说的是「两个都给了」。
+    ///
+    /// 静默挑一个（比如总是信 `bytes`）会把一次拖窗口变成一次乱敲——
+    /// 而用户看到的只是「终端里多出一串字符」，与根因相距最远的一种。
+    #[test]
+    fn a_frame_carrying_both_bytes_and_resize_is_refused_by_name() {
+        let mut t = Terminal::new();
+        t.open(req(serde_json::json!({}))).expect("open");
+        let err = t
+            .on_data(&serde_json::json!({
+                "bytes": "x",
+                "resize": { "cols": 100, "rows": 40 }
+            }))
+            .expect_err("must refuse");
+        assert!(err.to_string().contains("both"), "got {err}");
+    }
+
+    /// `Default` 是注册表按名造 connector 时走的那条路（`create` → `new`）。
+    /// 一个只能 `new()` 的类型进不了那张表，所以默认值必须真的给出
+    /// 一个「没开但能开」的实例。
+    #[test]
+    fn the_default_terminal_is_closed_and_openable() {
+        let mut t = Terminal::default();
+        assert!(!t.is_open(), "默认实例不该凭空占一个 PTY");
+        assert!(!t.finished(), "没开过的终端不是「跑完了」");
+        assert!(t.poll().expect("poll").is_empty());
+        t.open(req(serde_json::json!({ "shell": "/bin/sh" })))
+            .expect("open");
+        assert!(t.is_open());
     }
 }

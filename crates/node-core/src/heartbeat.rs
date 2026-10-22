@@ -67,12 +67,6 @@ pub fn heartbeat(workspace_roots: Vec<String>) -> Heartbeat {
     }
 }
 
-/// 载荷里可以缺省的字段（约束 14）。
-///
-/// Hub 侧对它们一律「缺省则保持上一次的值」，所以这里**不**为了「让字段好看」
-/// 而填默认值。两边清单漂移就会出现「节点以为能省、Hub 以为必须给」。
-pub const OPTIONAL_FIELDS: &[&str] = &["capabilities", "resources", "workspace_roots"];
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,7 +144,13 @@ mod tests {
         assert!(!c["arch"].as_str().expect("arch").is_empty());
         // 取不到的真实值一律 null，不编一个 0 —— Hub 会照它做硬过滤。
         assert!(c["container_runtime"].is_null());
-        assert!(c["resources"].is_null());
+        // `resources` **不在能力表里**：它属于心跳的另一个字段。
+        // `c["resources"]` 对缺键返回 `Null`，那条断言因此恒真——写它等于
+        // 没写。判据要看键在不在。
+        assert!(
+            c.get("resources").is_none(),
+            "能力表里不该有 resources 这个键：{c}"
+        );
     }
 
     /// 路径只到根一级：给几个根报几个根，本模块不碰文件系统。
@@ -183,15 +183,41 @@ mod tests {
         assert_eq!(back.workspace_roots, hb.workspace_roots);
     }
 
-    /// 缺省字段清单必须与协议结构一致。
+    /// **可缺省字段必须真的可缺省**：这份清单从协议结构上**探**出来，
+    /// 不是手抄的字面量。
+    ///
+    /// 做法：把 `Heartbeat` 序列化成一个对象，逐个字段**删掉**再解一次——
+    /// 还能解开 = 该字段可缺省（`#[serde(default)]`），解不开 = 必填。
+    /// 手抄的清单与协议各改各的时，这条测试依旧绿，而真正的漂移信号
+    /// （node 以为可省、Hub 以为必填）要等真机踩到。
     #[test]
-    fn the_optional_field_list_matches_the_protocol_struct() {
-        assert_eq!(OPTIONAL_FIELDS.len(), 3);
-        for f in OPTIONAL_FIELDS {
-            assert!(
-                ["capabilities", "resources", "workspace_roots"].contains(f),
-                "{f} 不在 Heartbeat 里"
-            );
+    fn the_optional_field_list_is_derived_from_the_protocol_struct() {
+        let full = serde_json::to_value(heartbeat(vec!["/w".to_string()])).expect("serialize");
+        let keys: Vec<String> = full
+            .as_object()
+            .expect("心跳载荷是对象")
+            .keys()
+            .cloned()
+            .collect();
+        let mut optional: Vec<String> = Vec::new();
+        for key in keys {
+            let mut probe = full.clone();
+            if let Some(obj) = probe.as_object_mut() {
+                obj.remove(&key);
+            }
+            if serde_json::from_value::<Heartbeat>(probe).is_ok() {
+                optional.push(key);
+            }
         }
+        optional.sort();
+        assert_eq!(
+            optional,
+            vec![
+                "capabilities".to_string(),
+                "resources".to_string(),
+                "workspace_roots".to_string()
+            ],
+            "可缺省字段必须与协议结构一致（探出来的，不是抄的）"
+        );
     }
 }

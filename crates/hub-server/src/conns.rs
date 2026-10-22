@@ -57,6 +57,13 @@ struct Queues {
     data: mpsc::Sender<Outbound>,
 }
 
+/// 推哪条队列。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Which {
+    Control,
+    Data,
+}
+
 /// `conn_id → 该连接的出站队列`。
 #[derive(Debug, Clone, Default)]
 pub struct OutboundTable(Arc<RwLock<HashMap<String, Queues>>>);
@@ -88,16 +95,7 @@ impl OutboundTable {
     ///   这属于异常，必须留痕而不是静默丢弃（「帧没发出去」正是排查
     ///   互抢环的唯一线索）。
     pub fn send(&self, conn_id: &str, frame: Outbound) -> Result<bool, PushError> {
-        let Some(q) = self.0.read().get(conn_id).cloned() else {
-            return Ok(false);
-        };
-        // `try_send` 而不是 `send`：这里**不能** await。
-        // 顶替发生在握手路径上，await 一个满队列会把整条握手堵死；
-        // 而队列满本身就说明对端半死不活，等下去没有意义。
-        q.control
-            .try_send(frame)
-            .map_err(|_| PushError::QueueFull)?;
-        Ok(true)
+        self.push(conn_id, frame, Which::Control)
     }
 
     /// 向一条连接推一帧**数据帧**（通道回帧，子任务 5b）。
@@ -107,10 +105,26 @@ impl OutboundTable {
     /// 队列满时由调用方丢弃这一帧并回 `err{code:"flood"}`：PTY 输出是纯推送，
     /// 丢了就丢了，堵住控制面才是真事故。
     pub fn send_data(&self, conn_id: &str, frame: Outbound) -> Result<bool, PushError> {
+        self.push(conn_id, frame, Which::Data)
+    }
+
+    /// 两个 `send` 的共同实现。**只有一份**：`try_send` 的失败映射与
+    /// 「表里没有这条连接」的返回口径若各写一遍，改一处漏一处的症状是
+    /// 「控制帧返回 Gone、数据帧仍返回 `Ok(false)`」，而两个调用点
+    /// （`ws.rs` 的 `queue_control` / `queue_data`）对这两种返回的处理不同——
+    /// 数据面会静默丢帧而控制面走留痕分支。
+    fn push(&self, conn_id: &str, frame: Outbound, which: Which) -> Result<bool, PushError> {
         let Some(q) = self.0.read().get(conn_id).cloned() else {
             return Ok(false);
         };
-        q.data.try_send(frame).map_err(|_| PushError::QueueFull)?;
+        // `try_send` 而不是 `send`：这里**不能** await。
+        // 顶替发生在握手路径上，await 一个满队列会把整条握手堵死；
+        // 而队列满本身就说明对端半死不活，等下去没有意义。
+        let sent = match which {
+            Which::Control => q.control.try_send(frame),
+            Which::Data => q.data.try_send(frame),
+        };
+        sent.map_err(|_| PushError::QueueFull)?;
         Ok(true)
     }
 

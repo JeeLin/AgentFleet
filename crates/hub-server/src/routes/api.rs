@@ -25,7 +25,7 @@ use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{ApiError, AppState};
+use crate::{err, ApiError, AppState};
 
 /// 会话当前归属的登录身份（单用户；subject 恒为 `admin`）。
 ///
@@ -51,9 +51,6 @@ impl Authenticated {
         Self { subject }
     }
 }
-
-/// 从请求头里取 `Last-Event-ID`（SSE 断线重连语义，子任务 5a）。
-pub use crate::routes::last_event_id;
 
 /// 设备状态。**这三态是页面契约**（设计规范 §6.1）：
 /// `online` / `reconnecting` / `offline`。
@@ -171,15 +168,17 @@ fn device_summary(state: &AppState, device: &hub_storage::repo::Device) -> Devic
         hub_core::Presence::Reconnecting => DeviceStatus::Reconnecting,
         hub_core::Presence::Offline => DeviceStatus::Offline,
     };
+    // 库里的版本号优先（那是登记时的快照），库里没有才用心跳上报的。
+    let agent_version = match (device.node_version.as_deref(), report.as_ref()) {
+        (Some(v), _) => v.to_string(),
+        (None, Some(r)) => r.node_version.clone(),
+        (None, None) => String::new(),
+    };
     DeviceSummary {
         id: device.id.clone(),
         name: device.name.clone(),
         platform: platform_of(device.os.as_deref(), device.arch.as_deref()),
-        agent_version: device
-            .node_version
-            .clone()
-            .or_else(|| report.as_ref().map(|r| r.node_version.clone()))
-            .unwrap_or_else(String::new),
+        agent_version,
         status,
         last_seen: device.last_seen_at.clone(),
         cpu: report
@@ -191,8 +190,7 @@ fn device_summary(state: &AppState, device: &hub_storage::repo::Device) -> Devic
         gpu: report.as_ref().is_some_and(|r| has_gpu(&r.resources)),
         agents: report
             .as_ref()
-            .map(|r| agent_list(&r.capabilities))
-            .unwrap_or_else(Vec::new),
+            .map_or_else(Vec::new, |r| agent_list(&r.capabilities)),
         derived: !matches!(presence, hub_core::Presence::Online),
         key_fingerprint: crate::routes::masked_fingerprint(&device.key_fingerprint),
     }
@@ -216,6 +214,10 @@ pub async fn list_devices(
 /// `agent_id` 本阶段恒不填（M3 起才接 ACP，`session.agent_id` 允许 NULL），
 /// 但字段先收下：前端「新建会话」三步里本来就有选 agent 一步，
 /// 现在不选、以后要选时不用再改一次契约。
+///
+/// **没有 connector 字段**：connector 是开面板时才指定的（`POST /api/channels`
+/// 的 `connector`），所以「设备能力是否覆盖所需 connector」这道门禁**只能**
+/// 落在开通道那一刻——见 [`crate::routes::stream::open_channel`] 的错误口径。
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateSession {
     pub node_id: String,
@@ -301,16 +303,13 @@ pub async fn create_session(
     // **422** 与一条 `text/plain` 说明（裸的 `JsonRejection` 直接落进响应），
     // 而 `/api/*` 的错误体形状是 `{"error": "<code>"}`（前端 `http.ts` 按它
     // 做错误映射）。统一成自己解，形状才有一处定义。
-    let body = match read_body(req).await {
-        Ok(b) => b,
-        Err(_) => return Err(ApiError::bad_request(BAD_BODY)),
-    };
+    let body = crate::routes::read_body(req).await?;
     let body: CreateSession = match serde_json::from_slice(&body) {
         Ok(b) => b,
-        Err(_) => return Err(ApiError::bad_request(BAD_BODY)),
+        Err(_) => return Err(ApiError::bad_request(err::BAD_BODY)),
     };
     hub_storage::WorkspaceRepo::validate_path(&body.path)
-        .map_err(|_| ApiError::bad_request("invalid_workspace_path"))?;
+        .map_err(|_| ApiError::bad_request(err::INVALID_WORKSPACE_PATH))?;
 
     let device = state
         .devices()
@@ -324,7 +323,7 @@ pub async fn create_session(
     let status = device_summary(&state, &device).status;
     if !matches!(status, DeviceStatus::Online) {
         return Err(ApiError::conflict_with(
-            "device_offline",
+            err::OFFLINE,
             || json!({"status": status}),
         ));
     }
@@ -346,6 +345,8 @@ pub async fn create_session(
         ended_at: session.ended_at.clone(),
         workspace: WorkspaceRef::new(&device.id, &body.path),
     };
+    // coverage: excluded — 多行宏的参数行被 llvm-cov 记为 miss（已知现象），
+    // 宏本身在上面的用例里执行过。
     tracing::info!(
         session_id = %session.id,
         node_id = %body.node_id,
@@ -359,22 +360,6 @@ pub async fn create_session(
         .streams()
         .session_state(&session.id, session.state.as_str());
     Ok((StatusCode::CREATED, Json(detail)).into_response())
-}
-
-/// 请求体读不出来或超上限时的错误码。
-const BAD_BODY: &str = "invalid_request_body";
-
-/// 读请求体（上限 1 MiB，与 WS 帧上限同值）。
-///
-/// 借用协议侧的常量而不是另立一个：这是「Hub 从对端收到的最大一段输入」的
-/// 同一个问题，两处写不同的数就会出现「终端发得动但 `/send` 收不下」。
-async fn read_body(req: axum::extract::Request) -> Result<Vec<u8>, &'static str> {
-    match axum::body::to_bytes(req.into_body(), crate::WS_MAX_MESSAGE_BYTES).await {
-        Ok(b) => Ok(b.to_vec()),
-        // 读出错与超上限都归成 400：「你发来的东西我没法处理」。**错误串不进响应体**
-        // （约束 13），所以这两种情况在页面看来是同一件事——它们确实是。
-        Err(_) => Err(BAD_BODY),
-    }
 }
 
 /// `GET /api/agents`：Agent 目录（只读聚合，设计规范 §7.6）。
@@ -454,7 +439,7 @@ mod tests {
                 },
             )
             .expect("enroll");
-        outcome.node_id().expect("a fresh key enrolls").to_string()
+        outcome.node_id().to_string()
     }
 
     fn report_with(st: &AppState, node: &str, caps: serde_json::Value, res: serde_json::Value) {
@@ -613,10 +598,10 @@ mod tests {
     #[test]
     fn last_event_id_is_parsed_or_ignored() {
         let mut h = axum::http::HeaderMap::new();
-        assert_eq!(last_event_id(&h), None);
+        assert_eq!(crate::routes::last_event_id(&h), None);
         h.insert("last-event-id", "42".parse().unwrap());
-        assert_eq!(last_event_id(&h), Some(42));
+        assert_eq!(crate::routes::last_event_id(&h), Some(42));
         h.insert("last-event-id", "not-a-number".parse().unwrap());
-        assert_eq!(last_event_id(&h), None);
+        assert_eq!(crate::routes::last_event_id(&h), None);
     }
 }

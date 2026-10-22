@@ -1,7 +1,6 @@
 //! 设备与秘密的仓储层。
 //!
-//! 这里是 `hub-core` 唯一直接写 SQL 的地方之外的唯一例外说明：
-//! 实际上 `hub-storage` 持有全部 SQL，本模块是它的数据结构入口。
+//! `hub-storage` 持有全部 SQL；本模块是设备与 secret 的数据结构入口。
 //! `hub-core` 通过 [`DeviceRepo`] / [`SecretRepo`] 操作，不拼 SQL。
 
 use r2d2_sqlite::rusqlite::{params, OptionalExtension};
@@ -126,31 +125,33 @@ impl DeviceRepo {
     /// 按指纹查设备。
     pub fn find_by_fingerprint(&self, fp: &str) -> Result<Option<Device>> {
         let conn = self.pool.get()?;
-        conn.query_row(
-            "SELECT id, name, key_fingerprint, enrolled_at, last_seen_at, status,
-                    last_seen_gen, superseded_at, os, arch, hostname, node_version,
-                    capabilities, resources, public_key
-             FROM device WHERE key_fingerprint = ?1",
-            params![fp],
-            row_to_device,
-        )
-        .optional()
-        .map_err(StorageError::from)
+        let row = conn
+            .query_row(
+                "SELECT id, name, key_fingerprint, enrolled_at, last_seen_at, status,
+                        last_seen_gen, superseded_at, os, arch, hostname, node_version,
+                        capabilities, resources, public_key
+                 FROM device WHERE key_fingerprint = ?1",
+                params![fp],
+                row_to_device_row,
+            )
+            .optional()?;
+        row.map(DeviceRow::into_device).transpose()
     }
 
     /// 按 node_id 查设备。
     pub fn find_by_id(&self, id: &str) -> Result<Option<Device>> {
         let conn = self.pool.get()?;
-        conn.query_row(
-            "SELECT id, name, key_fingerprint, enrolled_at, last_seen_at, status,
-                    last_seen_gen, superseded_at, os, arch, hostname, node_version,
-                    capabilities, resources, public_key
-             FROM device WHERE id = ?1",
-            params![id],
-            row_to_device,
-        )
-        .optional()
-        .map_err(StorageError::from)
+        let row = conn
+            .query_row(
+                "SELECT id, name, key_fingerprint, enrolled_at, last_seen_at, status,
+                        last_seen_gen, superseded_at, os, arch, hostname, node_version,
+                        capabilities, resources, public_key
+                 FROM device WHERE id = ?1",
+                params![id],
+                row_to_device_row,
+            )
+            .optional()?;
+        row.map(DeviceRow::into_device).transpose()
     }
 
     /// 全部设备（Hub 重启后、设备尚未连上时也要能回答「有没有这台设备」）。
@@ -162,9 +163,9 @@ impl DeviceRepo {
                     capabilities, resources, public_key
              FROM device ORDER BY enrolled_at",
         )?;
-        let rows = stmt.query_map([], row_to_device)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(StorageError::from)
+        let rows = stmt.query_map([], row_to_device_row)?;
+        let raw = rows.collect::<std::result::Result<Vec<DeviceRow>, _>>()?;
+        raw.into_iter().map(DeviceRow::into_device).collect()
     }
 
     /// 心跳后更新能力/负载/在线状态。
@@ -274,16 +275,67 @@ impl DeviceRepo {
     }
 }
 
-fn row_to_device(
+/// 一行设备的**原始形状**：`status` 保持库里的文本，解析推迟到
+/// [`DeviceRow::into_device`]。
+///
+/// 分两段是为了让「状态非法」能变成 [`StorageError::InvalidDeviceStatus`]
+/// 而不是被压成 `rusqlite::Error`——行映射函数的错误类型由 rusqlite 定死，
+/// 装不下仓储层自己的错误类型。
+struct DeviceRow {
+    id: String,
+    name: String,
+    key_fingerprint: String,
+    enrolled_at: String,
+    last_seen_at: Option<String>,
+    status: String,
+    last_seen_gen: u64,
+    superseded_at: Option<String>,
+    os: Option<String>,
+    arch: Option<String>,
+    hostname: Option<String>,
+    node_version: Option<String>,
+    capabilities: Option<String>,
+    resources: Option<String>,
+    public_key: Option<String>,
+}
+
+impl DeviceRow {
+    /// 解析状态并组装成 [`Device`]。
+    ///
+    /// **状态非法就报错，不静默回落 offline**——回落会把数据损坏伪装成
+    /// 「设备离线」，页面显示正常而库里那行是垃圾值，日志里一个字都没有。
+    fn into_device(self) -> Result<Device> {
+        let status = DeviceStatus::from_str(&self.status)?;
+        Ok(Device {
+            id: self.id,
+            name: self.name,
+            key_fingerprint: self.key_fingerprint,
+            enrolled_at: self.enrolled_at,
+            last_seen_at: self.last_seen_at,
+            status,
+            last_seen_gen: self.last_seen_gen,
+            superseded_at: self.superseded_at,
+            os: self.os,
+            arch: self.arch,
+            hostname: self.hostname,
+            node_version: self.node_version,
+            capabilities: self.capabilities,
+            resources: self.resources,
+            public_key: self.public_key,
+        })
+    }
+}
+
+fn row_to_device_row(
     r: &r2d2_sqlite::rusqlite::Row<'_>,
-) -> std::result::Result<Device, r2d2_sqlite::rusqlite::Error> {
-    Ok(Device {
+) -> std::result::Result<DeviceRow, r2d2_sqlite::rusqlite::Error> {
+    Ok(DeviceRow {
         id: r.get(0)?,
         name: r.get(1)?,
         key_fingerprint: r.get(2)?,
         enrolled_at: r.get(3)?,
         last_seen_at: r.get(4)?,
-        status: DeviceStatus::from_str(&r.get::<_, String>(5)?).unwrap_or(DeviceStatus::Offline),
+        status: r.get(5)?,
         last_seen_gen: r.get::<_, i64>(6)? as u64,
         superseded_at: r.get(7)?,
         os: r.get(8)?,
@@ -396,8 +448,8 @@ mod tests {
 
     #[test]
     fn device_status_roundtrips_and_rejects_unknown() {
-        // DB 里存的是文本，读回来必须还能解析回去——
-        // 否则 row_to_device 的静默 Offline 兜底会掩盖数据损坏
+        // DB 里存的是文本，读回来必须还能解析回去——非法值在**读路径**上报错，
+        // 不静默变成 Offline（见下面那条用例）。
         assert_eq!(DeviceStatus::Online.as_str(), "online");
         assert_eq!(DeviceStatus::Offline.as_str(), "offline");
         for s in [DeviceStatus::Online, DeviceStatus::Offline] {
@@ -407,6 +459,42 @@ mod tests {
         assert!(matches!(
             "reconnecting".parse::<DeviceStatus>(),
             Err(StorageError::InvalidDeviceStatus(_))
+        ));
+    }
+
+    /// 库里那行 `status` 是垃圾值时，读路径必须**报错**，不能静默回落 offline。
+    ///
+    /// 回落会把数据损坏伪装成「设备离线」：页面显示正常，日志里一个字都没有，
+    /// 而库里那行是垃圾值。schema 上的 `CHECK` 拦得住正常途径写入，这种值只能
+    /// 来自外部改库——正是这种情况最需要有人被告知。
+    #[test]
+    fn a_corrupted_status_is_reported_instead_of_being_read_as_offline() {
+        let (_d, dr, _sr) = repo();
+        insert_device(&dr, "n_a", "fp_a");
+        {
+            let conn = dr.pool.get().unwrap();
+            // CHECK 约束拦得住正常途径写入；这一次绕开它。
+            conn.execute_batch("PRAGMA ignore_check_constraints = ON;")
+                .unwrap();
+            conn.execute(
+                "UPDATE device SET status = 'reconnecting' WHERE id = ?1",
+                params!["n_a"],
+            )
+            .unwrap();
+        }
+        // 三条读路径都必须报同一个错
+        let e = dr.find_by_id("n_a").unwrap_err();
+        assert!(
+            matches!(&e, StorageError::InvalidDeviceStatus(s) if s == "reconnecting"),
+            "got {e:?}"
+        );
+        assert!(matches!(
+            dr.find_by_fingerprint("fp_a").unwrap_err(),
+            StorageError::InvalidDeviceStatus(_)
+        ));
+        assert!(matches!(
+            dr.list().unwrap_err(),
+            StorageError::InvalidDeviceStatus(_)
         ));
     }
 
@@ -633,34 +721,6 @@ mod tests {
         );
     }
 
-    /// 列里那一串解不出 32 字节（或压根不是 base64）时，`public_key_bytes`
-    /// 返回 `None` 而不是别的：调用方据此拒绝重连。
-    ///
-    /// 库完好时写不进这种值（`set_public_key` 只接受 `&[u8; 32]`），它来自
-    /// 外部改库或迁移回填了脏数据。
-    #[test]
-    fn a_stored_public_key_that_is_not_a_32_byte_key_reads_as_absent() {
-        let (_d, dr, _sr) = repo();
-        insert_device(&dr, "n_a", "fp_a");
-        for bad in ["!!!不是 base64!!!", "AAAA", ""] {
-            {
-                let conn = dr.pool().get().unwrap();
-                conn.execute(
-                    "UPDATE device SET public_key = ?2 WHERE id = ?1",
-                    params!["n_a", bad],
-                )
-                .unwrap();
-            }
-            let d = dr.find_by_id("n_a").unwrap().unwrap();
-            assert_eq!(d.public_key.as_deref(), Some(bad), "{bad:?} 原样读回");
-            assert_eq!(
-                d.public_key_bytes(),
-                None,
-                "{bad:?} 必须读作没有，绝不退回 capabilities 去凑"
-            );
-        }
-    }
-
     /// 解码走的是仓储层那份，与 `base64url_of` 同一个判据——
     /// 两处各写一份编解码器迟早在「哪个字符算非法」上分叉。
     #[test]
@@ -738,8 +798,12 @@ mod tests {
         assert!(dr.find_by_id("n_ghost").unwrap().is_none());
     }
 
-    /// 读出来的公钥三种坏值都必须报「没有」而不是崩：非 base64、长度不对、
-    /// NULL。重连验签据此拒绝，绝不拿一个错的公钥去试。
+    /// 读出来的公钥各种坏值都必须报「没有」而不是崩：非 base64、长度不对、
+    /// 合法 base64 但只有 31 字节、以及 NULL。重连验签据此拒绝，绝不拿一个
+    /// 错的公钥去试。
+    ///
+    /// 库完好时写不进这种值（`set_public_key` 只接受 `&[u8; 32]`），它来自
+    /// 外部改库或迁移回填了脏数据。
     #[test]
     fn a_broken_stored_public_key_reads_as_absent() {
         let (_d, dr, _sr) = repo();
@@ -748,7 +812,15 @@ mod tests {
         assert_eq!(d.public_key, None);
         assert_eq!(d.public_key_bytes(), None);
 
-        for bad in [Some("!!!not base64!!!"), Some("AAAA"), Some("")] {
+        // 31 字节那条只在合法 base64、长度不足时命中 `<[u8; 32]>::try_from`，
+        // 与「压根不是 base64」是两条不同的拒绝路径。
+        let short = base64url_of(&[9u8; 31]);
+        for bad in [
+            Some("!!!not base64!!!"),
+            Some("AAAA"),
+            Some(""),
+            Some(short.as_str()),
+        ] {
             let conn = dr.pool().get().unwrap();
             conn.execute(
                 "UPDATE device SET public_key = ?1 WHERE id = 'n_a'",
@@ -756,17 +828,53 @@ mod tests {
             )
             .unwrap();
             d = dr.find_by_id("n_a").unwrap().unwrap();
-            assert_eq!(d.public_key.as_deref(), bad);
-            assert_eq!(d.public_key_bytes(), None, "{bad:?} must not decode");
+            assert_eq!(d.public_key.as_deref(), bad, "{bad:?} 原样读回");
+            assert_eq!(
+                d.public_key_bytes(),
+                None,
+                "{bad:?} must not decode, and must not fall back to capabilities"
+            );
         }
     }
 
+    /// `pool()` 交出的必须是**同一个库**，不是一份快照、也不是另一条独立连接。
+    ///
+    /// 断言方式是真写一次再经 `find_by_id` 读回来：指针相等由类型系统保证，
+    /// 那种断言在任何实现下都绿，等于没测。
     #[test]
-    fn pool_accessor_returns_same_pool() {
-        // hub-core 在同一条连接上开显式事务需要拿 pool 引用。
+    fn pool_accessor_exposes_the_same_database() {
         let (_d, dr, _sr) = repo();
-        let p1: *const _ = dr.pool();
-        let p2: *const _ = dr.pool();
-        assert_eq!(p1, p2, "pool() must return the same connection pool");
+        insert_device(&dr, "n_a", "fp_a");
+        // 经 `pool()` 直接写：`find_by_id` 走的是仓储自己的 pool
+        {
+            let mut conn = dr.pool().get().unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute(
+                "UPDATE device SET name = 'written-through-pool' WHERE id = ?1",
+                params!["n_a"],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        assert_eq!(
+            dr.find_by_id("n_a").unwrap().unwrap().name,
+            "written-through-pool"
+        );
+
+        // 回滚的事务对仓储不可见：同一个库，不是「一份读、一份写」
+        {
+            let mut conn = dr.pool().get().unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute(
+                "UPDATE device SET name = 'rolled-back' WHERE id = ?1",
+                params!["n_a"],
+            )
+            .unwrap();
+            drop(tx);
+        }
+        assert_eq!(
+            dr.find_by_id("n_a").unwrap().unwrap().name,
+            "written-through-pool"
+        );
     }
 }

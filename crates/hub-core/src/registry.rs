@@ -4,22 +4,21 @@
 //! - enroll 是 `BEGIN IMMEDIATE → SELECT → INSERT(UNIQUE) → 签发 → COMMIT`，
 //!   **绝不 upsert**——UPSERT 会让并发 enroll 者覆盖别人的指纹绑定，
 //!   导致已签发的 `node_id` 立即失效，而对方私钥已落盘，永远接不回来。
-//! - 重连两步：**只信库内指纹**，忽略请求里带来的任何公钥，失败绝不改写指纹。
+//! - **重连验签不在这里**：握手状态机在 `protocol::handshake`，验签用的是
+//!   库内那一列公钥（`Device::public_key_bytes`）。本模块只管 enroll 这一侧
+//!   的写——「只信库内指纹」是调用方的契约，不是这里的一个入口。
 
 use crate::time;
-use ed25519_dalek::VerifyingKey;
 use hub_storage::repo::{Device, DeviceRepo, NewDevice};
 
 // `DeviceStatus` 只在测试断言里用；生产代码只写不读状态枚举。
 #[cfg(test)]
 use hub_storage::repo::DeviceStatus;
 use hub_storage::Db;
-#[cfg(test)]
-use r2d2_sqlite::rusqlite as sqlite;
-use r2d2_sqlite::rusqlite::{params, OptionalExtension};
+use r2d2_sqlite::rusqlite::{params, Connection, OptionalExtension};
 
 use crate::CoreError;
-use identity::{self, Fingerprint, KeyPair};
+use identity::{self, Fingerprint};
 
 pub mod error;
 pub use error::RegistryError;
@@ -36,8 +35,6 @@ pub enum EnrollOutcome {
     Enrolled { node_id: String },
     /// 该指纹已绑定到一个 node_id；调用方应走重连流程。
     AlreadyRegistered { node_id: String },
-    /// 并发 enroll 撞了唯一约束；让客户端重试。
-    Race,
 }
 
 impl EnrollOutcome {
@@ -46,16 +43,13 @@ impl EnrollOutcome {
     /// 两个成功路径都带同一个 node_id——**指纹是唯一入口**，
     /// 所以「重复注册」不是新设备，而是「老设备又来了一次 enroll」，
     /// 客户端应改走 `auth` 重连流程（§4.3）。
-    pub fn node_id(&self) -> Option<&str> {
+    ///
+    /// **总是有值**：enroll 只有「签发」与「已注册」两条出路，
+    /// 没有第三种结果可表示「拿不到 node_id」。
+    pub fn node_id(&self) -> &str {
         match self {
-            Self::Enrolled { node_id } | Self::AlreadyRegistered { node_id } => Some(node_id),
-            Self::Race => None,
+            Self::Enrolled { node_id } | Self::AlreadyRegistered { node_id } => node_id,
         }
-    }
-
-    /// 是否是本次新注册（而非重复）。
-    pub fn is_new(&self) -> bool {
-        matches!(self, Self::Enrolled { .. })
     }
 }
 
@@ -85,37 +79,62 @@ impl Registry {
         // 显式事务：BEGIN IMMEDIATE → INSERT(UNIQUE) → COMMIT
         let conn = self.devices.pool().get()?;
         conn.execute("BEGIN IMMEDIATE", [])?;
-        let result = (|| -> Result<(), CoreError> {
-            // 事务内再查一次：另一个事务可能刚插入
-            let dup: Option<String> = conn
-                .query_row(
-                    "SELECT id FROM device WHERE key_fingerprint = ?1",
-                    [&fp],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if let Some(id) = dup {
-                // 已存在：回滚并告知已注册（不是错误）
-                return Err(CoreError::Registry(RegistryError::AlreadyRegistered(id)));
-            }
-            conn.execute(
-                "INSERT INTO device
-                    (id, name, key_fingerprint, enrolled_at, status, os, arch, hostname, node_version)
-                 VALUES (?1, ?2, ?3, ?4, 'offline', ?5, ?6, ?7, ?8)",
-                params![
-                    node_id,
-                    info.name,
-                    fp,
-                    now,
-                    info.os,
-                    info.arch,
-                    info.hostname,
-                    info.node_version
-                ],
-            )?;
-            Ok(())
-        })();
+        let result = Self::enroll_in_tx(&conn, &fp, &node_id, &now, &info);
+        Self::finish_enroll(&conn, result, node_id)
+    }
 
+    // 事务体：事务内再查一次重复指纹 → 插入设备行。
+    //
+    // 抽成独立函数是为了能**确定性地**测到「事务内查到重复指纹」那条臂：
+    // 生产里它由并发 enroll 触发（败者在 `BEGIN IMMEDIATE` 上等胜者提交，
+    // 进去就查到刚提交的那一行），竞态没法稳定复现，而这条臂恰恰是
+    // 「绝不 upsert」的第二道闸——删掉它，并发同指纹就能插出两行。
+    fn enroll_in_tx(
+        conn: &Connection,
+        fp: &str,
+        node_id: &str,
+        now: &str,
+        info: &NewDevice,
+    ) -> Result<(), CoreError> {
+        // 事务内再查一次：另一个事务可能刚插入
+        let dup: Option<String> = conn
+            .query_row(
+                "SELECT id FROM device WHERE key_fingerprint = ?1",
+                [fp],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = dup {
+            // 已存在：回滚并告知已注册（不是错误）
+            return Err(CoreError::Registry(RegistryError::AlreadyRegistered(id)));
+        }
+        conn.execute(
+            "INSERT INTO device
+                (id, name, key_fingerprint, enrolled_at, status, os, arch, hostname, node_version)
+             VALUES (?1, ?2, ?3, ?4, 'offline', ?5, ?6, ?7, ?8)",
+            params![
+                node_id,
+                info.name,
+                fp,
+                now,
+                info.os,
+                info.arch,
+                info.hostname,
+                info.node_version
+            ],
+        )?;
+        Ok(())
+    }
+
+    // 事务收尾：把事务体的结果翻译成 `EnrollOutcome`，并落定事务。
+    //
+    // 抽出来同样是为了能确定性地测到「事务内查到重复指纹」那条臂
+    // （见 `Registry::enroll_in_tx`）：生产里它只由并发竞态触发。
+    fn finish_enroll(
+        conn: &Connection,
+        result: Result<(), CoreError>,
+        node_id: String,
+    ) -> Result<EnrollOutcome, CoreError> {
         match result {
             Ok(()) => {
                 conn.execute("COMMIT", [])?;
@@ -125,7 +144,7 @@ impl Registry {
                 conn.execute("ROLLBACK", [])?;
                 Ok(EnrollOutcome::AlreadyRegistered { node_id: id })
             }
-            // Err(e) 主体由 enroll_rolls_back_on_transaction_error 覆盖。
+            // Err(e) 主体由 enroll_inner_statement_error_rolls_back_and_propagates 覆盖。
             //
             // coverage: excluded — 下面的 `if let Err(rb)` 不可达：只要闭包返回
             // Err 事务仍活跃，SQLite 的 ROLLBACK 必然成功；该分支仅防御连接级
@@ -138,30 +157,6 @@ impl Registry {
                 Err(e)
             }
         }
-    }
-
-    /// 重连认证：查库内指纹 → 验签。**绝不接受上传的公钥**。
-    pub fn verify_reconnect(
-        &self,
-        node_id: &str,
-        nonce: &str,
-        signature: &[u8; 64],
-        v: u32,
-        seq: u64,
-        msg_type: &str,
-    ) -> Result<Device, CoreError> {
-        let device = self
-            .devices
-            .find_by_id(node_id)?
-            .ok_or(CoreError::NoSuchNode(node_id.to_string()))?;
-
-        // 库内指纹 → 公钥。忽略请求里带来的任何 public_key。
-        let pubkey = pubkey_from_fingerprint(&device)?;
-        let msg = identity::signature_message(v, node_id, seq, msg_type, nonce);
-        if !KeyPair::verify(&pubkey, &msg, signature) {
-            return Err(CoreError::Registry(RegistryError::IdentityMismatch));
-        }
-        Ok(device)
     }
 
     pub fn device(&self, node_id: &str) -> Result<Option<Device>, CoreError> {
@@ -177,23 +172,6 @@ impl Registry {
     }
 }
 
-/// 从设备行取公钥。
-///
-/// M1 起它就是 `device.public_key` 一列（M0 时代寄居在 `capabilities` 的 JSON
-/// 键里，靠 `reports::preserve_public_key` 在心跳覆盖时抢救——那套约定已随
-/// v2 迁移一并删除）。列里没有就是没有：降级二进制会被 `SchemaTooNew` 挡在
-/// 开库之前，不存在「只有 JSON 里有公钥」的合法库。
-fn pubkey_from_fingerprint(device: &Device) -> Result<[u8; 32], CoreError> {
-    let pubkey = device
-        .public_key_bytes()
-        .ok_or(CoreError::Registry(RegistryError::NoStoredPublicKey))?;
-    // 校验一致性：存公钥的指纹必须与库里一致
-    if Fingerprint::of(&pubkey).to_hex() != device.key_fingerprint {
-        return Err(CoreError::Registry(RegistryError::IdentityMismatch));
-    }
-    Ok(pubkey)
-}
-
 /// 当前时刻的时间戳串，落库进 `enrolled_at` / `last_seen_at`。
 ///
 /// **格式是 `unix:<秒>`，不是 RFC3339**（函数名与这个文档串都曾经说成
@@ -206,24 +184,11 @@ pub fn now_stamp() -> String {
     format!("unix:{}", time::unix_secs())
 }
 
-/// 把上传的 base64url 公钥解析为 32 字节。
-pub fn parse_pubkey(b64: &str) -> Result<[u8; 32], RegistryError> {
-    let raw = identity::base64url_decode(b64).map_err(|_| RegistryError::BadPublicKey)?;
-    let mut out = [0u8; 32];
-    if raw.len() != 32 {
-        return Err(RegistryError::BadPublicKey);
-    }
-    out.copy_from_slice(&raw);
-    // 必须是合法的 Ed25519 公钥点
-    VerifyingKey::from_bytes(&out).map_err(|_| RegistryError::BadPublicKey)?;
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use hub_storage::db::open;
-    use identity::issue_node_id;
+    use identity::{issue_node_id, KeyPair};
 
     fn setup() -> (tempfile::TempDir, Registry) {
         let d = tempfile::tempdir().unwrap();
@@ -245,14 +210,15 @@ mod tests {
 
     /// enroll 一次，断言成功并返回 node_id。
     ///
-    /// 用 `node_id()` 访问器而不是 `match { other => panic!() }`：
-    /// 后者的兜底臂在 100% 覆盖率门禁下永远跑不到，会把 TOTAL 拖下来。
+    /// 用 `matches!` 而不是 `match { other => panic!() }`：后者的兜底臂在
+    /// 100% 覆盖率门禁下永远跑不到，会把 TOTAL 拖下来。
     fn enroll_ok(r: &Registry, kp: &KeyPair) -> String {
         let out = r.enroll(&kp.public_key_bytes(), info()).unwrap();
-        assert!(out.is_new(), "expected Enrolled, got {out:?}");
-        out.node_id()
-            .expect("Enrolled carries a node_id")
-            .to_string()
+        assert!(
+            matches!(out, EnrollOutcome::Enrolled { .. }),
+            "expected Enrolled, got {out:?}"
+        );
+        out.node_id().to_string()
     }
 
     #[test]
@@ -278,7 +244,7 @@ mod tests {
         );
         // 库里仍然只有一行（绝不 upsert / 绝不插第二行）
         assert_eq!(r.list().unwrap().len(), 1);
-        assert_eq!(second.node_id(), Some(node_id.as_str()));
+        assert_eq!(second.node_id(), node_id.as_str());
     }
 
     #[test]
@@ -317,121 +283,9 @@ mod tests {
             .filter(|o| matches!(o, EnrollOutcome::Enrolled { .. }))
             .count();
         assert_eq!(enrolled, 1, "exactly one enroll may win");
-        // 败者看到的是 AlreadyRegistered（而不是 Race），库里一行
+        // 败者拿到的是同一个 node_id（已注册），库里始终一行
+        assert_eq!(a.node_id(), b.node_id());
         assert_eq!(r.list().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn reconnect_verifies_with_stored_pubkey_only() {
-        let (_d, r) = setup();
-        let kp = KeyPair::generate();
-        let node_id = enroll_ok(&r, &kp);
-        // 模拟 Hub 把公钥存进 capabilities（M0 权宜，BUGS.md 已登记）
-        r.devices()
-            .set_public_key(&node_id, &kp.public_key_bytes())
-            .unwrap();
-
-        let msg = identity::signature_message(1, &node_id, 0, "auth", "nonce-1");
-        let sig = kp.sign(&msg);
-        let dev = r
-            .verify_reconnect(&node_id, "nonce-1", &sig, 1, 0, "auth")
-            .unwrap();
-        assert_eq!(dev.id, node_id);
-    }
-
-    /// 心跳把 `capabilities` 整个覆盖掉之后，重连验签仍然成功。
-    ///
-    /// 这是把公钥提成真列（M1 v2 迁移）换来的东西：`set_public_key` 抹掉 JSON
-    /// 里的旧键、心跳再覆盖一次 capabilities，库里那份公钥都不受影响。
-    /// 改 `merge_into_stored` 或 `touch_online` 的人不必再知道有这件事。
-    #[test]
-    fn a_heartbeat_overwriting_capabilities_does_not_break_reconnect() {
-        let (_d, r) = setup();
-        let kp = KeyPair::generate();
-        let node_id = enroll_ok(&r, &kp);
-        r.devices()
-            .set_public_key(&node_id, &kp.public_key_bytes())
-            .unwrap();
-        r.devices()
-            .touch_online(&node_id, r#"{"connectors":["terminal"]}"#, "{}", "unix:10")
-            .unwrap();
-
-        let msg = identity::signature_message(1, &node_id, 1, "auth", "nonce-1");
-        let sig = kp.sign(&msg);
-        assert!(r
-            .verify_reconnect(&node_id, "nonce-1", &sig, 1, 1, "auth")
-            .is_ok());
-    }
-
-    /// 没有库内公钥的设备（老数据 / 手工插的行）一律拒绝重连。
-    #[test]
-    fn reconnect_without_a_stored_public_key_is_refused() {
-        let (_d, r) = setup();
-        let kp = KeyPair::generate();
-        let node_id = enroll_ok(&r, &kp); // 没调 set_public_key
-        let msg = identity::signature_message(1, &node_id, 0, "auth", "nonce-1");
-        let sig = kp.sign(&msg);
-        let err = r
-            .verify_reconnect(&node_id, "nonce-1", &sig, 1, 0, "auth")
-            .unwrap_err();
-        assert!(
-            matches!(err, CoreError::Registry(RegistryError::NoStoredPublicKey)),
-            "missing public key must surface as a registry error, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn reconnect_with_wrong_key_is_identity_mismatch_and_keeps_fp() {
-        let (_d, r) = setup();
-        let kp = KeyPair::generate();
-        let evil = KeyPair::generate();
-        let node_id = enroll_ok(&r, &kp);
-        r.devices()
-            .set_public_key(&node_id, &kp.public_key_bytes())
-            .unwrap();
-        let before = r.device(&node_id).unwrap().unwrap().key_fingerprint;
-
-        // 持正确 node_id + 错误密钥对 + 合法签名
-        let msg = identity::signature_message(1, &node_id, 0, "auth", "nonce-1");
-        let sig = evil.sign(&msg);
-        let e = r.verify_reconnect(&node_id, "nonce-1", &sig, 1, 0, "auth");
-        assert!(matches!(
-            e,
-            Err(CoreError::Registry(RegistryError::IdentityMismatch))
-        ));
-        // 库内指纹绝不被改写
-        assert_eq!(r.device(&node_id).unwrap().unwrap().key_fingerprint, before);
-    }
-
-    #[test]
-    fn reconnect_with_replayed_signature_across_connection_fails() {
-        let (_d, r) = setup();
-        let kp = KeyPair::generate();
-        let node_id = enroll_ok(&r, &kp);
-        r.devices()
-            .set_public_key(&node_id, &kp.public_key_bytes())
-            .unwrap();
-
-        // 连接 1：seq=0 的 auth 签名
-        let m1 = identity::signature_message(1, &node_id, 0, "auth", "nonce-A");
-        let sig1 = kp.sign(&m1);
-        // 连接 2：同样 seq=0 但 nonce 不同 → 旧签名必须失败
-        assert!(r
-            .verify_reconnect(&node_id, "nonce-B", &sig1, 1, 0, "auth")
-            .is_err());
-    }
-
-    #[test]
-    fn unknown_node_is_rejected() {
-        let (_d, r) = setup();
-        let kp = KeyPair::generate();
-        let node_id = issue_node_id();
-        let msg = identity::signature_message(1, &node_id, 0, "auth", "n");
-        let sig = kp.sign(&msg);
-        assert!(matches!(
-            r.verify_reconnect(&node_id, "n", &sig, 1, 0, "auth"),
-            Err(CoreError::NoSuchNode(_))
-        ));
     }
 
     /// 时间戳格式是 `unix:<秒>`——落库的两列（`enrolled_at` / `last_seen_at`）
@@ -460,61 +314,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_pubkey_validates_length_and_charset() {
-        let kp = KeyPair::generate();
-        let b64 = identity::base64url(&kp.public_key_bytes());
-        assert!(parse_pubkey(&b64).is_ok());
-        assert!(parse_pubkey("AAAA").is_err()); // 长度不对（3 字节 ≠ 32）
-        assert!(parse_pubkey("!!!not-base64!!!").is_err()); // 非法字符
-                                                            // 全零在 Ed25519 是合法点（小序点），dalek 会接受；
-                                                            // 是否「可用」由后续签名验证决定，不在此处预设
-        assert!(parse_pubkey(&identity::base64url(&[0u8; 32])).is_ok());
-    }
-
-    #[test]
     fn node_id_issued_by_registry_is_unique() {
         let ids: std::collections::HashSet<_> = (0..100).map(|_| issue_node_id()).collect();
         assert_eq!(ids.len(), 100);
-    }
-
-    #[test]
-    fn stored_pubkey_of_wrong_length_is_rejected() {
-        let (_d, r) = setup();
-        let kp = KeyPair::generate();
-        let node_id = enroll_ok(&r, &kp);
-        // 手写一个长度不对的 capabilities.public_key（16 字节而非 32）：
-        // 走 pool() 直接写库，避免为测试在生产 API 上加只测一次用的口子。
-        let conn = r.devices().pool().get().unwrap();
-        let bad = serde_json::json!({"public_key": identity::base64url(&[7u8; 16])});
-        conn.execute(
-            "UPDATE device SET capabilities = ?2 WHERE id = ?1",
-            sqlite::params![node_id, bad.to_string()],
-        )
-        .unwrap();
-        let msg = identity::signature_message(1, &node_id, 0, "auth", "n");
-        let sig = kp.sign(&msg);
-        assert!(matches!(
-            r.verify_reconnect(&node_id, "n", &sig, 1, 0, "auth"),
-            Err(CoreError::Registry(RegistryError::NoStoredPublicKey))
-        ));
-    }
-
-    #[test]
-    fn stored_pubkey_inconsistent_with_fingerprint_is_mismatch() {
-        let (_d, r) = setup();
-        let kp = KeyPair::generate();
-        let evil = KeyPair::generate();
-        let node_id = enroll_ok(&r, &kp);
-        // 库里存的是**另一把**公钥：指纹对不上 → IdentityMismatch
-        r.devices()
-            .set_public_key(&node_id, &evil.public_key_bytes())
-            .unwrap();
-        let msg = identity::signature_message(1, &node_id, 0, "auth", "n");
-        let sig = kp.sign(&msg);
-        assert!(matches!(
-            r.verify_reconnect(&node_id, "n", &sig, 1, 0, "auth"),
-            Err(CoreError::Registry(RegistryError::IdentityMismatch))
-        ));
     }
 
     #[test]
@@ -536,12 +338,12 @@ mod tests {
 
     #[test]
     fn enroll_inner_statement_error_rolls_back_and_propagates() {
-        // 让 enroll **闭包内部**的 INSERT 失败，才能命中 match 的 `Err(e)` 臂
-        // （registry.rs:130）。
+        // 让 enroll **事务体内**的 INSERT 失败，才能命中 `finish_enroll` 的
+        // `Err(e)` 臂。
         //
         // 为什么不能直接 DROP TABLE：事务外还有一次快路径查询
         // （`find_by_fingerprint`，enroll 开头），表没了会在这里就 `?` 返回，
-        // 根本进不了 match。
+        // 根本进不了事务体。
         //
         // 手段：建一个 `BEFORE INSERT` 触发器主动 RAISE(ABORT)。表结构完好，
         // 快路径查询正常返回 None，只有 INSERT 会失败——确定性的，不依赖竞态。
@@ -573,24 +375,83 @@ mod tests {
         let (_d, r) = setup();
         let kp = KeyPair::generate();
         let first = r.enroll(&kp.public_key_bytes(), info()).unwrap();
-        assert!(first.is_new());
         let second = r.enroll(&kp.public_key_bytes(), info()).unwrap();
-        assert!(!second.is_new());
         // 两个成功路径都要拿到同一个 node_id（指纹是唯一入口，§4.3）
         assert_eq!(first.node_id(), second.node_id());
-        // Race 变体不带 node_id
-        assert_eq!(EnrollOutcome::Race.node_id(), None);
-        assert!(!EnrollOutcome::Race.is_new());
+        // `node_id()` 永远有值：没有第三种「拿不到 node_id」的结果可表示
+        assert!(!first.node_id().is_empty());
     }
 
+    /// 事务体查到重复指纹 → 拒绝插入，报「已注册」。
+    ///
+    /// 生产触发路径是并发 enroll（败者在 `BEGIN IMMEDIATE` 上等胜者提交，
+    /// 进事务就查到刚提交的那一行），竞态没法稳定复现，所以这里直接驱动
+    /// 事务体：库里已经有同指纹的行时，事务体必须拒绝插入——**绝不 upsert**
+    /// 的第二道闸就靠它。
     #[test]
-    fn enroll_transaction_branches_covered_by_race() {
-        // enroll 的「事务内再查到重复指纹 → 回滚并报告 AlreadyRegistered」
-        // （registry.rs:92,97,122-124）与「闭包因 UNIQUE 冲突失败 → 走 Err(e)
-        // 臂回滚」（registry.rs:126）两条分支都依赖并发竞态：两线程同时通过
-        // 快路径后，胜者提交、败者要么在事务内查到已提交行（122-124）、要么
-        // 在 INSERT 时撞 UNIQUE（126）。多跑若干次确保两条臂都被命中，并断言
-        // 库里始终只有一行、且恰好一个 Enrolled。
+    fn a_duplicate_seen_inside_the_transaction_is_refused() {
+        let (_d, r) = setup();
+        let kp = KeyPair::generate();
+        let fp = Fingerprint::of(&kp.public_key_bytes()).to_hex();
+
+        // 直接插一行同指纹的设备（模拟「另一个事务刚提交」）
+        {
+            let conn = r.devices().pool().get().unwrap();
+            conn.execute(
+                "INSERT INTO device
+                    (id, name, key_fingerprint, enrolled_at, status, os, arch, hostname, node_version)
+                 VALUES ('n_dup', 'pi', ?1, 'unix:0', 'offline', 'linux', 'aarch64', 'h', 'v')",
+                [&fp],
+            )
+            .unwrap();
+        }
+
+        let conn = r.devices().pool().get().unwrap();
+        conn.execute("BEGIN IMMEDIATE", []).unwrap();
+        let err = Registry::enroll_in_tx(&conn, &fp, "n_new", "unix:0", &info()).unwrap_err();
+        assert!(
+            matches!(&err, CoreError::Registry(RegistryError::AlreadyRegistered(id)) if id == "n_dup"),
+            "expected AlreadyRegistered(n_dup), got {err:?}"
+        );
+        conn.execute("ROLLBACK", []).unwrap();
+        // 库里仍然只有那一行：重复指纹没有插出第二行
+        assert_eq!(r.list().unwrap().len(), 1);
+    }
+
+    /// 事务体报「已注册」→ 回滚，把已绑定的 node_id 交回去。
+    ///
+    /// 与上一个测试配套：那条臂的另一半是「回滚并如实交出已绑定的
+    /// node_id」，生产里同样只由并发竞态触发，所以在这里直接驱动收尾逻辑。
+    #[test]
+    fn the_duplicate_outcome_rolls_back_and_keeps_the_existing_node_id() {
+        let (_d, r) = setup();
+        let conn = r.devices().pool().get().unwrap();
+        conn.execute("BEGIN IMMEDIATE", []).unwrap();
+        let outcome = Registry::finish_enroll(
+            &conn,
+            Err(CoreError::Registry(RegistryError::AlreadyRegistered(
+                "n_dup".into(),
+            ))),
+            "n_new".into(),
+        )
+        .unwrap();
+        assert!(
+            matches!(&outcome, EnrollOutcome::AlreadyRegistered { node_id } if node_id == "n_dup"),
+            "expected AlreadyRegistered(n_dup), got {outcome:?}"
+        );
+        // 事务已回滚：连接上没有悬挂的事务
+        conn.execute("BEGIN IMMEDIATE", []).unwrap();
+        conn.execute("ROLLBACK", []).unwrap();
+    }
+
+    /// 并发 enroll 同一指纹：恰好一个成功，库里恰好一行，绝不 upsert。
+    ///
+    /// 败者走哪条臂取决于竞态（快路径命中已提交的行，还是事务内查到
+    /// 刚提交的行），本测试**不区分**——它守的是不变量：一行、一个
+    /// Enrolled、两边拿到同一个 node_id。两条臂各自的分支由上面两个
+    /// 直接驱动事务体与收尾逻辑的测试覆盖。
+    #[test]
+    fn concurrent_enroll_of_one_fingerprint_registers_exactly_one_device() {
         for _ in 0..60 {
             let (_d, r) = setup();
             let kp = KeyPair::generate();

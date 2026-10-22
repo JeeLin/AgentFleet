@@ -53,6 +53,31 @@ pub const DEFAULT_HEARTBEAT_INTERVAL_MS: u64 = 15_000;
 /// 帧大小上限。与 `protocol::MAX_FRAME_BYTES` 一致（§2）：超限即断开。
 pub const WS_MAX_MESSAGE_BYTES: usize = protocol::MAX_FRAME_BYTES;
 
+/// `/api/*` 的固定错误码（约束 13）。**每个语义只在这里定义一次**。
+///
+/// 前端按 `code` 分支（`packages/web/src/lib/http.ts` 的映射表），所以同一个
+/// 语义出现两份字面量时，改名漏改的那一处**不会有任何编译错误**——页面只是
+/// 静默落进默认分支，显示一句「没成功」而不说清哪里不对。`read_body` 的两个
+/// 调用点（`/send`、`/open`）各写一份时，症状正是这样。
+pub mod err {
+    /// JSON body 缺失 / 形状不对 / 超过上限。
+    pub const BAD_BODY: &str = "invalid_request_body";
+    /// 工作区路径不合法（既非绝对路径也不以 `~` 开头）。
+    pub const INVALID_WORKSPACE_PATH: &str = "invalid_workspace_path";
+    /// 设备不在线（设备已断开，或它在「查注册表」与「投递」之间断了）。
+    pub const OFFLINE: &str = "device_offline";
+    /// 会话存在但已结束——存在性没问题，状态不对。
+    pub const SESSION_ENDED: &str = "session_ended";
+    /// 通道存在，但不是这个 subject 开的。
+    pub const FORBIDDEN: &str = "channel_not_yours";
+    /// 设备读不过来（写侧队列打满，§6.1.1）。
+    pub const BUSY: &str = "device_busy";
+    /// 终端尺寸越界（0 或超出 `u16`）。
+    pub const INVALID_SIZE: &str = "invalid_terminal_size";
+    /// 设备上报的能力里没有这个 connector（子任务 11 的硬过滤）。
+    pub const NOT_REPORTED: &str = "connector_not_reported";
+}
+
 /// 启动期错误：数据目录写不了 / 数据库读不了，Hub 起不来。
 ///
 /// 与请求期的 [`ApiError`] 分开：启动失败必须**中止进程**，
@@ -85,7 +110,7 @@ impl ApiError {
 
     /// JSON body 缺失/形状不对。
     pub fn bad_request_body() -> Self {
-        Self::bad_request("invalid_request_body")
+        Self::bad_request(err::BAD_BODY)
     }
 
     pub fn unauthorized(code: &'static str) -> Self {
@@ -664,11 +689,12 @@ mod tests {
     /// 静态资产与 SPA fallback **免 session**（登录页自己得能加载 JS/CSS），
     /// 而 `/api/*` 仍要认证——两者的分界由 `.layer` 的注册次序决定。
     ///
-    /// 这里把四条边界一起钉住：
+    /// 这里把五条边界一起钉住：
     /// - `/` 与 `/login`（GET）无 cookie 也 200；
     /// - `/api/nonexistent` 无 cookie **401**（不是 404、更不是 200）；
     /// - 有 cookie 时 `/api/nonexistent` 是 **404 JSON**（不是 index.html）；
-    /// - 未认证的未知非 API 路径也是 200 外壳（没有任何设备数据可漏）。
+    /// - 未认证的未知非 API 路径也是 200 外壳（没有任何设备数据可漏）；
+    /// - 有 cookie 时 `/` 与 `/login` **仍然** 200（规格要求两种情形都 200）。
     #[tokio::test]
     async fn static_routes_are_public_but_api_404s_stay_behind_auth() {
         let d = tempdir();
@@ -699,6 +725,20 @@ mod tests {
                 .issue("admin")
                 .unwrap()
         );
+
+        // 已认证那一路也必须有断言：规格要求「已认证与未认证两种情况下
+        // `/` 与 `/login` 都返回 200」。少了它，把静态路由挪到
+        // `.layer(require_auth)` 之前/之后的回归不会被任何用例发现。
+        for uri in ["/", "/login"] {
+            let req = Request::builder()
+                .uri(uri)
+                .header("cookie", cookie.clone())
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "已认证的 {uri} 也必须 200");
+        }
+
         let req = Request::builder()
             .uri("/api/nonexistent")
             .header("cookie", cookie)

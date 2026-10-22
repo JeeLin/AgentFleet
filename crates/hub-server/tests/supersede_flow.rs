@@ -138,6 +138,53 @@ async fn a_reconnect_with_a_stale_gen_is_rejected_as_superseded() {
     }
 }
 
+/// 标准③ 的第三半：`seen == live` 时**不构成顶替**——同一代次不是「落后」。
+///
+/// 判据是 `seen < live`（严格小于），等于时放行。写成 `<=` 会让一台设备的
+/// 「它自己就是当前连接」的正常重连被判成已被顶替，于是它再也接不上。
+///
+/// 这条同时是 `handshake` 里兜底分支唯一一条「进得去、又不 return」的路：
+/// `seen` 与 `live` 都拿得到、且不满足 `seen < live`。
+#[tokio::test]
+async fn a_reconnect_reporting_the_live_gen_is_not_superseded() {
+    let hub = Hub::boot().await;
+    let (est1, node_id, kp) = connect_enrolled(&hub).await;
+    let gen1 = est1.auth_ok.gen;
+    drop(est1);
+    wait_disconnected(&hub, &node_id, Duration::from_secs(3)).await;
+
+    // 新连接顶掉旧的，并保持活着：`live` 拿得到
+    let _est2 = connect_once(&hub.ws_url(), &kp, Some(&node_id), None, device_info())
+        .await
+        .expect("reconnect must succeed");
+    let live = hub
+        .state
+        .connections()
+        .get(&node_id)
+        .expect("the new connection must be registered")
+        .gen;
+    assert!(live >= gen1, "代次只会推进: {gen1} → {live}");
+
+    // 带着**当前活着的那一代**回来：不是落后，必须放行
+    let est3 = connect_once(
+        &hub.ws_url(),
+        &kp,
+        Some(&node_id),
+        Some(live),
+        device_info(),
+    )
+    .await
+    .expect("带着当前 gen 回来不是被顶替，必须放行");
+    assert!(est3.auth_ok.gen > live, "新连接必须拿到更大的 gen");
+    // 放行的代价是顶替者被摘：这正是上面 `assert!(live >= gen1)` 想说的
+    let after = hub
+        .state
+        .connections()
+        .get(&node_id)
+        .expect("注册表里必须有一条");
+    assert_eq!(after.gen, est3.auth_ok.gen, "表里必须是这条新连接");
+}
+
 /// 标准③ 的边界：顶替者自己也走了 → 旧连接带着落后 gen 回来应当放行。
 ///
 /// 缺这条的话，「兜底」会退化成「一旦被顶替过就永久锁死」：

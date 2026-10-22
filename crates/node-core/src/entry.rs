@@ -143,6 +143,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// 轮转失败也**必须留下痕迹**：`rotate_at_startup` 是启动路径，失败时
+    /// 只靠 `log.rs` 返回的 `Err` 就静默了——排障时看到「日志没轮转」却
+    /// 不知道为什么。这里补写的那行就是原因。
+    #[test]
+    fn a_failed_rotation_is_recorded_rather_than_silently_dropped() {
+        let d = dir("rotate-fail");
+        let path = log::log_path(&d);
+        std::fs::create_dir_all(path.parent().expect("logs dir")).expect("mkdir");
+        std::fs::write(&path, vec![b'x'; (log::MAX_LOG_BYTES + 1) as usize]).expect("fill");
+        // 最旧一代换成目录：`remove_file` 对目录必失败（unlink 目录 = EPERM），
+        // 于是轮转整体报错。用目录而不是去掉写权限——root 绕过权限位，
+        // 而这个失败与以什么身份运行无关。
+        std::fs::create_dir(path.with_file_name("afcli.log.3")).expect("dir blocker");
+
+        rotate_at_startup(&d, ROLE_SUPERVISOR);
+
+        let text = std::fs::read_to_string(&path).expect("log still there");
+        assert!(
+            text.contains("cannot rotate"),
+            "轮转失败必须留下痕迹：{text:?}"
+        );
+        assert!(
+            text.contains("remove oldest rotation"),
+            "要说清是哪一步失败的，否则这行等于没写：{text:?}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// 秒级时间戳：日志不参与判定，也不需要毫秒排序。
     #[test]
     fn the_timestamp_is_seconds() {

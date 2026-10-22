@@ -37,6 +37,17 @@ type Logger = dyn Fn(&str) + Send + Sync;
 /// 用户要愣一下才反应过来的错位。
 const BIN_NAME: &str = "afcli";
 
+/// 「Hub 还没设密码」时打给用户的**可操作指引**。
+///
+/// **它打在 stdout 而不是日志文件里**：用户反馈的原话是「连不上又不报错」，
+/// 而日志要 `afcli log` 才看得见——指路的话必须在用户已经盯着的那块屏幕上。
+/// 一句「Hub 拒绝了这台设备」只会让人去查设备，而真相是「Hub 还没做首次
+/// setup」，那是浏览器里的一个动作。
+const SETUP_GUIDANCE: &str = "\
+afcli: the Hub has no password yet.
+  Open the Hub in a browser and finish the first-run setup (it prints a setup token).
+  This device keeps retrying on its own — nothing else is needed here.";
+
 /// 一次已认证连接上的循环被什么终止了。
 #[derive(Debug)]
 enum SessionEnd {
@@ -46,6 +57,15 @@ enum SessionEnd {
     Transport(String),
     /// 被顶替：终态，不重连（§7.1）。
     Superseded { gen: u64 },
+}
+
+/// 会话结束之后该干什么。
+#[derive(Debug)]
+enum AfterSession {
+    /// 退避后重连（短语进日志）。
+    Reconnect(String),
+    /// 终态：停下，不重连。
+    Stop,
 }
 
 /// worker 需要的全部东西。
@@ -76,14 +96,12 @@ impl Worker {
         }
     }
 
-    /// 自定日志落点（集成测试用：把帧处理过程收进内存缓冲）。
-    pub fn with_logger(mut self, log: impl Fn(&str) + Send + Sync + 'static) -> Self {
-        self.log = Box::new(log);
-        self
-    }
-
     /// 阻塞运行，返回进程退出码。正常情况下不返回。
-    pub fn work(&mut self) -> std::process::ExitCode {
+    ///
+    /// `out` 是**给用户看的那块屏幕**（进程 stdout）：有些话必须说到用户
+    /// 眼前，而不是只留在日志文件里——日志要 `afcli log` 才看得见，而
+    /// 「Hub 还没设密码，去浏览器里做完 setup」这句话正是这种话。
+    pub fn work<W: std::io::Write>(&mut self, out: W) -> std::process::ExitCode {
         self.rotate_log();
         // coverage: excluded — `work` 的 load 成功臂后段：需真 data_dir，
         // 与 `run_with` 同一不可达形状（:64）。
@@ -97,7 +115,7 @@ impl Worker {
             } // coverage: excluded — `run_with` 自建多线程 runtime，嵌在 `#[tokio::test]`
               // 里会 panic。
         };
-        self.run_with(identity)
+        self.run_with(identity, out)
     }
 
     /// 身份已备好之后的全部流程。
@@ -107,7 +125,11 @@ impl Worker {
     /// 见 `mod tests` 里的 `run_with` 用例。
     // coverage: excluded — 进程入口：自建多线程 runtime 并 block_on，
     // 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-    fn run_with(&mut self, mut identity: Identity) -> std::process::ExitCode {
+    fn run_with<W: std::io::Write>(
+        &mut self,
+        mut identity: Identity,
+        out: W,
+    ) -> std::process::ExitCode {
         let node_id = identity.node_id();
         self.say(&format!(
             "{BIN_NAME} worker starting, node_id={}, hub={}",
@@ -134,7 +156,7 @@ impl Worker {
         // 退出码协议里的三个非零码都带「这一版坏了」的语义，
         // coverage: excluded — 同上：`block_on` 是进程入口路径。
         // 而 worker 自己不打算判自己坏——它只会「正常停下」。
-        let _ = rt.block_on(self.connect_loop(&mut identity, node_id.as_deref()));
+        let _ = rt.block_on(self.connect_loop(&mut identity, node_id.as_deref(), out));
         std::process::ExitCode::SUCCESS
     }
 
@@ -145,8 +167,16 @@ impl Worker {
     ///
     /// 三个终止条件里只有 `superseded` 与「Hub 明确裁决」是终态（§7.1）——
     /// 传输层失败永远退避重试，设备的活儿不该因为 Hub 短暂重启就结束。
-    async fn connect_loop(&mut self, identity: &mut Identity, node_id: Option<&str>) -> i32 {
+    async fn connect_loop<W: std::io::Write>(
+        &mut self,
+        identity: &mut Identity,
+        node_id: Option<&str>,
+        mut out: W,
+    ) -> i32 {
         let mut attempt: u32 = 0;
+        // 「Hub 还没设密码」的指引**一个进程只说一次**：它是同一件事，
+        // 反复刷屏只会把真正要看的那一行淹掉。
+        let mut setup_notice_shown = false;
         loop {
             // 带上本节点见过的最大 gen。它是 §7.1 兜底路径的输入：
             // Hub 见它落后就回 `auth_fail{superseded}` 而不接管，
@@ -160,28 +190,23 @@ impl Worker {
             )
             .await;
             let end = match outcome {
-                Ok(mut est) => {
+                Ok(est) => {
                     // 连上了：退避归零（§7.0「每次成功连接后 attempt 归零」）。
                     attempt = 0;
-                    // coverage: excluded — `backfill_node_id` 失败需身份文件在会话中途
-                    // 变成只读或损坏。
-                    if let Err(e) = backfill_node_id(identity, est.enrolled, &est.auth_ok.node_id) {
-                        self.say(&format!("error: cannot record the issued node_id: {e}"));
-                        return exit_code::CRASH;
+                    // 认证成功过 = Hub 那边已经初始化过了：指引重新变成
+                    // 「有可能再遇到」，于是下一次再说一遍。
+                    setup_notice_shown = false;
+                    match self.run_established(identity, est).await {
+                        Ok(end) => end,
+                        Err(code) => return code,
                     }
-                    // 记下本次的 gen，**必须落盘**：进程重启后若从 0 开始，
-                    // 而 Hub 已经发到 42，这条连接永远被判成「已被顶替」——
-                    // 设备接不上且无自愈路径（子任务 7 标准⑧）。
-                    // coverage: excluded — `record_gen` 失败同上：需身份文件中途不可写。
-                    if let Err(e) = identity.record_gen(est.auth_ok.gen) {
-                        self.say(&format!("error: cannot record the connection gen: {e}"));
-                        return exit_code::CRASH;
-                    }
-                    let interval = Duration::from_millis(est.auth_ok.heartbeat_interval_ms);
-                    self.session(&mut est, interval).await
                 }
                 Err(outcome) => {
                     self.say(&format!("connect failed: {}", outcome_phrase(&outcome)));
+                    if !setup_notice_shown && is_hub_not_initialized(&outcome) {
+                        setup_notice_shown = true;
+                        drop(writeln!(out, "{SETUP_GUIDANCE}"));
+                    }
                     match reconnect::retry_after(&outcome, attempt, reconnect::jitter()) {
                         Some(d) => {
                             attempt = attempt.saturating_add(1);
@@ -208,35 +233,82 @@ impl Worker {
                     }
                 }
             };
-            let phrase = match &end {
-                SessionEnd::PeerClosed => "peer closed the connection".to_string(),
-                SessionEnd::Transport(detail) => detail.clone(),
-                SessionEnd::Superseded { gen } => {
-                    // §7.1 终态。再连一次就是和新连接互抢；supervisor 读到
-                    // 正常退出码会重拉 worker，新 worker 的第一次 auth 又会被
-                    // 同一条「同 node_id 顶替」规则挡住——不是无限互抢。
-                    //
-                    // 但这个终态**不能只靠内存**：supervisor 重拉出的新进程
-                    // 什么都不记得，会老老实实再连一次。所以持久化到身份文件，
-                    // 由人工介入清除（「被顶替」意味着同 node_id 另有连接活着）。
-                    // coverage: excluded — `mark_superseded` 失败需身份文件中途不可写。
-                    if let Err(e) = identity.mark_superseded(&crate::now_secs()) {
-                        self.say(&format!("error: cannot persist the superseded mark: {e}"));
-                        return exit_code::CRASH;
-                    }
+            match self.after_session(identity, &end) {
+                Err(code) => return code,
+                Ok(AfterSession::Stop) => return 0,
+                Ok(AfterSession::Reconnect(phrase)) => {
+                    attempt = attempt.saturating_add(1);
+                    let d = reconnect::backoff_with_jitter(attempt, reconnect::jitter());
                     self.say(&format!(
-                        "disconnected (superseded, gen {gen}); stopping without reconnecting"
+                        "disconnected ({phrase}); reconnecting in {}s (attempt {attempt})",
+                        d.as_secs()
                     ));
-                    return 0;
+                    tokio::time::sleep(d).await;
                 }
-            };
-            attempt = attempt.saturating_add(1);
-            let d = reconnect::backoff_with_jitter(attempt, reconnect::jitter());
+            }
+        }
+    }
+
+    /// 握手成功之后：记账 + 跑一次会话。
+    ///
+    /// **会话结束 = 通道全部释放**：通道与连接同生共死（约束 4：每设备
+    /// 一条 WS）。不释放的话，旧连接留下的 PTY 会在重连后继续往新连接上
+    /// 推数据——而 Hub 那边已经把账清了（`stream.rs` 的 `drop_node`），
+    /// 两边对「断连后通道还在不在」的假设正好相反。
+    async fn run_established(
+        &mut self,
+        identity: &mut Identity,
+        mut est: Established,
+    ) -> Result<SessionEnd, i32> {
+        if let Err(e) = backfill_node_id(identity, est.enrolled, &est.auth_ok.node_id) {
+            self.say(&format!("error: cannot record the issued node_id: {e}"));
+            return Err(exit_code::CRASH);
+        }
+        // 记下本次的 gen，**必须落盘**：进程重启后若从 0 开始，
+        // 而 Hub 已经发到 42，这条连接永远被判成「已被顶替」——
+        // 设备接不上且无自愈路径（子任务 7 标准⑧）。
+        // coverage: excluded — `record_gen` 失败同上：需身份文件中途不可写。
+        if let Err(e) = identity.record_gen(est.auth_ok.gen) {
+            self.say(&format!("error: cannot record the connection gen: {e}"));
+            return Err(exit_code::CRASH);
+        }
+        let interval = Duration::from_millis(est.auth_ok.heartbeat_interval_ms);
+        let end = self.session(&mut est, interval).await;
+        let released = channel::on_disconnect();
+        if released > 0 {
             self.say(&format!(
-                "disconnected ({phrase}); reconnecting in {}s (attempt {attempt})",
-                d.as_secs()
+                "released {released} channel(s) together with the connection"
             ));
-            tokio::time::sleep(d).await;
+        }
+        Ok(end)
+    }
+
+    /// 会话结束之后的处置。
+    ///
+    /// **`Superseded` 是终态**（§7.1）：再连一次就是和新连接互抢。它还必须
+    /// **持久化**——supervisor 重拉出的新进程什么都不记得，会老老实实再连
+    /// 一次，所以由人工介入清除（「被顶替」意味着同 node_id 另有连接活着）。
+    fn after_session(
+        &mut self,
+        identity: &mut Identity,
+        end: &SessionEnd,
+    ) -> Result<AfterSession, i32> {
+        match end {
+            SessionEnd::PeerClosed => Ok(AfterSession::Reconnect(
+                "peer closed the connection".to_string(),
+            )),
+            SessionEnd::Transport(detail) => Ok(AfterSession::Reconnect(detail.clone())),
+            SessionEnd::Superseded { gen } => {
+                // coverage: excluded — `mark_superseded` 失败需身份文件中途不可写。
+                if let Err(e) = identity.mark_superseded(&crate::now_secs()) {
+                    self.say(&format!("error: cannot persist the superseded mark: {e}"));
+                    return Err(exit_code::CRASH);
+                }
+                self.say(&format!(
+                    "disconnected (superseded, gen {gen}); stopping without reconnecting"
+                ));
+                Ok(AfterSession::Stop)
+            }
         }
     }
 
@@ -276,14 +348,7 @@ impl Worker {
                 // 那一臂上，所以通道繁忙不会让心跳迟到。
                 _ = pump.tick() => {
                     for (channel_id, frames) in channel::pump() {
-                        if let Err(e) = self.send_channel_frames(est, &channel_id, &frames).await {
-                            self.say(&format!(
-                                "pumped frame send failed ({} {}): {}",
-                                channel_id,
-                                frames.len(),
-                                outcome_phrase(&e)
-                            ));
-                        }
+                        self.pump_channel(est, &channel_id, &frames).await;
                     }
                 }
                 incoming = est.next_text() => match incoming {
@@ -309,6 +374,29 @@ impl Worker {
                     },
                 },
             }
+        }
+    }
+
+    /// 把一轮 `channel::pump` 的某一组帧发出去。**失败只留痕**，理由同
+    /// [`Self::send_channel_frames`]：Hub 判离站靠收不到心跳。
+    ///
+    /// 单独拆成一个方法（而不是内联在 `session` 的 `select!` 臂里）是因为
+    /// 那条臂只能在真连接上触达，而「发不出去时留痕」这件事值得被单独
+    /// 断言：它是 `pump` 语义的最后一环，也是唯一一句说得出
+    /// 「哪条通道、攒了多少帧、为什么没发走」的日志。
+    async fn pump_channel(
+        &self,
+        est: &mut Established,
+        channel_id: &str,
+        frames: &[protocol::Frame],
+    ) {
+        if let Err(e) = self.send_channel_frames(est, channel_id, frames).await {
+            self.say(&format!(
+                "pumped frame send failed ({} {}): {}",
+                channel_id,
+                frames.len(),
+                outcome_phrase(&e)
+            ));
         }
     }
 
@@ -457,24 +545,35 @@ fn outcome_phrase(outcome: &ConnOutcome) -> String {
     match outcome {
         ConnOutcome::Transport { detail } => detail.clone(),
         ConnOutcome::Superseded { gen } => format!("superseded by a newer connection (gen {gen})"),
-        ConnOutcome::Rejected { reason }
-            if reason == protocol::message::reason::HUB_NOT_INITIALIZED =>
-        {
+        ConnOutcome::Rejected { .. } if is_hub_not_initialized(outcome) => {
             // **这一种必须单独说清楚**：它意味的不是「Hub 拒绝了这台设备」，
             // 而是「Hub 还没有设密码」。两台进程谁都没坏——所以一句
-            // `hub refused: hub not initialized` 之后人不知道该动哪边，
-            // 重试一万次也一样（`Rejected` 本就该停）。
+            // `hub refused: hub not initialized` 之后人不知道该动哪边。
             //
             // 最常见的来路是 Hub 换了数据目录 / 重装过：设备带着 M0 的旧身份
             // 去连一台全新的 Hub，而 Hub 此时还没有用户，于是 enroll 一律被拒
             // （`hub-server/src/routes/ws.rs` 的 `hub_is_initialized` 判据）。
-            // 把「下一步做什么」写进短语里，运维才不必去翻 Hub 源码。
-            "the Hub has no password yet: complete first-run setup in the browser (it prints a setup token), then restart this device".to_string()
+            //
+            // **它不是终态**：等人在浏览器里做完 setup 就好了，所以设备自己
+            // 会一直重试——短语里必须说清这一点，否则用户以为要去重启设备。
+            "the Hub has no password yet: complete first-run setup in the browser (it prints a setup token); this device keeps retrying".to_string()
         }
         ConnOutcome::Rejected { reason } => format!("hub refused: {reason}"),
         // 只在「握手成功却被当成失败传进来」时才可能发生——那是 bug 不是状态。
         ConnOutcome::Authed { node_id, .. } => format!("already authed as {node_id}"),
     }
+}
+
+/// 这次失败是不是「Hub 还没初始化」。
+///
+/// **单独一个函数而不是内联比较**：它同时决定「要不要退避重试」
+/// （[`crate::reconnect::retry_after`]）与「要不要给用户指路」，
+/// 两处必须对同一件事给同一个答案。
+fn is_hub_not_initialized(outcome: &ConnOutcome) -> bool {
+    matches!(
+        outcome,
+        ConnOutcome::Rejected { reason } if reason == protocol::message::reason::HUB_NOT_INITIALIZED
+    )
 }
 
 /// enroll 时上传的设备描述。
@@ -496,6 +595,8 @@ mod tests {
     use super::*;
     use crate::Identity;
     use futures_util::{SinkExt, StreamExt};
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
     fn frame_of(t: &str, c: serde_json::Value) -> Frame {
         serde_json::from_value(serde_json::json!({"v":1,"seq":1,"t":t,"c":c})).expect("frame")
@@ -634,8 +735,12 @@ mod tests {
             "短语必须指出「先去完成首次 setup」：{phrase}"
         );
         assert!(
-            phrase.contains("restart"),
-            "短语必须说明设完密码要重启设备：{phrase}"
+            phrase.contains("keeps retrying"),
+            "短语必须说清设备会自己重试——说成「要重启」会让人以为必须手动干预：{phrase}"
+        );
+        assert!(
+            !phrase.contains("restart"),
+            "它不是终态，不该让用户去重启设备：{phrase}"
         );
         assert!(
             !phrase.contains("hub refused"),
@@ -758,10 +863,16 @@ mod tests {
                     let _ = ws.next().await;
                     return;
                 }
+                if matches!(tail, HubTail::HubNotInitialized) {
+                    let _ = send(&mut ws, auth_fail_not_initialized()).await;
+                    let _ = ws.next().await;
+                    return;
+                }
                 let _ = send(&mut ws, auth_ok()).await;
                 // coverage: excluded — `unreachable!`：上面已经 return，结构上不可达。
                 match tail {
                     HubTail::Reject => unreachable!("上面已返回"),
+                    HubTail::HubNotInitialized => unreachable!("上面已返回"),
                     HubTail::Close => {
                         let _ = ws.close(None).await;
                         let _ = ws.next().await;
@@ -796,6 +907,22 @@ mod tests {
                         drop(ws);
                     }
                     HubTail::Hang => futures_util::future::pending::<()>().await,
+                    HubTail::UnknownFrameThenHang => {
+                        // 一帧「整帧合法、类型名没听说过」的帧，之后**挂着不关**。
+                        //
+                        // 「不关」是这条用例的判据所在：会话若被未知帧打断，
+                        // worker 会去重连，而这个夹具只 accept 一次——于是立刻
+                        // 现出「connect failed」。会话若还活着，日志里除了
+                        // `authed as n_x` 就再没有别的。
+                        let _ = send(&mut ws, unknown_frame()).await;
+                        futures_util::future::pending::<()>().await;
+                    }
+                    HubTail::BadChannelPayload => {
+                        // 整帧合法，但 `open_channel` 的载荷不是对象：
+                        // 协议分叉，worker 必须按 Transport 断连重连。
+                        let _ = send(&mut ws, bad_channel_payload()).await;
+                        let _ = ws.next().await;
+                    }
                     HubTail::ReadOnly => {
                         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
                             .await;
@@ -830,8 +957,29 @@ mod tests {
         serde_json::json!({"v":1,"seq":2,"t":"auth_fail","c":{"reason":"identity mismatch"}})
     }
 
+    /// Hub 还没做首次 setup 时的拒绝。**理由短语必须与协议层一致**——
+    /// 它是「重试还是停下」的唯一判据（`reconnect::retry_after`）。
+    fn auth_fail_not_initialized() -> serde_json::Value {
+        serde_json::json!({"v":1,"seq":2,"t":"auth_fail","c":{
+            "reason": protocol::message::reason::HUB_NOT_INITIALIZED
+        }})
+    }
+
     fn superseded() -> serde_json::Value {
         serde_json::json!({"v":1,"seq":3,"t":"disconnect","c":{"reason":"superseded","gen":2}})
+    }
+
+    /// 一帧「整帧合法、类型名没听说过」的帧。
+    fn unknown_frame() -> serde_json::Value {
+        serde_json::json!({"v":1,"seq":3,"t":"some_future_type","c":{"anything":1}})
+    }
+
+    /// 整帧合法，但 `open_channel` 的载荷是数字而不是对象。
+    ///
+    /// 与 `unknown_frame` 的区别正是这条用例要分的两层：那一层是「没
+    /// 听说过」，这一层是「听说过但说岔了」。
+    fn bad_channel_payload() -> serde_json::Value {
+        serde_json::json!({"v":1,"seq":3,"t":"open_channel","c":5})
     }
 
     async fn send(
@@ -886,6 +1034,8 @@ mod tests {
         Close,
         Superseded,
         Reject,
+        /// Hub 还没做首次 setup：`auth_fail{hub not initialized}`。
+        HubNotInitialized,
         Hang,
         /// `auth_ok` 之后立刻 RST：worker 的心跳必然发不出去。
         RstAfterAuthOk,
@@ -895,6 +1045,10 @@ mod tests {
         BadJson,
         /// 握手后发一个二进制帧。
         Binary,
+        /// 握手后发一帧类型名没听说过的帧，然后**挂着不关**。
+        UnknownFrameThenHang,
+        /// 握手后发一帧整帧合法、但 `open_channel` 载荷不合协议的帧。
+        BadChannelPayload,
     }
 
     /// Hub 明确裁决身份 → worker **不重连**，正常退出码 0。
@@ -907,7 +1061,7 @@ mod tests {
         let url = fake_hub(HubTail::Reject);
         let mut w = Worker::new(d.clone(), url);
         let mut id = Identity::load_or_create(&d).expect("identity");
-        let code = w.connect_loop(&mut id, None).await;
+        let code = w.connect_loop(&mut id, None, std::io::sink()).await;
         assert_eq!(code, 0, "被拒绝是终态，但退出码是「正常退出」");
         let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
         assert!(log.contains("hub refused"), "{log}");
@@ -921,11 +1075,48 @@ mod tests {
         let url = fake_hub(HubTail::Superseded);
         let mut w = Worker::new(d.clone(), url);
         let mut id = Identity::load_or_create(&d).expect("identity");
-        let code = w.connect_loop(&mut id, None).await;
+        let code = w.connect_loop(&mut id, None, std::io::sink()).await;
         assert_eq!(code, 0);
         let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
         assert!(log.contains("superseded"), "{log}");
         assert!(log.contains("stopping without reconnecting"), "{log}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **Hub 还没做首次 setup 不是终态**：设备自己退避重试，并把
+    /// 「去浏览器里做完 setup」这句话打到 stdout。
+    ///
+    /// 判据有三层：① 连接没有停（超时到点 = 还在重试）；② stdout 上有
+    /// 可操作指引；③ 日志说的是「keeps retrying」而不是「停下等人」。
+    ///
+    /// **为什么必须打到 stdout**：用户反馈的原话是「连不上又不报错」，
+    /// 而日志要 `afcli log` 才看得见——指路的话必须落在用户已经盯着的
+    /// 那块屏幕上。
+    #[tokio::test]
+    async fn an_uninitialized_hub_keeps_retrying_and_points_at_the_browser() {
+        let (d, _w) = worker("hub-not-init");
+        let url = fake_hub(HubTail::HubNotInitialized);
+        let mut w = Worker::new(d.clone(), url);
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        let mut out: Vec<u8> = Vec::new();
+        let code = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            w.connect_loop(&mut id, None, &mut out),
+        )
+        .await;
+        assert!(code.is_err(), "Hub 没初始化时不该停下来，而该一直重试");
+        let text = String::from_utf8_lossy(&out).into_owned();
+        assert!(text.contains("setup"), "stdout 必须有可操作指引：{text:?}");
+        assert!(
+            text.contains("keeps retrying"),
+            "指引必须说清设备会自己重试：{text:?}"
+        );
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
+        assert!(log.contains("keeps retrying"), "{log}");
+        assert!(
+            !log.contains("stopping"),
+            "它不是终态，不该说「停下来等人」：{log}"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -940,7 +1131,7 @@ mod tests {
         let mut w = Worker::new(d.clone(), fake_hub(HubTail::ReadOnly));
         let code = tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            w.connect_loop(&mut id, None),
+            w.connect_loop(&mut id, None, std::io::sink()),
         )
         .await;
         assert!(code.is_err(), "连接还活着，loop 不该退出");
@@ -956,7 +1147,7 @@ mod tests {
         let (d, _w) = worker("bad-json");
         let mut id = Identity::load_or_create(&d).expect("identity");
         let mut w = Worker::new(d.clone(), fake_hub(HubTail::BadJson));
-        let h = tokio::spawn(async move { w.connect_loop(&mut id, None).await });
+        let h = tokio::spawn(async move { w.connect_loop(&mut id, None, std::io::sink()).await });
         let log = wait_for_log(&d, "reconnecting", std::time::Duration::from_secs(5)).await;
         assert!(log.contains("bad frame json"), "{log}");
         assert!(log.contains("reconnecting"), "{log}");
@@ -970,7 +1161,7 @@ mod tests {
         let (d, _w) = worker("binary");
         let mut id = Identity::load_or_create(&d).expect("identity");
         let mut w = Worker::new(d.clone(), fake_hub(HubTail::Binary));
-        let h = tokio::spawn(async move { w.connect_loop(&mut id, None).await });
+        let h = tokio::spawn(async move { w.connect_loop(&mut id, None, std::io::sink()).await });
         let log = wait_for_log(&d, "reconnecting", std::time::Duration::from_secs(5)).await;
         // 短语来自 conn.rs 的 next_text：二进制帧是「帧种类不对」而不是
         // 「读失败」——排障时两者指向不同方向。
@@ -994,7 +1185,7 @@ mod tests {
         // 3s 足够让它重连一次并被记进日志。超时到点 = 它还在重连。
         let code = tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            w.connect_loop(&mut id, None),
+            w.connect_loop(&mut id, None, std::io::sink()),
         )
         .await;
         // 第二次连的是同一个已关闭的端口 → 传输失败 → 继续退避，
@@ -1016,7 +1207,7 @@ mod tests {
         let mut id = Identity::load_or_create(&d).expect("identity");
         let code = tokio::time::timeout(
             std::time::Duration::from_millis(400),
-            w.connect_loop(&mut id, None),
+            w.connect_loop(&mut id, None, std::io::sink()),
         )
         .await;
         assert!(code.is_err(), "连接还活着，loop 不该退出");
@@ -1036,7 +1227,7 @@ mod tests {
         let url = fake_hub(HubTail::Superseded);
         let mut w = Worker::new(d.clone(), url);
         let mut id = Identity::load_or_create(&d).expect("identity");
-        let code = w.connect_loop(&mut id, None).await;
+        let code = w.connect_loop(&mut id, None, std::io::sink()).await;
         assert_eq!(code, 0);
         let reread = Identity::load_or_create(&d).expect("reread");
         assert_eq!(reread.node_id().as_deref(), Some("n_x"));
@@ -1054,7 +1245,7 @@ mod tests {
         let (d, _w) = worker("hb-send-fail");
         let mut id = Identity::load_or_create(&d).expect("identity");
         let mut w = Worker::new(d.clone(), fake_hub(HubTail::RstAfterAuthOk));
-        let h = tokio::spawn(async move { w.connect_loop(&mut id, None).await });
+        let h = tokio::spawn(async move { w.connect_loop(&mut id, None, std::io::sink()).await });
         let log = wait_for_log(
             &d,
             "heartbeat send failed",
@@ -1066,6 +1257,504 @@ mod tests {
             "必须留下发送失败的痕迹: {log}"
         );
         h.abort();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ---- 通道繁忙时的心跳节奏 ----
+
+    /// 让终端持续产出的命令。
+    ///
+    /// **必须有间隔**：一条全速输出的命令会把 CPU 与 socket 一起打满，
+    /// 那测到的会是「机器被压垮了」而不是「心跳臂被饿死了」。
+    const BUSY_COMMAND: &str = "while true; do echo tick; sleep 0.05; done\n";
+
+    /// 一个「握手后一直读」的假 Hub：它记下每次心跳到达的时刻。
+    ///
+    /// **它必须一直读**：worker 的通道帧与心跳走同一条连接，Hub 不读时
+    /// TCP 发送缓冲会满，于是测到的会是「socket 堵了」而不是
+    /// 「心跳臂被饿死了」——那是两回事。
+    fn fake_hub_recording_heartbeats(interval_ms: u64) -> (String, Arc<Mutex<Vec<Instant>>>) {
+        let arrivals: Arc<Mutex<Vec<Instant>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&arrivals);
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        std_listener.set_nonblocking(true).expect("nonblocking");
+        let addr = std_listener.local_addr().expect("addr");
+        let listener = tokio::net::TcpListener::from_std(std_listener).expect("listener");
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            rt.block_on(async move {
+                // coverage: excluded — 测试夹具：accept 失败臂在测试自己起的
+                // 监听器上构造不出。
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                // coverage: excluded — 同上：upgrade 失败臂。
+                let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                    return;
+                };
+                let _ = ws.next().await;
+                let _ = send(&mut ws, challenge()).await;
+                let _ = ws.next().await;
+                let _ = send(&mut ws, auth_ok_with_interval(interval_ms)).await;
+                // 开一条终端通道并让它持续产出——「通道繁忙」正是本用例的前提。
+                let _ = send(&mut ws, open_terminal_channel()).await;
+                let _ = send(&mut ws, terminal_input(BUSY_COMMAND)).await;
+                while let Some(msg) = ws.next().await {
+                    let Ok(tokio_tungstenite::tungstenite::Message::Text(text)) = msg else {
+                        continue;
+                    };
+                    // coverage: excluded — 真 PTY 通道上的断言：worker 只会发
+                    // 自己造的 JSON 帧，这条「解析不动」的 continue 在
+                    // `fake_hub_recording_heartbeats` 上构造不出（对端发的
+                    // 每帧都由 `Frame::push` 保证可解析）。
+                    let Ok(frame) = serde_json::from_str::<Frame>(&text) else {
+                        continue;
+                    };
+                    if frame.msg_type == "heartbeat" {
+                        sink.lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(Instant::now());
+                    }
+                }
+            });
+        });
+        (format!("ws://{addr}/ws"), arrivals)
+    }
+
+    fn auth_ok_with_interval(interval_ms: u64) -> serde_json::Value {
+        serde_json::json!({"v":1,"seq":2,"t":"auth_ok","c":{
+            "node_id":"n_x","protocol_version":1,"gen":1,"heartbeat_interval_ms":interval_ms
+        }})
+    }
+
+    /// 开一条终端通道。**信用给得很大**：这条用例要量的是心跳节奏，
+    /// 不是信用流控。
+    fn open_terminal_channel() -> serde_json::Value {
+        serde_json::json!({"v":1,"seq":3,"t":"open_channel","c":{
+            "channel_id":"ch-hb",
+            "connector":"terminal",
+            "params":{"shell":"/bin/sh"},
+            "credit_start":100000
+        }})
+    }
+
+    fn terminal_input(cmd: &str) -> serde_json::Value {
+        serde_json::json!({"v":1,"seq":4,"t":"channel_data","c":{
+            "channel_id":"ch-hb",
+            "payload":{"bytes": cmd}
+        }})
+    }
+
+    /// 一次**握手成功、随后对端正常关闭**的连接。
+    ///
+    /// 「帧发不出去」那几条臂都是「只留痕、不断连」，而要让真连接确定地
+    /// 写不进去，靠「让对端恰好在两帧之间消失」是个竞态。改用一个确定的
+    /// 形状：先读到对端的 Close，此后 tungstenite 的状态就是 Closed，
+    /// 再 `send` 必然返回错。
+    async fn established_after_peer_close(d: &Path) -> Established {
+        let url = fake_hub(HubTail::Close);
+        let id = Identity::load_or_create(d).expect("identity");
+        let mut est = conn::connect_once(&url, id.key(), None, None, device_info())
+            .await
+            .expect("handshake");
+        assert_eq!(
+            est.next_text().await.expect("close"),
+            None,
+            "对端应当正常关闭"
+        );
+        est
+    }
+
+    /// `auth_ok` 之后那笔**必须落盘**的账（首次 enroll，`node_id` 由 Hub
+    /// 签发）写不进去时，worker 必须按「这一版坏了」停下。
+    ///
+    /// 构造是把身份文件写成不可解析的 JSON：`set_node_id` 走「读-改-原子写」，
+    /// 读不动就报错。用损坏文件而不是只读文件，是因为 root 读得穿
+    /// `chmod 000`，那条路在 CI 里会静默变成空转（同
+    /// `backfill_reports_a_failed_write_instead_of_succeeding_quietly`）。
+    #[tokio::test]
+    async fn an_identity_that_cannot_record_the_issued_node_id_stops_the_loop() {
+        let (d, _w) = worker("record-node-id-fail");
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        std::fs::write(id.path(), b"{ not json").expect("corrupt");
+        // node_id 为 None = enroll 形态：假 Hub 的 auth_ok 就是「刚签发」。
+        let mut w = Worker::new(d.clone(), fake_hub(HubTail::Close));
+        let code = w.connect_loop(&mut id, None, std::io::sink()).await;
+        assert_eq!(code, exit_code::CRASH, "记不下 node_id 不能算正常退出");
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
+        assert!(log.contains("cannot record the issued node_id"), "{log}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `record_gen` 写不下盘时同样得停下：进程重启后若从 0 开始，而 Hub
+    /// 已经发到 42，这条连接永远被判成「已被顶替」——设备接不上且无自愈
+    /// 路径（子任务 7 标准⑧）。
+    ///
+    /// 让 `backfill` 先变成 no-op（带 `node_id` 重连 = `enrolled: false`），
+    /// 否则失败会被前一条臂挡住，这一条永远走不到。
+    #[tokio::test]
+    async fn an_identity_that_cannot_record_the_gen_stops_the_loop() {
+        let (d, _w) = worker("record-gen-fail");
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        std::fs::write(id.path(), b"{ not json").expect("corrupt");
+        let mut w = Worker::new(d.clone(), fake_hub(HubTail::Close));
+        let code = w.connect_loop(&mut id, Some("n_x"), std::io::sink()).await;
+        assert_eq!(code, exit_code::CRASH, "gen 没落盘必须停下");
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
+        assert!(log.contains("cannot record the connection gen"), "{log}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 被顶替要**落盘**；落不下时同样得停下——supervisor 重拉的新进程
+    /// 什么都不记得，只看内存的话它会老老实实再连一次，于是和新连接互抢。
+    ///
+    /// 构造让前面的 `record_gen` 成功而 `mark_superseded` 失败：盘上的
+    /// `last_seen_gen` 已高于这次 `auth_ok` 的 gen（`record_gen` 只前进不
+    /// 回退，于是它**不写盘**），而残留的 `identity.json.tmp` 让原子写的
+    /// `create_new(true)` 每次都失败。
+    #[tokio::test]
+    async fn a_superseded_mark_that_cannot_be_persisted_stops_the_loop() {
+        let (d, _w) = worker("superseded-mark-fail");
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        id.record_gen(5).expect("record a newer gen");
+        std::fs::write(d.join("identity.json.tmp"), b"").expect("leftover tmp");
+        // 带 node_id 重连：`enrolled = false`，于是 backfill 是 no-op。
+        let mut w = Worker::new(d.clone(), fake_hub(HubTail::Superseded));
+        let code = w.connect_loop(&mut id, Some("n_x"), std::io::sink()).await;
+        assert_eq!(code, exit_code::CRASH, "裁决没落盘就必须停下");
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
+        assert!(log.contains("cannot persist the superseded mark"), "{log}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 通道帧**发不出去只留痕**，不当成断连理由：Hub 判离站靠收不到心跳。
+    ///
+    /// 两个发送点各走一次：泵臂的聚合发送（`send_channel_frames`）与它的
+    /// 留痕包装（`pump_channel`）。那句日志是「哪条通道、攒了多少帧、
+    /// 为什么没发走」的唯一去处。
+    #[tokio::test]
+    async fn channel_frames_that_cannot_be_sent_only_leave_a_trace() {
+        let (d, _w) = worker("channel-send-fail");
+        let w = Worker::new(d.clone(), "ws://hub/ws".to_string());
+        let mut est = established_after_peer_close(&d).await;
+        let frames = vec![Frame::push("channel_data", 0, serde_json::json!({"c":{}}))];
+        let direct = w.send_channel_frames(&mut est, "ch-p", &frames).await;
+        assert!(direct.is_err(), "对端已关闭，发送必须报错");
+        w.pump_channel(&mut est, "ch-p", &frames).await;
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
+        assert!(
+            log.contains("channel frame send failed (ch-p channel_data)"),
+            "{log}"
+        );
+        assert!(log.contains("pumped frame send failed (ch-p 1)"), "{log}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `on_channel_message` 的三条归类：不是通道帧 / 吸收掉 / 要回帧。
+    ///
+    /// `Action::None` 那条在真会话里没有任何可观察行为（那正是它存在的
+    /// 理由：§5 的未知通道静默），所以只能在这一层单独钉住——否则「静默」
+    /// 与「根本没走到这里」在日志上长得一模一样。
+    #[tokio::test]
+    async fn on_channel_message_sorts_frames_into_none_and_send() {
+        let (d, _w) = worker("channel-message-sort");
+        let w = Worker::new(d.clone(), "ws://hub/ws".to_string());
+        let mut est = established_after_peer_close(&d).await;
+        let not_channel = frame_of("heartbeat", serde_json::json!({"anything":1}));
+        assert!(w.on_channel_message(&mut est, &not_channel).await.is_none());
+        let absorbed = frame_of(
+            "channel_data",
+            serde_json::json!({"channel_id":"ch-never-opened","payload":{"bytes":"x"}}),
+        );
+        let absorbed_end = w.on_channel_message(&mut est, &absorbed).await;
+        assert!(absorbed_end.is_none(), "打在没开过的通道上必须静默（§5）");
+        // 要回帧：`close_channel` 对表里没有的通道也回一帧 `close_channel`。
+        let closing = frame_of(
+            "close_channel",
+            serde_json::json!({"channel_id":"ch-never-opened","reason":"done"}),
+        );
+        let closing_end = w.on_channel_message(&mut est, &closing).await;
+        assert!(
+            closing_end.is_none(),
+            "回帧发不出去不是协议分叉，会话不该结束"
+        );
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
+        assert!(
+            log.contains("channel frame send failed (close_channel)"),
+            "{log}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ---- session 内帧分派的各条臂 ----
+
+    /// `on_control_frame` 对**非 disconnect** 的一律忽略，哪怕载荷是坏的。
+    ///
+    /// 反例就在旁边：把它写成「先解载荷、解不动就断连」，那么 Hub 发一帧
+    /// 未知类型（其载荷按 `Disconnect` 解必然失败）就会把设备踢下线——
+    /// 这正是约束 14 要挡的。
+    #[test]
+    fn a_frame_that_is_not_disconnect_never_ends_the_session() {
+        let (d, w) = worker("ctrl-not-disconnect");
+        for t in ["auth_ok", "disconnectx", "disconnec", "DISCONNECT"] {
+            let f = frame_of(t, serde_json::json!({"reason":12345}));
+            assert!(
+                w.on_control_frame(&f).is_none(),
+                "{t} 不是 disconnect，必须忽略（载荷也是坏的）"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `disconnect{admin}` → `PeerClosed`，设备照常退避重连。
+    ///
+    /// 只有 `superseded` 是终态（§7.1）；用户手动下线意味着**设备没坏**，
+    /// 停下来等人是错的——它该自己找回来。
+    ///
+    /// 反向对照放在同一条里：`superseded` 必须**确实**给出终态，否则
+    /// 「一律返回 PeerClosed」的实现会被这条同时放行。
+    #[test]
+    fn an_admin_disconnect_keeps_the_device_alive() {
+        let (d, w) = worker("ctrl-reason");
+        let admin = frame_of("disconnect", serde_json::json!({"reason":"admin"}));
+        assert!(
+            matches!(w.on_control_frame(&admin), Some(SessionEnd::PeerClosed)),
+            "手动下线不是终态，设备该继续重连"
+        );
+        let superseded = frame_of("disconnect", serde_json::json!({"reason":"superseded"}));
+        let ended = w.on_control_frame(&superseded);
+        assert!(
+            matches!(ended, Some(SessionEnd::Superseded { .. })),
+            "被顶替才是终态"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `disconnect` 的 `reason` **不在枚举里** → 按 `bad disconnect` 结束。
+    ///
+    /// 它是协议分叉而不是「这条消息没听懂」：`reason` 决定的是「停下还是
+    /// 重连」这种**不可逆**的动作，猜错方向最坏的形状是设备永久停摆
+    /// （当成 superseded）或永久撞墙（当成 admin 反复重连）。所以不猜，
+    /// 按 Transport 退避重连并留痕。
+    #[test]
+    fn an_unknown_disconnect_reason_is_not_guessed() {
+        let (d, w) = worker("ctrl-unknown-reason");
+        for reason in ["shutdown", "some_future_reason", ""] {
+            let f = frame_of("disconnect", serde_json::json!({"reason":reason}));
+            match w.on_control_frame(&f) {
+                Some(SessionEnd::Transport(detail)) => {
+                    assert!(detail.starts_with("bad disconnect:"), "{detail}")
+                }
+                // coverage: excluded — 只在上面这条断言失败时执行；`panic!` 的
+                // 参数行被 llvm-cov 记为 miss（多行宏已知现象）。
+                other => panic!("{reason} 不该被猜成 {other:?}"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `outcome_phrase` 的 `Authed` 臂说的是「已经认证过了」，并**点名
+    /// node_id**——那是「握手成功却被当成失败传进来」时才可能出现的
+    /// 分支（bug 不是状态），日志要能直接指到那个 node。
+    #[test]
+    fn an_authed_outcome_says_which_node_it_was() {
+        let phrase = outcome_phrase(&ConnOutcome::Authed {
+            node_id: "n_z".into(),
+            protocol_version: 1,
+            gen: 5,
+            heartbeat_interval_ms: 15_000,
+            enrolled: true,
+        });
+        assert!(phrase.contains("n_z"), "{phrase}");
+        assert!(phrase.contains("authed"), "{phrase}");
+    }
+
+    /// `is_hub_not_initialized` 只对那一个协议理由为真。
+    ///
+    /// 它同时决定「要不要退避重试」与「要不要给用户指路」，两处必须对
+    /// 同一件事给同一个答案——所以判据在这里单独钉住，包括大小写与
+    /// 非 `Rejected` 的反例（把理由串塞进 `Transport` 的 detail 里不算）。
+    #[test]
+    fn only_the_hub_not_initialized_reason_counts() {
+        assert!(is_hub_not_initialized(&ConnOutcome::Rejected {
+            reason: protocol::message::reason::HUB_NOT_INITIALIZED.into(),
+        }));
+        for other in ["identity mismatch", "", "HUB_NOT_INITIALIZED"] {
+            assert!(
+                !is_hub_not_initialized(&ConnOutcome::Rejected {
+                    reason: other.into(),
+                }),
+                "{other} 不该被当成「Hub 还没初始化」"
+            );
+        }
+        assert!(!is_hub_not_initialized(&ConnOutcome::Transport {
+            detail: protocol::message::reason::HUB_NOT_INITIALIZED.into(),
+        }));
+    }
+
+    /// `after_session` 的三种归类：只有 `Superseded` 是终态，且**必须落盘**。
+    ///
+    /// 落盘那一半不是附带检查：supervisor 重拉出的新进程什么都不记得，
+    /// 只看内存的话它会老老实实再连一次。
+    #[test]
+    fn after_session_only_stops_on_superseded_and_persists_it() {
+        let (d, _w) = worker("after-session");
+        let mut w = Worker::new(d.clone(), "ws://hub/ws".to_string());
+        let mut id = Identity::load_or_create(&d).expect("identity");
+
+        assert!(matches!(
+            w.after_session(&mut id, &SessionEnd::PeerClosed),
+            Ok(AfterSession::Reconnect(_))
+        ));
+        assert!(matches!(
+            w.after_session(&mut id, &SessionEnd::Transport("boom".into())),
+            Ok(AfterSession::Reconnect(_))
+        ));
+        assert!(matches!(
+            w.after_session(&mut id, &SessionEnd::Superseded { gen: 9 }),
+            Ok(AfterSession::Stop)
+        ));
+        let reread = Identity::load_or_create(&d).expect("reread");
+        assert!(reread.is_superseded(), "裁决必须持久化，重启后不再重连");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `send_heartbeat` 在一段**活着的**连接上必须发得出去。
+    ///
+    /// 这条用例一度是空的：只断言「日志里没有 heartbeat send failed」，
+    /// 而把函数体改成直接 `return Ok(())`（一帧都不发）时它照样是绿的——
+    /// 因为不发也就不会失败。所以判据改成**在对端计数**：假 Hub 记下行的
+    /// 每一帧，`heartbeat` 至少到一次。
+    ///
+    /// 与 `the_first_heartbeat_arrives_without_waiting_for_the_interval`
+    /// 的分工：那条量的是「第一个周期之内就到」，这条量的是「确实到了」。
+    #[tokio::test]
+    async fn a_heartbeat_on_a_live_connection_is_sent() {
+        let (d, _w) = worker("hb-live");
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        let (url, arrivals) = fake_hub_recording_heartbeats(15_000);
+        let mut w = Worker::new(d.clone(), url);
+        let h = tokio::spawn(async move { w.connect_loop(&mut id, None, std::io::sink()).await });
+        let log = wait_for_log(&d, "authed as n_x", std::time::Duration::from_secs(5)).await;
+        assert!(!log.contains("heartbeat send failed"), "{log}");
+        // 对端真的收到了：这是「发出去了」的唯一判据。
+        assert!(
+            !arrivals
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "对端一帧心跳都没收到"
+        );
+        h.abort();
+        crate::channel::on_disconnect();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **`session` 里来的未知帧类型**：整帧是合法 JSON、类型名却不是
+    /// 任何一种通道帧 → 忽略，会话继续。
+    ///
+    /// 上面 `a_frame_that_is_not_disconnect_never_ends_the_session` 钉的是
+    /// `on_control_frame` 那一层；这条钉的是**同一帧继续走到**
+    /// `on_channel_message` 之后也返回 `None`。少了它，「未知类型」的
+    /// 忽略就只被验证了一半——而 `session` 是先问控制面再问通道面的，
+    /// 两处都得给 `None` 才行。
+    ///
+    /// 判据是「连接没断」：Hub 发完未知帧后再正常 Close，于是 loop 会走
+    /// 完整的 `PeerClosed → 重连` 一路；而它断没断，看的是日志里有没有
+    /// 「reconnecting」以及**有没有**把它当成协议错误。
+    #[tokio::test]
+    async fn an_unknown_frame_from_the_hub_does_not_end_the_session() {
+        let (d, _w) = worker("unknown-in-session");
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        let mut w = Worker::new(d.clone(), fake_hub(HubTail::UnknownFrameThenHang));
+        let h = tokio::spawn(async move { w.connect_loop(&mut id, None, std::io::sink()).await });
+        let log = wait_for_log(&d, "authed as n_x", std::time::Duration::from_secs(5)).await;
+        assert!(log.contains("authed as n_x"), "{log}");
+        // 给未知帧留出被打断的时间：3s 足够一次完整的「断连 → 退避 → 重连」。
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
+        assert!(!log.contains("reconnecting"), "未知帧不该让会话结束：{log}");
+        assert!(!log.contains("disconnected"), "未知帧不该让会话结束：{log}");
+        assert_eq!(
+            log.matches("authed as n_x").count(),
+            1,
+            "未知帧若打断了会话，worker 会去重连，于是握第二次手：{log}"
+        );
+        h.abort();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **通道帧载荷解不开** → `Action::End` → 会话按 `Transport` 结束并
+    /// 退避重连，日志**点名是哪一种帧坏了**。
+    ///
+    /// 这与「帧本身不是 JSON」是两层：那一层是整帧解不开（`bad frame
+    /// json`），这一层是整帧合法、载荷不合协议。后者是**协议分叉**——
+    /// 留着这条连接只会让后面每一帧都解不开，所以必须断。
+    ///
+    /// 判据取 `bad open_channel payload` 这个完整短语：只断言「重连了」
+    /// 的话，把 `Action::End` 改成 `Action::None` 的实现照样是绿的，而
+    /// 那个改法会让设备在协议分叉时安静地留着一条坏连接。
+    #[tokio::test]
+    async fn a_channel_frame_with_an_unparsable_payload_ends_the_session() {
+        let (d, _w) = worker("bad-channel-payload");
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        let mut w = Worker::new(d.clone(), fake_hub(HubTail::BadChannelPayload));
+        let h = tokio::spawn(async move { w.connect_loop(&mut id, None, std::io::sink()).await });
+        let log = wait_for_log(
+            &d,
+            "bad open_channel payload",
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            log.contains("reconnecting"),
+            "载荷解不开要按 Transport 重连：{log}"
+        );
+        h.abort();
+        crate::channel::on_disconnect();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **通道繁忙时心跳仍按时发出**。
+    ///
+    /// 心跳 ticker 与通道 pump 是 `select!` 的两条独立臂，PTY 的读另在
+    /// 独立线程——但那只是**结构**上的保证。这条用例把它变成**行为**上
+    /// 的保证：一条持续产出的终端通道摆在旁边，心跳仍然按
+    /// `heartbeat_interval_ms` 到达。
+    ///
+    /// 退化形态（把 pump 臂改成串行 `await`、或在这一臂里做阻塞 IO）
+    /// 会让心跳迟到甚至停摆——那正是这条用例要挡住的。
+    #[tokio::test]
+    async fn a_busy_channel_does_not_starve_the_heartbeat() {
+        let (d, _w) = worker("hb-busy");
+        let (url, arrivals) = fake_hub_recording_heartbeats(300);
+        let mut w = Worker::new(d.clone(), url);
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        let h = tokio::spawn(async move { w.connect_loop(&mut id, None, std::io::sink()).await });
+        // 让会话跑起来：握手、开通道、持续产出。
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        h.abort();
+        crate::channel::on_disconnect();
+
+        let seen = arrivals.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        // coverage: excluded — `assert!` 的格式参数行（多行宏已知现象）：只在
+        // 上面这条断言失败时才执行。
+        assert!(
+            seen.len() >= 5,
+            "4 秒里只收到 {} 次心跳（周期 300ms）：心跳被通道饿死了",
+            seen.len()
+        );
+        let mut max_gap = std::time::Duration::ZERO;
+        for pair in seen.windows(2) {
+            max_gap = max_gap.max(pair[1].saturating_duration_since(pair[0]));
+        }
+        assert!(
+            max_gap < std::time::Duration::from_millis(1500),
+            "心跳最大间隔 {max_gap:?} 远超周期 300ms"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }

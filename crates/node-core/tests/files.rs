@@ -5,9 +5,14 @@
 //! `open_channel.params` 进来，越界错误得变成一帧 `channel_error`
 //! 而不是让整条连接断掉。**这是 Hub 实际会踩的那条路。**
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
-use node_core::channel;
+use node_core::channel::{self, Action};
 use node_core::connector::names;
 use protocol::channel::{ChannelData, OpenChannel};
 use protocol::frame::Frame;
@@ -48,10 +53,21 @@ fn data_frame(channel_id: &str, payload: serde_json::Value) -> Frame {
     )
 }
 
+/// `Action` 里的帧。
+///
+/// **不提供 `.frames()` 便捷方法**：它会把「没有应答」（`Action::None`）
+/// 与「连接该结束了」（`Action::End`）都变成一个空切片。
+fn frames_of(action: &Action) -> &[Frame] {
+    match action {
+        Action::Send(frames) => frames,
+        other => panic!("expected frames, got {other:?}"),
+    }
+}
+
 /// 一次 `data` 之后的全部回帧。files 是同步的：一帧进、一帧出。
 fn after_data(channel_id: &str, payload: serde_json::Value) -> Vec<Frame> {
     let action = channel::on_channel_frame(&data_frame(channel_id, payload));
-    action.frames().to_vec()
+    frames_of(&action).to_vec()
 }
 
 fn payload_of(frames: &[Frame]) -> serde_json::Value {
@@ -95,7 +111,10 @@ fn listing_a_directory_over_a_channel_comes_back_as_channel_data() {
     let (_base, ws) = sandbox();
 
     let ready = channel::on_channel_frame(&open_frame("ch-list", &ws));
-    assert!(!ready.frames().is_empty(), "开通道至少要回 channel_ready");
+    assert!(
+        !frames_of(&ready).is_empty(),
+        "开通道至少要回 channel_ready"
+    );
 
     let out = after_data("ch-list", serde_json::json!({ "op": "list" }));
     assert_eq!(out.len(), 1, "一次请求一次应答：{out:?}");
@@ -229,16 +248,16 @@ fn opening_files_without_a_workspace_root_fails_the_open() {
         serde_json::to_value(&spec).expect("open spec"),
     );
     let action = channel::on_channel_frame(&frame);
-    assert_eq!(action.frames().len(), 1, "{:?}", action.frames());
+    let frames = frames_of(&action);
+    assert_eq!(frames.len(), 1, "{frames:?}");
     assert!(
-        is_error(&action.frames()[0]),
-        "缺根必须开不出来，而不是退化成当前目录：{:?}",
-        action.frames()
+        is_error(&frames[0]),
+        "缺根必须开不出来，而不是退化成当前目录：{frames:?}"
     );
     // **绝不回落 cwd**：那会让文件面板看起来能用（它列得出东西，只是列的
     // 不是用户那个工作区），而越界检查此时判的是「相对进程启动目录」，
     // 那等于没有边界（约束 3）。
-    let reason = action.frames()[0].c["reason"].as_str().expect("reason");
+    let reason = frames[0].c["reason"].as_str().expect("reason");
     assert!(
         reason.contains("no workspace root"),
         "要说清是「没给工作区」而不是别的原因：{reason}"
@@ -266,10 +285,10 @@ fn the_workspace_root_really_reaches_the_connector() {
     let (base, ws) = sandbox();
 
     let ready = channel::on_channel_frame(&open_frame("ch-shape", &ws));
+    let ready_frames = frames_of(&ready);
     assert!(
-        !ready.frames().is_empty() && !is_error(&ready.frames()[0]),
-        "带根的 open 必须成功：{:?}",
-        ready.frames()
+        !ready_frames.is_empty() && !is_error(&ready_frames[0]),
+        "带根的 open 必须成功：{ready_frames:?}"
     );
 
     // 根里的目录列得出来，且**只有它**列得出来——把 workspace_root 丢掉的
@@ -306,7 +325,8 @@ fn a_workspace_root_that_is_gone_says_which_root_it_could_not_use() {
     let base = tempfile::tempdir().expect("tempdir");
     let gone = base.path().join("deleted");
     let action = channel::on_channel_frame(&open_frame("ch-gone", &gone));
-    let err = &action.frames()[0];
+    let frames = frames_of(&action);
+    let err = &frames[0];
     assert!(is_error(err), "{err:?}");
     let reason = err.c["reason"].as_str().expect("reason");
     assert!(reason.contains("not usable"), "要给出错在哪一步：{reason}");
@@ -330,9 +350,8 @@ fn the_workspace_root_is_a_first_class_param_not_connector_private() {
         payload["params"]["workspace_root"],
         ws.to_string_lossy().as_ref()
     );
-    assert!(
-        !channel::on_channel_frame(&frame).frames().is_empty(),
-        "带根的 open 必须至少回 channel_ready"
-    );
+    let action = channel::on_channel_frame(&frame);
+    let frames = frames_of(&action);
+    assert!(!frames.is_empty(), "带根的 open 必须至少回 channel_ready");
     channel::on_disconnect();
 }

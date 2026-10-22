@@ -10,8 +10,6 @@
 //! 注意：**不要**把连接 / 进程逻辑挪进来——本文件只负责「解析 + 分派」。
 //! supervisor 在 [`supervisor`]，worker 在 [`node_core::worker`]：连接能力属于
 //! `node-core`（connector 只能被已认证连接使用），本 crate 只决定「起哪个角色」。
-//! `main.rs` 保持极薄、每条分支都能由「spawn 二进制 + 不同 argv」走到
-//! （覆盖率门禁要求 main.rs 100%）。
 
 pub mod log_cmd;
 pub mod runargs;
@@ -137,12 +135,9 @@ where
     }
 }
 
-/// 跑 `run`：按角色分派到 supervisor 或 worker。
+/// 跑 `run`：备好环境（数据目录、Hub 地址）后转 [`dispatch`]。
 ///
-/// 角色判定只有 [`role_of`] 一处，但**两处都要用**——本函数决定现在跑谁，
-/// supervisor 用 `worker_argv` 决定下次 spawn 谁。两处判定漂移的后果是
-/// supervisor 把自己当 worker（或反过来）spawn 出一个 supervisor，
-/// 设备变成两个进程互相等对方退出。
+/// **它不做角色判定**：角色只看 argv，而那件事只有 [`role_of`] 一处。
 // coverage: excluded — 进程入口：真建数据目录、真解析 hub url，再转
 // `dispatch`（可测接缝）。单元测试从 `dispatch` 进入。
 fn run_node<W1, W2>(args: &[String], out: W1, mut err: W2) -> std::process::ExitCode
@@ -179,7 +174,10 @@ fn dispatch<W: std::io::Write>(
     match role_of(args) {
         Role::Worker => {
             let mut w = node_core::worker::Worker::new(data_dir, hub_url);
-            w.work()
+            // **stdout 直达用户**：worker 要说的话（「Hub 还没设密码，去浏览器
+            // 里做完 setup」）必须落在用户已经盯着的那块屏幕上，而不是只进
+            // 日志文件——日志要 `afcli log` 才看得见。
+            w.work(out)
         }
         Role::Supervisor => {
             // **完整 argv**（不含程序名）原样传下去：用户给的参数全部自动继承

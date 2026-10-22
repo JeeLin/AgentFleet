@@ -52,10 +52,15 @@ pub fn backoff_with_jitter(attempt: u32, jitter_factor: f64) -> Duration {
 
 /// 这次连接失败之后要不要重连、退避多久。
 ///
-/// **只有传输层失败才退避重连**：
+/// **传输层失败一定退避重连**：
 /// - `Superseded` 是终态（§7.1）——再连一次就是和新连接互抢；
-/// - `Rejected` 是 Hub 对身份的明确裁决，重试一万次结果一样（§7.1），
+/// - `Rejected` 大多是 Hub 对身份的明确裁决，重试一万次结果一样（§7.1），
 ///   该做的是停下来让人看见，而不是把设备刷成日志噪声。
+///
+/// **唯一的例外是「Hub 还没初始化」**：那不是「Hub 拒绝了这台设备」，而是
+/// 「一次性前置条件没满足」——等人在浏览器里做完首次 setup 就好了。把它
+/// 当终态，设备就会在 supervisor 眼里变成「连不上又退干净了」的退出风暴，
+/// 症状是「不报错也不连上」。等得起就等：退避重试。
 ///
 /// 握手成功（`Ok`）不在这里出现：那条路直接进消息循环。
 /// 但 `Authed` 变体仍被显式列出——合并进终态那两臂会让将来给
@@ -63,6 +68,11 @@ pub fn backoff_with_jitter(attempt: u32, jitter_factor: f64) -> Duration {
 pub fn retry_after(outcome: &ConnOutcome, attempt: u32, jitter_factor: f64) -> Option<Duration> {
     match outcome {
         ConnOutcome::Transport { .. } => Some(backoff_with_jitter(attempt, jitter_factor)),
+        ConnOutcome::Rejected { reason }
+            if reason == protocol::message::reason::HUB_NOT_INITIALIZED =>
+        {
+            Some(backoff_with_jitter(attempt, jitter_factor))
+        }
         ConnOutcome::Superseded { .. }
         | ConnOutcome::Rejected { .. }
         | ConnOutcome::Authed { .. } => None,

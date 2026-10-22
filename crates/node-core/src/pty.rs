@@ -143,6 +143,9 @@ impl Pty {
                 &winsize,
             )
         };
+        // coverage: excluded — 下面这一臂（含错误串的 `format!` 参数行）要求
+        // `forkpty` 失败：`/dev/ptmx` 用尽或 fd 耗尽，测试环境无可控构造手段
+        // （防御性兜底）。
         if pid < 0 {
             return Err(PtyError::Start(format!(
                 "forkpty failed: {}",
@@ -150,6 +153,10 @@ impl Pty {
             )));
         }
 
+        // coverage: excluded — 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的
+        // **子进程**，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，
+        // 子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与
+        // `execvp` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
         if pid == 0 {
             // ---- 子进程 ----
             // `forkpty` 已经替我们做好 setsid + TIOCSCTTY + dup2 0/1/2，
@@ -255,6 +262,9 @@ impl Pty {
             if n < 0 {
                 return Err(std::io::Error::last_os_error().into());
             }
+            // coverage: excluded — `n == 0` 臂（`BrokenPipe` + "terminal is
+            // gone"）：`write(2)` 对一根活着的 PTY 只会返回正数或负 errno，
+            // 返回 0 需要「是终端却一个字节都不收」的稳定时序，测试环境造不出来。
             if n == 0 {
                 // 写不进任何字节：PTY 被关掉了。说清楚而不是空转。
                 return Err(PtyError::Io(std::io::Error::new(
@@ -411,6 +421,27 @@ mod tests {
         pty.close();
     }
 
+    /// `read_fd` 只把 `EIO` 当「读完了」：别的 errno 必须**报出来**。
+    ///
+    /// 判据是一根只写的 fd（`read` 必然 `EBADF`，且它是真的打开着的，所以
+    /// `OwnedFd` 关它不会触发 IO-safety 中止——用未打开的 fd 号会让测试以
+    /// SIGABRT 结束）。`EIO` 与其它 errno 混为一谈的后果是「读失败被静默当成
+    /// 子进程退出」，于是真的读错误在用户眼里是「终端自己关了」。
+    #[test]
+    fn a_read_error_that_is_not_eio_is_reported_not_swallowed() {
+        let path = std::ffi::CString::new("/dev/null").expect("cstr");
+        let wfd = unsafe { libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
+        assert!(wfd >= 0, "open /dev/null");
+        let owned = unsafe { OwnedFd::from_raw_fd(wfd) };
+        let mut buf = [0u8; 8];
+        let err =
+            read_fd(owned.as_raw_fd(), &mut buf).expect_err("只写 fd 上 read 必须报错，不是 0");
+        assert!(
+            matches!(err, PtyError::Io(_)),
+            "非 EIO 的读错误要原样报出来：{err:?}"
+        );
+    }
+
     /// 写进 PTY 的字节能被对面读到——**并且 PTY 的行规程真的在工作**：
     /// 一行规矩是真的终端与一根管道的区别，也正是「方向键 / `Ctrl-C` /
     /// 补全」这些键位在 xterm.js 上能用的原因。
@@ -429,31 +460,37 @@ mod tests {
         // 所以「写进去再等它出现」本身就是闭环。而等一个具体字符
         // 会在 root（提示符是 `#`）与普通用户（`$`）之间假红。
         pty.write(b"hello-pty\n").expect("write");
-        let seen = read_until(&pty, b"hello-pty");
+        let seen = crate::pty::testutil::read_until(&pty, b"hello-pty");
+        let text = String::from_utf8_lossy(&seen);
         assert!(
             seen.windows(9).any(|w| w == b"hello-pty"),
-            "PTY 没把输入回显回来: {}",
-            String::from_utf8_lossy(&seen)
+            "PTY 没把输入回显回来: {text}"
         );
     }
 
     /// 子进程退出后 `read` 返回 0 而不是 `EIO` 报错。
     #[test]
     fn the_child_exiting_ends_the_read_stream_cleanly() {
-        let pty = Pty::spawn("true", &[], Size { cols: 80, rows: 24 }).expect("spawn");
-        let mut buf = [0u8; 16];
+        // **先产出再退出**（`echo` 而不是 `true`）：零输出的子进程第一轮就撞上
+        // EOF，「读到字节」那一轮根本没被验到。
+        let pty = Pty::spawn(
+            "/bin/echo",
+            &["bye".to_string()],
+            Size { cols: 80, rows: 24 },
+        )
+        .expect("spawn");
+        let mut buf = [0u8; 64];
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            let n = pty.read(&mut buf).expect("read");
-            if n == 0 {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "子进程退出了却读不出 EOF"
-            );
+        let mut seen = 0;
+        let mut n = 1;
+        while n > 0 {
+            n = pty.read(&mut buf).expect("read");
+            seen += n;
+            let in_time = std::time::Instant::now() < deadline;
+            assert!(in_time, "子进程退出了却读不出 EOF");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        assert!(seen > 0, "先读到子进程的输出，再读到 EOF");
     }
 
     /// 参数里的 NUL 不可能传进 `execvp`（C 字符串没有 NUL 结尾的概念）。
@@ -466,6 +503,214 @@ mod tests {
         assert!(err.to_string().contains("NUL"), "got {err}");
     }
 
+    /// `cwd` 不是合法 UTF-8 / 带一个 NUL：都必须在 **fork 之前**被拒。
+    ///
+    /// fork 之后再发现这件事就只能 `_exit(126)`，而那对用户是一句
+    /// 「终端打不开」——没有路径、没有原因。在 fork 前拒掉，错误里才有
+    /// 那个具体路径与具体原因。
+    #[test]
+    fn a_cwd_that_cannot_be_a_c_string_is_refused_before_forking() {
+        use std::os::unix::ffi::OsStringExt;
+        // 一个真的带 NUL 的路径：`\0` 转义会被当成两个字符，测不到 C 字符串
+        // 装不下 NUL 这件事。
+        let nul = std::path::PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/ba\0d".to_vec()));
+        let err = Pty::spawn_in("/bin/sh", &[], Size { cols: 8, rows: 8 }, Some(&nul), &[])
+            .expect_err("NUL 路径必须被拒");
+        assert!(
+            err.to_string().contains("NUL"),
+            "错误要说清是路径里有 NUL：{err}"
+        );
+
+        // 非 UTF-8 路径：`to_str()` 返回 None。
+        let weird =
+            std::path::PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/\xff\xfe".to_vec()));
+        let err = Pty::spawn_in("/bin/sh", &[], Size { cols: 8, rows: 8 }, Some(&weird), &[])
+            .expect_err("非 UTF-8 路径必须被拒");
+        assert!(
+            err.to_string().contains("UTF-8"),
+            "错误要说清是编码问题：{err}"
+        );
+    }
+
+    /// `env` 是**追加并覆盖**，不是整体替换。
+    ///
+    /// 整体替换会让 `PATH` / `TERM` 从设备的环境里消失：没有 `TERM` 的终端
+    /// 既没有颜色也没有退格处理，而没有 `PATH` 的 shell 连 `ls` 都找不到。
+    /// 判据是三件事：同名键被页面给的值盖掉、新键被追加、设备原有的键还在。
+    #[test]
+    fn env_is_appended_and_overrides_rather_than_replacing() {
+        // 覆盖那条臂要一个**设备环境里确定存在**的键：这里自己先在本进程里
+        // 种下它，而不是赌某个键一定被继承下来。
+        std::env::set_var("AFCLI_PTY_PROBE", "from-device");
+        let first = Pty::spawn_in(
+            "/bin/sh",
+            &["-c".to_string(), "echo $AFCLI_PTY_PROBE".to_string()],
+            Size { cols: 80, rows: 24 },
+            None,
+            &[("AFCLI_PTY_PROBE".to_string(), "overridden".to_string())],
+        )
+        .expect("spawn");
+        std::env::remove_var("AFCLI_PTY_PROBE");
+        let seen = crate::pty::testutil::read_until(&first, b"overridden");
+        let text = String::from_utf8_lossy(&seen);
+        assert!(
+            seen.windows(10).any(|w| w == b"overridden"),
+            "同名键要覆盖：{text}"
+        );
+        assert!(
+            !seen.windows(11).any(|w| w == b"from-device"),
+            "页面给的值该盖掉设备的：{text}"
+        );
+
+        // 追加一个**原本没有**的键同样要生效（走 `None => push` 那条臂）。
+        let second = Pty::spawn_in(
+            "/bin/sh",
+            &["-c".to_string(), "echo $AFCLI_PTY_NEW_KEY".to_string()],
+            Size { cols: 80, rows: 24 },
+            None,
+            &[("AFCLI_PTY_NEW_KEY".to_string(), "appended".to_string())],
+        )
+        .expect("spawn");
+        let seen = crate::pty::testutil::read_until(&second, b"appended");
+        let text = String::from_utf8_lossy(&seen);
+        assert!(
+            seen.windows(8).any(|w| w == b"appended"),
+            "新键要被追加进去：{text}"
+        );
+
+        // **设备原有的环境必须还在**：这是「追加」之所以是追加的全部意义。
+        // 整体替换会让 `PATH` 消失，而一个没有 `PATH` 的 shell 连 `/bin/sh`
+        // 都靠 `execvp` 找不到——那时用户看到的只是「终端打不开」。
+        std::env::set_var("AFCLI_PTY_INHERITED", "kept");
+        let third = Pty::spawn_in(
+            "/bin/sh",
+            &["-c".to_string(), "echo $AFCLI_PTY_INHERITED".to_string()],
+            Size { cols: 80, rows: 24 },
+            None,
+            &[("AFCLI_PTY_NEW_KEY".to_string(), "appended".to_string())],
+        )
+        .expect("spawn");
+        std::env::remove_var("AFCLI_PTY_INHERITED");
+        let seen = crate::pty::testutil::read_until(&third, b"kept");
+        let text = String::from_utf8_lossy(&seen);
+        assert!(
+            seen.windows(4).any(|w| w == b"kept"),
+            "设备原有的环境变量必须被继承下来（追加，不是替换）：{text}"
+        );
+    }
+
+    /// `pid()` 给的是那个子进程的号：它是「这个终端后面跑的是谁」的唯一
+    /// 外部可查入口（排障时用 `ps` 对得上号）。
+    #[test]
+    fn pid_reports_the_child_the_pty_started() {
+        let pty = Pty::spawn("true", &[], Size { cols: 80, rows: 24 }).expect("spawn");
+        assert!(pty.pid() > 0, "子进程号必须是正数：{}", pty.pid());
+        // `true` 会立刻退出，于是 `waitpid` 能把它收走——这同时证明
+        // `pid()` 报的是**真的**那一个，不是一个随手填的数。
+        let mut status: libc::c_int = 0;
+        let rc = unsafe { libc::waitpid(pty.pid(), &mut status, libc::WNOHANG) };
+        assert!(rc != -1, "`pid()` 报的必须是一个真实子进程：waitpid 失败");
+    }
+
+    /// `read_until` 的每一个提前返回臂：等不到 needle 时必须**返回**，
+    /// 不能把测试挂死。
+    ///
+    /// 它挂死的样子是「测试很慢」，而那与「测试错了」看起来完全不同——
+    /// 排障者会先去查机器负载。
+    #[test]
+    fn read_until_returns_instead_of_hanging_when_the_needle_never_comes() {
+        // **一个活着的 shell**：`true` 之类立刻退出的命令会让读端马上 EOF，
+        // 于是 `read_until` 从「读不到字节」那条臂提前返回，deadline 根本
+        // 不会被走到——那条臂就还是没被验到。要让 deadline 成为唯一的出口，
+        // 对面必须一直开着且不产出这个 needle。
+        let mut pty =
+            Pty::spawn("/bin/sh", &["-i".to_string()], Size { cols: 80, rows: 24 }).expect("spawn");
+        // 一个永远不会出现的 needle：到点必须返回，而不是一直等下去。
+        //
+        // **每一轮都要真的有字节可读**，否则 `poll_wait` 会自己超时并把
+        // `read_until` 提前送回去——那时 deadline 那条臂根本没被走到。
+        // 所以这里让对面持续产出（`yes`），只是产出的内容里不含 needle。
+        pty.write(b"yes 0123456789\n").expect("write");
+        let got = crate::pty::testutil::read_until(&pty, b"never-gonna-appear");
+        assert!(
+            !got.windows(17).any(|w| w == b"never-gonna-appear"),
+            "没出现就是没出现，不该编出来"
+        );
+        assert!(!got.is_empty(), "对面一直在产出，不该一个字节都没读到");
+        // 关掉 master 之后：`raw_fd()` 落空那条臂同样要返回而不是崩。
+        pty.close();
+        let got = crate::pty::testutil::read_until(&pty, b"anything");
+        assert!(got.is_empty(), "关掉的 PTY 读不出任何字节");
+    }
+
+    /// `read_until` 的**提前返回臂**必须真的返回，且每一个都该被走到：
+    /// deadline 到点、`raw_fd()` 落空、`poll` 等不到、`read` 出错、读到 EOF。
+    ///
+    /// 不逐条钉住的后果是「这些臂下次被改坏也发现不了」——它们唯一的职责
+    /// 就是把一个挂死的测试变成一个失败的测试。
+    #[test]
+    fn read_until_returns_on_every_early_exit_instead_of_hanging() {
+        let timeout = std::time::Duration::from_millis(200);
+        let rt = crate::pty::testutil::read_until_within;
+
+        // deadline：对面一直开着，只是不产出这个 needle。
+        let live =
+            Pty::spawn("/bin/sh", &["-i".to_string()], Size { cols: 80, rows: 24 }).expect("spawn");
+        live.write(b"yes 0123456789\n").expect("write");
+        let timed_out = rt(&live, b"never-gonna-appear", timeout);
+        assert!(
+            !timed_out.is_empty(),
+            "对面一直在产出，不该一个字节都没读到"
+        );
+
+        // `poll` 等不到：对面活着但一个字节都不产出，于是 `poll` 自己先超时。
+        let quiet = Pty::spawn(
+            "/bin/sleep",
+            &["30".to_string()],
+            Size { cols: 80, rows: 24 },
+        )
+        .expect("spawn");
+        let quiet_got = rt(&quiet, b"anything", timeout);
+        assert!(quiet_got.is_empty(), "对面不出字节，不该读出一个字符");
+
+        // 读到 EOF：对面已经退了，读一次就到头。
+        let gone = Pty::spawn("/bin/true", &[], Size { cols: 80, rows: 24 }).expect("spawn");
+        let gone_got = rt(&gone, b"anything", timeout);
+        assert!(gone_got.is_empty(), "退了的对面读不出字节");
+
+        // `raw_fd()` 落空：master 关掉之后同样必须返回。
+        drop(gone);
+        drop(live);
+        let mut closed =
+            Pty::spawn("/bin/sh", &["-i".to_string()], Size { cols: 80, rows: 24 }).expect("spawn");
+        closed.close();
+        let closed_got = rt(&closed, b"anything", timeout);
+        assert!(closed_got.is_empty(), "关掉的 PTY 读不出任何字节");
+    }
+
+    /// `read` 本身失败（不是 EOF）：`read_until` 必须返回，而不是把测试挂死。
+    ///
+    /// master 换成一根**只写**的管道：对端（读端）已关，`poll` 报 `POLLERR`，
+    /// 随后 `read` 必给 `EBADF`——这正是「读这条路坏了」时唯一能返回的出口。
+    #[test]
+    fn read_until_returns_when_the_read_itself_fails() {
+        let mut fds = [-1 as RawFd; 2];
+        // coverage: excluded — `pipe2` 失败需 fd 表耗尽。
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        let broken = Pty {
+            master: Some(unsafe { OwnedFd::from_raw_fd(fds[1]) }),
+            pid: 0,
+            size: Size { cols: 8, rows: 8 },
+        };
+        drop(unsafe { OwnedFd::from_raw_fd(fds[0]) });
+        let got = crate::pty::testutil::read_until_within(
+            &broken,
+            b"anything",
+            std::time::Duration::from_millis(200),
+        );
+        assert!(got.is_empty(), "读失败只能返回空，不该读出字节");
+    }
+
     /// 可用的 shell。`$SHELL` 优先，其次 `/bin/sh`——设备上不一定有 bash。
     #[test]
     fn the_default_shell_is_whatever_the_device_has() {
@@ -475,11 +720,6 @@ mod tests {
             std::path::Path::new(&s).is_absolute(),
             "shell 必须是绝对路径：{s}"
         );
-    }
-
-    /// 一直读到 `needle` 出现，或超时。
-    fn read_until(pty: &Pty, needle: &[u8]) -> Vec<u8> {
-        crate::pty::testutil::read_until(pty, needle)
     }
 }
 
@@ -522,7 +762,19 @@ pub(crate) mod testutil {
         rc > 0 && pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
     }
     pub(crate) fn read_until(pty: &Pty, needle: &[u8]) -> Vec<u8> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        read_until_within(pty, needle, std::time::Duration::from_secs(5))
+    }
+
+    /// 同 [`read_until`]，超时由调用方给。
+    ///
+    /// **「等不到就返回」那条臂不该为了被验到而真的等满 5 秒**：一个慢 5 秒的
+    /// 测试看起来像「机器卡」，不像「这条臂被走到了」。
+    pub(crate) fn read_until_within(
+        pty: &Pty,
+        needle: &[u8],
+        budget: std::time::Duration,
+    ) -> Vec<u8> {
+        let deadline = std::time::Instant::now() + budget;
         let mut all = Vec::new();
         let mut buf = [0u8; 1024];
         loop {

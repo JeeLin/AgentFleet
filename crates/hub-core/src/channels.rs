@@ -143,7 +143,6 @@ mod tests {
         let later = t + READY_TIMEOUT * 2;
         ready(&mut h, "n_a", "terminal", later);
         assert_eq!(h.credit("n_a", "ch-1"), Some(CREDIT_START));
-        assert!(!h.registry("n_a").ready_timed_out("ch-1", later));
         assert_eq!(h.registry("n_a").state("ch-1"), Some(ChannelState::Ready));
     }
 

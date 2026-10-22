@@ -47,11 +47,6 @@ impl SessionStore {
         }
     }
 
-    /// 覆盖有效期（测试用）。
-    pub fn with_ttl(key: [u8; 32], ttl_secs: i64) -> Self {
-        Self { key, ttl_secs }
-    }
-
     /// 签发一个 session，返回 cookie 值。
     ///
     /// 格式：`<payload_b64url>.<sig_b64url>`，payload 是 `sub|exp|iat`。
@@ -242,7 +237,10 @@ mod tests {
     #[test]
     fn expired_session_is_rejected() {
         // TTL = -120s：iat 在过去，exp 已过且超出容差
-        let s = SessionStore::with_ttl([7u8; 32], -120);
+        let s = SessionStore {
+            key: [7u8; 32],
+            ttl_secs: -120,
+        };
         let cookie = s.issue("admin").unwrap();
         assert!(matches!(s.verify(&cookie), Err(SessionError::Expired)));
     }
@@ -250,7 +248,10 @@ mod tests {
     #[test]
     fn expiry_within_clock_skew_is_accepted() {
         // 刚过期 30s，在 60s 容差内 → 仍有效（容忍时钟偏差）
-        let s = SessionStore::with_ttl([7u8; 32], -30);
+        let s = SessionStore {
+            key: [7u8; 32],
+            ttl_secs: -30,
+        };
         let cookie = s.issue("admin").unwrap();
         assert!(s.verify(&cookie).is_ok());
     }

@@ -129,16 +129,6 @@ impl Fingerprint {
         Self(*head)
     }
 
-    pub fn from_hex(s: &str) -> Result<Self, IdentityError> {
-        let b = hex_decode(s)?;
-        if b.len() != 16 {
-            return Err(IdentityError::BadFingerprint);
-        }
-        let mut out = [0u8; 16];
-        out.copy_from_slice(&b);
-        Ok(Self(out))
-    }
-
     pub fn to_hex(&self) -> String {
         hex_encode(&self.0)
     }
@@ -277,27 +267,6 @@ pub fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-pub fn hex_decode(s: &str) -> Result<Vec<u8>, IdentityError> {
-    if !s.len().is_multiple_of(2) {
-        return Err(IdentityError::BadHex);
-    }
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len() / 2);
-    for pair in b.chunks(2) {
-        // `to_digit` 给的是**数值**（'f' → 15）；`from_digit` 给的是字符
-        // （15 → 'f'）。这里要的是数值，用 `to_digit`。
-        // 长度已在校验过是偶数，chunks(2) 必给满块；仍走 get 不留索引 panic。
-        let hi = (*pair.first().ok_or(IdentityError::BadHex)? as char)
-            .to_digit(16)
-            .ok_or(IdentityError::BadHex)?;
-        let lo = (*pair.get(1).ok_or(IdentityError::BadHex)? as char)
-            .to_digit(16)
-            .ok_or(IdentityError::BadHex)?;
-        out.push(((hi << 4) | lo) as u8);
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,8 +360,6 @@ mod tests {
         let fb = Fingerprint::of(&b.public_key_bytes());
         assert_eq!(fa, Fingerprint::of(&a.public_key_bytes()));
         assert_ne!(fa, fb);
-        // hex 往返
-        assert_eq!(Fingerprint::from_hex(&fa.to_hex()).unwrap(), fa);
     }
 
     #[test]
@@ -439,25 +406,35 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_from_hex_rejects_wrong_length() {
-        let kp = KeyPair::generate();
-        let fp = Fingerprint::of(&kp.public_key_bytes());
-        let hex = fp.to_hex();
-        assert_eq!(hex.len(), 32, "16 bytes → 32 hex chars");
-        // 长度不对（15 字节 / 17 字节 / 空）必须拒绝，
-        // 否则库里会存进一个截断的指纹，验签永远失败
-        for bad_len in [0usize, 15, 17, 32] {
-            let s = "ab".repeat(bad_len);
-            assert!(matches!(
-                Fingerprint::from_hex(&s),
-                Err(IdentityError::BadFingerprint)
-            ));
-        }
-        // 非 hex 字符也在 from_hex 里被拒（hex_decode 的职责）
-        assert!(matches!(
-            Fingerprint::from_hex(&"zz".repeat(16)),
-            Err(IdentityError::BadHex)
-        ));
+    fn base64url_decode_maps_the_underscore_arm() {
+        // `_` 是 base64url 的第 64 个字符（值 63），与标准 base64 的 `/` 对应。
+        // 它是字符表里唯一「值 63」的臂：编码端只在该 6 位组全为 1 时才产出
+        // （如 0xff 0xff 0xff → "____"），而随机 id / nonce 撞上它的概率约
+        // 1/64——所以必须有确定性用例锁住，否则解码端字符表少一个字符不会被
+        // 任何现有测试发现（`base64url_roundtrip` 用的是 0..len 递增量，
+        // 永远产不出 `_`；`base64url_decode_rejects_short_tail_and_bad_charset`
+        // 只覆盖了「非法字符」那条 Err 臂）。
+        let all_ones = base64url(&[0xff, 0xff, 0xff]);
+        assert_eq!(all_ones, "____", "encoder should emit the 63-valued char");
+        assert_eq!(
+            base64url_decode(&all_ones).unwrap(),
+            vec![0xff, 0xff, 0xff],
+            "underscore arm must decode back to the same three bytes"
+        );
+        // 与 `-`（值 62）必须分开：把 63 误映射成 62（或漏掉这个臂）时，
+        // 前两个断言仍成立，只有这一条能发现。
+        assert_eq!(base64url_decode("----").unwrap(), vec![0xfb, 0xef, 0xbe]);
+        assert_ne!(
+            base64url_decode("----").unwrap(),
+            base64url_decode("____").unwrap(),
+            "63 must not decode the same as 62"
+        );
+        // 混排：两个相邻的臂在同一条输入里都出现
+        assert_eq!(base64url_decode("-___").unwrap(), vec![0xfb, 0xff, 0xff]);
+        assert_eq!(
+            base64url_decode(&base64url(&[0xfb, 0xff, 0xfe])).unwrap(),
+            vec![0xfb, 0xff, 0xfe]
+        );
     }
 
     #[test]
@@ -475,15 +452,6 @@ mod tests {
         let m1 = signature_message(1, "ab", 0, "c", "n");
         let m2 = signature_message(1, "a", 0, "bc", "n");
         assert_ne!(m1, m2);
-    }
-
-    #[test]
-    fn hex_roundtrip_and_rejects_odd() {
-        assert_eq!(
-            hex_decode(&hex_encode(&[0, 255, 16])).unwrap(),
-            vec![0, 255, 16]
-        );
-        assert!(hex_decode("abc").is_err());
     }
 
     #[test]

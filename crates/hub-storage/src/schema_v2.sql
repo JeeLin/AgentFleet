@@ -24,7 +24,7 @@
 ALTER TABLE device ADD COLUMN public_key TEXT;
 
 -- 存量回填：v1 时代公钥只存在于 capabilities JSON 里。抽不出来就留 NULL
--- （`NoStoredPublicKey` 会拒绝该设备重连，比拿一个错的公钥去验签安全）。
+-- （列里没有公钥的设备会被拒绝重连，比拿一个错的公钥去验签安全）。
 UPDATE device
    SET public_key = json_extract(capabilities, '$.public_key')
  WHERE public_key IS NULL

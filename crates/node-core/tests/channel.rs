@@ -62,13 +62,32 @@ fn close_frame(channel_id: &str, reason: &str) -> Frame {
     )
 }
 
-/// 取出 `Action` 里的第一帧并断言类型。
+/// `Action` 里的第一帧。
+///
+/// **不提供 `Action::first()` 便捷方法**：那会把「没有应答」
+/// （`Action::None`）与「连接该结束了」（`Action::End`）都变成 `None`，
+/// 而这两件事必须分开断言——前者是合法沉默，后者是协议分叉。
 fn expect_frame(action: &Action, want_type: &str) -> Frame {
-    let f = action
+    let Action::Send(frames) = action else {
+        panic!("expected a {want_type} frame, got {action:?}");
+    };
+    let f = frames
         .first()
         .unwrap_or_else(|| panic!("expected a {want_type} frame"));
     assert_eq!(f.msg_type, want_type, "got {:?}", f.c);
     f.clone()
+}
+
+/// 这条动作**什么都不回**。
+///
+/// 与 `expect_frame` 互为反面：能走到这里说明确实没有帧，而不是帧被
+/// `Action::End` 吞掉。`Action::End` 必须用 `matches!` 单独断言。
+fn assert_no_reply(action: Action, why: &str) {
+    match action {
+        Action::None => {}
+        Action::Send(frames) if frames.is_empty() => {}
+        other => panic!("{why}：got {other:?}"),
+    }
 }
 
 /// 标准①：**回的是 `channel_ready`，不是 `channel_opened`**。
@@ -173,21 +192,24 @@ fn the_terminal_connector_reports_ready_rather_than_not_built_yet() {
 
 /// 标准③：通道关闭后**资源被释放**（有测试用计数断言）。
 ///
+/// 这条断言的是**关闭路径的幂等**：关一条不在表里的通道只回一帧 close，
+/// 不留表项，也不报错。
+///
 /// 这里的 connector 持有的是一个可数的句柄（`Files` 每开一次记一次），
 /// 关通道与断连各释放一次，计数必须跟着降。
 #[test]
 fn closing_a_channel_releases_the_connector_resource() {
     reset();
-    let action = channel::on_channel_frame(&open_frame("ch-c", "files", 4));
-    expect_frame(&action, types::CHANNEL_ERROR); // 骨架阶段：开不了，但表项不进
-    assert_eq!(channel::live_count(), 0);
-
-    // 直接用表做一次「成功开到有资源」的场景由子任务 9 承接；这里断言
-    // 的是关闭路径的**幂等**：关一条不在表里的通道只回一帧 close，不留表项。
+    // 直接关一条**从未开过**的通道：Hub 在重连后会重发 `close_channel`，
+    // 而它那边可能还留着旧连接记的账。对不上号时唯一有意义的动作是「清掉」。
     let action = channel::on_channel_frame(&close_frame("ch-c", "user closed"));
     let f = expect_frame(&action, types::CLOSE_CHANNEL);
     assert_eq!(f.c["channel_id"], "ch-c");
-    assert!(!channel::has_channel("ch-c"));
+    assert!(
+        !channel::has_channel("ch-c"),
+        "关一条没开过的通道也不该留下表项"
+    );
+    assert_eq!(channel::live_count(), 0);
 }
 
 /// 数据帧打在**未注册的**通道上：静默，不能回错。
@@ -198,9 +220,9 @@ fn closing_a_channel_releases_the_connector_resource() {
 fn data_on_an_unknown_channel_is_silent() {
     reset();
     let action = channel::on_channel_frame(&data_frame("ch-nope", serde_json::json!({"in":"x"})));
-    assert!(action.is_none(), "数据打在未知通道上不该有应答");
+    assert_no_reply(action, "数据打在未知通道上不该有应答");
     let action = channel::on_channel_frame(&credit_frame("ch-nope", 8));
-    assert!(action.is_none(), "补信用给未知通道不该有应答");
+    assert_no_reply(action, "补信用给未知通道不该有应答");
 }
 
 /// 载荷解不开 = 协议分叉，必须让调用方结束连接。
