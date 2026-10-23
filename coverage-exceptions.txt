@@ -27,10 +27,9 @@ crates/hub-core/src/registry.rs:155: Err(e) 主体由 enroll_inner_statement_err
 crates/hub-core/src/reports.rs:103: 锁中毒意味着另一个持锁者 panic 了， 而 workspace lint 把 panic 禁成 deny（生产代码无 panic 路径）； 那种情况下进程的状态已不可信，静默丢弃这次上报不会更糟。
 crates/hub-core/src/reports.rs:114: 同 record：锁中毒只在别的持锁者 panic 时出现。
 crates/hub-core/src/reports.rs:248: 同 record：锁中毒只在别的持锁者 panic 时出现。
-crates/hub-server/src/channels.rs:122: M0 的 Hub 侧没有 connector 协商：`open_channel` 一到就置 Ready 并回 `channel_ready`。 不置 Ready 的话账本是死的——`on_data_received` 只对 Ready 的通道记账 （协议层 `ready_mut`），于是 node 发来的数据全部回 `NotReady`， 而 node 那边还在等 `channel_ready`，两边互等。 mark_ready 失败需同一把锁内出现第二个写入者， 而 Hub 在 open 成功后的下一行就 mark_ready，构造不出来。
-crates/hub-server/src/channels.rs:171: **回填 Hub 侧账本**：只发 `channel_credit` 而不记账，Hub 侧余额 恒为 0——下一帧又立刻归零，于是**每帧都补一次信用**，node 侧的 余额越滚越大（约束 4 的「每通道独立流控」就此失效）。 补的量与发出去的那一帧一致：Hub 说「再给你 32 格」，它自己的 账本也得有那 32 格。 `on_credit` 只在通道不存在时失败，而这条通道 刚在同一把锁里被 `on_data_received` 成功记过账：两者之间没有能改 这张表的代码路径（同一把写锁）。
-crates/hub-server/src/channels.rs:315: 只在断言失败时执行；`panic!` 的格式串行被 llvm-cov 记为 miss（多行宏已知现象）。
-crates/hub-server/src/channels.rs:317: 只在断言失败时执行；`panic!` 的格式串行被 llvm-cov 记为 miss（多行宏已知现象）。
+crates/hub-server/src/channels.rs:116: **回填 Hub 侧账本**：只发 `channel_credit` 而不记账，Hub 侧余额 恒为 0——下一帧又立刻归零，于是**每帧都补一次信用**，node 侧的 余额越滚越大（约束 4 的「每通道独立流控」就此失效）。 补的量与发出去的那一帧一致：Hub 说「再给你 32 格」，它自己的 账本也得有那 32 格。 `on_credit` 只在通道不存在时失败，而这条通道 刚在同一把锁里被 `on_data_received` 成功记过账：两者之间没有能改 这张表的代码路径（同一把写锁）。
+crates/hub-server/src/channels.rs:260: 只在断言失败时执行；`panic!` 的格式串行被 llvm-cov 记为 miss（多行宏已知现象）。
+crates/hub-server/src/channels.rs:262: 只在断言失败时执行；`panic!` 的格式串行被 llvm-cov 记为 miss（多行宏已知现象）。
 crates/hub-server/src/main.rs:43: 建不出 OS 线程（fd/内存耗尽或线程数受限）， 无可控手段在测试里构造；守卫逻辑本身由各处错误分支覆盖。
 crates/hub-server/src/routes/api.rs:353: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
 crates/hub-server/src/routes/assets.rs:100: 构造上不可达：`build.rs` 在 dist 缺失时写的就是 index.html。 真走到这里（有人手工改 AF_WEB_DIST）也不该 panic——那是一台 活着但页面打不开的 Hub，比进程退出好排查。 上面三行已说明：这条分支结构上不可达。
@@ -42,76 +41,84 @@ crates/hub-server/src/routes/setup.rs:170: `JoinError` 只在任务 panic 或运
 crates/hub-server/src/routes/setup.rs:224: 闭锁的信号量会永远等不到 permit。闸门与 `AppState` 同生命周期，本 workspace 从不调用 `tokio::sync::Semaphore::close()`（已 grep 确认零调用点），所以 `AcquireError` 在本 crate 不可达。注意这是**约定性**不可达 （我们选择不调用），不是结构性的——`close()` 是 pub。 闭锁不是「忙」，必须 500 而不是 429：否则一次内部事故会被伪装成 「服务繁忙」，把真正的根因（有人闭锁了闸门）藏起来。
 crates/hub-server/src/routes/setup.rs:225: 闭锁的信号量会永远等不到 permit。闸门与 `AppState` 同生命周期，本 workspace 从不调用 `tokio::sync::Semaphore::close()`（已 grep 确认零调用点），所以 `AcquireError` 在本 crate 不可达。注意这是**约定性**不可达 （我们选择不调用），不是结构性的——`close()` 是 pub。 闭锁不是「忙」，必须 500 而不是 429：否则一次内部事故会被伪装成 「服务繁忙」，把真正的根因（有人闭锁了闸门）藏起来。
 crates/hub-server/src/routes/setup.rs:226: 闭锁的信号量会永远等不到 permit。闸门与 `AppState` 同生命周期，本 workspace 从不调用 `tokio::sync::Semaphore::close()`（已 grep 确认零调用点），所以 `AcquireError` 在本 crate 不可达。注意这是**约定性**不可达 （我们选择不调用），不是结构性的——`close()` 是 pub。 闭锁不是「忙」，必须 500 而不是 429：否则一次内部事故会被伪装成 「服务繁忙」，把真正的根因（有人闭锁了闸门）藏起来。
-crates/hub-server/src/routes/stream.rs:367: 锁没放过，上面 `get` 又刚命中，所以 `remove` 必给出记录；取不到就 当作 NotFound，不为一个不可能的情形 `unwrap`。 `else` 臂在同一把锁内结构上不可达：上面的 `map.get(channel_id)` 刚命中而锁自始至终没放，`remove` 不可能返回 `None`（parking_lot 的 `MutexGuard` 不可重入，中间也没有别的代码 路径能碰到这张表）。写成 `if let` 而不是 `unwrap` 只是不给「不可能」 留一条 panic 路径，不是因为这里打算测它。
-crates/hub-server/src/routes/stream.rs:495: `subject = %auth.subject()` 这一行被 llvm-cov 记为 miss。 本 crate 里三处 `%auth.subject()` 字段行全部如此（另两处：`open_channel`、 `api::create_session`），而同一宏里 `%字段` 与 `?局部变量` 的行都覆盖—— 即「以 `%方法调用()` 记录的字段行」这一类被工具漏记，不是这条分支没执行。
-crates/hub-server/src/routes/stream.rs:620: 与 `stream()`（同文件 :490）同一条：`subject = %auth.subject()` 这一行被 llvm-cov 记为 miss，而同宏里 `%字段` 与 `%局部变量` 的行都覆盖—— 是「%方法调用()」这一类的工具漏记，不是这条分支没执行。该宏本身由 `tests/stream.rs` 的用例真跑过（201 + 断言 channel_id 与 node_id）。
-crates/hub-server/src/routes/stream.rs:954: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 同 `routes/api.rs:348`。该臂本身已由 `expiring_an_unacked_channel_survives_a_device_that_will_not_take_the_close` 覆盖（队列满 → 走这里，只留痕不扩散）。
-crates/hub-server/src/routes/stream.rs:957: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 同 `routes/api.rs:348`。该臂本身已由 `expiring_an_unacked_channel_survives_a_device_that_will_not_take_the_close` 覆盖（队列满 → 走这里，只留痕不扩散）。
-crates/hub-server/src/routes/stream.rs:1154: 夹具的收尾：`Streams` 自己握着发送端， 流在测试期间从不结束，所以这条 `break` 打不到；它不是被测逻辑的分支。
-crates/hub-server/src/routes/stream.rs:1980: 同上面的 `Closed` 臂： `panic!` 的参数行被 llvm-cov 记为 miss（多行宏已知现象）。
-crates/hub-server/src/routes/stream.rs:2036: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
-crates/hub-server/src/routes/ws.rs:142: 同上面的收尾行：单测里 task 被 runtime 取消， `Err` 臂走不到，故这行日志不可达。
-crates/hub-server/src/routes/ws.rs:250: 表里没它：旧连接已在自己的断开处理器里被摘掉。 要触达需让它在 insert 之后、send 之前被另一个 task 摘表（极窄窗口）。
-crates/hub-server/src/routes/ws.rs:256: 控制帧队列 8 格而顶替只推一帧，要满得让同一连接被 连续顶替 9 次且一次都不消费。
-crates/hub-server/src/routes/ws.rs:309: 流结束而没走过关闭握手：设备那边直接关了 TCP（它还没学会 Close 帧，或进程被 kill 时正好在写）。此时不要再补一帧 失败帧——对端已经不在了，补帧只会把 fd 耗在一个死人连接上。 结构上不可达，不是「测试没造出来」： tungstenite 把「没收到 Close 帧就 EOF」报成 `ResetWithoutClosingHandshake` 读错误（走上面那条臂）， 而真收到 Close 帧时 `socket.recv()` 交出的是 `Some(Ok(Close))`。 证据：`a_peer_that_closes_during_the_handshake_is_not_answered` 就是纯 FIN 关连接，它走的是上面那条读错误臂——这一行至今未覆盖。
-crates/hub-server/src/routes/ws.rs:349: challenge 帧发送失败需对端在收帧前消失， 握手期 socket 由 fixture 持有，构造不出确定性的发送失败。
-crates/hub-server/src/routes/ws.rs:634: `auth_ok` 发送失败（对端在收帧前消失）这一臂： 端到端 `an_auth_ok_that_cannot_be_delivered_*` 两条用例（RST 连接）断言的 是「连接不许上架」，而 tungstenite 的 `send` 会把帧排进内部队列并当场返回 成功——脏数据在**下一次** write 时才报错，所以这两行在大多数时序下不命中。
-crates/hub-server/src/routes/ws.rs:718: 对端直接 FIN 而不发 Close 帧才会走到。
+crates/hub-server/src/routes/stream.rs:368: 锁没放过，上面 `get` 又刚命中，所以 `remove` 必给出记录；取不到就 当作 NotFound，不为一个不可能的情形 `unwrap`。 `else` 臂在同一把锁内结构上不可达：上面的 `map.get(channel_id)` 刚命中而锁自始至终没放，`remove` 不可能返回 `None`（parking_lot 的 `MutexGuard` 不可重入，中间也没有别的代码 路径能碰到这张表）。写成 `if let` 而不是 `unwrap` 只是不给「不可能」 留一条 panic 路径，不是因为这里打算测它。
+crates/hub-server/src/routes/stream.rs:496: `subject = %auth.subject()` 这一行被 llvm-cov 记为 miss。 本 crate 里三处 `%auth.subject()` 字段行全部如此（另两处：`open_channel`、 `api::create_session`），而同一宏里 `%字段` 与 `?局部变量` 的行都覆盖—— 即「以 `%方法调用()` 记录的字段行」这一类被工具漏记，不是这条分支没执行。
+crates/hub-server/src/routes/stream.rs:607: `subject = %auth.subject()` 这一行被 llvm-cov 记为 miss。 本 crate 里三处 `%auth.subject()` 字段行全部如此（另两处：`open_channel`、 `api::create_session`），而同一宏里 `%字段` 与 `?局部变量` 的行都覆盖—— 即「以 `%方法调用()` 记录的字段行」这一类被工具漏记，不是这条分支没执行。
+crates/hub-server/src/routes/stream.rs:637: 与 `stream()`（同文件 :490）同一条：`subject = %auth.subject()` 这一行被 llvm-cov 记为 miss，而同宏里 `%字段` 与 `%局部变量` 的行都覆盖—— 是「%方法调用()」这一类的工具漏记，不是这条分支没执行。该宏本身由 `tests/stream.rs` 的用例真跑过（201 + 断言 channel_id 与 node_id）。
+crates/hub-server/src/routes/stream.rs:929: 与 `stream()`（同文件 :490）同一条：`subject = %auth.subject()` 这一行被 llvm-cov 记为 miss，而同宏里 `%字段` 与 `%局部变量` 的行都覆盖—— 是「%方法调用()」这一类的工具漏记，不是这条分支没执行。该宏本身由 `tests/stream.rs` 的用例真跑过（201 + 断言 channel_id 与 node_id）。
+crates/hub-server/src/routes/stream.rs:932: 与 `stream()`（同文件 :490）同一条：`subject = %auth.subject()` 这一行被 llvm-cov 记为 miss，而同宏里 `%字段` 与 `%局部变量` 的行都覆盖—— 是「%方法调用()」这一类的工具漏记，不是这条分支没执行。该宏本身由 `tests/stream.rs` 的用例真跑过（201 + 断言 channel_id 与 node_id）。
+crates/hub-server/src/routes/stream.rs:997: 与 `stream()`（同文件 :490）同一条：`subject = %auth.subject()` 这一行被 llvm-cov 记为 miss，而同宏里 `%字段` 与 `%局部变量` 的行都覆盖—— 是「%方法调用()」这一类的工具漏记，不是这条分支没执行。该宏本身由 `tests/stream.rs` 的用例真跑过（201 + 断言 channel_id 与 node_id）。
+crates/hub-server/src/routes/stream.rs:1018: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 同 `routes/api.rs:348`。该臂本身已由 `expiring_an_unacked_channel_survives_a_device_that_will_not_take_the_close` 覆盖（队列满 → 走这里，只留痕不扩散）。
+crates/hub-server/src/routes/stream.rs:1021: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 同 `routes/api.rs:348`。该臂本身已由 `expiring_an_unacked_channel_survives_a_device_that_will_not_take_the_close` 覆盖（队列满 → 走这里，只留痕不扩散）。
+crates/hub-server/src/routes/stream.rs:1218: 夹具的收尾：`Streams` 自己握着发送端， 流在测试期间从不结束，所以这条 `break` 打不到；它不是被测逻辑的分支。
+crates/hub-server/src/routes/stream.rs:2044: 同上面的 `Closed` 臂： `panic!` 的参数行被 llvm-cov 记为 miss（多行宏已知现象）。
+crates/hub-server/src/routes/stream.rs:2100: 同上面的 `Closed` 臂： `panic!` 的参数行被 llvm-cov 记为 miss（多行宏已知现象）。
+crates/hub-server/src/routes/ws.rs:141: 同上面的收尾行：单测里 task 被 runtime 取消， `Err` 臂走不到，故这行日志不可达。
+crates/hub-server/src/routes/ws.rs:248: 表里没它：旧连接已在自己的断开处理器里被摘掉。 要触达需让它在 insert 之后、send 之前被另一个 task 摘表（极窄窗口）。
+crates/hub-server/src/routes/ws.rs:254: 控制帧队列 8 格而顶替只推一帧，要满得让同一连接被 连续顶替 9 次且一次都不消费。
+crates/hub-server/src/routes/ws.rs:307: 流结束而没走过关闭握手：设备那边直接关了 TCP（它还没学会 Close 帧，或进程被 kill 时正好在写）。此时不要再补一帧 失败帧——对端已经不在了，补帧只会把 fd 耗在一个死人连接上。 结构上不可达，不是「测试没造出来」： tungstenite 把「没收到 Close 帧就 EOF」报成 `ResetWithoutClosingHandshake` 读错误（走上面那条臂）， 而真收到 Close 帧时 `socket.recv()` 交出的是 `Some(Ok(Close))`。 证据：`a_peer_that_closes_during_the_handshake_is_not_answered` 就是纯 FIN 关连接，它走的是上面那条读错误臂——这一行至今未覆盖。
+crates/hub-server/src/routes/ws.rs:347: challenge 帧发送失败需对端在收帧前消失， 握手期 socket 由 fixture 持有，构造不出确定性的发送失败。
+crates/hub-server/src/routes/ws.rs:627: `auth_ok` 发送失败（对端在收帧前消失）这一臂： 端到端 `an_auth_ok_that_cannot_be_delivered_*` 两条用例（RST 连接）断言的 是「连接不许上架」，而 tungstenite 的 `send` 会把帧排进内部队列并当场返回 成功——脏数据在**下一次** write 时才报错，所以这两行在大多数时序下不命中。
+crates/hub-server/src/routes/ws.rs:706: 对端直接 FIN 而不发 Close 帧才会走到。
+crates/hub-server/src/routes/ws.rs:778: 单帧超硬上限没有「等等就好」这回事——它永远超。 单帧超 1 MiB 的端到端路径需要往真 socket 里灌 超大帧；单测覆盖的是令牌桶本身（`limits.rs`）与应答帧映射 （`flood_frame_maps_each_limit_error_to_its_own_code`）， 这里只留「超限即断开」的接线：日志 + 应答帧 + 断开。
+crates/hub-server/src/routes/ws.rs:785: 见臂上的标注：端到端超大帧路径。
+crates/hub-server/src/routes/ws.rs:786: 见臂上的标注：端到端超大帧路径。
+crates/hub-server/src/routes/ws.rs:787: 见臂上的标注：端到端超大帧路径。
+crates/hub-server/src/routes/ws.rs:788: 见臂上的标注：端到端超大帧路径。
 crates/hub-server/src/routes/ws.rs:790: 单帧超硬上限没有「等等就好」这回事——它永远超。 单帧超 1 MiB 的端到端路径需要往真 socket 里灌 超大帧；单测覆盖的是令牌桶本身（`limits.rs`）与应答帧映射 （`flood_frame_maps_each_limit_error_to_its_own_code`）， 这里只留「超限即断开」的接线：日志 + 应答帧 + 断开。
-crates/hub-server/src/routes/ws.rs:797: 见臂上的标注：端到端超大帧路径。
-crates/hub-server/src/routes/ws.rs:798: 见臂上的标注：端到端超大帧路径。
-crates/hub-server/src/routes/ws.rs:799: 见臂上的标注：端到端超大帧路径。
-crates/hub-server/src/routes/ws.rs:800: 见臂上的标注：端到端超大帧路径。
-crates/hub-server/src/routes/ws.rs:802: 见臂上的标注：端到端超大帧路径。
-crates/hub-server/src/routes/ws.rs:808: 要真等满 30s 才会走到，超时窗口不可压缩。
-crates/hub-server/src/routes/ws.rs:814: 同上：30s 窗口不可压缩。
-crates/hub-server/src/routes/ws.rs:815: 同上：30s 窗口不可压缩。
-crates/hub-server/src/routes/ws.rs:816: 同上：30s 窗口不可压缩。
-crates/hub-server/src/routes/ws.rs:817: 同上：30s 窗口不可压缩。
-crates/hub-server/src/routes/ws.rs:819: 同上：30s 窗口不可压缩。
-crates/hub-server/src/routes/ws.rs:886: 见函数上的标注（:864）：写失败需对端 在读循环中途消失，端到端测试构造不出确定的发送失败。
-crates/hub-server/src/routes/ws.rs:887: 见函数上的标注（:864）：写失败需对端 在读循环中途消失，端到端测试构造不出确定的发送失败。
-crates/hub-server/src/routes/ws.rs:892: 见函数上的标注（:864）：收端关闭要在连接 被回收、队列的发送端全被 drop 后才出现，测试里构造不出。
-crates/hub-server/src/routes/ws.rs:898: 同上：写失败需对端在读循环中途消失。
-crates/hub-server/src/routes/ws.rs:899: 同上：写失败需对端在读循环中途消失。
+crates/hub-server/src/routes/ws.rs:796: 要真等满 30s 才会走到，超时窗口不可压缩。
+crates/hub-server/src/routes/ws.rs:802: 同上：30s 窗口不可压缩。
+crates/hub-server/src/routes/ws.rs:803: 同上：30s 窗口不可压缩。
+crates/hub-server/src/routes/ws.rs:804: 同上：30s 窗口不可压缩。
+crates/hub-server/src/routes/ws.rs:805: 同上：30s 窗口不可压缩。
+crates/hub-server/src/routes/ws.rs:807: 同上：30s 窗口不可压缩。
+crates/hub-server/src/routes/ws.rs:874: 见函数上的标注（:864）：写失败需对端 在读循环中途消失，端到端测试构造不出确定的发送失败。
+crates/hub-server/src/routes/ws.rs:875: 见函数上的标注（:864）：写失败需对端 在读循环中途消失，端到端测试构造不出确定的发送失败。
+crates/hub-server/src/routes/ws.rs:880: 见函数上的标注（:864）：收端关闭要在连接 被回收、队列的发送端全被 drop 后才出现，测试里构造不出。
+crates/hub-server/src/routes/ws.rs:886: 同上：写失败需对端在读循环中途消失。
+crates/hub-server/src/routes/ws.rs:887: 同上：写失败需对端在读循环中途消失。
+crates/hub-server/src/routes/ws.rs:891: 同 `control_open`：收端关闭要真实的回收竞争。
+crates/hub-server/src/routes/ws.rs:895: 同 `control_open`：收端关闭要真实的回收竞争。
+crates/hub-server/src/routes/ws.rs:902: 同 `control_open`：收端关闭要真实的回收竞争。
 crates/hub-server/src/routes/ws.rs:903: 同 `control_open`：收端关闭要真实的回收竞争。
-crates/hub-server/src/routes/ws.rs:907: 同 `control_open`：收端关闭要真实的回收竞争。
-crates/hub-server/src/routes/ws.rs:914: / 控制帧入队；连接已走就丢（没什么可通知的了）。 / 整个函数体（签名行、`match` 与 `Ok` 臂）都不可达： / 调用它的三处（读侧超限的两条断开臂与数据面打满的告警臂）本身不可达， / 见它们各自的标注。
-crates/hub-server/src/routes/ws.rs:915: / 控制帧入队；连接已走就丢（没什么可通知的了）。 / 整个函数体（签名行、`match` 与 `Ok` 臂）都不可达： / 调用它的三处（读侧超限的两条断开臂与数据面打满的告警臂）本身不可达， / 见它们各自的标注。
-crates/hub-server/src/routes/ws.rs:916: / 控制帧入队；连接已走就丢（没什么可通知的了）。 / 整个函数体（签名行、`match` 与 `Ok` 臂）都不可达： / 调用它的三处（读侧超限的两条断开臂与数据面打满的告警臂）本身不可达， / 见它们各自的标注。
-crates/hub-server/src/routes/ws.rs:920: 控制面 8 格，而这里一次只投一帧；要满需 同一连接在极窄窗口里被连续顶替 9 次且写协程一次都不消费。
-crates/hub-server/src/routes/ws.rs:923: 控制面 8 格，而这里一次只投一帧；要满需 同一连接在极窄窗口里被连续顶替 9 次且写协程一次都不消费。
-crates/hub-server/src/routes/ws.rs:937: 数据面 256 帧；写协程在测试里始终消费， 端到端构造「对端不读 + 256 帧回帧」需要真 socket 背压， 而决策本身（满 → 丢 + 回 err）由 `conns.rs` 的单测覆盖。
-crates/hub-server/src/routes/ws.rs:941: 数据面 256 帧；写协程在测试里始终消费， 端到端构造「对端不读 + 256 帧回帧」需要真 socket 背压， 而决策本身（满 → 丢 + 回 err）由 `conns.rs` 的单测覆盖。
-crates/hub-server/src/routes/ws.rs:1062: / 尽力发出一帧，失败只记日志。 / / **所有握手失败路径都走这里**：失败帧发不出去时连接马上就断了， / 没有第二个渠道能通知节点，所以「发送失败」不是可行动的错误—— / 但它**必须留痕**（「帧没发出去」正是排查协议不一致的唯一线索）。 / / 单独抽出来而不是 11 处各写一遍：11 份 `if let Err` 加日志会漂移， `send_best_effort` 的失败留痕行：所有握手失败帧 发送失败的共同路径，需对端在收失败帧前消失。 / 而「错误帧没送达」这类问题恰恰只在其中一处被记录时最难查。
-crates/identity/src/lib.rs:95: ed25519-dalek 对几乎所有 32 字节输入均解压成功， 构造不出确定性非法曲线点。
-crates/identity/src/lib.rs:127: SHA-256 输出恒 32 字节，`first_chunk::<16>` 必成功。用 `first_chunk` 取前 16 字节：返回 Option，无需 panic 路径。 else 臂（first_chunk::<16> 返回 None）结构上不可达， SHA-256 digest 恒为 32 字节，恒 ≥ 16。
+crates/hub-server/src/routes/ws.rs:904: 同 `control_open`：收端关闭要真实的回收竞争。
+crates/hub-server/src/routes/ws.rs:908: 控制面 8 格，而这里一次只投一帧；要满需 同一连接在极窄窗口里被连续顶替 9 次且写协程一次都不消费。
+crates/hub-server/src/routes/ws.rs:911: 控制面 8 格，而这里一次只投一帧；要满需 同一连接在极窄窗口里被连续顶替 9 次且写协程一次都不消费。
+crates/hub-server/src/routes/ws.rs:925: 数据面 256 帧；写协程在测试里始终消费， 端到端构造「对端不读 + 256 帧回帧」需要真 socket 背压， 而决策本身（满 → 丢 + 回 err）由 `conns.rs` 的单测覆盖。
+crates/hub-server/src/routes/ws.rs:929: 数据面 256 帧；写协程在测试里始终消费， 端到端构造「对端不读 + 256 帧回帧」需要真 socket 背压， 而决策本身（满 → 丢 + 回 err）由 `conns.rs` 的单测覆盖。
+crates/hub-server/src/routes/ws.rs:1049: / 尽力发出一帧，失败只记日志。 / / **所有握手失败路径都走这里**：失败帧发不出去时连接马上就断了， / 没有第二个渠道能通知节点，所以「发送失败」不是可行动的错误—— / 但它**必须留痕**（「帧没发出去」正是排查协议不一致的唯一线索）。 / / 单独抽出来而不是 11 处各写一遍：11 份 `if let Err` 加日志会漂移， `send_best_effort` 的失败留痕行：所有握手失败帧 发送失败的共同路径，需对端在收失败帧前消失。 / 而「错误帧没送达」这类问题恰恰只在其中一处被记录时最难查。
+crates/identity/src/lib.rs:94: ed25519-dalek 对几乎所有 32 字节输入均解压成功， 构造不出确定性非法曲线点。
+crates/identity/src/lib.rs:126: SHA-256 输出恒 32 字节，`first_chunk::<16>` 必成功。用 `first_chunk` 取前 16 字节：返回 Option，无需 panic 路径。 else 臂（first_chunk::<16> 返回 None）结构上不可达， SHA-256 digest 恒为 32 字节，恒 ≥ 16。
 crates/node-cli/src/lib.rs:124: data_dir 取不到：dirs::data_dir 在 HOME 存在即返回 Some，且 root 下权限错误不可构造，本环境下该 Err 分支不可达（防御性兜底）。
 crates/node-cli/src/lib.rs:125: data_dir 取不到：dirs::data_dir 在 HOME 存在即返回 Some，且 root 下权限错误不可构造，本环境下该 Err 分支不可达（防御性兜底）。
 crates/node-cli/src/lib.rs:126: data_dir 取不到：dirs::data_dir 在 HOME 存在即返回 Some，且 root 下权限错误不可构造，本环境下该 Err 分支不可达（防御性兜底）。
+crates/node-cli/src/lib.rs:151: data_dir 取不到：dirs::data_dir 在 HOME 存在即返回 Some，root 下权限错误又不可构造，本环境下该 Err 分支不可达（防御性兜底）。
 crates/node-cli/src/lib.rs:152: data_dir 取不到：dirs::data_dir 在 HOME 存在即返回 Some，root 下权限错误又不可构造，本环境下该 Err 分支不可达（防御性兜底）。
 crates/node-cli/src/lib.rs:153: data_dir 取不到：dirs::data_dir 在 HOME 存在即返回 Some，root 下权限错误又不可构造，本环境下该 Err 分支不可达（防御性兜底）。
-crates/node-cli/src/lib.rs:154: data_dir 取不到：dirs::data_dir 在 HOME 存在即返回 Some，root 下权限错误又不可构造，本环境下该 Err 分支不可达（防御性兜底）。
-crates/node-cli/src/lib.rs:332: 测试夹具的 `String::from_utf8_lossy`：非 UTF-8 输出分支在现有断言下不可达。
+crates/node-cli/src/lib.rs:331: 测试夹具的 `String::from_utf8_lossy`：非 UTF-8 输出分支在现有断言下不可达。
+crates/node-cli/src/supervisor.rs:171: 替换臂：`replace` 会真的 rename 运行中的二进制， 破坏测试进程自身（同 :109）。
 crates/node-cli/src/supervisor.rs:172: 替换臂：`replace` 会真的 rename 运行中的二进制， 破坏测试进程自身（同 :109）。
-crates/node-cli/src/supervisor.rs:173: 替换臂：`replace` 会真的 rename 运行中的二进制， 破坏测试进程自身（同 :109）。
-crates/node-cli/src/supervisor.rs:176: 替换臂：`replace` 会真的 rename 运行中的 二进制，破坏测试进程自身（同 :109）。
+crates/node-cli/src/supervisor.rs:175: 替换臂：`replace` 会真的 rename 运行中的 二进制，破坏测试进程自身（同 :109）。
+crates/node-cli/src/supervisor.rs:178: 替换臂：`replace` 会真的 rename 运行中的 二进制，破坏测试进程自身（同 :109）。
 crates/node-cli/src/supervisor.rs:179: 替换臂：`replace` 会真的 rename 运行中的 二进制，破坏测试进程自身（同 :109）。
 crates/node-cli/src/supervisor.rs:180: 替换臂：`replace` 会真的 rename 运行中的 二进制，破坏测试进程自身（同 :109）。
 crates/node-cli/src/supervisor.rs:181: 替换臂：`replace` 会真的 rename 运行中的 二进制，破坏测试进程自身（同 :109）。
-crates/node-cli/src/supervisor.rs:182: 替换臂：`replace` 会真的 rename 运行中的 二进制，破坏测试进程自身（同 :109）。
+crates/node-cli/src/supervisor.rs:184: 回滚臂：`rollback` 同样要动二进制文件本身。
 crates/node-cli/src/supervisor.rs:185: 回滚臂：`rollback` 同样要动二进制文件本身。
 crates/node-cli/src/supervisor.rs:186: 回滚臂：`rollback` 同样要动二进制文件本身。
 crates/node-cli/src/supervisor.rs:187: 回滚臂：`rollback` 同样要动二进制文件本身。
 crates/node-cli/src/supervisor.rs:188: 回滚臂：`rollback` 同样要动二进制文件本身。
 crates/node-cli/src/supervisor.rs:189: 回滚臂：`rollback` 同样要动二进制文件本身。
-crates/node-cli/src/supervisor.rs:190: 回滚臂：`rollback` 同样要动二进制文件本身。
-crates/node-cli/src/supervisor.rs:230: spawn 失败臂：需二进制路径不可执行。
-crates/node-cli/src/supervisor.rs:234: spawn 失败臂：需二进制路径不可执行。
-crates/node-cli/src/supervisor.rs:235: spawn 失败臂：需二进制路径不可执行。
+crates/node-cli/src/supervisor.rs:228: spawn 失败臂：需二进制路径不可执行。
+crates/node-cli/src/supervisor.rs:232: spawn 失败臂：需二进制路径不可执行。
+crates/node-cli/src/supervisor.rs:233: spawn 失败臂：需二进制路径不可执行。
+crates/node-cli/src/supervisor.rs:239: wait 失败臂：需子进程被信号杀死后 `wait` 报错。
+crates/node-cli/src/supervisor.rs:240: wait 失败臂：需子进程被信号杀死后 `wait` 报错。
 crates/node-cli/src/supervisor.rs:241: wait 失败臂：需子进程被信号杀死后 `wait` 报错。
-crates/node-cli/src/supervisor.rs:242: wait 失败臂：需子进程被信号杀死后 `wait` 报错。
-crates/node-cli/src/supervisor.rs:243: wait 失败臂：需子进程被信号杀死后 `wait` 报错。
+crates/node-core/src/channel.rs:235: `live_ids()` 的每个 id 都来自**这张表**的 键（它遍历的就是 `self.channels`），而这里持的是同一张表的 `&mut` 借用，期间不可能被摘掉，所以这个 None 臂不可达。
+crates/node-core/src/channel.rs:236: `live_ids()` 的每个 id 都来自**这张表**的 键（它遍历的就是 `self.channels`），而这里持的是同一张表的 `&mut` 借用，期间不可能被摘掉，所以这个 None 臂不可达。
+crates/node-core/src/channel.rs:237: `live_ids()` 的每个 id 都来自**这张表**的 键（它遍历的就是 `self.channels`），而这里持的是同一张表的 `&mut` 借用，期间不可能被摘掉，所以这个 None 臂不可达。
+crates/node-core/src/channel.rs:238: `live_ids()` 的每个 id 都来自**这张表**的 键（它遍历的就是 `self.channels`），而这里持的是同一张表的 `&mut` 借用，期间不可能被摘掉，所以这个 None 臂不可达。
 crates/node-core/src/channel.rs:344: `live_ids()` 的每个 id 都来自**这张表**的 键（它遍历的就是 `self.channels`），而这里持的是同一张表的 `&mut` 借用，期间不可能被摘掉，所以这个 None 臂不可达。
 crates/node-core/src/channel.rs:874: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
 crates/node-core/src/channel.rs:929: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
@@ -129,61 +136,66 @@ crates/node-core/src/channel.rs:941: 测试自身的失败分支（`expect` / `a
 crates/node-core/src/channel.rs:949: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
 crates/node-core/src/conn.rs:291: `Frame` 只含字符串键与有限数值，serde 结构上不会 失败；要触达需往协议里塞 NaN/非字符串键，那会被 protocol crate 的单测挡住。
 crates/node-core/src/conn.rs:292: `Frame` 只含字符串键与有限数值，serde 结构上不会 失败；要触达需往协议里塞 NaN/非字符串键，那会被 protocol crate 的单测挡住。
+crates/node-core/src/conn.rs:316: 对端 Close 帧先到并命中下面的 Close 臂， 这个「流结束」臂因此被遮蔽；纯 FIN 而不发 Close 的对端会被 tungstenite 报成读错误，走的是另一条路。
 crates/node-core/src/conn.rs:317: 对端 Close 帧先到并命中下面的 Close 臂， 这个「流结束」臂因此被遮蔽；纯 FIN 而不发 Close 的对端会被 tungstenite 报成读错误，走的是另一条路。
-crates/node-core/src/conn.rs:318: 对端 Close 帧先到并命中下面的 Close 臂， 这个「流结束」臂因此被遮蔽；纯 FIN 而不发 Close 的对端会被 tungstenite 报成读错误，走的是另一条路。
-crates/node-core/src/connector/exec.rs:383: `pipe2` 失败需 fd 表耗尽，测试环境无可控构造 手段（防御性兜底）。
-crates/node-core/src/connector/exec.rs:384: `pipe2` 失败需 fd 表耗尽，测试环境无可控构造 手段（防御性兜底）。
-crates/node-core/src/connector/exec.rs:385: `pipe2` 失败需 fd 表耗尽，测试环境无可控构造 手段（防御性兜底）。
-crates/node-core/src/connector/exec.rs:386: `pipe2` 失败需 fd 表耗尽，测试环境无可控构造 手段（防御性兜底）。
-crates/node-core/src/connector/exec.rs:434: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:435: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:436: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:437: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:438: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:439: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:441: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:442: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:443: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:444: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:445: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:448: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:449: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:450: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:451: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:452: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:453: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:454: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:456: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:457: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:462: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:253: `spawn` 失败需线程数达上限或内存耗尽， 测试环境无可控构造手段。
+crates/node-core/src/connector/exec.rs:254: `spawn` 失败需线程数达上限或内存耗尽， 测试环境无可控构造手段。
+crates/node-core/src/connector/exec.rs:255: `spawn` 失败需线程数达上限或内存耗尽， 测试环境无可控构造手段。
+crates/node-core/src/connector/exec.rs:256: `spawn` 失败需线程数达上限或内存耗尽， 测试环境无可控构造手段。
 crates/node-core/src/connector/exec.rs:463: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
 crates/node-core/src/connector/exec.rs:464: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
 crates/node-core/src/connector/exec.rs:465: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
 crates/node-core/src/connector/exec.rs:466: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:467: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:468: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:469: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:470: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:471: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
-crates/node-core/src/connector/exec.rs:493: `fork` 失败需进程表耗尽，测试环境无可控构造 手段（防御性兜底）。
-crates/node-core/src/connector/exec.rs:494: `fork` 失败需进程表耗尽，测试环境无可控构造 手段（防御性兜底）。
-crates/node-core/src/connector/exec.rs:495: `fork` 失败需进程表耗尽，测试环境无可控构造 手段（防御性兜底）。
-crates/node-core/src/connector/exec.rs:496: `fork` 失败需进程表耗尽，测试环境无可控构造 手段（防御性兜底）。
-crates/node-core/src/connector/exec.rs:501: `fork` 失败需进程表耗尽，测试环境无可控构造 手段（防御性兜底）。
-crates/node-core/src/connector/exec.rs:581: 多行 `tracing!` 的参数行被 llvm-cov 记为 miss（已知现象）；这条日志本身由 `a_pipe_that_fails_permanently_is_dropped_not_retried` 走到。
-crates/node-core/src/connector/exec.rs:625: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
-crates/node-core/src/connector/exec.rs:626: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
-crates/node-core/src/connector/exec.rs:627: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
-crates/node-core/src/connector/exec.rs:628: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
-crates/node-core/src/connector/exec.rs:629: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
+crates/node-core/src/connector/exec.rs:514: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:515: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:516: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:517: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:518: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:519: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:521: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:522: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:523: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:524: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:525: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:528: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:529: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:530: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:531: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:532: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:533: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:534: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:536: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:537: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:542: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:543: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:544: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:545: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:546: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:547: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:548: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:549: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:550: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:551: / 子进程那一侧。**永不返回**。 / / 任何一步失败都只能 `_exit`：此刻子进程里跑的还是 Rust 的运行时 / （栈展开、析构、锁状态全是 fork 时刻的快照），走栈展开等于在一个 / 锁状态不确定的世界里调析构。 下面整个 `child_exec`（签名行也是）：这是 `fork` 之后的 **子进程**分支，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，子进程里 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败， 正常测试环境构造不出来（防御性兜底）。
+crates/node-core/src/connector/exec.rs:572: `fork` 失败需进程表耗尽，测试环境无可控构造 手段（防御性兜底）。
+crates/node-core/src/connector/exec.rs:573: `fork` 失败需进程表耗尽，测试环境无可控构造 手段（防御性兜底）。
+crates/node-core/src/connector/exec.rs:574: `fork` 失败需进程表耗尽，测试环境无可控构造 手段（防御性兜底）。
+crates/node-core/src/connector/exec.rs:575: `fork` 失败需进程表耗尽，测试环境无可控构造 手段（防御性兜底）。
+crates/node-core/src/connector/exec.rs:580: `fork` 失败需进程表耗尽，测试环境无可控构造 手段（防御性兜底）。
+crates/node-core/src/connector/exec.rs:659: 多行 `tracing!` 的参数行被 llvm-cov 记为 miss（已知现象）；这条日志本身由 `a_pipe_that_fails_permanently_is_dropped_not_retried` 走到。
+crates/node-core/src/connector/exec.rs:701: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
+crates/node-core/src/connector/exec.rs:702: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
+crates/node-core/src/connector/exec.rs:703: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
+crates/node-core/src/connector/exec.rs:704: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
+crates/node-core/src/connector/exec.rs:705: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
+crates/node-core/src/connector/exec.rs:810: `fds()` 里已关的那根传的就是 -1，内核会忽略它而 `revents` 恒 0—— 语义与「不在表里」相同，所以不需要在这里再筛一遍。 `poll` 失败需 nfds 超范围或非法 fd，这里传的都是 内核刚给的 fd（防御性兜底）。
 crates/node-core/src/connector/files.rs:109: Unix 上 `RootDir` 必然让 `asked.is_absolute()` 为真、在 :97 就已经返回；`Prefix` 只在 Windows 出现（盘符 / UNC），本 crate 只在 Unix 目标上构建。 留着这一臂是为了「将来若支持 Windows，越界判定不会漏掉盘符」。
 crates/node-core/src/connector/files.rs:137: `lexical` 由根的分段拼成，而根在 `open` 时 已被 canonicalize 过（必然存在），所以向上走必然在根处停住。
 crates/node-core/src/connector/files.rs:138: `lexical` 由根的分段拼成，而根在 `open` 时 已被 canonicalize 过（必然存在），所以向上走必然在根处停住。
 crates/node-core/src/connector/files.rs:139: `lexical` 由根的分段拼成，而根在 `open` 时 已被 canonicalize 过（必然存在），所以向上走必然在根处停住。
-crates/node-core/src/connector/files.rs:325: 元数据读不到要求该项在 `read_dir` 之后被另一个进程删掉，同样是竞态而非分支。
-crates/node-core/src/connector/files.rs:679: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
-crates/node-core/src/connector/files.rs:1248: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
-crates/node-core/src/connector/files.rs:1318: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/connector/files.rs:324: 元数据读不到要求该项在 `read_dir` 之后被另一个进程删掉，同样是竞态而非分支。
+crates/node-core/src/connector/files.rs:678: 元数据读不到要求该项在 `read_dir` 之后被另一个进程删掉，同样是竞态而非分支。
+crates/node-core/src/connector/files.rs:1247: mkfifo 只可能因 umask/路径/已存在而失败， 这里传的是刚由 tempfile 建出的目录下的新名字。
+crates/node-core/src/connector/files.rs:1317: mkfifo 只可能因 umask/路径/已存在而失败， 这里传的是刚由 tempfile 建出的目录下的新名字。
 crates/node-core/src/connector/terminal.rs:217: 0 视作「没给」：页面刚挂载、还没量到尺寸时会发 0， 而 0 对内核是「未设置」，`stty size` 会报 `0 0`。回落到默认比 报错更接近用户要的——他要的是一个能看见提示符的终端。 `?` 的那条 Err 因此**结构上不可达**：`non_zero` 只放行 ≥1，而 `MIN_DIM` 也是 1，两个入口都不会让 `checked` 失败。下面的 `?` 留着是因为「以后若把 MIN_DIM 调大，这里要立刻跟着拒绝」。 理由见上：`checked` 在 `open` 里恒成功。
 crates/node-core/src/connector/terminal.rs:272: 上面 `self.pty()?` 已经确认开着，同一 函数里 `self.pty` 不可能从 Some 变成 None（改它的 `close` / `detach` 都是别的入口），所以这个 None 臂结构上不可达。
 crates/node-core/src/connector/terminal.rs:273: 上面 `self.pty()?` 已经确认开着，同一 函数里 `self.pty` 不可能从 Some 变成 None（改它的 `close` / `detach` 都是别的入口），所以这个 None 臂结构上不可达。
@@ -206,68 +218,69 @@ crates/node-core/src/connector/terminal.rs:739: 测试自身的失败分支（`e
 crates/node-core/src/connector/terminal.rs:740: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
 crates/node-core/src/connector/terminal.rs:741: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
 crates/node-core/src/connector/terminal.rs:742: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
-crates/node-core/src/identity.rs:317: 见 :298：内层 `if let Ok(d)` 的 else 不可达， 这里是它的收尾行。
-crates/node-core/src/log.rs:85: 收紧日志目录权限：目录已存在（create_dir_all 成功）即 set_permissions 必成功，正常文件系统构造不出失败（防御性兜底）。
+crates/node-core/src/identity.rs:316: 见 :298：内层 `if let Ok(d)` 的 else 不可达， 这里是它的收尾行。
+crates/node-core/src/log.rs:83: 收紧日志目录权限：目录已存在（create_dir_all 成功）即 set_permissions 必成功，正常文件系统构造不出失败（防御性兜底）。
+crates/node-core/src/pty.rs:149: 下面这一臂（含错误串的 `format!` 参数行）要求 `forkpty` 失败：`/dev/ptmx` 用尽或 fd 耗尽，测试环境无可控构造手段 （防御性兜底）。
 crates/node-core/src/pty.rs:150: 下面这一臂（含错误串的 `format!` 参数行）要求 `forkpty` 失败：`/dev/ptmx` 用尽或 fd 耗尽，测试环境无可控构造手段 （防御性兜底）。
 crates/node-core/src/pty.rs:151: 下面这一臂（含错误串的 `format!` 参数行）要求 `forkpty` 失败：`/dev/ptmx` 用尽或 fd 耗尽，测试环境无可控构造手段 （防御性兜底）。
 crates/node-core/src/pty.rs:152: 下面这一臂（含错误串的 `format!` 参数行）要求 `forkpty` 失败：`/dev/ptmx` 用尽或 fd 耗尽，测试环境无可控构造手段 （防御性兜底）。
-crates/node-core/src/pty.rs:153: 下面这一臂（含错误串的 `format!` 参数行）要求 `forkpty` 失败：`/dev/ptmx` 用尽或 fd 耗尽，测试环境无可控构造手段 （防御性兜底）。
+crates/node-core/src/pty.rs:171: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的 **子进程**，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了， 子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
 crates/node-core/src/pty.rs:172: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的 **子进程**，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了， 子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
 crates/node-core/src/pty.rs:173: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的 **子进程**，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了， 子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
 crates/node-core/src/pty.rs:174: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的 **子进程**，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了， 子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
 crates/node-core/src/pty.rs:175: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的 **子进程**，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了， 子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
-crates/node-core/src/pty.rs:176: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的 **子进程**，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了， 子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
+crates/node-core/src/pty.rs:178: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的 **子进程**，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了， 子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
 crates/node-core/src/pty.rs:179: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的 **子进程**，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了， 子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
 crates/node-core/src/pty.rs:180: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的 **子进程**，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了， 子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
-crates/node-core/src/pty.rs:181: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的 **子进程**，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了， 子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
-crates/node-core/src/pty.rs:189: ---- 父进程 ---- master < 0 在 forkpty 返回正 pid 时不可能 （内核要么同时给出两者，要么同时失败），属结构上不可达。
-crates/node-core/src/pty.rs:219: `fcntl(F_DUPFD_CLOEXEC)` 失败需 fd 表耗尽， 测试环境无可控构造手段（防御性兜底）。
-crates/node-core/src/pty.rs:263: 写中断的 `EINTR` 重试分支：本仓库的读写都 很快且非信号密集，这条只在极端时序下发生，无法确定性构造。
+crates/node-core/src/pty.rs:188: ---- 父进程 ---- master < 0 在 forkpty 返回正 pid 时不可能 （内核要么同时给出两者，要么同时失败），属结构上不可达。
+crates/node-core/src/pty.rs:217: `fcntl(F_DUPFD_CLOEXEC)` 失败需 fd 表耗尽， 测试环境无可控构造手段（防御性兜底）。
+crates/node-core/src/pty.rs:261: 写中断的 `EINTR` 重试分支：本仓库的读写都 很快且非信号密集，这条只在极端时序下发生，无法确定性构造。
+crates/node-core/src/pty.rs:268: `n == 0` 臂（`BrokenPipe` + "terminal is gone"）：`write(2)` 对一根活着的 PTY 只会返回正数或负 errno， 返回 0 需要「是终端却一个字节都不收」的稳定时序，测试环境造不出来。
+crates/node-core/src/pty.rs:269: `n == 0` 臂（`BrokenPipe` + "terminal is gone"）：`write(2)` 对一根活着的 PTY 只会返回正数或负 errno， 返回 0 需要「是终端却一个字节都不收」的稳定时序，测试环境造不出来。
 crates/node-core/src/pty.rs:270: `n == 0` 臂（`BrokenPipe` + "terminal is gone"）：`write(2)` 对一根活着的 PTY 只会返回正数或负 errno， 返回 0 需要「是终端却一个字节都不收」的稳定时序，测试环境造不出来。
 crates/node-core/src/pty.rs:271: `n == 0` 臂（`BrokenPipe` + "terminal is gone"）：`write(2)` 对一根活着的 PTY 只会返回正数或负 errno， 返回 0 需要「是终端却一个字节都不收」的稳定时序，测试环境造不出来。
-crates/node-core/src/pty.rs:272: `n == 0` 臂（`BrokenPipe` + "terminal is gone"）：`write(2)` 对一根活着的 PTY 只会返回正数或负 errno， 返回 0 需要「是终端却一个字节都不收」的稳定时序，测试环境造不出来。
-crates/node-core/src/pty.rs:273: `n == 0` 臂（`BrokenPipe` + "terminal is gone"）：`write(2)` 对一根活着的 PTY 只会返回正数或负 errno， 返回 0 需要「是终端却一个字节都不收」的稳定时序，测试环境造不出来。
-crates/node-core/src/pty.rs:356: `ioctl` 失败需要一个「是终端却拒绝改尺寸」的 fd （普通管道 / 普通文件会返回 ENOTTY，但那不是 PTY 路径构造得出来的）， 属防御性兜底。
-crates/node-core/src/worker.rs:109: `work` 的 load 成功臂后段：需真 data_dir， 与 `run_with` 同一不可达形状（:64）。
-crates/node-core/src/worker.rs:118: `run_with` 自建多线程 runtime，嵌在 `#[tokio::test]` 里会 panic。
-crates/node-core/src/worker.rs:128: / 身份已备好之后的全部流程。 / / 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， / 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— / 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:129: / 身份已备好之后的全部流程。 / / 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， / 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— / 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:130: / 身份已备好之后的全部流程。 / / 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， / 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— / 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:131: / 身份已备好之后的全部流程。 / / 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， / 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— / 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:132: / 身份已备好之后的全部流程。 / / 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， / 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— / 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:133: / 身份已备好之后的全部流程。 / / 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， / 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— / 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:134: / 身份已备好之后的全部流程。 / / 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， / 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— / 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:135: / 身份已备好之后的全部流程。 / / 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， / 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— / 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:136: / 身份已备好之后的全部流程。 / / 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， / 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— / 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:137: 见 :66 的 `run_with` 标注：进程入口，只能由 真进程触达。
-crates/node-core/src/worker.rs:138: 见 :66 的 `run_with` 标注：进程入口，只能由 真进程触达。
-crates/node-core/src/worker.rs:139: 见 :66 的 `run_with` 标注：进程入口，只能由 真进程触达。
-crates/node-core/src/worker.rs:140: 见 :66 的 `run_with` 标注：进程入口，只能由 真进程触达。
-crates/node-core/src/worker.rs:144: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
+crates/node-core/src/pty.rs:354: `ioctl` 失败需要一个「是终端却拒绝改尺寸」的 fd （普通管道 / 普通文件会返回 ENOTTY，但那不是 PTY 路径构造得出来的）， 属防御性兜底。
+crates/node-core/src/worker.rs:110: `work` 是进程入口，只能靠 spawn 真二进制走到： `load_or_create` 的成功臂、失败臂与整条 `run_with` 链在单测里都触达不到 （`run_with` 自建多线程 runtime，嵌在 `#[tokio::test]` 里会 panic）。
+crates/node-core/src/worker.rs:118: `work` 是进程入口，只能靠 spawn 真二进制走到： `load_or_create` 的成功臂、失败臂与整条 `run_with` 链在单测里都触达不到 （`run_with` 自建多线程 runtime，嵌在 `#[tokio::test]` 里会 panic）。
+crates/node-core/src/worker.rs:128: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
+crates/node-core/src/worker.rs:129: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
+crates/node-core/src/worker.rs:130: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
+crates/node-core/src/worker.rs:131: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
+crates/node-core/src/worker.rs:132: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
+crates/node-core/src/worker.rs:133: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
+crates/node-core/src/worker.rs:134: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
+crates/node-core/src/worker.rs:135: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
+crates/node-core/src/worker.rs:136: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
+crates/node-core/src/worker.rs:137: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
+crates/node-core/src/worker.rs:138: 见 `run_with` 上的标注：进程入口，只能由 真进程触达。
+crates/node-core/src/worker.rs:139: 见 `run_with` 上的标注：进程入口，只能由 真进程触达。
+crates/node-core/src/worker.rs:140: 见 `run_with` 上的标注：进程入口，只能由 真进程触达。
+crates/node-core/src/worker.rs:144: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
 crates/node-core/src/worker.rs:145: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
 crates/node-core/src/worker.rs:146: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
 crates/node-core/src/worker.rs:148: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
 crates/node-core/src/worker.rs:151: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
 crates/node-core/src/worker.rs:152: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
 crates/node-core/src/worker.rs:153: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
-crates/node-core/src/worker.rs:159: 退出码协议里的三个非零码都带「这一版坏了」的语义， 同上：`block_on` 是进程入口路径。 而 worker 自己不打算判自己坏——它只会「正常停下」。
-crates/node-core/src/worker.rs:160: 退出码协议里的三个非零码都带「这一版坏了」的语义， 同上：`block_on` 是进程入口路径。 而 worker 自己不打算判自己坏——它只会「正常停下」。
-crates/node-core/src/worker.rs:161: 退出码协议里的三个非零码都带「这一版坏了」的语义， 同上：`block_on` 是进程入口路径。 而 worker 自己不打算判自己坏——它只会「正常停下」。
-crates/node-core/src/worker.rs:339: 心跳 tick 臂：需让 ticker 在 session 内触发而 read 不返回。
-crates/node-core/src/worker.rs:360: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
-crates/node-core/src/worker.rs:470: heartbeat 编码失败需构造 serde 失败的 Heartbeat。
-crates/node-core/src/worker.rs:471: heartbeat 编码失败需构造 serde 失败的 Heartbeat。
-crates/node-core/src/worker.rs:625: 只在断言失败时执行；`panic!` 的格式串行被 llvm-cov 记为 miss（多行宏已知现象）。
-crates/node-core/src/worker.rs:669: 同上：只在断言失败时执行的 `panic!` 参数行。
-crates/node-core/src/worker.rs:699: `assert!` 的格式串参数行（多行宏已知现象）。
-crates/node-core/src/worker.rs:708: 同上：`assert!` 的格式串参数行。
-crates/node-core/src/worker.rs:852: 测试夹具 `fake_hub`：fixture 只在测试自己起的 监听器上跑，accept / upgrade 失败臂构造不出。
-crates/node-core/src/worker.rs:856: 同上：fixture 的 upgrade 失败臂。
-crates/node-core/src/worker.rs:874: `unreachable!`：上面已经 return，结构上不可达。
-crates/node-core/src/worker.rs:875: `unreachable!`：上面已经 return，结构上不可达。
-crates/node-core/src/worker.rs:1014: 日志轮询辅助函数的 deadline `assert!` 行： 只在失败时执行。
-crates/node-core/src/worker.rs:1292: 测试夹具：accept 失败臂在测试自己起的 监听器上构造不出。
-crates/node-core/src/worker.rs:1296: 同上：upgrade 失败臂。
-crates/node-core/src/worker.rs:1314: 真 PTY 通道上的断言：worker 只会发 自己造的 JSON 帧，这条「解析不动」的 continue 在 `fake_hub_recording_heartbeats` 上构造不出（对端发的 每帧都由 `Frame::push` 保证可解析）。
-crates/node-core/src/worker.rs:1553: 只在上面这条断言失败时执行；`panic!` 的 参数行被 llvm-cov 记为 miss（多行宏已知现象）。
-crates/node-core/src/worker.rs:1748: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
+crates/node-core/src/worker.rs:159: 退出码协议里的三个非零码都带「这一版坏了」的语义， 而 worker 自己不打算判自己坏——它只会「正常停下」。 同上：`block_on` 是进程入口路径。
+crates/node-core/src/worker.rs:160: 退出码协议里的三个非零码都带「这一版坏了」的语义， 而 worker 自己不打算判自己坏——它只会「正常停下」。 同上：`block_on` 是进程入口路径。
+crates/node-core/src/worker.rs:161: 退出码协议里的三个非零码都带「这一版坏了」的语义， 而 worker 自己不打算判自己坏——它只会「正常停下」。 同上：`block_on` 是进程入口路径。
+crates/node-core/src/worker.rs:336: 心跳 tick 臂：需让 ticker 在 session 内触发而 read 不返回。
+crates/node-core/src/worker.rs:357: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
+crates/node-core/src/worker.rs:466: heartbeat 编码失败需构造 serde 失败的 Heartbeat。
+crates/node-core/src/worker.rs:467: heartbeat 编码失败需构造 serde 失败的 Heartbeat。
+crates/node-core/src/worker.rs:621: 只在断言失败时执行；`panic!` 的格式串行被 llvm-cov 记为 miss（多行宏已知现象）。
+crates/node-core/src/worker.rs:665: 同上：只在断言失败时执行的 `panic!` 参数行。
+crates/node-core/src/worker.rs:695: `assert!` 的格式串参数行（多行宏已知现象）。
+crates/node-core/src/worker.rs:704: 同上：`assert!` 的格式串参数行。
+crates/node-core/src/worker.rs:848: 测试夹具 `fake_hub`：fixture 只在测试自己起的 监听器上跑，accept / upgrade 失败臂构造不出。
+crates/node-core/src/worker.rs:852: 同上：fixture 的 upgrade 失败臂。
+crates/node-core/src/worker.rs:870: `unreachable!`：上面已经 return，结构上不可达。
+crates/node-core/src/worker.rs:871: `unreachable!`：上面已经 return，结构上不可达。
+crates/node-core/src/worker.rs:1010: 日志轮询辅助函数的 deadline `assert!` 行： 只在失败时执行。
+crates/node-core/src/worker.rs:1298: 测试夹具：accept 失败臂在测试自己起的 监听器上构造不出。
+crates/node-core/src/worker.rs:1302: 同上：upgrade 失败臂。
+crates/node-core/src/worker.rs:1322: 真 PTY 通道上的断言：worker 只会发 自己造的 JSON 帧，这条「解析不动」的 continue 在 `fake_hub_recording_heartbeats` 上构造不出（对端发的 每帧都由 `Frame::push` 保证可解析）。
+crates/node-core/src/worker.rs:1562: 只在上面这条断言失败时执行；`panic!` 的 参数行被 llvm-cov 记为 miss（多行宏已知现象）。
+crates/node-core/src/worker.rs:1767: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
+crates/node-core/src/worker.rs:1812: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
