@@ -277,9 +277,11 @@ SSE_PID=$!
 # ---------------------------------------------------------------------------
 # 起设备（真 afcli，一条命令）
 # ---------------------------------------------------------------------------
-NODE_CMD="AFCLI_DATA_DIR=$TMP/node AFCLI_HUB_URL=ws://127.0.0.1:$PORT/ws $AFCLI_BIN run"
-AFCLI_DATA_DIR="$TMP/node" AFCLI_HUB_URL="ws://127.0.0.1:$PORT/ws" \
-  setsid "$AFCLI_BIN" run >>"$TMP/node.stdout" 2>&1 &
+# 接入命令：既是这里实跑的那一条，也是脚本末尾回显给用户照着抄的那一条。
+# 早先这里是两处各写一遍（一个带 env 前缀的展示串、一个靠 export 的实跑命令），
+# 于是回显里那条粘过去跑不起来——改 env 名只改得一边。
+NODE_CMD=(env "AFCLI_DATA_DIR=$TMP/node" "AFCLI_HUB_URL=ws://127.0.0.1:$PORT/ws" "$AFCLI_BIN" run)
+setsid "${NODE_CMD[@]}" >>"$TMP/node.stdout" 2>&1 &
 NODE_PID=$!
 
 NODE_ID=""
@@ -414,7 +416,7 @@ dump() {
 # ---------------------------------------------------------------------------
 echo
 echo "== 标准 1 afcli run 一条命令接入，设备出现在 /api/devices =="
-echo "  接入命令：$NODE_CMD"
+echo "  接入命令：${NODE_CMD[*]}"
 if [ -n "$NODE_ID" ] && [ "$DEVICE_STATUS" = "online" ]; then
   ok "设备已在 /api/devices：id=$NODE_ID status=$DEVICE_STATUS"
   info "$(printf '%s' "$DEVICES" | jq -c '.[0] | {id, name, platform, agent_version, status, key_fingerprint}')"
