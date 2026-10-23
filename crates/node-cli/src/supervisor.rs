@@ -106,7 +106,6 @@ pub struct Supervisor {
 
 impl Supervisor {
     /// 生产构造：被管理的二进制就是当前这个可执行文件。
-    // coverage: excluded — 只在 main 的 run 路径上构造，而 main 是另一编译
     // 单元、覆盖率不计；单测入口是 `with_exe`。
     pub fn new(argv: Vec<String>, data_dir: PathBuf) -> Self {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from(crate::BIN_NAME));
@@ -217,7 +216,6 @@ impl Supervisor {
     ///
     /// stdout/stderr 直接继承：worker 的输出要进 supervisor 所在的 journal，
     /// 中间再插一层转发只会让排障多一跳。
-    // coverage: excluded — 同 supervise：真 spawn 二进制并阻塞 wait，
     // 在单元测试里等于递归起自己。
     fn spawn_and_wait(&self) -> ExitInfo {
         let started = Instant::now();

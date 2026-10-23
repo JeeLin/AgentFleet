@@ -39,10 +39,8 @@ pub fn write(data_dir: &Path, role: &str, level: &str, msg: &str) {
 /// 本来就不该由日志频率触发。
 pub fn rotate_at_startup(data_dir: &Path, role: &str) {
     let path = log::log_path(data_dir);
-    // coverage: excluded — 轮转失败需要日志目录不可写，而 `rotate_if_needed`
     // 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
     if let Err(e) = log::rotate_if_needed(&path) {
-        // coverage: excluded — 轮转失败需要日志目录不可写，而 `rotate_if_needed`
         // 的失败路径本身已登记在 node-core/src/log.rs；这里只做「再记一行」。
         write(
             data_dir,

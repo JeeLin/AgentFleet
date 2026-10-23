@@ -138,7 +138,6 @@ where
 /// 跑 `run`：备好环境（数据目录、Hub 地址）后转 [`dispatch`]。
 ///
 /// **它不做角色判定**：角色只看 argv，而那件事只有 [`role_of`] 一处。
-// coverage: excluded — 进程入口：真建数据目录、真解析 hub url，再转
 // `dispatch`（可测接缝）。单元测试从 `dispatch` 进入。
 fn run_node<W1, W2>(args: &[String], out: W1, mut err: W2) -> std::process::ExitCode
 where

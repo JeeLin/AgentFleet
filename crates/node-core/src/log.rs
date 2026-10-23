@@ -50,14 +50,12 @@ pub fn rotate_if_needed(path: &Path) -> Result<bool, String> {
     // 从最旧往最新挪，避免覆盖：先删掉最后一个，再逐个后移
     let oldest = rotated_path(path, KEEP_ROTATIONS);
     if oldest.exists() {
-        // coverage: excluded — 轮转删最旧文件：目录可写、文件存在即可删，正常文件系统构造不出确定性失败（防御性兜底）。
         std::fs::remove_file(&oldest).map_err(|e| format!("remove oldest rotation: {e}"))?;
     }
     for n in (1..KEEP_ROTATIONS).rev() {
         let from = rotated_path(path, n);
         let to = rotated_path(path, n + 1);
         if from.exists() {
-            // coverage: excluded — 轮转后移文件：源存在、目标在其同级目录，正常文件系统构造不出确定性失败（防御性兜底）。
             std::fs::rename(&from, &to).map_err(|e| format!("rotate {n}: {e}"))?;
         }
     }

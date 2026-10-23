@@ -132,7 +132,6 @@ impl Pty {
         };
 
         let mut master: libc::c_int = -1;
-        // coverage: excluded — `forkpty` 失败需 `/dev/ptmx` 用尽或 fd 耗尽，
         // 测试环境无可控构造手段（防御性兜底）。尺寸非法那类**可测**的
         // 失败在上层就挡住了，不会走到这里。
         let pid = unsafe {
@@ -188,7 +187,6 @@ impl Pty {
         if master < 0 {
             return Err(PtyError::Start("forkpty returned no master fd".into()));
         }
-        // coverage: excluded — 同上：`fd < 0` 时构造 OwnedFd 即崩，而它来自
         // 一个刚成功返回的 forkpty 调用。
         let master = unsafe { OwnedFd::from_raw_fd(master) };
         Ok(Self {

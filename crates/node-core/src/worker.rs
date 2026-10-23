@@ -103,8 +103,9 @@ impl Worker {
     /// 「Hub 还没设密码，去浏览器里做完 setup」这句话正是这种话。
     pub fn work<W: std::io::Write>(&mut self, out: W) -> std::process::ExitCode {
         self.rotate_log();
-        // coverage: excluded — `work` 的 load 成功臂后段：需真 data_dir，
-        // 与 `run_with` 同一不可达形状（:64）。
+        // coverage: excluded — `work` 是进程入口，只能靠 spawn 真二进制走到：
+        // `load_or_create` 的成功臂、失败臂与整条 `run_with` 链在单测里都触达不到
+        // （`run_with` 自建多线程 runtime，嵌在 `#[tokio::test]` 里会 panic）。
         let identity = match Identity::load_or_create(&self.data_dir) {
             Ok(id) => id,
             // 身份文件坏了/读不了时**不能**重新生成：那等于换了一台设备，
@@ -112,8 +113,7 @@ impl Worker {
             Err(e) => {
                 self.say(&format!("error: cannot load identity: {e}"));
                 return std::process::ExitCode::FAILURE;
-            } // coverage: excluded — `run_with` 自建多线程 runtime，嵌在 `#[tokio::test]`
-              // 里会 panic。
+            }
         };
         self.run_with(identity, out)
     }
@@ -133,7 +133,7 @@ impl Worker {
         let node_id = identity.node_id();
         self.say(&format!(
             "{BIN_NAME} worker starting, node_id={}, hub={}",
-            // coverage: excluded — 见 :66 的 `run_with` 标注：进程入口，只能由
+            // coverage: excluded — 见 `run_with` 上的标注：进程入口，只能由
             // 真进程触达。
             node_id.as_deref().unwrap_or("<none: will enroll>"),
             self.hub_url
@@ -154,8 +154,8 @@ impl Worker {
             }
         };
         // 退出码协议里的三个非零码都带「这一版坏了」的语义，
-        // coverage: excluded — 同上：`block_on` 是进程入口路径。
         // 而 worker 自己不打算判自己坏——它只会「正常停下」。
+        // coverage: excluded — 同上：`block_on` 是进程入口路径。
         let _ = rt.block_on(self.connect_loop(&mut identity, node_id.as_deref(), out));
         std::process::ExitCode::SUCCESS
     }
@@ -216,7 +216,6 @@ impl Worker {
                                 d.as_secs(),
                                 attempt
                             ));
-                            // coverage: excluded — 退避重连的 continue：需构造一次「可重试的传输
                             // 失败」并等过退避窗口。
                             tokio::time::sleep(d).await;
                             continue;
@@ -267,7 +266,6 @@ impl Worker {
         // 记下本次的 gen，**必须落盘**：进程重启后若从 0 开始，
         // 而 Hub 已经发到 42，这条连接永远被判成「已被顶替」——
         // 设备接不上且无自愈路径（子任务 7 标准⑧）。
-        // coverage: excluded — `record_gen` 失败同上：需身份文件中途不可写。
         if let Err(e) = identity.record_gen(est.auth_ok.gen) {
             self.say(&format!("error: cannot record the connection gen: {e}"));
             return Err(exit_code::CRASH);
@@ -299,7 +297,6 @@ impl Worker {
             )),
             SessionEnd::Transport(detail) => Ok(AfterSession::Reconnect(detail.clone())),
             SessionEnd::Superseded { gen } => {
-                // coverage: excluded — `mark_superseded` 失败需身份文件中途不可写。
                 if let Err(e) = identity.mark_superseded(&crate::now_secs()) {
                     self.say(&format!("error: cannot persist the superseded mark: {e}"));
                     return Err(exit_code::CRASH);
@@ -363,7 +360,6 @@ impl Worker {
                         Err(e) => return SessionEnd::Transport(format!("bad frame json: {e}")),
                         Ok(frame) => {
                             if let Some(ended) = self.on_control_frame(&frame) {
-                                // coverage: excluded — 未知控制帧的忽略臂：需发一帧 disconnect 之外的
                                 // 未知类型并让它走到这里。
                                 return ended;
                             }

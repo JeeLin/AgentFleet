@@ -304,7 +304,6 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), IdentityError> {
     fs::rename(&tmp, path)?;
     // 目录项也要落盘：rename 本身在断电后可能丢失。
     if let Some(dir) = path.parent() {
-        // coverage: excluded — 内层 `if let Ok(d)` 的 else（父目录打不开）需先破坏
         // tempdir 再调 write_atomic，测试无法在不弄坏夹具的前提下构造；
         // 外层 `Some(dir)` 恒成立（tmp_path 由 path 派生，必带父目录）。
         if let Ok(d) = fs::File::open(dir) {

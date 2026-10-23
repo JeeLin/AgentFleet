@@ -293,7 +293,6 @@ async fn send_frame(
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(text))
         .await
-        // coverage: excluded — 需服务端完成 WS 升级后立刻 RST 才能触达，而这与
         // node 紧接着发 hello 存在竞态，测试构造不出确定性的失败（flaky 比不测更坏）。
         .map_err(|e| ConnOutcome::Transport {
             detail: format!("send failed: {e}"),

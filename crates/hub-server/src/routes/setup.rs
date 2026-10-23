@@ -451,7 +451,6 @@ async fn spawn_blocking_password(
 ) -> Result<Result<(), AuthError>, BlockingTaskError> {
     tokio::task::spawn_blocking(move || worker.auth().setup_password(&password))
         .await
-        // coverage: excluded —— 同 [`spawn_blocking_verify`]：只在任务 panic
         // 或运行时关闭时失败，生产代码不 panic，测试里不可达。
         .map_err(BlockingTaskError)
 }

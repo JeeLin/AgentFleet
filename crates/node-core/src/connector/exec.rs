@@ -586,7 +586,6 @@ impl Child {
             libc::close(out_w);
             libc::close(err_w);
         }
-        // coverage: excluded — `from_raw_fd` 在 fd < 0 时即崩，而这两个 fd
         // 来自刚成功的 `pipe2`。
         let pipes = vec![
             Some(unsafe { OwnedFd::from_raw_fd(out_r) }),
@@ -680,10 +679,8 @@ impl Child {
     /// `setpgid` 了（`sh -c 'exec ...'` 里某个工具会这么干），
     /// 只杀 pid 会留下它 fork 出来的孙进程继续往管道里写。
     fn kill(&self) {
-        // coverage: excluded — kill 对已退出/已回收的 pid 返回 ESRCH，
         // 忽略即可（那正是我们想看到的）。
         let _ = unsafe { libc::kill(-self.pid, libc::SIGKILL) };
-        // coverage: excluded — 同上。
         let _ = unsafe { libc::kill(self.pid, libc::SIGKILL) };
     }
 
@@ -710,7 +707,6 @@ impl Child {
         if libc::WIFEXITED(status) {
             return libc::WEXITSTATUS(status);
         }
-        // coverage: excluded — `WIFSTOPPED`/`WIFCONTINUED` 只有在带
         // `WUNTRACED`/`WCONTINUED` 的 waitpid 下才可能返回，而这里两个
         // 标志都没给，所以剩下的唯一分支就是「被信号杀掉」。
         128 + libc::WTERMSIG(status)

@@ -127,7 +127,6 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
             // relay 的返回值**记日志而不消音**：「连接为什么结束」正是排查
             // 设备掉线时唯一有用的信息。
             //
-            // coverage: excluded — 这个 `Ok(auth)` 臂的收尾行（下面的 `}`）
             // 只在 relay **正常返回**后才执行，而测试里连接 task 的生命周期
             // 长于 fixture——runtime 关闭时它已被取消，走不到收尾。
             let relayed = relay(&state, &mut stream, &conn_id, auth).await;
@@ -141,7 +140,6 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
                 tracing::info!(conn_id = %conn_id, reason = %reason, "ws relay ended");
             }
         }
-        // coverage: excluded — 连接 task 在 runtime 关闭时被取消：`Ok(auth)` 臂的
         // 收尾行与整个 `Err(reason)` 臂在单测里都不可达（fixture 的生命周期长于
         // 那个 task）。
         Err(reason) => {
@@ -488,12 +486,10 @@ async fn finish_enroll(
         .devices()
         .set_public_key(&node_id, &accepted.public_key)
     {
-        // coverage: excluded — 写库失败需让 SQLite 在握手中途失败，
         // 单测的 fixture 数据库全程可写。
         tracing::warn!(error = %e, "cannot store public key after enroll");
     }
     if let Err(e) = state.registry().devices().set_gen(&node_id, gen) {
-        // coverage: excluded — 同上：写库失败需让 SQLite 在握手中途失败。
         tracing::warn!(error = %e, "cannot record connection gen");
     }
     finish_ok(
@@ -576,7 +572,6 @@ async fn finish_reconnect(
                 live_gen = live,
                 "rejecting a reconnect from a superseded connection"
             );
-            // coverage: excluded — `reject` 是共用的失败出口，被顶替的重连
             // 走到这里就结束了：单测只覆盖到「拒绝返回 reason」这一层
             // （见 `a_reconnect_with_a_bad_signature_is_rejected`）。
             return Err(reject(
@@ -590,7 +585,6 @@ async fn finish_reconnect(
         }
     }
     if let Err(e) = state.registry().devices().set_gen(&auth.node_id, gen) {
-        // coverage: excluded — 写库失败需让 SQLite 在握手中途失败，
         // 单测的 fixture 数据库全程可写。
         tracing::warn!(error = %e, "cannot record connection gen");
     }
@@ -622,7 +616,6 @@ async fn finish_ok(
     let interval = state.heartbeat_interval_ms();
     let frame = hs
         .auth_ok(seq, &node_id, gen, interval)
-        // coverage: excluded — auth_ok 发送失败需对端在收帧前消失；
         // 真进程路径由 `tests/afcli_process.rs` 承接。
         .map_err(handshake_error_phrase)?;
     // coverage: excluded — `auth_ok` 发送失败（对端在收帧前消失）这一臂：
@@ -667,15 +660,10 @@ fn frame_text(msg: axum::extract::ws::Message) -> Result<Option<String>, String>
         // ping/pong 由 axum 自动应答，这里只是不让它打断流程
         axum::extract::ws::Message::Ping(_) | axum::extract::ws::Message::Pong(_) => Ok(None),
         other => Err(format!("unexpected frame kind: {other:?}")),
-        // coverage: excluded — `flood_frame` 只在读侧限流触发时调用，而「持续 30s
-        // 超限」要真等 30s（超时窗口不可压缩）；令牌桶本身与「慢读不误杀」
-        // 另有单测覆盖。
     }
 }
 
 /// 读侧超限的应答：`err{code}`，随后断开（§6.1）。
-// coverage: excluded — 只在读侧限流触发时调用，而「持续 30s 超限」要真等
-// 30s（超时窗口不可压缩）；令牌桶本身与「慢读不误杀」另有单测覆盖。
 fn flood_frame(e: &hub_core::limits::LimitError) -> Frame {
     let code = match e {
         hub_core::limits::LimitError::FrameTooLarge => protocol::message::ErrorCode::FrameTooLarge,
@@ -950,7 +938,6 @@ fn queue_data(state: &AppState, conn_id: &str, frame: Frame, flood: Frame) {
 /// 也没有通道号的东西，前端拿它渲染终端只会显示一个空面板。
 fn publish_channel_data(state: &AppState, node_id: &str, frame: &Frame) {
     let Ok(data) = frame.payload::<protocol::channel::ChannelData>() else {
-        // coverage: excluded — 覆盖这条日志行需要装一个 `tracing` subscriber
         // 且 debug 级别开着（`install_subscriber` 装的是 INFO），而单测夹具
         // `stream_state()` 不装 subscriber。同形的 `publish_channel_error` 的
         // else 臂已覆盖（那条在单测里执行到了），差异只在 subscriber 的级别。

@@ -294,7 +294,6 @@ impl Files {
         let mut items: Vec<serde_json::Value> = Vec::new();
         let mut total = 0usize;
         for entry in entries {
-            // coverage: excluded — `read_dir` 的迭代项本身出错要求目录在
             // 遍历期间被另一个进程改动，测试里不可确定地构造；`continue`
             // 让这种竞态不至于让整次列目录失败。
             let Ok(entry) = entry else { continue };

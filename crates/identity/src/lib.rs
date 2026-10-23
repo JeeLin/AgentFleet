@@ -83,7 +83,6 @@ impl KeyPair {
     }
 
     /// 用库内公钥验签。
-    // coverage: excluded — `Err(_)` 臂（from_bytes 拒绝非法曲线点）无可控测试输入；
     // ed25519-dalek 会对几乎所有 32 字节解压成功，构造不出确定性非法点。
     pub fn verify(pubkey: &[u8; 32], msg: &[u8], sig: &[u8; 64]) -> bool {
         match VerifyingKey::from_bytes(pubkey) {
