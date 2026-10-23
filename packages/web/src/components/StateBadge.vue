@@ -34,11 +34,14 @@ const spec = computed(() => describeStatus(props.state))
 </template>
 
 <style scoped>
-/* 「推」徽标压到 9px 并紧贴状态文字：它是注解，不是第二个状态。 */
+/* 「推」徽标压到 `text-2xs`（10px）并紧贴状态文字：它是注解，不是第二个状态。
+   早先是裸 `font-size: 9px`——一个不在 design-system.md §2.3 九档里的字号，
+   于是「什么时候该用哪一档」在它身上没有依据。 */
 .af-state__derived {
   height: 13px;
   padding: 0 3px;
-  font-size: 9px;
+  font-size: var(--af-text-2xs);
   line-height: 1;
+  font-weight: 600;
 }
 </style>

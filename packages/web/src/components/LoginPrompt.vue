@@ -188,7 +188,11 @@ onBeforeUnmount(() => {
       <div class="af-modal">
         <div class="af-modal__head">
           <span class="af-panel__title">登录已过期</span>
-          <span class="af-t-mute" style="font-size: var(--af-text-2xs)">
+          <!-- 这句是整句中文，不是注解：它按 §2.3 的立法意图不许压到 text-2xs。
+               text-2xs 的合法性只来自「不是长文本」，而这里 14 个字连成一句，
+               压到 10px 就是这个产品主打的「高文字密度看不清」。删除行内样式后
+               它继承 .af-modal__head 的自然字号（body 基线 13px）。 -->
+          <span class="af-t-mute">
             重新登录就回到刚才那页，做过的事不会丢
           </span>
           <span class="af-spacer"></span>

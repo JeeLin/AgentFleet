@@ -311,7 +311,7 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 .af-dot { width: 8px; height: 8px; border-radius: var(--af-radius-full); background: currentColor; }
 
 .af-state { display: inline-flex; align-items: center; gap: var(--af-space-2); font-size: var(--af-text-md); white-space: nowrap; }
-.af-state__glyph { font-size: 10px; }
+.af-state__glyph { font-size: var(--af-text-2xs); }
 .af-state[data-state='online']   { color: var(--af-ok-fg); }
 .af-state[data-state='reconnecting'] { color: var(--af-warn-fg); }
 .af-state[data-state='offline']  { color: var(--af-danger-fg); }
@@ -838,7 +838,7 @@ kbd, .kbd {
 }
 .af-docktabs__b:hover { background: var(--af-surface-2); color: var(--af-fg-primary); }
 .af-docktabs__b[aria-selected='true'] { color: var(--af-fg-primary); border-bottom-color: var(--af-accent); background: var(--af-surface-0); }
-.af-docktabs__b .af-badge { font-size: 9px; }
+.af-docktabs__b .af-badge { font-size: var(--af-text-2xs); }
 .af-docktabs__spacer { flex: 1 1 auto; }
 .af-docktabs__close {
   padding: var(--af-space-2) var(--af-space-3); border: 0; background: none;
