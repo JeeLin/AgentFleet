@@ -80,12 +80,22 @@ PW='correct horse battery'
 # 同一台机器上别人也在跑 afcli 时，`pkill -f afcli` 会误伤别人的设备。
 stray_pids() {
   [ -n "${TMP:-}" ] || return 0
-  local p pid cmd envs
+  # 判据取自 `NODE_CMD` 自己，不再手写一份 `AFCLI_DATA_DIR=…`：两处各写一遍
+  # 时，改 env 名只改得一边，`stray_pids` 就会漏掉真在跑的 afcli（或者反过来
+  # 匹配到别人的进程）。
+  local data_dir_env="" p pid cmd envs
+  for data_dir_env in "${NODE_CMD[@]:-}"; do
+    case "$data_dir_env" in
+      AFCLI_DATA_DIR=*) break ;;
+      *) data_dir_env="" ;;
+    esac
+  done
+  [ -n "$data_dir_env" ] || return 0
   for p in /proc/[0-9]*; do
     [ -r "$p/environ" ] || continue
     envs=$(tr '\0' '\n' <"$p/environ" 2>/dev/null) || continue
     case "$envs" in
-      *"AFCLI_DATA_DIR=$TMP/node"*) ;;
+      *"$data_dir_env"*) ;;
       *) continue ;;
     esac
     cmd=$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null) || continue
@@ -201,20 +211,22 @@ echo "  现场：$TMP（Hub 端口 $PORT，工作区 $WS）"
 # 先找常量；读不到就退出——**不许**退回写死的 80x24。
 # ---------------------------------------------------------------------------
 WEB_SRC="$ROOT/packages/web/src"
-page_term_cols() {
-  local n
-  n=$(grep -rhoE 'DEFAULT_COLS[^0-9]{0,24}[0-9]+' "$WEB_SRC" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
-  [ -n "$n" ] || n=$(grep -oE 'cols:[[:space:]]*[0-9]+' "$WEB_SRC/pages/SessionPage.vue" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+# 一个函数读 cols 或 rows：两者的差别只是常量名、字段名与正则里的锚点。
+# 拆成两个同构函数的代价不是「多写一遍」而是会漂移——早先两边的 grep
+# 正则各自演进，其中一个后来加了 `[^0-9]{0,24}` 而另一个没有，于是同一个
+# 「读到初值」的逻辑在 cols 与 rows 上行为不一致，而那种不一致要等前端改了
+# 常量写法才会显形。
+#
+# 参数：$1 = 常量名（DEFAULT_COLS / DEFAULT_ROWS），$2 = 页面字段名（cols / rows）
+page_term_dim() {
+  local const="$1" field="$2" n
+  # 先找共享常量（`DEFAULT_COLS = 80`），再退回页面里的字面量（`cols: 80`）
+  n=$(grep -rhoE "$const[^0-9]{0,24}[0-9]+" "$WEB_SRC" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+  [ -n "$n" ] || n=$(grep -oE "$field:[[:space:]]*[0-9]+" "$WEB_SRC/pages/SessionPage.vue" 2>/dev/null | grep -oE '[0-9]+' | head -1)
   printf '%s' "$n"
 }
-page_term_rows() {
-  local n
-  n=$(grep -rhoE 'DEFAULT_ROWS[^0-9]{0,24}[0-9]+' "$WEB_SRC" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
-  [ -n "$n" ] || n=$(grep -oE 'rows:[[:space:]]*[0-9]+' "$WEB_SRC/pages/SessionPage.vue" 2>/dev/null | grep -oE '[0-9]+' | head -1)
-  printf '%s' "$n"
-}
-PAGE_COLS=$(page_term_cols)
-PAGE_ROWS=$(page_term_rows)
+PAGE_COLS=$(page_term_dim DEFAULT_COLS cols)
+PAGE_ROWS=$(page_term_dim DEFAULT_ROWS rows)
 if [ -z "$PAGE_COLS" ] || [ -z "$PAGE_ROWS" ]; then
   echo "  ❌ 读不到页面的终端初值（$WEB_SRC 里的 DEFAULT_COLS/DEFAULT_ROWS 或 SessionPage.vue 的 cols:/rows:）" >&2
   exit 2
@@ -419,7 +431,7 @@ echo "== 标准 1 afcli run 一条命令接入，设备出现在 /api/devices ==
 echo "  接入命令：${NODE_CMD[*]}"
 if [ -n "$NODE_ID" ] && [ "$DEVICE_STATUS" = "online" ]; then
   ok "设备已在 /api/devices：id=$NODE_ID status=$DEVICE_STATUS"
-  info "$(printf '%s' "$DEVICES" | jq -c '.[0] | {id, name, platform, agent_version, status, key_fingerprint}')"
+  info "$(printf '%s' "$DEVICES" | jq -c '.[0] | {id, name, platform, node_version, status, key_fingerprint}')"
   supervisor_cmd=$(tr '\0' ' ' <"/proc/$NODE_PID/cmdline" 2>/dev/null)
   worker_pid=$(pgrep -P "$NODE_PID" | head -1)
   WORKER_PID=$worker_pid

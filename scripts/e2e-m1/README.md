@@ -89,9 +89,9 @@ TMPDIR=/tmp/opencode bash scripts/e2e-m1.sh   # 换临时目录根（默认 /tmp
 
 面板参数与前端**逐字一致**（这是断言的一部分）：
 
-- terminal：`{"cwd": <会话路径>, "cols": 80, "rows": 24}` — `SessionPage.vue:279`
-- files：`{}` — `SessionPage.vue:279`（工作区根由 Hub 按会话补）
-- exec：`{"command": …, "args": […], "cwd": ""}` — `SessionPage.vue:827`
+- terminal：`{"cwd": <会话路径>, "cols": 80, "rows": 24}` — `packages/web/src/pages/SessionPage.vue:280`
+- files：`{}` — `packages/web/src/pages/SessionPage.vue:280`（工作区根由 Hub 按会话补）
+- exec：`{"command": …, "args": […], "cwd": ""}` — `packages/web/src/pages/SessionPage.vue:897`
 
 ---
 
@@ -192,37 +192,39 @@ SIGCONT → 继续观察回到 online
 
 - 里程碑 `M1-web-console.md` §9 写的是「会话工作区根目录在 `open_channel` 时由
   **Hub** 塞进 params（Hub 从 `session.workspace_id` 查出 `(node_id, path)`）」。
-- 实际：`crates/hub-server/src/routes/stream.rs:465` 原样转发浏览器给的 `params`，
-  从不注入 `workspace_root`；前端 files 面板发的就是 `{}`（`SessionPage.vue:279`）。
+- 实际：`crates/hub-server/src/routes/stream.rs:574` 的 `open_channel` 如今先调
+  `params_with_workspace_root` 把会话工作区根**覆盖**进 params（`:874` 是那个函数），
+  而前端 files 面板发的就是 `{}`（`packages/web/src/pages/SessionPage.vue:280`）。
 - 设备侧：`files` / `exec` 的 `open` 都要求 `OpenReq.workspace_root`
-  （`connector/files.rs:171`、`connector/exec.rs:156`），缺了就直接回 `channel_error`。
+  （`crates/node-core/src/connector/files.rs:193`、`crates/node-core/src/connector/exec.rs:186`），
+  缺了就直接回 `channel_error`。
 - 后果：文件面板永远是一棵空树；`exec` 面板提交命令后没有任何反应。
-- **现在**：`open_channel` 调 `params_with_workspace_root`（`routes/stream.rs:492`）
+- **现在**：`open_channel` 调 `params_with_workspace_root`（`crates/hub-server/src/routes/stream.rs:607`）
   把会话工作区根注入 params，浏览器给什么都会被覆盖。
 
 ### 6.2 files 的取数载荷在 Hub 就被改写成了终端载荷（已修）
 
 - 页面取数走 `channel.send(JSON.stringify({op:"list",…}))`
-  （`SessionPage.vue:565`）→ `POST /api/channels/{id}/send`。
-- 该端点把**任何**请求体包成 `{"bytes": <text>}`（`routes/stream.rs:530`）——
+  （`packages/web/src/pages/SessionPage.vue:592`）→ `POST /api/channels/{id}/send`。
+- 该端点把**任何**请求体包成 `{"bytes": <text>}`（`crates/hub-server/src/routes/stream.rs:851`）——
   那是 terminal connector 的载荷形状；而 files connector 只认**顶层** `op`
-  （`connector/files.rs:192`）。
+  （`crates/node-core/src/connector/files.rs:219`）。
 - 所以 `{"op":"list"}` 到设备时变成 `{"bytes":"{\"op\":\"list\"…}"}`，
-  在边界检查之前就已经走岔了。`routes/stream.rs:517` 的注释也明说
-  「二进制通道（files 读写）走各自的 connector 载荷，不复用这条裸字节入口」——
-  但**没有第二条入口**（`/api/channels` 只有 `send` / `resize` / `DELETE`）。
-- **现在**：`/send` 按 Content-Type 分派（`routes/stream.rs:710` 的 `payload_kind`）——
+  在边界检查之前就已经走岔了。当年设计上假定「二进制通道（files 读写）走各自的
+  connector 载荷，不复用这条裸字节入口」，可**实际没有第二条入口**
+  （`/api/channels` 只有 `send` / `resize` / `DELETE`）——那条分离是纸面上的。
+- **现在**：`/send` 按 Content-Type 分派（`crates/hub-server/src/routes/stream.rs:850` 的 `payload_kind`）——
   `application/json` 原样、`application/octet-stream` 包成 `{"bytes":…}`、
   其余按内容判断。files 面板走 JSON，与 terminal 的裸字节入口分开。
 
 ### 6.3 设备回的 `channel_error` 到不了页面（已修）
 
-- `routes/ws.rs:736` 只把 `channel_data` 的载荷推给 SSE；`channel_error` 走
+- `crates/hub-server/src/routes/ws.rs:855` 只把 `channel_data` 的载荷推给 SSE；`channel_error` 走
   `channels::on_channel_frame` 后落进 `_ => Reply::Nothing`，**不转发**。
 - 后果：即使 6.1 / 6.2 修好，标准 5 的「越界被拒且**错误可读**」在页面上仍然是
   一片空白——面板停在「已连接」，用户看不到「为什么进不去」。
   这与 `design-system.md` §7.4 的第 ③ 路（解释性错误面板）直接冲突。
-- **现在**：`routes/ws.rs:742` 识别 `CHANNEL_ERROR` 并调 `publish_channel_error`，
+- **现在**：`crates/hub-server/src/routes/ws.rs:861` 识别 `CHANNEL_ERROR` 并调 `publish_channel_error`（`:990`），
   错误因此能到 SSE、到页面。
 
 ### 6.4 面板在设备确认之前就显示「已连接」（已修）
@@ -232,14 +234,14 @@ SIGCONT → 继续观察回到 online
   （`lib/channel.ts` 的 `set('ready')`）。设备那边的 `channel_ready` 帧到 Hub 后
   并不会被转发给页面（同 6.3 的口径）。
 - 后果：从面板出现到设备 `open` 完成之间的输入，会被设备当成未知通道**静默丢弃**
-  （`node-core/src/channel.rs:150`「通道不存在 / 已关：静默」），页面上既没有
+  （`crates/node-core/src/channel.rs:136`「通道不存在 / 已关：静默」），页面上既没有
   「已丢 N 条」也没有失败标记——打字没反应，用户只会以为卡了。
 - 本脚本的应对：像人一样先等**首帧**（提示符）到达再开始敲（`terminal_has_frames`），
   这不是绕过断言——标准 3 要验的是「从页面敲能出结果」，不是「设备打开前敲的字也不许丢」。
   但这条窗口本身是产品该修的（要么等设备 `channel_ready` 再翻 `ready`，
   要么把节点侧的 `channel_error`/丢帧反馈给页面）。
 - **现在**：Hub 只在设备回 `channel_ready` 之后才推 `channel.ready` 给页面
-  （`routes/stream.rs:767`），页面的 `ready` 因此是「设备已确认」而不是「已下发」。
+  （`crates/hub-server/src/routes/stream.rs:888` 的 `announce_ready`），页面的 `ready` 因此是「设备已确认」而不是「已下发」。
 
 ### 怎么区分「脚本 bug」和「产品 bug」
 

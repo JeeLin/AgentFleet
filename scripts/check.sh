@@ -179,7 +179,13 @@ ZH_ANCHORED = '(?:' + '|'.join(re.escape(k) for k in _ZH_ANCHORED) + r')\:\d+'
 MENTION = re.compile(r'`?((?:' + MD_PATH + r')|(?:' + BARE_ALIAS + r')):?(?:\d+(?:-\d+)?)?`?'
                     r'|`?(' + ZH_ANCHORED + r')`?')
 SECTION = re.compile(r'§\s*(\d+(?:\.\d+)*)')
+# 代码锚点与文档锚点同规则（`:N` 必须落在稳定行上）。分开两个组是因为
+# 两者的解析方式不同：`.md` 走上面的 resolve()（别名表 / docs/ 前缀），
+# 代码路径要按仓库真实布局找（README 里常写 `routes/stream.rs` 这种
+# 省略了 crate 前缀的简写）。
+CODE_PATH = r'\.?[A-Za-z0-9_][A-Za-z0-9_\-/\.]*\.(?:rs|vue|ts|js|css|json|sql|sh)'
 LINEANCHOR = re.compile(r'`?(' + MD_PATH + r'):(\d+)`?')
+CODEANCHOR = re.compile(r'`?(' + CODE_PATH + r'):(\d+)`?')
 # 「原 `x.md:N`」= 指向历史版本的行号（文件已改过），只查文件存在。
 # 「原文锚点」/「历史锚点」是本仓库在缺陷池里声明同一件事的写法。
 HISTORICAL = re.compile(r'(原\s*[`（(]?[^`）)]*\.md:\d+|原文锚点|历史锚点|原锚点)')
@@ -230,7 +236,7 @@ def collect_mentions(lines):
 
 
 bad_a, bad_b, pending = [], [], []
-n_a = n_b = n_hist = 0
+n_a = n_b = n_hist = n_code = 0
 
 
 def check_a(path, lines, all_mentions):
@@ -265,6 +271,55 @@ def check_a(path, lines, all_mentions):
                 bad_a.append((path, lineno, cands[0], sec))
 
 
+def resolve_code(tok):
+    """把代码文件锚点解析成仓库内真实路径；找不到返回 None。
+
+    文档里写代码路径常用**省略 crate 前缀**的简写（`routes/stream.rs`、
+    `SessionPage.vue`），那是给人读的短名，不是 os.path 能直接命中的路径。
+    所以这里按已知布局逐级试，而不是只查一次 exists：
+    先按原样（已是全路径的情形），再试 crates/*/src/ 与 packages/web/src/，
+    最后按 basename 在全仓搜（同名文件多处命中时取第一个并让调用方报歧义）。
+    """
+    t = tok.strip('`').rstrip('.,;:、)）')
+    if os.path.exists(t):
+        return t
+    for pat in ('crates/*/src/' + t, 'packages/web/src/' + t,
+                'packages/web/src/pages/' + t, 'packages/web/src/components/' + t,
+                'crates/*/' + t):
+        hits = sorted(glob.glob(pat))
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            return 'AMBIGUOUS:' + '|'.join(hits)
+    base = os.path.basename(t)
+    hits = [q for q in CODE_INDEX.get(base, []) if q.endswith(t) or q.endswith('/' + t)]
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        return 'AMBIGUOUS:' + '|'.join(hits)
+    return None
+
+
+_CODE_INDEX = None
+
+
+def code_index():
+    """{basename: [全路径, ...]}：全仓代码文件按文件名索引（不含 target/）。"""
+    global _CODE_INDEX
+    if _CODE_INDEX is None:
+        idx = {}
+        for root, dirs, names in os.walk('.'):
+            dirs[:] = [d for d in dirs if d not in ('target', 'node_modules', '.git')]
+            for name in names:
+                if name.endswith(('.rs', '.vue', '.ts', '.js', '.css', '.json', '.sql', '.sh')):
+                    idx.setdefault(name, []).append(os.path.join(root, name)[2:])
+        _CODE_INDEX = idx
+    return _CODE_INDEX
+
+
+CODE_INDEX = code_index()
+
+
 def check_b(path, lines, own):
     """B 轨：`xxx.md:N` 裸行号必须落在目标文件的稳定锚点行上。
 
@@ -275,7 +330,7 @@ def check_b(path, lines, own):
     （`--strict-anchors` 才判红）——那批锚点归主线迁移（见 M1 里程碑 Bugs 表
     910 条），门禁在这里只负责「把漂移摆出来」，不负责替主线改文档。
     """
-    global n_b, n_hist
+    global n_b, n_hist, n_code
     for lineno, line in enumerate(lines, 1):
         historical = bool(HISTORICAL.search(line))
         for m in LINEANCHOR.finditer(line):
@@ -287,17 +342,69 @@ def check_b(path, lines, own):
             if historical:
                 n_hist += 1
                 continue
-            fl = open(rp, encoding='utf-8').read().split('\n')
-            n = int(m.group(2))
-            if n < 1 or n > len(fl) or not fl[n - 1].strip():
-                item = (path, lineno, m.group(1), n, 'LINE EMPTY OR OUT OF RANGE')
+            item = verify_line_anchor(path, lineno, m.group(1), rp, int(m.group(2)))
+            if item is None:
+                n_b += 1
+            else:
+                (bad_b if own else pending).append(item)
+        # 代码锚点（`.rs` / `.vue` / …）。原来只有 `.md` 一类，于是
+        # `scripts/e2e-m1/README.md` 里 17 处代码行号引用**一个都没被查过**：
+        # 它们全指错了也没人发现。同一套规则（解析 → 范围 → 稳定行）搬过来即可，
+        # 判红口径也一致：仓库自有文档判红，里程碑文档只报。
+        for m in CODEANCHOR.finditer(line):
+            rp = resolve_code(m.group(1))
+            if rp is None:
+                item = (path, lineno, m.group(1), int(m.group(2)), 'CODE FILE MISSING')
                 (bad_b if own else pending).append(item)
                 continue
-            if not (HEADING_LINE.match(fl[n - 1]) or BACKTICK.search(fl[n - 1])):
-                item = (path, lineno, m.group(1), n, 'NOT A STABLE ANCHOR LINE')
+            if rp.startswith('AMBIGUOUS:'):
+                cands = rp[len('AMBIGUOUS:'):].split('|')
+                item = (path, lineno, m.group(1), int(m.group(2)),
+                        'CODE FILE AMBIGUOUS (%d candidates: %s)' % (len(cands), ', '.join(cands[:3])))
                 (bad_b if own else pending).append(item)
                 continue
-            n_b += 1
+            if historical:
+                n_hist += 1
+                continue
+            item = verify_code_anchor(path, lineno, m.group(1), rp, int(m.group(2)))
+            if item is None:
+                n_code += 1
+            else:
+                (bad_b if own else pending).append(item)
+
+
+def verify_code_anchor(src, lineno, tok, target, n):
+    """代码锚点的校验：文件能解析 → 行号在范围内且非空。
+
+    **不要求「稳定锚点行」**（md 那套「标题 / 含反引号」的判据）——那是对付
+    文档插行的：md 里插一行表格，行号仍然合法但指向了另一行，所以要求目标
+    落在不会被插行穿过的地方。代码文件没有这个结构：`.rs` 的行就是语句，
+    没有「标题行」这个概念，而绝大多数语句也不含反引号。把 md 的判据搬过来
+    等于要求每条代码锚点都指向注释或字符串——那只会把锚点逼到注释上。
+
+    代价是代码行号确实会随编辑漂移，这一点由 `check.sh` 每次实跑来兜：
+    行号越界 / 空行立刻报，指向了别处则要等下一轮审查发现。
+    """
+    fl = open(target, encoding='utf-8').read().split('\n')
+    if n < 1 or n > len(fl) or not fl[n - 1].strip():
+        return (src, lineno, tok, n, 'LINE EMPTY OR OUT OF RANGE')
+    return None
+
+
+def verify_line_anchor(src, lineno, tok, target, n):
+    """裸行号锚点的三段校验：能解析 → 行号在范围内且非空 → 落在稳定行上。
+
+    只查「行号在范围内且非空」拦不住表格插行：插一行后行号仍然合法，
+    指向的却是另一行。所以额外要求目标是**稳定锚点行**（标题 / 含代码标识符的行）。
+
+    返回 None 表示通过；否则返回一条待登记的五元组。
+    """
+    fl = open(target, encoding='utf-8').read().split('\n')
+    if n < 1 or n > len(fl) or not fl[n - 1].strip():
+        return (src, lineno, tok, n, 'LINE EMPTY OR OUT OF RANGE')
+    if not (HEADING_LINE.match(fl[n - 1]) or BACKTICK.search(fl[n - 1])):
+        return (src, lineno, tok, n, 'NOT A STABLE ANCHOR LINE')
+    return None
 
 
 for path in MILESTONE + OWN:
@@ -314,6 +421,8 @@ if STRICT:
 print(f"  A 轨（§N.N 稳定锚）：{n_a} 处待解析，{'全部解析到小节标题' if not bad_a else str(len(bad_a)) + ' 处悬空'}")
 print(f"  B 轨（file.md:N 裸行号）：{n_b + n_hist + len(pending)} 处（含 {n_hist} 处历史锚点仅查文件存在），"
       f"{'无失效' if not bad_b else str(len(bad_b)) + ' 处失效'}")
+print(f"  B 轨代码锚点（.rs/.vue/…:N）：{n_code} 处，"
+      f"{'全部有效' if not bad_b else str(len(bad_b)) + ' 处失效'}")
 if pending:
     print(f"  ⚠️  里程碑文档待迁移的裸行号锚点：{len(pending)} 处（指向非稳定锚点行 / 行号已越界，"
           f"插一行即指错；迁移清单见 M1 里程碑 Bugs 表 910 条）")

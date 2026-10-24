@@ -33,13 +33,17 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --check) MODE="--check" ;;
         --rebuild) MODE="--rebuild" ;;
+        --racy) MODE="--racy" ;;
         --uncovered)
             shift
             UNCOVERED_FILE="${1:-}"
             [ -n "$UNCOVERED_FILE" ] || { echo "FATAL: --uncovered 需要一个文件路径" >&2; exit 2; }
             ;;
         -h | --help)
-            sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+            # 打到说明段末行（`set -uo pipefail` 前一行）：原写法 `2,22p` 少打了
+            # `--uncovered` 的末句「清单是调用方给的，工具会提示这一点」，
+            # 而那半句正是这个参数的安全边界。
+            sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -76,25 +80,9 @@ collect_uncovered() {
         exit 1
     fi
     rm -f "$err"
-    printf '%s\n' "$raw" \
-        | sed -n '/^Uncovered Lines:/,$p' \
-        | grep -E '\.rs:' \
-        | while IFS= read -r line; do
-            file="${line%%:*}"
-            rest="${line#*:}"
-            nums="${rest// /}"
-            IFS=',' read -ra parts <<< "$nums"
-            for p in "${parts[@]}"; do
-                if [[ "$p" == *-* ]]; then
-                    a="${p%%-*}"; b="${p##*-}"
-                    for ((i = a; i <= b; i++)); do
-                        echo "$file:$i"
-                    done
-                elif [[ -n "$p" ]]; then
-                    echo "$file:$p"
-                fi
-            done
-        done | sed "s|^$PWD/||" | sort -u
+    # 展开成 `路径:行号` 的管线只有一份，在 scripts/uncovered-lines.sh 里：
+    # 本工具与 scripts/check-coverage.sh 都要这个集合，抄两份必然漂移。
+    printf '%s\n' "$raw" | "$(dirname "$0")/uncovered-lines.sh"
 }
 
 # ---------------------------------------------------------------------------
@@ -277,6 +265,25 @@ if uncovered_path and uncovered_path != '-':
             if raw:
                 uncovered.add(raw)
 
+if mode == '--racy':
+    # 输出**覆盖性非确定**的行集合：源码里带 `// coverage: excluded (racy)`
+    # 就地标注的那些。语义与其余例外同规则——标注就写在被豁免的那一行上
+    # （行尾或紧邻其上的注释段），归属由同一个 `marker_blocks` 判定，不另立一套。
+    #
+    # 消费者是 `scripts/check-coverage.sh`：它把这些行从「集合相等」的两个方向
+    # 都比对里剔掉。之所以要单独一类，是因为 `tokio::select!` 对多条就绪的臂
+    # **随机轮询**，臂内代码的执行取决于协程调度时序，同一次代码每次 llvm-cov
+    # 实跑的结果都可能不同（实测同一份代码四次实跑报错 8 / 3 / 34 条，且集合
+    # 成员互不重合）。按确定性行核对它，门禁会随机红——而随机红的门禁等于没有
+    # 门禁，开发者无法区分「我改坏了」与「这次运气不好」。
+    racy = []
+    for p in marker_files():
+        for marker_line, reason in marker_blocks(read_lines(p)):
+            if '(racy)' in reason:
+                racy.append('%s:%d' % (p, marker_line))
+    print('\n'.join(sorted(racy)))
+    sys.exit(0)
+
 if mode == '--rebuild':
     # 人工精修过的理由按「同一行」记住：行号没动就原样带回，行号动了就退回标注原文。
     curated_by_line = {}
@@ -345,6 +352,12 @@ for path in mf:
     for marker_line, text in markers:
         if marker_line in regions:
             continue
+        # `(racy)` 标注不参与孤儿判定：它申请的不是「这一行不可触达」的例外，
+        # 而是「这一行的覆盖性非确定」——由 `check-coverage.sh` 单独从双向
+        # 比对里豁免（见 `--racy`）。把它当普通例外要求一条登记行，会让
+        # 「非确定」被写成「不可达」，而那是不诚实的原因。
+        if '(racy)' in text:
+            continue
         if marker_line not in used:
             orphans.append((path, marker_line, text))
 
@@ -379,16 +392,22 @@ PYEOF
 
 case "$MODE" in
     --check)
+        # `--check` 走不到 `--uncovered`：它的语义就是「拿登记文件核对」，没有
+        # 「少查一部分」的入口。显式拒绝而不是静默忽略——静默忽略会让
+        # 「我以为只核了这几条」和「其实全核了」无法区分。
+        if [ -n "$UNCOVERED_FILE" ]; then
+            echo "FATAL: --check 不接受 --uncovered（--check 核对的是整张登记表）" >&2
+            exit 2
+        fi
+        analyse "$MODE" "$EXCEPTIONS" '-'
+        ;;
+    --racy)
         analyse "$MODE" "$EXCEPTIONS" '-'
         ;;
     --rebuild)
         tmp="$(mktemp)"
-        trap 'rm -f "$tmp"' EXIT
+        trap 'rm -f "$tmp" "$tmp.header"' EXIT
         collect_uncovered > "$tmp"
-        if [ -z "$(grep -c . "$tmp")" ]; then
-            echo "FATAL: no uncovered lines collected" >&2
-            exit 1
-        fi
         # 表头照抄现文件（表头是文件的一部分，不是生成物）
         sed -n '1,/^[^#]/p' "$EXCEPTIONS" | sed '$d' > "$tmp.header"
         cat "$tmp.header"
