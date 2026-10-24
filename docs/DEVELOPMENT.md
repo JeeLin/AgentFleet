@@ -165,6 +165,7 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
 | `PRODUCT.md` §3.2 后续 | 任务系统 | M8 |
 | `PRODUCT.md` §3.2 后续 | 分布式推理进阶 | M6（阶段 1）+ 后续 |
 | `PRODUCT.md` §3.2 后续 | 自动化 / 社交软件 / 原生客户端 | **无排期**（开工前单独排期，见 §3 下方说明） |
+| `PRODUCT.md` §3.1「Hub 一键安装 agent」行内 | **afcli 自身的升级通路**（页面显示各设备 afcli 版本号 → 手动触发升级 → 「自动升级」开关；版本号由 Hub 下发，失败回滚并回报） | M2（与 agent 托管配置同一节落地，依据 `workspace-and-sync.md` §4.5）。**M1 只交付前半段**：`/api/devices` 给出版本号（`node_version`，即改名前 `agent_version`），触发与回滚不在 M1 |
 
 > 「后续」不是编号里程碑，不在 M0–M8 范围内，需在开工前单独排期与编号。
 > 第二阶段从 M5（任务分发与 agent 安装）开始。

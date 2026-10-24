@@ -274,7 +274,9 @@ Vite 7 的 `engines` 是 `^20.19.0 || >=22.12.0`，且 `@vitejs/plugin-vue` 用
 
 四道门禁的 mise 入口是 `mise run web-ci`（`web-check` + `web-test` +
 `web-build`）。**本地全量门禁是 `mise run ci`**（check + fmt + lint + test +
-`cov-gate` + web-ci），CI 跑的是同一串（见 `.github/workflows/ci.yml`）。
+`cov-gate` + `cov-anchors` + web-ci），CI 跑的是同一串（见
+`.github/workflows/ci.yml`）。`cov-anchors` 是「每条覆盖率例外的理由都能在源码里
+找到出处」的核对——少了它，例外清单会攒下一批无法复核的理由。
 
 **前端不设行覆盖率阈值**——这是**度量工具不适用**，不是放水：Rust 侧 100% 依赖
 「行覆盖率」这个度量，而 Vue SFC 模板 / 脚本 / 样式混排无法按行表达执行与否，

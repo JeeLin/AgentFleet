@@ -866,7 +866,7 @@ Mock 形状 = 将来 API 的形状。前端只读。
   "id": "dev-mbp",              // node_id，永不变（升级只换 worker）
   "name": "mbp.local",
   "platform": "darwin/arm64",
-  "agent_version": "0.1.0",
+  "node_version": "0.1.0",
   "status": "online",           // online | reconnecting | offline
   "last_seen": "12s",           // 人读格式；API 应给 ISO 时间戳
   "cpu": 34,                    // 0–100，来自心跳能力上报
