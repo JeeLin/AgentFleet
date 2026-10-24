@@ -130,6 +130,25 @@ pub struct ErrPayload {
     pub message: String,
 }
 
+/// 消息类帧载荷的兜底形状（序列化失败时用）。
+///
+/// 与 [`crate::channel::fallback`] 同规则：兜底形状由协议层给，调用点不手写。
+/// 手写的那份会漏字段——`ws.rs` 曾写 `json!({"code": code})` 当 `err` 的兜底，
+/// 漏了必填的 `message`，对端解不开，比丢一帧更糟。
+pub mod fallback {
+    use super::{DisconnectReason, ErrorCode};
+
+    /// `disconnect` 的兜底：`reason` 必填，`gen` 可选。
+    pub fn disconnect(reason: DisconnectReason, gen: Option<u64>) -> serde_json::Value {
+        serde_json::json!({ "reason": reason, "gen": gen })
+    }
+
+    /// `err` 的兜底：`code` 与 `message` 都必填（§4）。
+    pub fn err(code: ErrorCode, message: &str) -> serde_json::Value {
+        serde_json::json!({ "code": code, "message": message })
+    }
+}
+
 /// 通用错误码（`err.code`，§4）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

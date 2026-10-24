@@ -288,6 +288,36 @@ impl Streams {
             json!({"session_id": session_id, "state": state}).to_string(),
         )
     }
+
+    /// `channel.closed`：通道关掉（面板关、设备回 `close_channel`、删除接口）。
+    pub fn channel_closed(&self, node_id: &str, session_id: &str, channel_id: &str) -> u64 {
+        self.publish(
+            "channel.closed",
+            json!({
+                "node_id": node_id,
+                "session_id": session_id,
+                "channel_id": channel_id,
+            })
+            .to_string(),
+        )
+    }
+
+    /// `channel.ready`：**设备**确认了通道。页面据此才认为「可以发数据」。
+    ///
+    /// 与「Hub 已下发 `open_channel`」是两件事（缺陷 4）：Hub 下发只说明
+    /// 队列收下了这一帧，设备能不能开还不知道。所以这条事件由设备侧
+    /// `channel_ready` 帧到达时发，而不是 `open_channel` 处理完就发。
+    pub fn channel_ready(&self, node_id: &str, session_id: &str, channel_id: &str) -> u64 {
+        self.publish(
+            "channel.ready",
+            json!({
+                "node_id": node_id,
+                "session_id": session_id,
+                "channel_id": channel_id,
+            })
+            .to_string(),
+        )
+    }
 }
 
 /// 回放缓冲里序号 `> last` 的事件。
@@ -783,15 +813,9 @@ pub async fn close_channel(
             return Err(e);
         }
     }
-    state.streams().publish(
-        "channel.closed",
-        json!({
-            "node_id": binding.node_id,
-            "session_id": binding.session_id,
-            "channel_id": channel_id,
-        })
-        .to_string(),
-    );
+    state
+        .streams()
+        .channel_closed(&binding.node_id, &binding.session_id, &channel_id);
     tracing::info!(
         node_id = %binding.node_id,
         channel_id = %channel_id,
@@ -894,15 +918,9 @@ pub(crate) fn announce_ready(state: &AppState, channel_id: &str) {
         );
         return;
     };
-    state.streams().publish(
-        "channel.ready",
-        json!({
-            "node_id": node_id,
-            "channel_id": channel_id,
-            "session_id": session_id,
-        })
-        .to_string(),
-    );
+    state
+        .streams()
+        .channel_ready(node_id.as_str(), session_id.as_str(), channel_id);
     tracing::debug!(channel_id = %channel_id, "device confirmed the channel");
 }
 

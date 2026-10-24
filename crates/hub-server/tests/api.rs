@@ -252,7 +252,7 @@ async fn a_connected_device_is_reported_as_online_with_its_agents() {
     let v = r.json();
     assert_eq!(v[0]["id"], json!(node_id));
     assert_eq!(v[0]["platform"], json!("linux/aarch64"));
-    assert_eq!(v[0]["agent_version"], json!("0.1.0"));
+    assert_eq!(v[0]["node_version"], json!("0.1.0"));
     assert_eq!(v[0]["status"], json!("online"));
     assert_eq!(v[0]["derived"], json!(false), "online 不是推出来的");
     assert_eq!(v[0]["cpu"], json!(34));

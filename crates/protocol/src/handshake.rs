@@ -244,22 +244,6 @@ impl AuthPayload {
                 HandshakeError::MalformedAuth("enroll needs public_key + signature + device_info")
             })
     }
-
-    /// enroll 形态；重连载荷返回 `None`。
-    pub fn as_enroll(&self) -> Option<&EnrollAuth> {
-        match self {
-            Self::Enroll(a) => Some(a),
-            Self::Reconnect(_) => None,
-        }
-    }
-
-    /// 重连形态；enroll 载荷返回 `None`。
-    pub fn as_reconnect(&self) -> Option<&ReconnectAuth> {
-        match self {
-            Self::Reconnect(a) => Some(a),
-            Self::Enroll(_) => None,
-        }
-    }
 }
 
 /// enroll 验签通过的结果。`node_id` 由注册表入库成功后签发，**本层不发**（§3）。
@@ -316,14 +300,6 @@ impl Handshake {
         match self.phase {
             Phase::Challenged { negotiated, .. } | Phase::Authed { negotiated } => Some(negotiated),
             Phase::AwaitingHello | Phase::Rejected => None,
-        }
-    }
-
-    /// **尚未消费**的 nonce。没有 = 还没发 challenge，或已经用掉（用完即弃，§3）。
-    pub fn pending_nonce(&self) -> Option<&str> {
-        match &self.phase {
-            Phase::Challenged { nonce, .. } => Some(nonce),
-            Phase::AwaitingHello | Phase::Authed { .. } | Phase::Rejected => None,
         }
     }
 
@@ -805,7 +781,10 @@ mod tests {
         assert_eq!(err, HandshakeError::BadSignature);
         // 验签失败 → 终态，不再有 nonce 可用，也换不出 auth_ok
         assert_eq!(hs2.state(), HandshakeState::Rejected);
-        assert_eq!(hs2.pending_nonce(), None);
+        assert!(
+            matches!(hs2.phase, Phase::Rejected),
+            "验签失败后不该还挂着 nonce"
+        );
         assert!(hs2.auth_ok(0, "n_x", 1, 15_000).is_err());
 
         // 调用方回 auth_fail（§3）
@@ -843,13 +822,17 @@ mod tests {
         // 连接 2：seq 同样从 0 起，但 nonce 是新的
         let (mut hs2, ch2) = challenged();
         let replayed = AuthPayload::from_value(&payload).unwrap();
-        // 重放的 enroll 载荷不会「变成」重连：没有 node_id 就是 enroll
-        let replayed_enroll = replayed.as_enroll().expect("replayed enroll stays enroll");
-        assert!(replayed.as_reconnect().is_none());
-        assert_eq!(
-            hs2.on_enroll(0, replayed_enroll, &HubIdentity).unwrap_err(),
-            HandshakeError::BadSignature
-        );
+        // 重放的 enroll 载荷不会「变成」重连：没有 node_id 就是 enroll。
+        // 两种形态互斥——用穷尽 match 表达，而不是 `as_reconnect().is_none()`
+        // 那种从反面推断的写法（枚举加第三个变体时它会静默失效）。
+        match &replayed {
+            AuthPayload::Enroll(replayed_enroll) => assert_eq!(
+                hs2.on_enroll(0, replayed_enroll, &HubIdentity).unwrap_err(),
+                HandshakeError::BadSignature
+            ),
+            // coverage: excluded — 测试失败路径：这条分支只在「载荷本该是 enroll」时才执行。
+            AuthPayload::Reconnect(_) => panic!("replayed enroll stays enroll: {replayed:?}"),
+        }
         assert_ne!(ch2.nonce, ch1.nonce);
 
         // 同一连接上按新 nonce 重签一份 → 必须能过（否则上面只是「全拒」）
@@ -953,12 +936,18 @@ mod tests {
     fn nonce_is_consumed_once() {
         let kp = KeyPair::generate();
         let (mut hs, ch) = challenged();
-        assert_eq!(hs.pending_nonce(), Some(ch.nonce.as_str()));
+        assert!(
+            matches!(&hs.phase, Phase::Challenged { nonce, .. } if nonce == &ch.nonce),
+            "challenge 发出后 nonce 必须可取"
+        );
 
         let auth = signed_enroll(&kp, PROTOCOL_VERSION, 0, &ch.nonce);
         assert!(hs.on_enroll(0, &auth, &HubIdentity).is_ok());
         // 验签通过后 nonce 也不在手上
-        assert_eq!(hs.pending_nonce(), None);
+        assert!(
+            !matches!(hs.phase, Phase::Challenged { .. }),
+            "nonce 用完即弃"
+        );
         assert!(hs.protocol_version().is_some());
 
         // 同一 nonce 第二次消费 → 直接被状态机拒（没有 nonce 可取）
@@ -985,7 +974,10 @@ mod tests {
             hs.on_enroll(0, &bad, &HubIdentity).unwrap_err(),
             HandshakeError::BadSignature
         );
-        assert_eq!(hs.pending_nonce(), None);
+        assert!(
+            !matches!(hs.phase, Phase::Challenged { .. }),
+            "nonce 用完即弃"
+        );
         assert_eq!(hs.protocol_version(), None);
         assert_eq!(
             hs.reject(),
@@ -1008,7 +1000,10 @@ mod tests {
                 event: "hello"
             })
         ));
-        assert_eq!(hs.pending_nonce(), Some(ch2.nonce.as_str()));
+        assert!(
+            matches!(&hs.phase, Phase::Challenged { nonce, .. } if nonce == &ch2.nonce),
+            "新一轮 challenge 的 nonce 必须可取"
+        );
     }
 
     // ---------- 测试标准 ⑥：握手超时（10s 边界由 Hub 的 relay 循环兑现） ----------
@@ -1140,7 +1135,12 @@ mod tests {
         let reconnect = json!({"node_id": "n_pi01", "signature": "sig"});
         let got = AuthPayload::from_value(&reconnect).unwrap();
         assert_eq!(
-            got.as_reconnect().expect("node_id present → reconnect"),
+            match &got {
+                AuthPayload::Reconnect(r) => r,
+                // 走不到：上面那条 `assert!` 已经钉住形态。
+                // coverage: excluded — 测试失败路径：这条分支只在「上面那条断言本该红」时才执行。
+                AuthPayload::Enroll(_) => panic!("node_id present → reconnect, got {got:?}"),
+            },
             &ReconnectAuth {
                 node_id: String::from("n_pi01"),
                 signature: String::from("sig"),
@@ -1148,15 +1148,16 @@ mod tests {
             }
         );
         // 两种形态互斥：重连载荷取不到 enroll 载荷
-        assert!(got.as_enroll().is_none());
+        assert!(matches!(got, AuthPayload::Reconnect(_)), "两种形态互斥");
         // 带 last_seen_gen
         let with_gen = json!({"node_id": "n_pi01", "signature": "sig", "last_seen_gen": 4});
         let with_gen = AuthPayload::from_value(&with_gen).unwrap();
         assert_eq!(
-            with_gen
-                .as_reconnect()
-                .expect("node_id present → reconnect")
-                .last_seen_gen,
+            match &with_gen {
+                AuthPayload::Reconnect(r) => r.last_seen_gen,
+                // coverage: excluded — 测试失败路径：这条分支只在「上面那条断言本该红」时才执行。
+                AuthPayload::Enroll(_) => panic!("node_id present → reconnect"),
+            },
             Some(4)
         );
     }
@@ -1213,7 +1214,7 @@ mod tests {
         );
         // 收到 auth 就烧掉了 challenge：载荷非法也不给第二次机会
         assert_eq!(hs.state(), HandshakeState::Rejected);
-        assert_eq!(hs.pending_nonce(), None);
+        assert!(!matches!(hs.phase, Phase::Challenged { .. }));
 
         // 长度不对（32 字节的槽塞 31 字节）
         let (mut hs, _) = challenged();
@@ -1374,7 +1375,10 @@ mod tests {
         };
         let c = serde_json::to_value(&enroll).unwrap();
         let parsed = AuthPayload::from_value(&c).unwrap();
-        let got = parsed.as_enroll().expect("enroll without node_id");
+        let AuthPayload::Enroll(got) = &parsed else {
+            // coverage: excluded — 测试失败路径：这条分支只在「上面那条断言本该红」时才执行。
+            panic!("enroll without node_id: {parsed:?}");
+        };
         assert_eq!(got.public_key, enroll.public_key);
         assert_eq!(got.signature, enroll.signature);
         assert_eq!(got.device_info.hostname, "raspberrypi");
@@ -1386,21 +1390,22 @@ mod tests {
         };
         let c = serde_json::to_value(&reconnect).unwrap();
         assert_eq!(
-            AuthPayload::from_value(&c)
-                .unwrap()
-                .as_reconnect()
-                .expect("reconnect with node_id"),
+            match &AuthPayload::from_value(&c).unwrap() {
+                AuthPayload::Reconnect(r) => r,
+                // coverage: excluded — 测试失败路径：这条分支只在「上面那条断言本该红」时才执行。
+                AuthPayload::Enroll(_) => panic!("reconnect with node_id"),
+            },
             &reconnect
         );
         // last_seen_gen 省略时也能解出来（§3 的 `last_seen_gen?`）
         let mut without = serde_json::to_value(&reconnect).unwrap();
         without.as_object_mut().unwrap().remove("last_seen_gen");
         assert_eq!(
-            AuthPayload::from_value(&without)
-                .unwrap()
-                .as_reconnect()
-                .expect("reconnect with node_id")
-                .last_seen_gen,
+            match &AuthPayload::from_value(&without).unwrap() {
+                AuthPayload::Reconnect(r) => r.last_seen_gen,
+                // coverage: excluded — 测试失败路径：这条分支只在「上面那条断言本该红」时才执行。
+                AuthPayload::Enroll(_) => panic!("reconnect with node_id"),
+            },
             None
         );
     }
@@ -1411,7 +1416,7 @@ mod tests {
         assert_eq!(hs.state(), HandshakeState::AwaitingHello);
         assert!(hs.hello().is_none());
         assert_eq!(hs.protocol_version(), None);
-        assert_eq!(hs.pending_nonce(), None);
+        assert!(!matches!(hs.phase, Phase::Challenged { .. }));
         // `Debug` 要能看到状态名：握手日志直接打它
         let d = format!("{hs:?}");
         assert!(d.contains("AwaitingHello"), "got {d}");

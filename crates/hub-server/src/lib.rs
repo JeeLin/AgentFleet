@@ -290,6 +290,31 @@ impl AppState {
         login_queue_timeout: Duration,
         limiter: LoginRateLimiter,
     ) -> Result<Self, BootstrapError> {
+        Self::bootstrap_with_login_permits(
+            pool,
+            data_dir,
+            params,
+            login_queue_timeout,
+            limiter,
+            hub_core::auth::LOGIN_SEMAPHORE_PERMITS,
+        )
+    }
+
+    /// 与 [`Self::bootstrap_with`] 同，但显式指定 `/login` 并发闸门的容量。
+    ///
+    /// 存在的理由：闸门容量是把「Argon2 不阻塞 tokio worker」这类**并发**性质
+    /// 变成可观测事实的前提——容量 2 而用例发 20 个并发登录时，绝大多数请求
+    /// 在队列里耗尽 `login_queue_timeout` 拿到 429，被观测到的就成了排队超时
+    /// 而不是被测性质。放宽闸门让这两件事解耦，生产默认值仍走
+    /// [`hub_core::auth::LOGIN_SEMAPHORE_PERMITS`]。
+    pub fn bootstrap_with_login_permits(
+        pool: Db,
+        data_dir: &Path,
+        params: AuthParams,
+        login_queue_timeout: Duration,
+        limiter: LoginRateLimiter,
+        login_permits: usize,
+    ) -> Result<Self, BootstrapError> {
         let auth = HubAuth::new(pool.clone(), params);
         // 计数器起点取库里的历史最大值：内存计数每次重启归零，
         // 而设备带着 `last_seen_gen` 重连，Hub 发出的 gen 必须单调越过它
@@ -307,7 +332,7 @@ impl AppState {
         let state = Self(Arc::new(Inner {
             auth,
             setup: Mutex::new(None),
-            login_gate: Arc::new(Semaphore::new(hub_core::auth::LOGIN_SEMAPHORE_PERMITS)),
+            login_gate: Arc::new(Semaphore::new(login_permits)),
             login_queue_timeout,
             limiter,
             data_dir: data_dir.to_path_buf(),

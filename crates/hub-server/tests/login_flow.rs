@@ -55,10 +55,37 @@ struct Harness {
 
 impl Harness {
     fn with(params: AuthParams, queue: Duration, limiter: LoginRateLimiter) -> Self {
+        Self::with_permits(
+            params,
+            queue,
+            limiter,
+            hub_core::auth::LOGIN_SEMAPHORE_PERMITS,
+        )
+    }
+
+    /// 与 [`Self::with`] 同，但显式指定 `/login` 并发闸门容量。
+    ///
+    /// 用途：标准⑩要观测的是「Argon2 校验有没有阻塞 tokio worker」，而它靠
+    /// 20 个并发登录制造压力。闸门容量默认只有 2（`LOGIN_SEMAPHORE_PERMITS`），
+    /// 那 18 个请求会在队列里耗尽超时并拿到 429——观测到的就成了排队超时，
+    /// 而不是被测性质。这里放宽闸门，让「并发压力」与「闸门容量」解耦。
+    fn with_permits(
+        params: AuthParams,
+        queue: Duration,
+        limiter: LoginRateLimiter,
+        permits: usize,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let pool = hub_storage::db::open_in(dir.path()).unwrap().1;
-        let state =
-            AppState::bootstrap_with(pool.clone(), dir.path(), params, queue, limiter).unwrap();
+        let state = AppState::bootstrap_with_login_permits(
+            pool.clone(),
+            dir.path(),
+            params,
+            queue,
+            limiter,
+            permits,
+        )
+        .unwrap();
         let app = hub_server::build_app(state.clone());
         Self {
             dir,
@@ -689,7 +716,10 @@ async fn standard_09_changing_password_keeps_sessions_rotating_hmac_kills_them()
 async fn standard_10_argon2_verification_does_not_block_the_tokio_worker() {
     // 单线程 runtime：**任何在 worker 上的同步阻塞都会让整个运行时停摆**，
     // 这一点让「有没有走 spawn_blocking」变成可观测的事实，而不是拍脑袋。
-    let h = Harness::with(
+    // 闸门放宽到 32（≥ 下面的 20 个并发）：本条要观测的是「Argon2 有没有阻塞
+    // worker」，而默认容量 2 会让 18 个请求在队列里超时拿到 429 —— 那观测到的
+    // 就成了排队超时，不是被测性质。生产默认值不受本用例影响。
+    let h = Harness::with_permits(
         AuthParams {
             m_cost: 65536,
             t_cost: 2,
@@ -697,6 +727,7 @@ async fn standard_10_argon2_verification_does_not_block_the_tokio_worker() {
         },
         Duration::from_secs(60),
         LoginRateLimiter::new(1000, 60),
+        32,
     );
     h.set_password().await;
 

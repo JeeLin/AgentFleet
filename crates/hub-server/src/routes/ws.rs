@@ -147,6 +147,28 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
         }
     }
 
+    // 收尾：断开处理器。提成单独函数只为一件事——`handle_socket` 里
+    // 曾对同一个 `outcome` match 了两次（第一段是「连上之后干什么」，
+    // 第二段是「断开之后收拾什么」），两段相隔 60 行而共用同一个匹配值，
+    // 读的人得自己确认「第二次 match 的臂和第一次一样吗」。
+    cleanup(&state, &outcome, &conn_id, started).await;
+}
+
+/// `handle_socket` 的收尾：摘表、结算两本账、推 `device.status`。
+///
+/// **为什么单独一个函数**：`handle_socket` 曾对同一个 `outcome` match 两次
+/// （连上之后干什么 / 断开之后收拾什么），两段相隔 60 行却共用同一个匹配值。
+/// 放在一起就只剩一个匹配点，`match &outcome` 也自然只有一处。
+///
+/// **两本账各有各的形状**（见下）：`channels` 按 node 分表所以能 `remove` key，
+/// `bindings` 按 channel 存所以只能按字段 `retain`。硬凑一个跨 crate 的
+/// 共同抽象会把两者都写坏——它们的共同点只有「都要按 node 清」这一句。
+async fn cleanup(
+    state: &AppState,
+    outcome: &Result<Authenticated, String>,
+    conn_id: &str,
+    started: Instant,
+) {
     // 断开处理器：**先校验这条连接仍是当前连接**再摘表（§7.1）。
     // 已关闭的连接不得把别人（新连接）的状态改掉。
     //
@@ -156,7 +178,7 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
         Ok(auth) => {
             let removed = state
                 .connections()
-                .remove_if_current(&auth.node_id, &conn_id);
+                .remove_if_current(&auth.node_id, conn_id);
             // 上报**不清**：它要活过这段窗口，才有 `Reconnecting` 这回事
             // （`reports.rs::presence`——WS 断了但心跳没超时 → 调度仍算可用）。
             // 清掉它等于让「重连中的设备被过滤」这条 `PRODUCT.md` 承诺落空。
@@ -169,7 +191,7 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
             // 摘不到表（`removed == false`），而断开处理器**根本不碰 status**
             // ——改 status 的只有 `on_heartbeat`，且只往 online 改。所以
             // 「旧连接把 status 改回 offline、盖掉新连接的 online」不可能发生。
-            state.outbound().remove(&conn_id);
+            state.outbound().remove(conn_id);
             // 账本结算：设备断开时按 node 一次性清干净。**将来新增任何按
             // node 记账的东西都要落进这份清单**——漏掉一份的症状是「Hub 认
             // 为通道已清、对方还在发帧」，而两份账本相隔两个 crate，改一处
@@ -229,11 +251,16 @@ fn supersede(state: &AppState, old: &ConnHandle, gen: u64, new_conn_id: &str, no
     let frame = protocol::frame::Frame::push(
         protocol::message::types::DISCONNECT,
         0,
-        serde_json::to_value(protocol::message::Disconnect {
-            reason: protocol::message::DisconnectReason::Superseded,
-            gen: Some(gen),
-        })
-        .unwrap_or_else(|_| serde_json::json!({"reason": "superseded", "gen": gen})),
+        protocol::frame::payload_or(
+            &protocol::message::Disconnect {
+                reason: protocol::message::DisconnectReason::Superseded,
+                gen: Some(gen),
+            },
+            protocol::message::fallback::disconnect(
+                protocol::message::DisconnectReason::Superseded,
+                Some(gen),
+            ),
+        ),
     );
     match state.outbound().send(&old.conn_id, frame) {
         Ok(true) => tracing::info!(
@@ -672,11 +699,13 @@ fn flood_frame(e: &hub_core::limits::LimitError) -> Frame {
     Frame::push(
         types::ERR,
         0,
-        serde_json::to_value(protocol::message::ErrPayload {
-            code,
-            message: e.to_string(),
-        })
-        .unwrap_or_else(|_| serde_json::json!({"code": code})),
+        protocol::frame::payload_or(
+            &protocol::message::ErrPayload {
+                code,
+                message: e.to_string(),
+            },
+            protocol::message::fallback::err(code, &e.to_string()),
+        ),
     )
 }
 

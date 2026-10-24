@@ -76,7 +76,11 @@ pub struct DeviceSummary {
     pub name: String,
     /// `os/arch` 拼成的短串（`darwin/arm64`）。上报前取空串。
     pub platform: String,
-    pub agent_version: String,
+    /// afcli 的版本号（**不是** AI agent 的：约束 2 里 `agent` 一词只指 AI
+    /// agent，设备侧进程一律叫 node / afcli）。字段名跟着协议走
+    /// （`heartbeat.node_version`、`security-and-lifecycle.md` §7.1.4），
+    /// 曾叫 `agent_version` ——那个名字违反约束 2，已改。
+    pub node_version: String,
     pub status: DeviceStatus,
     /// 时间戳原文（`unix:<秒>`）。**不是人读格式**：§6.1 说 API 给可比值，
     /// 「12s」那种相对时间由前端按当前时刻渲染——服务端给的相对时间在
@@ -169,7 +173,7 @@ fn device_summary(state: &AppState, device: &hub_storage::repo::Device) -> Devic
         hub_core::Presence::Offline => DeviceStatus::Offline,
     };
     // 库里的版本号优先（那是登记时的快照），库里没有才用心跳上报的。
-    let agent_version = match (device.node_version.as_deref(), report.as_ref()) {
+    let node_version = match (device.node_version.as_deref(), report.as_ref()) {
         (Some(v), _) => v.to_string(),
         (None, Some(r)) => r.node_version.clone(),
         (None, None) => String::new(),
@@ -178,7 +182,7 @@ fn device_summary(state: &AppState, device: &hub_storage::repo::Device) -> Devic
         id: device.id.clone(),
         name: device.name.clone(),
         platform: platform_of(device.os.as_deref(), device.arch.as_deref()),
-        agent_version,
+        node_version,
         status,
         last_seen: device.last_seen_at.clone(),
         cpu: report
@@ -574,13 +578,13 @@ mod tests {
         assert!(!s.key_fingerprint.contains(&stored));
         // 设备行里的平台与版本进了摘要
         assert_eq!(s.platform, "linux/aarch64");
-        assert_eq!(s.agent_version, "0.1.0");
+        assert_eq!(s.node_version, "0.1.0");
     }
 
     /// 版本回退：设备行里没有 `node_version` 时取内存上报的，
     /// 再没有就是空串（不是 `null`——前端的 `??` 兜底要的是字符串）。
     #[test]
-    fn the_agent_version_falls_back_to_the_latest_heartbeat() {
+    fn the_node_version_falls_back_to_the_latest_heartbeat() {
         let (st, _d) = state();
         let with_row = insert_device(&st, "row");
         let from_hb = insert_device(&st, "hb");
@@ -590,8 +594,8 @@ mod tests {
             .execute("UPDATE device SET node_version = NULL", [])
             .unwrap();
         report_with(&st, &from_hb, json!({}), json!(null));
-        assert_eq!(summary_of_device(&st, &from_hb).agent_version, "0.1.0");
-        assert_eq!(summary_of_device(&st, &with_row).agent_version, "");
+        assert_eq!(summary_of_device(&st, &from_hb).node_version, "0.1.0");
+        assert_eq!(summary_of_device(&st, &with_row).node_version, "");
     }
 
     /// `Last-Event-ID` 头：畸形 / 缺失 / 正常三种。

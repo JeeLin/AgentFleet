@@ -25,6 +25,7 @@ use axum::Router;
 use common::{connect_enrolled, device_info, Hub};
 use http_body_util::BodyExt;
 use hub_server::{build_app, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};
+use identity::KeyPair;
 use node_core::conn::connect_once;
 use protocol::channel::{ChannelCredit, ChannelData, CloseChannel, CREDIT_DELTA, CREDIT_START};
 use protocol::frame::Frame;
@@ -602,8 +603,13 @@ async fn a_bad_open_channel_gets_an_explicit_error() {
                     "设备侧自发 open_channel 不该换来一帧 channel_error：它被忽略，不是被回绝"
                 );
             }
-            // 没有更多帧了：违例帧什么都没换来
-            _ => break,
+            // 超时 = 没有更多帧了：违例帧什么都没换来。**这是唯一的正常出口。**
+            Err(_) => break,
+            // 读错误 / 连接已断：这是失败，不是「没有更多帧」。早先与超时合用
+            // 一个 `_ => break`，于是「连接断了」会被当成「等到了底」——
+            // 上面那条 `assert_ne!` 一帧都没执行过，绿灯是空的。
+            Ok(Err(e)) => panic!("读连接时出错（不是「没有更多帧」）：{e:?}"),
+            Ok(Ok(None)) => break,
         }
         assert!(Instant::now() < deadline, "轮询超时");
     }
@@ -843,16 +849,25 @@ async fn a_flooding_node_is_slow_read_not_killed_on_the_first_burst() {
     // 已经恢复」——慢读是有意的，积压的 12 MiB 要按 1 MiB/s 慢慢放行，
     // 全放完要 ~12s。判据是「洪峰之后这条通道还能一条条记账」：
     // 先记下洪峰前的余额，再等它掉一格。
+    // 判据是「再记三帧就恰好扣三格」，而不是「余额变成 before-1」：
+    // `before - 1` 的期望值是从被测系统自己的读数算出来的，只要余额动了
+    // 一格就算过——那与用例名里的「slow read」（令牌桶速率）毫无关系，
+    // 把速率调成瞬间放行它照样绿。差值「三帧 → 降三格」才是记账这件事
+    // 本身，且不依赖余额的绝对值（洪峰已经把它扣掉多少都无所谓）。
     let before = page.hub.credit(&node_id, &ch).expect("通道必须在账本里");
-    est.send(&channel_data(&ch, 1)).await.unwrap();
+    for seq in 1..=3 {
+        est.send(&channel_data(&ch, seq)).await.unwrap();
+    }
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        if page.hub.credit(&node_id, &ch) == Some(before - 1) {
+        if page.hub.credit(&node_id, &ch) == Some(before.saturating_sub(3)) {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "洪峰消化完之后通道必须还能一条条记账（余额停在 {before}）"
+            "洪峰消化完之后通道必须还能逐帧记账：发了 3 帧，余额该从 {before} 降到 {}（现在是 {:?}）",
+            before.saturating_sub(3),
+            page.hub.credit(&node_id, &ch)
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -868,8 +883,7 @@ async fn an_oversized_single_frame_is_frame_too_large() {
     let (mut est, _node_id, _kp) = connect_enrolled(&hub).await;
 
     // WS 侧有 WS_MAX_MESSAGE_BYTES 的限制，所以这一帧可能连发都发不出去；
-    // 发得出去就应当被判 frame too large，发不出去则连接已断——两者都可接受，
-    // 关键是**不能**把 Hub 弄死。
+    // 发不出去时断言的是「Hub 还活着、没被这一帧弄死」。
     //
     // `channel_id` 是个随手写的字面量：这一帧在读侧限流（`admit_read`）就被
     // 拦下，根本走不到「按通道认领」那一步，所以不需要一条真开过的通道。
@@ -881,20 +895,37 @@ async fn an_oversized_single_frame_is_frame_too_large() {
         1,
         serde_json::json!({"channel_id": "ch-0", "payload": {"chunk": big}}),
     );
-    if est.send(&f).await.is_ok() {
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            match est.next_text().await {
-                Ok(Some(text)) => {
-                    let r: Frame = serde_json::from_str(&text).unwrap();
-                    if r.msg_type == types::ERR {
-                        assert_eq!(r.c["code"], "frame too large");
-                        break;
+    match est.send(&f).await {
+        Ok(()) => {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                match est.next_text().await {
+                    Ok(Some(text)) => {
+                        let r: Frame = serde_json::from_str(&text).unwrap();
+                        if r.msg_type == types::ERR {
+                            assert_eq!(
+                                r.c["code"], "frame too large",
+                                "超限必须是 frame too large，不是 flood（ flood 是速率超限）"
+                            );
+                            break;
+                        }
                     }
+                    Ok(None) | Err(_) => break,
                 }
-                Ok(None) | Err(_) => break,
+                assert!(Instant::now() < deadline);
             }
-            assert!(Instant::now() < deadline);
+        }
+        // 发送就被拒：WS 层自己拦的。这时要的是「Hub 没死」——**重新连一次**
+        // 就是判据。早先这里写成 `if send.is_ok() { …断言… }`，发送失败时
+        // **整条用例什么都不验就绿**，而用例名承诺的「是 frame too large」
+        // 一次都没被执行到。
+        Err(e) => {
+            let kp = KeyPair::generate();
+            let again = connect_once(&hub.ws_url(), &kp, None, None, device_info()).await;
+            assert!(
+                again.is_ok(),
+                "Hub 进程还该活着（重连应当成功），但它对一次全新握手回了 {again:?}；原发送错误 {e:?}"
+            );
         }
     }
 }

@@ -66,19 +66,22 @@ async fn wait_for_report(hub: &Hub, node_id: &str, budget: Duration) {
 /// ⚠️ **不是**等内存上报消失：上报要活过重连窗口，才有「WS 断了但心跳新鲜
 /// → `Reconnecting`，调度仍算可用」这回事（子任务 6）。断开时清掉它，
 /// `PRODUCT.md`「离线期间会话仍存活」的承诺就落空了。
-async fn wait_for_no_report(hub: &Hub, node_id: &str, budget: Duration) {
+async fn wait_for_gone_from_registry(hub: &Hub, node_id: &str, budget: Duration) {
     wait_until(budget, || hub.state.connections().get(node_id).is_none()).await;
 }
 
 /// 等 `device.last_seen_at` 出现（第一份心跳落库完成的信号）。
-async fn wait_for_seen(hub: &Hub, node_id: &str, budget: Duration) -> String {
-    let mut seen = String::new();
+///
+/// 返回 `()` 而不是那个时间串：调用点要的是「落库了」这个事实，不是它的值。
+/// 早先返回 `String`，三个调用点全都丢掉——一个从没被用过的返回值会让人
+/// 以为谁在断言它，从而在改动落库格式时漏掉真正的依赖。
+async fn wait_for_seen(hub: &Hub, node_id: &str, budget: Duration) {
     wait_until(budget, || {
-        seen = device_row(hub, node_id, "last_seen_at").unwrap_or_default();
-        !seen.is_empty()
+        !device_row(hub, node_id, "last_seen_at")
+            .unwrap_or_default()
+            .is_empty()
     })
     .await;
-    seen
 }
 
 /// 断开一条连接：直接 drop。drop 会关 TCP，Hub 侧 relay 随即结束并摘表。
@@ -138,7 +141,7 @@ async fn a_minimal_heartbeat_keeps_the_persisted_capabilities() {
     send_heartbeat(&mut est, serde_json::json!({"node_version": "0.2.0"})).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     disconnect(est).await;
-    wait_for_no_report(&hub, &node_id, Duration::from_secs(3)).await;
+    wait_for_gone_from_registry(&hub, &node_id, Duration::from_secs(3)).await;
 
     let mut est2 = connect_reconnect(&hub, &kp, &node_id).await;
     send_heartbeat(&mut est2, full_heartbeat()).await;
@@ -252,7 +255,7 @@ async fn capabilities_survive_the_device_going_offline() {
     wait_for_report(&hub, &node_id, Duration::from_secs(3)).await;
 
     disconnect(est).await;
-    wait_for_no_report(&hub, &node_id, Duration::from_secs(3)).await;
+    wait_for_gone_from_registry(&hub, &node_id, Duration::from_secs(3)).await;
 
     // 让内存里那份过期（> OFFLINE_AFTER）：这样断言命中的必然是**库里的值**，
     // 而不是「内存还留着」。断开后上报要活过重连窗口（子任务 6 的
@@ -436,7 +439,9 @@ async fn the_heartbeat_payload_has_no_slot_for_key_material() {
 
 /// 握手失败时 `connect_once` 不返回 `Authed`——心跳路径只在成功之后存在。
 ///
-/// 库里塞一行「有 node_id、没有公钥」的历史数据，重连必被拒。
+/// 库里塞一行「有 node_id、有 `key_fingerprint`、但 `capabilities` 里没有公钥」
+/// 的历史数据（`insert_legacy_device` 正是这么塞的），重连必被拒：
+/// Hub 拿不到设备侧公钥就没法验签，于是握手停在 auth 之前。
 #[tokio::test]
 async fn a_failed_handshake_yields_no_connection_to_heartbeat_on() {
     let hub = Hub::boot().await;
@@ -565,7 +570,7 @@ async fn a_closed_connection_end_is_recorded() {
         ))
         .await;
     disconnect(est).await;
-    wait_for_no_report(&hub, &node_id, Duration::from_secs(3)).await;
+    wait_for_gone_from_registry(&hub, &node_id, Duration::from_secs(3)).await;
     assert!(
         hub.state.connections().get(&node_id).is_none(),
         "连接必须从注册表摘掉"
