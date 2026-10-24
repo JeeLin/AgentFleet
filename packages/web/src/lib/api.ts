@@ -25,7 +25,7 @@ export interface DeviceSummary {
   name: string
   /** `os/arch`，未上报时为空串。 */
   platform: string
-  agent_version: string
+  node_version: string
   status: ApiDeviceStatus
   /** `unix:<秒>` 原文；从没上报过是 `null`。**不是**人读的相对时间。 */
   last_seen: string | null

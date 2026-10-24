@@ -106,7 +106,7 @@ function offlineReason(device: DeviceSummary): string {
             <span class="af-fp af-t-mute af-dev-id" :title="d.id">{{ d.key_fingerprint }}</span>
           </td>
           <td class="af-t-mute">{{ d.platform || '—' }}</td>
-          <td data-num class="af-t-mute">{{ d.agent_version || '—' }}</td>
+          <td data-num class="af-t-mute">{{ d.node_version || '—' }}</td>
           <td>
             <span v-if="d.agents.length" class="af-caps">
               <span v-for="a in d.agents" :key="a" class="af-badge af-badge--agent">{{ a }}</span>

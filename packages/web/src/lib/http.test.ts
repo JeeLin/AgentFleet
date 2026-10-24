@@ -389,10 +389,15 @@ describe('describeReadFailure（错误 → 用户可见文案）', () => {
     )
   })
 
-  it('同一个 session_expired 在不同名词下也是同一句话（只有名词在变）', () => {
-    const a = describeReadFailure(new ApiError(401, 'session_expired'), '设备列表')
-    const b = describeReadFailure(new ApiError(401, 'session_expired'), '会话列表')
-    expect(a).toBe(b)
+  it('session_expired 那句话里不出现码字，也不出现名词', () => {
+    // 早先这里断言的是「两个名词下 a === b」。那是个恒真判据：`session_expired`
+    // 臂根本不读 `noun`（`http.ts:344` 直接返回常量），所以「同一句话」是实现
+    // 的直接推论，而不是一条能失败的断言。而 `noun` 之外的码字，才是真正
+    // 会泄露给用户的东西——403 那条刻意带上码字便于排障，这一条不该带。
+    const line = describeReadFailure(new ApiError(401, 'session_expired'), '设备列表')
+    expect(line).not.toContain('session_expired')
+    expect(line).not.toContain('设备列表')
+    expect(line).not.toMatch(/\([^)]*\)/)
   })
 
   it('别的错误码带上码字，便于排障', () => {

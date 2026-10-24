@@ -115,7 +115,7 @@ function createSession(device: DeviceSummary): void {
           <span class="af-kv__k">密钥指纹</span>
           <span class="af-kv__v af-fp">{{ inspected.key_fingerprint }}</span>
           <span class="af-kv__k">afcli</span>
-          <span class="af-kv__v">{{ inspected.agent_version || '未上报' }}</span>
+          <span class="af-kv__v">{{ inspected.node_version || '未上报' }}</span>
           <span class="af-kv__k">最近心跳</span>
           <span class="af-kv__v">{{ relativeTime(inspected.last_seen) }}</span>
           <span class="af-kv__k">资源</span>

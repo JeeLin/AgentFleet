@@ -144,13 +144,10 @@
     return r === true;
   };
 
-  AF.hasHandler = function (act) { return !!handlers[act]; };
-
   /* 表里有、但没人实现的 act。开发期在控制台吵，而不是等用户按到死键。 */
   AF.unimplemented = function () {
     return Object.keys(ACTS).filter(function (a) { return !handlers[a]; });
   };
-  AF.keysTable = function () { return KEYS; };
 
   /* -------------------------------------------------------------------------
      自己的动作自己注册。Esc / Tab 是这个文件的职责（焦点栈归它管），
@@ -229,8 +226,6 @@
     return true;
   };
 
-  AF.focusDepth = function () { return stack.length; };
-
   /* =========================================================================
      §4 焦点陷阱（动态版）
      -------------------------------------------------------------------------
@@ -269,7 +264,6 @@
   function listOf(el) {
     return el && el.closest ? el.closest('[data-role="list"], [data-role="tree"]') : null;
   }
-  AF.listOf = listOf;
 
   AF.rowsIn = function (list) {
     return [].filter.call(list.querySelectorAll('[data-row]'), function (r) {
@@ -286,8 +280,6 @@
     });
     if (focus !== false) row.focus();
   }
-
-  AF.selectRow = selectRow;
 
   AF.currentRow = function () {
     var list = listOf(document.activeElement);

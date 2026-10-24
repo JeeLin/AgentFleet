@@ -37,7 +37,6 @@ body {
 /* 只有内容区可选中：终端输出、代码预览、路径、日志 */
 .af-selectable,
 .af-term,
-.af-code,
 .af-fp,
 td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 
@@ -115,11 +114,6 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 }
 .af-sidebar__item:hover .af-sidebar__hint,
 .af-sidebar__item:focus-visible .af-sidebar__hint { opacity: 1; }
-.af-sidebar__count {
-  font-size: var(--af-text-sm); color: var(--af-fg-tertiary);
-  border: 1px solid var(--af-border-subtle); border-radius: var(--af-radius-sm);
-  padding: 0 var(--af-space-1);
-}
 .af-sidebar__close {
   text-align: left; background: none; border: 0; cursor: pointer;
   color: var(--af-fg-tertiary); font-size: var(--af-text-sm);
@@ -185,7 +179,6 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 .af-fp { font-family: var(--af-font-mono); color: var(--af-fg-secondary); }
 .af-truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .af-hairline { height: 1px; background: var(--af-border-subtle); border: 0; margin: 0; }
-.af-vline { width: 1px; align-self: stretch; background: var(--af-border-subtle); }
 
 /* ===========================================================================
    3. Button
@@ -263,26 +256,21 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 .af-field__hint { font-size: var(--af-text-sm); color: var(--af-fg-tertiary); line-height: var(--af-leading-snug); }
 .af-field__error { font-size: var(--af-text-sm); color: var(--af-danger-fg); line-height: var(--af-leading-snug); }
 
-/* Checkbox / Radio：用 accent 而不是系统默认（系统样式在暗底上不可见） */
-.af-check, .af-radio {
+/* Checkbox：用 accent 而不是系统默认（系统样式在暗底上不可见） */
+.af-check {
   appearance: none; width: 14px; height: 14px; flex: 0 0 14px;
   background: var(--af-surface-2); border: 1px solid var(--af-border-strong);
   border-radius: var(--af-radius-sm); cursor: pointer; position: relative;
   transition: background-color var(--af-dur-instant) linear, border-color var(--af-dur-instant) linear;
 }
-.af-radio { border-radius: var(--af-radius-full); }
-.af-check:hover, .af-radio:hover { border-color: var(--af-accent); }
-.af-check:checked, .af-radio:checked { background: var(--af-accent); border-color: var(--af-accent); }
+.af-check:hover { border-color: var(--af-accent); }
+.af-check:checked { background: var(--af-accent); border-color: var(--af-accent); }
 .af-check:checked::after {
   content: ''; position: absolute; left: 3px; top: 0px;
   width: 4px; height: 8px; border: solid var(--af-fg-on-accent);
   border-width: 0 2px 2px 0; transform: rotate(45deg);
 }
-.af-radio:checked::after {
-  content: ''; position: absolute; inset: 3px; border-radius: var(--af-radius-full);
-  background: var(--af-fg-on-accent);
-}
-.af-check:disabled, .af-radio:disabled { opacity: 0.5; pointer-events: none; }
+.af-check:disabled { opacity: 0.5; pointer-events: none; }
 
 /* Switch：滑块轨道是控件本体 → 边界 ≥3:1 */
 .af-switch {
@@ -372,14 +360,6 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
    只有真的互斥时才用 tabs。终端与文件是同时看的 → 不用 tabs（见规范 §7.1）。
    =========================================================================== */
 .af-tabs { display: flex; gap: var(--af-space-1); border-bottom: 1px solid var(--af-border-subtle); }
-.af-tabs__tab {
-  background: none; border: 0; border-bottom: 2px solid transparent; cursor: pointer;
-  font-family: inherit; font-size: var(--af-text-sm); color: var(--af-fg-tertiary);
-  padding: var(--af-space-3) var(--af-space-4);
-  transition: color var(--af-dur-instant) linear, border-color var(--af-dur-instant) linear;
-}
-.af-tabs__tab:hover { color: var(--af-fg-primary); }
-.af-tabs__tab[aria-selected='true'] { color: var(--af-accent-fg); border-bottom-color: var(--af-accent); }
 
 /* ===========================================================================
    8. Table
@@ -489,13 +469,6 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 .af-modal__foot {
   display: flex; gap: var(--af-space-3); padding: var(--af-space-4) var(--af-space-5);
   border-top: 1px solid var(--af-border-subtle); flex: 0 0 auto;
-}
-
-.af-drawer {
-  position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 100%);
-  display: flex; flex-direction: column;
-  background: var(--af-surface-2); border-left: 1px solid var(--af-border-default);
-  box-shadow: var(--af-shadow-3); z-index: var(--af-z-drawer);
 }
 
 /* 命令面板：模态的替代品，所以层级更高 */
@@ -862,7 +835,6 @@ kbd, .kbd {
 .af-term__dim { color: var(--af-term-ansi-bright-black); }
 .af-term__ok  { color: var(--af-term-ansi-green); }
 .af-term__warn { color: var(--af-term-ansi-yellow); }
-.af-term__agent { color: var(--af-term-ansi-magenta); }
 
 /* 文件树面板内嵌版 */
 .af-fpane { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
@@ -1027,13 +999,6 @@ kbd, .kbd {
    之间不会多出一道空隙。 */
 .af-tab .af-badge { flex: 0 0 auto; }
 
-/* 未保存标记：琥珀点、永不动画（它由用户自己的编辑触发，在没动手的
-   会话上闪就是噪声）。宽高写死而不是靠内容，这样「有没有未保存改动」
-   不改变 tab 的宽度、切 tab 时不会左右抽。 */
-.af-tab__dirty {
-  flex: 0 0 auto; width: 6px; height: 6px; line-height: 0;
-  border-radius: var(--af-radius-full); background: var(--af-warn); color: var(--af-warn);
-}
 
 /* 关闭按钮默认藏起来：常驻的 ✕ 每个 tab 6px 宽，六个 tab 就是一个
    分心的大问号。用 opacity 而不是 display——淡入淡出要能被

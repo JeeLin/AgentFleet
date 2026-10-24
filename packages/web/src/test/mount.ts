@@ -34,7 +34,7 @@ export function device(over: Partial<DeviceSummary> = {}): DeviceSummary {
     id: 'n_1',
     name: 'mbp.local',
     platform: 'darwin/arm64',
-    agent_version: '0.1.0',
+    node_version: '0.1.0',
     status: 'online',
     last_seen: 'unix:1700000000',
     cpu: 20,
