@@ -66,30 +66,61 @@ if [ "$llvm_cov_status" -ne 0 ]; then
     exit 1
 fi
 
-# 抽取 "src/x.rs: 1, 2-3, 5" 形式，展开成 "path:line" 每行一条
-actual="$(printf '%s\n' "$raw" \
-    | sed -n '/^Uncovered Lines:/,$p' \
-    | grep -E '\.rs:' \
-    | while IFS= read -r line; do
-        file="${line%%:*}"
-        rest="${line#*:}"
-        nums="${rest// /}"
-        IFS=',' read -ra parts <<< "$nums"
-        for p in "${parts[@]}"; do
-            if [[ "$p" == *-* ]]; then
-                a="${p%%-*}"; b="${p##*-}"
-                for ((i = a; i <= b; i++)); do
-                    echo "$file:$i"
-                done
-            elif [[ -n "$p" ]]; then
-                echo "$file:$p"
-            fi
-        done
-    done | sed "s|^$PWD/||" | sort -u)"
+# 抽取 "src/x.rs: 1, 2-3, 5" 形式，展开成 "path:line" 每行一条。
+#
+# 这段管线只有一份实现，在 scripts/uncovered-lines.sh 里：本门禁与
+# `scripts/coverage-exceptions.sh --rebuild` 都要这个集合，而它们必须给出
+# 同一个答案。抄两份的代价不是多写一遍，而是会漂移——llvm-cov 的输出格式
+# 一变（或我们想支持别的范围记号），改一处忘一处，两个门禁就对同一份源码
+# 给出不同的未覆盖集合。
+actual="$(printf '%s\n' "$raw" | "$(dirname "$0")/uncovered-lines.sh")"
 
 declared="$(grep -vE '^\s*(#|$)' "$EXCEPTIONS" \
     | cut -d: -f1,2 \
-    | sort -u)"
+    | LC_ALL=C sort -u)"
+
+# 覆盖性**非确定**的行：源码里带 `// coverage: excluded (racy)` 标注的那些。
+#
+# 为什么要有这一类：`tokio::select!` 对多条就绪的臂是**随机轮询**的，于是
+# 臂内代码的执行取决于协程调度时序——同一份代码、同一个输入，每次 llvm-cov
+# 实跑的结果都可能不同（实测同一次代码四次实跑得到 8 / 3 / 34 条报错，
+# 且集合成员互不重合）。把这类行当成确定性行做「集合相等」双向核对，
+# 门禁会随机红，而随机红的门禁等于没有门禁：开发者无法区分
+# 「我改坏了」与「这次运气不好」。
+#
+# 这不是放水：非时序敏感行仍走严格双向比对，一条都不放松。被豁免的只是
+# 「断言它某次一定不被执行」这个**不可能成立**的要求。判据改由该臂所属
+# 函数自己的用例给（例：`select!` 的 pump 臂由 `channel::pump` 的用例覆盖）。
+#
+# 标注必须在源码里就地写（与其余例外同规则），因为「哪一行是 racy」是
+# 代码结构的事实，不是清单能单方面声明的。
+racy="$(scripts/coverage-exceptions.sh --racy)"
+
+if [ -n "$racy" ]; then
+    echo
+    echo "==> non-deterministic lines (marked \`(racy)\` in source, excluded from both checks)"
+    printf '%s\n' "$racy" | sed 's/^/  /'
+fi
+
+# 从两个方向都比对里剔掉 racy 行。
+#
+# 用 `grep -vxF -f`（整行精确、固定串）而**不是** `comm -13`：`comm` 要求两个
+# 输入各自按**它认可的同一 collation** 排好序，否则它会在 stderr 打一行
+# `input is not in sorted order` 之后**静默丢行**——结果集看着正常，却少了几条，
+# 于是「两边都在」的行会被误判。这不是理论风险：本仓三份数据的排序实现本来就
+# 不同（`$declared`/`$actual` 走 shell `sort`，受 `LC_ALL` 影响；`$racy` 走
+# Python 的 `sorted()`，纯 codepoint 序），而 locale 排序把
+# `connector/terminal.rs` 排在 `conn.rs` 之前、codepoint 序相反。用 `comm`
+# 就把「门禁的判定」绑在一个与命题无关的排序细节上。
+# `grep -vxF -f` 不要求有序，也不会因序不同而少输出，语义正是我们要的
+# 「从集合里减掉另一个集合」。
+if [ -n "$racy" ]; then
+    declared_checked="$(printf '%s\n' "$declared" | grep -vxF -f <(printf '%s\n' "$racy") | sed '/^$/d')"
+    actual_checked="$(printf '%s\n' "$actual" | grep -vxF -f <(printf '%s\n' "$racy") | sed '/^$/d')"
+else
+    declared_checked="$(printf '%s\n' "$declared" | sed '/^$/d')"
+    actual_checked="$(printf '%s\n' "$actual" | sed '/^$/d')"
+fi
 
 echo
 echo "==> declared exceptions (from $EXCEPTIONS)"
@@ -107,20 +138,20 @@ fail=0
 # 未覆盖但没登记 → 门禁失败
 while IFS= read -r miss; do
     [ -z "$miss" ] && continue
-    if ! printf '%s\n' "$declared" | grep -qxF "$miss"; then
+    if ! printf '%s\n' "$declared_checked" | grep -qxF "$miss"; then
         echo "ERROR: uncovered line not declared in $EXCEPTIONS: $miss" >&2
         fail=1
     fi
-done <<< "$actual"
+done <<< "$actual_checked"
 
 # 登记了但已覆盖 → 例外过期，门禁失败（防止例外清单变成永久豁免）
 while IFS= read -r d; do
     [ -z "$d" ] && continue
-    if ! printf '%s\n' "$actual" | grep -qxF "$d"; then
+    if ! printf '%s\n' "$actual_checked" | grep -qxF "$d"; then
         echo "ERROR: stale exception (line is now covered), remove from $EXCEPTIONS: $d" >&2
         fail=1
     fi
-done <<< "$declared"
+done <<< "$declared_checked"
 
 if [ "$fail" -ne 0 ]; then
     echo
