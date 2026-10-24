@@ -261,7 +261,7 @@ impl ChannelTable {
             // 入队与溢出判定都走同一处：`poll_all` 也要入队，
             // 两份拷贝的溢出策略迟早会分叉，而分叉的表现是
             // 「按一下键就不溢出了」。
-            self.queue_frames(channel_id, out)?;
+            self.queue_frames(channel_id, out, MAX_BACKLOG_BYTES)?;
         }
         Ok(self.flush(channel_id))
     }
@@ -271,10 +271,16 @@ impl ChannelTable {
     /// 溢出不截断：`protocol.md` §6 的信用模型是「排进待发队列、等
     /// `channel_credit` 再放行」，所以这里只能排队。排到内存上限还排不下
     /// 说明对端永久不读，唯一能自保的动作是放掉这条通道。
+    ///
+    /// `limit` 是待发字节上限，由调用方给而不是在这里读模块常量：测试要能
+    /// 注入一个小上限，从而把「越限即关通道」这条命题与「往真 PTY 里灌
+    /// 8 MiB 需要多少秒」解耦开（后者随机器负载变，实测在并发下能从 14 秒
+    /// 涨到越过 30 秒的预算）。生产调用点一律传 [`MAX_BACKLOG_BYTES`]。
     fn queue_frames(
         &mut self,
         channel_id: &str,
         out: Vec<crate::connector::OutFrame>,
+        limit: usize,
     ) -> Result<(), DataError> {
         let Some(entry) = self.channels.get_mut(channel_id) else {
             return Err(DataError::UnknownChannel);
@@ -285,7 +291,7 @@ impl ChannelTable {
             // 信封记，两边口径不同就会让每出一帧多减几十字节——差额被
             // `saturating_sub` 静默吞掉，8 MiB 的闸实际松了一大截。
             let bytes = frame.c.to_string().len();
-            if entry.backlog_bytes + bytes > MAX_BACKLOG_BYTES {
+            if entry.backlog_bytes + bytes > limit {
                 // 「关掉」必须走 [`Self::release`] 那一条路，而不能只是把
                 // `live` 抹成 false：那会让这条通道变成一只僵尸——PTY 还
                 // 开着（子进程一直在跑，设备上看不见也管不着）、8 MiB 积压
@@ -356,7 +362,9 @@ impl ChannelTable {
                 // 这里把那句 `channel_error` 一起发出去。吞掉它的话，
                 // 页面只会看到终端不声不响地停住——而「对端永远不读」
                 // 恰恰是最需要说出口的那种故障。
-                if let Err(DataError::Connector(e)) = self.queue_frames(&id, produced) {
+                if let Err(DataError::Connector(e)) =
+                    self.queue_frames(&id, produced, MAX_BACKLOG_BYTES)
+                {
                     out.push((id.clone(), vec![error_frame(&id, e.code(), &e.to_string())]));
                     continue;
                 }
@@ -549,6 +557,19 @@ pub fn reset_for_tests() {
     lock().channels.clear();
 }
 
+// 以下一组访问器是**测试与排障 API**：读通道表的内部计数（信用、积压、
+// 已发帧数、存活数）。生产路径一个都不调用——worker 与 connector 直接用
+// `pump()` / `push()` 的返回值，不需要回头看表里记了什么。
+//
+// 为什么不加 `#[cfg(test)]`：`crates/node-core/tests/` 下的**集成测试**
+// （`channel_flow.rs` / `heartbeat_flow.rs`）也要用它们，而集成测试是另一个
+// crate，`#[cfg(test)]` 只在编译本 crate 的测试目标时生效，加了它们就编不过。
+// `cfg(test)` 在这里不是「收紧」而是「把集成测试全打断」，所以这一组保持
+// `pub`，靠本条说明与 `AGENTS.md` 的「测试与排障 API」条目约束。
+//
+// 新增成员前先想清楚：它是测试需要的，还是「顺手想看」的？后者会让这张表
+// 变成公开内部状态的缺口，而那正是通道表要封装起来的原因。
+
 /// 这条通道的信用余额（测试与排障用）。
 pub fn credit_of(channel_id: &str) -> Option<u32> {
     lock().credit_of(channel_id)
@@ -732,14 +753,6 @@ mod tests {
         Frame::push(types::OPEN_CHANNEL, 1, serde_json::to_value(&spec).unwrap())
     }
 
-    fn data(channel_id: &str, payload: serde_json::Value) -> Frame {
-        let spec = ChannelData {
-            channel_id: channel_id.to_string(),
-            payload,
-        };
-        Frame::push(types::CHANNEL_DATA, 2, serde_json::to_value(&spec).unwrap())
-    }
-
     /// 表探针：`len` / `is_empty` / `summary` 三个口径必须同时说得通。
     ///
     /// 只测一个会漏掉「表里有 1 条但 `is_empty` 说空」这种纯记账 bug——
@@ -825,19 +838,23 @@ mod tests {
         assert!(!has_channel("ghost"), "补信用不能凭空造出通道");
     }
 
-    /// 8 MiB 待发上限：**溢出不截断，而是关通道并报错**。
+    /// 待发字节上限：**溢出不截断，而是关通道并报错**。
     ///
     /// 「不静默丢字节」是产品承诺（PTY 输出不丢），所以排到上限只能放掉
     /// 这条通道；而放掉必须**说出口**——否则页面只会看到终端不声不响停住。
     ///
-    /// **用真 shell 造积压**：这条闸判的是 `queue_frames` 的字节账，而它是
-    /// `poll_all` 与 `on_data` 共用的那条路。手工塞一份超大 payload 会被
-    /// files 自己的载荷预算先拦下，测到的就不是这条闸了。
+    /// **注入一个小上限，不往真 PTY 里灌 8 MiB**：这条闸判的是字节账与
+    /// 越限后的三个动作（关通道、报错、释放资源），与「上限具体是多大」无关。
+    /// 早先这里靠 `while :; do echo fill; done` 真灌满 8 MiB，实测单独跑约
+    /// 14 秒，而全量并发下会涨到越过 30 秒的预算——**那条用例因此随机红**，
+    /// 而随机红的用例等于没有用例。注入上限让被测命题与机器吞吐解耦，
+    /// 生产默认值（`MAX_BACKLOG_BYTES`）一个字节都没动。
     #[test]
-    fn an_unbacked_backlog_over_8mib_closes_the_channel_and_says_why() {
+    fn an_unbacked_backlog_closes_the_channel_and_says_why() {
         let _guard = table_lock();
         reset();
-        // 信用给 1：每轮只放一帧出去，于是积压真的会涨过 8 MiB。
+        // 真开一条 terminal 通道：闸判在 `queue_frames`，而它是 `poll_all`
+        // 与 `on_data` 共用的那条路——所以通道必须是真开起来的。
         let spec = OpenChannel {
             channel_id: "ch-flood".to_string(),
             connector: connector::names::TERMINAL.to_string(),
@@ -847,34 +864,25 @@ mod tests {
         let f = Frame::push(types::OPEN_CHANNEL, 1, serde_json::to_value(&spec).unwrap());
         assert!(matches!(on_channel_frame(&f), Action::Send(_)));
 
-        // 一条一次吐满一屏、停一下再吐的命令：让读线程有机会把字节交上来。
-        let d = data(
-            "ch-flood",
-            serde_json::json!({"bytes":"while :; do echo fill; done\n"}),
+        // 上限给 1：第一帧就越限。判据是「字节账越限」这个动作本身，
+        // 不是「攒够多少字节」——那随机器变，正是要摆脱的东西。
+        let limit = 1usize;
+        let out = vec![connector::OutFrame::new(serde_json::json!({ "k": "v" }))];
+        let got = lock().queue_frames("ch-flood", out, limit);
+        assert!(
+            matches!(got, Err(DataError::Connector(_))),
+            "越过待发上限必须报错，而不是静默丢字节：{got:?}"
         );
-        on_channel_frame(&d);
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            for (_id, frames) in pump() {
-                if frames.iter().any(|f| f.msg_type == types::CHANNEL_ERROR) {
-                    assert_eq!(
-                        live_count(),
-                        0,
-                        "溢出之后资源必须被释放，不能留一只僵尸通道"
-                    );
-                    assert_eq!(backlog_bytes_of("ch-flood"), 0, "释放要清掉积压字节账");
-                    on_disconnect();
-                    return;
-                }
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "30s 里积压没越过 8 MiB（backlog_bytes={}）",
-                backlog_bytes_of("ch-flood")
-            );
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        assert_eq!(
+            live_count(),
+            0,
+            "溢出之后资源必须被释放，不能留一只僵尸通道"
+        );
+        assert_eq!(backlog_bytes_of("ch-flood"), 0, "释放要清掉积压字节账");
+        // 表里**仍留着**这条通道：`release` 只释放资源，条目要留到随后那帧
+        // `close_channel` 对上号（§5：关一条通道不得影响其他通道）。判「资源
+        // 放没放」看 `live_count`，不是看表里还有没有这个名字。
+        assert!(has_channel("ch-flood"), "条目要留着等 close_channel 对上号");
     }
 
     /// `queue_frames` / `flush` 对**表里没有的通道**：报错而不是静默丢帧。
@@ -888,7 +896,7 @@ mod tests {
         reset();
 
         let out = vec![connector::OutFrame::new(serde_json::json!({ "k": "v" }))];
-        let got = lock().queue_frames("ch-not-there", out);
+        let got = lock().queue_frames("ch-not-there", out, MAX_BACKLOG_BYTES);
         assert!(
             matches!(got, Err(DataError::UnknownChannel)),
             "往一条没开的通道上排帧必须报 UnknownChannel：{got:?}"
@@ -923,6 +931,15 @@ mod tests {
     }
 
     /// 一个 `poll` 总是报错的 connector。
+    ///
+    /// 只为 `poll_all_skips_a_connector_whose_poll_fails` 一条用例存在，
+    /// 那条用例把实例直接塞进通道表、只调 `poll_all`。
+    // coverage: excluded — `FailingPoll` 夹具只被 `poll_all_skips_a_connector_
+    // whose_poll_fails` 一条用例使用，那条用例把实例直接塞进通道表后只调
+    // `poll_all`。`open` / `on_data` 是 `Connector` trait 的另外两个方法，
+    // 本例没有任何路径会调到：它们是夹具的结构性未用部分，不是漏测。
+    // （标注与上面的文档注释之间**不留空行**：`comment_blocks` 把紧邻的整行
+    // 注释算成同一段，隔开它就会被算到上一段去，理由文本会串。）
     struct FailingPoll;
 
     impl connector::Connector for FailingPoll {

@@ -33,6 +33,12 @@ fn reported() -> Vec<String> {
 /// 刻意不写死名字列表——写死的话，「注册表加了第四个 connector 而上报
 /// 忘了」只要顺手改一行断言就又绿了，而那正是这条测试要抓的东西。
 /// 集合相等是那条唯一的不变式。
+///
+/// **它不是「期望值来自被测实现」的那种假绿**：`reported()` 取自
+/// `heartbeat::capabilities()`，`registered_names()` 取自
+/// `connector::registered()`，两边是**不同的调用点**——虽然前者内部就是
+/// 调后者。真正让这条有意义的是它同时钉住了「上报里一个不少、一个不多」：
+/// 少了漏一个可用能力，多了把任务派给做不到的机器。
 #[test]
 fn the_reported_capabilities_are_exactly_the_registry() {
     assert_eq!(

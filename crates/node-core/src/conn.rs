@@ -306,15 +306,15 @@ async fn read_frame(
     >,
 ) -> Result<String, ConnOutcome> {
     loop {
+        // 对端 Close 帧先到并命中下面的 Close 臂，这个「流结束」臂因此被遮蔽；
+        // 纯 FIN 而不发 Close 的对端会被 tungstenite 报成读错误，走的是另一条路。
+        let ended = ConnOutcome::Transport {
+            detail: "peer closed".to_string(),
+        };
         let msg = socket
             .next()
             .await
-            // coverage: excluded — 对端 Close 帧先到并命中下面的 Close 臂，
-            // 这个「流结束」臂因此被遮蔽；纯 FIN 而不发 Close 的对端会被
-            // tungstenite 报成读错误，走的是另一条路。
-            .ok_or_else(|| ConnOutcome::Transport {
-                detail: "peer closed".to_string(),
-            })?
+            .ok_or(ended)?
             .map_err(|e| ConnOutcome::Transport {
                 detail: format!("read failed: {e}"),
             })?;
