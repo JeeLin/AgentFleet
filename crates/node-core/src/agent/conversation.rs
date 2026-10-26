@@ -123,14 +123,18 @@ impl Conversations {
             )
         })?;
         let env: BTreeMap<String, String> = spec.env.clone();
-        let cwd = std::path::PathBuf::from(&spec.cwd);
+        // `~` 只在这里展开（见 `expand_home` 的文档）：Hub 给的是原样字符串。
+        let cwd = std::path::PathBuf::from(expand_home(&spec.cwd));
         let acp_args: Vec<&str> = spec.acp_args.iter().map(String::as_str).collect();
         let args = build_args(&acp_args, &spec.args);
         let client = AcpClient::spawn(&program, &args, &env, &program, Some(&cwd))
             .await
             .map_err(|e| format!("cannot start {}: {e}", spec.agent_id))?;
+        // 用**展开后**的路径，不是 `spec.cwd` 原文：agent 拿 `session/new` 的
+        // `cwd` 决定在哪儿干活，给它带 `~` 的串等于让它自己猜一遍——而它多半
+        // 不会展开，于是建立了一个根在 `~` 字面目录下的会话。
         let session_id = client
-            .new_session(&spec.cwd)
+            .new_session(&cwd.to_string_lossy())
             .await
             .map_err(|e| format!("cannot create an acp session: {e}"))?;
 
@@ -236,6 +240,38 @@ impl Conversations {
     }
 }
 
+/// 把 `agent_config.command` 为空串时的回落与 `cwd` 的展开说清楚。
+///
+/// # `cwd` 里的 `~` 必须在这里展开
+///
+/// Hub 存的工作区路径是**原样字符串**（`Workspace::path` 的注释明说「不做 `~`
+/// 展开」），因为 Hub 不知道设备上的家目录是哪个。而设备侧执行的是
+/// `Command::current_dir(cwd)`——**没有 shell 参与，`~` 不会被展开**。
+///
+/// 后果不报错：agent 会在设备进程自己的 cwd 里跑起来，然后在那里建文件。症状
+/// 是「对话能开，但 agent 说找不到我的项目」。所以展开只能在设备侧做，就在
+/// 起子进程之前。
+///
+/// 只展开**开头**的 `~`，且只认 `~/` 与裸 `~`：`~user/...` 需要查密码库，
+/// 而用户的工作区路径不可能是那个形态，认它只会让「展开失败」变成一条没人
+/// 看得懂的错。展开不成就原样传下去，让 `current_dir` 报出那句真实错误。
+fn expand_home(cwd: &str) -> String {
+    let rest = match cwd.strip_prefix('~') {
+        Some(rest) => rest,
+        None => return cwd.to_string(),
+    };
+    // `~foo` 不是「家目录」，是一个以 ~ 开头的相对名字。不猜。
+    if !(rest.is_empty() || rest.starts_with('/')) {
+        return cwd.to_string();
+    }
+    match std::env::var_os("HOME") {
+        Some(home) => format!("{}{rest}", home.to_string_lossy()),
+        // 拿不到家目录：原样传下去，让 `current_dir` 自己报错。编一个路径只会
+        // 让 agent 在一个不存在的目录里失败，而错误指向的是我们编的那个。
+        None => cwd.to_string(),
+    }
+}
+
 /// `agent_config.command` 为空串时用扫描到的可执行文件；都拿不到就是 `None`。
 ///
 /// 抽成函数是为了让「空串 = 用扫描到的那一个」这条契约**只有一个实现**：
@@ -335,6 +371,37 @@ fn flush(channel_id: &str, batch: &mut Vec<Value>, bytes: &mut usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **`cwd` 的 `~` 只在设备侧展开，且只展开开头那一个。**
+    ///
+    /// 这条挡的是「对话能开、agent 在错误目录里跑」——症状是 agent 说找不到
+    /// 用户的项目，而没有任何报错。反向验证：把 `expand_home` 改成恒等函数，
+    /// 前两条会红。
+    ///
+    /// 依赖 `HOME` 的用例改进程环境是全局的（与 `detect.rs` 顶部那条注释同样的
+    /// 理由），所以这里**不设 `HOME`**，而是按「当前 `HOME` 是什么」算期望值；
+    /// 没有 `HOME` 时走「原样传」的断言。两种机器上都成立。
+    #[test]
+    fn only_a_leading_tilde_is_expanded_on_the_device() {
+        match std::env::var_os("HOME") {
+            Some(home) => {
+                let home = home.to_string_lossy().into_owned();
+                assert_eq!(expand_home("~/src/app"), format!("{home}/src/app"));
+                assert_eq!(expand_home("~"), home);
+            }
+            None => {
+                assert_eq!(expand_home("~/src/app"), "~/src/app");
+                assert_eq!(expand_home("~"), "~");
+            }
+        }
+        // 绝对路径原样：这是最常见的形态，改写它等于自己造 bug。
+        assert_eq!(expand_home("/srv/app"), "/srv/app");
+        // `~user/x` 需要查密码库，不猜。
+        assert_eq!(expand_home("~root/src"), "~root/src");
+        // 相对路径里的 `~` 不是家目录。
+        assert_eq!(expand_home("a/~/b"), "a/~/b");
+        assert_eq!(expand_home(""), "");
+    }
 
     /// **空串 = 用扫描到的那一个**；两者都空 = 起不来。
     ///

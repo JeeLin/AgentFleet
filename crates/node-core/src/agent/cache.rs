@@ -174,6 +174,23 @@ fn report_of(spec: &AgentSpec, probe: &Probe) -> AgentReport {
             error: None,
             path: None,
         },
+        // **装了、能跑、但不能对话**。它必须出现在上报里（`available: false`
+        // + 一句能照做的原因），而不是像早先那样整个消失：用户装了 `claude`，
+        // 页面上一个字都不提，他只会以为系统没扫到。
+        //
+        // 原因里写**具体是什么不支持**，不写「不可用」——后者对用户是废话，
+        // 既不能验证也不能照做。
+        Probe::NotCapable { version, path } => AgentReport {
+            id: spec.id.to_string(),
+            name: spec.name.to_string(),
+            version: Some(version.clone()),
+            available: false,
+            error: Some(format!(
+                "{} has no ACP entry point, so it cannot be used for dialogue",
+                spec.bin
+            )),
+            path: Some(path.to_string_lossy().into_owned()),
+        },
         Probe::Ready { version, path } => AgentReport {
             id: spec.id.to_string(),
             name: spec.name.to_string(),

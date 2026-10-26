@@ -62,29 +62,150 @@ pub struct AgentSpec {
     /// 它**不由 Hub 配置下发**（`agent_config.args` 是用户追加的参数）：
     /// 「怎么进 ACP 模式」是这个 agent 自己的 CLI 契约，与「怎么问版本」同一
     /// 性质。让用户去配它，等于要求用户读我们没写的文档。
+    ///
+    /// # 空列表 = 这个 agent **不能对话**
+    ///
+    /// 不是「还没适配」，而是一条**事实**：它压根没有 ACP 入口，我们也没验证
+    /// 过跟它对话。实测 `claude` v2.1.310 没有 `acp` 子命令
+    /// （`claude acp` → `unknown command "acp"`），所以它的这一项是空的。
+    ///
+    /// 这类 agent **仍然出现在上报里**（[`Probe::NotCapable`]）：用户装了它，
+    /// 页面上却完全不提，用户无从知道「为什么我的 agent 不在列表里」——那比
+    /// 一条写着「这个 agent 不支持对话」的灰字糟糕得多。
     pub acp_args: &'static [&'static str],
 }
 
-/// 内置的 agent 清单。
+impl AgentSpec {
+    /// 能不能拿它开对话。判据就是清单里有没有 ACP 入口参数。
+    pub fn can_converse(&self) -> bool {
+        !self.acp_args.is_empty()
+    }
+}
+
+/// 内置的 agent 清单（「扫描 PATH 自动发现」认的名字表）。
 ///
-/// 只列**本里程碑真的验证过**的：opencode v2.1.4（ACP 地基实测过）。
-/// 不预置 claude / codex 等未验证的条目——「上报了但跑不起来」比「没上报」危险。
-pub const KNOWN_AGENTS: &[AgentSpec] = &[AgentSpec {
-    id: "opencode",
-    name: "opencode",
-    bin: "opencode",
-    version_args: &["--version"],
-    acp_args: &["acp"],
-}];
+/// # 两种条目，一条判据
+///
+/// `acp_args` 非空 = **真的验证过能对话**（`opencode` 是本里程碑唯一跑通整条
+/// 链的：开通道 → 起子进程 → `session/new` → `session/prompt` → 事件流 →
+/// `turn_end`，真机 6.45 s）。
+///
+/// `acp_args` 为空 = 只被发现、**不能对话**。这类条目存在的理由是「让用户看见
+/// 事实」：用户装了 `claude`，页面上既不该假装它能用（点下去永远转圈），也不该
+/// 什么都不说（用户以为系统没扫到）。于是它出现在列表里，带一句能照做的原因。
+///
+/// # 加新条目之前先做三件事
+///
+/// 1. 查出它的 **ACP 入口参数**（`opencode acp` 之于 opencode）。查不出来就
+///    别填 `acp_args`——留空是对的，编一个会让「点开对话」变成一次静默挂起。
+/// 2. 用真机跑一遍，确认 `initialize` / `session/new` / `session/prompt` 的
+///    形态与本仓 `acp.rs` 的假设一致。
+/// 3. 配一条 `#[ignore]` 真机测试（模板见 `conversation.rs` 的
+///    `a_real_opencode_turn_reaches_the_channel_as_a_batch`）。
+///
+/// 没做第 2、3 步就填 `acp_args` 的后果**不可见**：单测全绿、页面也正常，只是
+/// 用户点开对话后什么都不发生。
+///
+/// # 为什么名单写死而不是「扫 PATH 里每个可执行文件」
+///
+/// 全扫的代价是给每个可执行文件起一次 `--version`（本机 PATH 里上百个），而且
+/// 会误报——`cargo --version` 也答应得很好。名单里的名字是**人装的 agent 名**，
+/// 与「机器上有哪些命令行工具」不是同一个集合。
+pub const KNOWN_AGENTS: &[AgentSpec] = &[
+    AgentSpec {
+        id: "opencode",
+        name: "opencode",
+        bin: "opencode",
+        version_args: &["--version"],
+        // 本里程碑真机验证过。不带的后果见 `acp_args` 的文档。
+        acp_args: &["acp"],
+    },
+    // ---- 以下只被发现，不能对话（`acp_args` 为空）----
+    //
+    // 实测 `claude` v2.1.310：`claude acp` → `unknown command "acp"`。它没有
+    // ACP 入口，本仓也不是通过 ACP 跟它说话的，所以**不能**对话。列出来是为了
+    // 让用户看到「我装的 claude 被发现了，但它不支持对话」。
+    AgentSpec {
+        id: "claude",
+        name: "claude",
+        bin: "claude",
+        version_args: &["--version"],
+        acp_args: &[],
+    },
+    // 以下几条**没有在本机验证过 ACP 入口**，因此一律留空：宁可显示成「不支持
+    // 对话」，也不要让用户点开一个永远不回话的会话。它们的 `version_args` 是
+    // 各自的 CLI 惯例（`--version`），探测失败会显示成「已装但跑不起来」。
+    AgentSpec {
+        id: "gemini",
+        name: "gemini",
+        bin: "gemini",
+        version_args: &["--version"],
+        acp_args: &[],
+    },
+    AgentSpec {
+        id: "codex",
+        name: "codex",
+        bin: "codex",
+        version_args: &["--version"],
+        acp_args: &[],
+    },
+    AgentSpec {
+        id: "cursor-agent",
+        name: "cursor-agent",
+        bin: "cursor-agent",
+        version_args: &["--version"],
+        acp_args: &[],
+    },
+    AgentSpec {
+        id: "aider",
+        name: "aider",
+        bin: "aider",
+        version_args: &["--version"],
+        acp_args: &[],
+    },
+    AgentSpec {
+        id: "crush",
+        name: "crush",
+        bin: "crush",
+        version_args: &["--version"],
+        acp_args: &[],
+    },
+    AgentSpec {
+        id: "goose",
+        name: "goose",
+        bin: "goose",
+        version_args: &["--version"],
+        acp_args: &[],
+    },
+    AgentSpec {
+        id: "qwen",
+        name: "qwen",
+        bin: "qwen",
+        version_args: &["--version"],
+        acp_args: &[],
+    },
+];
 
 /// 探测一个 agent 的结果。
 ///
-/// **三态不是两态**（设计核对 H-7）：`available` 是布尔时无法区分「没装」与
+/// **四态不是两态**（设计核对 H-7）：`available` 是布尔时无法区分「没装」与
 /// 「装了但探测失败」，而子任务 5 的 409 门禁要的是「已装**且**可用」。
+///
+/// 第四态 [`Probe::NotCapable`] 是「扫描 PATH 自动发现」加进来的：一个装了、
+/// 跑得起来、但**没有 ACP 入口**的 agent。它与 `Failed` 的区别是「它没坏，
+/// 只是我们不通过 ACP 跟它说话」，两者的 `error` 文案完全不同——前者用户
+/// 无从下手，后者用户去看 `--version` 就知道怎么了。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Probe {
     /// 可执行文件不存在。
     NotInstalled,
+    /// 找到了可执行文件、`--version` 也答出来了，但**它没有 ACP 入口**。
+    ///
+    /// `version` 与 `path` 照常给出：用户要知道「被发现的到底是哪一个」。
+    NotCapable {
+        version: String,
+        path: PathBuf,
+    },
     /// 找到了可执行文件，`--version` 也答出来了。
     Ready {
         version: String,
@@ -101,6 +222,9 @@ pub enum Probe {
 
 impl Probe {
     /// 能不能现在拿它对话。门禁判据就是这一条。
+    ///
+    /// **只有 `Ready` 为真**。`NotCapable` 是「装了但不能对话」——它一旦为真，
+    /// 用户就能建出一个永远没人回话的会话。
     pub fn is_available(&self) -> bool {
         matches!(self, Self::Ready { .. })
     }
@@ -109,14 +233,16 @@ impl Probe {
     pub fn path(&self) -> Option<&Path> {
         match self {
             Self::NotInstalled => None,
-            Self::Ready { path, .. } | Self::Failed { path, .. } => Some(path),
+            Self::NotCapable { path, .. }
+            | Self::Ready { path, .. }
+            | Self::Failed { path, .. } => Some(path),
         }
     }
 
-    /// 版本串；只有 `Ready` 有。
+    /// 版本串；`Ready` 与 `NotCapable` 都有（这两个都成功跑过 `--version`）。
     pub fn version(&self) -> Option<&str> {
         match self {
-            Self::Ready { version, .. } => Some(version),
+            Self::NotCapable { version, .. } | Self::Ready { version, .. } => Some(version),
             _ => None,
         }
     }
@@ -135,7 +261,16 @@ pub fn detect_one(
         return Probe::NotInstalled;
     };
     match run_version(&path, spec.version_args, timeout) {
-        Ok(version) => Probe::Ready { version, path },
+        // **能跑起来还不够，还得有 ACP 入口**。这一步是「扫描 PATH 自动发现」
+        // 的核心判据：`claude --version` 答得很好，但 `claude acp` 是
+        // `unknown command`，拿它开对话只会永远等不到 `initialize`。
+        Ok(version) => {
+            if spec.can_converse() {
+                Probe::Ready { version, path }
+            } else {
+                Probe::NotCapable { version, path }
+            }
+        }
         Err(reason) => Probe::Failed { reason, path },
     }
 }
@@ -443,7 +578,85 @@ mod tests {
             Probe::Failed { ref reason, .. } => {
                 panic!("本机装了 opencode 却探测失败，这是真问题：{reason}");
             }
+            Probe::NotCapable { ref version, .. } => {
+                // `KNOWN_AGENTS[0]` 是 opencode，它**有** ACP 入口（`acp_args`
+                // 非空），所以不该走到这里。真走到说明有人把 `acp_args` 清空了
+                // ——那会让唯一验证过能对话的 agent 变成「不支持对话」。
+                panic!("opencode 的 acp_args 被清空了？版本 {version}");
+            }
         }
+    }
+
+    /// **装了、能跑、但没有 ACP 入口 → `NotCapable`，不是 `Ready`。**
+    ///
+    /// 这是「扫描 PATH 自动发现」的核心判据。反向验证：把 `detect_one` 里的
+    /// `if spec.can_converse()` 改成恒真，这条会红——而红的样子正是用户会
+    /// 遇到的：页面上 `claude` 显示成可用，点开对话永远转圈。
+    #[test]
+    fn an_installed_agent_without_an_acp_entry_is_not_capable_not_ready() {
+        let d = tempdir();
+        let bin = write_script(&d, "claude", "#!/bin/sh\necho '2.1.310 (Claude Code)'\n");
+        let lookup = lookup_of(vec![("claude", bin.clone())]);
+        let spec = KNOWN_AGENTS
+            .iter()
+            .find(|s| s.id == "claude")
+            .expect("清单里必须有 claude（要求：扫描要发现它）");
+
+        let got = detect_one(spec, &lookup, DEFAULT_PROBE_TIMEOUT);
+        assert!(
+            matches!(got, Probe::NotCapable { .. }),
+            "claude 没有 acp 子命令，必须是 NotCapable，实际 {got:?}"
+        );
+        assert!(!got.is_available(), "不能对话就不能过门禁");
+        assert_eq!(
+            got.version(),
+            Some("2.1.310 (Claude Code)"),
+            "NotCapable 仍要报版本：用户要确认被发现的到底是哪个"
+        );
+        assert_eq!(got.path(), Some(bin.as_path()), "路径照常报出来");
+    }
+
+    /// `NotCapable` 在上报里带**一句能照做的原因**，而不是「不可用」。
+    ///
+    /// 页面上「不可用」是废话：用户既不能验证也不能照着做。原因里必须点名
+    /// 是哪个可执行文件、缺的是什么。
+    #[test]
+    fn a_not_capable_agent_reports_why_it_cannot_converse() {
+        use crate::agent::cache::{probe_once, Snapshot};
+        let d = tempdir();
+        let bin = write_script(&d, "claude", "#!/bin/sh\necho 1.0.0\n");
+        let lookup = lookup_of(vec![("claude", bin)]);
+        // `probe_once` 探整份清单，这里只关心 claude 那一条。
+        let Snapshot { agents, .. } = probe_once(&lookup, DEFAULT_PROBE_TIMEOUT);
+        let claude = agents
+            .iter()
+            .find(|a| a.id == "claude")
+            .expect("claude 必须在清单里");
+        assert!(!claude.available);
+        let err = claude.error.as_deref().expect("必须给出原因");
+        assert!(
+            err.contains("claude") && err.contains("ACP"),
+            "原因要点名是哪个程序、缺的是什么，实际：{err:?}"
+        );
+    }
+
+    /// **`can_converse` 的判据是 `acp_args` 非空**，且清单里恰好只有 opencode 为真。
+    ///
+    /// 这条会红的情形有两种，都是真问题：
+    /// - 有人给没验证过的 agent 填了 `acp_args`（用户点开对话会静默挂起）；
+    /// - 有人把 opencode 的 `acp_args` 清空了（唯一能用的 agent 变成不能用）。
+    #[test]
+    fn only_the_verified_agent_claims_it_can_converse() {
+        let capable: Vec<&str> = KNOWN_AGENTS
+            .iter()
+            .filter(|s| s.can_converse())
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(
+            capable,
+            vec!["opencode"],
+            "只有真机验证过的才能声称能对话；加新的先读 `KNOWN_AGENTS` 的文档"
+        );
     }
 
     /// 测试用临时目录。不引 `tempfile` 依赖（node-core 目前没有它），
