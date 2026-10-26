@@ -579,9 +579,43 @@ pub async fn open_channel(
     let body = crate::routes::read_body(req).await?;
     let body: OpenChannel =
         serde_json::from_slice(&body).map_err(|_| ApiError::bad_request(err::BAD_BODY))?;
+    let opened = open_device_channel(
+        &state,
+        &auth,
+        &body.session_id,
+        &body.connector,
+        body.params,
+        true,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(opened)).into_response())
+}
 
+/// 开一条通道并把 `open_channel` 下发到设备。**两条路由共用这一份实现**：
+/// 页面直连 connector（[`open_channel`]）与对话通道
+/// （`routes::conversation::open`）。
+///
+/// `check_reported` 区分两者的能力门禁：
+/// - connector 通道传 `true`：设备没上报这个 connector 就拒。connector 是
+///   **可选能力**，没上报过不代表不支持，但既然上报里没有它，下发一帧注定
+///   被拒的 `open_channel` 只会让页面在 `channel.ready` 之后才知道失败。
+/// - 对话通道传 `false`：`acp` **不是 connector**（`AGENTS.md` 约束 3），
+///   它永远不会出现在设备的 connector 上报里。按 connector 去过滤等于
+///   永远开会话失败。它该有的门禁是「agent 可用」，那一条由调用方查
+///   `agent_runtime` 给出。
+///
+/// 校验顺序与错误码见 [`open_channel`] 的文档注释；这里多一层
+/// `check_reported`，其余不变。
+pub(crate) async fn open_device_channel(
+    state: &AppState,
+    auth: &Authenticated,
+    session_id: &str,
+    connector: &str,
+    params: serde_json::Value,
+    check_reported: bool,
+) -> Result<OpenedChannel, ApiError> {
     let detail = hub_storage::SessionRepo::new(state.pool().clone())
-        .detail(&body.session_id)
+        .detail(session_id)
         .map_err(|e| ApiError::internal_with("cannot read the session", e))?;
     let Some(detail) = detail else {
         return Err(ApiError::not_found());
@@ -601,21 +635,20 @@ pub async fn open_channel(
     // 能力硬过滤（子任务 11）：设备上报的 connectors 里没有它，就不下发。
     // 下发一帧注定被 node 拒绝的 `open_channel` 会让页面拿到 `channel.ready`
     // 之后才知道失败——那时通道号已经发出去、面板已经显示「已连接」。
-    if let Some(reported) = unreported_connector(&state, &node_id, &body.connector) {
-        return Err(ApiError::conflict_with(
-            err::NOT_REPORTED,
-            || json!({ "connector": body.connector, "reported": reported }),
-        ));
+    if check_reported {
+        if let Some(reported) = unreported_connector(state, &node_id, connector) {
+            return Err(ApiError::conflict_with(
+                err::NOT_REPORTED,
+                || json!({ "connector": connector, "reported": reported }),
+            ));
+        }
     }
 
     let channel_id = identity::random_id();
-    let params = params_with_workspace_root(body.params, &detail.workspace.path);
-    let open = protocol::channel::OpenChannel::with_params(
-        channel_id.clone(),
-        body.connector.clone(),
-        params,
-    );
-    let fallback = protocol::channel::fallback::open(&channel_id, &body.connector);
+    let params = params_with_workspace_root(params, &detail.workspace.path);
+    let open =
+        protocol::channel::OpenChannel::with_params(channel_id.clone(), connector, params);
+    let fallback = protocol::channel::fallback::open(&channel_id, connector);
     let frame = Frame::push(
         types::OPEN_CHANNEL,
         0,
@@ -633,23 +666,17 @@ pub async fn open_channel(
     // 置 `Ready` 是 M0 的口径（Hub 侧没有 connector 协商）：不置的话账本是
     // 死的——`on_data_received` 只对 Ready 的通道记账（协议层 `ready_mut`），
     // 于是设备发来的数据全部回 `NotReady`，两边互等。
-    open_ledger(
-        &state,
-        &node_id,
-        &channel_id,
-        &body.connector,
-        open.credit_start,
-    )?;
+    open_ledger(state, &node_id, &channel_id, connector, open.credit_start)?;
     state.bindings().bind(
         &channel_id,
         ChannelBinding {
             node_id: node_id.clone(),
-            session_id: body.session_id.clone(),
+            session_id: session_id.to_string(),
             subject: auth.subject().to_string(),
             acked: false,
         },
     );
-    if let Err(e) = send_to_device(&state, &node_id, frame) {
+    if let Err(e) = send_to_device(state, &node_id, frame) {
         // 下发失败：绑定跟着撤，别在 Hub 里留下一个只有页面知道的通道号。
         state.bindings().unbind(&channel_id);
         return Err(e);
@@ -667,20 +694,16 @@ pub async fn open_channel(
     tracing::info!(
         node_id = %node_id,
         channel_id = %channel_id,
-        session_id = %body.session_id,
-        connector = %body.connector,
+        session_id = %session_id,
+        connector = %connector,
         subject = %auth.subject(),
         "browser opened a channel"
     );
-    Ok((
-        StatusCode::CREATED,
-        Json(OpenedChannel {
-            channel_id,
-            node_id,
-            session_id: body.session_id,
-        }),
-    )
-        .into_response())
+    Ok(OpenedChannel {
+        channel_id,
+        node_id,
+        session_id: session_id.to_string(),
+    })
 }
 
 // ---------------------------------------------------------------------------

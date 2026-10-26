@@ -630,6 +630,19 @@ pub fn build_app(state: AppState) -> Router {
                 .post(routes::agents::upsert_config)
                 .delete(routes::agents::delete_config),
         )
+        // 对话数据面（子任务 7/11）。**必须落在 `.layer(...)` 之前**：
+        // `open` 是状态变更端点（POST），落到后面会绕过 session 认证与 CSRF。
+        //
+        // 轨迹查询是 GET，但仍放在这里：它读的是别的设备写进来的对话内容，
+        // 与「谁能看这个会话」同一条判据，没有理由对它放宽。
+        .route(
+            "/api/sessions/{id}/conversation",
+            axum::routing::post(routes::conversation::open),
+        )
+        .route(
+            "/api/sessions/{id}/trajectory",
+            axum::routing::get(routes::conversation::trajectory),
+        )
         .route("/api/stream", get(routes::stream::stream))
         .route("/api/channels", post(routes::stream::open_channel))
         .route("/api/channels/{id}/send", post(routes::stream::send_bytes))

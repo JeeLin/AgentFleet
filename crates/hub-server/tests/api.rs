@@ -945,3 +945,337 @@ async fn the_gate_reads_the_table_not_the_in_memory_report() {
         r.body
     );
 }
+
+// ---- 要求 3/4：对话端点（子任务 7/11）----
+//
+// `POST /api/sessions/{id}/conversation` 不是 `POST /api/channels` 的别名：
+// 它多两件事——agent 可用门禁、以及把 `agent_config` 读出来随 `params` 下发
+// （用户裁定「Hub 存，设备读」，设备上没有那张表）。
+
+impl Harness {
+    /// `POST /api/sessions/{id}/conversation`，带 CSRF 双重提交。
+    async fn open_conversation(&self, session_id: &str) -> Reply {
+        self.send(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/conversation"))
+                .header(CSRF_HEADER, &self.csrf)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+}
+
+/// 建一个「已选 agent、设备可用」的会话，返回 `(harness, node_id, session_id, est)`。
+///
+/// `est` 是那条真连接：对话端点会往它上面下发 `open_channel`，而 `_keepalive`
+/// 的名字在别处——这里必须**返回**它，否则连接一 drop Hub 就判设备离站。
+async fn conversation_ready(
+    agents: Value,
+    with_agent: Option<&str>,
+) -> (
+    Harness,
+    String,
+    String,
+    node_core::conn::Established,
+) {
+    let hub = common::Hub::boot().await;
+    let (node_id, est) = enrolled_device_reporting(&hub, agents).await;
+    let h = Harness::from_hub(hub).await;
+    let mut body = json!({"node_id": node_id, "path": "~/src/app"});
+    if let Some(a) = with_agent {
+        body["agent_id"] = json!(a);
+    }
+    let created = h.create_session(body).await;
+    assert_eq!(created.status, StatusCode::CREATED, "body: {}", created.body);
+    let session_id = created.json()["id"]
+        .as_str()
+        .expect("建会话要回 id")
+        .to_string();
+    (h, node_id, session_id, est)
+}
+
+/// **会话没选 agent → 409 `agent_unavailable`，`detail.agent_id` 是 null。**
+///
+/// 判据是 null 而不是某个 agent 名：这不是「那个 agent 不可用」，是「这个会话
+/// 没有可用的对话对象」。挑一个代进去等于替用户做了会写进历史的决定。
+#[tokio::test]
+async fn opening_a_conversation_on_a_session_without_an_agent_is_a_conflict() {
+    let (h, _node, session_id, _est) = conversation_ready(json!([]), None).await;
+
+    let r = h.open_conversation(&session_id).await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "body: {}", r.body);
+    let v = r.json();
+    assert_eq!(v["error"], json!("agent_unavailable"), "body: {}", r.body);
+    assert_eq!(
+        v["detail"]["agent_id"],
+        Value::Null,
+        "没选 agent 时 detail.agent_id 必须是 null，不能编一个名字"
+    );
+}
+
+/// **agent 建会话之后变成不可用 → 开对话 409**，且 `detail.agent_id` 点名是哪个。
+///
+/// **必须分两步上报**，不能一开始就用 `available: false`：那样连会话都建不出来
+/// （`create_session` 有同一套门禁），测的是建会话而不是开对话。而真实世界里
+/// 「建完会话、agent 随后不可用」恰恰会发生——用户卸载了 agent，或下一次探测
+/// 开始失败。所以开对话端点**必须自己再查一次库**，不能相信「会话建成功时可用过」。
+///
+/// 这条与上一条分开写：两者都回 `agent_unavailable`，但页面要显示的话
+/// 完全不同（「这个会话还没选 agent」vs「设备上那个 agent 现在跑不了」）。
+#[tokio::test]
+async fn opening_a_conversation_with_an_unavailable_agent_is_a_conflict() {
+    // 第一步：可用，建会话（建不出就说明门禁把这条测试挡在门外了）
+    let (h, node_id, session_id, mut est) = conversation_ready(
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        Some("opencode"),
+    )
+    .await;
+
+    // 第二步：同一台设备再上报一次，这次 opencode 跑不起来了
+    common::send_heartbeat(
+        &mut est,
+        json!({
+            "node_version": "0.1.0",
+            "capabilities": {"connectors": ["terminal"], "agents": [
+                {"id": "opencode", "name": "opencode", "version": "2.1.4",
+                 "available": false, "error": "exec format error"},
+            ]},
+            "resources": {"cpu": 34, "mem": 61},
+            "workspace_roots": [],
+        }),
+    )
+    .await;
+    // 等**库**被改写：门禁读库。不等就会在旧行上断言，于是时红时绿。
+    let pool = h.hub.state.pool().clone();
+    common::wait_until(Duration::from_secs(2), || {
+        hub_storage::AgentRuntimeRepo::new(pool.clone())
+            .usable_for_session(&node_id, "opencode")
+            .expect("读 agent_runtime")
+            .is_none()
+    })
+    .await;
+
+    let r = h.open_conversation(&session_id).await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "body: {}", r.body);
+    let v = r.json();
+    assert_eq!(v["error"], json!("agent_unavailable"), "body: {}", r.body);
+    assert_eq!(
+        v["detail"]["agent_id"],
+        json!("opencode"),
+        "要点名是哪个 agent：{}",
+        r.body
+    );
+}
+
+/// **正常路径**：201，且下发到设备的 `open_channel` 带着完整的配置。
+///
+/// 断言的重点是 `params`：`agent_id` / `cwd` / `command` / `args` / `env` 五项
+/// 必须同时到位。`cwd` 尤其不能少——设备侧拿不到它就会让 agent 在设备自己的
+/// 数据目录里建文件。
+#[tokio::test]
+async fn opening_a_conversation_sends_the_agent_config_down_to_the_device() {
+    let (h, node_id, session_id, mut est) = conversation_ready(
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        Some("opencode"),
+    )
+    .await;
+
+    // 先写一份配置：命令 + 参数 + 环境变量
+    let w = h
+        .post_config(json!({
+            "node_id": node_id,
+            "agent_id": "opencode",
+            "command": "/opt/oc/bin/opencode",
+            "args": ["--model", "x"],
+            "env": {"FOO": "bar"}
+        }))
+        .await;
+    assert_eq!(w.status, StatusCode::OK, "body: {}", w.body);
+
+    let r = h.open_conversation(&session_id).await;
+    assert_eq!(r.status, StatusCode::CREATED, "body: {}", r.body);
+    let v = r.json();
+    assert_eq!(v["session_id"], json!(session_id));
+    assert_eq!(v["node_id"], json!(node_id));
+    let channel_id = v["channel_id"].as_str().expect("要回 channel_id");
+
+    // 设备那条连接上应当收到一帧 `open_channel`
+    let open = open_channel_on(&mut est).await;
+    let open: protocol::channel::OpenChannel = open.payload().expect("open_channel 载荷");
+    assert_eq!(open.channel_id, channel_id, "页面拿到的 id 就是下发的 id");
+    assert_eq!(
+        open.connector, "acp",
+        "对话通道的 connector 是标记 acp，不是某个真 connector"
+    );
+    assert_eq!(open.params["agent_id"], json!("opencode"));
+    // **设备收到的是原文 `~/src/app`，不是绝对路径**：Hub 不知道设备家目录
+    // （`Workspace::path` 的注释明说「不做 `~` 展开」），展开只能在设备侧、
+    // 起子进程之前做（`node-core` 的 `expand_home`）。
+    assert_eq!(
+        open.params["cwd"], json!("~/src/app"),
+        "cwd 原样下发；`~` 的展开是设备侧的事：{}",
+        open.params
+    );
+    assert_eq!(open.params["command"], json!("/opt/oc/bin/opencode"));
+    assert_eq!(open.params["args"], json!(["--model", "x"]));
+    assert_eq!(open.params["env"], json!({"FOO": "bar"}));
+}
+
+/// **没有配置也要能开**：`command` 是空串（= 用设备扫描到的那个），不是缺字段。
+///
+/// 这条钉的是「配置是可选的」：把空串发成缺失，设备侧就得区分「没给」与
+/// 「给了空串」——而它们意思完全一样。
+#[tokio::test]
+async fn a_conversation_opens_even_when_no_config_was_ever_written() {
+    let (h, _node, session_id, mut est) = conversation_ready(
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        Some("opencode"),
+    )
+    .await;
+
+    let r = h.open_conversation(&session_id).await;
+    assert_eq!(r.status, StatusCode::CREATED, "body: {}", r.body);
+
+    let open = open_channel_on(&mut est).await;
+    let open: protocol::channel::OpenChannel = open.payload().expect("载荷");
+    assert_eq!(
+        open.params["command"],
+        json!(""),
+        "没配命令是空串，语义是「用扫描到的可执行文件」"
+    );
+    assert_eq!(open.params["args"], json!([]));
+    assert_eq!(open.params["env"], json!({}));
+}
+
+/// 会话不存在 → 404（与 `POST /api/channels` 同一口径）。
+#[tokio::test]
+async fn opening_a_conversation_on_a_missing_session_is_404() {
+    let h = Harness::new().await;
+    let r = h.open_conversation("s_does_not_exist").await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "body: {}", r.body);
+}
+
+/// 轨迹空 → `events: []`、`gaps: []`、`incomplete: false`。
+///
+/// **空轨迹不算未完成**：一个还没说过话的会话没有「一轮」，把它标成未完成
+/// 会让每个新会话一打开就带一条警告。
+#[tokio::test]
+async fn an_empty_trajectory_is_empty_and_not_incomplete() {
+    let (h, _node, session_id, _est) = conversation_ready(json!([]), None).await;
+
+    let r = h
+        .get(&format!("/api/sessions/{session_id}/trajectory"))
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "body: {}", r.body);
+    let v = r.json();
+    assert_eq!(v["events"], json!([]));
+    assert_eq!(v["gaps"], json!([]));
+    assert_eq!(
+        v["incomplete"],
+        json!(false),
+        "没有一轮就没有「未完成」"
+    );
+}
+
+/// 有 `seq` 断口 → `gaps` 报出来，且带 `missing` 条数。
+///
+/// 这是 `session-and-trajectory.md` §3.2.1 三层里的第二层「不完整可见」：
+/// 丢掉的那段**不补齐**（已裁决），但页面必须能画出「此处缺失 N 条」。
+#[tokio::test]
+async fn a_trajectory_with_a_hole_reports_the_gap() {
+    let (h, node_id, session_id, _est) = conversation_ready(json!([]), None).await;
+
+    let repo = hub_storage::TrajectoryRepo::new(h.hub.state.pool().clone());
+    // 故意跳过 seq = 3、4：这段就是「丢掉的那截」
+    for seq in [1_i64, 2, 5] {
+        repo.append(
+            &session_id,
+            &node_id,
+            &hub_storage::NewEvent::new(seq, "agent_message_chunk", r#"{"n":1}"#),
+            &hub_core::registry::now_stamp(),
+        )
+        .expect("写轨迹");
+    }
+
+    let r = h
+        .get(&format!("/api/sessions/{session_id}/trajectory"))
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "body: {}", r.body);
+    let v = r.json();
+    let gaps = v["gaps"].as_array().expect("gaps 是数组");
+    assert_eq!(gaps.len(), 1, "只有一处断口：{}", v);
+    // `Gap` 是**半开区间** `[from, to)`：seq 1、2 在库、5 在库，缺的是 3、4，
+    // 所以要报 `from=3, to=5`（`to` 是那个存在的 seq，充当排他上界）。
+    assert_eq!(gaps[0]["from"], json!(3), "从缺的第一条开始");
+    assert_eq!(gaps[0]["to"], json!(5), "到下一个存在的 seq 为止（不含）");
+    assert_eq!(
+        gaps[0]["missing"],
+        json!(2),
+        "缺的是 seq 3、4 两条，不是「一个区间」"
+    );
+    assert_eq!(v["events"].as_array().map(Vec::len), Some(3));
+}
+
+/// 末尾没有 `turn_end` → `incomplete: true`。**这是另一个方向的缺口**：
+/// `gaps` 看不见它（序号没断），只有「最后一轮没收口」这一条判据看得见。
+#[tokio::test]
+async fn a_trajectory_whose_last_turn_never_ended_is_incomplete() {
+    let (h, node_id, session_id, _est) = conversation_ready(json!([]), None).await;
+
+    let repo = hub_storage::TrajectoryRepo::new(h.hub.state.pool().clone());
+    for (seq, kind) in [(1_i64, "user_message"), (2, "agent_message_chunk")] {
+        repo.append(
+            &session_id,
+            &node_id,
+            &hub_storage::NewEvent::new(seq, kind, r#"{"k":1}"#),
+            &hub_core::registry::now_stamp(),
+        )
+        .expect("写轨迹");
+    }
+
+    let r = h
+        .get(&format!("/api/sessions/{session_id}/trajectory"))
+        .await;
+    let v = r.json();
+    assert_eq!(
+        v["incomplete"],
+        json!(true),
+        "最后一轮没 turn_end 就必须标未完成：{}",
+        v
+    );
+    assert_eq!(
+        v["gaps"],
+        json!([]),
+        "序号没断，所以没有 gaps —— 两个方向必须分开报"
+    );
+}
+
+/// 轨迹端点对不存在的会话回 404，不是空轨迹。
+///
+/// 空轨迹与「没有这个会话」必须能区分：前端按 404 显示「会话没了」，按空数组
+/// 显示「还没有消息」。混成一种会让删掉的会话一直显示成空白新会话。
+#[tokio::test]
+async fn the_trajectory_of_a_missing_session_is_404() {
+    let h = Harness::new().await;
+    let r = h.get("/api/sessions/s_does_not_exist/trajectory").await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "body: {}", r.body);
+}
+
+/// 等一帧 `open_channel`（跳过心跳等其他帧）。
+async fn open_channel_on(est: &mut node_core::conn::Established) -> protocol::frame::Frame {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let text = tokio::time::timeout_at(deadline, est.next_text())
+            .await
+            .expect("3s 内必须下发 open_channel")
+            .expect("连接不许断")
+            .expect("必须是文本帧");
+        let f: protocol::frame::Frame =
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("解不开的帧 {text}: {e}"));
+        if f.msg_type == protocol::message::types::OPEN_CHANNEL {
+            return f;
+        }
+    }
+}

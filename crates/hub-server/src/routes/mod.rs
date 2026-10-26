@@ -125,6 +125,7 @@ mod tests {
 pub mod agents;
 pub mod api;
 pub mod assets;
+pub mod conversation;
 pub mod setup;
 pub mod stream;
 pub mod ws;
