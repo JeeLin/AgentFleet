@@ -405,11 +405,25 @@ async fn read_loop(
         }
     };
 
-    // 退出码：`try_wait` 可能在进程还没被回收时回 `None`，那就报 `None`。
-    // **不在这里 `wait()`**：那会在这个任务里阻塞到进程真正退出，
-    // 而 stdout 已关时上层该立刻知道，不必等回收。
+    // 退出码：先**松开 stdin**（对自己 `take()` 而不是对整个 child 上锁），很多
+    // agent 看见 stdin 关就自己退了（实测 opencode 是这样）。这件事必须先做：
+    // 后面要 `wait()`，而一个还在等我们关 stdin 的子进程会让 `wait()` 挂到超时。
+    //
+    // 🔴 **这里原来是 `try_wait()`，会把退出码整条丢掉**（本轮实跑抓到的真缺陷）：
+    // stdout 关闭通常发生在进程被回收**之前**，`try_wait()` 那时回 `None`，于是
+    // `Exited { code: None }`——上层拿到的 `exited` 帧没有 code，「agent 自己
+    // 崩了」与「我们关了它」分不开，而这正是 `code` 字段存在的唯一理由（注释在
+    // `Event::Exited` 上）。测试隔离跑时它偶现，全量跑必现：负载让这窗口变宽了。
+    //
+    // 所以这里是 `wait()` 加一个宽限，而不是 `try_wait()`：退出码是**上层要显示
+    // 的东西**，宁可多等这一小会儿，也不要给一个「不知道」。
+    inner.stdin.lock().await.take();
     let code = match inner.child.lock().await.as_mut() {
-        Some(c) => c.try_wait().ok().flatten().and_then(|s| s.code()),
+        Some(c) => match tokio::time::timeout(std::time::Duration::from_secs(5), c.wait()).await {
+            Ok(Ok(status)) => status.code(),
+            // 超时或被回收失败：真的不知道，如实报 `None`，不要编。
+            Ok(Err(_)) | Err(_) => None,
+        },
         None => None,
     };
     drop(inner.pending.lock().await.drain());
