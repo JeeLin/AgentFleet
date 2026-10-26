@@ -268,22 +268,34 @@ impl AcpClient {
 
     /// `session/load` —— 重连后恢复一个既有会话。
     ///
-    /// **实测：这是「重建流」而不是「接着推」**。同进程实测 live 9 条事件 →
-    /// replay 4 条，且重放的事件**没有 `seq`、没有时间戳**。所以：
+    /// # 实测（2026-10-27，真 opencode v2.1.4，跨进程）
+    ///
+    /// 这是「重建流」而不是「接着推」：live 收到 2 条事件、load 重放 3 条
+    /// （`user_message_chunk` / `agent_message_chunk` / `available_commands_update`），
+    /// 且重放的事件**没有 `seq`、没有时间戳、中间态被折叠**。所以：
     /// - 重放**不写轨迹**（否则历史会被重复写入且顺序错乱）
     /// - 页面历史一律读轨迹表，不靠 replay 补
     ///
-    /// 返回值是重放出来多少条——只用于日志与测试，**不是**「这个会话有多少历史」。
-    pub async fn load_session(&self, session_id: &str, cwd: &str) -> Result<usize, AcpError> {
-        let r = self
-            .request(
-                "session/load",
-                json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [] }),
-            )
-            .await?;
-        Ok(r.get("replayed")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as usize)
+    /// # 返回值为什么是「响应拿到了没有」而不是「重放了几条」
+    ///
+    /// 真机的 `session/load` 响应**只有 `configOptions`**，没有条数——重放全在
+    /// 事件流里异步到达。此前这里读 `replayed` 字段并 `unwrap_or(0)`，于是
+    /// 真机上**永远返回 0**，而单测里的假 agent 回了 `{"replayed":1}` 让它显得
+    /// 正常。那是一份编出来的事实：调用方会据此以为「没有历史可恢复」。
+    ///
+    /// 所以这里只报「load 被 agent 接受了吗」，条数让调用方自己数事件流——
+    /// 那是唯一的真相源。重放事件**不要写 `trajectory_event`**。
+    ///
+    /// 跨进程实测结论（这是 V-2 一直欠的那条）：**load 之后 agent 记得上一轮的
+    /// 内容**（进程 1 让它记住 7391、进程 2 load 后问它，回 `7391`）。所以
+    /// 「新进程 + 同一 sessionId 直接 prompt」不成立，`session/load` 是必需的。
+    pub async fn load_session(&self, session_id: &str, cwd: &str) -> Result<(), AcpError> {
+        self.request(
+            "session/load",
+            json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [] }),
+        )
+        .await?;
+        Ok(())
     }
 
     /// `session/prompt` —— 发一条用户消息。
@@ -565,8 +577,10 @@ for raw in sys.stdin:
     elif method == "session/new":
         send({{"jsonrpc":"2.0","id":mid,"result":{{"sessionId":"ses_test_1"}}}})
     elif method == "session/load":
+        # 真机实测的响应形状：**只有 configOptions，没有条数**。以前这个假
+        # agent 回了 {{"replayed":1}}，于是读 `replayed` 的实现看起来是对的。
         notify("session/update", {{"sessionId":"ses_test_1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"replayed"}}}}}})
-        send({{"jsonrpc":"2.0","id":mid,"result":{{"replayed":1}}}})
+        send({{"jsonrpc":"2.0","id":mid,"result":{{"configOptions":[]}}}})
 "#
         );
         fake_agent(dir, "minimal", &body)
@@ -798,18 +812,62 @@ for raw in sys.stdin:
         }
     }
 
-    /// `session/load` 的重放走**事件流**，返回的条数只是日志/测试用。
+    /// `session/load` 的重放走**事件流**；响应里**没有**条数，也不该有。
+    ///
+    /// 反向验证：把实现改回「读 `r["replayed"]` 并 `unwrap_or(0)`」再让假 agent
+    /// 回 `{"replayed":1}`——这条会红（返回值对不上）。而如果只让假 agent 模拟
+    /// 真机（不带 `replayed`），旧实现会**静默返回 0**，正是不可能被断言抓到的
+    /// 那种「编出来的事实」。所以假 agent 与真机对齐才是这条测试的立足点。
     #[tokio::test]
     async fn load_session_replays_through_the_event_stream() {
         let d = tempfile::tempdir().expect("tmp");
         let c = client_for(&minimal_agent(d.path())).await;
-        let n = c.load_session("ses_test_1", "/tmp/proj").await.expect("load");
-        assert_eq!(n, 1);
+        c.load_session("ses_test_1", "/tmp/proj")
+            .await
+            .expect("响应里没有 replayed 不算失败——真机就没有这个字段");
         let ev = tokio::time::timeout(std::time::Duration::from_secs(5), c.recv())
             .await
             .expect("必须收到重放事件")
             .expect("事件流还在");
-        assert!(matches!(ev, Event::SessionUpdate(_)));
+        assert!(
+            matches!(ev, Event::SessionUpdate(_)),
+            "重放必须走事件流，它是唯一的真相源"
+        );
+        c.shutdown().await;
+    }
+
+    /// 一个**只回 `configOptions`** 的 agent（真机就是这个形状）。
+    fn agent_without_replayed_count(dir: &Path) -> PathBuf {
+        let body = format!(
+            r#"{PRELUDE}
+    if method == "initialize":
+        send({{"jsonrpc":"2.0","id":mid,"result":{{"protocolVersion":1,"agentCapabilities":{{"loadSession":True}}}}}})
+    elif method == "session/new":
+        send({{"jsonrpc":"2.0","id":mid,"result":{{"sessionId":"ses_test_1"}}}})
+    elif method == "session/load":
+        send({{"jsonrpc":"2.0","id":mid,"result":{{"configOptions":[]}}}})
+"#
+        );
+        fake_agent(dir, "no-count", &body)
+    }
+
+    /// **真机的 `session/load` 响应里没有条数**（只有 `configOptions`）。
+    ///
+    /// 这条锁住的是「不许编一个数回来」：旧实现读 `r["replayed"]` 并
+    /// `unwrap_or(0)`，于是真机上**永远返回 0**——调用方会据此以为「这个会话
+    /// 没有历史可恢复」。单测里的假 agent 当时回了 `{"replayed":1}`，所以那条
+    /// 测试一直是绿的。
+    ///
+    /// 反向验证的判据：把返回值改回 `Result<usize>` 并读 `replayed`，让这条
+    /// 断言 `n > 0` 就会红（真机形状下恒 0）。这正是「编出来的事实」的形状：
+    /// **不改假 agent 就永远抓不到**。
+    #[tokio::test]
+    async fn load_session_succeeds_even_when_the_agent_reports_no_count() {
+        let d = tempfile::tempdir().expect("tmp");
+        let c = client_for(&agent_without_replayed_count(d.path())).await;
+        c.load_session("ses_test_1", "/tmp/proj")
+            .await
+            .expect("只有 configOptions 也是成功");
         c.shutdown().await;
     }
 
