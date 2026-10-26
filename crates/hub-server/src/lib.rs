@@ -262,6 +262,11 @@ struct Inner {
     agent_runtime: hub_storage::agent::AgentRuntimeRepo,
     /// agent 启动配置仓储（要求 2「扫描 + 配置」的配置侧）。
     agent_config: hub_storage::AgentConfigRepo,
+    /// 对话轨迹仓储。**只写不读**：写入在 WS 读循环（`channel_data` 到达时），
+    /// 读取在 `GET /api/sessions/{id}/trajectory`。两侧不是同一个进程内的调用
+    /// 点，所以放在共享状态里，而不是让两边各建一个——`TrajectoryRepo` 只是
+    /// `pool` 的一层包装，但「这份仓储存在」本身要能被找到。
+    trajectory: hub_storage::TrajectoryRepo,
     /// 连接池句柄。**只在路由里读**（`/api/*` 的会话仓储要用它），
     /// 而连接池是 `Arc`——clone 不产生新连接，所以路由各建各的仓储
     /// 没有代价，也不会让心跳路径上的「一次心跳建一个 repo」变成惯例。
@@ -354,6 +359,7 @@ impl AppState {
         let devices = hub_storage::repo::DeviceRepo::new(pool.clone());
         let agent_runtime = hub_storage::agent::AgentRuntimeRepo::new(pool.clone());
         let agent_config = hub_storage::AgentConfigRepo::new(pool.clone());
+        let trajectory = hub_storage::TrajectoryRepo::new(pool.clone());
         let state = Self(Arc::new(Inner {
             auth,
             setup: Mutex::new(None),
@@ -369,6 +375,7 @@ impl AppState {
             devices,
             agent_runtime,
             agent_config,
+            trajectory,
             outbound: conns::OutboundTable::new(),
             channels: Arc::new(parking_lot::RwLock::new(
                 hub_core::channels::HubChannels::new(),
@@ -465,6 +472,11 @@ impl AppState {
     /// agent 启动配置仓储。
     pub fn agent_config(&self) -> &hub_storage::AgentConfigRepo {
         &self.0.agent_config
+    }
+
+    /// 对话轨迹仓储。写侧在 WS 读循环，读侧在 [`routes::conversation::trajectory`]。
+    pub fn trajectory(&self) -> &hub_storage::TrajectoryRepo {
+        &self.0.trajectory
     }
 
     /// 连接池句柄（`/api/*` 里的会话仓储用它）。

@@ -350,6 +350,17 @@ pub(crate) struct ChannelBinding {
     acked: bool,
 }
 
+impl ChannelBinding {
+    /// 这条通道属于哪个会话。轨迹落库要它（`session_id` 是轨迹外键）。
+    ///
+    /// 读它而不是把字段改成 `pub`：绑定表是**内存**的、借出 `&str` 会给调用方
+    /// 一个随时可能被 `unbind` 抽掉的引用，而调用方（WS 读循环）又恰好是在
+    /// 另一个 task 里。返回克隆的字符串把这件事变成显然的。
+    pub(crate) fn session_id(&self) -> String {
+        self.session_id.clone()
+    }
+}
+
 /// `channel_id → 绑定`。
 ///
 /// `Clone` 是 **Arc 克隆**：多个句柄指向**同一张表**，而不是各持一份拷贝。

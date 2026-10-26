@@ -27,6 +27,13 @@
 //! **`events` 里每个元素都是 ACP 原样的 `update` 对象**，不解释、不裁剪：
 //! 新版本 agent 推的类型我们不认识，裁剪就是静默丢消息。类型判定在页面做。
 //!
+//! # 序号（`seq`）
+//!
+//! ACP 事件**没有序号也没有时间戳**，而序号是 Hub 判断「有没有丢」的唯一依据。
+//! 所以它由设备侧生成，且**整条对话共用一个计数器**——读循环与 `prompt` 的
+//! `turn_end` 是两个并发 task，各持一个计数器就会撞号，而撞号在 Hub 侧被
+//! `UNIQUE` 静默忽略，正好丢掉一条且看不出来。见 [`Seq`]。
+//!
 //! `turn_end` 单独一类而不是塞进 `batch`：它是**一轮的边界**，页面按它切
 //! 消息块，而 `batch` 只是传输聚合——两者混在一起，页面就得在一批事件里
 //! 找出哪条是边界，而边界本来就是我们自己写的。
@@ -38,6 +45,8 @@
 //! 两条路收掉进程：`close_channel`（用户关了对话）与设备进程退出。
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -101,6 +110,9 @@ struct LiveConversation {
     session_id: String,
     /// 读事件的 task。关会话时先 abort 再 shutdown。
     reader: JoinHandle<()>,
+    /// 与读循环共享的序号发生器。`prompt` 的那条 `turn_end` 也从这里取号，
+    /// 否则两条并发路径会撞号（见 [`Seq`] 的注释）。
+    seq: Seq,
 }
 
 impl Conversations {
@@ -150,7 +162,12 @@ impl Conversations {
         // 读循环必须拿**原始句柄**（`recv` 只在它上面有值）。所以这里先克隆
         // 一个给会话表（发 prompt 用），原始那个进读 task。
         let sender = client.clone();
-        let reader = tokio::spawn(read_events(spec.channel_id.clone(), client));
+        let seq = Seq::new();
+        let reader = tokio::spawn(read_events(
+            spec.channel_id.clone(),
+            client,
+            seq.clone(),
+        ));
 
         self.live.lock().await.insert(
             spec.channel_id,
@@ -158,6 +175,7 @@ impl Conversations {
                 client: sender,
                 session_id,
                 reader,
+                seq,
             },
         );
         Ok(())
@@ -176,6 +194,9 @@ impl Conversations {
         };
         let client = conv.client.clone();
         let session_id = conv.session_id.clone();
+        // **同一个计数器**：`turn_end` 与读循环的事件共用一条编号序列。见
+        // [`Seq`] 的注释——各用一个会撞号，而撞号在 Hub 侧是静默丢一条。
+        let seq = conv.seq.clone();
         let ch = channel_id.to_string();
         let text = text.to_string();
         drop(live);
@@ -186,13 +207,17 @@ impl Conversations {
                     // **`turn_end` 的唯一来源**：`session/prompt` 的响应带
                     // `stopReason`（实测 `end_turn`）。chunk 流自己不会说它
                     // 结束了，而序号断裂检测看不见末尾——见
-                    // `session-and-trajectory.md` §3.2.1。
+                    // `session-and-trajectory.md` 3.2.1。
                     //
                     // 没有 `stopReason` 就**不写**：那不是「没走完」，是
                     // 「这次没拿到凭据」。写一条假的 `turn_end` 会让页面把
                     // 一个还在跑的轮次画成已结束。
                     if let Some(reason) = AcpClient::stop_reason(&result) {
-                        let ev = json!({ "type": "turn_end", "stopReason": reason });
+                        let ev = json!({
+                            "type": "turn_end",
+                            "stopReason": reason,
+                            "seq": seq.next(),
+                        });
                         let _ = channel::push_external(&ch, vec![ev]);
                     }
                 }
@@ -200,6 +225,8 @@ impl Conversations {
                     // 发不出去要说出口：否则页面停在「正在回复」。用 `batch`
                     // 里一条 agent 不认识的事件形状？不——单独一类 `error`，
                     // 页面不必猜。
+                    //
+                    // `error` **不占序号**：它不是对话事件。
                     let ev = json!({ "type": "error", "message": e.to_string() });
                     let _ = channel::push_external(&ch, vec![ev]);
                 }
@@ -272,6 +299,48 @@ fn expand_home(cwd: &str) -> String {
     }
 }
 
+/// 一条对话的序号发生器：**只增，且整条对话共用一个**。
+///
+/// # 为什么是共享的、而不是每个 task 各一个
+///
+/// 编号的有两处：读循环的事件流，与 `prompt` 拿到 `stopReason` 后写的
+/// `turn_end`。它们是**并发**的两个 task。两个计数器从同一个数开始，于是
+/// 第 N 条事件与这一轮的 `turn_end` 会有同一个序号——而在 Hub 侧，同一
+/// `(session_id, seq)` 的第二条被 `UNIQUE` **`INSERT OR IGNORE` 掉**。
+///
+/// 结果是丢一条，且**看不出来**：序号仍然连续，断路检测（`gaps`）不报警，
+/// 页面也照样画。
+///
+/// # 这条约束**靠什么保证**（实测过，别高估类型）
+///
+/// 曾经以为「除了通过 `Seq` 之外没有办法拿到序号」就能挡住误用。实测不成立：
+/// 给 `read_events` 另传一个 `Seq::new()`，全部单测**仍然全绿**——因为单测证
+/// 明的是 `Seq` 的**克隆语义**，不是调用点传的是不是同一个。
+///
+/// 所以真正的约束是：`Seq::new()` 在**生产代码里只出现一次**，就在
+/// [`Conversations::open`]。两处编号都从 `open` 传下去的同一份克隆取号。
+/// 新增编号处**不要** `Seq::new()`，从会话表里那份 `.clone()`。
+#[derive(Debug, Clone)]
+pub struct Seq(Arc<AtomicI64>);
+
+impl Seq {
+    /// **生产代码里只有 [`Conversations::open`] 该调它**——见类型文档的
+    /// 「这条约束靠什么保证」。其余地方一律 `.clone()` 已有的那一份。
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicI64::new(0)))
+    }
+
+    /// 取下一个序号。从 1 开始（`0` 留给「没有序号」）。
+    pub fn next(&self) -> i64 {
+        self.0.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// 已经发到几了。给重连用（续着往下编，而不是重新从 1 开始）。
+    pub fn last(&self) -> i64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
 /// `agent_config.command` 为空串时用扫描到的可执行文件；都拿不到就是 `None`。
 ///
 /// 抽成函数是为了让「空串 = 用扫描到的那一个」这条契约**只有一个实现**：
@@ -296,8 +365,19 @@ fn build_args(acp_args: &[&str], configured: &[String]) -> Vec<String> {
     out
 }
 
-/// 读事件 → 聚合 → 推进通道。**这个 task 死掉等于这条对话瞎了**。
-async fn read_events(channel_id: String, client: AcpClient) {
+/// 读事件 → 编序号 → 聚合 → 推进通道。**这个 task 死掉等于这条对话瞎了**。
+///
+/// # `seq` 为什么在这里生成
+///
+/// ACP 的事件**没有序号也没有时间戳**（实测 `agent_message_chunk` /
+/// `tool_call` / `usage_update` 的 payload 里两者皆无）。而序号是 Hub 侧判断
+/// 「有没有丢」的唯一依据（`TrajectoryRepo::gaps` 看的是 `seq` 断裂）。所以
+/// 序号只能由**唯一见到原始顺序的那一方**生成——就是这个读循环。
+///
+/// Hub 侧按到达顺序编号是不行的：一次 `flush` 里的多条事件在 Hub 眼里是
+/// **一帧**，而一帧内部到达顺序本身就由这里的 `batch` 决定，等于让 Hub 重新
+/// 猜一遍它已经失去的信息。
+async fn read_events(channel_id: String, client: AcpClient, seq: Seq) {
     let mut batch: Vec<Value> = Vec::new();
     let mut bytes = 0usize;
     let mut last_flush = Instant::now();
@@ -310,9 +390,14 @@ async fn read_events(channel_id: String, client: AcpClient) {
             ev = client.recv() => match ev {
                 None => break,
                 Some(Event::SessionUpdate(params)) => {
-                    // `update` 才是页面要的那一层；`sessionId` 我们已知（就是
-                    // 这份会话），留着只会让每个事件多几字节。
-                    let update = params.get("update").cloned().unwrap_or(params);
+                    let mut update = params.get("update").cloned().unwrap_or(params);
+                    // 把序号写进事件本身，而不是让 payload 与序号分两个并行
+                    // 数组传：后者一旦两边长度不一致，整批事件的序号全错，
+                    // 而错法是**看上去对**（序号连续，只是挂错了事件）。
+                    let n = seq.next();
+                    if let Value::Object(o) = &mut update {
+                        o.insert("seq".to_string(), json!(n));
+                    }
                     bytes += update.to_string().len();
                     batch.push(update);
                     if bytes >= BATCH_BYTES {
@@ -323,8 +408,13 @@ async fn read_events(channel_id: String, client: AcpClient) {
                 Some(Event::Request { id, method, params }) => {
                     // 权限请求：**本里程碑不回**（ACP 允许请求方超时）。
                     // 但要让用户看见，否则页面看着像 agent 卡住了。
+                    //
+                    // 它**占用一个序号**：这是设备上真实发生过的事件，跳过它
+                    // 会让 `gaps` 在每一处权限请求上报警告——用户会以为丢了东西。
+                    let n = seq.next();
                     let ev = json!({
                         "type": "request",
+                        "seq": n,
                         "method": method,
                         "params": params,
                         "pending": true,
@@ -336,6 +426,8 @@ async fn read_events(channel_id: String, client: AcpClient) {
                     // 先把手里的发完，再说「子进程没了」——顺序反了会让最后
                     // 半句话丢掉，而那句话往往正是崩之前说的最后一句。
                     flush(&channel_id, &mut batch, &mut bytes);
+                    // `exited` **不占序号**：它不是对话事件，是传输终态。给它
+                    // 序号会让下一轮重连时的序号从错位开始。
                     let ev = json!({
                         "type": "exited",
                         "code": code,
@@ -401,6 +493,28 @@ mod tests {
         // 相对路径里的 `~` 不是家目录。
         assert_eq!(expand_home("a/~/b"), "a/~/b");
         assert_eq!(expand_home(""), "");
+    }
+
+    /// **`Seq` 的克隆共享同一个计数**：两个并发 task 各取号也不会撞。
+    ///
+    /// 这条挡的是「丢一条且看不出来」：撞号在 Hub 侧被 `UNIQUE` 的
+    /// `INSERT OR IGNORE` 静默吃掉，而序号仍然连续——`gaps` 不报警、页面照画。
+    ///
+    /// **它只证明到 `Seq` 自己的克隆语义，证明不到调用点**。实测把
+    /// `read_events` 换成另传一个 `Seq::new()`，这条**仍然全绿**。所以
+    /// 「两处编号是同一个」靠的是 `Seq::new()` 在生产代码里只出现一次，
+    /// 见类型文档的「这条约束靠什么保证」。
+    #[test]
+    fn a_cloned_seq_keeps_one_numbering_for_the_whole_conversation() {
+        let seq = Seq::new();
+        assert_eq!(seq.last(), 0, "还没取过号");
+        assert_eq!(seq.next(), 1, "从 1 开始：0 留给「没有序号」");
+        assert_eq!(seq.next(), 2);
+
+        let for_reader = seq.clone();
+        assert_eq!(for_reader.next(), 3, "克隆的是同一个计数，不是一份拷贝");
+        assert_eq!(seq.last(), 3, "原句柄也看见 3");
+        assert_eq!(seq.next(), 4, "接着往下编，不回到 1");
     }
 
     /// **空串 = 用扫描到的那一个**；两者都空 = 起不来。

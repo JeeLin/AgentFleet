@@ -29,7 +29,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures_util::{SinkExt as _, StreamExt as _};
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -973,9 +973,102 @@ fn publish_channel_data(state: &AppState, node_id: &str, frame: &Frame) {
         tracing::debug!(node_id = %node_id, "not forwarding an unparsable channel_data");
         return;
     };
+    // 轨迹落库在推 SSE **之后**：页面先看到字，库后写。反过来会把一次写库
+    // 失败（磁盘满、库锁）变成「页面什么都不出」，而那不是用户能做的事。
     state
         .streams()
-        .channel_frame(node_id, &data.channel_id, data.payload);
+        .channel_frame(node_id, &data.channel_id, data.payload.clone());
+    persist_trajectory(state, node_id, &data.channel_id, &data.payload);
+}
+
+/// 把对话通道上行的一帧写进轨迹表。**非对话通道一律不写**。
+///
+/// # 为什么落库在 Hub 侧、而不是设备侧
+///
+/// `session/update` 只有设备收得到，但**会话 id 只有 Hub 知道**：轨迹表的
+/// `session_id` 是 Hub 的会话主键，设备手里只有 ACP 自己的 `sessionId`
+/// （`ses_...`）。让设备落库就得把 Hub 的会话 id 先下发下去，而那会让
+/// 「设备写库时用的 id」与「Hub 认定的 id」成为两份可能分叉的事实。
+///
+/// # 认哪几类帧
+///
+/// 只认 `batch` 与 `turn_end`，这两类才是**事件**。`ready` / `error` /
+/// `request` / `exited` 是控制面的话，不进轨迹——它们的语义是「这条通道
+/// 现在怎么了」，不是「agent 说了什么」。把它们写进轨迹会让页面把一次
+/// 重连的 `ready` 画成一条对话消息。
+///
+/// # 未知事件类型必须写，不得丢
+///
+/// `batch.events` 里的每个元素原样存（`kind` 取它的 `sessionUpdate`）。
+/// 新版本 agent 推的类型我们不认识，在这里过滤就是静默丢消息——
+/// 而轨迹是「不承诺完整、但必须可见」，丢掉的那些连可见都做不到。
+fn persist_trajectory(state: &AppState, node_id: &str, channel_id: &str, payload: &Value) {
+    // 没绑过（页面没开过这条通道、或已摘）就不写。通道绑定是内存表，
+    // 断连即清——所以断线期间到达的帧本就无从归属，与「不承诺补齐」一致。
+    let Some(binding) = state.bindings().get(channel_id) else {
+        return;
+    };
+    let session_id = binding.session_id();
+    let Some(kind) = payload.get("type").and_then(Value::as_str) else {
+        // 没有 `type` 的不是对话帧（terminal 的载荷是 `{op, bytes}`）。
+        return;
+    };
+    if kind != "batch" && kind != "turn_end" {
+        return;
+    }
+    let now = hub_core::registry::now_stamp();
+
+    if kind == "turn_end" {
+        // `turn_end` 是一条事件，不是一批。它的 `seq` 由设备侧那条共享
+        // 计数器给（与读循环同一条序列，见 `node-core` 的 `Seq`）。
+        //
+        // **缺 `seq` 就整条不写**，不写 0：两条都缺的帧会都落 `seq = 0`，
+        // 第二条被 `UNIQUE` 的 `INSERT OR IGNORE` 吃掉——丢一条且看不出来
+        // （序号仍然连续，`gaps` 不报警）。宁可少一条，也不要一个错号。
+        let Some(seq) = payload.get("seq").and_then(Value::as_i64) else {
+            tracing::error!(channel_id = %channel_id, "a turn_end arrived without a seq; dropped");
+            return;
+        };
+        let reason = payload
+            .get("stopReason")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let e = hub_storage::NewEvent::turn_end(seq, reason);
+        if let Err(err) = state
+            .trajectory()
+            .append(&session_id, node_id, &e, &now)
+        {
+            tracing::error!(node_id = %node_id, channel_id = %channel_id, error = %err,
+                "cannot persist a turn_end");
+        }
+        return;
+    }
+
+    let Some(events) = payload.get("events").and_then(Value::as_array) else {
+        return;
+    };
+    for ev in events {
+        // 同上：缺 `seq` 的事件**跳过并留痕**，不写 0。与 `turn_end` 同一条
+        // 理由，而这里更危险——一批里可能有好几条。
+        let Some(seq) = ev.get("seq").and_then(Value::as_i64) else {
+            tracing::error!(channel_id = %channel_id, "a trajectory event arrived without a seq; dropped");
+            continue;
+        };
+        // 事件类型名就是 ACP 的 `sessionUpdate` 字段；取不到就用 `update`，
+        // 绝不因为不认识而**跳过**这条事件（见本函数文档第 3 条）。
+        let ev_kind = ev
+            .get("sessionUpdate")
+            .and_then(Value::as_str)
+            .unwrap_or("update");
+        let e = hub_storage::NewEvent::new(seq, ev_kind, ev.to_string());
+        if let Err(err) = state
+            .trajectory()
+            .append(&session_id, node_id, &e, &now)
+        {
+            tracing::error!(node_id = %node_id, channel_id = %channel_id, error = %err,
+                "cannot persist a trajectory event");
+        }
+    }
 }
 
 /// 把一帧 `channel_error` 推给页面订阅者（缺陷 3）。
@@ -1686,6 +1779,201 @@ mod tests {
             &Frame::push(types::CHANNEL_ERROR, 1, serde_json::json!("nope")),
         );
         assert!(state.streams().replay_since(Some(0)).is_empty());
+    }
+
+    /// **一批事件被写进轨迹**，且每条保留它自己的类型名与原始载荷。
+    ///
+    /// 这条走的是「设备 → Hub」的落库路径，是子任务 9 的正面证据：以前只有
+    /// `TrajectoryRepo` 自己的单测，证明不了设备真发上来的帧会被写进去。
+    #[test]
+    fn a_batch_of_events_reaches_the_trajectory_table() {
+        let (state, _dir) = stream_state();
+        state
+            .bindings()
+            .bind("ch-1", crate::routes::stream::test_binding("n_a", "admin", true));
+
+        persist_trajectory(
+            &state,
+            "n_a",
+            "ch-1",
+            &serde_json::json!({
+                "type": "batch",
+                "events": [
+                    {"seq": 1, "sessionUpdate": "agent_message_chunk", "text": "hi"},
+                    {"seq": 2, "sessionUpdate": "tool_call", "status": "pending"},
+                ],
+            }),
+        );
+
+        let rows = state.trajectory().list("s_1", 0, 100).unwrap();
+        assert_eq!(rows.len(), 2, "两条都要写进去：{rows:?}");
+        assert_eq!(rows[0].seq, 1);
+        assert_eq!(rows[0].kind, "agent_message_chunk");
+        assert_eq!(rows[1].kind, "tool_call");
+        // 原始载荷留着：页面要画它，裁剪等于让页面没法画。
+        assert!(rows[0].payload.contains("hi"), "{}", rows[0].payload);
+    }
+
+    /// **`turn_end` 单条落库，带 `stopReason`**。它是「这一轮走完了」的唯一凭据。
+    #[test]
+    fn a_turn_end_is_persisted_with_its_stop_reason() {
+        let (state, _dir) = stream_state();
+        state
+            .bindings()
+            .bind("ch-1", crate::routes::stream::test_binding("n_a", "admin", true));
+
+        persist_trajectory(
+            &state,
+            "n_a",
+            "ch-1",
+            &serde_json::json!({"type": "turn_end", "stopReason": "end_turn", "seq": 7}),
+        );
+
+        let rows = state.trajectory().list("s_1", 0, 100).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "turn_end");
+        assert_eq!(rows[0].seq, 7);
+        assert!(rows[0].payload.contains("end_turn"), "{}", rows[0].payload);
+    }
+
+    /// **没绑过的通道不写**：页面没开过的通道，无从知道它属于哪个会话。
+    #[test]
+    fn an_unbound_channel_writes_nothing_to_the_trajectory() {
+        let (state, _dir) = stream_state();
+        persist_trajectory(
+            &state,
+            "n_a",
+            "ch-unknown",
+            &serde_json::json!({"type": "batch", "events": [{"seq": 1}]}),
+        );
+        assert!(state.trajectory().list("s_1", 0, 100).unwrap().is_empty());
+    }
+
+    /// **控制面的帧不进轨迹**：`ready` / `error` / `exited` 说的是「这条通道
+    /// 怎么了」，不是「agent 说了什么」。写进去会让页面把一次重连画成一条消息。
+    #[test]
+    fn control_frames_never_reach_the_trajectory() {
+        let (state, _dir) = stream_state();
+        state
+            .bindings()
+            .bind("ch-1", crate::routes::stream::test_binding("n_a", "admin", true));
+
+        for payload in [
+            serde_json::json!({"type": "ready", "sessionId": "ses_1", "agentId": "opencode"}),
+            serde_json::json!({"type": "error", "message": "boom"}),
+            serde_json::json!({"type": "exited", "code": 0, "reason": "closed"}),
+            serde_json::json!({"type": "request", "method": "permission", "seq": 1}),
+            // terminal 通道的载荷形状：完全没有 `type`
+            serde_json::json!({"op": "data", "bytes": "ls\n"}),
+        ] {
+            persist_trajectory(&state, "n_a", "ch-1", &payload);
+        }
+        assert!(
+            state.trajectory().list("s_1", 0, 100).unwrap().is_empty(),
+            "控制帧不该落进轨迹表"
+        );
+    }
+
+    /// **带 `events` 的控制类帧同样不写**——只靠「没有 `events` 键」挡不住它们。
+    ///
+    /// 这条是上一条的加强：上一条里那几类帧大多连 `events` 都没有，于是即使
+    /// 把类型过滤删掉，它们也会因为取不到 `events` 而 return，测试**照样绿**——
+    /// 实测确认过。所以这里给控制类帧补上 `events`，让「不写」真正只能由
+    /// 类型过滤来解释。
+    #[test]
+    fn a_control_frame_carrying_events_still_writes_nothing() {
+        let (state, _dir) = stream_state();
+        state
+            .bindings()
+            .bind("ch-1", crate::routes::stream::test_binding("n_a", "admin", true));
+
+        for kind in ["ready", "error", "exited", "request"] {
+            persist_trajectory(
+                &state,
+                "n_a",
+                "ch-1",
+                &serde_json::json!({
+                    "type": kind,
+                    "events": [{"seq": 1, "sessionUpdate": "x"}],
+                }),
+            );
+        }
+        assert!(
+            state.trajectory().list("s_1", 0, 100).unwrap().is_empty(),
+            "控制类帧即使带了 events 也不进轨迹"
+        );
+    }
+
+    /// **未知事件类型照样写，不丢**。
+    ///
+    /// 新版本 agent 会推我们不认识的类型。在这里过滤就是静默丢消息——
+    /// 而轨迹的口径是「不承诺完整、但必须可见」，丢掉的那些连可见都做不到。
+    #[test]
+    fn an_unknown_event_kind_is_stored_not_dropped() {
+        let (state, _dir) = stream_state();
+        state
+            .bindings()
+            .bind("ch-1", crate::routes::stream::test_binding("n_a", "admin", true));
+
+        persist_trajectory(
+            &state,
+            "n_a",
+            "ch-1",
+            &serde_json::json!({
+                "type": "batch",
+                "events": [{"seq": 1, "sessionUpdate": "some_new_kind_from_a_later_version"}],
+            }),
+        );
+        let rows = state.trajectory().list("s_1", 0, 100).unwrap();
+        assert_eq!(rows.len(), 1, "不认识也得写：{rows:?}");
+        assert_eq!(rows[0].kind, "some_new_kind_from_a_later_version");
+    }
+
+    /// **缺 `seq` 的事件整条跳过，不写 0**。
+    ///
+    /// 写 0 的后果是「丢一条且看不出来」：两条都缺的帧都落 `seq = 0`，第二条
+    /// 被 `UNIQUE` 的 `INSERT OR IGNORE` 吃掉，而序号看上去仍然连续。
+    #[test]
+    fn events_without_a_seq_are_dropped_not_numbered_zero() {
+        let (state, _dir) = stream_state();
+        state
+            .bindings()
+            .bind("ch-1", crate::routes::stream::test_binding("n_a", "admin", true));
+
+        // 两条都缺 seq：若写成 0，第二条会被静默丢掉，于是看起来「写进去了」
+        persist_trajectory(
+            &state,
+            "n_a",
+            "ch-1",
+            &serde_json::json!({"type": "batch", "events": [{"text": "a"}, {"text": "b"}]}),
+        );
+        persist_trajectory(
+            &state,
+            "n_a",
+            "ch-1",
+            &serde_json::json!({"type": "turn_end", "stopReason": "end_turn"}),
+        );
+        assert!(
+            state.trajectory().list("s_1", 0, 100).unwrap().is_empty(),
+            "缺 seq 的一律不写，绝不能写成 0"
+        );
+    }
+
+    /// **同一 seq 重写被忽略，不产生第二行**（子任务 9 的测试标准）。
+    #[test]
+    fn replaying_the_same_seq_does_not_duplicate_a_row() {
+        let (state, _dir) = stream_state();
+        state
+            .bindings()
+            .bind("ch-1", crate::routes::stream::test_binding("n_a", "admin", true));
+        let payload =
+            serde_json::json!({"type": "batch", "events": [{"seq": 1, "sessionUpdate": "x"}]});
+
+        persist_trajectory(&state, "n_a", "ch-1", &payload);
+        persist_trajectory(&state, "n_a", "ch-1", &payload);
+
+        let rows = state.trajectory().list("s_1", 0, 100).unwrap();
+        assert_eq!(rows.len(), 1, "重发不是错误，但也不该变成两行：{rows:?}");
     }
 
     fn stream_state() -> (AppState, tempfile::TempDir) {
