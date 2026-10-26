@@ -105,6 +105,66 @@ describe('懒建立：拿到句柄不等于开了通道', () => {
   })
 })
 
+describe('对话通道走专用端点', () => {
+  /**
+   * `acp` 不是 connector：它不出现在设备的能力上报里，所以通用端点的能力门禁
+   * 会判它「未上报」并 409。而对话的启动配置存 Hub 侧、设备没有那张表，只有
+   * 专用端点会把它读出并随 params 下发。所以它必须走别处。
+   */
+  it('openVia=conversation 时 POST 的是 /api/sessions/{id}/conversation', async () => {
+    const fetchMock = stubFetch({
+      '/api/sessions/s_1/conversation': {
+        status: 201,
+        body: { channel_id: 'ch-1', node_id: 'n_1', session_id: 's_1' },
+      },
+    })
+    const hub = makeHub()
+    const ch = hub.handle('k', {
+      sessionId: 's_1',
+      connector: 'acp',
+      openVia: 'conversation',
+    })
+    await ch.open()
+
+    expect(ch.state()).toBe('ready')
+    expect(ch.id()).toBe('ch-1')
+    const calls = sentCalls(fetchMock)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.url).toBe('/api/sessions/s_1/conversation')
+    expect(FakeEventSource.instances).toHaveLength(1)
+  })
+
+  it('不指定 openVia 时仍然走通用端点——既有面板不受影响', async () => {
+    const fetchMock = stubFetch({
+      '/api/channels': { status: 201, body: { channel_id: 'ch-1', node_id: 'n_1', session_id: 's_1' } },
+    })
+    const hub = makeHub()
+    const ch = hub.handle('k', { sessionId: 's_1', connector: 'acp' })
+    await ch.open()
+
+    expect(sentCalls(fetchMock)[0]?.url).toBe('/api/channels')
+  })
+
+  it('对话端点 409（agent 现在不可用）→ 通道进 failed，错误码留下来', async () => {
+    stubFetch({
+      '/api/sessions/s_1/conversation': {
+        status: 409,
+        body: { error: 'agent_unavailable', detail: { agent_id: 'opencode' } },
+      },
+    })
+    const hub = makeHub()
+    const ch = hub.handle('k', {
+      sessionId: 's_1',
+      connector: 'acp',
+      openVia: 'conversation',
+    })
+    await ch.open().catch(() => undefined)
+
+    expect(ch.state()).toBe('failed')
+    expect(ch.errorCode()).toBe('agent_unavailable')
+  })
+})
+
 describe('帧分发', () => {
   it('channel.frame 按 channel_id 找到对应句柄，payload 不再剥一层', async () => {
     stubFetch({

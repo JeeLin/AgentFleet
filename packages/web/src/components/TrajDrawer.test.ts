@@ -220,34 +220,130 @@ describe('TrajDrawer：父级自己把 open 置回 false 也要出栈', () => {
 })
 
 describe('TrajDrawer：空态不含假行', () => {
-  it('空态明写「M3 起有数据」并解释为什么', async () => {
+  it('空态明写「还没有事件」并解释什么是轨迹', async () => {
     scaffold()
     await openDrawer({}, null)
 
     const empty = drawer().querySelector('.af-empty')
-    expect(empty?.textContent).toContain('M3 起有数据')
+    expect(empty?.textContent).toContain('还没有事件')
+    // 「轨迹是什么」要说清楚：它是 append-only 流水，而对话是它的折叠读法。
+    // 不说这句，用户会去比「对话里有几条、轨迹里有几条」——本该逐条对齐的两栏
+    // 被当成了两套数据。
     expect(empty?.textContent).toContain('trajectory_event')
-    expect(empty?.textContent).toContain('不画假行')
+    expect(empty?.textContent).toContain('同一份数据的两种看法')
+    // M1 那句「M3 起有数据」已经不成立了：轨迹现在真的会写。
+    expect(empty?.textContent).not.toContain('M3 起有数据')
   })
 
-  it('不画一条轨迹行：没有 seq / kind 的条目', async () => {
+  it('没有事件时不画一条轨迹行（不编一条假的来填空白）', async () => {
     scaffold()
     await openDrawer({}, null)
 
     const el = drawer()
-    expect(el.querySelectorAll('.af-msg')).toHaveLength(0)
-    expect(el.querySelectorAll('li')).toHaveLength(0)
-    expect(el.querySelector('.af-traj__body')?.textContent).not.toContain('0ms')
+    expect(el.querySelectorAll('[data-traj-row]')).toHaveLength(0)
+    expect(el.querySelectorAll('[data-traj-gap]')).toHaveLength(0)
   })
 
-  it('预告 M3 每行的五项字段，但不把它们当成一行数据', async () => {
+  it('读失败时说清原因，而不是给一个空抽屉', async () => {
     scaffold()
-    await openDrawer({}, null)
+    await openDrawer({ error: '会话不存在' }, null)
 
-    const foot = drawer().querySelector('.af-traj__foot')
-    expect(foot?.textContent).toContain('seq')
-    expect(foot?.textContent).toContain('归属')
-    expect(foot?.textContent).toContain('本阶段不画这些行')
+    const err = drawer().querySelector('.af-traj__error')
+    expect(err?.getAttribute('role')).toBe('alert')
+    expect(err?.textContent).toContain('会话不存在')
+    // 空态不该同时出现：那是「没有轨迹」的意思，与「读不到」不是一回事
+    expect(drawer().querySelector('.af-empty')).toBeNull()
+  })
+})
+
+describe('TrajDrawer：把轨迹事件画成行', () => {
+  /** 造一条轨迹事件。 */
+  function ev(id: number, seq: number, kind: string, payload: unknown = {}) {
+    return { id, seq, kind, payload: JSON.stringify(payload), created_at: '2026-10-26 10:00:00' }
+  }
+
+  it('每行带 seq / kind / payload，条数写在脚注里', async () => {
+    scaffold()
+    await openDrawer(
+      {
+        events: [
+          ev(1, 1, 'agent_message_chunk', { content: [{ type: 'text', text: 'hi' }] }),
+          ev(2, 2, 'turn_end', { stopReason: 'end_turn' }),
+        ],
+      },
+      null,
+    )
+
+    const el = drawer()
+    expect(el.querySelectorAll('[data-traj-row]')).toHaveLength(2)
+    expect(el.textContent).toContain('agent_message_chunk')
+    expect(el.textContent).toContain('turn_end')
+    expect(el.querySelector('.af-traj__foot')?.textContent).toContain('2 条')
+  })
+
+  it('断口画在缺的那截上，写明缺几条', async () => {
+    scaffold()
+    // seq 1、2 在，5 在：缺的是 3、4
+    await openDrawer(
+      {
+        events: [ev(1, 1, 'agent_message_chunk'), ev(2, 2, 'agent_message_chunk'), ev(3, 5, 'turn_end')],
+        gaps: [{ from: 3, to: 5, missing: 2 }],
+      },
+      null,
+    )
+
+    const gap = drawer().querySelector('[data-traj-gap]')
+    // 先断言它画出来了：按 `from` 索引会一个都不画（那条 seq 本就不在库里），
+    // 而页面看起来就是连续的——正是这个功能要防的事。
+    expect(gap, '断口标记必须画出来').not.toBeNull()
+    expect(gap?.textContent).toContain('缺失 2 条')
+    expect(gap?.textContent).toContain('seq 2 之后断开')
+    expect(drawer().querySelector('.af-traj__foot')?.textContent).toContain('断口 1 处')
+  })
+
+  it('没有断口就不画断口标记——不谎报', async () => {
+    scaffold()
+    await openDrawer({ events: [ev(1, 1, 'turn_end')], gaps: [] }, null)
+    expect(drawer().querySelectorAll('[data-traj-gap]')).toHaveLength(0)
+  })
+
+  it('末轮没收口 → 写「本轮未完成」', async () => {
+    scaffold()
+    await openDrawer({ events: [ev(1, 1, 'agent_message_chunk')], incomplete: true }, null)
+
+    const el = drawer().querySelector('[data-traj-incomplete]')
+    expect(el?.textContent).toContain('本轮未完成')
+    expect(el?.textContent).toContain('turn_end')
+  })
+
+  it('有更多时给「加载更多」按钮，正在取时禁用它', async () => {
+    scaffold()
+    const w = await openDrawer({ events: [ev(1, 1, 'turn_end')], hasMore: true }, null)
+
+    const btn = drawer().querySelector<HTMLButtonElement>('[data-traj-more]')
+    expect(btn, 'hasMore 为真时必须有按钮').not.toBeNull()
+    expect(btn?.disabled).toBe(false)
+    await btn?.click()
+    expect(w.emitted('more')).toHaveLength(1)
+
+    await w.setProps({ loading: true })
+    expect(drawer().querySelector<HTMLButtonElement>('[data-traj-more]')?.disabled).toBe(true)
+  })
+
+  it('没有更多时不给按钮——不给一个按下去没有反应的东西', async () => {
+    scaffold()
+    await openDrawer({ events: [ev(1, 1, 'turn_end')], hasMore: false }, null)
+    expect(drawer().querySelector('[data-traj-more]')).toBeNull()
+  })
+
+  it('payload 过长时截断显示（只影响显示，不影响数据）', async () => {
+    scaffold()
+    const long = 'x'.repeat(400)
+    await openDrawer({ events: [{ id: 1, seq: 1, kind: 'tool_call', payload: long, created_at: '' }] }, null)
+
+    const shown = drawer().querySelector('.af-traj__payload')?.textContent ?? ''
+    expect(shown.length).toBeLessThan(140)
+    expect(shown).toContain('…')
   })
 })
 

@@ -89,6 +89,85 @@ export function listSessions(options?: RequestOptions): Promise<SessionSummary[]
   return getJson<SessionSummary[]>('/api/sessions', options)
 }
 
+/** `GET /api/sessions/{id}/trajectory` 的一项。是 `trajectory_event` 的一行。 */
+export interface TrajectoryEvent {
+  id: number
+  /** 设备侧编的序号。**重连后会从 1 重数**，所以只在一次进程生命周期内单调。 */
+  seq: number
+  kind: string
+  /** **原始 JSON 字符串**：Hub 不解析成对象再序列化，页面自己解。 */
+  payload: string
+  created_at: string
+}
+
+/**
+ * 一段序号空洞：`[from, to)` 里的 seq 都不在库里。
+ *
+ * `to` 是那个**存在**的 seq、充当排他上界，所以「缺几条」是 `to - from`。
+ * 这个减法是 Hub 算好放进 `missing` 的，**前端不重算**——两处各算一份会分叉。
+ */
+export interface TrajectoryGap {
+  from: number
+  to: number
+  missing: number
+}
+
+/** `GET /api/sessions/{id}/trajectory` 的响应。 */
+export interface TrajectoryView {
+  events: TrajectoryEvent[]
+  gaps: TrajectoryGap[]
+  /** 最后一轮没有 `turn_end`：还在跑，或结尾丢了。 */
+  incomplete: boolean
+}
+
+/** `OpenedChannel`：开通道的响应。字段与 Hub 侧同名同义。 */
+export interface OpenedChannel {
+  channel_id: string
+  /** 通道所在设备。页面据此把帧对上设备，不必再查一次会话。 */
+  node_id: string
+  session_id: string
+}
+
+/**
+ * 开一条对话通道。
+ *
+ * 只负责「开」：消息走既有的 `POST /api/channels/{id}/send`，与终端、文件
+ * 同一个机制（M2 没有新增消息类型）。
+ *
+ * 可能 409：`agent_unavailable`（那台设备上这个 agent 现在跑不起来），
+ * 也可能 404（会话不存在）。
+ */
+export function openConversation(
+  sessionId: string,
+  options?: RequestOptions,
+): Promise<OpenedChannel> {
+  return postJson<OpenedChannel>(`/api/sessions/${sessionId}/conversation`, undefined, options)
+}
+
+/**
+ * 读一页轨迹。**会话不存在时 404。**
+ *
+ * `after` 是**物理 id 不是 `seq`**：回放顺序是物理顺序，而 `seq` 在设备侧 ACP
+ * 子进程重启后会从 1 重数，所以它只在一次进程生命周期内单调。按 `seq` 翻页
+ * 会在重连后翻到已经读过的那一页。
+ *
+ * `hasMore` 由「这一页取满了没有」推出：`limit` 被服务端夹到 [1, 1000]，
+ * 取满就说明后面可能还有。这是前端能拿到的唯一信号——Hub 不返回总数。
+ */
+export async function getTrajectory(
+  sessionId: string,
+  after: number = 0,
+  limit: number = 200,
+  options?: RequestOptions,
+): Promise<TrajectoryView & { hasMore: boolean }> {
+  const qs = `?after=${after}&limit=${limit}`
+  const view = await getJson<TrajectoryView>(
+    `/api/sessions/${sessionId}/trajectory${qs}`,
+    options,
+  )
+  return { ...view, hasMore: view.events.length >= limit }
+}
+
 /** 读 Agent 目录。M1 恒空（没有 agent 运行时可探测）。 */
 export function listAgents(options?: RequestOptions): Promise<AgentSummary[]> {
   return getJson<AgentSummary[]>('/api/agents', options)

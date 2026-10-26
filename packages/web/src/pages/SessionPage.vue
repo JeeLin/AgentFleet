@@ -59,8 +59,13 @@ import StateBadge from '@/components/StateBadge.vue'
 import TabBar, { type TabConn } from '@/components/TabBar.vue'
 import TerminalPanel, { type TerminalSize } from '@/components/TerminalPanel.vue'
 import TrajDrawer from '@/components/TrajDrawer.vue'
-import type { DeviceSummary, SessionSummary } from '@/lib/api'
-import { listDevices, listSessions } from '@/lib/api'
+import type {
+  DeviceSummary,
+  SessionSummary,
+  TrajectoryEvent,
+  TrajectoryGap,
+} from '@/lib/api'
+import { getTrajectory, listDevices, listSessions } from '@/lib/api'
 import {
   ChannelHub,
   DEFAULT_COLS,
@@ -165,6 +170,32 @@ interface TabWorkspace {
   traj: boolean
   /** 打开抽屉的那个元素——关闭后焦点还给它。 */
   trajOpener: HTMLElement | null
+  /**
+   * 已读到的轨迹事件。
+   *
+   * **来源是 `GET /api/sessions/{id}/trajectory`，不是 SSE 帧**：帧在断线期间
+   * 会丢，而它是库里的行。两个来源混着用会让页面出现两套顺序——刷新前后
+   * 看到的还不一样。
+   */
+  events: TrajectoryEvent[]
+  /** 序号断口（Hub 算好的 `missing` 一并带来）。 */
+  gaps: TrajectoryGap[]
+  /** 最后一轮没有 `turn_end`：还在跑，或结尾丢了。 */
+  incomplete: boolean
+  /** 轨迹还有下一页吗。由「上一页取满没有」推出（Hub 不给总数）。 */
+  hasMore: boolean
+  /** 正在读轨迹。防重入：每来一帧都发一次请求会把 Hub 打满。 */
+  trajLoading: boolean
+  /** 读轨迹失败的原因。空态与「读不到」是两件不同的事，要分开说。 */
+  trajError: string | null
+  /**
+   * 对话通道最近一次失败的错误码。
+   *
+   * 只用来**显示原因**——它不拦发送（判据只有 `agent_id`，见 `ConvFlow`）：
+   * agent 不可用是设备侧当时的状态，过一会可能就好了，留着重试的路比替用户
+   * 判定「这次不行」有用。
+   */
+  convError: string | null
   /** 每个面板的通道视图（状态 / 错误 / 丢弃数）。 */
   views: Record<PanelName, ChannelView>
 }
@@ -188,6 +219,13 @@ function blankWorkspace(): TabWorkspace {
     dirty: false,
     traj: false,
     trajOpener: null,
+    events: [],
+    gaps: [],
+    incomplete: false,
+    hasMore: false,
+    trajLoading: false,
+    trajError: null,
+    convError: null,
     views: {
       terminal: { state: 'idle', error: null, dropped: 0 },
       files: { state: 'idle', error: null, dropped: 0 },
@@ -273,6 +311,15 @@ let execSeq = 0
  * `mounted.length` 算的。
  */
 const execHandles = new Set<ChannelHandle>()
+
+/**
+ * 对话通道句柄（`tabId␀chat` → 句柄）。
+ *
+ * **不进 `channels`**：那条表的键是 `tabId␀panel`，而 `chat` 不是一个面板
+ * （它挂在对话列、没有坞位）。混进去会让「这个 tab 有哪些面板」与「这个 tab
+ * 有哪些通道」变成两张对不上的账——面板数徽标正是按 `mounted.length` 算的。
+ */
+const chatHandles = new Map<string, ChannelHandle>()
 
 function ensureChannel(tab: TabMeta, panel: PanelName): ChannelHandle {
   const key = channelKey(tab.id, panel)
@@ -532,6 +579,116 @@ function terminalResize(size: TerminalSize): void {
 function convSend(text: string): void {
   terminalInput(text)
 }
+
+/* ------------------------------------------------------------------ 对话（ACP） */
+
+/**
+ * 对话通道：`ensureChannel` 会按 `tabId␀panel` 记账，而 `acp` 不是面板
+ * （它挂在对话列、没有坞位）。所以单独建，键固定带 `chat`。
+ *
+ * **懒建立**：说第一句话才开（`ensureChatChannel`）。打开会话页就开一条，
+ * 会让「打开过一个会话」变成「在那台设备上起过一个 agent 子进程」——
+ * 而用户可能只是路过。
+ */
+function ensureChatChannel(tab: TabMeta): ChannelHandle {
+  const key = `${tab.id}\u0000chat`
+  const existing = chatHandles.get(key)
+  if (existing) return existing
+  if (!hub) throw new Error('channel hub is not mounted')
+  const handle = hub.handle(key, {
+    sessionId: tab.id,
+    connector: 'acp',
+    openVia: 'conversation',
+  })
+  chatHandles.set(key, handle)
+  const ws = workspaceOf(tab.id)
+  // 失败的原因要看得见：输入框已经清空而没有回音时，用户唯一能读到的是这句。
+  // 通道是在**发第一句话时**才开的，所以这里只显示结果，不参与能不能发的判据。
+  handle.onState(() => {
+    ws.convError = handle.errorCode()
+  })
+  // 对话的帧只用来判「还在动」：内容一律读轨迹表（`GET .../trajectory`），
+  // 因为帧在断线期间会丢，而轨迹是库里的。页面不靠帧补历史。
+  handle.onFrame(() => {
+    void refreshTrajectory(tab.id)
+  })
+  return handle
+}
+
+/** 说一句话：交给设备的 ACP 子进程。回复从事件流回来，不在这里等。 */
+function convSay(text: string): void {
+  const tab = activeTab.value
+  if (!tab || ended.value || !hub) return
+  const handle = ensureChatChannel(tab)
+  void handle.open().catch(() => undefined)
+  handle.send(text)
+}
+
+/**
+ * 重读轨迹。
+ *
+ * **每次有帧到达就重读一次**，而不是把帧直接拼进列表：帧是「此刻流过的事」，
+ * 断线期间会丢；轨迹是「库里的事实」，两者拼起来会有两套顺序。页面只信后者。
+ */
+async function refreshTrajectory(tabId: string): Promise<void> {
+  const ws = workspaces.get(tabId)
+  if (!ws) return
+  if (ws.trajLoading) return
+  ws.trajLoading = true
+  try {
+    const view = await getTrajectory(tabId)
+    ws.events = view.events
+    ws.gaps = view.gaps
+    ws.incomplete = view.incomplete
+    ws.hasMore = view.hasMore
+    ws.trajError = null
+  } catch (err) {
+    // 说清为什么空：一个空抽屉会被读成「这个会话没有轨迹」，
+    // 而「读不到」与「没有」是两件不同的事。
+    ws.trajError = describeReadFailure(err, '轨迹')
+  } finally {
+    ws.trajLoading = false
+  }
+}
+
+/**
+ * 「加载更多」：接着最后一行的**物理 id** 往下取，拼在后面。
+ *
+ * 不用 `seq` 当游标（见 `getTrajectory` 的注释），也不用 `events.length` 当
+ * `after`——那是「我已经有几条」，而游标要的是「库里读到第几个 id 了」；
+ * 中途有新事件写进来的话这两个数不是一个意思。
+ */
+async function onTrajMore(): Promise<void> {
+  const ws = activeWs.value
+  const tab = activeTab.value
+  if (!ws || !tab || ws.trajLoading) return
+  const last = ws.events.at(-1)
+  ws.trajLoading = true
+  try {
+    const view = await getTrajectory(tab.id, last ? last.id : 0)
+    // 按 id 去重：Hub 可能把已读过的那一页又给一次（例如重连后重读），
+    // 不去重就会把同一条事件画两遍。
+    const seen = new Set(ws.events.map((e) => e.id))
+    ws.events = [...ws.events, ...view.events.filter((e) => !seen.has(e.id))]
+    ws.gaps = view.gaps
+    ws.incomplete = view.incomplete
+    ws.hasMore = view.hasMore
+    ws.trajError = null
+  } catch (err) {
+    ws.trajError = describeReadFailure(err, '轨迹')
+  } finally {
+    ws.trajLoading = false
+  }
+}
+
+/** 抽屉打开时读一次：不读的话用户看到的是「还没有事件」，而他明明说过话。 */
+watch(
+  () => activeWs.value?.traj ?? false,
+  (open) => {
+    const tab = activeTab.value
+    if (open && tab) void refreshTrajectory(tab.id)
+  },
+)
 
 const dockEl = ref<HTMLElement | null>(null)
 const openButtonEl = ref<HTMLButtonElement | null>(null)
@@ -1288,8 +1445,14 @@ onBeforeUnmount(() => {
             :ended="ended"
             :terminal-ready="terminalReady"
             :traj-open="activeWs?.traj ?? false"
+            :agent-id="current?.agent_id ?? null"
+            :conv-error="activeWs?.convError ?? null"
+            :events="activeWs?.events ?? []"
+            :gaps="activeWs?.gaps ?? []"
+            :incomplete="activeWs?.incomplete ?? false"
             @run="runCommand"
             @send="convSend"
+            @say="convSay"
             @open-traj="toggleTraj"
           />
           <div class="af-wb__convhint af-field__hint">
@@ -1376,7 +1539,14 @@ onBeforeUnmount(() => {
         :title="title"
         :device-name="deviceLabel"
         :path="rootPath"
+        :events="activeWs?.events ?? []"
+        :gaps="activeWs?.gaps ?? []"
+        :incomplete="activeWs?.incomplete ?? false"
+        :has-more="activeWs?.hasMore ?? false"
+        :loading="activeWs?.trajLoading ?? false"
+        :error="activeWs?.trajError ?? null"
         @close="closeTraj"
+        @more="onTrajMore"
       />
     </template>
   </div>

@@ -93,6 +93,20 @@ async function mountWorkbench(seed: TabMeta[] = TWO_TABS, id = 's_1'): Promise<C
     '/api/channels': { status: 201, body: { channel_id: 'ch-1', node_id: 'n_1', session_id: 's_1' } },
     '/api/channels/ch-1': { empty: true },
     '/api/channels/ch-1/send': { empty: true },
+    // 对话走专用端点（不是 /api/channels）：`acp` 不是 connector
+    '/api/sessions/s_1/conversation': {
+      status: 201,
+      body: { channel_id: 'ch-acp', node_id: 'n_1', session_id: 's_1' },
+    },
+    '/api/sessions/s_1/trajectory': {
+      body: {
+        events: [
+          { id: 1, seq: 1, kind: 'agent_message_chunk', payload: '{"content":[{"type":"text","text":"hi"}]}', duration_ms: null, duration_source: 'none', created_at: 'unix:1' },
+        ],
+        gaps: [],
+        incomplete: false,
+      },
+    },
   })
   const w = mountIn(SessionPage)
   await flush(w)
@@ -723,12 +737,14 @@ describe('面板正文是 13b / 13c 的真组件，不是 13a 的占位', () => 
 })
 
 describe('对话列：ConvFlow 与轨迹抽屉', () => {
-  it('对话区挂着 ConvFlow（M1 恒空，明写「M3 起有数据」）', async () => {
+  it('对话区挂着 ConvFlow，且没有 agent 时说清为什么不能对话', async () => {
     const { w } = await mountWorkbench()
     const conv = w.element.querySelector('.af-wb__conv')
     expect(conv?.querySelector('[data-conv-input]')).not.toBeNull()
-    expect(conv?.textContent).toContain('M3 起有数据')
-    expect(conv?.textContent).toContain('输入区是唯一有数据源的部分')
+    // M1 那句「M3 起有数据」已经不成立了：对话真的能跑。现在没 agent 的会话
+    // 说的是「为什么不能对话」，不是一句没来由的「无数据」。
+    expect(conv?.textContent).toContain('还不能对话')
+    expect(conv?.textContent).toContain('没有选 agent')
   })
 
   it('`t` 打开轨迹抽屉，再按一次关掉（键位由页面注册）', async () => {
@@ -781,6 +797,14 @@ describe('对话列：ConvFlow 与轨迹抽屉', () => {
 describe('一次性命令走 exec 通道', () => {
   it('提交一条命令 = 开一条 exec 通道，参数带 command / args / cwd', async () => {
     const { w, fetchMock } = await mountWorkbench()
+    // **必须先选 exec**：默认目标是「对话」（这个组件叫对话流），而对话走的是
+    // ACP 子进程，不是 exec 通道。不显式选就会走错那条路。
+    const target = w.element.querySelector<HTMLSelectElement>('[data-conv-target]')
+    if (!target) throw new Error('no conv target')
+    target.value = 'exec'
+    target.dispatchEvent(new Event('change'))
+    await w.vm.$nextTick()
+
     const input = w.element.querySelector<HTMLTextAreaElement>('[data-conv-input]')
     if (!input) throw new Error('no conv input')
     input.value = 'ls -la'
@@ -818,5 +842,117 @@ describe('找不到的会话', () => {
     const empty = w.element.querySelector('.af-empty')
     expect(empty?.textContent).toContain('这个会话不存在')
     expect(w.element.querySelector('.af-wb__head')).toBeNull()
+  })
+})
+
+/* ------------------------------------------------------------------ 对话端到端 */
+
+/**
+ * 这些用例走的是**真接线**：从输入区一路到 `POST .../conversation` 与
+ * `GET .../trajectory`。组件自己的单测证明不了页面把 `@say` 接到了哪个端点上。
+ */
+/** 一个**选了 agent** 的会话：只有它才走得到「开对话通道」那一步。 */
+const WITH_AGENT = [
+  session({
+    id: 's_1',
+    agent_id: 'opencode',
+    workspace: { node_id: 'n_1', path: '/srv/alpha', path_locked: true },
+  }),
+]
+
+async function mountWithAgent(sessions = WITH_AGENT): Promise<Ctx> {
+  const fetchMock = stubFetch({
+    '/api/sessions': { body: sessions },
+    '/api/devices': { body: DEVICES },
+    '/api/sessions/s_1/conversation': {
+      status: 201,
+      body: { channel_id: 'ch-acp', node_id: 'n_1', session_id: 's_1' },
+    },
+    '/api/channels/ch-acp': { empty: true },
+    '/api/channels/ch-acp/send': { empty: true },
+    '/api/sessions/s_1/trajectory': {
+      body: {
+        events: [
+          { id: 1, seq: 1, kind: 'agent_message_chunk', payload: '{"content":[{"type":"text","text":"hi"}]}', duration_ms: null, duration_source: 'none', created_at: 'unix:1' },
+        ],
+        gaps: [],
+        incomplete: false,
+      },
+    },
+  })
+  sessionStorage.setItem(STORAGE_KEY, JSON.stringify([TWO_TABS[0]]))
+  window.history.replaceState(null, '', '/sessions/s_1')
+  route.value = matchRoute('/sessions/s_1')
+  const w = mountIn(SessionPage)
+  await flush(w)
+  return {
+    w,
+    fetchMock,
+    posts: () => 0,
+    deletes: () => [],
+    src: () => FakeEventSource.instances[0],
+  }
+}
+
+describe('对话：说一句话走专用端点（不是 /api/channels）', () => {
+  it('选了 agent 的会话，「对话」目标可选', async () => {
+    const { w } = await mountWithAgent()
+    const opt = w.element.querySelector<HTMLOptionElement>('option[value="chat"]')
+    expect(opt?.disabled, '选了 agent 就该能对话').toBe(false)
+  })
+
+  it('没有 agent 时「对话」目标不可选', async () => {
+    const { w } = await mountWithAgent([
+      session({ id: 's_1', agent_id: null, workspace: { node_id: 'n_1', path: '/srv/alpha', path_locked: true } }),
+    ])
+    const opt = w.element.querySelector<HTMLOptionElement>('option[value="chat"]')
+    expect(opt?.disabled).toBe(true)
+  })
+
+  it('发送 → POST /api/sessions/{id}/conversation，不是 /api/channels', async () => {
+    const { w, fetchMock } = await mountWithAgent()
+    const input = w.element.querySelector<HTMLTextAreaElement>('[data-conv-input]')
+    if (!input) throw new Error('no conv input')
+    input.value = '帮我看看测试为什么红'
+    input.dispatchEvent(new Event('input'))
+    await w.vm.$nextTick()
+    w.element.querySelector('form')?.dispatchEvent(new Event('submit', { cancelable: true }))
+    await flush(w)
+
+    const urls = fetchMock.mock.calls.map(([u]) => new URL(String(u), 'http://hub.local').pathname)
+    // **不是 /api/channels**：`acp` 不是 connector，通用端点的能力门禁会 409
+    expect(urls, `实际请求：${urls.join(', ')}`).toContain('/api/sessions/s_1/conversation')
+  })
+
+  it('没有 agent 时点发送不会开任何对话通道', async () => {
+    const { w, fetchMock } = await mountWithAgent([
+      session({ id: 's_1', agent_id: null, workspace: { node_id: 'n_1', path: '/srv/alpha', path_locked: true } }),
+    ])
+    const input = w.element.querySelector<HTMLTextAreaElement>('[data-conv-input]')
+    if (!input) throw new Error('no conv input')
+    input.value = 'hi'
+    input.dispatchEvent(new Event('input'))
+    await w.vm.$nextTick()
+    w.element.querySelector('form')?.dispatchEvent(new Event('submit', { cancelable: true }))
+    await flush(w)
+
+    const urls = fetchMock.mock.calls.map(([u]) => new URL(String(u), 'http://hub.local').pathname)
+    expect(urls, `实际请求：${urls.join(', ')}`).not.toContain('/api/sessions/s_1/conversation')
+  })
+})
+
+describe('轨迹抽屉：打开即读，读到就画', () => {
+  it('按 t 打开抽屉 → GET .../trajectory，事件画进列表', async () => {
+    const { w, fetchMock } = await mountWithAgent()
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 't', bubbles: true, cancelable: true }))
+    await flush(w)
+
+    const urls = fetchMock.mock.calls.map(([u]) => new URL(String(u), 'http://hub.local').pathname)
+    expect(urls, `实际请求：${urls.join(', ')}`).toContain('/api/sessions/s_1/trajectory')
+
+    const rows = document.querySelectorAll('[data-traj-row]')
+    expect(rows.length, '轨迹行要画出来').toBe(1)
+    expect(rows[0]?.textContent).toContain('agent_message_chunk')
   })
 })

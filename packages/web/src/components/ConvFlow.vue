@@ -1,42 +1,46 @@
 <script setup lang="ts">
 /* ===========================================================================
-   ConvFlow —— 对话流（规范 §5.4 / §7.5 / §3.11 / §3.10）
+   ConvFlow —— 对话流
    ---------------------------------------------------------------------------
-   13d 只做**框架与空态**：对话区在 M1 恒为空，因为这个里程碑的会话是
-   **页面级容器**（工作区 + 面板），它不产生真实 agent 轨迹——ACP 归 M3。
-   所以这里渲染的是「空态 + 为什么空 + 什么时候会有」，**不画一条假消息**。
-   按 `design-system.md:736` 把 User / Agent / Tool / System 四类行全字段
-   画出来（含折叠的工具块），那是在实现 M3。
+   **对话是 agent 说的话，exec 是跑一条命令**，两者在这个组件里共用一行输入框，
+   但它们不是一回事，所以从这个里程碑起把话说清楚：
 
-   ── 输入区为什么是这里唯一「有数据源」的部分 ────────────────────
-   对话是空的，输入区不是装饰：它把一行命令交给 **exec connector**
-   （子任务 10）跑一次。这不是 ACP——没有 agent 参与，不产生轨迹事件，
-   所以跑完之后对话流**仍然为空**。这一句必须写在页面上，否则用户会
-   读成「执行了但没反应」。
+   - 选「对话」：把整段文本交给设备的 ACP 子进程，回复以事件流回来，
+     **写进 trajectory_event**（页面刷新后还在）；
+   - 选「exec」：一次性命令，跑完通道就关，输出一次回完，**不进轨迹**。
 
-   ── 为什么不做 shell ──────────────────────────────────────────
-   一行按空白切成 `command` + `args`，引号只用来把带空格的参数合成一个。
-   管道 / 重定向 / 通配 / 变量展开**都不生效**：exec connector 走
-   `execvp(2)`，不是 `/bin/sh -c`。这条写在提示里——用户第一次敲
-   `grep x * | head` 的时候应该已经知道它不会按 shell 的语义跑。
-   与其悄悄丢掉那半句，不如一开始就说明白这里没有 shell。
+   以前输入区恒冒充对话区（「把一行命令交给 exec connector」是当时唯一有数据
+   源的部分），页面上却没有一句「这不是对话」。现在两件事分开标的，
+   因为同一个输入框里有两种语义而不说明，用户会把「跑完没有任何消息」
+   读成「功能坏了」。
 
-   ── 空态为什么必须明写「M3 起有数据」 ────────────────────────────
-   一个什么都不说的空区域会被读成「加载失败」或「功能没做完」。
-   `AgentsPage` 顶上那条 `af-stage-note`（「M1 无数据」+ 为什么）是同一个
-   问题的既有答案，这里照它的调性做。
+   ── 帧格式是设备侧定的契约 ──────────────────────────────────────
+   `node-core` 的 `conversation.rs` 往通道里推六类帧：`batch` / `turn_end` /
+   `ready` / `error` / `request` / `exited`。这里**只解释不发明**：缺字段就用
+   保守空值，不在前端编一条「看起来像回复」的消息。
 
-   ── 会话已结束时输入区整体禁用 ────────────────────────────────
-   不是灰掉按钮了事：结束的会话不再建任何通道，而「能打字但按下没反应」
-   比「不能打字」难懂得多。禁用 + 一句为什么。
+   `batch.events` 里每条是 ACP 原样的 `update` 对象（`sessionUpdate` 标类型、
+   `seq` 由设备编号）。**未知类型照样画**，只是没有专门的版式——新版本 agent
+   推的类型我们还没见过，过滤掉就是让用户看不见 agent 说了什么。
+
+   ── 断口要画出来，不许假装连续 ──────────────────────────────────
+   `seq` 由设备编号、中间丢一段在 Hub 侧看得出来（`gaps`）。把缺的那一截
+   悄悄拼上，用户会以为 agent 就是说了这些。所以：缺 N 条就写「缺失 N 条」，
+   末轮没有 `turn_end` 就写「本轮未完成」。**不补内容**——轨迹备份格里 halo
+   补不回来（ACP 没有重发机制，`session/load` 是重建流，不是原始事件流）。
+
+   ── 为什么不是 shell ──────────────────────────────────────────
+   exec 目标下，一行按空白切成 `command` + `args`，引号只用来把带空格的参数
+   合成一个。管道 / 重定向 / 通配 / 变量展开**都不生效**：exec connector 走
+   `execvp(2)`，不是 `/bin/sh -c`。这条写在提示里。
    =========================================================================== */
 
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import EmptyState from '@/components/EmptyState.vue'
 
-/** 输入区的发送目标。 */
-export type ConvTarget = 'exec' | 'terminal'
+/** 输入区的发送目标。`exec` 是一次性命令，`chat` 才是对话。 */
+export type ConvTarget = 'exec' | 'terminal' | 'chat'
 
 /** 一次 exec 请求。字段与 `node-core/src/connector/exec.rs` 的 `ExecParams` 对齐。 */
 export interface ConvExecRequest {
@@ -46,10 +50,31 @@ export interface ConvExecRequest {
   args: string[]
   /**
    * 相对工作区根。恒为 `''`——工作区根就是会话路径（创建后锁定），
-   * 而这个页面没有第二个根（§5.4）。
+   * 而这个页面没有第二个根。
    */
   cwd: string
 }
+
+/**
+ * 一段序号空洞：`[from, to)` 里的 seq 都不在库里。
+ *
+ * 与 Hub 侧 `hub-storage/src/trajectory.rs` 的 `Gap` 同一套坐标：`to` 是
+ * **那个存在的 seq**、充当排他上界，所以「缺几条」是 `to - from`。前端不自己
+ * 算这个减法——Hub 已经把它算进 `missing` 字段里了，两处各算一份会分叉。
+ */
+export interface ConvGap {
+  from: number
+  to: number
+  missing: number
+}
+
+/** 一条待渲染的对话事件。已按 `seq` 排好、断口已插进去。 */
+export type ConvRow =
+  | { kind: 'gap'; key: string; missing: number; after: number | null }
+  | { kind: 'msg'; key: string; who: 'user' | 'agent' | 'system'; text: string }
+  | { kind: 'tool'; key: string; name: string; status: string; detail: string }
+  | { kind: 'turn'; key: string; reason: string; incomplete?: false }
+  | { key: string; kind: 'incomplete' }
 
 const props = withDefaults(
   defineProps<{
@@ -61,17 +86,56 @@ const props = withDefaults(
     ended?: boolean
     /** 终端面板是否已有可用通道（决定「终端」这个目标能不能选）。 */
     terminalReady?: boolean
+    /**
+     * 对话通道最近一次失败的错误码。
+     *
+     * **它不拦发送**：agent 不可用是设备侧当时的状态，过一会可能就好了。
+     * 通道是「说第一句话时才开」的，所以失败只在**已经发过**之后才可能有值——
+     * 那时把原因显示出来，而把重试的路留着（再发一次就会再开一次）。
+     */
+    convError?: string | null
     /** 轨迹抽屉是否开着——让这个入口能显示展开态。 */
     trajOpen?: boolean
+    /** 这个会话选了哪个 agent。没有就不能对话，原因要写在页面上。 */
+    agentId?: string | null
+    /**
+     * 累积的对话事件。**按物理顺序**，与 `GET /api/sessions/{id}/trajectory`
+     * 返回的 `events` 同形（每条带 `seq` / `kind` / `payload`）。
+     */
+    events?: ConvEvent[]
+    /** 序号断口。Hub 算好给过来，前端不重算。 */
+    gaps?: ConvGap[]
+    /** 最后一轮没有 `turn_end`：还在跑，或结尾丢了。 */
+    incomplete?: boolean
   }>(),
-  { ended: false, terminalReady: false, trajOpen: false },
+  {
+    ended: false,
+    terminalReady: false,
+    convError: null,
+    trajOpen: false,
+    agentId: null,
+    events: () => [],
+    gaps: () => [],
+    incomplete: false,
+  },
 )
+
+/** Hub 侧 `trajectory_event` 一行的形状（见 `EventOut`）。 */
+export interface ConvEvent {
+  id: number
+  seq: number
+  kind: string
+  /** **原始 JSON 字符串**，这里是 ACP `update` 对象。 */
+  payload: string
+}
 
 const emit = defineEmits<{
   /** 跑一条一次性命令：交给 exec connector。 */
   (e: 'run', req: ConvExecRequest): void
   /** 把一段文本送进终端面板的通道（等于在终端里敲这一行）。 */
   (e: 'send', text: string): void
+  /** 说一句话：交给设备的 ACP 子进程。 */
+  (e: 'say', text: string): void
   /**
    * 打开轨迹抽屉。`opener` 是触发它的那个元素——抽屉关闭后焦点还给它，
    * 所以触发方必须把它交出来，而不是让抽屉去猜 `activeElement`
@@ -80,32 +144,222 @@ const emit = defineEmits<{
   (e: 'open-traj', opener: HTMLElement | null): void
 }>()
 
-const EMPTY_TEXT =
-  'M3 起有数据。对话是 trajectory_event 按 kind 折叠后的读法，' +
-  '而 M1 的会话容器不产生这条事件流（ACP 归 M3）——所以这里恒空是预期结果，' +
-  '不是加载失败。这里不画假消息。'
+const EMPTY_HAS_AGENT =
+  '选好目标后按 ⏎ 发送。选「对话」时，回复会以事件流回来并写进轨迹——' +
+  '刷新页面后还在。'
+
+const EMPTY_NO_AGENT =
+  '这个会话没有选 agent，所以还不能对话。' +
+  '消息要经过设备上的 agent 才有回复，而 Hub 不替你挑一个——' +
+  '那会替你做一个写进会话历史的决定。'
 
 const draft = ref('')
-const target = ref<ConvTarget>('exec')
+/** 默认是 `chat` 而不是 `exec`：这个组件的名字是「对话流」。 */
+const target = ref<ConvTarget>('chat')
 const trajBtnEl = ref<HTMLButtonElement | null>(null)
+const flowEl = ref<HTMLElement | null>(null)
+/** 用户手动往上翻过就先不自动滚——自动滚回去等于抢走他正在读的位置。 */
+let pinnedToBottom = true
 
 const canSubmit = computed(() => !props.ended && draft.value.trim().length > 0)
 
-const placeholder = computed(() =>
-  props.ended
-    ? '这个会话已结束：面板与命令都不会再建立通道'
-    : `在 ${props.path} 里跑一条命令（不是 shell：管道与重定向不会生效）`,
-)
+/** 每个目标为什么不可用。不可用时该目标直接不选。 */
+/**
+ * 「对话」这个目标为什么不能用。
+ *
+ * **判据只有 `agentId`**：对话通道是**说第一句话时才开**的（见页面
+ * `ensureChatChannel`），所以「通道还没建」不是不能发，而是**还没发**——
+ * 把它算进判据就死锁了：目标选不了 → 发不出去 → 通道永远建不起来。
+ *
+ * 通道建不建的**结果**由 `convError` 表达，而且它不拦发送：agent 不可用
+ * 是设备侧当时的状态，过一会可能就好了，所以这里要留重试的路。
+ */
+const chatBlocked = computed(() => {
+  if (props.ended) return '会话已结束'
+  if (!props.agentId) return '没有选 agent'
+  return ''
+})
+
+const canChat = computed(() => chatBlocked.value === '')
+
+const placeholder = computed(() => {
+  if (props.ended) return '这个会话已结束：面板与命令都不会再建立通道'
+  if (target.value === 'chat') {
+    return props.agentId
+      ? `对 ${props.agentId} 说一句话`
+      : '这个会话没有选 agent，不能对话'
+  }
+  return `在 ${props.path} 里跑一条命令（不是 shell：管道与重定向不会生效）`
+})
 
 const targetHint = computed(() => {
   if (props.ended) return ''
+  if (target.value === 'chat') {
+    if (!canChat.value) return chatBlocked.value
+    // 开通道失败要说出来：输入框已经清空，而用户没看到任何回复——
+    // 不说明的话他会以为「发出去了没回音」，然后一遍遍重发。
+    if (props.convError) return `上一次没开成对话通道（${props.convError}）。再发一次会重试。`
+    // 「慢」要说在前面：实测有一次 130 秒才回完。不预告的话，用户会把
+    // 长时间没有回复读成「卡住了」，然后重复发送。
+    return `交给 ${props.agentId}：回复可能很长也很慢（实测最慢一次 130 秒才回完），` +
+      '期间页面不会卡住——事件是流式的'
+  }
   if (target.value === 'exec') {
-    return 'exec 是一次性命令：跑完就结束、通道随即关闭，退出码与输出一次回完（没有交互）'
+    return 'exec 是一次性命令：跑完就结束、通道随即关闭，输出与退出码一次回完（没有交互，也不进轨迹）'
   }
   return props.terminalReady
     ? '送进已打开的终端面板：等于在终端里敲这一行并回车'
     : '终端面板还没有通道：先按 o 打开面板并与它交互一次'
 })
+
+/** 把 Hub 给的事件排成行，断口插在它该在的位置。 */
+const rows = computed<ConvRow[]>(() => {
+  const out: ConvRow[] = []
+  // **断口按「它前面断了的那条存在的事件」索引，也就是 `gap.to`**。
+  //
+  // `Gap` 是半开区间 `[from, to)`：`to` 是那个**存在**的 seq。所以断口标记
+  // 画在 `seq == to` 那条事件之前。
+  //
+  // 按 `from` 索引是错的，而且错得很隐蔽：断口里的 seq 都不在库里，
+  // 于是「找到 seq == from 的那条事件」永远找不到，标记一个也不画——
+  // 页面看起来就是连续的。这正是这条功能要防的事。
+  const gapBefore = new Map<number, ConvGap>()
+  for (const g of props.gaps) {
+    gapBefore.set(g.to, g)
+  }
+  for (const ev of props.events) {
+    const gap = gapBefore.get(ev.seq)
+    if (gap) {
+      // 画一句「缺了 N 条」而不是悄悄补上内容——补上就等于撒谎，
+      // 因为没有第 3 层（见模块注释）能把它们找回来。
+      out.push({
+        kind: 'gap',
+        key: `gap-${gap.from}`,
+        // `after` 是断口前最后一条**存在**的 seq，也就是 `from - 1`。
+        missing: gap.missing,
+        after: gap.from - 1,
+      })
+    }
+    const row = rowOf(ev)
+    if (row) out.push(row)
+  }
+  if (props.incomplete) {
+    out.push({ key: 'incomplete', kind: 'incomplete' })
+  }
+  return out
+})
+
+const hasRows = computed(() => rows.value.length > 0)
+
+/**
+ * 一条落成库的事件 → 一行。
+ *
+ * `payload` 是原始 JSON 字符串：**解开失败就退化成原文**，不整条丢掉。
+ * 丢掉的表现是「agent 说了话，页面上什么都没有」，而那比一段看不懂的 JSON 糟。
+ */
+function rowOf(ev: ConvEvent): ConvRow | null {
+  const p = parsePayload(ev.payload)
+  switch (ev.kind) {
+    case 'turn_end':
+      return { kind: 'turn', key: `${ev.id}`, reason: str(p?.stopReason) }
+    case 'user_message_chunk':
+      return { kind: 'msg', key: `${ev.id}`, who: 'user', text: chunkText(p, ev.payload) }
+    case 'agent_message_chunk':
+      return { kind: 'msg', key: `${ev.id}`, who: 'agent', text: chunkText(p, ev.payload) }
+    case 'tool_call':
+    case 'tool_call_update':
+      return {
+        kind: 'tool',
+        key: `${ev.id}`,
+        name: toolName(p, ev.kind),
+        status: str(p?.status) || 'running',
+        detail: toolDetail(p),
+      }
+    default:
+      // 未知事件类型照样画（`dynamic_system.md` 的要求与此一致）：它也是
+      // agent 说过的话的一部分，静默丢掉就是让用户看不见。
+      return { kind: 'msg', key: `${ev.id}`, who: 'system', text: fallbackText(ev, p) }
+  }
+}
+
+/**
+ * 消息行头的那三个字。
+ *
+ * 用「我 / agent / 系统」而不是 ACP 的事件类型名（`agent_message_chunk`）：
+ * 行头是给人读的，而类型名是协议里的东西——把协议名直接端上页面，
+ * 用户看到的是一串不认识的下划线。
+ */
+function whoLabel(who: 'user' | 'agent' | 'system'): string {
+  if (who === 'user') return '我'
+  if (who === 'agent') return 'agent'
+  return '系统'
+}
+
+function parsePayload(raw: string): Record<string, unknown> | null {
+  try {
+    const v: unknown = JSON.parse(raw)
+    return v && typeof v === 'object' ? (v as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
+function str(v: unknown): string {
+  return typeof v === 'string' ? v : ''
+}
+
+/**
+ * chunk 的文本在 `content` 里，而它可能是数组（多模态）。取 text 段拼起来。
+ *
+ * `raw` 是**原始 payload 字符串**，专门给「解不开 JSON」那一档用：那一档必须
+ * 原样显示出来，而不是退化成一个空对象——`JSON.stringify(p ?? {})` 会得到
+ * `{}`，于是 agent 说的话在页面上变成一对空花括号，而那比一段看不懂的原文
+ * 糟得多（用户连「它到底说了什么」都没了）。
+ */
+function chunkText(p: Record<string, unknown> | null, raw: string): string {
+  if (!p) return raw
+  const c = p.content
+  if (typeof c === 'string') return c
+  if (Array.isArray(c)) {
+    const text = c
+      .map((b) => {
+        const blk = b as Record<string, unknown>
+        if (typeof blk.text === 'string') return blk.text
+        return ''
+      })
+      .join('')
+    if (text) return text
+  }
+  if (typeof p.text === 'string') return p.text
+  return raw
+}
+
+function toolName(p: Record<string, unknown> | null, kind: string): string {
+  const title = typeof p?.title === 'string' ? p.title : ''
+  if (title) return title
+  const raw = p?.rawInput
+  if (raw && typeof raw === 'object') {
+    const o = raw as Record<string, unknown>
+    for (const k of ['command', 'filePath', 'path', 'pattern']) {
+      if (typeof o[k] === 'string') return String(o[k])
+    }
+  }
+  return kind === 'tool_call_update' ? 'tool update' : 'tool'
+}
+
+/** 工具块折叠起来的那部分：命令 / 路径优先，拿不到就 dump 整个入参。 */
+function toolDetail(p: Record<string, unknown> | null): string {
+  const raw = p?.rawInput ?? p?.rawOutput
+  if (raw === undefined) return ''
+  return typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2)
+}
+
+/** 未知类型的兜底文案：带上 `kind`，用户至少能报「哪种事件没在页面上」。 */
+function fallbackText(ev: ConvEvent, p: Record<string, unknown> | null): string {
+  const head = `${ev.kind}`
+  if (!p) return ev.payload
+  return `${head} ${JSON.stringify(p)}`
+}
 
 /**
  * 一行 → `{ command, args }`。
@@ -157,6 +411,12 @@ function submit(): void {
     draft.value = ''
     return
   }
+  if (target.value === 'chat') {
+    if (!canChat.value) return
+    emit('say', text)
+    draft.value = ''
+    return
+  }
   const parsed = parseCommand(text)
   if (!parsed) return
   emit('run', { command: parsed.command, args: parsed.args, cwd: '' })
@@ -176,29 +436,93 @@ function onKeydown(e: KeyboardEvent): void {
   e.preventDefault()
   submit()
 }
+
+function onScroll(): void {
+  const el = flowEl.value
+  if (!el) return
+  // 底部 24px 内算「贴着底」：消息是一条一条追加上来的，差几像素不该
+  // 把用户甩出自动跟随。
+  pinnedToBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+}
+
+/** 有新内容就贴到底——除非用户自己翻上去了。 */
+watch(
+  () => rows.value.length,
+  async () => {
+    if (!pinnedToBottom) return
+    await Promise.resolve()
+    const el = flowEl.value
+    if (el) el.scrollTop = el.scrollHeight
+  },
+)
 </script>
 
 <template>
   <div class="af-flowhost">
-    <!-- 这条横幅是「为什么空」：不写它，空对话区会被读成加载失败 -->
-    <div class="af-stage-note" role="note">
-      <span class="af-badge af-badge--warn">M1 无数据</span>
+    <!--
+      只在「没有 agent」时挂这条横幅。其他情形不挂：以前那条「M1 无数据」
+      在这个里程碑已经不成立了（对话真的能跑），留着它才是在骗人。
+    -->
+    <div v-if="!agentId && !ended" class="af-stage-note" role="note">
+      <span class="af-badge af-badge--warn">不能对话</span>
       <div class="af-stage-note__body">
         <p>
-          <b>对话流在 M1 恒定为空</b>：M1 的会话是页面级容器（工作区 + 面板），
-          没有 ACP 会话，也不产生 <span class="af-fp">trajectory_event</span>——
-          ACP 归 M3。这里不画假消息。
-        </p>
-        <p class="af-t-mute">
-          输入区是唯一有数据源的部分：它把一行命令交给 exec connector 跑一次
-          （子任务 10）。那不是对话——跑完不会在这里留下一条消息。
+          <b>这个会话没有选 agent</b>，所以「对话」目标不可用。消息要经过设备上
+          的 agent 才有回复，Hub 不替用户挑一个——那会替用户做一个写进会话历史的
+          决定。
         </p>
       </div>
     </div>
 
-    <!-- 对话流本体：M1 恒空，容器先立好（role="log" 是 M3 追加消息时的语义） -->
-    <div class="af-flow af-flowhost__flow" role="log" aria-label="对话流（M1 恒空，M3 起有数据）">
-      <EmptyState glyph="◇" title="M3 起有数据" :text="EMPTY_TEXT" />
+    <!-- 对话流本体：role="log" 是「会不断追加」的语义，读屏会播报新增内容 -->
+    <div
+      ref="flowEl"
+      class="af-flow af-flowhost__flow"
+      :class="{ 'af-flow--rows': hasRows }"
+      role="log"
+      aria-label="对话流"
+      data-conv-log
+      @scroll="onScroll"
+    >
+      <template v-if="hasRows">
+        <template v-for="row in rows" :key="row.key">
+          <!-- 断口：写清缺了几条，不假装连续 -->
+          <p v-if="row.kind === 'gap'" class="af-gap" data-conv-gap>
+            <span aria-hidden="true">⋯</span>
+            此处缺失 {{ row.missing }} 条（seq {{ row.after }} 之后断开）
+          </p>
+
+          <p v-else-if="row.kind === 'incomplete'" class="af-gap af-gap--open" data-conv-incomplete>
+            <span aria-hidden="true">◌</span>
+            本轮未完成：没有收到 <span class="af-fp">turn_end</span>，可能还在跑，也可能结尾丢了
+          </p>
+
+          <div v-else-if="row.kind === 'msg'" class="af-msg" :data-who="row.who" data-conv-msg>
+            <span class="af-msg__who">{{ whoLabel(row.who) }}</span>
+            <div class="af-msg__body">{{ row.text }}</div>
+          </div>
+
+          <details v-else-if="row.kind === 'tool'" class="af-tool" data-open="false" data-conv-tool>
+            <summary class="af-tool__head">
+              <span class="af-tool__name">{{ row.name }}</span>
+              <span class="af-tool__ms">{{ row.status }}</span>
+            </summary>
+            <pre v-if="row.detail" class="af-tool__body">{{ row.detail }}</pre>
+          </details>
+
+          <p v-else-if="row.kind === 'turn'" class="af-turn" data-conv-turn>
+            <span aria-hidden="true">✓</span> 本轮结束：{{ row.reason || '未说明原因' }}
+          </p>
+        </template>
+      </template>
+
+      <EmptyState
+        v-else-if="!agentId"
+        glyph="◇"
+        title="还不能对话"
+        :text="EMPTY_NO_AGENT"
+      />
+      <EmptyState v-else glyph="◇" title="还没有消息" :text="EMPTY_HAS_AGENT" />
     </div>
 
     <form class="af-compose" @submit.prevent="submit">
@@ -209,7 +533,7 @@ function onKeydown(e: KeyboardEvent): void {
           rows="1"
           :disabled="ended"
           :aria-label="
-            ended ? '命令（这个会话已结束：不会再建立通道）' : '命令：一行，按 ⏎ 执行'
+            ended ? '输入（这个会话已结束：不会再建立通道）' : '输入：按 ⏎ 发送'
           "
           :placeholder="placeholder"
           data-conv-input
@@ -223,12 +547,18 @@ function onKeydown(e: KeyboardEvent): void {
           aria-label="发送目标"
           data-conv-target
         >
+          <option value="chat" :disabled="!canChat">对话 · 交给 agent</option>
           <option value="exec">exec · 一次性命令</option>
           <option value="terminal" :disabled="!terminalReady">终端 · 送进 PTY</option>
         </select>
 
-        <button class="af-btn af-btn--primary" type="submit" :disabled="!canSubmit" data-conv-run>
-          执行
+        <button
+          class="af-btn af-btn--primary"
+          type="submit"
+          :disabled="!canSubmit || (target === 'chat' && !canChat)"
+          data-conv-run
+        >
+          {{ target === 'chat' ? '发送' : '执行' }}
         </button>
 
         <button
@@ -250,7 +580,7 @@ function onKeydown(e: KeyboardEvent): void {
         与「结束了为什么不能打字」两条都写在这里，而不只写在 placeholder。
       -->
       <p class="af-compose__hint af-field__hint">
-        <span><kbd>⏎</kbd> 执行</span>
+        <span><kbd>⏎</kbd> 发送</span>
         <span><kbd>⇧⏎</kbd> 换行</span>
         <span><kbd>t</kbd> 轨迹抽屉</span>
         <span class="af-spacer"></span>
@@ -258,9 +588,12 @@ function onKeydown(e: KeyboardEvent): void {
         <span v-if="ended" class="af-compose__why">
           这个会话已结束：工作区不再可达，面板与命令都不会再建立通道。
         </span>
-        <span v-else class="af-compose__why">
+        <span v-else-if="target === 'exec'" class="af-compose__why">
           这里不是 shell：一行按空白切成程序名与参数，引号只用来把带空格的参数
           合成一个——管道与重定向、通配与变量展开都不会生效。
+        </span>
+        <span v-else-if="target === 'chat' && chatBlocked" class="af-compose__why">
+          不能对话：{{ chatBlocked }}。
         </span>
         <span v-if="targetHint" class="af-t-mute">{{ targetHint }}</span>
       </p>
@@ -280,6 +613,13 @@ function onKeydown(e: KeyboardEvent): void {
   display: flex;
   flex-direction: column;
   justify-content: center;
+  overflow: auto;
+}
+/* 有内容时改成「顶对齐 + 留白」，不再把整块挤到垂直居中 */
+.af-flow--rows {
+  justify-content: flex-start;
+  gap: var(--af-space-3);
+  padding: var(--af-space-4) var(--af-space-5);
 }
 .af-compose__target {
   flex: 0 0 auto;
@@ -296,8 +636,28 @@ function onKeydown(e: KeyboardEvent): void {
   order: 1;
 }
 
+/* 断口 / 收尾：这两者是「完整性可见」的两个方向，样式同族（虚线 + 弱色） */
+.af-gap {
+  margin: 0;
+  padding: var(--af-space-2) var(--af-space-3);
+  font-size: var(--af-text-xs);
+  color: var(--af-fg-tertiary);
+  border: 1px dashed var(--af-border-default);
+  border-radius: var(--af-radius-md);
+  background: var(--af-surface-2);
+}
+.af-gap--open {
+  border-color: var(--af-warn);
+  color: var(--af-warn);
+}
+.af-turn {
+  margin: 0;
+  font-size: var(--af-text-xs);
+  color: var(--af-fg-tertiary);
+}
+
 /* 阶段横幅。与 AgentsPage 的同名块同一套语言（§3.11 的「为什么空」）：
-   警告色左边线 + 徽标 + 两段说明，不跟随滚动，也不是 toast。 */
+   警告色左边线 + 徽标 + 说明，不跟随滚动，也不是 toast。 */
 .af-stage-note {
   display: flex;
   align-items: flex-start;

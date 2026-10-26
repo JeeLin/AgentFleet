@@ -63,10 +63,25 @@ export const DEFAULT_ROWS = 24
 /** 开一条通道所需的全部输入。 */
 export interface ChannelSpec {
   sessionId: string
-  /** `terminal` / `files` / `exec`。 */
+  /** `terminal` / `files` / `exec` / `acp`。 */
   connector: string
   /** connector 私有参数（terminal 的 `cwd` / `cols` / `rows` 等）。 */
   params?: Record<string, unknown>
+  /**
+   * 开通道走哪个端点。缺省（以及 `channel`）是通用的 `POST /api/channels`。
+   *
+   * `conversation` 走 `POST /api/sessions/{id}/conversation`：
+   *
+   * - **`acp` 不是 connector**，它不出现在设备的能力上报里，所以通用端点
+   *   的能力门禁永远判它「未上报」并 409；
+   * - 对话的启动配置（`agent_config`）存在 Hub 侧，设备没有那张表。只有专用
+   *   端点会把它读出来随 `params` 下发，通用端点只透传页面给的东西——
+   *   让页面自己拼配置，等于把「设备上用哪份配置」变成可自相矛盾的输入。
+   *
+   * 两种端点返回同一个 `OpenedChannel`，所以此后的一切（信用、SSE、关闭）
+   * 完全复用。
+   */
+  openVia?: 'channel' | 'conversation'
 }
 
 /** `POST /api/channels` 的响应。 */
@@ -295,7 +310,14 @@ class ChannelHandleImpl implements ChannelHandle {
   /** 通道所属设备。`open()` 成功时从 Hub 的响应里取——分派键要用它。 */
   private nodeId: string | null = null
   private failure: string | null = null
-  private inflight: Promise<void> | null = null
+  /**
+   * 在建的那次 `open()`。
+   *
+   * 类型是 `Promise<unknown>` 而不是 `Promise<void>`：建通道的两个端点里，
+   * 对话那个是 `Promise<OpenedChannel>`，而 `.then` 链最终归一成 `Promise<void>`。
+   * 标成 `void` 会让「先把响应赋进来、再接 then」这种写法编译不过。
+   */
+  private inflight: Promise<unknown> | null = null
 
   /** 断线期间丢掉的**文本条数**（UI 要显示的这个数）。 */
   private dropCount = 0
@@ -342,16 +364,20 @@ class ChannelHandleImpl implements ChannelHandle {
 
   open(): Promise<void> {
     if (this.current === 'ready') return Promise.resolve()
-    if (this.inflight) return this.inflight
+    if (this.inflight) return this.inflight.then(() => undefined)
     this.set('opening')
     this.failure = null
     // **先建 SSE**：开了通道但没有下行订阅，用户会看到「已连接」却收不到一个字。
     this.hub.connect()
-    this.inflight = postJson<OpenedChannel>('/api/channels', {
-      session_id: this.spec.sessionId,
-      connector: this.spec.connector,
-      params: this.spec.params ?? {},
-    })
+    const opening: Promise<OpenedChannel> =
+      this.spec.openVia === 'conversation'
+        ? postJson<OpenedChannel>(`/api/sessions/${this.spec.sessionId}/conversation`)
+        : postJson<OpenedChannel>('/api/channels', {
+            session_id: this.spec.sessionId,
+            connector: this.spec.connector,
+            params: this.spec.params ?? {},
+          })
+    this.inflight = opening
       .then((res) => {
         // 建好之前被关掉了（点开面板又立刻关）：这次 open 的成果作废，
         // 否则一个刚 DELETE 掉的通道会被重新标成 ready 并 bind 回 Hub，
@@ -382,7 +408,7 @@ class ChannelHandleImpl implements ChannelHandle {
       .finally(() => {
         this.inflight = null
       })
-    return this.inflight
+    return this.inflight.then(() => undefined)
   }
 
   send(text: string): void {
