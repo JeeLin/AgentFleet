@@ -73,6 +73,12 @@ pub struct Worker {
     data_dir: PathBuf,
     hub_url: String,
     log: Box<Logger>,
+    /// 本机 agent 探测结果的缓存（要求 1「cli 能上报 agent 运行时」）。
+    ///
+    /// 心跳**读它**、不探测（探测会起子进程并最多等 2s，放进心跳臂等于让
+    /// 心跳节奏取决于本机装了什么 agent）。刷新在 `run_with` 里做，不在
+    /// `select!` 的阻塞路径上。
+    detected: crate::agent::Detected,
 }
 
 /// 主动泵一轮的周期。
@@ -93,6 +99,7 @@ impl Worker {
             data_dir,
             hub_url,
             log: Box::new(log),
+            detected: crate::agent::Detected::new(),
         }
     }
 
@@ -271,6 +278,22 @@ impl Worker {
             return Err(exit_code::CRASH);
         }
         let interval = Duration::from_millis(est.auth_ok.heartbeat_interval_ms);
+        // 探测本机 agent，**在心跳循环之前、`select!` 之外**（要求 1）。
+        //
+        // 放这里的两个理由：
+        // 1. 探测起子进程、最多等 2s——放进心跳臂会让心跳的准时性取决于本机
+        //    装了什么 agent（M1 的 `exec` 堵住心跳臂就是这个形状）。
+        // 2. 放在每条连接建立后，而不是进程启动时一次：设备上装完 agent
+        //    （子任务 4）之后重连就能报出来，不必重启进程。这正是要求 2
+        //    「装完 → 心跳回报就绪」依赖的那条路径。
+        //
+        // 探测失败不影响连接：拿不到就是空/不可用，**不编造**。
+        let snap = self.detected.refresh();
+        let available = snap.agents.iter().filter(|a| a.available).count();
+        self.say(&format!(
+            "detected {} agent(s), {available} available",
+            snap.agents.len()
+        ));
         let end = self.session(&mut est, interval).await;
         let released = channel::on_disconnect();
         if released > 0 {
@@ -473,7 +496,12 @@ impl Worker {
     /// 工作区根留空：M0 还没有「用户配置的工作区」这个概念，而本模块
     /// 明确不许遍历文件系统去猜（§2 路径排除规则）。
     async fn send_heartbeat(&self, est: &mut Established) -> Result<(), ConnOutcome> {
-        let hb = heartbeat::heartbeat(Vec::new());
+        // 读缓存，**不探测**：这条函数在 `select!` 的心跳臂里被调用，
+        // 而探测要起子进程并最多等 2 秒——在这里做等于让心跳的准时性
+        // 取决于本机装了什么 agent（M1 的 `exec` 在 `open()` 里同步跑命令
+        // 就是这么把心跳臂堵住的）。刷新点在 `run_with`，见那里的注释。
+        let agents = &self.detected.snapshot().agents;
+        let hb = heartbeat::heartbeat_with_agents(Vec::new(), agents);
         // coverage: excluded — heartbeat 编码失败需构造 serde 失败的 Heartbeat。
         let payload = serde_json::to_value(&hb).map_err(|e| ConnOutcome::Transport {
             detail: format!("heartbeat encode: {e}"),

@@ -2,15 +2,18 @@
 /* ===========================================================================
    AgentsPage —— Agent 目录（规范 §5.3 / §7.6）
    ---------------------------------------------------------------------------
-   这个页面在 M1 **必然是空的**，所以它必须把「为什么空」写在页面上，
-   而不是做出一个「做了但永远空」的页面。
+   数据源是设备心跳上报的 `capabilities.agents`。
 
-   数据源是设备心跳上报的 `capabilities.agents`（「已装且就绪」，不是
-   「支持」）。M1 的设备没有 agent 运行时可探测——`node-core` 的心跳
-   故意留空并加了测试锁定「未探测到就上报空，不得编造」——所以这里恒空是
-   正确行为，不是加载失败、也不是功能没做完。
+   **M2 起这个页面不再必然为空**：设备会探测本机装了哪些 agent 并上报
+   （要求 1）。上一条注释（「M1 的设备没有 agent 运行时可探测，所以这里恒空」）
+   描述的前提已被推翻。M1 时 `node-core` 的心跳故意留空并加了测试锁定
+   「未探测到就上报空，不得编造」——**「不编造」这条仍然有效**，只是现在
+   真的有东西可报了：探测不到就仍是空，探测到就列出来。
 
-   M3 接 ACP 之后，这里会填上按设备分组的就绪实例。
+   列表含义是「这台设备上装了哪些 agent」，**不是**「哪些现在能用」：
+   `/api/agents` 用 `agent_list()` 归并了所有设备的上报，装了但跑不起来的
+   也在其中（页面要让人看见自己装坏的那个）。真正的可用性门禁在建会话那一步
+   （未装或不可用 → 409）。
    =========================================================================== */
 
 import { onMounted, ref } from 'vue'
@@ -49,7 +52,8 @@ async function load(): Promise<void> {
       <div>
         <h1 class="af-page__title">Agent 目录</h1>
         <p class="af-page__sub">
-          这里列出的是各设备<b>已装且就绪</b>的 agent，不是「支持哪些 agent」。
+          这里列出各设备上<b>已装</b>的 agent，不是「支持哪些 agent」。已装但跑不起来的
+          也会列出（你自己装坏的那个要能看见）；能否用它开会话，在建会话时判定。
           数据来自设备心跳上报的 <span class="af-fp">capabilities.agents</span>。
         </p>
       </div>
@@ -57,19 +61,19 @@ async function load(): Promise<void> {
       <button class="af-btn af-btn--sm" type="button" :disabled="loading" @click="load">刷新</button>
     </div>
 
-    <!-- 这条横幅是本页存在的前提：不写它，验收时会被当成「做了但永远空」 -->
+    <!-- 空态也要说清「为什么空」，否则验收时会被当成「做了但永远空」 -->
     <div class="af-stage-note" role="note">
-      <span class="af-badge af-badge--warn">M1 无数据</span>
+      <span class="af-badge af-badge--warn">取决于设备装了什么</span>
       <div class="af-stage-note__body">
         <p>
-          <b>M1 没有 agent 运行时可探测</b>，所以这一页在 M1 恒定为空：
-          M1 的设备侧只实现了 terminal / files / exec 三个 connector，
-          agent 运行时的 ACP 会话层归 M3。设备心跳不会编造一个 agent 清单，
-          所以这里也不显示任何行。
+          M2 起设备会探测本机装了哪些 agent 并随心跳上报，所以这一页<b>不再必然为空</b>：
+          设备上装了 opencode，这里就会多一行。
+          <b>探测不到就是空</b>——设备不会编造一个清单，Hub 也不会。
         </p>
         <p class="af-t-mute">
-          会话在这一页之外建：M1 的会话是<b>页面级容器</b>（工作区 + 面板），
-          agent 由你在设备侧自行启动，Hub 不接管它的生命周期。
+          安装入口 <b>不在这里</b>：从 Hub 下发安装需要「选设备 + 选模板」，
+          那是单独的一步，且**永远由用户手动触发**，不会因为「发现某台设备缺某个 agent」
+          就自动装。
         </p>
       </div>
     </div>
@@ -86,8 +90,8 @@ async function load(): Promise<void> {
     <EmptyState
       v-else-if="agents.length === 0"
       glyph="☰"
-      title="M1 无数据，M3 起填充"
-      :text="`${devices.length} 台设备里没有任何一台上报 agent——这是 M1 的预期结果。M3 接 ACP 之后，这里会出现按设备分组的就绪实例，以及它们各自的会话入口。`"
+      title="还没有设备上报 agent"
+      :text="`${devices.length} 台设备里没有任何一台上报 agent。设备上装一个（例如 opencode）后，它会在下次心跳里出现。探测不到就是空，设备和 Hub 都不会编造。`"
     >
       <button class="af-btn" type="button" @click="navigate('/sessions/new')">新建会话</button>
     </EmptyState>
@@ -103,7 +107,7 @@ async function load(): Promise<void> {
         </div>
       </div>
       <p class="af-t-mute af-foot">
-        定义来自各设备心跳的上报；M1 只读、不提供安装入口（装 agent 是 M5 的流程）。
+        定义来自各设备心跳的上报；本页只读，安装入口不在这一页。
       </p>
     </template>
   </div>

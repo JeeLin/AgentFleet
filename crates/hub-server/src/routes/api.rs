@@ -134,19 +134,67 @@ fn has_gpu(resources: &serde_json::Value) -> bool {
     })
 }
 
-/// `capabilities.agents` → 去重且排序的字符串列表。
+/// `capabilities.agents` → 去重且排序的名字列表。
 ///
 /// **去重 + 排序**：同一台设备多次心跳的同一批 agent 必须给出同一份输出，
 /// 否则页面每刷新一次顺序就变一次（`BTreeSet` 同时管住了两件事）。
-/// 非字符串成员一律跳过：那是坏数据，宁可少列一个也不把一个对象
-/// 当成 agent 名显示出去。
+///
+/// # 两种形态都要认（M2）
+///
+/// M1 的 `agents` 是字符串数组 `["opencode"]`；M2 起 node 上报的是对象
+/// `[{"id","name","version","available","error"}]`（见
+/// `node-core/src/agent/cache.rs` 的 `AgentReport`），因为字符串装不下
+/// 「版本 / 可用 / 失败原因」，而子任务 5 的 409 门禁判的是「已装**且**可用」。
+///
+/// **这里必须两种都认**：只认字符串的话，新形态会让页面上 agent
+/// **静默消失**——不报错、不警告，只是列表空了。反过来只认对象则会让
+/// 升级窗口里还在发旧帧的设备同样空掉。两种都认，过渡期两边都在。
+///
+/// 认不出的成员仍然跳过：那是坏数据，宁可少列一个。
 fn agent_list(caps: &serde_json::Value) -> Vec<String> {
     let Some(arr) = caps.get("agents").and_then(serde_json::Value::as_array) else {
         return Vec::new();
     };
     arr.iter()
-        .filter_map(serde_json::Value::as_str)
-        .map(str::to_string)
+        .filter_map(|v| {
+            // 旧形态：裸字符串
+            if let Some(name) = v.as_str() {
+                return Some(name.to_string());
+            }
+            // 新形态：对象，取 `name`（缺省回落到 `id`）
+            let o = v.as_object()?;
+            o.get("name")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| o.get("id").and_then(serde_json::Value::as_str))
+                .map(str::to_string)
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// `capabilities.agents` 里**现在可用**的 agent 名（子任务 5 的 409 门禁用）。
+///
+/// 与 [`agent_list`] 分开：目录页列的是「这台设备上有哪些 agent」（含装了但
+/// 跑不起来的），而建会话的门禁只认「已装**且可用**」。合成一个函数会让
+/// 页面列出的东西比门禁允许的少，或者门禁放行一个其实跑不起来的 agent。
+///
+/// 旧形态（裸字符串）**一律不算可用**：它不携带可用性证据，宁严勿松。
+fn available_agent_names(caps: &serde_json::Value) -> Vec<String> {
+    let Some(arr) = caps.get("agents").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|v| {
+            let o = v.as_object()?;
+            if o.get("available").and_then(serde_json::Value::as_bool) != Some(true) {
+                return None;
+            }
+            o.get("name")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| o.get("id").and_then(serde_json::Value::as_str))
+                .map(str::to_string)
+        })
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -430,6 +478,70 @@ mod tests {
         )
         .unwrap();
         (st, dir)
+    }
+
+    /// `agent_list` 必须**同时认两种形态**（M2 把 `agents` 从字符串改成了对象）。
+    ///
+    /// 判据不是「能解析」，而是**不会静默消失**：只认字符串时，新形态让页面
+    /// 上 agent 列表变空——不报错、没有日志，用户只看到「这台设备没有 agent」。
+    /// 所以这里两种形态各断言一次，且断言它们的顺序稳定（可 diff）。
+    #[test]
+    fn agent_list_accepts_both_the_legacy_string_and_the_object_form() {
+        // 旧形态（M1 设备还在发这种帧）
+        let legacy = serde_json::json!({ "agents": ["opencode", "claude"] });
+        assert_eq!(
+            agent_list(&legacy),
+            vec!["claude".to_string(), "opencode".to_string()],
+            "旧形态必须继续列出来"
+        );
+
+        // 新形态（M2）
+        let modern = serde_json::json!({
+            "agents": [
+                {"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true, "error": null},
+                {"id": "broken", "name": "broken", "version": null, "available": false, "error": "退出码 3"},
+            ]
+        });
+        assert_eq!(
+            agent_list(&modern),
+            vec!["broken".to_string(), "opencode".to_string()],
+            "新形态必须列出来（含装了但跑不起来的），否则页面会静默变空"
+        );
+
+        // 两种形态混在一帧里（升级窗口）
+        let mixed = serde_json::json!({ "agents": ["a", {"id": "b", "available": true}] });
+        assert_eq!(agent_list(&mixed), vec!["a".to_string(), "b".to_string()]);
+
+        // 坏数据跳过，不 panic
+        let garbage = serde_json::json!({ "agents": [42, null, {"no_id": 1}] });
+        assert!(agent_list(&garbage).is_empty(), "认不出的成员一律跳过");
+        // 缺键 / 非数组
+        assert!(agent_list(&serde_json::json!({})).is_empty());
+        assert!(agent_list(&serde_json::json!({ "agents": "opencode" })).is_empty());
+    }
+
+    /// **可用性判据**：门禁只认 `available: true`，旧形态一律不算。
+    ///
+    /// 与 `agent_list` 分开断言，是因为二者服务于不同目的：目录页要列出
+    /// 「装了但跑不起来」的 agent，而建会话的门禁只认「已装且可用」。合成
+    /// 一个函数要么让目录页少东西，要么让门禁放行一个其实起不来的 agent。
+    #[test]
+    fn only_agents_marked_available_pass_the_gate() {
+        let caps = serde_json::json!({
+            "agents": [
+                {"id": "opencode", "name": "opencode", "available": true},
+                {"id": "broken", "name": "broken", "available": false},
+                {"id": "noflag", "name": "noflag"},
+            ]
+        });
+        assert_eq!(available_agent_names(&caps), vec!["opencode".to_string()]);
+
+        // 旧形态不携带可用性证据 → 宁严勿松
+        let legacy = serde_json::json!({ "agents": ["opencode"] });
+        assert!(
+            available_agent_names(&legacy).is_empty(),
+            "只说名字的旧帧不能过门禁"
+        );
     }
 
     /// 走产品自己的 enroll 入口建一台设备（不碰真 WS）：

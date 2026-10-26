@@ -14,7 +14,7 @@ use protocol::message::Heartbeat;
 
 use crate::connector;
 
-/// M1 上报的能力：connectors 与 arch。
+/// M1 上报的能力：connectors 与 arch，以及（M2 起）探测到的 agent。
 ///
 /// **`connectors` 由 [`connector::registered_names`] 导出，不手写数组**
 /// （子任务 11）。M0 的心跳硬编码报着 `["terminal","files","git","exec"]`，
@@ -28,14 +28,38 @@ use crate::connector;
 /// connector 而上报没跟上时，`tests/capabilities.rs` 会红，而手写的数组
 /// 要等到有人在真实路由里踩到才发现。
 ///
-/// `agents` **故意留空**：M1 还没有 agent 运行时可探测（ACP 归 M3）。
-/// 路由按它做硬过滤，编一个「就绪」等于把任务派给一台根本没装那个 agent
-/// 的机器。**不做「从实际安装探测导出」**：M1 没有任何探测对象，照做会做出
-/// 一个恒空的 `AgentSummary[]` 与一个「做了但永远空」的 Agent 目录页。
+/// # `agents`（M2 起非空）
+///
+/// M1 时这里是硬编码的 `[]`，注释写着「M1 还没有 agent 运行时可探测」。
+/// **那个前提已被推翻**：M2 起设备探测本机装了哪些 agent（`agent::detect`），
+/// 结果由 [`capabilities_with_agents`] 填进来。
+///
+/// 但**「不编造」这条没变**，只是换了个方向：
+/// - 探测不到就是空数组 / `available:false`，**绝不填一个看起来能用的假条目**；
+/// - 探测**不在这个函数里做**（它会起子进程）。这里只消费已经探好的快照，
+///   见 [`crate::agent::Detected`]——心跳路径上阻塞等于让心跳节奏取决于本机
+///   装了什么 agent（M1 的 `exec` 在 `open()` 里同步跑命令就是这么翻的车）。
+///
+/// 兼容性：agent 项从字符串改成了对象，Hub 侧 `agent_list()` 已配套支持两种
+/// 形态（`AgentReport::from_json` 也认旧的纯字符串）。改形态而不同步改 Hub
+/// 解析，会让页面上 agent **静默消失**——这条在 `agent::cache` 的模块注释里。
 pub fn capabilities() -> serde_json::Value {
+    capabilities_with_agents(&[])
+}
+
+/// 同 [`capabilities`]，但带上探测到的 agent。
+///
+/// `agents` 是 [`crate::agent::AgentReport`] 的切片，按 id 排序后上报
+/// （稳定顺序才 diff 得动，`scheduling.md` §2）。
+pub fn capabilities_with_agents(agents: &[crate::agent::AgentReport]) -> serde_json::Value {
+    let mut sorted: Vec<&crate::agent::AgentReport> = agents.iter().collect();
+    sorted.sort_by(|a, b| a.id.cmp(&b.id));
     serde_json::json!({
         "connectors": connector::registered_names(),
-        "agents": [],
+        "agents": sorted
+            .into_iter()
+            .map(crate::agent::AgentReport::to_json)
+            .collect::<Vec<_>>(),
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
         "container_runtime": null,
@@ -58,10 +82,22 @@ pub fn workspace_roots(roots: &[&Path]) -> Vec<String> {
 ///
 /// `resources` 留 `null`：M1 取不到真实的负载，而 Hub 侧对缺省字段的约定是
 /// 「保持上一次的值」——留空让 Hub 保留旧事实，填假值会让它把猜测写进路由。
+///
+/// 不带 agent：需要上报探测结果时用 [`heartbeat_with_agents`]。
 pub fn heartbeat(workspace_roots: Vec<String>) -> Heartbeat {
+    heartbeat_with_agents(workspace_roots, &[])
+}
+
+/// 组一份带 agent 探测结果的心跳。
+///
+/// `agents` 是**已经探好的快照**，本函数不做探测（理由见 [`capabilities`]）。
+pub fn heartbeat_with_agents(
+    workspace_roots: Vec<String>,
+    agents: &[crate::agent::AgentReport],
+) -> Heartbeat {
     Heartbeat {
         node_version: env!("CARGO_PKG_VERSION").to_string(),
-        capabilities: capabilities(),
+        capabilities: capabilities_with_agents(agents),
         resources: serde_json::Value::Null,
         workspace_roots,
     }
@@ -105,19 +141,88 @@ mod tests {
         }
     }
 
-    /// **`agents` 为空是 M1 的事实，不是遗漏。**
+    /// **`agents` 从 M1 的恒空改成了真实上报**——前提被推翻，不是回归。
     ///
-    /// M1 没有任何 agent 运行时（ACP 归 M3），所以「未探测到就上报空」是
-    /// **正确**的形状。这条测试锁住的是那个「不得编造」：一旦有人为了
-    /// 让 Agent 目录页看起来有东西而填一个假名字，这里会红。
+    /// M1 里这条测试正向断言 `agents` 恒为空，理由是「M1 没有 agent 运行时可探测」。
+    /// M2 让设备探测本机 agent（要求 1），那个前提没了，所以判据换成：
+    ///
+    /// 1. **不传探测结果时仍然是空数组**——「不编造」这条没变。
+    /// 2. **传了结果就原样上报**，且 `available` 由探测结论决定，不由这里猜。
+    ///
+    /// 第 1 条保留原测试的价值（防止有人为了让目录页有东西而填假名字），
+    /// 第 2 条是新增的正向能力。两条一起才既守住「不编造」又证明「真能上报」。
     #[test]
-    fn agents_stay_empty_because_none_is_detected() {
+    fn agents_are_empty_only_when_nothing_was_detected() {
+        // ① 没探测结果 → 空数组（原判据，保留）
         let c = capabilities();
         let agents = c["agents"].as_array().expect("agents 是数组");
         assert!(
             agents.is_empty(),
-            "M1 没有 agent 运行时可探测，上报一个「就绪」等于把任务派给 \
-             一台根本没装那个 agent 的机器（约束 9）：{agents:?}"
+            "没有探测结果时必须报空，不许编一个「就绪」的假条目：{agents:?}"
+        );
+
+        // ② 有探测结果 → 原样上报
+        let with = capabilities_with_agents(&[
+            crate::agent::AgentReport {
+                id: "opencode".into(),
+                name: "opencode".into(),
+                version: Some("2.1.4".into()),
+                available: true,
+                error: None,
+            },
+            crate::agent::AgentReport {
+                id: "broken".into(),
+                name: "broken".into(),
+                version: None,
+                available: false,
+                error: Some("退出码 3".into()),
+            },
+        ]);
+        let list = with["agents"].as_array().expect("agents 是数组");
+        assert_eq!(list.len(), 2, "探到几个就报几个");
+        let ids: Vec<&str> = list.iter().filter_map(|v| v["id"].as_str()).collect();
+        assert_eq!(ids, vec!["broken", "opencode"], "按 id 排序，便于 diff");
+        // 可用与否是探测的结论，这里只搬运
+        assert_eq!(list[1]["available"], serde_json::json!(true));
+        assert_eq!(list[1]["version"], serde_json::json!("2.1.4"));
+        assert_eq!(list[0]["available"], serde_json::json!(false));
+        assert_eq!(list[0]["error"], serde_json::json!("退出码 3"));
+    }
+
+    /// 上报的 agent 项能被 Hub 侧的解码器原样读回（形状对得上）。
+    ///
+    /// 这条守的是「改形态而不同步改解析」：`agents` 从字符串变成对象后，
+    /// 只要有一侧不同步，页面上 agent 就会**静默消失**（不报错，只是列表空）。
+    #[test]
+    fn the_reported_agent_items_round_trip_through_the_hub_decoder() {
+        let source = vec![
+            crate::agent::AgentReport {
+                id: "opencode".into(),
+                name: "opencode".into(),
+                version: Some("2.1.4".into()),
+                available: true,
+                error: None,
+            },
+            crate::agent::AgentReport {
+                id: "nocreds".into(),
+                name: "nocreds".into(),
+                version: Some("1.0.0".into()),
+                available: false,
+                error: Some("缺凭据".into()),
+            },
+        ];
+        let caps = capabilities_with_agents(&source);
+        let decoded: Vec<crate::agent::AgentReport> = caps["agents"]
+            .as_array()
+            .expect("agents")
+            .iter()
+            .filter_map(crate::agent::AgentReport::from_json)
+            .collect();
+        let mut expect = source.clone();
+        expect.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(
+            decoded, expect,
+            "node 上报的形状必须能被 Hub 的解码器读懂"
         );
     }
 

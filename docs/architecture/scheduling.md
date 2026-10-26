@@ -46,8 +46,9 @@ M0 实际上报的形状见 `crates/node-core/src/heartbeat.rs`。与下面这�
   "node_version": "0.1.0",
   "capabilities": {
     "connectors": ["terminal", "files", "git", "exec"],
-    "agents": [                     // 已装且就绪的 agent（不是「支持」）
-      { "name": "opencode", "version": "0.4.2" }
+    "agents": [                     // 本机探测到的 agent（不是「支持哪些」）
+      { "id": "opencode", "name": "opencode",
+        "version": "2.1.4", "available": true, "error": null }
     ],
     "os": "linux", "arch": "aarch64",
     "container_runtime": null       // 有 docker/podman 则给出，null 表示没有
@@ -63,8 +64,27 @@ M0 实际上报的形状见 `crates/node-core/src/heartbeat.rs`。与下面这�
 }
 ```
 
-**心跳绝不报告任何路径细节**——这是信息泄露面，不是功能缺陷：
+**`agents` 的三态（M2）**：每一项带 `available`，因为「装了」与「能用」是两件事：
 
+| 情形 | `available` | `version` | `error` |
+|---|---|---|---|
+| 未装 | `false` | `null` | `null` |
+| 已装且 `--version` 答出来 | `true` | 版本串 | `null` |
+| 已装但跑不起来 / 超时 | `false` | `null` | 可读原因 |
+
+**为什么不是「只报可用的」**：页面要能显示「你装的那个坏了」，只报可用的会让
+「装坏」与「没装」在页面上长得一样。而**建会话的门禁只认 `available: true`**，
+所以列出来不等于可用（`api.rs` 的 `available_agent_names` 与 `agent_list` 是两个函数）。
+
+**形态从字符串改成了对象**（M1 是 `["opencode"]`）。Hub 侧 `agent_list()`
+两种都认——只认一种会让另一侧静默丢数据：认不出新形态则页面 agent 列表变空，
+认不出旧形态则升级窗口里还在发旧帧的设备列表变空。
+
+**探测不在心跳路径上做**：探测要起子进程、最多等 2 秒，放进心跳臂等于让心跳
+的准时性取决于本机装了什么 agent。心跳只读缓存，刷新在连接建立后、`select!` 之外
+（M1 的 `exec` 在 `open()` 里同步跑命令堵住心跳臂就是这个形状）。
+
+**心跳绝不报告任何路径细节**——这是信息泄露面，不是功能缺陷：
 - 不报子目录、不报仓库名、不报文件名、不报 `head` 提交号；
 - 不报 `<data_dir_root>` 下的任何内容（那是 `identity.json`、模型 key 的所在）；
 - 不报 `.git/`、`.env`、`~/.ssh/` 这类高价值路径的存在与否
@@ -81,7 +101,7 @@ M0 实际上报的形状见 `crates/node-core/src/heartbeat.rs`。与下面这�
 
 | 类别 | 例子 | 变化频率 | 谁关心 |
 |---|---|---|---|
-| **能力**（能做） | connectors / agents / arch / GPU 有无 | 几乎不变（装东西才变） | 任务路由的**硬过滤** |
+| **能力**（能做） | connectors / agents / arch / GPU 有无 | 几乎不变（装东西才变；M2 起 `agents` 由探测得出） | 任务路由的**硬过滤** |
 | **负载**（忙不忙） | load / available_mb / active_sessions | 每心跳变 | 任务路由的**打分** |
 | **存量**（有什么） | workspace / 已装模型 | 按需变 | 推理路由 |
 

@@ -3,6 +3,7 @@
 //! 约束 2：这里的进程叫 **node**（设备进程），不是 agent。
 //! 对外命令名 `afcli`（crate 名 `node-*`）。
 
+pub mod agent;
 pub mod channel;
 pub mod conn;
 pub mod connector;
