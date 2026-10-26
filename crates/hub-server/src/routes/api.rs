@@ -326,6 +326,51 @@ pub async fn list_devices(
     ))
 }
 
+/// `DELETE /api/devices/{id}`：移除一台设备。
+///
+/// # 它**不删**会话与轨迹
+///
+/// 用户 2026-10-26 裁定的「删除语义三分离」：卸载 agent 不删会话、删设备不删
+/// 会话、有会话的工作区拒删。前两条的共同理由是**对话是用户的数据，设备只是
+/// 一条通路**——而这个动作在页面上看起来只是「移除一台机器」。工作区与会话
+/// 留一行 `removed_node_id`，页面据此显示「已移除的设备」而不是一片空白。
+///
+/// 见 `hub_storage::DeviceRepo::delete_and_mark_removed`。
+///
+/// # 在线设备也允许删
+///
+/// 不给这条加「先断开」的前置条件：约束里没有「必须先卸载」这一步，而要求用户
+/// 先去别处断开再回来删，是把内部实现顺序暴露成操作流程。连接本身由 `ws` 层
+/// 在设备重连时按「库里有这行吗」处理——那一步已有（`auth_fail`）。
+///
+/// # 404 还是 204
+///
+/// 不存在就 404，与其它端点同口径（`:not_found` 一个码走全路由）。设备**真的
+/// 存在过**是这条请求唯一的前置事实，它不成立时「删掉了」这句话是假的。
+pub async fn delete_device(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let n = state
+        .devices()
+        .delete_and_mark_removed(&id)
+        .map_err(|e| ApiError::internal_with("cannot delete the device", e))?;
+    if n == 0 {
+        return Err(ApiError::not_found());
+    }
+    // 通道账本是**内存**的、断连即清（`hub_core::channels` 的 `drop_node`）。
+    // 在线时删掉设备，那些记录还挂在一个已经不存在的 node_id 上——不释放的话
+    // 它们要等到下一次断连才走，而那时进来的可能是**另一台复用同一 node_id
+    // 的机器**，它会继承别人的通道信用。
+    //
+    // **两份账本都要清**，与 `ws.rs` 断开处理器同一张清单：漏掉 `bindings`
+    // 那份的症状是「`channel_id` 仍指向一台已不存在的设备」，于是
+    // `close_channel` 会对一条设备侧早已不存在的通道走完归属校验。
+    state.channels().write().drop_node(&id);
+    state.bindings().drop_node(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `POST /api/sessions` 的请求体。
 ///
 /// `agent_id` 本阶段恒不填（M3 起才接 ACP，`session.agent_id` 允许 NULL），

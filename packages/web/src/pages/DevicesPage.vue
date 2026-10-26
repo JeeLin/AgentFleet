@@ -15,7 +15,7 @@ import { computed, onMounted, ref } from 'vue'
 import EmptyState from '@/components/EmptyState.vue'
 import DeviceTable from '@/components/DeviceTable.vue'
 import type { DeviceSummary } from '@/lib/api'
-import { listDevices } from '@/lib/api'
+import { deleteDevice, listDevices } from '@/lib/api'
 import { describeReadFailure } from '@/lib/http'
 import { percent, relativeTime } from '@/lib/format'
 import { navigate } from '@/router'
@@ -24,6 +24,8 @@ const devices = ref<DeviceSummary[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 const inspected = ref<DeviceSummary | null>(null)
+/** 移除失败的理由。与 `error` 分开：读失败会顶掉整张表，写失败只该提示一条。 */
+const removeError = ref<string | null>(null)
 
 const online = computed(() => devices.value.filter((d) => d.status === 'online'))
 const reconnecting = computed(() => devices.value.filter((d) => d.status === 'reconnecting'))
@@ -51,6 +53,35 @@ function inspect(device: DeviceSummary): void {
 
 function createSession(device: DeviceSummary): void {
   navigate(`/sessions/new?device=${encodeURIComponent(device.id)}`)
+}
+
+/**
+ * 移除一台设备。
+ *
+ * # 成功之后**只**去掉那一行
+ *
+ * 会话与轨迹留在 Hub 上，所以这里不碰任何会话状态、不发 `navigate`——去动
+ * 别的东西会把「会话还在」这条事实在页面上做反。列表重新拉一次是因为设备行
+ * 从 Hub 上没了，本地这一份已经是旧事实。
+ *
+ * # 404 当成成功
+ *
+ * 重复点击、或另一个标签页先删了，都会回 `not_found`。目标状态已经达成，
+ * 给它画一条红字只会让用户去重试一件已经做完的事。其余错误照常报出。
+ */
+async function remove(device: DeviceSummary): Promise<void> {
+  removeError.value = null
+  try {
+    await deleteDevice(device.id)
+  } catch (err) {
+    const code = (err as { code?: string } | null)?.code
+    if (code !== 'not_found') {
+      removeError.value = `没能移除「${device.name}」：${describeReadFailure(err, '设备')}`
+      return
+    }
+  }
+  if (inspected.value?.id === device.id) inspected.value = null
+  await load()
 }
 </script>
 
@@ -84,6 +115,11 @@ function createSession(device: DeviceSummary): void {
       <button class="af-btn af-btn--sm" type="button" @click="load">重试</button>
     </div>
 
+    <div v-if="removeError" class="af-inline-error" role="alert">
+      {{ removeError }}
+      <button class="af-btn af-btn--sm" type="button" @click="removeError = null">知道了</button>
+    </div>
+
     <!-- 加载态是骨架，不是空态：两者混用会让用户以为设备没了（§4.8） -->
     <div v-else-if="loading" class="af-skel" aria-busy="true" aria-label="正在加载设备">
       <div v-for="i in 4" :key="i" class="af-skeleton af-skeleton--row"></div>
@@ -97,7 +133,12 @@ function createSession(device: DeviceSummary): void {
     />
 
     <template v-else>
-      <DeviceTable :devices="devices" :on-inspect="inspect" :on-create="createSession" />
+      <DeviceTable
+        :devices="devices"
+        :on-inspect="inspect"
+        :on-create="createSession"
+        :on-remove="remove"
+      />
 
       <section v-if="inspected" class="af-inspect" aria-label="设备详情">
         <div class="af-row gap-4">

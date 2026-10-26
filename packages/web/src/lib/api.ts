@@ -13,7 +13,7 @@
    出现 `active` / `ended`。映射集中在此处，页面不各自写一遍。
    =========================================================================== */
 
-import { getJson, postJson, request, type RequestOptions } from './http'
+import { del, getJson, postJson, request, type RequestOptions } from './http'
 
 /** 设备态。与 `hub-server/src/routes/api.rs` 的 `DeviceStatus` 逐字一致。 */
 export type ApiDeviceStatus = 'online' | 'reconnecting' | 'offline'
@@ -104,6 +104,24 @@ export function listDevices(options?: RequestOptions): Promise<DeviceSummary[]> 
 /** 读会话列表（新的在前）。 */
 export function listSessions(options?: RequestOptions): Promise<SessionSummary[]> {
   return getJson<SessionSummary[]>('/api/sessions', options)
+}
+
+/**
+ * 移除一台设备。
+ *
+ * # 它**不删**这台设备上的会话与轨迹
+ *
+ * 会话是用户的数据，设备只是一条通路。删完之后那些会话仍在 `/api/sessions`
+ * 里，`workspace.node_id` 变成 `null`、`workspace.removed_node_id` 记下原 id——
+ * 所以调用方**不需要**在成功之后去清会话列表或本地缓存。
+ *
+ * # 404 是「本来就不存在」，不是「删失败」
+ *
+ * 抛出的 `ApiError.code` 是 `not_found`。重复点击、或另一处已经删过，都会走到
+ * 这一条；调用方应当把它当成「目标状态已达成」，而不是显示一个错误。
+ */
+export function deleteDevice(id: string, options?: RequestOptions): Promise<void> {
+  return del(`/api/devices/${encodeURIComponent(id)}`, options)
 }
 
 /** `GET /api/sessions/{id}/trajectory` 的一项。是 `trajectory_event` 的一行。 */

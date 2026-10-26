@@ -24,11 +24,11 @@ describe('DeviceTable：列表导航（↑↓ / Home / End / Enter）', () => {
     device({ id: 'n_3', name: 'c' }),
   ]
 
-  function mountTable(onInspect = vi.fn(), onCreate = vi.fn()) {
+  function mountTable(onInspect = vi.fn(), onCreate = vi.fn(), onRemove = vi.fn()) {
     const w = mountIn(DeviceTable, {
-      props: { devices, onInspect, onCreate },
+      props: { devices, onInspect, onCreate, onRemove },
     })
-    return { w, onInspect, onCreate }
+    return { w, onInspect, onCreate, onRemove }
   }
 
   it('容器是唯一的 Tab 落点，行是 tabindex="-1"', () => {
@@ -92,6 +92,7 @@ describe('DeviceTable：离线设备', () => {
         devices: [device({ id: 'n_off', name: 'offline', status: 'offline' })],
         onInspect: vi.fn(),
         onCreate: vi.fn(),
+        onRemove: vi.fn(),
       },
     })
     const row = rows(w)[0] as HTMLElement
@@ -106,6 +107,7 @@ describe('DeviceTable：离线设备', () => {
         devices: [device({ id: 'n_off', status: 'offline' })],
         onInspect: vi.fn(),
         onCreate: vi.fn(),
+        onRemove: vi.fn(),
       },
     })
     const btn = w.element.querySelector<HTMLButtonElement>('tbody button')
@@ -121,6 +123,7 @@ describe('DeviceTable：离线设备', () => {
         devices: [device({ id: 'n_rc', status: 'reconnecting' })],
         onInspect: vi.fn(),
         onCreate: vi.fn(),
+        onRemove: vi.fn(),
       },
     })
     const btn = w.element.querySelector<HTMLButtonElement>('tbody button')
@@ -131,7 +134,7 @@ describe('DeviceTable：离线设备', () => {
     const onInspect = vi.fn()
     const onCreate = vi.fn()
     const w = mountIn(DeviceTable, {
-      props: { devices: [device({ id: 'n_1' })], onInspect, onCreate },
+      props: { devices: [device({ id: 'n_1' })], onInspect, onCreate, onRemove: vi.fn() },
     })
     await w.element.querySelector<HTMLButtonElement>('tbody button')?.click()
     expect(onCreate).toHaveBeenCalledTimes(1)
@@ -146,6 +149,7 @@ describe('DeviceTable：未上报与推值', () => {
         devices: [device({ cpu: null, mem: null })],
         onInspect: vi.fn(),
         onCreate: vi.fn(),
+        onRemove: vi.fn(),
       },
     })
     const cells = Array.from(w.element.querySelectorAll('td[data-num]')).map((c) => c.textContent?.trim())
@@ -155,7 +159,7 @@ describe('DeviceTable：未上报与推值', () => {
 
   it('未上报 agent 列表时明写「未上报」，不留空', () => {
     const w = mountIn(DeviceTable, {
-      props: { devices: [device({ agents: [] })], onInspect: vi.fn(), onCreate: vi.fn() },
+      props: { devices: [device({ agents: [] })], onInspect: vi.fn(), onCreate: vi.fn(), onRemove: vi.fn() },
     })
     expect(w.element.textContent).toContain('未上报')
   })
@@ -172,6 +176,7 @@ describe('DeviceTable：未上报与推值', () => {
         devices: [device({ agents: ['opencode', 'claude'], usable_agents: ['opencode'] })],
         onInspect: vi.fn(),
         onCreate: vi.fn(),
+        onRemove: vi.fn(),
       },
     })
     const badges = Array.from(w.element.querySelectorAll<HTMLElement>('.af-caps .af-badge'))
@@ -196,6 +201,7 @@ describe('DeviceTable：未上报与推值', () => {
         devices: [device({ status: 'reconnecting', derived: true })],
         onInspect: vi.fn(),
         onCreate: vi.fn(),
+        onRemove: vi.fn(),
       },
     })
     expect(w.element.textContent).toContain('推')
@@ -216,5 +222,84 @@ describe('DeviceTable：设备名与指纹这一格的竖向对齐', () => {
 
   it('名字可收缩：长名字走省略号，不把整列撑宽去挤别的列', () => {
     expect(src).toMatch(/\.af-dev-name__name\s*\{[^}]*min-width:\s*0/)
+  })
+})
+
+describe('DeviceTable：移除设备的行内确认', () => {
+  /** 造一行并撒出它的两个按钮：常态的「移除」与确认态的「确认移除」。 */
+  function mountOne(onRemove = vi.fn()) {
+    const w = mountIn(DeviceTable, {
+      props: {
+        devices: [device({ id: 'n_1', name: 'pi' })],
+        onInspect: vi.fn(),
+        onCreate: vi.fn(),
+        onRemove,
+      },
+    })
+    return { w, onRemove }
+  }
+
+  const ask = (w: ReturnType<typeof mountIn>) =>
+    w.element.querySelector<HTMLButtonElement>('[data-remove="n_1"]')
+
+  const confirm = (w: ReturnType<typeof mountIn>) =>
+    w.element.querySelector<HTMLButtonElement>('[data-confirm="n_1"]')
+
+  it('点「移除」只进入确认态，不调用 onRemove', async () => {
+    const { w, onRemove } = mountOne()
+    ask(w)?.click()
+    await w.vm.$nextTick()
+    // 判据只能是「还没删」，不能是「出现了确认按钮」——后者在点之前就可能
+    // 因为渲染条件写反而恒真（比如把确认态默认设成选中的那一行）。
+    expect(onRemove).not.toHaveBeenCalled()
+    expect(confirm(w)).not.toBeNull()
+  })
+
+  it('确认之后才调用 onRemove，且带上整行设备', async () => {
+    const { w, onRemove } = mountOne()
+    ask(w)?.click()
+    await w.vm.$nextTick()
+    confirm(w)?.click()
+    await w.vm.$nextTick()
+    expect(onRemove).toHaveBeenCalledTimes(1)
+    expect(onRemove.mock.calls[0]?.[0]).toMatchObject({ id: 'n_1' })
+  })
+
+  it('取消回到常态，且点击取消不会删', async () => {
+    const { w, onRemove } = mountOne()
+    ask(w)?.click()
+    await w.vm.$nextTick()
+    const cancel = Array.from(
+      w.element.querySelectorAll<HTMLButtonElement>('tbody button'),
+    ).find((b) => b.textContent?.trim() === '取消')
+    expect(cancel).toBeDefined()
+    cancel?.click()
+    await w.vm.$nextTick()
+    expect(onRemove).not.toHaveBeenCalled()
+    // 回到常态=「移除」在、确认按钮不在
+    expect(ask(w)).not.toBeNull()
+    expect(confirm(w)).toBeNull()
+  })
+
+  it('确认态里说清「会话保留」——否则用户会以为会话也被删了', async () => {
+    const { w } = mountOne()
+    ask(w)?.click()
+    await w.vm.$nextTick()
+    expect(w.element.textContent).toContain('会话保留')
+  })
+
+  it('点击行内按钮不冒泡到行（行 ⏎ 是「看详情」，否则一点删除就跳走）', async () => {
+    const onInspect = vi.fn()
+    const w = mountIn(DeviceTable, {
+      props: {
+        devices: [device({ id: 'n_1' })],
+        onInspect,
+        onCreate: vi.fn(),
+        onRemove: vi.fn(),
+      },
+    })
+    ask(w)?.click()
+    await w.vm.$nextTick()
+    expect(onInspect).not.toHaveBeenCalled()
   })
 })

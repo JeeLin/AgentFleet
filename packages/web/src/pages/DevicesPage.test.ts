@@ -151,3 +151,124 @@ describe('DevicesPage：离线设备', () => {
     expect(location.search).toBe('?device=n_1')
   })
 })
+
+describe('DevicesPage：移除设备', () => {
+  /** 点「移除」→「确认移除」。返回 fetch 的 mock 以检查发了什么请求。 */
+  async function removeDevice(w: ReturnType<typeof mountIn>, id = 'n_1'): Promise<void> {
+    w.element.querySelector<HTMLButtonElement>(`[data-remove="${id}"]`)?.click()
+    await w.vm.$nextTick()
+    w.element.querySelector<HTMLButtonElement>(`[data-confirm="${id}"]`)?.click()
+    await flush(w)
+  }
+
+  it('确认后发 DELETE /api/devices/{id}，并重新拉列表把它去掉', async () => {
+    let devices = [device({ id: 'n_1', name: 'pi.local' })]
+    // `stubFetch` 只按路径分派，不看方法；而这一页对同一个路径既有 GET
+    // （列表）又有 DELETE（移除）。所以这里自己装一个按方法分派的 fetch。
+    const calls: Array<{ url: string; method: string }> = []
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const method = (init?.method ?? 'GET').toUpperCase()
+      calls.push({ url, method })
+      if (method === 'DELETE') {
+        devices = []
+        return new Response(null, { status: 204 })
+      }
+      return new Response(JSON.stringify(devices), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const w = mountIn(DevicesPage)
+    await flush(w)
+    await removeDevice(w)
+
+    expect(calls.filter((c) => c.method === 'DELETE').map((c) => c.url)).toEqual([
+      expect.stringContaining('/api/devices/n_1'),
+    ])
+    expect(w.element.textContent).not.toContain('pi.local')
+    expect(w.element.textContent).toContain('还没有设备接入')
+  })
+
+  it('**不碰会话列表**：删设备不级联删会话，所以这一页不该去动它', async () => {
+    // 删那条路径必须返回成功。我第一版漏了它 → stubFetch 给未声明路径回 500
+    // → `remove()` 走失败分支直接 return，`listSessions()` 那段根本没执行，
+    // 于是把页面改成「删完顺手拉会话列表」这个反例跑下来仍然是绿的。
+    const fetchMock = stubFetch({
+      '/api/devices': { body: [device({ id: 'n_1' })] },
+      // DELETE 的路径要单独声明（stubFetch 只按路径分派，不看方法）
+      '/api/devices/n_1': { empty: true, status: 204 },
+    })
+    const w = mountIn(DevicesPage)
+    await flush(w)
+    await removeDevice(w)
+
+    const all = fetchMock.mock.calls.map(
+      (c) => `${(c[1] as RequestInit | undefined)?.method ?? 'GET'} ${String(c[0])}`,
+    )
+    // 先钉住「删除真的发生了」，否则这条断言又退化成「什么都没发生所以没请求」
+    expect(all, `实际请求：${all.join(', ')}`).toContain('DELETE /api/devices/n_1')
+    expect(all.some((x) => x.includes('/api/sessions')), `实际请求：${all.join(', ')}`).toBe(false)
+  })
+
+  it('404 当成「已经删掉了」：不弹错误', async () => {
+    // 第一次 GET 必须有这台设备，否则「移除」按钮根本不渲染，这个用例会
+    // 变成空转（点不到按钮 = 没发 DELETE = 没报错，一路绿）。这正是我第一版
+    // 写成「列表恒空」时踩的坑：反例（404 也报错）跑下来仍然是绿的。
+    let listed: unknown[] = [device({ id: 'n_1', name: 'pi.local' })]
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = (init?.method ?? 'GET').toUpperCase()
+        if (method === 'DELETE') {
+          // 另一个标签页先删了：目标状态已达成，只是这次没删到行
+          listed = []
+          return new Response(JSON.stringify({ error: 'not_found' }), {
+            status: 404,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+        return new Response(JSON.stringify(listed), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }),
+    )
+    const w = mountIn(DevicesPage)
+    await flush(w)
+    expect(w.element.querySelector('[data-remove="n_1"]')).not.toBeNull()
+    await removeDevice(w)
+    expect(w.element.querySelector('[role="alert"]')).toBeNull()
+    // 判据的另一半：它真的把那一行去掉了，而不是「什么都没发生所以没报错」
+    expect(w.element.textContent).toContain('还没有设备接入')
+  })
+
+  it('真失败时报出理由，而不是静默地把行留在那儿', async () => {
+    const devices = [device({ id: 'n_1', name: 'pi.local' })]
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = (init?.method ?? 'GET').toUpperCase()
+        if (method === 'DELETE') {
+          return new Response(JSON.stringify({ error: 'internal_error' }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+        return new Response(JSON.stringify(devices), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }),
+    )
+    const w = mountIn(DevicesPage)
+    await flush(w)
+    await removeDevice(w)
+    // 行还在（Hub 上没删掉），同时要有一条可读的理由
+    expect(w.element.textContent).toContain('pi.local')
+    const alert = w.element.querySelector('[role="alert"]')
+    expect(alert?.textContent).toContain('没能移除')
+  })
+})

@@ -623,6 +623,13 @@ pub fn build_app(state: AppState) -> Router {
             get(routes::api::list_sessions).post(routes::api::create_session),
         )
         .route("/api/agents", get(routes::api::list_agents))
+        // 删设备（子任务 12 第 1 条）。**必须是 DELETE 而不是 GET/POST 带参数**：
+        // 它是状态变更端点，落在下面那条 `.layer(...)` 之后就会绕过 session
+        // 认证与 CSRF 双重提交——任意网页都能把用户的设备删掉。
+        .route(
+            "/api/devices/{id}",
+            axum::routing::delete(routes::api::delete_device),
+        )
         // 页面侧实时数据面（子任务 5a）：SSE 下行 + 四个上行端点。
         //
         // 同样**必须落在下面那条 `.layer(...)` 之前**：`/api/channels*` 是

@@ -29,7 +29,34 @@ const props = defineProps<{
   onInspect: (device: DeviceSummary) => void
   /** 用它开会话。 */
   onCreate: (device: DeviceSummary) => void
+  /** 确认移除这一台。 */
+  onRemove: (device: DeviceSummary) => void
 }>()
+
+/**
+ * 正在等待二次确认的设备 id。
+ *
+ * 行内确认而不是模态：删设备**不级联删会话**（用户裁定的「删除语义三分离」），
+ * 所以它不是一个把数据带走的高危动作——但它也不可撤销（设备要重新 enroll 才会
+ * 回到列表里）。行内一档就够，不需要一个锁住整页焦点的对话框。
+ *
+ * `null` = 没有正在确认的行。确认态只存 id 不存整行：刷新列表之后那一行可能
+ * 已经不在，此时留着旧对象会让「确认」按钮指向一台不存在的设备。
+ */
+const confirming = ref<string | null>(null)
+
+function askRemove(id: string): void {
+  confirming.value = id
+}
+
+function cancelRemove(): void {
+  confirming.value = null
+}
+
+function confirmRemove(device: DeviceSummary): void {
+  confirming.value = null
+  props.onRemove(device)
+}
 
 const list = ref<HTMLElement | null>(null)
 const selectedId = ref<string | null>(null)
@@ -137,16 +164,44 @@ function offlineReason(device: DeviceSummary): string {
             <span :title="d.last_seen ?? '从未上报'">{{ relativeTime(d.last_seen) }}</span>
           </td>
           <td class="af-dev-acts">
-            <button
-              class="af-btn af-btn--sm af-btn--primary"
-              type="button"
-              :disabled="!canCreateSession(d)"
-              :aria-disabled="!canCreateSession(d)"
-              :title="offlineReason(d) || `在这台设备上开一个会话`"
-              @click.stop="onCreate(d)"
-            >
-              用它开会话
-            </button>
+            <!-- 确认态：一句话说清「删什么、不删什么」，因为「删除」这个词会让
+                 人以为会话也没了。两个按钮都是 `type="button"`，在表格里默认会
+                 变成 submit。 -->
+            <template v-if="confirming === d.id">
+              <span class="af-dev-confirm af-t-mute">移除设备行，会话保留</span>
+              <button
+                class="af-btn af-btn--sm af-btn--danger"
+                type="button"
+                :data-confirm="d.id"
+                @click.stop="confirmRemove(d)"
+              >
+                确认移除
+              </button>
+              <button class="af-btn af-btn--sm af-btn--ghost" type="button" @click.stop="cancelRemove">
+                取消
+              </button>
+            </template>
+            <template v-else>
+              <button
+                class="af-btn af-btn--sm af-btn--primary"
+                type="button"
+                :disabled="!canCreateSession(d)"
+                :aria-disabled="!canCreateSession(d)"
+                :title="offlineReason(d) || `在这台设备上开一个会话`"
+                @click.stop="onCreate(d)"
+              >
+                用它开会话
+              </button>
+              <button
+                class="af-btn af-btn--sm af-btn--ghost af-dev-remove"
+                type="button"
+                :title="`把 ${d.name} 从设备列表里移除（它上面的会话与轨迹都保留）`"
+                :data-remove="d.id"
+                @click.stop="askRemove(d.id)"
+              >
+                移除
+              </button>
+            </template>
           </td>
         </tr>
       </tbody>
@@ -186,5 +241,12 @@ function offlineReason(device: DeviceSummary): string {
 .af-dev-acts {
   text-align: right;
   white-space: nowrap;
+}
+.af-dev-remove:hover {
+  color: var(--af-danger);
+}
+.af-dev-confirm {
+  font-size: var(--af-text-2xs);
+  margin-right: var(--af-space-2);
 }
 </style>

@@ -168,6 +168,56 @@ impl DeviceRepo {
         raw.into_iter().map(DeviceRow::into_device).collect()
     }
 
+    /// 删掉设备行，并把它留下的痕迹标成「这台设备已移除」。
+    ///
+    /// # 删什么、不删什么（用户 2026-10-26 裁定的「删除语义三分离」）
+    ///
+    /// | 对象 | 处置 |
+    /// |---|---|
+    /// | `device` 行 | **删**——这一行的存在就是「这台设备还注册着」 |
+    /// | `workspace` / `session` / `trajectory_event` | **全部保留** |
+    /// | `agent_runtime` / `agent_config` | **删**——它们是「设备现状」，设备没了就没有现状 |
+    ///
+    /// 会话与轨迹不删的理由是**它们不是设备的一部分**：一次对话的内容是用户的
+    /// 数据，而设备只是一条通路。删掉设备就等于删掉用户的历史，而这个动作在
+    /// 页面上看起来只是「移除一台机器」。
+    ///
+    /// # 为什么必须在一个事务里
+    ///
+    /// 「设备行没了但工作区还挂着它的 node_id」是一个**无法再被发现**的中间态：
+    /// 页面会画出一台不存在的设备上的工作区，而删除动作已经返回成功、没有重试
+    /// 入口。四步要么全成，要么一行不动。
+    ///
+    /// 返回删掉了几行设备（0 = 本来就不存在，幂等）。
+    pub fn delete_and_mark_removed(&self, id: &str) -> Result<usize> {
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+        // 先把引用标成「已移除」。顺序在删设备之前：反过来的话，中途失败会留下
+        // 一个「设备没了但工作区还指向它」的孤儿——正是上面说的那个中间态。
+        //
+        // **会话没有自己的 `node_id`**（它的归属经由 `workspace_id`），所以这
+        // 一条要按工作区反查；照抄 `WHERE node_id = ?1` 会静默命中 0 行——
+        // 而 `removed_node_id` 一直是 NULL，页面上「已移除的设备」那一档
+        // 永远不会出现，会话列表还把机器名显示成空。
+        tx.execute(
+            "UPDATE session SET removed_node_id = ?1
+             WHERE workspace_id IN (SELECT id FROM workspace WHERE node_id = ?1)",
+            params![id],
+        )?;
+        tx.execute(
+            "UPDATE workspace SET removed_node_id = ?1, node_id = NULL WHERE node_id = ?1",
+            params![id],
+        )?;
+        // 设备现状类：设备没了，这些事实就没有承载者。留着会让一台新设备
+        // 复用同一个 node_id 时**继承上一台机器的 agent 清单**——那是最难查的
+        // 一类错误（页面上一切都对，只是全都不属于这台机器）。
+        tx.execute("DELETE FROM agent_runtime WHERE node_id = ?1", params![id])?;
+        tx.execute("DELETE FROM agent_config WHERE node_id = ?1", params![id])?;
+        let n = tx.execute("DELETE FROM device WHERE id = ?1", params![id])?;
+        tx.commit()?;
+        Ok(n)
+    }
+
     /// 心跳后更新能力/负载/在线状态。
     ///
     /// **不含 `node_version`**：版本在 enroll 首帧的 `device_info` 里带上并
@@ -417,11 +467,138 @@ mod tests {
         .unwrap();
     }
 
+    // ---- 删设备：删除语义三分离（子任务 12 第 1 条）----
+
+    /// 造一台设备 + 一个工作区 + 一个会话 + 一条轨迹 + 一条 agent_runtime。
+    fn seed_device_with_history(pool: &Db, node_id: &str) {
+        insert_device(&DeviceRepo::new(pool.clone()), node_id, "fp_x");
+        let sr = crate::session::SessionRepo::new(pool.clone());
+        let s = sr
+            .create(node_id, "/srv/app", Some("opencode"), "2026-01-01T00:00:00Z")
+            .unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO trajectory_event (session_id, node_id, seq, kind, payload, created_at)
+             VALUES (?1, ?2, 1, 'agent_message_chunk', '{}', '2026-01-01T00:00:01Z')",
+            rusqlite::params![s.id, node_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_runtime (node_id, agent_id, name, version, available, detected_at)
+             VALUES (?1, 'opencode', 'opencode', '2.1.4', 1, '2026-01-01T00:00:00Z')",
+            rusqlite::params![node_id],
+        )
+        .unwrap();
+    }
+
+    fn count(pool: &Db, sql: &str) -> i64 {
+        pool.get()
+            .unwrap()
+            .query_row(sql, [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// **删设备只删设备那一行**；会话、工作区、轨迹全部留下（用户裁定的
+    /// 「删除语义三分离」）。删掉它们等于借「移除一台机器」之手删用户的数据。
+    #[test]
+    fn deleting_a_device_keeps_its_sessions_workspaces_and_trajectory() {
+        let (d, _dr, _s) = repo();
+        let pool = open(&d.path().join("t.db")).unwrap();
+        seed_device_with_history(&pool, "n_a");
+        let dr = DeviceRepo::new(pool.clone());
+
+        assert_eq!(dr.delete_and_mark_removed("n_a").unwrap(), 1);
+
+        assert_eq!(count(&pool, "SELECT count(*) FROM device"), 0, "设备行要没了");
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM workspace"),
+            1,
+            "工作区要留着：它记录「这台机器上跑过什么」"
+        );
+        assert_eq!(count(&pool, "SELECT count(*) FROM session"), 1, "会话要留着");
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM trajectory_event"),
+            1,
+            "轨迹要留着——它是那次对话本身"
+        );
+    }
+
+    /// 归属改记到 `removed_node_id`，`node_id` 置 NULL。
+    ///
+    /// **会话那一半尤其要验**：`session` 表没有自己的 `node_id`（归属经由
+    /// `workspace_id`），照抄 `WHERE node_id = ?1` 会静默命中 0 行，而
+    /// 「已移除的设备」那一档在页面上就永远不出现。
+    #[test]
+    fn both_workspace_and_session_record_the_removed_node_id() {
+        let (d, _dr, _s) = repo();
+        let pool = open(&d.path().join("t.db")).unwrap();
+        seed_device_with_history(&pool, "n_a");
+        let dr = DeviceRepo::new(pool.clone());
+
+        dr.delete_and_mark_removed("n_a").unwrap();
+
+        let conn = pool.get().unwrap();
+        let (node_id, removed): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT node_id, removed_node_id FROM workspace",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(node_id, None, "node_id 要置 NULL：那台设备不存在了");
+        assert_eq!(removed.as_deref(), Some("n_a"), "原 id 要留着给页面显示");
+
+        let s_removed: Option<String> = conn
+            .query_row("SELECT removed_node_id FROM session", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            s_removed.as_deref(),
+            Some("n_a"),
+            "会话也要记：列表页不该为了判断「设备还在不在」去 join"
+        );
+    }
+
+    /// 「设备现状」类数据**要删**：留着会让一台复用同一 `node_id` 的新设备
+    /// 继承上一台的 agent 清单——页面上一切正常，只是全都不属于这台机器。
+    #[test]
+    fn the_removed_devices_agent_rows_go_with_it() {
+        let (d, _dr, _s) = repo();
+        let pool = open(&d.path().join("t.db")).unwrap();
+        seed_device_with_history(&pool, "n_a");
+        let dr = DeviceRepo::new(pool.clone());
+
+        dr.delete_and_mark_removed("n_a").unwrap();
+
+        assert_eq!(count(&pool, "SELECT count(*) FROM agent_runtime"), 0);
+        assert_eq!(count(&pool, "SELECT count(*) FROM agent_config"), 0);
+    }
+
+    /// 幂等：删一台不存在的设备返回 0（端点据此回 404），不报错、不误伤别人。
+    #[test]
+    fn deleting_an_unknown_device_touches_nothing() {
+        let (d, _dr, _s) = repo();
+        let pool = open(&d.path().join("t.db")).unwrap();
+        seed_device_with_history(&pool, "n_a");
+
+        assert_eq!(
+            DeviceRepo::new(pool.clone())
+                .delete_and_mark_removed("n_missing")
+                .unwrap(),
+            0
+        );
+        assert_eq!(count(&pool, "SELECT count(*) FROM device"), 1, "别人的行不许动");
+        let removed: Option<String> = pool
+            .get()
+            .unwrap()
+            .query_row("SELECT removed_node_id FROM workspace", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(removed, None, "别人的工作区也不许被标成已移除");
+    }
+
     /// 空库时起点必须是 0，否则第一台设备会拿到 `gen = 0`——而 `0` 正是
     /// 「还没连过」的哨兵值，`last_seen_gen` 兜底会把两者混同。
     #[test]
-    fn max_gen_on_an_empty_library_is_zero() {
-        let (_d, dr, _s) = repo();
+    fn max_gen_on_an_empty_library_is_zero() {        let (_d, dr, _s) = repo();
         assert_eq!(dr.max_gen().unwrap(), 0);
     }
 

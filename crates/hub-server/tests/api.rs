@@ -698,6 +698,19 @@ impl Harness {
         .await
     }
 
+    /// `DELETE /api/devices/{id}`，带 CSRF 双重提交。
+    async fn delete_device(&self, id: &str) -> Reply {
+        self.send(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/devices/{id}"))
+                .header(CSRF_HEADER, &self.csrf)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
     /// `DELETE /api/agents/config?...`，带 CSRF 双重提交。
     async fn delete_config(&self, node_id: &str, agent_id: &str) -> Reply {
         self.send(
@@ -868,6 +881,153 @@ async fn writing_a_config_without_the_csrf_header_is_rejected() {
         arr["configs"].as_array().map(Vec::len),
         Some(0),
         "被拒的请求不许留下任何行"
+    );
+}
+
+// ---- 删设备（子任务 12 第 1 条）----
+
+/// **删设备只删设备那一行**：会话与工作区留在列表里，并标上
+/// `removed_node_id`（用户裁定的「删除语义三分离」）。
+///
+/// 断言落在 `/api/devices` 与 `/api/sessions` **两个列表**上，不是直接查库：
+/// 这条功能的用户可见结果是「设备页少了一台、会话页那几条还在」，而它可能断在
+/// 路由、仓储或序列化任一层。
+#[tokio::test]
+async fn deleting_a_device_keeps_its_sessions_listed_as_removed() {
+    let hub = common::Hub::boot().await;
+    let (node_id, _keepalive) = enrolled_device(&hub).await;
+    let h = Harness::from_hub(hub).await;
+
+    let created = h
+        .create_session(json!({"node_id": node_id, "path": "/srv/app"}))
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    let r = h.delete_device(&node_id).await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "body: {}", r.body);
+
+    // 设备页：它没了
+    let devices = h.get("/api/devices").await.json();
+    assert!(
+        devices
+            .as_array()
+            .expect("数组")
+            .iter()
+            .all(|d| d["id"] != json!(node_id)),
+        "删完还在设备列表里：{devices}"
+    );
+
+    // 会话页：会话还在，且**标成「已移除的设备」**而不是一片空白
+    let sessions = h.get("/api/sessions").await.json();
+    let arr = sessions.as_array().expect("数组");
+    assert_eq!(arr.len(), 1, "会话被连带删了：{sessions}");
+    // 归属在 `workspace` 里（会话没有自己的 `node_id`，它经由工作区归属），
+    // 所以这三条断言都往下走一层——写成 `arr[0]["node_id"]` 会读到 `Null`
+    // 并「通过」，而那个 `Null` 只是键不存在。
+    assert_eq!(arr[0]["workspace"]["path"], json!("/srv/app"));
+    assert_eq!(
+        arr[0]["workspace"]["node_id"],
+        Value::Null,
+        "原来那台设备已经不存在，node_id 不该还指向它：{sessions}"
+    );
+    assert_eq!(
+        arr[0]["workspace"]["removed_node_id"],
+        json!(node_id),
+        "要记下原 node_id，否则页面只能显示一台没有名字的设备：{sessions}"
+    );
+}
+
+/// 再删一次是 **404**，与全路由同口径。
+///
+/// 不返回 204：`204` 说的是「删掉了」，而那时它本来就不存在——把这两件事合成
+/// 一个响应，页面对「我点了两次」与「本来就没成功」就分不出区别。
+#[tokio::test]
+async fn deleting_an_absent_device_is_404_and_leaves_the_list_alone() {
+    let hub = common::Hub::boot().await;
+    let (node_id, _keepalive) = enrolled_device(&hub).await;
+    let h = Harness::from_hub(hub).await;
+
+    let first = h.delete_device(&node_id).await;
+    assert_eq!(first.status, StatusCode::NO_CONTENT, "body: {}", first.body);
+
+    let second = h.delete_device(&node_id).await;
+    assert_eq!(second.status, StatusCode::NOT_FOUND, "body: {}", second.body);
+    assert_eq!(
+        h.get("/api/devices").await.json(),
+        json!([]),
+        "两次删之间不许复活血"
+    );
+}
+
+/// **删设备不级联删会话**，轨迹也还读得到。
+///
+/// 与「有会话的工作区拒删」是两条不同的语义，所以各测一次——否则容易把其中
+/// 一条悄悄改成另一条的镜像。
+#[tokio::test]
+async fn deleting_a_device_does_not_delete_its_sessions_trajectory() {
+    let hub = common::Hub::boot().await;
+    let (node_id, _keepalive) = enrolled_device(&hub).await;
+    let h = Harness::from_hub(hub).await;
+
+    let created = h
+        .create_session(json!({"node_id": node_id, "path": "/srv/app"}))
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let session_id = created.json()["id"]
+        .as_str()
+        .expect("会话 id")
+        .to_string();
+
+    assert_eq!(
+        h.delete_device(&node_id).await.status,
+        StatusCode::NO_CONTENT
+    );
+
+    // 轨迹端点仍能回答（读的是轨迹表，与设备无关）
+    let traj = h
+        .get(&format!("/api/sessions/{session_id}/trajectory"))
+        .await;
+    assert_eq!(traj.status, StatusCode::OK, "body: {}", traj.body);
+}
+
+/// **CSRF 门禁**：删设备是状态变更端点，少了 `X-CSRF-Token` 必须被拒。
+///
+/// 反向验证：把 `/api/devices/{id}` 挪到 `build_app` 的 `.layer(...)` 之后，
+/// 这条会红——而且不只是 CSRF，它连认证都不再经过，任意网页能删用户设备。
+#[tokio::test]
+async fn deleting_a_device_without_the_csrf_header_is_rejected() {
+    let hub = common::Hub::boot().await;
+    let (node_id, _keepalive) = enrolled_device(&hub).await;
+    let h = Harness::from_hub(hub).await;
+
+    let r = Reply::new(
+        h.app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/devices/{node_id}"))
+                    .header(
+                        "cookie",
+                        format!("{SESSION_COOKIE}={}; {CSRF_COOKIE}={}", h.session, h.csrf),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        r.status.is_client_error(),
+        "没有 CSRF 头的写请求必须被拒，实际 {}",
+        r.status
+    );
+    let devices = h.get("/api/devices").await.json();
+    assert_eq!(
+        devices.as_array().map(Vec::len),
+        Some(1),
+        "被拒的请求不许删掉设备：{devices}"
     );
 }
 
