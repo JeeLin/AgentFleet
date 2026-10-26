@@ -72,7 +72,15 @@ export interface ConvGap {
 export type ConvRow =
   | { kind: 'gap'; key: string; missing: number; after: number | null }
   | { kind: 'msg'; key: string; who: 'user' | 'agent' | 'system'; text: string }
-  | { kind: 'tool'; key: string; name: string; status: string; detail: string }
+  | {
+      kind: 'tool'
+      key: string
+      /** ACP 的 `toolCallId`。合并同一次工具调用靠它。 */
+      id: string
+      name: string
+      status: string
+      detail: string
+    }
   | { kind: 'turn'; key: string; reason: string; incomplete?: false }
   | { key: string; kind: 'incomplete' }
 
@@ -241,7 +249,28 @@ const rows = computed<ConvRow[]>(() => {
       })
     }
     const row = rowOf(ev)
-    if (row) out.push(row)
+    if (!row) continue
+
+    // 合并：**说话人没换**的连续 chunk 接在上一条消息后面。
+    //
+    // 这是「流式追加」的兑现处。实测一次 500 字回复是 30–80 个 chunk，
+    // 逐条铺开会把一句话切成几十行——而它们本来就是同一句话被拆开发来的。
+    // 判据只有「上一条是不是同一个说话人的消息」：ACP 的 chunk 既没有
+    // 「这条说完了」的标记，也没有会话内 id，能用的只有说话人这个信号。
+    const prev = out.at(-1)
+    if (row.kind === 'msg' && prev && prev.kind === 'msg' && prev.who === row.who) {
+      prev.text += row.text
+      continue
+    }
+    // 合并同一条工具调用：实测 ACP 为同一个 `toolCallId` 连发
+    // `tool_call_update`（live 收到过 4 条）。中间态的意义是「它后来变成了
+    // 什么」，不是「它曾经是什么」，所以只留最后一次的状态。
+    if (row.kind === 'tool' && row.id && prev && prev.kind === 'tool' && prev.id === row.id) {
+      prev.status = row.status
+      prev.detail = row.detail || prev.detail
+      continue
+    }
+    out.push(row)
   }
   if (props.incomplete) {
     out.push({ key: 'incomplete', kind: 'incomplete' })
@@ -271,6 +300,7 @@ function rowOf(ev: ConvEvent): ConvRow | null {
       return {
         kind: 'tool',
         key: `${ev.id}`,
+        id: toolId(p),
         name: toolName(p, ev.kind),
         status: str(p?.status) || 'running',
         detail: toolDetail(p),
@@ -332,6 +362,21 @@ function chunkText(p: Record<string, unknown> | null, raw: string): string {
   }
   if (typeof p.text === 'string') return p.text
   return raw
+}
+
+/**
+ * 这次工具调用的 id（ACP 的 `toolCallId`）。
+ *
+ * **缺了它就必须退回「每条各一块」**，不能退回「按 title 合并」：同名工具
+ * 在一轮里被调两次是常事，按名字合并会把两次不同的调用画成一块。
+ * 而 `tool_call_update` 与对应的 `tool_call` 同名——合并的正是它们。
+ *
+ * 拿不到 id 时返回空串，而空串**不参与合并**（见 `rows`）：宁可多画几块，
+ * 也不要把不是同一次的工具调用并成一块。
+ */
+function toolId(p: Record<string, unknown> | null): string {
+  const v = p?.toolCallId
+  return typeof v === 'string' ? v : ''
 }
 
 function toolName(p: Record<string, unknown> | null, kind: string): string {

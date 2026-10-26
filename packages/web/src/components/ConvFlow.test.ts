@@ -164,6 +164,82 @@ describe('ConvFlow：把轨迹事件画成对话', () => {
     expect(msg?.textContent).toContain('帮我')
   })
 
+  /**
+   * **连收 N 个 chunk 要拼成一条消息**，而不是 N 条。
+   *
+   * 这是子任务 7 点名的硬断言（「消息体为拼接结果，且**不重复、不丢**」）。
+   * 一次 500 字回复实测是 30–80 个 chunk，若每个 chunk 各成一行，页面会
+   * 把一句话切成几十条——而流式追加正是这个功能存在的理由。
+   */
+  it('连续的 agent chunk 拼成一条消息，不重复也不丢', async () => {
+    const w = mount({
+      agentId: 'opencode',
+      events: [
+        event(1, 1, 'agent_message_chunk', { content: [{ type: 'text', text: '你好' }] }),
+        event(2, 2, 'agent_message_chunk', { content: [{ type: 'text', text: '，' }] }),
+        event(3, 3, 'agent_message_chunk', { content: [{ type: 'text', text: '世界' }] }),
+      ],
+    })
+    await w.vm.$nextTick()
+
+    const msgs = w.element.querySelectorAll('[data-conv-msg]')
+    // 先断言条数：一条消息三行的话，「拼接」根本没发生
+    expect(msgs.length, '三个 chunk 必须是同一条消息').toBe(1)
+    expect(msgs[0]?.textContent).toContain('你好，世界')
+  })
+
+  it('user chunk 与 agent chunk 不拼在一起——说话人换了就是另一条', async () => {
+    const w = mount({
+      agentId: 'opencode',
+      events: [
+        event(1, 1, 'user_message_chunk', { content: [{ type: 'text', text: '问题' }] }),
+        event(2, 2, 'agent_message_chunk', { content: [{ type: 'text', text: '回答' }] }),
+      ],
+    })
+    await w.vm.$nextTick()
+
+    const msgs = w.element.querySelectorAll('[data-conv-msg]')
+    expect(msgs.length).toBe(2)
+    expect(msgs[0]?.getAttribute('data-who')).toBe('user')
+    expect(msgs[1]?.getAttribute('data-who')).toBe('agent')
+  })
+
+  /**
+   * **同一条 tool_call 的 pending → in_progress → completed 只留最后状态**。
+   *
+   * 实测 ACP 会为同一个 `toolCallId` 连发 `tool_call_update`（本机 live 收到
+   * 4 条）。逐条铺开会把一次工具调用画成四块，其中三块是中间态——中间态
+   * 的意义在于「它后来变成了什么」，不是「它曾经是什么」。
+   */
+  it('同一工具调用的多次 update 合并成一块，显示最后的状态', async () => {
+    const w = mount({
+      agentId: 'opencode',
+      events: [
+        event(1, 1, 'tool_call', { toolCallId: 't1', title: 'bash', status: 'pending' }),
+        event(2, 2, 'tool_call_update', { toolCallId: 't1', status: 'in_progress' }),
+        event(3, 3, 'tool_call_update', { toolCallId: 't1', status: 'completed' }),
+      ],
+    })
+    await w.vm.$nextTick()
+
+    const tools = w.element.querySelectorAll('[data-conv-tool]')
+    expect(tools.length, '同一 toolCallId 的更新要合并').toBe(1)
+    expect(tools[0]?.textContent).toContain('completed')
+    expect(tools[0]?.textContent).not.toContain('pending')
+  })
+
+  it('不同工具调用各占一块——合并只认同一个 toolCallId', async () => {
+    const w = mount({
+      agentId: 'opencode',
+      events: [
+        event(1, 1, 'tool_call', { toolCallId: 't1', title: 'bash', status: 'completed' }),
+        event(2, 2, 'tool_call', { toolCallId: 't2', title: 'read', status: 'completed' }),
+      ],
+    })
+    await w.vm.$nextTick()
+    expect(w.element.querySelectorAll('[data-conv-tool]').length).toBe(2)
+  })
+
   it('工具调用画成可折叠的块，默认收起（一屏里几十个工具会淹掉对话）', async () => {
     const w = mount({
       agentId: 'opencode',
