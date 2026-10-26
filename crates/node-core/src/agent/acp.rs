@@ -290,6 +290,9 @@ impl AcpClient {
     ///
     /// **立即返回**：真正的回复以 [`Event::SessionUpdate`] 的形式从事件流里出来。
     /// 不要把这个 `Result` 当成「这一轮结束了」——见模块注释的第 2 条硬约束。
+    ///
+    /// 返回值里**可能**带 `stopReason`（实测 `end_turn`），也可能什么都没有
+    /// （长回复那一次 130 s 未回）。要不要等它、等多久，是调用方的事。
     pub async fn prompt(&self, session_id: &str, text: &str) -> Result<Value, AcpError> {
         self.request(
             "session/prompt",
@@ -299,6 +302,19 @@ impl AcpClient {
             }),
         )
         .await
+    }
+
+    /// 从 `session/prompt` 的响应里取 `stopReason`。
+    ///
+    /// 抽成函数而不是让调用方自己 `get("stopReason")`：**这是「这一轮走完了」
+    /// 的唯一凭据**（chunk 流自己不会说它结束了）。集中在一处，才能保证轨迹的
+    /// `turn_end` 与页面判定用的是同一个判据。
+    ///
+    /// 返回 `None` 表示响应里没有这个字段——那**不能**当成「没走完」，
+    /// 只能当成「这一次没拿到凭据」。两者的区别在轨迹里体现为
+    /// `turn_end` 在或不在。
+    pub fn stop_reason(result: &Value) -> Option<&str> {
+        result.get("stopReason").and_then(Value::as_str)
     }
 
     /// `session/cancel` —— 中断当前这一轮。是通知，不等响应。
@@ -781,6 +797,21 @@ for raw in sys.stdin:
             .expect("事件流还在");
         assert!(matches!(ev, Event::SessionUpdate(_)));
         c.shutdown().await;
+    }
+
+    /// `stop_reason` 从响应里取 `stopReason`；没有就是 `None`，**不猜**。
+    #[test]
+    fn the_stop_reason_is_read_from_the_response_or_is_none() {
+        assert_eq!(
+            AcpClient::stop_reason(&json!({"stopReason": "end_turn", "usage": {}})),
+            Some("end_turn")
+        );
+        assert_eq!(
+            AcpClient::stop_reason(&json!({"usage": {}})),
+            None,
+            "没有凭据就是 None，不能当成 end_turn"
+        );
+        assert_eq!(AcpClient::stop_reason(&Value::Null), None);
     }
 
     /// **真机实证**：与真的 opencode 握手、建会话、发一条消息、收到回复。
