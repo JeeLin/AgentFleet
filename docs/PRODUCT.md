@@ -51,15 +51,15 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 |------|------------|
 | 设备接入 | `afcli run <hub-url>` 一条命令，节点生成密钥对、主动建立 WebSocket 外联；**首次启动自动 enroll**，用户无需单独跑 enroll；无需 Hub 入站端口 |
 | 节点身份与状态 | 注册时 Hub 签发 `node_id`；心跳即能力上报（os / arch / hostname / 版本 / 支持的 connector）；在线/离线状态 |
-| AI agent 管理与对话 | 接入各类 agent 软件（不同厂商/协议），在 Web 一个界面里统一配置、启动、对话。**agent 运行时装在节点上**，接入方式与安装来源见 `docs/PRODUCT.md` §5 |
+| AI agent 管理与对话 | 接入各类 agent 软件（不同厂商/协议），在 Web 一个界面里统一配置、启动、对话。**agent 运行时装在节点上**，接入方式见 `docs/architecture/session-and-trajectory.md`，安装来源见 `docs/architecture/workspace-and-sync.md` §4.4 |
 | Hub 一键安装 agent | 在 Hub 选设备 + 选 agent 模板 → 节点本地安装 → 自动套用托管配置 → 心跳回报就绪。**必须由用户在页面上手动选择后才执行，不自动安装**；agent 版本升级策略未决。节点进程 afcli 自身的升级是另一条通路：页面显示各设备 afcli 版本号 → **可手动触发升级** → 另有「自动升级」开关可开可关（关时只在页面手动触发）；版本号由 Hub 下发，升级失败自动回滚并回报。两者触发方式对照见 `architecture/workspace-and-sync.md` §4.5 |
 | 对话与动作流 | 会话有 Trajectory 视图，逐条展示 User/Assistant/Tool/子agent/压缩记录；**随时可看**本次改动文件与 diff |
 | 文件浏览 | 会话工作区内浏览/读写节点本地目录，写操作限制在工作区根内（**仅约束页面用户**；agent 用自己装的能力，不走这条路径） |
 | Git 操作界面 | 会话工作区的 git 状态 / diff / 提交视图 |
 | Bash / PTY | 会话工作区内的本地 shell；不装 openssh-server，Hub 不拨入 |
-| 工作区供料 | Hub 把项目文件喂进设备：git 项目只传 commit 引用（节点自己去 origin 拉），非 git 项目按 manifest 差分；不传依赖目录（见 `architecture/workspace-and-sync.md`） |
+| ~~工作区供料~~ **已撤销（2026-10-26）** | 原计划 Hub 把项目文件喂进设备。**产品裁定只做每台设备内自己的对话，不做任务分发**，因此没有项目文件传输需求。规格留 `architecture/workspace-and-sync.md` 作决策记录 |
 | 统一配置 agent | 在 Hub 统一管理各设备的 agent 配置（专家 agent 定义、技能）；托管文件在节点上只读，本地改动标记为「漂移」，可 push / pull |
-| 产物归档 | 任务产出的制品归档到 Hub，设备关机后仍可下载 |
+| ~~产物归档~~ **已撤销（2026-10-26）** | 同属「东西从设备回 Hub」的传输面，随任务分发一起撤销 |
 | 模型配置一处切换 | 在 Hub 一处配置模型与 API key，各节点上的 agent 复用同一套配置（一处改、处处生效，对标 ccswitch 的交互） |
 
 > **终端 / 文件 / git 是会话内的面板**，绑定该会话的工作区（设备上的一个 `(node_id, path)`），
@@ -90,14 +90,13 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 ### 3.3 用户可见流程（第一版）/ Key flows (first release)
 
 1. **接入一台设备**：在设备上跑 `afcli run <hub-url>` → 首次自动 enroll、生成密钥对并外联 → Hub 显示新节点（真实 os/arch/hostname）→ 在线。之后排障用 `afcli log` 看最近日志。
-2. **在某个设备上开 agent 对话**：选节点 → 选工作区路径（项目文件由 Hub 喂进去）→ 选/配 agent →
+2. **在某个设备上开 agent 对话**：选节点 → 选工作区路径（设备上已有的目录）→ 选该设备上已装且可用的 agent →
    会话建立，terminal / files 面板挂到这个工作区上（git 面板在 M4 加入）→
    在面板里对话 → Trajectory 逐条可查。
-3. **看它改了什么**：会话进行中随时可看 → 改动文件列表 → 点开看 diff（基线在会话开始时建立，持续 diff）。
+3. **看它改了什么**：会话进行中，ACP 的 `tool_call` 事件逐条展示工具名、状态与输出摘要（改动内容从这里看）。专门的 diff 视图留到 M3 的 git 面板。
 4. **操作文件 / git / bash**：在**该会话内**用对应面板，直接作用于该会话的工作区。
-5. **统一配置 agent**：在 Hub 改一份 agent 配置（专家 agent 定义 / 技能）→ 下发到所有节点 → 节点上只读生效，
-   被本地改过的文件标记为「漂移」，可 push 或 pull。
-6. **取回产物**：任务结束 → 产物归档到 Hub → 设备关机后仍可下载。
+5. ~~**统一配置 agent**~~：**暂缓**（规格在 `architecture/workspace-and-sync.md` §4.1–4.3，实现未排期）。
+6. ~~**取回产物**~~：**已撤销（2026-10-26）**，随产物归档一起撤销。
 7. **设备掉线**：WS 断开 → 节点自动指数退避重连（1s/2s/4s…上限 30s），UI 显示「重连中」与已重试时长；
    连续心跳丢失 > 45s（= 3 个心跳周期）转为「离线」；离线期间工作区与 agent 会话在设备上仍存活，
    面板转为只读并显示最后已知状态，禁止发起新操作；用户可手动点「立即重连」。
@@ -131,8 +130,8 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
   工作区快照引用都存 Hub，节点只持有「当前执行所需的上下文切片」。节点掉线，任务状态不丢。
 - **断点可恢复**：任务 = 持久化的状态机 + 事件日志；节点执行带「检查点（checkpoint）」，
   重连后从最后一个成功检查点续跑，不重做。
-- **工作区/产物定位用内容寻址或稳定引用**：跨节点续跑时，需要的文件/产物一律经
-  **Hub 的内容寻址仓库**按内容哈希取得，不依赖「上一台机器还在」，**不做设备间 P2P 直传**。
+- ~~**工作区/产物定位用内容寻址或稳定引用**~~：跨节点续跑属任务系统里程碑，**暂缓**。
+  仍然有效的是：**不做设备间 P2P 直传**；唯一保留的内容寻址存储是 agent 安装包。
 - **ACP 的 `session/load` 作为对话恢复机制**：agent 会话恢复走 ACP，而非自建。
 - **轨迹 append-only**：所有动作写入 dsh 式事件流，既是 UI 回放源，也是断点续跑的审计源。
 
@@ -183,12 +182,12 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 | connector | 节点上提供的一类**有类型**的能力（terminal / files / git / exec / ssh / db / …），可插件化 |
 | task | 一个完整任务；sub-task 是任务下可独立执行/续跑的单元，在某台 node 上由 agent 会话执行 |
 | trajectory | dsh 式的会话动作事件流，Web 逐条回放 |
-| 会话 / 会话页 | M1 的**会话容器**：一个页面（`/sessions/:id`），持有对话流与面板坞。**它不是 ACP agent 会话**——那归 M3，本阶段不含 ACP。Session page: the container page `/sessions/:id`; an M1 concept, not an ACP agent session (M3) |
+| 会话 / 会话页 | 会话容器：一个页面（`/sessions/:id`），持有对话流与面板坞。**M1 的会话不含 ACP；M2 起会话可选挂一个 agent**，拥有 `acp_session_id`，对话走 ACP。Session page: the container page `/sessions/:id`; M1 sessions carried no ACP, M2 sessions may bind an agent and carry an `acp_session_id` |
 | workspace | 工作区：设备上的一个 `(node_id, path)`，**会话的一个字段**，不是路由、不是页面；可被多个会话引用（同一条路径可被两个会话同时打开，各自持有自己的通道）。Workspace: a `(node_id, path)` on a device, carried as a field on a session — not a route and not a page |
-| artifact | 产物：任务产出的最终制品，按 id 归档到 Hub，设备关机后仍可取回。Artifact: a task's final output, archived on the Hub by id and retrievable after the device powers off |
+| ~~artifact~~ | **已撤销（2026-10-26）**：原指任务产出的最终制品归档到 Hub。随产物归档一起撤销 |
 | channel_id | 通道号：一条设备 WebSocket 上的子通道，通道键为 `(node_id, channel_id)`，每通道独立流控。Channel id: a sub-channel on one node WebSocket, keyed `(node_id, channel_id)`, with per-channel flow control |
-| baseline | 基线：会话开始时记录的工作区初始状态，用于随时计算改动文件与 diff。Baseline: the workspace state captured at session start, used to compute changed files and diffs on demand |
-| CAS | 内容寻址仓库：Hub 侧以内容哈希存储 blob 的仓库，统一供料项目文件、配置与产物。CAS: the Hub's content-addressed blob store, feeding project files, config and artifacts alike |
+| ~~baseline~~ | **暂缓**：原指会话开始时记录的工作区初始状态，用于算改动文件与 diff。专门的 diff 视图留到 M3 git 面板 |
+| CAS | 内容寻址存储：Hub 侧以内容哈希存 blob。**现只用于 agent 安装包**（`put` / `get` + 校验），不再供料项目文件 / 配置 / 产物（2026-10-26 裁定）。CAS: content-addressed blob storage, now used only for agent install packages |
 | supervisor | 守护进程的父进程：不碰业务与 WebSocket，只负责拉起 / 监控 / 替换 / 回滚 worker——**执行回滚的代码不参与被回滚**。Supervisor: the parent process that touches neither business logic nor the WebSocket, only starting, monitoring, swapping and rolling back the worker — the code performing a rollback is never itself replaced |
 | worker | 工作进程：持有设备身份与 WebSocket，实际执行 connector 与 agent；升级时更换，`node_id` 不变。Worker: the process holding device identity and the WebSocket that actually runs connectors and agents; swapped on upgrade, `node_id` unchanged |
 | worktree | Git 工作树：同一仓库的多个独立工作目录，用于隔离并行任务，共享 object store。Worktree: independent working directories of one repository, isolating parallel tasks while sharing the object store |

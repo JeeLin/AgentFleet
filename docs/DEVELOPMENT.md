@@ -29,7 +29,7 @@ crates/
   hub-core/     Hub 核心：注册表、连接注册表、会话/任务编排、推理网关
   hub-server/   Hub HTTP/WS 服务 + 前端托管（进程入口 `main.rs` 在此）
   hub-storage/  Hub 存储：SQLite 连接（WAL + busy_timeout）、schema.sql、版本化迁移、数据目录解析与权限
-  node-core/    node 核心：连接、connector（terminal/files/git/exec，**仅面向页面用户**）、能力上报
+  node-core/    node 核心：连接、connector（terminal/files/exec，**仅面向页面用户**）、能力上报、agent 探测与 ACP 客户端
   node-cli/     node 二进制（enroll / run / worker），**对外命令名 `afcli`**（避免与 Node.js 运行时 `node` 撞名）
   protocol/     共享：消息定义、(node_id, channel_id) 通道、事件类型
 packages/
@@ -97,21 +97,25 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
 | # | 里程碑 | 目标 | 承接 §3.1 能力 |
 |---|--------|------|--------------|
 | M0 ✅ 已完成 | 设备接入 | `afcli run` 一条命令（首次自动 enroll）；**密钥对在 node 本地生成、Hub 只存指纹**；supervisor/worker 同二进制双角色（`run --worker`，回滚由未被替换的 supervisor 执行，见 `DECISIONS.md` D1/D2）；单条 WS 主动外联；心跳即能力上报；掉线指数退避重连；防重复注册（同一指纹不得新建设备）；`afcli log` 看最近日志；**WS 协议层与 enroll 时序一并设计**（见 `architecture/protocol.md`） | 设备接入、节点身份与状态、存储与启动基座 |
-| M1 🔄 当前 | 会话容器与首个演示 | 工作区 `(node_id, path)` 落库；会话创建即挂载工作区；**在树莓派上开一个会话，会话内的 terminal / files / exec 面板可用，零入站端口、不装 openssh-server**；exec connector（一次性命令、无 PTY；**只经会话通道触发**，connector 跑在设备上，Hub 没有旁路入口）随此里程碑落地。**connector 只面向页面用户，不向 agent 暴露**。**「会话」指页面级容器，不是 ACP agent 会话**——ACP 归 M3 | Bash/PTY、文件浏览 |
-| M2 | 工作区供料与同步 | Hub 内容寻址仓库（CAS）；manifest 差分物化到 `(node_id, path)`；排除依赖目录；技能/配置走托管覆盖层（只读 + 漂移检测 + **全局/会话两层权限规则**）；产物归档（见 `architecture/workspace-and-sync.md`） | 工作区供料、统一配置 agent、产物归档、模型配置一处切换 |
-| M3 | ACP 会话与轨迹 | 接入 ACP；Trajectory 逐条可查（事件表含类型/输入/输出/耗时/归属节点）；会话开始建基线，**随时可看**改动文件与 diff | 对话与动作流、AI agent 管理与对话 |
-| M4 | Git 界面 | 会话工作区的 git 状态 / diff / 提交视图；**此时会话面板补齐第三个 git 面板** | Git 操作界面 |
-| M5 | 任务分发与 agent 安装 | **Hub 新建任务 → 仅节点内编排**：Hub 建任务，**node 决定开几个 sub-task**（按 `DECISIONS.md` D9 收窄为节点内编排，跨设备分发留 M8——其三支柱 CAS 工作区物化 / checkpoint 续跑 / 环境声明分别在 M2 / M8，M5 做必残缺）；任务工作区来源分发时确认；预置的专家 agent 定义走托管覆盖层（约束 8）；**Hub 一键把 agent 装到设备**并套用托管配置（升级策略未决，见 `architecture/workspace-and-sync.md` §4.4） | Hub 一键安装 agent |
-| M6 | 推理网关 | 一个 OpenAI 兼容端点，背后是 N 台设备各自的全量副本（阶段 1，请求级路由） | —（新增能力） |
-| M7 | connector 插件化 | 把协议族做成插件按需加载 + 抓包插件 + 端口转发插件 | —（`PRODUCT.md` §3.2 后续项） |
-| M8 | 任务系统 | 完整任务定义 / 状态 / 进度 / 断点续跑（跨节点任务连贯性，见 `architecture/task-continuity.md`）。**前置条件：M2 的 CAS 与 checkpoint 重建**——跨设备续跑必须能从 CAS 取到所需文件与产物，否则「换一台机器接着跑」没有数据基座 | —（`PRODUCT.md` §3.2 后续项） |
+| M1 ✅ 已完成 | 会话容器与首个演示 | 工作区 `(node_id, path)` 落库；会话创建即挂载工作区；**在树莓派上开一个会话，会话内的 terminal / files / exec 面板可用，零入站端口、不装 openssh-server**；exec connector（一次性命令、无 PTY；**只经会话通道触发**，connector 跑在设备上，Hub 没有旁路入口）随此里程碑落地。**connector 只面向页面用户，不向 agent 暴露**。**「会话」指页面级容器，不是 ACP agent 会话**——ACP 归 M2 | Bash/PTY、文件浏览 |
+| M2 🔄 当前 | ACP 对话 | 接入 ACP（`session-and-trajectory.md`）：设备探测并心跳上报 agent 运行时；Hub 登记 agent 模板并**由用户手动触发**下发安装；建会话可选用该设备上已装且可用的 agent（未装 → 409）；ACP 客户端（`initialize` / `session/new` / `session/prompt` / `session/update` / `session/cancel` / `session/load`）；`session/update` 事件流落 append-only 轨迹表（类型/输入/输出/耗时/归属节点）；对话页面。**删除语义三分离**：卸载 agent 不删会话、删设备不删会话、删工作区有会话则拒。**不用外键**——归属关系由业务层显式检查并给可读错误 | AI agent 管理与对话、对话与动作流、Hub 一键安装 agent |
+| M3 | Git 界面 | 会话工作区的 git 状态 / diff / 提交视图；**此时会话面板补齐第三个 git 面板** | Git 操作界面 |
+| M4 | 任务分发与托管配置 | **Hub 新建任务 → 仅节点内编排**：Hub 建任务，**node 决定开几个 sub-task**（按 `DECISIONS.md` D9 收窄为节点内编排，跨设备分发留 M8）；任务工作区来源分发时确认；托管配置覆盖层（skills / 两层权限 / 漂移检测，见 `architecture/workspace-and-sync.md` §4.1–4.3，**暂缓**）；agent 软件本体升级策略（未决，见同文 §4.4） | 统一配置 agent、模型配置一处切换 |
+| M5 | 推理网关 | 一个 OpenAI 兼容端点，背后是 N 台设备各自的全量副本（阶段 1，请求级路由） | —（新增能力） |
+| M6 | connector 插件化 | 把协议族做成插件按需加载 + 抓包插件 + 端口转发插件 | —（`PRODUCT.md` §3.2 后续项） |
+| M7 | 任务系统 | 完整任务定义 / 状态 / 进度 / 断点续跑（跨节点任务连贯性，见 `architecture/task-continuity.md`） | —（`PRODUCT.md` §3.2 后续项） |
 | 后续 | 后续能力 | 自动化、社交软件接入、原生客户端、分布式推理进阶（RPC 层切分 / MoE 分片） | —（`PRODUCT.md` §3.2 后续项） |
 
-> 首个演示是 M1：在树莓派上开一个**会话**（页面级容器，不是 ACP agent 会话——ACP 归 M3），会话里的 shell 与文件浏览就能用，且零入站端口。
+> 首个演示是 M1：在树莓派上开一个**会话**（页面级容器，不是 ACP agent 会话——ACP 归 M2），会话里的 shell 与文件浏览就能用，且零入站端口。
 > 终端 / 文件 / git 都在会话内，因此演示必须经由会话，不能脱离会话直接开终端。
-
-> M2 排在 ACP 与 Git 之前：会话要在目标设备上正确跑起来，工作区必须先能被喂进去。
-> git 项目走「Hub 只发 commit 引用、节点自己去 origin 拉」的主路径；非 git 项目走 CAS 差分。
+>
+> **2026-10-26 范围裁定**：原 M2「工作区供料与同步」整体撤销——产品当前只做**每台设备内自己的对话**，
+> 不做任务分发，因此没有项目文件传输的需求（原 CAS / manifest 差分 / A-B-C-D 四档规格留在
+> `architecture/workspace-and-sync.md` 作决策记录）。原 M3 的 ACP 对话与轨迹**整个提前**为现在的 M2；
+> 原 M5 的「Hub 一键把 agent 装到设备」也并入 M2。
+>
+> **原 M2 与 Git 的先后顺序已不适用**：那条理由（「工作区必须先能被喂进去」）随传输面一起撤销。
+> M3（Git 界面）现在只需 M1 的工作区绑定即可开工。
 
 > 第一版 = M0–M4（首个可用版本）。M5 起为第二阶段。
 > The first usable version is M0–M4; M5 onward is the next stage.
@@ -148,14 +152,15 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
 | 存储与启动基座 | M0（新增，非 §3.1 能力） | `architecture/README.md` §3/§8；`security-and-lifecycle.md` §2.1（强制防护） |
 | Bash / PTY | M1 | `architecture/README.md` §4.1（工作区绑定）；`design-system.md` §7.0（入口是会话） |
 | 文件浏览 | M1 | 同上 |
-| AI agent 管理与对话 | M3 | `session-and-trajectory.md`（ACP 会话）。**M1 的会话容器不是 agent 会话**，见 §3 M1 行 |
-| 对话与动作流 | M3 | `session-and-trajectory.md` §3/§4/§7（轨迹表） |
-| Git 操作界面 | M4 | `architecture/README.md` §4 |
-| 工作区供料 | M2 | `workspace-and-sync.md` §1/§3 |
-| 统一配置 agent | M2 | `workspace-and-sync.md` §4（托管覆盖层 + 两层权限） |
-| 模型配置一处切换 | M2 | `workspace-and-sync.md` §4.3；`security-and-lifecycle.md` §3 |
-| 产物归档 | M2 | `workspace-and-sync.md` §5 |
-| Hub 一键安装 agent | M5 | `workspace-and-sync.md` §4.4；`security-and-lifecycle.md` §7 |
+| AI agent 管理与对话 | M2 | `session-and-trajectory.md`（ACP 会话）。**M1 的会话容器不是 agent 会话**，见 §3 M1 行 |
+| 对话与动作流 | M2 | `session-and-trajectory.md` §3/§7（轨迹表） |
+| Git 操作界面 | M3 | `architecture/README.md` §4 |
+| 统一配置 agent | M4（**暂缓**） | `workspace-and-sync.md` §4.1–4.3（托管覆盖层 + 两层权限）。**规格在，实现未排期** |
+| 模型配置一处切换 | M4（**暂缓**） | `workspace-and-sync.md` §4.3；`security-and-lifecycle.md` §3 |
+| Hub 一键安装 agent | M2 | `workspace-and-sync.md` §4.4；`security-and-lifecycle.md` §7 |
+
+> **§3.1 里已撤销的两项不再出现在上表**：「工作区供料」与「产物归档」（2026-10-26 裁定）。
+> 它们的架构依据（`workspace-and-sync.md` §3 / §5）保留原文并标注已撤销，作决策记录。
 
 ### 4.3 反向检查
 

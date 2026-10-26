@@ -107,15 +107,20 @@ secret(          -- M0 建：Hub 自身的秘密（登录密码哈希、session 
 
 - 工作区 = 设备上的一个 `(node_id, path)`，**可被多个会话引用**（同一条路径可被两个会话同时打开，各自持有自己的通道）。
   **落库形态（M1，v2 迁移）**：`workspace` 表是**主实体**（`UNIQUE (node_id, path)`），
-  `session.workspace_id` 是指向它的外键——同一个 `(node_id, path)` 永远只有一行，
+  `session.workspace_id` 指向它——同一个 `(node_id, path)` 永远只有一行，
   多个会话引用的是同一行而不是各建一份互相看不见的副本。
-  理由：**M2 的 manifest 差分按 `(node_id, path)` 定位**，工作区必须独立于会话存在
-  （`workspace-and-sync.md` §3.1）；且「用户在会话里选路径」这条交互说的是**会话引用一个
-  已经在那儿的工作区**，不是会话生出一个工作区。
-  `ON DELETE RESTRICT` 是刻意的：删工作区前必须显式检查有没有会话指着它，
-  「关掉一个面板」不该悄悄连带删掉别的会话正在用的工作区。
+  **理由（2026-10-26 修订）**：原理由是「M2 的 manifest 差分按 `(node_id, path)` 定位」，
+  该理由随项目文件传输面一起撤销。现在成立的理由只有一条且足够：
+  「用户在会话里选路径」这条交互说的是**会话引用一个已经在那儿的工作区**，不是会话生出一个工作区；
+  且两个面板打开同一路径时必须看到同一份事实，不能各建副本。
+  **不用外键（2026-10-26 用户裁定）**：v2 里 `workspace.node_id` 是 `ON DELETE CASCADE`、
+  `session.workspace_id` 是 `ON DELETE RESTRICT`，两者在「删设备」时互相打架（CASCADE 要删工作区，
+  RESTRICT 又拦住），导致删设备根本执行不了。改法：两条外键都去掉，归属关系由业务层显式检查
+  并给可读错误（`WorkspaceInUse` / `DeviceNotFound`），孤儿归属用 `removed_node_id` 文字列保留。
+  理由见 `docs/BUGS.md` 设备删除条与 M2 里程碑的「删除语义与去外键」节。
+  **删除语义三分离**：卸载 agent 不删会话；删设备不删会话；删工作区时有会话指着则拒。
   反过来，**删会话不删工作区**——工作区独立于会话存在。
-  **「归属于某个 agent 会话」是 M3 的措辞**（那时才接 ACP），M1 的会话容器不是 agent 会话。
+  **「归属于某个 agent 会话」是 M2 的措辞**（M2 起接 ACP），M1 的会话容器不是 agent 会话。
 - terminal / files / git 三个面板都绑在会话的工作区上：**进入会话才建立通道，退出即释放**。
 - 不做设备级的长驻多资源管理台（不是「一个设备下面挂 N 个资源 tab」那种形态）。
   这不是交互偏好，是结构要求：**工作区不是路由**（`PRODUCT.md` §6 术语表、`design-system.md` §7.0）。
@@ -126,7 +131,7 @@ secret(          -- M0 建：Hub 自身的秘密（登录密码哈希、session 
 agent 在节点上用自己的工具读写文件，**不经过我们的 files connector**，
 因此页面侧的「工作区根内」限制**约束不到 agent**。对 agent 的约束只有两层：
 
-1. **它自己的权限机制**（我们通过 M2 的托管覆盖层统一下发配置，见 `workspace-and-sync.md` §4）
+1. **它自己的权限机制**（~~我们通过托管覆盖层统一下发配置~~——**暂缓**，见 `workspace-and-sync.md` §4；M2 的 ACP 权限请求走协议内）
 2. **它自己装在什么目录**——我们控制工作区目录与设备上的执行权限，不做额外沙箱
 
 > **不要**因为「connector 限制在工作区内」就认为 agent 也被限制了。这是两套独立的路径。
@@ -148,7 +153,7 @@ agent 在节点上用自己的工具读写文件，**不经过我们的 files co
 产物（按 `artifact_id` 归档）。
 
 git 项目走主路径：Hub 只发 commit 引用，节点自己去 origin 拉，**大文件不进 WebSocket**。
-非 git 项目走 manifest 差分 + 内容哈希跳过。详见 `workspace-and-sync.md`。
+~~非 git 项目走 manifest 差分 + 内容哈希跳过。~~ **已撤销（2026-10-26）**：项目文件不在设备间传输。
 
 ## 5. 会话与轨迹
 
@@ -174,4 +179,4 @@ Gateway 复用约束 9 的调度范式（能力硬过滤 + 有序打分），且
 
 SQLite（WAL + busy_timeout）存 device / 会话元数据 / 任务状态 / 轨迹事件引用。
 轨迹事件与工作区产物的存储位置与保留策略见 `session-and-trajectory.md`。
-内容寻址仓库（blob / snapshot / artifact / managed_file）见 `workspace-and-sync.md`。
+~~内容寻址仓库（blob / snapshot / artifact / managed_file）~~：**部分撤销（2026-10-26）**——现只保留 agent 安装包的 `blob` 最小形态，见 `workspace-and-sync.md` §7。

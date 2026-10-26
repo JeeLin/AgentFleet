@@ -34,9 +34,12 @@ M0 实际上报的形状见 `crates/node-core/src/heartbeat.rs`。与下面这�
 
 - `workspace_roots` 是**顶层数组**而不是 `workspace.roots` 嵌套对象——
   协议层 `Heartbeat` 就是这样定义的（§2 的「只报根」约束与嵌套与否无关）；
-- `resources` 在 M0 是 `null`。取真实负载要读 `/proc` 或引依赖，而**编一个数字
-  比不报坏得多**：路由会照着它做硬过滤。Hub 侧对缺省字段的约定是「保持上一次的
-  值」，所以留 null 让 Hub 保留旧事实。
+- `resources` 在 **M0/M1 是 `null`，M2 起真采集**。原理由是「取真实负载要读 `/proc`
+  或引依赖，而编一个数字比不报坏得多」——这条理由仍然成立，**编造数字依然禁止**；
+  M2 排进了真采集（node 读 `/proc/loadavg` + `/proc/meminfo`），所以不再是「没有」，
+  而是「有就报、探测失败就留 null」。Hub 侧对缺省字段的约定仍是「保持上一次的值」，
+  所以 `null` 依然让 Hub 保留旧事实。**注意 `load_percent` 有 `min(100)` 截断**
+  （`hub-server/src/routes/api.rs`），高负载设备恒读 100，不能拿它做精确比较。
 
 ```jsonc
 {

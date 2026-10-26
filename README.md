@@ -32,19 +32,29 @@ node, run AI agent sessions, and route tasks to the node best suited to run them
 > 「第一版」指**首个可用版本（里程碑 M0–M4）**。M5 起为第二阶段。
 > "First release" = the first usable version (M0–M4). M5 onward is the next stage.
 
-> **当前进度 / Current status：M0 与 M1 已完成，M2 起未开始。**
+> **当前进度 / Current status：M0、M1、M2 已完成，M3 起未开始。**
 > M1 交付的是**会话容器**（页面级：工作区 + 终端 / 文件 / exec 面板）与 Web 控制台。
+> M2 把 ACP 接进来：设备上报 agent 运行时、Hub 下发安装、选设备上的 agent 对话、轨迹落库。
 > 下面每项后面的 `Mx` 是它真正落地的里程碑——**清单描述的是第一版全貌，不是现在就能用的东西**。
-> Shipped today: M0 and M1. The `Mx` tag on each line is the milestone that actually delivers it.
+> Shipped today: M0, M1 and M2. The `Mx` tag on each line is the milestone that actually delivers it.
 
 - **设备接入** `M0`：一条 CLI 命令注册，单条 WebSocket 主动外联；心跳即能力上报。One CLI command, one outbound WebSocket, heartbeats carry capabilities.
 - **节点身份与状态** `M0`：Hub 签发 `node_id`，设备密钥对认证，不用静态共享 token。Hub-issued `node_id`, key-pair auth, no static shared token.
 - **Web 控制台与会话面板** `M1`：设备 / 会话列表与工作台；终端（PTY，含 resize）/ 文件浏览 / 一次性 exec，全部绑定会话工作区 `(node_id, path)`，**零入站端口**。Devices and sessions, a workbench with terminal (PTY, resizable), file browser and one-shot exec—all bound to the session workspace, **zero inbound ports**.
-- **AI agent 管理与对话** `M3`：各类 agent 统一配置、启动、对话。Configure, launch and chat with any agent in one place.
-- **对话与动作流** `M3`：dsh 式 Trajectory 逐条可查，列出本次改动的**文件**与 diff。A dsh-style trajectory, step by step, plus changed files and diffs.
-- **会话内 git 面板** `M4`：完整面板集补齐第三个（终端 / 文件 / git）。The third panel (git) completes the set.
-- **工作区供料与统一配置** `M2`：内容寻址仓库喂项目文件（git 只传 commit 引用），统一管理子 agent 与技能，**密钥永不上传**。A content-addressed store feeds project files, sub-agents and skills are managed centrally, **node keys never leave the device**.
-- **产物归档** `M2`：制品归档到 Hub，设备关机后仍可下载。Outputs archived on the Hub, downloadable after the device powers off.
+- **AI agent 管理与对话** `M2`：各类 agent 统一配置、启动、对话。Configure, launch and chat with any agent in one place.
+- **对话与动作流** `M2`：dsh 式 Trajectory 逐条可查，列出本次改动的**文件**与 diff。A dsh-style trajectory, step by step, plus changed files and diffs.
+- **会话内 git 面板** `M3`：完整面板集补齐第三个（终端 / 文件 / git）。The third panel (git) completes the set.
+- **Hub 一键安装 agent** `M2`：在 Hub 选设备 + 选 agent 模板 → 节点本地安装 → 心跳回报就绪。**必须用户手动选，不自动安装**。Pick a device and template on the Hub, the node installs it locally, a heartbeat reports readiness. **Always user-initiated.**
+
+> **2026-10-26 范围裁定**：原第一版里的「工作区供料与统一配置」与「产物归档」**整体撤销**——
+> 产品当前只做**每台设备内自己的对话**，不做任务分发，因此没有项目文件传输的需求。
+> 相关的 CAS / manifest 差分 / A-B-C-D 四档传输规格留在 `docs/architecture/workspace-and-sync.md`
+> 作决策记录（相关小节已标「已撤销」）。
+>
+> **Scope decision, 2026-10-26**: the former "workspace feeding / unified config" and
+> "artifact archiving" items are **retired** — the product only does per-device conversations,
+> so there is no project-file transfer surface. The CAS / manifest-diff / four-tier specs remain
+> in `docs/architecture/workspace-and-sync.md` as a decision record (marked as retired).
 
 > 完整范围与用户流程见 `docs/PRODUCT.md` §3。
 > Full scope and user flows: `docs/PRODUCT.md` §3.

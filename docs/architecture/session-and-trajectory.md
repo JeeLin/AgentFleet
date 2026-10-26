@@ -126,4 +126,5 @@ trajectory_event(
 
 - SQLite：建库必须 `journal_mode=WAL` + `busy_timeout`。
 - **只追加**：不 UPDATE、不 DELETE；修正以新事件表达。
-- 保留策略与产物同档（临时 / 归档 / 永久），见 `workspace-and-sync.md`。
+- ~~保留策略与产物同档（临时 / 归档 / 永久）~~：**产物归档已撤销（2026-10-26）**，
+  本条失去参照对象。轨迹事件的保留策略**待定**（当前不设自动清理）。
