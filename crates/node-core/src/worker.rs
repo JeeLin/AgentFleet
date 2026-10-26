@@ -96,7 +96,7 @@ impl Worker {
     pub fn new(data_dir: PathBuf, hub_url: String) -> Self {
         let log = log_to(&data_dir);
         Self {
-            data_dir,
+            data_dir: data_dir.clone(),
             hub_url,
             log: Box::new(log),
             detected: crate::agent::Detected::new(),

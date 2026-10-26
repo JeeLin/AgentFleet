@@ -4,6 +4,7 @@
 //! 建库时强制 `journal_mode=WAL` + `busy_timeout`（AGENTS.md「SQLite 铁律」：
 //! 多设备高频心跳/状态写入下，零 PRAGMA 必现 `SQLITE_BUSY`）。
 
+pub mod agent;
 pub mod db;
 pub mod error;
 pub mod migrate;
@@ -12,6 +13,7 @@ pub mod session;
 pub mod workspace;
 
 pub use db::{data_dir, open, open_in, set_umask_077, Db};
+pub use agent::{AgentConfig, AgentConfigRepo, AgentRuntime, AgentRuntimeRepo};
 pub use error::StorageError;
 pub use repo::{
     base64url_decode, base64url_of, Device, DeviceRepo, DeviceStatus, NewDevice, SecretRepo,

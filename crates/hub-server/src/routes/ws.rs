@@ -1061,6 +1061,88 @@ fn on_heartbeat(state: &AppState, conn_id: &str, auth: &Authenticated, frame: &F
     {
         tracing::error!(conn_id = %conn_id, node_id = %auth.node_id, error = %e, "heartbeat persistence failed; routing still reads memory");
     }
+
+    // agent 运行时落库（要求 1 的 Hub 侧 + 子任务 5 的 409 门禁数据源）。
+    //
+    // **必须落库，不能只留在内存 `Reports`**：那份表是「缺省即保留」且没有
+    // `forget`，一次不带 `capabilities` 的心跳会让旧 agent 清单永远粘在那里。
+    // `agent_runtime` 的语义是「这份清单就是设备现在的全部事实」——整体覆盖，
+    // 卸载掉的 agent 随之消失（见 `AgentRuntimeRepo::replace_detected`）。
+    persist_agents(state, &auth.node_id, &hb);
+}
+
+/// 把心跳里的 `capabilities.agents` 落进 `agent_runtime`。
+///
+/// # 为什么「没有 agents 键」时**什么都不做**
+///
+/// 协议允许只报 `node_version` 的心跳（老节点、或设备上探测还没跑过）。
+/// 若把「没有这个键」当成「一个 agent 都没有」，一次握手刚重连就会把设备上
+/// 所有 agent 从库里清空，门禁随即开始拦——那是比粘滞更糟的错法。
+///
+/// 区分靠 `capabilities` 里**有没有** `agents` 这个键，而不是它是否为空数组：
+/// 空数组是「探过了，一个都没有」（要删），缺键是「这次没报」（不动）。
+fn persist_agents(state: &AppState, node_id: &str, hb: &protocol::message::Heartbeat) {
+    let Some(list) = hb
+        .capabilities
+        .as_object()
+        .and_then(|o| o.get("agents"))
+        .and_then(|v| v.as_array())
+    else {
+        return;
+    };
+    let rows: Vec<(String, String, Option<String>, bool, Option<String>)> = list
+        .iter()
+        .filter_map(parse_agent_report)
+        .collect();
+    let now = hub_core::registry::now_stamp();
+    if let Err(e) = state.agent_runtime().replace_detected(node_id, &rows, &now) {
+        tracing::error!(node_id = %node_id, error = %e, "cannot persist the reported agents");
+    }
+}
+
+/// 解一项 `capabilities.agents`。
+///
+/// # 为什么这里自己写一份，而不是用 `node-core` 里的 `AgentReport`
+///
+/// `hub-server` 的**生产**依赖里没有 `node-core`（它只是 dev-dependency，
+/// 给 WS 集成测试用）。为一个 20 行的 JSON 读取把它提成生产依赖，会让
+/// 「设备侧探测」整棵子树（起子进程、PTY、tokio-tungstenite）进 Hub 的
+/// 依赖图——Hub 自己不需要碰这些。
+///
+/// 兼容旧形态（纯字符串）是**必须**的：升级窗口里设备可能还是老版本，
+/// 只认对象会让整张 agent 列表静默变空。
+///
+/// 返回 `(id, name, version, available, error)`。
+fn parse_agent_report(v: &serde_json::Value) -> Option<(String, String, Option<String>, bool, Option<String>)> {
+    if let Some(name) = v.as_str() {
+        // 旧帧只有名字。`available = false` 是刻意的保守值：一个只说名字的
+        // 帧不构成「可用」的证据，而门禁宁严勿松。
+        return Some((
+            name.to_string(),
+            name.to_string(),
+            None,
+            false,
+            None,
+        ));
+    }
+    let o = v.as_object()?;
+    let id = o.get("id").and_then(serde_json::Value::as_str)?;
+    Some((
+        id.to_string(),
+        o.get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(id)
+            .to_string(),
+        o.get("version")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        o.get("available")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        o.get("error")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    ))
 }
 
 /// 尽力发出一帧，失败只记日志。

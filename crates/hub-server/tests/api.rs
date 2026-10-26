@@ -188,7 +188,14 @@ async fn enrolled_device(hub: &common::Hub) -> (String, node_core::conn::Establi
 #[tokio::test]
 async fn api_routes_are_covered_by_the_auth_layer() {
     let h = Harness::new().await;
-    for path in ["/api/devices", "/api/sessions", "/api/agents"] {
+    for path in [
+        "/api/devices",
+        "/api/sessions",
+        "/api/agents",
+        // 配置端点同样是状态变更口：未认证必须 401，不能是 404（没挂上）
+        // 也不能是 200（认证层没覆盖到）。
+        "/api/agents/config",
+    ] {
         let resp = h
             .app
             .clone()
@@ -546,4 +553,207 @@ async fn the_agent_directory_is_the_deduplicated_union_of_heartbeat_reports() {
         r.json(),
         json!([{"name": "claude-code"}, {"name": "opencode"}])
     );
+}
+
+// ---- agent 配置（子任务 4，要求 2「扫描 + 配置」的配置侧）----
+//
+// 这里**没有安装端点**：2026-10-26 用户裁定取消「Hub 下发 agent 安装」，
+// agent 由用户自己在设备上装，Hub 只存它的启动配置。所以本段测的是
+// 「配置能写能读能删」，而不是「Hub 能让设备装东西」。
+
+impl Harness {
+    /// `POST /api/agents/config`，带 CSRF 双重提交。
+    async fn post_config(&self, body: Value) -> Reply {
+        self.send(
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents/config")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, &self.csrf)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+    }
+
+    /// `DELETE /api/agents/config?...`，带 CSRF 双重提交。
+    async fn delete_config(&self, node_id: &str, agent_id: &str) -> Reply {
+        self.send(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/api/agents/config?node_id={node_id}&agent_id={agent_id}"
+                ))
+                .header(CSRF_HEADER, &self.csrf)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+}
+
+/// 写→读往返：参数与环境变量都**结构化**回来，不是 JSON 字符串。
+#[tokio::test]
+async fn an_agent_config_round_trips_through_the_api() {
+    let h = Harness::new().await;
+
+    let written = h
+        .post_config(json!({
+            "node_id": "n_cfg",
+            "agent_id": "opencode",
+            "command": "/opt/opencode/bin/opencode",
+            "args": ["--acp", "--verbose"],
+            "env": {"FOO": "bar"}
+        }))
+        .await;
+    assert_eq!(written.status, StatusCode::OK, "body: {}", written.body);
+    let written = written.json();
+    assert_eq!(written["command"], json!("/opt/opencode/bin/opencode"));
+    assert_eq!(written["args"], json!(["--acp", "--verbose"]));
+    assert_eq!(written["env"], json!({"FOO": "bar"}));
+    assert!(
+        written["updated_at"].as_str().is_some_and(|s| !s.is_empty()),
+        "时间戳由 Hub 盖，必须在响应里：{}",
+        written
+    );
+
+    let listed = h.get("/api/agents/config?node_id=n_cfg").await;
+    assert_eq!(listed.status, StatusCode::OK);
+    let items = listed.json();
+    let arr = items["configs"].as_array().expect("configs 是数组");
+    assert_eq!(arr.len(), 1, "body: {}", listed.body);
+    assert_eq!(arr[0]["agent_id"], json!("opencode"));
+    assert_eq!(arr[0]["args"], json!(["--acp", "--verbose"]));
+}
+
+/// **配置可以先于 agent 存在**：装之前先配好是正常流程，不能被拒。
+///
+/// 反向验证：在 `upsert_config` 里加一条「`agent_runtime` 必须有这行」的检查，
+/// 这条会红（回 404 而不是 200）。
+#[tokio::test]
+async fn a_config_can_be_written_before_the_agent_is_installed() {
+    let h = Harness::new().await;
+    // 这台设备从没上报过任何 agent（`agent_runtime` 里没有 opencode）
+    let r = h
+        .post_config(json!({
+            "node_id": "n_never_seen",
+            "agent_id": "opencode",
+            "args": ["--acp"]
+        }))
+        .await;
+    assert_eq!(
+        r.status,
+        StatusCode::OK,
+        "先配置后安装必须能走通：{}",
+        r.body
+    );
+}
+
+/// 同一 (node, agent) 写两次只有一行，后写的覆盖前写的。
+#[tokio::test]
+async fn posting_the_same_config_twice_overwrites_instead_of_duplicating() {
+    let h = Harness::new().await;
+    for cmd in ["/old", "/new"] {
+        let r = h
+            .post_config(json!({
+                "node_id": "n_cfg",
+                "agent_id": "opencode",
+                "command": cmd
+            }))
+            .await;
+        assert_eq!(r.status, StatusCode::OK);
+    }
+    let arr = h.get("/api/agents/config?node_id=n_cfg").await.json();
+    let arr = arr["configs"].as_array().expect("数组");
+    assert_eq!(arr.len(), 1, "不许出现两行：{arr:?}");
+    assert_eq!(arr[0]["command"], json!("/new"));
+}
+
+/// 空命令是**合法**的：意思是「用扫描到的那个可执行文件」。
+#[tokio::test]
+async fn an_empty_command_is_accepted_and_means_use_the_scanned_binary() {
+    let h = Harness::new().await;
+    let r = h
+        .post_config(json!({"node_id": "n_cfg", "agent_id": "opencode"}))
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "body: {}", r.body);
+    let v = r.json();
+    assert_eq!(v["command"], json!(""), "缺省命令是空串，不是 null");
+    assert_eq!(v["args"], json!([]));
+    assert_eq!(v["env"], json!({}));
+}
+
+/// 删掉之后列表为空；**再删一次是 404**（「我以为删掉了」要能区分开）。
+#[tokio::test]
+async fn deleting_a_config_removes_it_and_a_second_delete_is_404() {
+    let h = Harness::new().await;
+    h.post_config(json!({"node_id": "n_cfg", "agent_id": "opencode"}))
+        .await;
+
+    let first = h.delete_config("n_cfg", "opencode").await;
+    assert_eq!(first.status, StatusCode::NO_CONTENT, "body: {}", first.body);
+
+    let arr = h.get("/api/agents/config?node_id=n_cfg").await.json();
+    assert_eq!(arr["configs"].as_array().map(Vec::len), Some(0));
+
+    let second = h.delete_config("n_cfg", "opencode").await;
+    assert_eq!(second.status, StatusCode::NOT_FOUND);
+}
+
+/// **CSRF 门禁的反向验证**：带 cookie 但不带 `X-CSRF-Token` 必须被拒。
+///
+/// 这条是配置端点的关键一条：写在 `args` / `env` 里的东西是设备下次启动
+/// agent 时会**原样带上**的，任意网页能改就等于任意网页能往用户的 agent
+/// 进程里塞参数与环境变量。
+///
+/// 反向验证：把 `/api/agents/config` 挪到 `build_app` 的 `.layer(...)` 之后，
+/// 这条会变成 200 而红。
+#[tokio::test]
+async fn writing_a_config_without_the_csrf_header_is_rejected() {
+    let h = Harness::new().await;
+    let r = Reply::new(
+        h.app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/agents/config")
+                    .header("content-type", "application/json")
+                    .header(
+                        "cookie",
+                        format!(
+                            "{SESSION_COOKIE}={}; {CSRF_COOKIE}={}",
+                            h.session, h.csrf
+                        ),
+                    )
+                    .body(Body::from(
+                        json!({"node_id": "n_cfg", "agent_id": "opencode"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        r.status.is_client_error(),
+        "没有 CSRF 头的写请求必须被拒，实际 {}",
+        r.status
+    );
+    // 确认它真的没写进去
+    let arr = h.get("/api/agents/config?node_id=n_cfg").await.json();
+    assert_eq!(
+        arr["configs"].as_array().map(Vec::len),
+        Some(0),
+        "被拒的请求不许留下任何行"
+    );
+}
+
+/// 形状不对的 body 回 `invalid_request_body`，且错误体只有 `error` 一个键。
+#[tokio::test]
+async fn a_config_body_without_an_agent_id_is_rejected_as_bad_body() {
+    let h = Harness::new().await;
+    let r = h.post_config(json!({"node_id": "n_cfg"})).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    r.assert_error_code("invalid_request_body");
 }

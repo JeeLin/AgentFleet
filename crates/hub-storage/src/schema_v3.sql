@@ -2,7 +2,7 @@
 --
 -- 三件事：
 --   1. 去掉全部外键（用户裁定 2026-10-26：「不应该用外链」）
---   2. 新增 agent_runtime / agent_template / blob / trajectory_event 四张表
+--   2. 新增 agent_runtime / agent_config / trajectory_event 三张表
 --   3. 给 session 加 acp_session_id（Hub 存它，重连后用 ACP 的 session/load 恢复）
 --
 -- 幂等要求：靠 `migrate.rs` 的 `PRAGMA user_version` 闸门，不靠 DDL 本身
@@ -108,82 +108,73 @@ CREATE INDEX IF NOT EXISTS idx_session_agent     ON session(agent_id)
     WHERE agent_id IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
--- agent_runtime：设备上装了哪些 agent（心跳上报，来自设备侧探测）
+-- agent_runtime：设备上**扫描到**了哪些 agent（心跳上报）
 -- ---------------------------------------------------------------------------
 --
--- PK 含 `install_source`，这一列不是冗余：
+-- 「扫描」是这张表的唯一来源：设备探测本机 PATH 里有什么、版本多少、
+-- 能不能跑，然后整体上报。**Hub 不往设备上装任何东西**——agent 由用户
+-- 自己 `npm i -g` / 下二进制 / 用系统包管理器装。
 --
--- 同一个可执行名可能来自两个地方——用户在 PATH 里自己装的（`detected`），
--- 和 Hub 模板装到固定目录的（`template`）。若 PK 只有 (node_id, agent_id)，
--- 两者会撞成一行，后写的覆盖前写的：模板装完回报就绪时会**掩蔽**用户自带
--- 那份的版本事实，页面上看起来像「agent 被升级了」，而本里程碑明确不做升级。
+-- 这一决定删掉了原先的两列，值得写清为什么：
 --
--- `available` 只有两态不够表达「已装但这次探测超时」，所以另有 `install_state`。
--- `install_error` 承接「安装失败只上报原因」的那句「原因」——没有它，
--- 原因报给谁、存哪都没有答案。
+-- - `install_source ∈ {detected, template}`：只为区分「用户自己装的」与
+--   「Hub 模板装的」。不再有 Hub 装的那一种，这一列恒为同一个值，
+--   留着只会让每个读者去猜另一种什么时候出现。
+-- - `install_state ∈ {none, installing, ready, failed}`：表达「正在装”。
+--   Hub 不发安装，就没有「正在装」这个中间态可表达。
 --
--- **本表不是 append-only**：探测是 upsert，卸载是 DELETE。append-only 只约束
--- `trajectory_event`（v2 文档里「只追加」紧跟轨迹表，主语曾被误读为盖住本表）。
+-- `install_error` 保留下来改名 `probe_error`：它承接的事实**变了但没消失**
+-- ——「扫描到了但跑不起来」仍然需要一个可读的原因（退出码、缺动态库），
+-- 否则页面上只有一个 available=false，用户无从下手。
+--
+-- **本表不是 append-only**：一次扫描整体覆盖这台设备的全部行。
+-- append-only 只约束 `trajectory_event`。
 CREATE TABLE IF NOT EXISTS agent_runtime (
-    node_id        TEXT NOT NULL,
-    agent_id       TEXT NOT NULL,            -- 探测出的稳定标识（见 detect.rs）
-    install_source TEXT NOT NULL DEFAULT 'detected'
-                   CHECK (install_source IN ('detected', 'template')),
-    name           TEXT NOT NULL,
-    version        TEXT NOT NULL,
-    available      INTEGER NOT NULL DEFAULT 0,  -- 现在能不能对话（探测 + ACP 可用）
-    install_state  TEXT NOT NULL DEFAULT 'ready'
-                   CHECK (install_state IN ('none', 'installing', 'ready', 'failed')),
-    install_error  TEXT,                     -- failed 时的可读原因；其余为 NULL
-    detected_at    TEXT NOT NULL,            -- 新鲜度：门禁用它判「这次探测是什么时候的」
-    PRIMARY KEY (node_id, agent_id, install_source)
+    node_id     TEXT NOT NULL,
+    agent_id    TEXT NOT NULL,             -- 探测出的稳定标识（见 detect.rs）
+    name        TEXT NOT NULL,
+    version     TEXT NOT NULL,             -- 没探到写空串（列 NOT NULL）
+    available   INTEGER NOT NULL DEFAULT 0, -- 现在能不能对话
+    probe_error TEXT,                      -- 「装了但跑不起来」的可读原因；其余 NULL
+    detected_at TEXT NOT NULL,             -- 新鲜度：门禁判「这次扫描是什么时候的」
+    PRIMARY KEY (node_id, agent_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_runtime_node ON agent_runtime(node_id);
 
 -- ---------------------------------------------------------------------------
--- agent_template：Hub 侧登记的安装模板
+-- agent_config：每个 agent 的**配置**（Hub 存，设备读）
 -- ---------------------------------------------------------------------------
 --
--- 「模板」= 装什么（kind / source）+ 怎么验（checksum）+ 需要什么运行时。
+-- 这是「取消安装」之后 Hub 侧真正要管的东西。用户在自己的机器上装好
+-- agent，然后在页面上配它怎么被启动：命令、参数、环境变量。
 --
--- 产品边界写在这里是为了让人看得见：**安装永远由用户手动触发**，
--- Hub 不得因为「发现某设备缺某 agent」就自动下发（workspace-and-sync.md §4.5）。
+-- 为什么配置在 Hub 而不是设备：换机器、重装 agent 之后配置还在；而且
+-- 用户只需要在网页上改一处，不必 SSH 到每台设备上编辑文件。
 --
--- `blob_hash` 可空：安装可以走 `install_source` 直连（npm / URL），
--- 安装包的 blob 托管是后置加固，不是安装的前置条件。
-CREATE TABLE IF NOT EXISTS agent_template (
-    id             TEXT PRIMARY KEY,
-    name           TEXT NOT NULL,
-    install_kind   TEXT NOT NULL
-                   CHECK (install_kind IN ('npm', 'url', 'builtin')),
-    install_source TEXT NOT NULL,
-    checksum       TEXT,                     -- 安装包的期望校验和；builtin 可空
-    runtime_req    TEXT,                     -- JSON：需要的运行时（如 node >= 20）
-    blob_hash      TEXT,                     -- 托管到 blob 后填，见子任务 10
-    created_at     TEXT NOT NULL
-);
-
--- ---------------------------------------------------------------------------
--- blob：agent 安装包的内容寻址存储（**只此一用**）
--- ---------------------------------------------------------------------------
+-- **配置不是代码**：这几列全是字符串与字符串数组，Hub 下发的是「怎么启动
+-- 一个用户已经装好的程序」，不是「一段要被执行的程序」。这正是取消安装
+-- 后风险等级降下来的地方——没有可执行文件从 Hub 流向设备。
 --
--- 原 M2 的 CAS 供「项目文件 / 配置 / 产物」三样东西，整体撤销（2026-10-26）。
--- 保留的只有 agent 安装包这一点，因为「Hub 下发安装」绕不开它：
--- 把二进制塞进 WS 帧会打断设备连接，直传又没有校验和防线。
+-- `agent_id` 是主键的一部分而不是单独的配置表：配置属于「这台设备上的
+-- 这个 agent」。同一台设备上不同 agent 的参数不能互相污染，而同一个 agent
+-- 在不同设备上可能需要不同参数（路径不同）。
 --
--- 只做最小形态：put / get / 校验。**不做** snapshot、manifest 差分、
--- refcount GC、四档传输。
---
--- `refcount` 只是一列，没有后台 GC——加它是为了让「孤儿 blob」可被发现
--- （删模板后它的包还占着盘），不是为了现在就做回收。
--- `ref_path` 存物理路径：大二进制不进 DB，DB 只存索引。
-CREATE TABLE IF NOT EXISTS blob (
-    hash       TEXT PRIMARY KEY,             -- sha256 hex（64 字符小写）
-    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
-    ref_path   TEXT NOT NULL,                -- 相对数据目录，如 `cas/ab/<hash>`
-    refcount   INTEGER NOT NULL DEFAULT 0 CHECK (refcount >= 0),
-    created_at TEXT NOT NULL
+-- 扫描不到的 agent 也可以有配置行：用户可能先配好、后装。所以本表与
+-- `agent_runtime` 之间**没有外键**，两者各自独立。
+CREATE TABLE IF NOT EXISTS agent_config (
+    node_id     TEXT NOT NULL,
+    agent_id    TEXT NOT NULL,
+    -- 启动命令。空串 = 用扫描到的可执行文件（`agent_runtime` 里那个）。
+    -- 允许覆盖是因为用户可能把它装在 PATH 之外。
+    command     TEXT NOT NULL DEFAULT '',
+    -- 启动参数，JSON 字符串数组（如 `["--acp"]`）。
+    args_json   TEXT NOT NULL DEFAULT '[]',
+    -- 环境变量，JSON 对象（如 `{"FOO":"bar"}`）。**值是明文**：
+    -- 密钥类的不该放这里，本里程碑没有加密存储，也不能假装有。
+    env_json    TEXT NOT NULL DEFAULT '{}',
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (node_id, agent_id)
 );
 
 -- ---------------------------------------------------------------------------

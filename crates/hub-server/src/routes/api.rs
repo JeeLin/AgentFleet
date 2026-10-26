@@ -91,8 +91,19 @@ pub struct DeviceSummary {
     pub cpu: Option<u64>,
     pub mem: Option<u64>,
     pub gpu: bool,
-    /// **已装且就绪**，不是「支持」（§6.1 最后一段）。
+    /// **已装**的 agent 名（含装了但跑不起来的）。目录页要能显示后者——
+    /// 那正是用户需要看见并处理的状态。
     pub agents: Vec<String>,
+    /// **已装且现在能对话**的 agent 名（建会话的可选项，子任务 5）。
+    ///
+    /// 与 [`Self::agents`] 分开是必须的：合成一个字段的话，页面要么列不出
+    /// 「装了但坏了」（用户不知道为什么建会话时它不可选），要么把坏的那个
+    /// 列进可选项（创建会话后永远无法对话）。
+    ///
+    /// 判据与 `POST /api/sessions` 的 409 门禁**同源**（都读 `agent_runtime`，
+    /// 判据与 `POST /api/sessions` 的 409 门禁**同源**（都读 `agent_runtime`，
+    /// 都只看 `available`），所以页面上选得到的一定建得成。
+    pub usable_agents: Vec<String>,
     pub derived: bool,
     /// 设备密钥指纹，**已按「前 3 + `***` + 后 3」掩过**（约束 13）。
     pub key_fingerprint: String,
@@ -173,13 +184,18 @@ fn agent_list(caps: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-/// `capabilities.agents` 里**现在可用**的 agent 名（子任务 5 的 409 门禁用）。
+/// `capabilities.agents` 里**现在可用**的 agent 名。
 ///
-/// 与 [`agent_list`] 分开：目录页列的是「这台设备上有哪些 agent」（含装了但
-/// 跑不起来的），而建会话的门禁只认「已装**且可用**」。合成一个函数会让
-/// 页面列出的东西比门禁允许的少，或者门禁放行一个其实跑不起来的 agent。
+/// # 它不用于建会话的门禁（子任务 5）
 ///
-/// 旧形态（裸字符串）**一律不算可用**：它不携带可用性证据，宁严勿松。
+/// 门禁读的是 `agent_runtime` 表，不是这里的心跳内存。原因：`Reports` 是
+/// 「缺省即保留」且没有 `forget`，一次不带 `capabilities` 的心跳会让旧清单
+/// 永久粘在那里，于是「设备卸载了 agent」传不到 Hub。判据在
+/// `hub_storage::AgentRuntimeRepo::usable_for_session`，那条带 `detected_at`
+/// 可判新鲜度。
+///
+/// 保留本函数是为了回答「**这一次心跳**说哪些 agent 可用」——它只描述那一帧，
+/// 不是当前事实。页面目录用 [`agent_list`]（列全部已装，含跑不起来的）。
 fn available_agent_names(caps: &serde_json::Value) -> Vec<String> {
     let Some(arr) = caps.get("agents").and_then(serde_json::Value::as_array) else {
         return Vec::new();
@@ -209,7 +225,21 @@ fn platform_of(os: Option<&str>, arch: Option<&str>) -> String {
     }
 }
 
-/// 设备行 + 内存上报 → 一项 `DeviceSummary`。
+/// 设备行 + 库里的 agent 事实 → 一项 `DeviceSummary`。
+///
+/// # `agents` 读 `agent_runtime` 表，不读心跳内存
+///
+/// 两个理由：
+///
+/// 1. **内存那份会结构性粘滞**：`hub_core::Reports` 的 `merge_report` 是
+///    「缺省即保留」，且没有 `forget`。一次不带 `capabilities` 的心跳之后，
+///    设备上已经卸载的 agent 仍会显示在页面上。
+/// 2. **库里有 `detected_at`**：探测事实有新鲜度，页面才能区分「刚探的」
+///    与「很久以前的事实」。内存 `Report` 的 `at` 是心跳时刻，不是探测时刻。
+///
+/// 读库失败时**退回心跳内存**而不是给一个空列表：空列表会被读成「这台设备
+/// 一个 agent 都没有」，而那与「库读不出来」是两件事。留痕由调用方看不到，
+/// 所以这里直接 `tracing::warn`。
 fn device_summary(state: &AppState, device: &hub_storage::repo::Device) -> DeviceSummary {
     let now = Instant::now();
     let connected = state.connections().get(&device.id).is_some();
@@ -226,6 +256,37 @@ fn device_summary(state: &AppState, device: &hub_storage::repo::Device) -> Devic
         (None, Some(r)) => r.node_version.clone(),
         (None, None) => String::new(),
     };
+    // 列全部已装的（含跑不起来的）：目录页要能显示「装了但坏了」，
+    // 那正是用户需要看见的东西。门禁另用 `usable_agents`。
+    let (agents, usable_agents) = match state.agent_runtime().list_for_node(&device.id) {
+        Ok(rows) => {
+            let mut all: BTreeSet<String> = BTreeSet::new();
+            let mut usable: BTreeSet<String> = BTreeSet::new();
+            for r in rows {
+                all.insert(r.name.clone());
+                // 只有 `available` 一个判据（不再有「正在装」这个中间态）：
+                // agent 由用户自己装，Hub 没有「正在操作它」的窗口。
+                if r.available {
+                    usable.insert(r.name.clone());
+                }
+            }
+            (
+                all.into_iter().collect::<Vec<_>>(),
+                usable.into_iter().collect::<Vec<_>>(),
+            )
+        }
+        Err(e) => {
+            tracing::warn!(
+                node_id = %device.id, error = %e,
+                "cannot read agent_runtime; falling back to the heartbeat report"
+            );
+            let caps = report.as_ref().map(|r| r.capabilities.clone());
+            match caps {
+                Some(c) => (agent_list(&c), available_agent_names(&c)),
+                None => (Vec::new(), Vec::new()),
+            }
+        }
+    };
     DeviceSummary {
         id: device.id.clone(),
         name: device.name.clone(),
@@ -240,9 +301,8 @@ fn device_summary(state: &AppState, device: &hub_storage::repo::Device) -> Devic
             .as_ref()
             .and_then(|r| load_percent(&r.resources, MEM_PERCENT_FIELDS)),
         gpu: report.as_ref().is_some_and(|r| has_gpu(&r.resources)),
-        agents: report
-            .as_ref()
-            .map_or_else(Vec::new, |r| agent_list(&r.capabilities)),
+        agents,
+        usable_agents,
         derived: !matches!(presence, hub_core::Presence::Online),
         key_fingerprint: crate::routes::masked_fingerprint(&device.key_fingerprint),
     }
@@ -437,10 +497,20 @@ pub async fn list_agents(
         .devices()
         .list()
         .map_err(|e| ApiError::internal_with("cannot list devices", e))?;
+    // 读 `agent_runtime` 表而不是心跳内存：理由见 `device_summary` 的注释
+    // （内存那份缺省即保留、没有 `forget`，卸载的 agent 永远留在里面）。
     let mut out: BTreeSet<String> = BTreeSet::new();
     for d in &devices {
-        if let Some(r) = state.reports().get(&d.id) {
-            out.extend(agent_list(&r.capabilities));
+        match state.agent_runtime().list_for_node(&d.id) {
+            Ok(rows) => out.extend(rows.into_iter().map(|r| r.name)),
+            Err(e) => {
+                // 退回心跳内存，但**留痕**：静默回落会让「库坏了」看起来像
+                // 「页面上少了几个 agent」。
+                tracing::warn!(node_id = %d.id, error = %e, "cannot read agent_runtime; using the heartbeat report");
+                if let Some(r) = state.reports().get(&d.id) {
+                    out.extend(agent_list(&r.capabilities));
+                }
+            }
         }
     }
     Ok(Json(

@@ -245,6 +245,14 @@ struct Inner {
     reports: Reports,
     /// 设备仓储（心跳落库用）。
     devices: hub_storage::repo::DeviceRepo,
+    /// agent 运行时（心跳落库 / 子任务 5 的 409 门禁数据源）。
+    ///
+    /// **和 `reports` 并存不是冗余**：`reports` 是内存里「最近一次心跳说了
+    /// 什么」，供路由即时读；本仓储是「库里那份事实」。门禁必须读后者，
+    /// 因为内存那份缺省即保留、没有 `forget`，卸载 agent 的事传不过来。
+    agent_runtime: hub_storage::agent::AgentRuntimeRepo,
+    /// agent 启动配置仓储（要求 2「扫描 + 配置」的配置侧）。
+    agent_config: hub_storage::AgentConfigRepo,
     /// 连接池句柄。**只在路由里读**（`/api/*` 的会话仓储要用它），
     /// 而连接池是 `Arc`——clone 不产生新连接，所以路由各建各的仓储
     /// 没有代价，也不会让心跳路径上的「一次心跳建一个 repo」变成惯例。
@@ -335,6 +343,8 @@ impl AppState {
         // 设备仓储在 bootstrap 时就建好：心跳是**热路径**，每次收到都建一个
         // repo 只是白拿一次池里的连接。
         let devices = hub_storage::repo::DeviceRepo::new(pool.clone());
+        let agent_runtime = hub_storage::agent::AgentRuntimeRepo::new(pool.clone());
+        let agent_config = hub_storage::AgentConfigRepo::new(pool.clone());
         let state = Self(Arc::new(Inner {
             auth,
             setup: Mutex::new(None),
@@ -348,6 +358,8 @@ impl AppState {
             reports: Reports::new(),
             pool: devices.pool().clone(),
             devices,
+            agent_runtime,
+            agent_config,
             outbound: conns::OutboundTable::new(),
             channels: Arc::new(parking_lot::RwLock::new(
                 hub_core::channels::HubChannels::new(),
@@ -434,6 +446,16 @@ impl AppState {
     /// 设备仓储（心跳落库 / 超时判离线）。
     pub fn devices(&self) -> &hub_storage::repo::DeviceRepo {
         &self.0.devices
+    }
+
+    /// agent 运行时仓储。**会话创建的门禁只读它**，不读 [`Self::reports`]。
+    pub fn agent_runtime(&self) -> &hub_storage::agent::AgentRuntimeRepo {
+        &self.0.agent_runtime
+    }
+
+    /// agent 启动配置仓储。
+    pub fn agent_config(&self) -> &hub_storage::AgentConfigRepo {
+        &self.0.agent_config
     }
 
     /// 连接池句柄（`/api/*` 里的会话仓储用它）。
@@ -586,6 +608,19 @@ pub fn build_app(state: AppState) -> Router {
         // 状态变更端点（POST / DELETE），一旦跑到 `.layer` 之后，它们会绕过
         // session 认证与 CSRF 双重提交——全仓库唯一的、能被任意网页用
         // 「读得着的 cookie」当武器往设备上打字节的口子。
+        // agent 启动配置（子任务 4，要求 2「扫描 + 配置」的配置侧）。
+        // **没有安装端点**：agent 由用户自己装，Hub 不往设备写可执行文件
+        // （见 `routes/agents.rs` 的头注释）。
+        //
+        // 三条都是**状态变更端点**，必须落在下面那条 `.layer(...)` 之前——
+        // 落到之后会绕过 session 认证与 CSRF，于是任意网页都能改用户设备上
+        // agent 的启动参数。
+        .route(
+            "/api/agents/config",
+            get(routes::agents::list_config)
+                .post(routes::agents::upsert_config)
+                .delete(routes::agents::delete_config),
+        )
         .route("/api/stream", get(routes::stream::stream))
         .route("/api/channels", post(routes::stream::open_channel))
         .route("/api/channels/{id}/send", post(routes::stream::send_bytes))

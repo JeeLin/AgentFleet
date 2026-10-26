@@ -38,7 +38,8 @@ pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// 一个已知的 agent 种类：显示名 + 可执行文件名 + 怎么问版本。
 ///
 /// 用常量表而不是配置文件：**这是探测的输入，不是用户配置**。用户能改的是
-/// 装什么（`agent_template`），不是「怎么问 opencode 版本」。
+/// 一个 agent **怎么被启动**（`agent_config` 的命令/参数/环境变量），
+/// 不是「怎么问 opencode 版本」——那是这个 agent 自己的 CLI 契约。
 #[derive(Debug, Clone, Copy)]
 pub struct AgentSpec {
     /// 稳定标识，Hub 侧 `agent_runtime.agent_id`。**不随显示名变**。
@@ -79,8 +80,8 @@ pub enum Probe {
     },
     /// 找到了可执行文件，但跑不起来 / 超时 / 退出码非 0。
     ///
-    /// `reason` 是给人看的一句话，会存进 `agent_runtime.install_error` 旁边
-    /// 的那个自由文本位（`install_state = 'failed'` 时）。
+    /// `reason` 是给人看的一句话，会存进 `agent_runtime.probe_error`。
+    /// 没有它，页面上只有一个 `available=false`，用户无从下手。
     Failed { reason: String, path: PathBuf },
 }
 
@@ -175,6 +176,7 @@ fn is_executable(p: &Path) -> bool {
 ///
 /// 超时后 `kill()` 子进程并返回 `Err`——**杀掉而不是放着**，否则一个挂死的
 /// agent 会一直占着一个进程槽，每轮探测再起一个。
+/// 跑 `<path> <args>` 取第一行输出（去空白）。
 fn run_version(path: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
     let mut child = Command::new(path)
         .args(args)
