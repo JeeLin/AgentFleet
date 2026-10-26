@@ -997,6 +997,9 @@ fn publish_channel_data(state: &AppState, node_id: &str, frame: &Frame) {
 /// 现在怎么了」，不是「agent 说了什么」。把它们写进轨迹会让页面把一次
 /// 重连的 `ready` 画成一条对话消息。
 ///
+/// 例外：`ready` 虽不写轨迹，却会被用来回填 `session.acp_session_id`
+/// （子任务 8）——它是唯一携带 ACP 会话 id 的帧。
+///
 /// # 未知事件类型必须写，不得丢
 ///
 /// `batch.events` 里的每个元素原样存（`kind` 取它的 `sessionUpdate`）。
@@ -1013,6 +1016,40 @@ fn persist_trajectory(state: &AppState, node_id: &str, channel_id: &str, payload
         // 没有 `type` 的不是对话帧（terminal 的载荷是 `{op, bytes}`）。
         return;
     };
+    // `ready` 不是轨迹事件（它是控制面：见本函数文档第 3 条），但它是
+    // **唯一带 ACP 会话 id 的帧**，所以顺手回填 `session.acp_session_id`
+    // （子任务 8）。放在这里而不是 `channel_ready` 那条路上，是因为
+    // ACP 通道的 `channel_ready` 由设备侧 `open_external` 生成、**不含
+    // sessionId**；agent 给的 id 是在这之后由 `conversation::open` 通过
+    // `push_external` 作为一条 `channel_data` 载荷推上来的
+    // （`{"type":"ready","sessionId":...,"agentId":...}`）。
+    //
+    // 不回填的后果是静默的：`acp_session_id` 永远为 NULL，设备每次都走
+    // `session/new`，关掉页面再回来 agent 那边就是一条全新会话——页面上
+    // 一切正常，只是之前聊的全没了。
+    if kind == "ready" {
+        if let Some(acp) = payload
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            match hub_storage::SessionRepo::new(state.pool().clone())
+                .set_acp_session_id(&session_id, acp)
+            {
+                Ok(()) => tracing::debug!(
+                    session_id = %session_id, acp_session_id = %acp,
+                    "recorded the agent's acp session id"
+                ),
+                // 会话在通道开着的时候被删了：不是 Hub 的问题，只是这次
+                // 回填没有落点。**不升级成错误**——通道还能用。
+                Err(e) => tracing::debug!(
+                    session_id = %session_id, error = %e,
+                    "cannot record the acp session id"
+                ),
+            }
+        }
+        return;
+    }
     if kind != "batch" && kind != "turn_end" {
         return;
     }

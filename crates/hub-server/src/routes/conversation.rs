@@ -116,6 +116,15 @@ pub async fn open(
         "command": command,
         "args": args,
         "env": env,
+        // 已有 ACP 会话 id 时**下发它**，设备侧据此走 `session/load` 而不是
+        // `session/new`（子任务 8）。这解决的是「Hub 重启 / worker 换代之后，
+        // 同一会话再开会话时 agent 还记不记得之前聊过什么」——实测新进程
+        // load 同一 id 之后确实记得（M2 里程碑文档的 V-2）。
+        //
+        // `null` 表示这条会话还没有 ACP id（第一次开），设备侧据此新建。
+        // **不要下发空串**：空串与「没有」在设备侧是两回事，写空串会让设备
+        // 去 load 一个叫 "" 的会话。
+        "acp_session_id": detail.session.acp_session_id,
     });
 
     // 4. 开通道并把 `open_channel` 下发。`check_reported = false`：`acp`

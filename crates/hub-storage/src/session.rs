@@ -53,6 +53,17 @@ pub struct Session {
     /// M1 恒 `None`：本阶段没有 agent 运行时（ACP 归 M3），建会话时选不选
     /// agent 都成立。字段先落下来，M3 才不必再动一次 schema。
     pub agent_id: Option<String>,
+    /// ACP 侧的会话 id（opencode 形如 `ses_...`）。**第一次开对话时为空**，
+    /// 由设备侧 `session/new` 现取、Hub 收到 `ready` 帧后回填。
+    ///
+    /// 它存在只有一个用途：关掉页面再回来、或 Hub/worker 换代之后，下发给设备
+    /// 让它走 `session/load` 而不是 `session/new`。**实测（M2 里程碑文档 V-2）：
+    /// 新进程 load 同一 id 之后 agent 记得上一轮的内容**；直接拿同一 id 去
+    /// `session/prompt` 不成立。所以这个字段决定「对话还能不能接上」。
+    ///
+    /// 没有 agent 的会话恒 `None`。
+    #[serde(default)]
+    pub acp_session_id: Option<String>,
     pub state: SessionState,
     pub created_at: String,
     /// `running` 时恒 `None`。
@@ -79,13 +90,14 @@ pub(crate) struct RawSession {
     id: String,
     workspace_id: String,
     agent_id: Option<String>,
+    acp_session_id: Option<String>,
     state: String,
     created_at: String,
     ended_at: Option<String>,
 }
 
 impl RawSession {
-    /// 从行映射里的 `offset` 列起读六列会话列。
+    /// 从行映射里的 `offset` 列起读**七列**会话列。
     ///
     /// 联表查询（工作区 × 会话）用它把两段列拼回各自的形状：SQL 层选出来的
     /// 列是平铺的，而这里是强类型的，两者靠**列序**对齐，所以那两条联表 SQL
@@ -98,9 +110,10 @@ impl RawSession {
             id: r.get(offset)?,
             workspace_id: r.get(offset + 1)?,
             agent_id: r.get(offset + 2)?,
-            state: r.get(offset + 3)?,
-            created_at: r.get(offset + 4)?,
-            ended_at: r.get(offset + 5)?,
+            acp_session_id: r.get(offset + 3)?,
+            state: r.get(offset + 4)?,
+            created_at: r.get(offset + 5)?,
+            ended_at: r.get(offset + 6)?,
         })
     }
 
@@ -109,6 +122,7 @@ impl RawSession {
             id: self.id,
             workspace_id: self.workspace_id,
             agent_id: self.agent_id,
+            acp_session_id: self.acp_session_id,
             state: SessionState::from_str(&self.state)?,
             created_at: self.created_at,
             ended_at: self.ended_at,
@@ -162,7 +176,7 @@ impl SessionRepo {
         // 解析器口径不一致时不会静默放过。
         let row = tx
             .query_row(
-                "SELECT id, workspace_id, agent_id, state, created_at, ended_at
+                "SELECT id, workspace_id, agent_id, acp_session_id, state, created_at, ended_at
                  FROM session WHERE id = ?1",
                 params![id],
                 raw_session,
@@ -193,7 +207,7 @@ impl SessionRepo {
     pub fn find(&self, id: &str) -> Result<Option<Session>> {
         let conn = self.pool.get()?;
         conn.query_row(
-            "SELECT id, workspace_id, agent_id, state, created_at, ended_at
+            "SELECT id, workspace_id, agent_id, acp_session_id, state, created_at, ended_at
              FROM session WHERE id = ?1",
             params![id],
             raw_session,
@@ -203,16 +217,49 @@ impl SessionRepo {
         .transpose()
     }
 
+    /// 记下 agent 给的 ACP 会话 id。
+    ///
+    /// 只在设备回过 `channel_ready` 之后调用：那时 `session/new` 或
+    /// `session/load` 已经成功，`ready` 帧里那个 id 是 agent 认的。
+    ///
+    /// # 为什么是「写」而不是「第一次建会话时就填」
+    ///
+    /// 这个 id 只有设备侧的 agent 知道——Hub 在建会话时无从得知，它来自
+    /// `session/new` 的响应。所以只能等设备上报后再回填。而回填之前这条会话的
+    /// `acp_session_id` 是 `NULL`，含义是「还没开过对话」，设备侧据此走
+    /// `session/new`。**不要**给它填一个 Hub 自己编的占位值：那会让第二次开对话
+    /// 去 load 一个 agent 从来不认识的 id。
+    ///
+    /// # 幂等
+    ///
+    /// 同一条会话重复回填同一个 id 是正常现象（断线重连、页面刷新都会再开一次
+    /// 通道），所以这里用 `UPDATE` 而不是 `INSERT`，且不改 `updated_at` 之外
+    /// 的任何东西。会话不存在时回 [`StorageError::NoSuchSession`]，与 `end`
+    /// 同口径——静默成功会让「回填给了一条已被删掉的会话」永远不被发现。
+    pub fn set_acp_session_id(&self, id: &str, acp_session_id: &str) -> Result<()> {
+        let conn = self.pool.get()?;
+        let n = conn.execute(
+            "UPDATE session SET acp_session_id = ?2 WHERE id = ?1",
+            params![id, acp_session_id],
+        )?;
+        if n == 0 {
+            return Err(StorageError::NoSuchSession(id.to_string()));
+        }
+        Ok(())
+    }
+
     /// 会话 + 工作区，供开通道时取 `(node_id, path)` 与页面渲染。
     pub fn detail(&self, id: &str) -> Result<Option<SessionDetail>> {
         let conn = self.pool.get()?;
         conn.query_row(
-            "SELECT s.id, s.workspace_id, s.agent_id, s.state, s.created_at, s.ended_at,
+            "SELECT s.id, s.workspace_id, s.agent_id, s.acp_session_id, s.state,
+                    s.created_at, s.ended_at,
                     w.id, w.node_id, w.removed_node_id, w.path, w.created_at
              FROM session s JOIN workspace w ON w.id = s.workspace_id
              WHERE s.id = ?1",
             params![id],
-            |r| Ok((raw_session(r)?, row_to_workspace_at(r, 6)?)),
+            // 7 而不是 6：会话那一段多了一列 `acp_session_id`。
+            |r| Ok((raw_session(r)?, row_to_workspace_at(r, 7)?)),
         )
         .optional()?
         .map(|(s, w)| {
@@ -286,7 +333,7 @@ mod tests {
         .unwrap();
         let got: Session = tx
             .query_row(
-                "SELECT id, workspace_id, agent_id, state, created_at, ended_at
+                "SELECT id, workspace_id, agent_id, acp_session_id, state, created_at, ended_at
                  FROM session WHERE id = 's_tx'",
                 [],
                 raw_session,
@@ -415,5 +462,70 @@ mod tests {
             "paused".parse::<SessionState>(),
             Err(StorageError::InvalidSessionState(_))
         ));
+    }
+    /// `acp_session_id` 写入后能被读回，且**新建的会话一开始是 `None`**。
+    ///
+    /// 两个方向都要：只验「写进去能读到」不能证明「新建时是空的」——
+    /// 而后者才是设备侧走 `session/new` 的判据（`Some` 会走 `load`）。
+    #[test]
+    fn the_acp_session_id_is_none_until_it_is_recorded_then_round_trips() {
+        let (_d, sr) = setup();
+        let s = sr
+            .create("n_a", "/srv/app", Some("opencode"), TS)
+            .unwrap();
+        assert_eq!(
+            s.acp_session_id, None,
+            "刚建的会话还没有 ACP id，设备侧据此走 session/new"
+        );
+
+        sr.set_acp_session_id(&s.id, "ses_abc").unwrap();
+
+        // 三条读路径都要看到它：`find` 是设备/API 用的单条读，
+        // `detail` 是开对话时用的联表读（列偏移不同），`list` 是页面用的。
+        assert_eq!(
+            sr.find(&s.id).unwrap().unwrap().acp_session_id.as_deref(),
+            Some("ses_abc")
+        );
+        assert_eq!(
+            sr.detail(&s.id)
+                .unwrap()
+                .unwrap()
+                .session
+                .acp_session_id
+                .as_deref(),
+            Some("ses_abc")
+        );
+        let listed = sr.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].session.acp_session_id.as_deref(), Some("ses_abc"));
+    }
+
+    /// 重复回填同一个 id 不算错（断线重连、页面刷新都会再开一次通道）。
+    #[test]
+    fn recording_the_same_acp_session_id_twice_is_not_an_error() {
+        let (_d, sr) = setup();
+        let s = sr
+            .create("n_a", "/srv/app", Some("opencode"), TS)
+            .unwrap();
+        sr.set_acp_session_id(&s.id, "ses_abc").unwrap();
+        sr.set_acp_session_id(&s.id, "ses_abc").unwrap();
+        assert_eq!(
+            sr.find(&s.id).unwrap().unwrap().acp_session_id.as_deref(),
+            Some("ses_abc")
+        );
+    }
+
+    /// 回填给一条不存在的会话要报错，不能静默成功。
+    ///
+    /// 静默成功的话，「回填给了一条已被删掉的会话」永远不被发现，而它的
+    /// 症状（对话接不上）在下一次开通道时才出现，已经离现场很远。
+    #[test]
+    fn recording_an_acp_session_id_on_an_unknown_session_is_an_error() {
+        let (_d, sr) = setup();
+        let err = sr.set_acp_session_id("s_missing", "ses_abc").unwrap_err();
+        assert!(
+            matches!(err, StorageError::NoSuchSession(ref id) if id == "s_missing"),
+            "实际 {err:?}"
+        );
     }
 }

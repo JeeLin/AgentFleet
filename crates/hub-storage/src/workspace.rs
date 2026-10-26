@@ -259,7 +259,7 @@ pub fn recent_sessions(
     let conn = repo.pool().get()?;
     let mut stmt = conn.prepare(
         "SELECT w.id, w.node_id, w.removed_node_id, w.path, w.created_at,
-                s.id, s.workspace_id, s.agent_id, s.state, s.created_at, s.ended_at
+                s.id, s.workspace_id, s.agent_id, s.acp_session_id, s.state, s.created_at, s.ended_at
          FROM workspace w
          JOIN session s ON s.id = (
              SELECT s2.id FROM session s2
@@ -303,7 +303,7 @@ pub struct SessionListItem {
 pub fn list_sessions(repo: &WorkspaceRepo) -> Result<Vec<SessionListItem>> {
     let conn = repo.pool().get()?;
     let mut stmt = conn.prepare(
-        "SELECT s.id, s.workspace_id, s.agent_id, s.state, s.created_at, s.ended_at,
+        "SELECT s.id, s.workspace_id, s.agent_id, s.acp_session_id, s.state, s.created_at, s.ended_at,
                 w.node_id, w.removed_node_id, w.path
          FROM session s
          JOIN workspace w ON w.id = s.workspace_id
@@ -311,7 +311,10 @@ pub fn list_sessions(repo: &WorkspaceRepo) -> Result<Vec<SessionListItem>> {
     )?;
     let rows = stmt.query_map([], |r| {
         let raw = crate::session::RawSession::from_row(r, 0)?;
-        Ok((raw, r.get(6)?, r.get(7)?, r.get(8)?))
+        // 从 7 起，不是 6：会话那一段多了一列 `acp_session_id`。写错的话
+        // `node_id` 会读到 `s.ended_at`，而 `ended_at` 是文本、`node_id` 是
+        // 可空文本——类型对得上，于是**静默错位**而不是报错。
+        Ok((raw, r.get(7)?, r.get(8)?, r.get(9)?))
     })?;
     rows.map(|r| {
         let (raw, node_id, removed_node_id, path) = r?;

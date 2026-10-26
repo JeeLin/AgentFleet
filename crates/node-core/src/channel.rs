@@ -767,6 +767,18 @@ fn on_open_acp(spec: OpenChannel) -> Action {
         None => Vec::new(),
     };
 
+    let acp_session_id = match spec
+        .params
+        .get("acp_session_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(v) if !v.is_empty() => Some(v.to_string()),
+        // 空串当成「没有」：`None` 与 `Some("")` 在 `open()` 里是「新建」与
+        // 「load 一个叫空字符串的会话」两种行为，后者必然失败。Hub 不该发空串，
+        // 但设备侧不该因为一个空串就把一次开对话打挂。
+        _ => None,
+    };
+
     let conv = crate::agent::conversation::ConversationSpec {
         channel_id: spec.channel_id.clone(),
         agent_id: agent_id.to_string(),
@@ -775,6 +787,7 @@ fn on_open_acp(spec: OpenChannel) -> Action {
         args,
         acp_args,
         env,
+        acp_session_id,
     };
     let frames = lock().open_external(&spec.channel_id, EXTERNAL_CREDIT_START);
     Action::OpenAcp {

@@ -1392,6 +1392,111 @@ async fn opening_a_conversation_sends_the_agent_config_down_to_the_device() {
     assert_eq!(open.params["env"], json!({"FOO": "bar"}));
 }
 
+/// **第一次开对话时下发的 `acp_session_id` 是 `null`**——设备侧据此走
+/// `session/new` 而不是 `load`。
+///
+/// 判据只能是 `null`（键存在、值为空），不能是「键缺失」：设备侧对
+/// 「没有这个键」与「键是 null」走同一条分支，但接口形状上这两者不同，
+/// 而这里要钉的是「Hub 明确表达了『这条会话还没有 ACP id』」。
+#[tokio::test]
+async fn the_first_conversation_sends_a_null_acp_session_id() {
+    let (h, _node, session_id, mut est) = conversation_ready(
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        Some("opencode"),
+    )
+    .await;
+
+    let r = h.open_conversation(&session_id).await;
+    assert_eq!(r.status, StatusCode::CREATED, "body: {}", r.body);
+    let open = open_channel_on(&mut est).await;
+    let open: protocol::channel::OpenChannel = open.payload().expect("open_channel 载荷");
+    assert!(
+        open.params.get("acp_session_id").is_some(),
+        "键必须在（值可以是 null），否则设备侧分不清「没给」与「还没有」：{}",
+        open.params
+    );
+    assert_eq!(
+        open.params["acp_session_id"],
+        Value::Null,
+        "第一次开对话还没有 ACP id，设备侧据此走 session/new"
+    );
+}
+
+/// **`ready` 载荷里的 ACP 会话 id 会被回填，并在下一次开对话时下发回去。**
+///
+/// 这是子任务 8 的整个价值所在：设备侧 `conversation::open` 在 `session/new`
+/// 成功之后推一条 `{"type":"ready","sessionId":"ses_...","agentId":...}` 上来，
+/// Hub 把它记进 `session.acp_session_id`；再开一次对话时把它下发回去，设备
+/// 才能走 `session/load` 恢复上下文——否则关掉页面再回来，agent 那边就是
+/// 一条全新会话，之前聊的全丢，而页面上看起来一切正常。
+///
+/// **只用 HTTP 观测，不查库**：这条功能的用户可见结果是「第二次开对话时
+/// 下发的是 load 而不是 new」，它可能断在帧解析、绑定表查询或仓储任一层。
+#[tokio::test]
+async fn the_acp_session_id_from_the_ready_frame_comes_back_on_the_next_open() {
+    let (h, node_id, session_id, mut est) = conversation_ready(
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        Some("opencode"),
+    )
+    .await;
+
+    // ---- 第一次：拿到通道号，然后像设备那样回一条 ready ----
+    let r = h.open_conversation(&session_id).await;
+    assert_eq!(r.status, StatusCode::CREATED, "body: {}", r.body);
+    let channel_id = r.json()["channel_id"]
+        .as_str()
+        .expect("要回 channel_id")
+        .to_string();
+    let _open = open_channel_on(&mut est).await;
+
+    // 设备侧 `channel_ready` 先到（Hub 的 ready 超时要它），再推 ACP 的 ready。
+    let ch_ready = json!({"channel_id": channel_id, "capabilities": {}});
+    est.send(&protocol::frame::Frame::push(
+        protocol::message::types::CHANNEL_READY,
+        0,
+        ch_ready,
+    ))
+    .await
+    .expect("channel_ready 必须发得出去");
+
+    let acp_ready = json!({"channel_id": channel_id, "payload": {
+        "type": "ready", "sessionId": "ses_from_the_agent", "agentId": "opencode"
+    }});
+    est.send(&protocol::frame::Frame::push(
+        protocol::message::types::CHANNEL_DATA,
+        0,
+        acp_ready,
+    ))
+    .await
+    .expect("ready 载荷必须发得出去");
+
+    // 回填是读循环里同步做的，所以要等 Hub 把那一帧处理完再开第二次对话。
+    // 判据用**仓储**而不是固定 sleep：这里的条件就是「落库了吗」本身，
+    // 而固定 sleep 在慢机器上会 flakes。
+    common::wait_until(Duration::from_secs(5), || {
+        hub_storage::SessionRepo::new(h.hub.state.pool().clone())
+            .find(&session_id)
+            .ok()
+            .flatten()
+            .and_then(|s| s.acp_session_id)
+            .is_some()
+    })
+    .await;
+
+    // ---- 第二次开对话：下发的必须是那个 id ----
+    let r = h.open_conversation(&session_id).await;
+    assert_eq!(r.status, StatusCode::CREATED, "body: {}", r.body);
+    let open = open_channel_on(&mut est).await;
+    let open: protocol::channel::OpenChannel = open.payload().expect("open_channel 载荷");
+    assert_eq!(
+        open.params["acp_session_id"],
+        json!("ses_from_the_agent"),
+        "第二次开对话必须把 agent 给的 id 下发回去，设备才能走 session/load：{}",
+        open.params
+    );
+    let _ = node_id;
+}
+
 /// **没有配置也要能开**：`command` 是空串（= 用设备扫描到的那个），不是缺字段。
 ///
 /// 这条钉的是「配置是可选的」：把空串发成缺失，设备侧就得区分「没给」与

@@ -81,6 +81,24 @@ pub struct ConversationSpec {
     pub acp_args: Vec<String>,
     /// 追加到继承环境之上（不是替换——替换会让子进程丢掉 `PATH`）。
     pub env: BTreeMap<String, String>,
+    /// 上一次开对话时 agent 给的 ACP 会话 id（`hub_storage::Session::acp_session_id`）。
+    ///
+    /// # `Some` 与 `None` 是两种**不同的动作**，不是「带不带参数」
+    ///
+    /// `Some(id)` → 走 `session/load`，让 agent 恢复这个会话的上下文；
+    /// `None` → 走 `session/new`，开一条全新的。
+    ///
+    /// 实测（M2 里程碑文档 V-2）：**新进程拿同一 `sessionId` 直接 `session/prompt`
+    /// 不成立**，agent 不认这个 id，必须先 `session/load` 把上下文喂进去；而 load
+    /// 之后它确实记得上一轮说的话。所以这个字段决定「关掉页面再回来还能不能接着聊」。
+    ///
+    /// # 重放事件**不进轨迹表**
+    ///
+    /// `session/load` 会把历史以事件流的形式重放一遍。那些事件**不写
+    /// `trajectory_event`**：重放是**重建**的（事件数与 live 不同、没有 `seq`、
+    /// 没有时间戳、中间态被折叠），写进去等于把同一段对话记两遍且顺序错乱。
+    /// 轨迹表是唯一真相源，页面历史只读它。
+    pub acp_session_id: Option<String>,
 }
 
 /// 聚合的字节闸：攒够这么多就发一批，不必等时间窗。
@@ -145,10 +163,25 @@ impl Conversations {
         // 用**展开后**的路径，不是 `spec.cwd` 原文：agent 拿 `session/new` 的
         // `cwd` 决定在哪儿干活，给它带 `~` 的串等于让它自己猜一遍——而它多半
         // 不会展开，于是建立了一个根在 `~` 字面目录下的会话。
-        let session_id = client
-            .new_session(&cwd.to_string_lossy())
-            .await
-            .map_err(|e| format!("cannot create an acp session: {e}"))?;
+        let cwd_str = cwd.to_string_lossy();
+        // load 与 new 二选一，**不是**「能 load 就 load、失败了再 new」：
+        // load 失败通常意味着那个 id 在 agent 侧已经不存在（`/tmp` 被清、agent
+        // 换了存储位置）。此时自动回落成 new 会**静默地**丢掉用户的上下文，
+        // 而页面上看起来一切正常（新会话也有 id、也能回话）。报错让人看见
+        // 「这条会话接不上了」，比悄悄开一条新的诚实。
+        let session_id = match spec.acp_session_id.as_deref() {
+            Some(existing) => {
+                client
+                    .load_session(existing, &cwd_str)
+                    .await
+                    .map_err(|e| format!("cannot restore acp session {existing}: {e}"))?;
+                existing.to_string()
+            }
+            None => client
+                .new_session(&cwd_str)
+                .await
+                .map_err(|e| format!("cannot create an acp session: {e}"))?,
+        };
 
         // `ready` 先推：页面拿到 sessionId 才能把消息挂到正确的会话上。
         // 丢不丢是另一回事——通道已经被 `fail_external` 之外的路开好了。
@@ -463,6 +496,7 @@ fn flush(channel_id: &str, batch: &mut Vec<Value>, bytes: &mut usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
 
     /// **`cwd` 的 `~` 只在设备侧展开，且只展开开头那一个。**
     ///
@@ -608,6 +642,9 @@ mod tests {
             // `initialize` 永远等不到响应（这就是第一次跑卡住的真因）。
             acp_args: vec!["acp".to_string()],
             env: BTreeMap::new(),
+            // 真机这条测的是「一轮问答能不能走通」，不是在测 load，
+            // 所以第一次开对话照常新建。
+            acp_session_id: None,
         };
         convs
             .open(spec, None)
@@ -670,6 +707,236 @@ mod tests {
         assert!(
             saw_turn_end,
             "一轮结束要有 turn_end（子任务 9.1 的完整性判据）"
+        );
+    }
+
+    // ---- 子任务 8：`acp_session_id` 决定走 load 还是 new ----
+
+    /// 一个**把收到的每个 method 名追加到日志**的假 agent。
+    ///
+    /// 这是本组测试的唯一观测手段：`open()` 走 load 还是 new 是它内部的
+    /// 一个分支，从外面看不见——只有 agent 侧知道 Hub 到底发了哪个 RPC。
+    /// 用真 opencode 验不了这一条：真 agent 两件事都能做，而我们要断言的是
+    /// **哪一件被做了**。
+    fn recording_agent(dir: &Path) -> (PathBuf, PathBuf) {
+        let log = dir.join("methods.log");
+        let path = dir.join("rec-agent");
+        let script = format!(
+            r#"#!/usr/bin/env python3
+import json, sys
+LOG = {log:?}
+
+def send(o):
+    sys.stdout.write(json.dumps(o) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    m = json.loads(line)
+    method = m.get("method", "")
+    mid = m.get("id")
+    with open(LOG, "a") as f:
+        f.write(method + "\n")
+    if method == "initialize":
+        send({{"jsonrpc": "2.0", "id": mid, "result": {{"protocolVersion": 1,
+              "agentCapabilities": {{"loadSession": True}}}}}})
+    elif method == "session/new":
+        send({{"jsonrpc": "2.0", "id": mid, "result": {{"sessionId": "ses_brand_new"}}}})
+    elif method == "session/load":
+        # 真机形状：只有 configOptions，没有条数。重放走事件流。
+        send({{"jsonrpc": "2.0", "id": mid, "result": {{"configOptions": []}}}})
+    elif method == "session/prompt":
+        send({{"jsonrpc": "2.0", "id": mid, "result": {{"stopReason": "end_turn"}}}})
+"#,
+            log = log.to_string_lossy()
+        );
+        std::fs::write(&path, script).expect("写脚本");
+        // 脚本要能执行，`AcpClient::spawn` 直接 exec 它。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).expect("stat").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("chmod");
+        }
+        (path, log)
+    }
+
+    fn spec_for(ch: &str, bin: &Path, acp_session_id: Option<&str>) -> ConversationSpec {
+        // `cwd` 必须**真实存在**：`AcpClient::spawn` 会 `current_dir(cwd)`，
+        // 给一个不存在的目录时 `spawn` 直接 `No such file or directory`——
+        // 而错因看起来像「可执行文件不存在」（它就是个绝对路径）。
+        ConversationSpec {
+            channel_id: ch.to_string(),
+            agent_id: "opencode".to_string(),
+            cwd: bin
+                .parent()
+                .expect("脚本必有父目录")
+                .to_string_lossy()
+                .into_owned(),
+            command: bin.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            acp_args: Vec::new(),
+            env: BTreeMap::new(),
+            acp_session_id: acp_session_id.map(str::to_string),
+        }
+    }
+
+    fn methods_in(log: &Path) -> Vec<String> {
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// **没有 `acp_session_id` → 走 `session/new`，且 `ready` 里是新 id。**
+    #[tokio::test]
+    async fn a_conversation_without_an_acp_id_creates_a_new_session() {
+        let d = tempfile::tempdir().expect("tmp");
+        let (bin, log) = recording_agent(d.path());
+        let convs = Conversations::default();
+
+        // 生产路径上这一步由 `channel::on_channel_frame` 的 `Action::OpenAcp`
+        // 分支做（`lock().open_external`）。直接调 `Conversations::open` 会
+        // 跳过它，而通道不存在时 `push_external` 返回 `None`——`ready` 就被
+        // 静默丢掉，看起来像「open() 没推 ready」。
+        let _ = channel::open_external("ch_new");
+        convs
+            .open(spec_for("ch_new", &bin, None), None)
+            .await
+            .expect("假 agent 必须能起来");
+
+        let methods = methods_in(&log);
+        assert!(
+            methods.contains(&"session/new".to_string()),
+            "没有 acp_session_id 时必须新建，实际: {methods:?}"
+        );
+        assert!(
+            !methods.contains(&"session/load".to_string()),
+            "没有 acp_session_id 时不该 load，实际: {methods:?}"
+        );
+
+        // `ready` 里带的是 agent 给的新 id。
+        let frames: Vec<_> = channel::pump().into_iter().flat_map(|(_, f)| f).collect();
+        let ready = frames
+            .iter()
+            .filter_map(|f| f.payload::<protocol::channel::ChannelData>().ok())
+            .find(|d| d.payload.get("type").and_then(Value::as_str) == Some("ready"))
+            .expect("必须推一条 ready");
+        assert_eq!(
+            ready.payload["sessionId"], json!("ses_brand_new"),
+            "ready 要把 agent 给的 sessionId 带上去，Hub 靠它回填"
+        );
+
+        convs.close("ch_new").await;
+    }
+
+    /// **有 `acp_session_id` → 走 `session/load`，且不新建。**
+    ///
+    /// 这条是子任务 8 的核心判据。反向验证：把 `open()` 改回恒走
+    /// `new_session`，这条会红在「必须 load」那句。
+    #[tokio::test]
+    async fn a_conversation_with_an_acp_id_loads_instead_of_creating() {
+        let d = tempfile::tempdir().expect("tmp");
+        let (bin, log) = recording_agent(d.path());
+        let convs = Conversations::default();
+
+        let _ = channel::open_external("ch_load");
+        convs
+            .open(spec_for("ch_load", &bin, Some("ses_existing")), None)
+            .await
+            .expect("假 agent 必须能起来");
+
+        let methods = methods_in(&log);
+        assert!(
+            methods.contains(&"session/load".to_string()),
+            "有 acp_session_id 时必须 load，实际: {methods:?}"
+        );
+        assert!(
+            !methods.contains(&"session/new".to_string()),
+            "有 acp_session_id 时不该新建（那会丢掉历史上下文），实际: {methods:?}"
+        );
+
+        // load 之后推出去的 `ready` 里必须还是**原来那个 id**，不是 agent 编的
+        // 新号：Hub 存的就是它，下一轮还要用它。
+        let frames: Vec<_> = channel::pump().into_iter().flat_map(|(_, f)| f).collect();
+        let ready = frames
+            .iter()
+            .filter_map(|f| f.payload::<protocol::channel::ChannelData>().ok())
+            .find(|d| d.payload.get("type").and_then(Value::as_str) == Some("ready"))
+            .expect("必须推一条 ready");
+        assert_eq!(
+            ready.payload["sessionId"], json!("ses_existing"),
+            "load 之后要沿用原来的 id，不能换成别的"
+        );
+
+        convs.close("ch_load").await;
+    }
+
+    /// **load 失败不回落成 new**：报错，而且不许悄悄新建一条。
+    ///
+    /// 自动回落是最诱人也最坏的选择：页面上一切正常（新会话有 id、也能回话），
+    /// 只是用户的上下文没了。所以这条钉住「宁可失败也要让人看见」。
+    #[tokio::test]
+    async fn a_failing_load_reports_an_error_instead_of_creating_a_new_session() {
+        let d = tempfile::tempdir().expect("tmp");
+        let log = d.path().join("methods.log");
+        let path = d.path().join("failing-load");
+        let script = format!(
+            r#"#!/usr/bin/env python3
+import json, sys
+LOG = {log:?}
+
+def send(o):
+    sys.stdout.write(json.dumps(o) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    m = json.loads(line)
+    method = m.get("method", "")
+    mid = m.get("id")
+    with open(LOG, "a") as f:
+        f.write(method + "\n")
+    if method == "initialize":
+        send({{"jsonrpc": "2.0", "id": mid, "result": {{"protocolVersion": 1,
+              "agentCapabilities": {{"loadSession": True}}}}}})
+    elif method == "session/load":
+        send({{"jsonrpc": "2.0", "id": mid,
+              "error": {{"code": -32602, "message": "no such session"}}}})
+    elif method == "session/new":
+        send({{"jsonrpc": "2.0", "id": mid, "result": {{"sessionId": "ses_fallback"}}}})
+"#,
+            log = log.to_string_lossy()
+        );
+        std::fs::write(&path, script).expect("写脚本");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).expect("stat").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("chmod");
+        }
+
+        let convs = Conversations::default();
+        let err = convs
+            .open(spec_for("ch_fail", &path, Some("ses_gone")), None)
+            .await
+            .expect_err("load 失败必须报错");
+
+        assert!(
+            err.contains("ses_gone"),
+            "错误里要点名是哪个会话接不上，实际: {err}"
+        );
+        let methods = methods_in(&log);
+        assert!(
+            !methods.contains(&"session/new".to_string()),
+            "load 失败**不许**悄悄回落成新建（那会静默丢上下文），实际: {methods:?}"
         );
     }
 }
