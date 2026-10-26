@@ -616,5 +616,61 @@ else
   printf '%b' "$shim_hits" | sed 's/^/      /'
 fi
 
+echo "== C6 systemd unit 必须与 afcli 的真实契约一致 =="
+# `deploy/afcli.service` 是唯一一份「怎么把 afcli 托给 systemd」的说明，而它
+# 描述的四件事（前台不 daemon 化 / 两个环境变量名 / supervisor 管 worker、systemd
+# 管进程）都在代码里有真相源。unit 与代码脱节时不会有任何编译错误——只会在
+# 一台真设备上表现为「服务卡在 activating」或「连到本机 Hub 永远注册不上」。
+python3 - <<'PYEOF'
+import re, sys, io, os
+
+UNIT = 'deploy/afcli.service'
+ENVX = 'deploy/afcli.env.example'
+bad = []
+
+def read(p):
+    if not os.path.exists(p):
+        bad.append(f'缺少 {p}')
+        return ''
+    return io.open(p, encoding='utf-8').read()
+
+unit = read(UNIT)
+read(ENVX)
+
+if unit:
+    # ① afcli 不会 daemon 化 → `Type=` 必须是 simple。
+    # 真相源：`crates/node-cli/src/supervisor.rs` 的 supervise() 是前台无限 loop。
+    m = re.search(r'^Type=(\S+)', unit, re.M)
+    if not m:
+        bad.append('unit 没有写 Type=')
+    elif m.group(1) != 'simple':
+        bad.append(f'Type={m.group(1)}：afcli 不会 daemon 化，必须是 Type=simple')
+
+    # ② 两个环境变量名必须与代码一致。改名而 unit 不改的症状是「配了不生效」。
+    src = io.open('crates/node-cli/src/runargs.rs', encoding='utf-8').read()
+    for name in ('AFCLI_HUB_URL', 'AFCLI_DATA_DIR'):
+        if name in src and name not in unit and name not in io.open(ENVX, encoding='utf-8').read():
+            bad.append(f'{name} 既不在 unit 也不在 env 样例里，但代码在读它')
+
+    # ③ 崩溃自拉起。supervisor 管 worker 生命周期，systemd 管进程存活——
+    #    少了这一层，supervisor 自己被 OOM kill 之后没人把它拉起来。
+    if not re.search(r'^Restart=(always|on-failure)', unit, re.M):
+        bad.append('unit 没有 Restart=：supervisor 死了没人拉，整台设备就掉了')
+
+    # ④ 不得以 root 跑：afcli 持有设备私钥。
+    if 'User=root' in unit:
+        bad.append('User=root：设备私钥不该交出去')
+
+    # ⑤ 禁止在 unit 里做 daemon 化包装（DECISIONS.md D1：supervisor 管生命周期）。
+    for pat in ('nohup', 'setsid', '&'):
+        if re.search(r'^ExecStart=.*' + re.escape(pat), unit, re.M):
+            bad.append(f'ExecStart 里有 {pat}：会把 supervisor 的退出观测全废掉')
+
+for b in bad:
+    print(f'      {b}')
+sys.exit(1 if bad else 0)
+PYEOF
+  [[ $? -ne 0 ]] && { echo "  ❌ systemd unit 与代码契约不一致"; fail=1; } || ok "unit 与代码契约一致"
+
 echo
 if [[ $fail -eq 0 ]]; then echo "门禁通过"; else echo "门禁未通过"; exit 1; fi

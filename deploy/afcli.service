@@ -1,0 +1,63 @@
+[Unit]
+Description=AgentFleet node agent (afcli)
+Documentation=https://github.com/AgentFleet/AgentFleet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# `Type=simple` 而不是 `forking`：afcli **不会** daemon 化（全仓无 setsid / nohup），
+# supervisor 是一个前台无限 loop。用 forking 会让 systemd 等一个永远不会来的
+# 父子交接，于是服务卡在 activating 直到超时。
+Type=simple
+
+# afcli 的二进制路径。装到别处就改这一行。
+ExecStart=/usr/local/bin/afcli run
+
+# 崩溃自拉起。supervisor 内部已有自己的退避（CrashStats / decide），
+# 两者不是重复：systemd 管的是**进程存活**（supervisor 自己被 OOM kill、
+# 被信号打死），supervisor 管的是**worker 生命周期**（worker 崩了怎么退避、
+# 什么时候判坏版本）。少任何一层都会留下一个没人管的窗口。
+Restart=always
+# 退避窗口：1s 起步、10 秒封顶。比 supervisor 自己的 worker 退避短，
+# 因为这一层针对的是「整个进程没了」——那种情况没有理由慢慢等。
+RestartSec=1
+
+# 环境变量走 EnvironmentFile 而不是写进 unit：改 Hub 地址不该改单元文件
+# （改 unit 要 daemon-reload，改 env 只要 restart）。
+EnvironmentFile=/etc/agentfleet/afcli.env
+
+# 以普通用户跑：afcli 持有设备私钥（`node.key`），跑成 root 等于把
+# 「Hub 能证明这台设备是谁」的凭据交给任何能读 /root 的东西。
+User=agentfleet
+Group=agentfleet
+
+# `AFCLI_DATA_DIR` 缺省是 `~/.local/share/agentfleet`（Linux）/
+# `~/Library/Application Support/agentfleet`（macOS），随 `User=` 解析。
+# 想单独放就在这里覆盖，并与 EnvironmentFile 里保持一致。
+# Environment=AFCLI_DATA_DIR=/var/lib/agentfleet
+
+WorkingDirectory=/var/lib/agentfleet
+
+# ── 隔离（能开多少开多少，不追求全部）─────────────────────────
+# afcli 要 spawn worker 子进程、要读写自己的数据目录，所以不能
+# `ProtectSystem=strict` + `ReadOnlyPaths=` 一刀切。
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+NoNewPrivileges=true
+
+# 只留必要的 capability。不加 `AmbientCapabilities`：afcli 不需要
+# 绑定低端口也不需要改系统时间。
+CapabilityBoundingSet=
+
+# supervisor 的日志走 stderr（`afcli log` 读的是数据目录里的日志文件），
+# journald 只兜住「进程为什么没了」那一层。
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=afcli
+
+TimeoutStopSec=15
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

@@ -93,8 +93,36 @@ mise run cli-log -- -n 50       # 看设备日志（一次性命令，不经 wat
 mise run build && mise run start
 
 # 设备接入（在设备上跑，不是 Hub 上）
-afcli run            # 默认连 ws://127.0.0.1:8080/ws；远程用 AFCLI_HUB_URL 指过去
+afcli run            # 前台阻塞；想脱离终端请用 systemd（见下）或 tmux
+mise run cli         # 开发用：debug 构建，数据落在 data/node
+mise run cli-log -- -n 50
 ```
+
+### 设备上跑成服务（systemd）
+
+`afcli run` 是**前台阻塞**的：supervisor 是一个无限 loop，进程自己不会 daemon 化
+（仓库里没有 setsid / nohup 路径，这是刻意的——见 `docs/DECISIONS.md` D1）。
+所以「开机自启 + 崩了自动拉起」交给 systemd，用仓库里的 unit 模板：
+
+```bash
+sudo useradd --system --home /var/lib/agentfleet --create-home agentfleet
+sudo install -m 0755 afcli /usr/local/bin/afcli
+sudo mkdir -p /etc/agentfleet
+sudo install -m 0600 deploy/afcli.env.example /etc/agentfleet/afcli.env
+sudo "$EDITOR" /etc/agentfleet/afcli.env      # 至少把 AFCLI_HUB_URL 改掉
+sudo install -m 0644 deploy/afcli.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now afcli
+systemctl status afcli          # 崩了看 journalctl -u afcli -f
+```
+
+**两层退避不重复**：systemd 的 `Restart=always` 管的是**进程存活**（supervisor 被 OOM kill
+或被打死），supervisor 内部的 `CrashStats` / `decide` 管的是**worker 生命周期**（worker 崩了
+怎么退避、什么时候判它是坏版本）。少任何一层都会留一个没人管的窗口。
+
+`AFCLI_HUB_URL` **必须显式给**：缺省是 `ws://127.0.0.1:8080/ws`，一台真设备给它等于
+永远注册不上。同理 `AFCLI_DATA_DIR` 一旦定了就**不要改**——换了就等于换了一台设备
+（新 `node_id`、要重新 enroll）。
 
 首次启动 Hub 会在 stderr 打一行 setup token（同时写进 `<data>/setup-token.txt`，0600）。
 打开页面 → 用 token 完成首次 setup → 设密码 → 登录。**没有默认密码**。
@@ -103,6 +131,10 @@ afcli run            # 默认连 ws://127.0.0.1:8080/ws；远程用 AFCLI_HUB_UR
 # Development: Hub on 8080 (loopback only) + Vite on 3002 with hot reload, proxying /api and /ws
 # Production: one process, one port, the built console embedded in the binary
 # Device: `mise run cli` starts afcli; its data dir is `data/node` (not the platform default)
+
+# Device as a service: `afcli run` blocks in the foreground and never daemonises,
+# so use the systemd unit in `deploy/afcli.service` (`Type=simple`, `Restart=always`)
+# See README above / the Chinese section for the install commands.
 ```
 
 On first start the Hub prints a setup token to stderr (also written to `<data>/setup-token.txt`,

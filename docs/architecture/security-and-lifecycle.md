@@ -236,6 +236,12 @@ supervisor 唯一要做的是「保证有一个能用的 worker」，它不需�
 文件换新了，进程继续跑旧映像（下次被 systemd/docker 拉起才更新新代码），
 所以新版本再坏，也坏不到执行回滚的那份代码里。
 
+> 「下次被 systemd 拉起」这句在 M2 之前只是一句假设——仓库里没有 unit，
+> 用户得自己从零写一个。现在有 `deploy/afcli.service`（`Type=simple`、
+> `Restart=always`、配置走 `EnvironmentFile`），本节与 `README.md` 的生产段
+> 都指向它。**两层分工不可合并**：systemd 管进程存活（supervisor 自己没了），
+> supervisor 管 worker 生命周期（worker 崩了怎么退避、何时判坏版本）。
+
 > supervisor 的职责被显式约束为一个**极小的稳定 ABI**：`spawn` + 退出码协议 +
 > `update-state.json`。它必须向后兼容——这是上面「懒生效」能成立的前提。
 
