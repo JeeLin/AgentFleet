@@ -101,7 +101,6 @@ pub struct DeviceSummary {
     /// 列进可选项（创建会话后永远无法对话）。
     ///
     /// 判据与 `POST /api/sessions` 的 409 门禁**同源**（都读 `agent_runtime`，
-    /// 判据与 `POST /api/sessions` 的 409 门禁**同源**（都读 `agent_runtime`，
     /// 都只看 `available`），所以页面上选得到的一定建得成。
     pub usable_agents: Vec<String>,
     pub derived: bool,

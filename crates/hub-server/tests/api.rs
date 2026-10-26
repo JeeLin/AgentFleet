@@ -261,6 +261,107 @@ async fn listing_devices_returns_an_empty_array_when_nothing_is_enrolled() {
     assert_eq!(r.json(), json!([]));
 }
 
+/// **设备表 CPU / 内存那两列现在有真值**（`docs/BUGS.md` 的「负载采集从未排进
+/// 任何里程碑」那条欠账）。
+///
+/// 端到端而不是只测采集器：那条欠账的症状在**页面**上（两列恒 `—`），
+/// 而它可能断在三处——采集没做、`resources` 形状与 Hub 读取口径不符、
+/// 或中间哪一层把它丢了。只测采集器第二段就验不到。
+///
+/// **用 node 侧真构造器发心跳**，不手搓 JSON：手搓的那份会跟着「我以为的
+/// 形状」走，形状漂了测试还绿（这正是这两列空了两三个里程碑的原因——
+/// Hub 读的是顶层 `cpu` / `mem`，而 `scheduling.md` 的目标形状是嵌套对象）。
+#[tokio::test]
+async fn the_device_table_load_columns_come_from_the_real_collection() {
+    let hub = common::Hub::boot().await;
+    let (mut est, node_id, _kp) = common::connect_enrolled(&hub).await;
+
+    let hb = node_core::heartbeat::heartbeat(Vec::new());
+    let res = hb.resources.clone();
+    common::send_heartbeat(&mut est, serde_json::to_value(&hb).expect("serialize")).await;
+    common::wait_until(Duration::from_secs(2), || {
+        hub.state.reports().get(&node_id).is_some()
+    })
+    .await;
+
+    let h = Harness::from_hub(hub).await;
+    let v = h.get("/api/devices").await.json();
+    let row = v
+        .as_array()
+        .and_then(|a| a.iter().find(|r| r["id"] == json!(node_id)))
+        .expect("设备行在");
+
+    // 非 Linux 上没有 /proc，两列就该是 null——**不许编一个数**。
+    if !std::path::Path::new("/proc/meminfo").exists() {
+        assert!(row["cpu"].is_null() && row["mem"].is_null(), "{row}");
+        return;
+    }
+    assert!(
+        !res.is_null(),
+        "有 /proc 却没采到负载：{res}——这条欠账就是要修这个"
+    );
+    let cpu = row["cpu"].as_u64().unwrap_or_else(|| panic!("cpu 不是数：{row}"));
+    let mem = row["mem"].as_u64().unwrap_or_else(|| panic!("mem 不是数：{row}"));
+
+    // 口径：与真读的 `/proc` 对账，而不是与采集器自己的输出对账——
+    // 后者只会证明「它把它算出来的数原样交了出去」。
+    let expect_mem = {
+        let text = std::fs::read_to_string("/proc/meminfo").expect("meminfo");
+        let mut total = 0u64;
+        let mut avail = 0u64;
+        for line in text.lines() {
+            let Some((k, rest)) = line.split_once(':') else { continue };
+            let Ok(kb) = rest.split_whitespace().next().unwrap_or("").parse::<u64>() else {
+                continue;
+            };
+            match k {
+                "MemTotal" => total = kb / 1024,
+                "MemAvailable" => avail = kb / 1024,
+                _ => {}
+            }
+        }
+        (((total - avail) as f64 / total as f64) * 100.0).round() as u64
+    };
+    // 容差 ±3：两次读 /proc 之间内存本身就在动，要求精确等值是假测试。
+    assert!(
+        mem.abs_diff(expect_mem) <= 3,
+        "mem 与真读的 /proc 对不上：上报 {mem}、真读 {expect_mem}"
+    );
+    // CPU 那列有 Hub 侧的 `min(100)` 截断，所以只卡上界，不要求等值。
+    assert!(cpu <= 100, "cpu 应在 0–100：{cpu}");
+}
+
+/// `resources` 采不到时**不许**回落成 0：页面会把「不知道」画成「空转 0%」，
+/// 而路由会把一台刚连上的设备当成最闲的那台去派活。
+#[tokio::test]
+async fn an_uncollected_load_stays_null_instead_of_becoming_zero() {
+    let hub = common::Hub::boot().await;
+    let (mut est, node_id, _kp) = common::connect_enrolled(&hub).await;
+    common::send_heartbeat(
+        &mut est,
+        json!({
+            "node_version": "0.1.0",
+            "capabilities": {"connectors": ["terminal"]},
+            "resources": null,
+            "workspace_roots": [],
+        }),
+    )
+    .await;
+    common::wait_until(Duration::from_secs(2), || {
+        hub.state.reports().get(&node_id).is_some()
+    })
+    .await;
+
+    let h = Harness::from_hub(hub).await;
+    let v = h.get("/api/devices").await.json();
+    let row = v
+        .as_array()
+        .and_then(|a| a.iter().find(|r| r["id"] == json!(node_id)))
+        .expect("设备行在");
+    assert!(row["cpu"].is_null(), "未上报 = 未知，不是 0：{row}");
+    assert!(row["mem"].is_null(), "未上报 = 未知，不是 0：{row}");
+}
+
 #[tokio::test]
 async fn a_connected_device_is_reported_as_online_with_its_agents() {
     let hub = common::Hub::boot().await;

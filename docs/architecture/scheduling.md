@@ -29,17 +29,31 @@
 心跳（周期由 Hub 在 `auth_ok` 下发，默认 15s，超时 45s 判离线）带一份
 **自描述的能力与负载**。
 
-M0 实际上报的形状见 `crates/node-core/src/heartbeat.rs`。与下面这份目标形状的
-**两处差异是有意的**：
+M2 实际上报的形状见 `crates/node-core/src/heartbeat.rs`。与下面这份目标形状的
+**差异都是有意的**：
 
 - `workspace_roots` 是**顶层数组**而不是 `workspace.roots` 嵌套对象——
   协议层 `Heartbeat` 就是这样定义的（§2 的「只报根」约束与嵌套与否无关）；
-- `resources` 在 **M0/M1 是 `null`，M2 起真采集**。原理由是「取真实负载要读 `/proc`
+- `resources` 在 **M0/M1 是 `null`，M2 起真采集**。理由是「取真实负载要读 `/proc`
   或引依赖，而编一个数字比不报坏得多」——这条理由仍然成立，**编造数字依然禁止**；
   M2 排进了真采集（node 读 `/proc/loadavg` + `/proc/meminfo`），所以不再是「没有」，
   而是「有就报、探测失败就留 null」。Hub 侧对缺省字段的约定仍是「保持上一次的值」，
   所以 `null` 依然让 Hub 保留旧事实。**注意 `load_percent` 有 `min(100)` 截断**
   （`hub-server/src/routes/api.rs`），高负载设备恒读 100，不能拿它做精确比较。
+
+- **百分比字段是扁平的**（`cpu_percent` / `mem_percent` 放在顶层，明细另放在
+  `load` / `memory` 里），与下面目标形状的嵌套写法不同。原因是**读的那一边**已定：
+  `api.rs` 的 `load_percent` 只按顶层键找（`CPU_PERCENT_FIELDS` / `MEM_PERCENT_FIELDS`），
+  嵌套对象会让它恒返回 `None`——设备表那两列会继续是 `—`，而「采集已落地」这条
+  事实在页面上完全看不出来（这正是那条欠账空了两三个里程碑的原因：目标形状是
+  嵌套的，读取口径是扁平的，两边谁也没错，只是对不上）。明细与百分比**都报**：
+  前者给将来的路由（需要 `load1` 与 `total_mb`），后者给今天的两列。
+
+- `cpu_percent` 是**每核负载**（`load1 / cores × 100`），**不是 CPU 利用率**：
+  load 含不可中断睡眠（等 IO），所以 IO 密集的机器会偏高于它的真实占用。报它
+  是因为「谁相对更闲」的排序用得上，而不需要跨心跳存状态的算法只有这一个。
+  `mem_percent` 用 `MemAvailable` 而不是 `MemFree`：后者在跑久了的机器上恒接近
+  0，会把它读成「内存满了」——那是一份撒谎的事实。
 
 ```jsonc
 {
