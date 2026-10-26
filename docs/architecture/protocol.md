@@ -156,6 +156,11 @@ M2 往这一层加的东西只有一个：**心跳的 `agents` 字段**（设备
 「M2 加了 ACP 对话」直觉上应该带来协议改动，而实际上**一行协议都没改**——
 ACP 走的是 worker 自己的子进程 stdio，不经过 WS。
 
+**ACP 是另一层协议，不归本文档管**。它是 JSON-RPC 2.0 over stdio、一行一条 JSON，
+由 `crates/node-core/src/agent/acp.rs` 实现。设备与 Hub 之间的 WS 只知道 M1 那套帧。
+对话内容要送到页面时，**复用 M1 的通道机制**（`open_channel` + 信用流控），
+而不是为对话在 WS 上新开一类消息——那会造出第二套数据面。
+
 ---
 
 ## 5. 通道（channel）复用
