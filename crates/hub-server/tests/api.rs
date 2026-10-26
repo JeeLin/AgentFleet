@@ -163,17 +163,30 @@ impl Reply {
 /// 就是 WS 断开，页面侧立刻从 online 变 reconnecting（那正是另一条用例要测的）。
 /// 「在线」这个状态只有真连接才造得出来，所以建会话的成功路径必须走它。
 async fn enrolled_device(hub: &common::Hub) -> (String, node_core::conn::Established) {
+    enrolled_device_reporting(hub, json!(["claude-code"])).await
+}
+
+/// 同上，但 agent 上报内容由调用方给。
+///
+/// `agents` 既是旧形态（字符串数组）也是新形态（对象数组）的入口——Hub 两种都认。
+/// 门禁测试需要精确控制「这台设备上报了什么」，所以不能复用写死的那一份。
+async fn enrolled_device_reporting(
+    hub: &common::Hub,
+    agents: Value,
+) -> (String, node_core::conn::Established) {
     let (mut est, node_id, _kp) = common::connect_enrolled(hub).await;
     common::send_heartbeat(
         &mut est,
         json!({
             "node_version": "0.1.0",
-            "capabilities": {"connectors": ["terminal"], "agents": ["claude-code"]},
+            "capabilities": {"connectors": ["terminal"], "agents": agents},
             "resources": {"cpu": 34, "mem": 61},
             "workspace_roots": [],
         }),
     )
     .await;
+    // 等**库**里有行，不是等内存 `Reports`：门禁读的是库（子任务 5 的核心判据）。
+    // 等内存会让测试在一条「库还没写完」的窗口上跑，于是时红时绿。
     common::wait_until(Duration::from_secs(2), || {
         hub.state.reports().get(&node_id).is_some()
     })
@@ -756,4 +769,179 @@ async fn a_config_body_without_an_agent_id_is_rejected_as_bad_body() {
     let r = h.post_config(json!({"node_id": "n_cfg"})).await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
     r.assert_error_code("invalid_request_body");
+}
+
+// ---- 要求 3：建会话时选 agent + 可用门禁（子任务 5）----
+//
+// 门禁的判据是 `agent_runtime` 表里有一行且 `available = 1`。**不读内存
+// `Reports`**——那一份是「缺省即保留」且没有 `forget`，一次不带 `capabilities`
+// 的心跳会让旧清单永久粘住，于是「设备卸载了 agent」传不到 Hub。
+
+/// 已上报且可用 → 201，`agent_id` 落进会话。
+#[tokio::test]
+async fn creating_a_session_with_an_available_agent_succeeds() {
+    let hub = common::Hub::boot().await;
+    let (node_id, _keepalive) = enrolled_device_reporting(
+        &hub,
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+    )
+    .await;
+    let h = Harness::from_hub(hub).await;
+
+    let r = h
+        .create_session(json!({
+            "node_id": node_id,
+            "path": "~/src/app",
+            "agent_id": "opencode"
+        }))
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "body: {}", r.body);
+    assert_eq!(r.json()["agent_id"], json!("opencode"));
+}
+
+/// 设备上报了，但那个 agent **没在清单里** → 409，且错误码可读。
+#[tokio::test]
+async fn creating_a_session_with_an_agent_the_device_never_reported_is_a_conflict() {
+    let hub = common::Hub::boot().await;
+    let (node_id, _keepalive) =
+        enrolled_device_reporting(&hub, json!(["opencode"])).await;
+    let h = Harness::from_hub(hub).await;
+
+    let r = h
+        .create_session(json!({
+            "node_id": node_id,
+            "path": "~/src/app",
+            "agent_id": "claude-code"
+        }))
+        .await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "body: {}", r.body);
+    let v = r.json();
+    assert_eq!(v["error"], json!("agent_unavailable"), "body: {}", r.body);
+    assert_eq!(
+        v["detail"]["agent_id"],
+        json!("claude-code"),
+        "要点名是哪个 agent：{}",
+        r.body
+    );
+}
+
+/// **装了但跑不起来**（`available = false`）→ 409。
+///
+/// 这一条是「目录页列全部已装、门禁只认可用的」那个区分的落点：
+/// 页面上能看到 opencode，但点创建会 409——因为现在用它开会话只会得到一个
+/// 立刻报错的对话。
+#[tokio::test]
+async fn creating_a_session_with_a_broken_agent_is_a_conflict() {
+    let hub = common::Hub::boot().await;
+    let (node_id, _keepalive) = enrolled_device_reporting(
+        &hub,
+        json!([{
+            "id": "opencode", "name": "opencode", "version": "2.1.4",
+            "available": false, "error": "exit status 3"
+        }]),
+    )
+    .await;
+    let h = Harness::from_hub(hub).await;
+
+    let r = h
+        .create_session(json!({
+            "node_id": node_id,
+            "path": "~/src/app",
+            "agent_id": "opencode"
+        }))
+        .await;
+    assert_eq!(
+        r.status,
+        StatusCode::CONFLICT,
+        "装了但跑不起来不能放行：{}",
+        r.body
+    );
+    assert_eq!(r.json()["error"], json!("agent_unavailable"));
+}
+
+/// **从没上报过任何 agent** → 409。
+///
+/// 这与 M1 的 connector 门禁**显式相反**（那条对「从没上报过」是放行）：
+/// connector 是可选能力，agent 是会话的必要前提。放行的后果是用户拿到一个
+/// 201 的会话，等开 ACP 时才发现二进制不存在。
+#[tokio::test]
+async fn creating_a_session_with_an_agent_on_a_silent_device_is_a_conflict() {
+    let hub = common::Hub::boot().await;
+    let (node_id, _keepalive) = enrolled_device_reporting(&hub, json!([])).await;
+    let h = Harness::from_hub(hub).await;
+
+    let r = h
+        .create_session(json!({
+            "node_id": node_id,
+            "path": "~/src/app",
+            "agent_id": "opencode"
+        }))
+        .await;
+    assert_eq!(
+        r.status,
+        StatusCode::CONFLICT,
+        "没上报过就是不可用：{}",
+        r.body
+    );
+    assert_eq!(r.json()["error"], json!("agent_unavailable"));
+}
+
+/// 不选 agent 仍然放行，`agent_id` 为 NULL。**这条不能退化**。
+#[tokio::test]
+async fn creating_a_session_without_an_agent_still_works() {
+    let hub = common::Hub::boot().await;
+    let (node_id, _keepalive) = enrolled_device_reporting(&hub, json!([])).await;
+    let h = Harness::from_hub(hub).await;
+
+    let r = h
+        .create_session(json!({"node_id": node_id, "path": "~/src/app"}))
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "body: {}", r.body);
+    assert_eq!(r.json()["agent_id"], Value::Null, "不选就是 NULL");
+}
+
+/// **反向验证「粘滞」**：库里的行被清掉，但内存 `Reports` 里还留着旧清单 → 必须 409。
+///
+/// 这是子任务 5 最关键的一条。若实现读的是 `Reports`，这条会红。
+///
+/// 造法：设备先上报 opencode（内存与库都有），然后**直接删库**（模拟「设备卸载了
+/// agent，并把这次扫描上报上来」的最终效果），**不动内存**。此时：
+/// - 读内存 → 看到 opencode → 201（错）
+/// - 读库   → 没有行 → 409（对）
+#[tokio::test]
+async fn the_gate_reads_the_table_not_the_in_memory_report() {
+    let hub = common::Hub::boot().await;
+    let (node_id, _keepalive) = enrolled_device_reporting(&hub, json!(["opencode"])).await;
+
+    // 先确认内存里**确实**还有那份旧清单，否则这条测不出任何东西
+    let in_memory = hub.state.reports().get(&node_id).expect("心跳已进内存");
+    assert!(
+        in_memory
+            .capabilities
+            .get("agents")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty()),
+        "前提：内存里要留着旧 agents，否则这条是恒真断言"
+    );
+
+    // 只清库，不清内存
+    hub.state
+        .agent_runtime()
+        .delete_for_node(&node_id)
+        .expect("清库");
+
+    let h = Harness::from_hub(hub).await;
+    let r = h
+        .create_session(json!({
+            "node_id": node_id,
+            "path": "~/src/app",
+            "agent_id": "opencode"
+        }))
+        .await;
+    assert_eq!(
+        r.status,
+        StatusCode::CONFLICT,
+        "库是空的就必须拒；放行说明门禁读的是内存 Reports（结构性粘滞）：{}",
+        r.body
+    );
 }

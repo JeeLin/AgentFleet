@@ -51,7 +51,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 |------|------------|
 | 设备接入 | `afcli run <hub-url>` 一条命令，节点生成密钥对、主动建立 WebSocket 外联；**首次启动自动 enroll**，用户无需单独跑 enroll；无需 Hub 入站端口 |
 | 节点身份与状态 | 注册时 Hub 签发 `node_id`；心跳即能力上报（os / arch / hostname / 版本 / 支持的 connector）；在线/离线状态 |
-| AI agent 管理与对话 | 接入各类 agent 软件（不同厂商/协议），在 Web 一个界面里统一配置、启动、对话。**agent 运行时装在节点上**，接入方式见 `docs/architecture/session-and-trajectory.md`，安装来源见 `docs/architecture/workspace-and-sync.md` §4.4 |
+| AI agent 管理与对话 | 接入各类 agent 软件（不同厂商/协议），在 Web 一个界面里统一配置、启动、对话。**agent 运行时装在节点上、由用户自己安装**（Hub 不代装，2026-10-26 裁定）；Hub 负责**扫描**出节点上装了什么、并保存它们的**启动配置**，见 `docs/architecture/workspace-and-sync.md` §4.4。接入方式见 `docs/architecture/session-and-trajectory.md` |
 | Hub 一键安装 agent | 在 Hub 选设备 + 选 agent 模板 → 节点本地安装 → 自动套用托管配置 → 心跳回报就绪。**必须由用户在页面上手动选择后才执行，不自动安装**；agent 版本升级策略未决。节点进程 afcli 自身的升级是另一条通路：页面显示各设备 afcli 版本号 → **可手动触发升级** → 另有「自动升级」开关可开可关（关时只在页面手动触发）；版本号由 Hub 下发，升级失败自动回滚并回报。两者触发方式对照见 `architecture/workspace-and-sync.md` §4.5 |
 | 对话与动作流 | 会话有 Trajectory 视图，逐条展示 User/Assistant/Tool/子agent/压缩记录；**随时可看**本次改动文件与 diff |
 | 文件浏览 | 会话工作区内浏览/读写节点本地目录，写操作限制在工作区根内（**仅约束页面用户**；agent 用自己装的能力，不走这条路径） |
@@ -182,7 +182,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 | connector | 节点上提供的一类**有类型**的能力（terminal / files / git / exec / ssh / db / …），可插件化 |
 | task | 一个完整任务；sub-task 是任务下可独立执行/续跑的单元，在某台 node 上由 agent 会话执行 |
 | trajectory | dsh 式的会话动作事件流，Web 逐条回放 |
-| 会话 / 会话页 | 会话容器：一个页面（`/sessions/:id`），持有对话流与面板坞。**M1 的会话不含 ACP；M2 起会话可选挂一个 agent**，拥有 `acp_session_id`，对话走 ACP。Session page: the container page `/sessions/:id`; M1 sessions carried no ACP, M2 sessions may bind an agent and carry an `acp_session_id` |
+| 会话 / 会话页 | 会话容器：一个页面（`/sessions/:id`），持有对话流与面板坞。**M1 的会话不含 ACP；M2 起会话可选挂一个 agent**，拥有 `acp_session_id`，对话走 ACP。挂 agent 时 `session.agent_id` 非 NULL，且建会话当时该 agent 在目标节点上必须**可用**（否则 409 `agent_unavailable`）；不挂时仍为 NULL，M1 的行为不变。Session page: the container page `/sessions/:id`; M1 sessions carried no ACP, M2 sessions may bind an agent and carry an `acp_session_id` |
 | workspace | 工作区：设备上的一个 `(node_id, path)`，**会话的一个字段**，不是路由、不是页面；可被多个会话引用（同一条路径可被两个会话同时打开，各自持有自己的通道）。Workspace: a `(node_id, path)` on a device, carried as a field on a session — not a route and not a page |
 | ~~artifact~~ | **已撤销（2026-10-26）**：原指任务产出的最终制品归档到 Hub。随产物归档一起撤销 |
 | channel_id | 通道号：一条设备 WebSocket 上的子通道，通道键为 `(node_id, channel_id)`，每通道独立流控。Channel id: a sub-channel on one node WebSocket, keyed `(node_id, channel_id)`, with per-channel flow control |

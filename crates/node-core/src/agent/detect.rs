@@ -223,6 +223,35 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    /// **`id` 与 `name` 现在恰好相同，但它们是两个字段，契约必须钉住。**
+    ///
+    /// 会话门禁按 `agent_id` 判（`agent_runtime.agent_id`），页面下拉按 `name`
+    /// 显示。两者一旦分叉，「页面上选得到、点创建 409」——而这是个只有
+    /// 真正点下去才会发现的 bug。这条测试把它变成 `cargo test` 当场红。
+    ///
+    /// 如果将来确实需要让它们不同，先改 `device_summary` / `usable_agents`
+    /// 的键（那里也用 `name`），再删这条测试。
+    #[test]
+    fn every_known_agent_has_an_id_equal_to_its_display_name_for_now() {
+        for spec in KNOWN_AGENTS {
+            assert_eq!(
+                spec.id, spec.name,
+                "`{}` 的 id 与 name 不同了：门禁按 id、下拉按 name，两处会分叉",
+                spec.id
+            );
+        }
+    }
+
+    /// `id` 必须唯一：它是 `agent_runtime` 主键的一半。两个 spec 撞 id
+    /// 会让一台设备上的两个 agent 互相覆盖。
+    #[test]
+    fn known_agent_ids_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for spec in KNOWN_AGENTS {
+            assert!(seen.insert(spec.id), "重复的 agent id: {}", spec.id);
+        }
+    }
+
     /// 一个「能跑」的可执行文件：`#!/bin/sh\necho 9.9.9`。
     fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
         use std::io::Write;

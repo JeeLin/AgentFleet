@@ -82,6 +82,15 @@ pub mod err {
     /// 已移除是「这台设备不会再回来了」。页面给的提示与下一步动作完全不同，
     /// 所以不能合用同一个 code——那样用户会一直等一台已经被删掉的机器。
     pub const DEVICE_REMOVED: &str = "device_removed";
+    /// 选的 agent 在这台设备上不可用（没装、装了但跑不起来、或从没上报过）。
+    ///
+    /// **和 [`NOT_REPORTED`] 是两个 code**：那个是 connector 的（「设备没声明支持
+    /// 这个通道类型」），这个是 agent 的（「这台机器上没有能对话的 X」）。
+    /// 页面给的下一步完全不同——前者是「换个通道」，后者是「去装/去配」。
+    ///
+    /// 判据是 `agent_runtime` 表里有一行且 `available = 1`，见
+    /// `routes/api.rs::create_session`。
+    pub const AGENT_UNAVAILABLE: &str = "agent_unavailable";
 }
 
 /// 启动期错误：数据目录写不了 / 数据库读不了，Hub 起不来。

@@ -448,6 +448,30 @@ pub async fn create_session(
         ));
     }
 
+    // agent 可用门禁（要求 3）。**读 `agent_runtime` 表，不读内存 `Reports`**：
+    // `Reports` 是「缺省即保留」且没有 `forget`，一次不带 `capabilities` 的心跳
+    // 会把旧清单永久粘在那里，于是设备卸载 agent 之后 Hub 仍然放行。
+    //
+    // **对「从没上报过」必须拒**——这与 M1 的 connector 门禁（`stream.rs` 的
+    // `unreported_connector`）正好相反，两处不一样是对的：connector 是可选能力，
+    // 没上报过不代表不支持；agent 是会话的**必要**前提，放行的后果是用户拿到
+    // 一个 201 的会话，等到开 ACP 时才发现二进制不存在——一个永远无法对话的
+    // 死会话，而它看起来像「建成功了」。
+    //
+    // 不选 agent（`None`）仍然放行：M1 的会话本来就可以没有 agent，这条不退化。
+    if let Some(agent_id) = body.agent_id.as_deref() {
+        let usable = state
+            .agent_runtime()
+            .usable_for_session(&body.node_id, agent_id)
+            .map_err(|e| ApiError::internal_with("cannot read agent_runtime", e))?;
+        if usable.is_none() {
+            return Err(ApiError::conflict_with(
+                err::AGENT_UNAVAILABLE,
+                || json!({"agent_id": agent_id}),
+            ));
+        }
+    }
+
     let session = hub_storage::SessionRepo::new(state.devices().pool().clone())
         .create(
             &body.node_id,
