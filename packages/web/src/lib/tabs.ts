@@ -25,8 +25,14 @@ export interface TabMeta {
   title: string
   /** 工作区路径（只读）。 */
   path: string
-  /** 归属节点，面板开通道时 Hub 自己从会话查，这里只用于显示。 */
-  nodeId: string
+  /**
+   * 归属节点，面板开通道时 Hub 自己从会话查，这里只用于显示。
+   *
+   * `null` = 这台设备已被删除。**不回落成空串**：空串看起来像一个 node_id
+   * （只是短了点），会让「设备已移除」这一态在类型里消失，模板里所有
+   * 「万一没有值」的分支都不会被发现。
+   */
+  nodeId: string | null
 }
 
 export interface TabsState {

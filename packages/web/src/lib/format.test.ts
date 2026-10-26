@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest'
 
-import { orDash, parseStamp, percent, relativeTime, sessionTitle, workspaceName } from './format'
+import type { DeviceSummary } from './api'
+import {
+  deviceLabel,
+  orDash,
+  parseStamp,
+  percent,
+  relativeTime,
+  sessionTitle,
+  workspaceName,
+} from './format'
 
 const NOW = 1_700_000_000_000
 
@@ -81,6 +90,45 @@ describe('workspaceName / sessionTitle', () => {
       workspace: { node_id: 'n_1', path: '/srv/agentfleet', path_locked: true },
     }
     expect(sessionTitle(session)).toBe('agentfleet')
+  })
+})
+
+describe('deviceLabel', () => {
+  // 完整的 DeviceSummary：只写 name/id 需要 `as unknown as` 强转，
+  // 而强转会让「后端加了必填字段」这类改动在测试里静默通过。
+  const DEVICE: DeviceSummary = {
+    id: 'n_1',
+    name: 'mbp.local',
+    platform: 'darwin/arm64',
+    node_version: '0.1.0',
+    status: 'online',
+    last_seen: 'unix:1700000000',
+    cpu: null,
+    mem: null,
+    gpu: false,
+    agents: [],
+    derived: false,
+    key_fingerprint: 'abc***xyz',
+  }
+  const DEVICES = new Map([[DEVICE.id, DEVICE]])
+
+  it('取得到就用名字', () => {
+    expect(deviceLabel(DEVICES, 'n_1')).toBe('mbp.local')
+  })
+
+  it('列表里还没有这台设备时回显 node_id（至少还能拿去搜）', () => {
+    expect(deviceLabel(DEVICES, 'n_9')).toBe('n_9')
+  })
+
+  it('node_id 为 null 是「设备已移除」，不是空串、也不等于「离线」', () => {
+    // null 与「列表还没回来」（上一条）必须显示成不同的话：
+    // 前者设备永远不会回来了，后者等一会儿就有名字。
+    expect(deviceLabel(DEVICES, null)).toBe('（设备已移除）')
+    expect(deviceLabel(DEVICES, null)).not.toBe('')
+  })
+
+  it('知道原 node_id 时把它带出来（用户要能认出是哪台）', () => {
+    expect(deviceLabel(DEVICES, null, 'n_old')).toBe('n_old（已移除）')
   })
 })
 

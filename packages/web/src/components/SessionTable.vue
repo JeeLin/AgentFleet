@@ -21,7 +21,7 @@ import { attach, type ListboxHandle } from '@/lib/listbox'
 const props = defineProps<{
   sessions: SessionSummary[]
   /** 设备名，node_id 查不到时原样显示 id。 */
-  deviceName: (nodeId: string) => string
+  deviceName: (nodeId: string | null, removedNodeId?: string) => string
   /** 行 ⏎ / 点标题：进这个会话。 */
   onOpen: (session: SessionSummary) => void
 }>()
@@ -86,7 +86,7 @@ onBeforeUnmount(() => {
             </button>
             <span class="af-t-mute af-fp af-sess-id">{{ s.id }}</span>
           </td>
-          <td>{{ deviceName(s.workspace.node_id) }}</td>
+          <td>{{ deviceName(s.workspace.node_id, s.workspace.removed_node_id) }}</td>
           <td>
             <span v-if="s.agent_id" class="af-badge af-badge--agent">{{ s.agent_id }}</span>
             <span v-else class="af-t-mute" title="M1 不接 agent 运行时（ACP 归 M3），会话不绑 agent">—</span>

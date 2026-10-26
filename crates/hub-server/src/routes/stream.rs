@@ -589,7 +589,12 @@ pub async fn open_channel(
     if detail.session.state != hub_storage::SessionState::Running {
         return Err(ApiError::conflict(err::SESSION_ENDED));
     }
-    let node_id = detail.workspace.node_id.clone();
+    // 设备已被删除时 `node_id` 是 None：这时候连「在线否」都无从谈起，
+    // 回 409 而不是 500——会话本身还在（删除语义：删设备不删会话），
+    // 只是它的设备没了，页面该显示「这台设备已被移除」。
+    let Some(node_id) = detail.workspace.node_id.clone() else {
+        return Err(ApiError::conflict(err::DEVICE_REMOVED));
+    };
     if state.connections().get(&node_id).is_none() {
         return Err(ApiError::conflict(err::OFFLINE));
     }

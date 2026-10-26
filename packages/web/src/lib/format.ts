@@ -72,9 +72,20 @@ export function orDash(value: number | null): string {
  * 取不到时**回显 `node_id`**：设备列表还没回来时显示「设备」会让人以为
  * 列表里没有这台设备，而 `n_xxx` 至少还能拿去搜。
  *
+ * `nodeId === null` = **这台设备已被删除**（删设备不删会话，`workspace.node_id`
+ * 置 NULL）。这一态和「列表还没回来」必须分开显示：前者设备永远不会回来了，
+ * 后者等一会儿就有名字。回落到空串或 `null` 会让页面显示成后者。
+ *
  * 列表页与工作台各写一份时，改兜底策略要改两处——漏一处则同一台设备在
- * 两处显示不同的名字。
+ * 两处显示不同的名字。所以这条判据只在这里写一次。
  */
-export function deviceLabel(devices: ReadonlyMap<string, DeviceSummary>, nodeId: string): string {
+export function deviceLabel(
+  devices: ReadonlyMap<string, DeviceSummary>,
+  nodeId: string | null,
+  removedNodeId?: string,
+): string {
+  if (nodeId === null) {
+    return removedNodeId ? `${removedNodeId}（已移除）` : '（设备已移除）'
+  }
   return devices.get(nodeId)?.name ?? nodeId
 }

@@ -208,7 +208,7 @@ impl SessionRepo {
         let conn = self.pool.get()?;
         conn.query_row(
             "SELECT s.id, s.workspace_id, s.agent_id, s.state, s.created_at, s.ended_at,
-                    w.id, w.node_id, w.path, w.created_at
+                    w.id, w.node_id, w.removed_node_id, w.path, w.created_at
              FROM session s JOIN workspace w ON w.id = s.workspace_id
              WHERE s.id = ?1",
             params![id],
@@ -383,7 +383,8 @@ mod tests {
         let (_d, sr) = setup();
         let s = sr.create("n_a", "/srv/app", None, TS).unwrap();
         let d = sr.detail(&s.id).unwrap().expect("detail");
-        assert_eq!(d.workspace.node_id, "n_a");
+        assert_eq!(d.workspace.node_id.as_deref(), Some("n_a"));
+        assert_eq!(d.workspace.removed_node_id, None, "设备还在时不填 removed");
         assert_eq!(d.workspace.path, "/srv/app");
         assert_eq!(d.workspace.created_at, TS);
         assert_eq!(d.session.workspace_id, d.workspace.id);

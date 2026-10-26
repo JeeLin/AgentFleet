@@ -38,7 +38,7 @@ const props = withDefaults(
     /** 每个 tab 已打开的面板数——**让「N 个 tab = N × 面板数条通道」这个代价可见**。 */
     panelCounts: Record<string, number>
     /** tab 所属设备的连接态。 */
-    connOf: (nodeId: string) => TabConn
+    connOf: (nodeId: string | null) => TabConn
     /**
      * 哪个 tab 有未保存的改动（文件面板编辑区）。
      *

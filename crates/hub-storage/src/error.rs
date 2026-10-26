@@ -52,6 +52,17 @@ pub enum StorageError {
     #[error("workspace {0:?} still has sessions attached")]
     WorkspaceInUse(String),
 
+    /// 给工作区指定了一个库里不存在的设备。
+    ///
+    /// **这一条是 v3 去外键后补上的**：v2 靠 `REFERENCES device(id)` 拒绝，
+    /// 报的是 `FOREIGN KEY constraint failed`——用户看不懂，也不知道是哪个
+    /// `node_id` 出的问题。现在由仓储层显式查设备表并给出可读错误。
+    ///
+    /// 判据仍然是「工作区必须挂在一台真实存在的设备上」：否则页面按节点分组
+    /// 会多出一个点不进去的分组。
+    #[error("no such device {0:?}: a workspace must belong to a device that exists")]
+    NoSuchDevice(String),
+
     /// 结束一个不存在的会话。
     #[error("no such session: {0}")]
     NoSuchSession(String),

@@ -21,7 +21,7 @@ const SESSIONS = [
 
 function mountTable(onOpen = vi.fn()) {
   const w = mountIn(SessionTable, {
-    props: { sessions: SESSIONS, deviceName: (id: string) => (id === 'n_1' ? 'mbp.local' : id), onOpen },
+    props: { sessions: SESSIONS, deviceName: (id: string | null) => (id === 'n_1' ? 'mbp.local' : (id ?? '')), onOpen },
   })
   return { w, onOpen }
 }

@@ -9,12 +9,30 @@ use tracing::info;
 use crate::error::{Result, StorageError};
 
 /// 当前 schema 版本。新增表/列时 +1 并在此处追加迁移。
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// 一个迁移：版本号 + 在该事务内执行的 SQL。
 struct Migration {
     version: i64,
     sql: &'static str,
+    /// 该迁移**重建表**（建新表 → `INSERT SELECT` → `DROP` → `RENAME`）。
+    ///
+    /// 为真时，迁移前后要把 `PRAGMA foreign_keys` 关掉再打开。**这不是可选的
+    /// 优化，不加就必然失败**：`PRAGMA foreign_keys=ON` 下 `DROP TABLE workspace`
+    /// 会去检查还有没有行指着它——v2 的 `session.workspace_id` 正是
+    /// `REFERENCES workspace(id)`，于是 SQLite 直接甩
+    /// `FOREIGN KEY constraint failed (1811)`，整条 v3 回滚。
+    ///
+    /// 官方重建表流程（SQLite 文档「Making Other Kinds Of Table Schema Changes」）
+    /// 原文就要求在重建期间关掉外键。这里照做，且**只在需要的迁移上关**——
+    /// 全局关会让普通迁移里的孤儿行静默通过。
+    ///
+    /// 两个反直觉点：
+    /// 1. `PRAGMA foreign_keys` 在**事务内是空操作**，必须开在 `BEGIN` 之前、
+    ///    关在 `COMMIT` 之后。写成事务内的一句 `pragma` 会静默不生效。
+    /// 2. 关掉期间检查不了外键，所以迁移自身要把数据搬对（`INSERT SELECT`
+    ///    原样搬）。迁移跑完后 `foreign_keys` 必须恢复原值——失败路径也恢复。
+    rebuilds_tables: bool,
 }
 
 /// 迁移清单。**必须按 version 升序**，且 version 从 1 开始连续。
@@ -22,10 +40,18 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
         sql: include_str!("schema.sql"),
+        rebuilds_tables: false,
     },
     Migration {
         version: 2,
         sql: include_str!("schema_v2.sql"),
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 3,
+        sql: include_str!("schema_v3.sql"),
+        // v3 去外键：SQLite 不支持 DROP CONSTRAINT，只能重建 workspace / session
+        rebuilds_tables: true,
     },
 ];
 
@@ -59,14 +85,32 @@ fn apply(conn: &mut Connection, migrations: &[Migration], target: i64) -> Result
         .iter()
         .filter(|m| m.version > current && m.version <= target)
     {
-        let tx = conn.transaction()?;
-        tx.execute_batch(m.sql)
-            .map_err(|source| StorageError::Migration {
-                version: m.version,
-                source,
-            })?;
-        tx.pragma_update(None, "user_version", m.version)?;
-        tx.commit()?;
+        // 重建表的迁移（v3）必须在 `foreign_keys=OFF` 下跑：`DROP TABLE workspace`
+        // 会撞上还在指着它的 `session.workspace_id` 外键。**PRAGMA 在事务内是
+        // 空操作**，所以开关必须在事务外，且**失败也要恢复**——否则一条失败的
+        // 迁移会把整个连接池的外键检查永久关掉（那是静默的数据损坏通道）。
+        let fk_before: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+        if m.rebuilds_tables && fk_before != 0 {
+            conn.pragma_update(None, "foreign_keys", "OFF")?;
+        }
+
+        let result = (|| -> Result<()> {
+            let tx = conn.transaction()?;
+            tx.execute_batch(m.sql)
+                .map_err(|source| StorageError::Migration {
+                    version: m.version,
+                    source,
+                })?;
+            tx.pragma_update(None, "user_version", m.version)?;
+            tx.commit()?;
+            Ok(())
+        })();
+
+        // 无论成败都恢复到迁移前的值：关着外键继续跑，后面所有写入都失去防线
+        if m.rebuilds_tables && fk_before != 0 {
+            conn.pragma_update(None, "foreign_keys", "ON")?;
+        }
+        result?;
         info!(version = m.version, "applied migration");
     }
 
@@ -236,15 +280,26 @@ mod tests {
             .unwrap();
         assert_eq!(before, SCHEMA_VERSION, "precondition: a migrated database");
 
-        // 注入一条会失败的 v3 迁移：第一条语句成功、第二条语法错
+        // 注入一条会失败的 v3 迁移：第一条语句成功、第二条语法错。
+        // `rebuilds_tables: true` 是刻意的：它让这条用例同时守住「失败路径也要
+        // 把 foreign_keys 恢复成 ON」——那是比丢数据更隐蔽的故障：
+        // 没恢复的话，进程余下的整个生命周期都在没有外键检查地写库，
+        // 而且不会有任何一条测试以外的信号。
         let bad = Migration {
             version: SCHEMA_VERSION + 1,
             sql: "CREATE TABLE boom (x); THIS IS NOT SQL;",
+            rebuilds_tables: true,
         };
         let e = apply(&mut c, &[bad], SCHEMA_VERSION + 1).unwrap_err();
         assert!(
             matches!(e, StorageError::Migration { version, .. } if version == SCHEMA_VERSION + 1),
             "got {e:?}"
+        );
+        assert_eq!(
+            c.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1,
+            "失败的迁移也必须把 foreign_keys 恢复为 ON"
         );
 
         // 版本号不前进
@@ -281,6 +336,7 @@ mod tests {
             // 第一条成功、第二条语法错：验证**整条迁移**回滚，
             // 而不只是失败的那一句
             sql: "CREATE TABLE ok_tbl (x); THIS IS NOT SQL;",
+            rebuilds_tables: false,
         };
         let e = apply(&mut c, &[bad], 1).unwrap_err();
         assert!(
@@ -382,6 +438,146 @@ mod tests {
             .map_err(|v: Vec<u8>| format!("bad length {v:?}"))
             .expect("length already asserted");
         assert_eq!(identity::Fingerprint::of(&bytes).to_hex(), fp);
+    }
+
+    /// v2 → v3：重建 `workspace` / `session` 两张表去掉外键，**数据不能丢**。
+    ///
+    /// 这条测试守的是 v3 迁移里最危险的一段：SQLite 不支持
+    /// `ALTER TABLE ... DROP CONSTRAINT`，去外键只能建新表 → `INSERT SELECT`
+    /// → `DROP` → `RENAME`。四步里任何一步漏了数据，用户已开的会话就没了，
+    /// 而 `INSERT SELECT` 只要列数对上就不会报错——**静默丢数据**是这里唯一的
+    /// 真实风险，必须用数据断言锁住，不能只断言 `user_version` 前进。
+    #[test]
+    fn a_v2_database_upgrades_to_v3_without_losing_workspaces_or_sessions() {
+        let mut c = memory();
+        apply(&mut c, MIGRATIONS, 2).unwrap();
+        c.execute(
+            "INSERT INTO device (id, name, key_fingerprint, enrolled_at)
+             VALUES ('n_a', 'pi', 'fp_a', 'unix:0')",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO workspace (id, node_id, path, created_at)
+             VALUES ('w1', 'n_a', '/srv/app', 'unix:10')",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO session (id, workspace_id, agent_id, state, created_at)
+             VALUES ('s1', 'w1', 'opencode', 'running', 'unix:11')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2,
+            "precondition: a v2 database"
+        );
+
+        run(&mut c).unwrap();
+
+        // 迁移期间为了重建表把外键关了，**跑完必须打开**。断言放在这里而不是
+        // 别处：只有这条路径真的走过 `rebuilds_tables = true` 的开关分支。
+        // 忘了恢复的话，进程余下的整个生命周期都在没有外键检查地写库。
+        assert_eq!(
+            c.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1,
+            "重建表之后 foreign_keys 必须恢复为 ON"
+        );
+
+        // 数据一行不少、字段原样
+        let (w_id, w_node, w_path, w_created): (String, String, String, String) = c
+            .query_row(
+                "SELECT id, node_id, path, created_at FROM workspace WHERE id='w1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (w_id.as_str(), w_node.as_str(), w_path.as_str(), w_created.as_str()),
+            ("w1", "n_a", "/srv/app", "unix:10")
+        );
+        let (s_id, s_ws, s_agent, s_state): (String, String, Option<String>, String) = c
+            .query_row(
+                "SELECT id, workspace_id, agent_id, state FROM session WHERE id='s1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (s_id.as_str(), s_ws.as_str(), s_agent.as_deref(), s_state.as_str()),
+            ("s1", "w1", Some("opencode"), "running")
+        );
+        // 新列在存量行上是 NULL，不是空串
+        let removed: Option<String> = c
+            .query_row("SELECT removed_node_id FROM workspace WHERE id='w1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(removed, None, "存量工作区的 removed_node_id 必须是 NULL");
+        let acp: Option<String> = c
+            .query_row("SELECT acp_session_id FROM session WHERE id='s1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(acp, None, "存量会话没有 acp_session_id");
+    }
+
+    /// **v3 去外键的验收点**：删设备现在真的能执行，且不连带删会话。
+    ///
+    /// 这是用户裁定「不应该用外链」的直接后果，也是 v2 做不到的事：
+    /// v2 里 `workspace.node_id` 是 `ON DELETE CASCADE`、`session.workspace_id`
+    /// 是 `ON DELETE RESTRICT`，两条一起让「删一台有会话的设备」在**数据库层
+    /// 根本执行不了**——先删 workspace 被 RESTRICT 拦，先删 session 又没人做。
+    ///
+    /// 这条测试不通过就说明迁移没生效（外键还在），而不是业务层有问题：
+    /// 它只发一条裸 `DELETE FROM device`，绕开所有业务代码。
+    #[test]
+    fn deleting_a_device_keeps_its_sessions_because_the_foreign_keys_are_gone() {
+        let mut c = memory();
+        run(&mut c).unwrap();
+        c.execute(
+            "INSERT INTO device (id, name, key_fingerprint, enrolled_at)
+             VALUES ('n_a', 'pi', 'fp_a', 'unix:0')",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO workspace (id, node_id, path, created_at)
+             VALUES ('w1', 'n_a', '/srv/app', 'unix:10')",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO session (id, workspace_id, state, created_at)
+             VALUES ('s1', 'w1', 'running', 'unix:11')",
+            [],
+        )
+        .unwrap();
+
+        // 外键开关仍然是 ON——去的是那两条外键，不是关掉这个开关
+        let fk: i64 = c
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk, 1, "PRAGMA foreign_keys 必须仍为 ON");
+
+        c.execute("DELETE FROM device WHERE id='n_a'", []).unwrap();
+
+        let sessions: i64 = c
+            .query_row("SELECT count(*) FROM session WHERE id='s1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(sessions, 1, "删设备不得删会话（删除语义三分离）");
+        let workspaces: i64 = c
+            .query_row("SELECT count(*) FROM workspace WHERE id='w1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(workspaces, 1, "删设备不得删工作区");
     }
 
     /// 「`user_version` 是迁移唯一的闸门」这条不变式怎么被保住。

@@ -76,6 +76,12 @@ pub mod err {
     pub const INVALID_SIZE: &str = "invalid_terminal_size";
     /// 设备上报的能力里没有这个 connector（子任务 11 的硬过滤）。
     pub const NOT_REPORTED: &str = "connector_not_reported";
+    /// 会话所属的设备已被删除（v3 去掉外键后 `workspace.node_id` 可为 NULL）。
+    ///
+    /// **和 [`OFFLINE`] 是两回事**：离线是「设备还在，现在连不上，等它回来」，
+    /// 已移除是「这台设备不会再回来了」。页面给的提示与下一步动作完全不同，
+    /// 所以不能合用同一个 code——那样用户会一直等一台已经被删掉的机器。
+    pub const DEVICE_REMOVED: &str = "device_removed";
 }
 
 /// 启动期错误：数据目录写不了 / 数据库读不了，Hub 起不来。

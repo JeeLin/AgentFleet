@@ -252,15 +252,23 @@ pub struct SessionSummary {
 pub struct WorkspaceRef {
     /// 归属的 node_id。**通道键是 `(node_id, channel_id)`**（约束 4），
     /// 页面拿这个引用就够定位，不必自己去 join 设备表。
-    pub node_id: String,
+    ///
+    /// `null` = 这台设备已被删除（v3 去掉外键后工作区行保留、`node_id` 置 NULL）。
+    /// 此时页面**不能**再拿它去开通道，也不该把它当「离线」等——那是另一种状态
+    /// （`err::DEVICE_REMOVED` 与 `err::OFFLINE` 是两个 code）。
+    pub node_id: Option<String>,
+    /// 设备被删前的原 node_id；设备还在时 `null`。仅供页面显示「已移除的设备」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_node_id: Option<String>,
     pub path: String,
     pub path_locked: bool,
 }
 
 impl WorkspaceRef {
-    fn new(node_id: &str, path: &str) -> Self {
+    fn new(node_id: &Option<String>, removed_node_id: &Option<String>, path: &str) -> Self {
         Self {
-            node_id: node_id.to_string(),
+            node_id: node_id.clone(),
+            removed_node_id: removed_node_id.clone(),
             path: path.to_string(),
             path_locked: true,
         }
@@ -275,7 +283,7 @@ fn summary_of(item: &hub_storage::SessionListItem) -> SessionSummary {
         state: item.session.state,
         created_at: item.session.created_at.clone(),
         ended_at: item.session.ended_at.clone(),
-        workspace: WorkspaceRef::new(&item.node_id, &item.path),
+        workspace: WorkspaceRef::new(&item.node_id, &item.removed_node_id, &item.path),
     }
 }
 
@@ -347,7 +355,9 @@ pub async fn create_session(
         state: session.state,
         created_at: session.created_at.clone(),
         ended_at: session.ended_at.clone(),
-        workspace: WorkspaceRef::new(&device.id, &body.path),
+        // 刚建出来的会话，设备必然存在（上面刚验过 `device.id`），
+        // 所以这里 node_id 一定有值、removed 一定为 None。
+        workspace: WorkspaceRef::new(&Some(device.id.clone()), &None, &body.path),
     };
     // coverage: excluded — 多行宏的参数行被 llvm-cov 记为 miss（已知现象），
     // 宏本身在上面的用例里执行过。

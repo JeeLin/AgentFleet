@@ -104,9 +104,18 @@ function deviceOf(nodeId: string): DeviceSummary | null {
   return devicesById.value.get(nodeId) ?? null
 }
 
-function connOf(nodeId: string): TabConn {
+/**
+ * 设备连接态。`nodeId === null` = 设备已被删除，**与「离线」是两种态**：
+ * 离线是「等它回来」，已移除是「它不会再回来了」。页面据此决定是显示
+ * 重连动画还是让用户别再等——合成一个态用户会一直等一台删掉的机器。
+ */
+function connOf(nodeId: string | null): TabConn {
+  if (nodeId === null) return 'offline'
   return deviceOf(nodeId)?.status ?? 'offline'
 }
+
+/** 会话所属设备是否已被删除（`workspace.node_id` 为 NULL）。 */
+const deviceRemoved = computed(() => current.value?.workspace.node_id === null)
 
 /* ---------------------------------------------------------------- tab 状态 */
 
@@ -921,7 +930,13 @@ const title = computed(() => (current.value ? sessionTitle(current.value) : '会
  * 设备在两页显示不同的名字。
  */
 const deviceLabel = computed(() =>
-  current.value ? deviceLabelOf(devicesById.value, current.value.workspace.node_id) : '—',
+  current.value
+    ? deviceLabelOf(
+        devicesById.value,
+        current.value.workspace.node_id,
+        current.value.workspace.removed_node_id,
+      )
+    : '—',
 )
 const startedLabel = computed(() =>
   current.value ? `${relativeTime(current.value.created_at)}开始` : '',
@@ -1098,7 +1113,7 @@ async function load(): Promise<void> {
     const known = list.find((s) => s.id === id)
     const fallback: TabMeta[] = known
       ? [metaOf(known)]
-      : [{ id, title: id, path: '', nodeId: '' }]
+      : [{ id, title: id, path: '', nodeId: null }]
     const restored = loadTabs(storage(), fallback)
     tabs.value = restored
     ensureWorkspaces(restored.tabs)
@@ -1246,6 +1261,16 @@ onBeforeUnmount(() => {
       <p v-if="ended" class="af-wb__banner" role="note">
         这个会话已结束：工作区不再可达，面板不会再建立通道。列表里仍然保留它，是为了能查到
         它曾在哪台设备的哪条路径上跑过。
+      </p>
+
+      <!--
+        设备已被删除：与会话「已结束」是两回事，所以是另一条横幅。
+        会话本身还在（删设备不删会话），但它的设备不会再回来了——不写这句
+        用户会一直等一台已经删掉的机器重连。
+      -->
+      <p v-if="deviceRemoved" class="af-wb__banner" role="note" data-device-removed>
+        这个会话所属的设备已被删除：对话与轨迹都保留着，但它的面板无法再建立通道。
+        原设备 {{ current?.workspace.removed_node_id ?? '（未记录）' }}。
       </p>
 
       <div class="af-wb__body">

@@ -16,7 +16,7 @@ function mountBar(activeId: string | null = 's_1', panelCounts: Record<string, n
       tabs: TABS,
       activeId,
       panelCounts,
-      connOf: (nodeId: string) => (nodeId === 'n_2' ? 'offline' : 'online'),
+      connOf: (nodeId: string | null) => (nodeId === 'n_2' ? 'offline' : 'online'),
     },
   })
   return w

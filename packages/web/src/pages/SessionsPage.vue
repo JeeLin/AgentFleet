@@ -18,7 +18,7 @@ import EmptyState from '@/components/EmptyState.vue'
 import SessionTable from '@/components/SessionTable.vue'
 import type { DeviceSummary, SessionSummary } from '@/lib/api'
 import { listDevices, listSessions } from '@/lib/api'
-import { sessionTitle } from '@/lib/format'
+import { deviceLabel, sessionTitle } from '@/lib/format'
 import { describeReadFailure } from '@/lib/http'
 import { navigate } from '@/router'
 
@@ -28,17 +28,21 @@ const loading = ref(true)
 const error = ref<string | null>(null)
 const query = ref('')
 
-const deviceNames = computed(() => new Map(devices.value.map((d) => [d.id, d.name])))
+const devicesById = computed(() => new Map(devices.value.map((d) => [d.id, d])))
 
-function deviceName(nodeId: string): string {
-  return deviceNames.value.get(nodeId) ?? nodeId
+/**
+ * 设备显示名。**共用 `lib/format.ts` 的那一份**——「设备已移除」的判据只在
+ * 那里写一次，否则同一个会话在列表页和工作台会显示成两种不同的名字。
+ */
+function deviceName(nodeId: string | null, removedNodeId?: string): string {
+  return deviceLabel(devicesById.value, nodeId, removedNodeId)
 }
 
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase()
   if (!q) return sessions.value
   return sessions.value.filter((s) =>
-    [sessionTitle(s), deviceName(s.workspace.node_id), s.workspace.path, s.agent_id ?? '', s.id]
+    [sessionTitle(s), deviceName(s.workspace.node_id, s.workspace.removed_node_id), s.workspace.path, s.agent_id ?? '', s.id]
       .join(' ')
       .toLowerCase()
       .includes(q),

@@ -43,7 +43,15 @@ export interface DeviceSummary {
 
 /** 会话的工作区引用。路径创建后只读（`path_locked` 恒 true）。 */
 export interface WorkspaceRef {
-  node_id: string
+  /**
+   * `null` = 这台设备已被删除（删设备不删会话）。
+   *
+   * 和「离线」是两种状态：离线是设备还在、等等会回来；已移除是它不会再回来了。
+   * 拿 `null` 去开通道没有意义，页面必须显式处理这一态。
+   */
+  node_id: string | null
+  /** 设备被删前的原 node_id；设备还在时缺省。仅供显示「已移除的设备」。 */
+  removed_node_id?: string
   path: string
   path_locked: boolean
 }

@@ -30,7 +30,19 @@ const OUTSIDE_ROOT_REASON: &str = "must stay inside the workspace root";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
     pub id: String,
-    pub node_id: String,
+    /// `None` = 它所属的设备已被删除（v3 起去掉外键，删设备不删工作区）。
+    ///
+    /// 这里**不回落成空串**：空串会是一个看起来像 node_id 的东西，页面按节点
+    /// 分组时会把所有孤儿工作区挤进一个名叫 "" 的分组。`None` 让调用方必须
+    /// 显式处理「设备已移除」这一态，而不是让它在类型里消失。
+    /// 原 node_id 在 [`Workspace::removed_node_id`] 里留着，供页面展示。
+    pub node_id: Option<String>,
+    /// 设备被删前的原 `node_id`；设备还在时恒 `None`。
+    ///
+    /// 是**历史事实**，不是要维护的关系：设备重新装回来也是一台新设备，
+    /// 旧工作区不该自动接到新设备上。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_node_id: Option<String>,
     /// 设备上的路径原文（`~/src/app` 或 `/srv/app`），不做 `~` 展开。
     pub path: String,
     pub created_at: String,
@@ -67,13 +79,30 @@ impl WorkspaceRepo {
         path: &str,
         now: &str,
     ) -> Result<Workspace> {
+        // 设备必须存在。v2 靠 `REFERENCES device(id)` 拒绝，v3 去掉了外键
+        // （用户裁定「不应该用外链」），这条判据挪到这里**显式**做，理由有两层：
+        //
+        // 1. 判据本身没有消失：工作区挂在一台不存在的设备上，页面按节点分组
+        //    就会多出一个点不进去的分组。
+        // 2. 错误必须可读：外键甩的是 `FOREIGN KEY constraint failed`，既不说
+        //    是哪个 node_id，也不说该怎么办。`NoSuchDevice` 两样都说。
+        //
+        // 不用 `ON CONFLICT` 兜这件事：它管的是并发下的重复插入，不是存在性。
+        let device_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM device WHERE id = ?1)",
+            params![node_id],
+            |r| r.get(0),
+        )?;
+        if !device_exists {
+            return Err(StorageError::NoSuchDevice(node_id.to_string()));
+        }
         tx.execute(
             "INSERT INTO workspace (id, node_id, path, created_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(node_id, path) DO UPDATE SET created_at = excluded.created_at",
             params![new_id(), node_id, path, now],
         )?;
         Ok(tx.query_row(
-            "SELECT id, node_id, path, created_at FROM workspace
+            "SELECT id, node_id, removed_node_id, path, created_at FROM workspace
              WHERE node_id = ?1 AND path = ?2",
             params![node_id, path],
             row_to_workspace,
@@ -84,7 +113,7 @@ impl WorkspaceRepo {
     pub fn find(&self, node_id: &str, path: &str) -> Result<Option<Workspace>> {
         let conn = self.pool.get()?;
         conn.query_row(
-            "SELECT id, node_id, path, created_at FROM workspace
+            "SELECT id, node_id, removed_node_id, path, created_at FROM workspace
              WHERE node_id = ?1 AND path = ?2",
             params![node_id, path],
             row_to_workspace,
@@ -97,7 +126,7 @@ impl WorkspaceRepo {
     pub fn list_for_node(&self, node_id: &str) -> Result<Vec<Workspace>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
-            "SELECT id, node_id, path, created_at FROM workspace
+            "SELECT id, node_id, removed_node_id, path, created_at FROM workspace
              WHERE node_id = ?1 ORDER BY created_at, id",
         )?;
         let rows = stmt.query_map(params![node_id], row_to_workspace)?;
@@ -188,7 +217,13 @@ pub(crate) fn row_to_workspace(
     row_to_workspace_at(r, 0)
 }
 
-/// 从 `offset` 列起读工作区的四列（联表查询里工作区排在会话之后时用）。
+/// 从 `offset` 列起读工作区的五列（联表查询里工作区排在会话之后时用）。
+///
+/// `offset` 是**列下标**，列序固定为 `id, node_id, removed_node_id, path, created_at`。
+/// 改这个顺序必须同时改**六处** `SELECT` 的列清单（`grep -rn removed_node_id`
+/// 可全查出来）：本文件 `upsert_in` / `find` / `list_for_node` /
+/// `recent_sessions` / `list_sessions`，加 `session.rs` 的 `detail`。
+/// 漏改一处不会编译失败——只会把一个字符串读进另一列。
 pub(crate) fn row_to_workspace_at(
     r: &r2d2_sqlite::rusqlite::Row<'_>,
     offset: usize,
@@ -196,8 +231,9 @@ pub(crate) fn row_to_workspace_at(
     Ok(Workspace {
         id: r.get(offset)?,
         node_id: r.get(offset + 1)?,
-        path: r.get(offset + 2)?,
-        created_at: r.get(offset + 3)?,
+        removed_node_id: r.get(offset + 2)?,
+        path: r.get(offset + 3)?,
+        created_at: r.get(offset + 4)?,
     })
 }
 
@@ -222,7 +258,7 @@ pub fn recent_sessions(
 ) -> Result<Vec<WorkspaceSession>> {
     let conn = repo.pool().get()?;
     let mut stmt = conn.prepare(
-        "SELECT w.id, w.node_id, w.path, w.created_at,
+        "SELECT w.id, w.node_id, w.removed_node_id, w.path, w.created_at,
                 s.id, s.workspace_id, s.agent_id, s.state, s.created_at, s.ended_at
          FROM workspace w
          JOIN session s ON s.id = (
@@ -234,7 +270,7 @@ pub fn recent_sessions(
          ORDER BY w.created_at, w.id",
     )?;
     let rows = stmt.query_map(params![node_id], |r| {
-        let raw = crate::session::RawSession::from_row(r, 4)?;
+        let raw = crate::session::RawSession::from_row(r, 5)?;
         Ok((row_to_workspace_at(r, 0)?, raw))
     })?;
     rows.map(|r| {
@@ -255,7 +291,11 @@ pub fn recent_sessions(
 pub struct SessionListItem {
     #[serde(flatten)]
     pub session: crate::session::Session,
-    pub node_id: String,
+    /// 同 [`Workspace::node_id`]：`None` = 它所属的设备已被删除。
+    pub node_id: Option<String>,
+    /// 设备被删前的原 node_id；设备还在时 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_node_id: Option<String>,
     pub path: String,
 }
 
@@ -264,20 +304,21 @@ pub fn list_sessions(repo: &WorkspaceRepo) -> Result<Vec<SessionListItem>> {
     let conn = repo.pool().get()?;
     let mut stmt = conn.prepare(
         "SELECT s.id, s.workspace_id, s.agent_id, s.state, s.created_at, s.ended_at,
-                w.node_id, w.path
+                w.node_id, w.removed_node_id, w.path
          FROM session s
          JOIN workspace w ON w.id = s.workspace_id
          ORDER BY s.created_at DESC, s.id DESC",
     )?;
     let rows = stmt.query_map([], |r| {
         let raw = crate::session::RawSession::from_row(r, 0)?;
-        Ok((raw, r.get(6)?, r.get(7)?))
+        Ok((raw, r.get(6)?, r.get(7)?, r.get(8)?))
     })?;
     rows.map(|r| {
-        let (raw, node_id, path) = r?;
+        let (raw, node_id, removed_node_id, path) = r?;
         Ok(SessionListItem {
             session: raw.into_session()?,
             node_id,
+            removed_node_id,
             path,
         })
     })
@@ -427,15 +468,27 @@ mod tests {
         wr.delete("ws_missing").unwrap();
     }
 
-    /// 工作区必须挂在一台**真实存在**的设备上：外键是硬约束，否则
-    /// 「按节点分组聚合」会出现一个页面点不进去的分组。
+    /// 工作区必须挂在一台**真实存在**的设备上，否则「按节点分组聚合」会出现
+    /// 一个页面点不进去的分组。
+    ///
+    /// **v3 起判据换了个地方落地，判据本身没变**：v2 靠 `REFERENCES device(id)`
+    /// 拒绝（报 `FOREIGN KEY constraint failed`），v3 去掉了外键（用户裁定
+    /// 「不应该用外链」），改由 `upsert_in` 显式查设备表并报 `NoSuchDevice`。
+    /// 这条测试因此从「断言是 Sqlite 错误」改成「断言是可读的 NoSuchDevice」——
+    /// **是前提被推翻，不是回归**：价值（防孤儿分组）保留，错误形态变好。
     #[test]
     fn a_workspace_cannot_reference_an_unknown_device() {
         let (_d, wr, sr) = setup();
         let err = sr.create("n_ghost", "/srv/app", None, TS).unwrap_err();
         assert!(
-            matches!(err, StorageError::Sqlite(_)),
-            "foreign key violation must surface as a sqlite error, got {err:?}"
+            matches!(&err, StorageError::NoSuchDevice(n) if n == "n_ghost"),
+            "an unknown device must be refused by name, got {err:?}"
+        );
+        // 错误必须带上那个 node_id：外键的错误信息里没有它，用户无从下手
+        let msg = err.to_string();
+        assert!(
+            msg.contains("n_ghost"),
+            "the error must name the offending device, got {msg}"
         );
         // 整件事回滚：没有半截工作区留在库里
         assert!(wr.find("n_ghost", "/srv/app").unwrap().is_none());
@@ -597,12 +650,12 @@ mod tests {
         assert_eq!(items[0].session.id, b.id, "新建的在前");
         assert_eq!(items[1].session.id, a.id);
         assert_eq!(
-            (items[0].node_id.as_str(), items[0].path.as_str()),
-            ("n_b", "/opt/lib")
+            (items[0].node_id.as_deref(), items[0].path.as_str()),
+            (Some("n_b"), "/opt/lib")
         );
         assert_eq!(
-            (items[1].node_id.as_str(), items[1].path.as_str()),
-            ("n_a", "/srv/app")
+            (items[1].node_id.as_deref(), items[1].path.as_str()),
+            (Some("n_a"), "/srv/app")
         );
         assert_eq!(items[1].session.state, SessionState::Running);
     }
@@ -624,7 +677,7 @@ mod tests {
             .unwrap();
         assert_eq!(app.session.id, new.id, "代表会话取最新的那个");
         assert_ne!(app.session.id, old.id);
-        assert_eq!(app.workspace.node_id, "n_a");
+        assert_eq!(app.workspace.node_id.as_deref(), Some("n_a"));
         assert_eq!(app.session.workspace_id, app.workspace.id);
         let lib = rows
             .iter()
@@ -665,7 +718,7 @@ mod tests {
 
         let only_a = recent_sessions(&wr, Some("n_a")).unwrap();
         assert_eq!(only_a.len(), 1);
-        assert_eq!(only_a[0].workspace.node_id, "n_a");
+        assert_eq!(only_a[0].workspace.node_id.as_deref(), Some("n_a"));
         assert_eq!(only_a[0].workspace.created_at, "unix:10");
         assert!(recent_sessions(&wr, Some("n_ghost")).unwrap().is_empty());
     }
