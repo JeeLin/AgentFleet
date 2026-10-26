@@ -108,8 +108,26 @@ function offlineReason(device: DeviceSummary): string {
           <td class="af-t-mute">{{ d.platform || '—' }}</td>
           <td data-num class="af-t-mute">{{ d.node_version || '—' }}</td>
           <td>
+            <!--
+              两档而不是一档。**装了但跑不起来的必须留着**，只是不带
+              `--agent` 的强调色：删掉它就回到「用户以为系统没扫到」。
+
+              判据取 `usable_agents` 而不是 `agents`：前者与建会话的 409 门禁
+              同源（都读 `agent_runtime` 的 `available`），所以这里看着「能对话」
+              的，点进新建页一定选得到。
+            -->
             <span v-if="d.agents.length" class="af-caps">
-              <span v-for="a in d.agents" :key="a" class="af-badge af-badge--agent">{{ a }}</span>
+              <span
+                v-for="a in d.agents"
+                :key="a"
+                class="af-badge"
+                :class="d.usable_agents.includes(a) ? 'af-badge--agent' : 'af-badge--off'"
+                :data-usable="d.usable_agents.includes(a) ? 'true' : 'false'"
+                :title="
+                  d.usable_agents.includes(a) ? '现在能对话' : '装了，但现在不能对话（没有可用的 ACP 入口）'
+                "
+                >{{ a }}</span
+              >
             </span>
             <span v-else class="af-badge af-badge--off">未上报</span>
           </td>

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import AgentsPage from '@/pages/AgentsPage.vue'
-import { device, mountIn } from '@/test/mount'
+import { agent, device, mountIn } from '@/test/mount'
 import { settle, stubFetch } from '@/test/http'
 
 async function flush(w: ReturnType<typeof mountIn>): Promise<void> {
@@ -57,7 +57,7 @@ describe('AgentsPage：渲染', () => {
   // 列表含义从「已装且就绪」改成了「已装」：装了但跑不起来的也要列出来
   // （用户要能看见自己装坏的那个），可用性门禁在建会话那一步判。
   it('有 agent 时按名字列出，并说明列的是「已装」而不是「能用」', async () => {
-    stubFetch({ '/api/agents': { body: [{ name: 'opencode' }] }, '/api/devices': { body: [device()] } })
+    stubFetch({ '/api/agents': { body: [agent()] }, '/api/devices': { body: [device()] } })
     const w = mountIn(AgentsPage)
     await flush(w)
 
@@ -67,6 +67,45 @@ describe('AgentsPage：渲染', () => {
     // 明确不承诺「就绪」：那是建会话时判的
     expect(sub).not.toContain('已装且就绪')
     expect(sub).toContain('建会话时判定')
+  })
+
+  /** 装了但跑不起来的：**列出 + 带原因 + 不可用**，三者缺一不可。 */
+  it('装了但不能对话的那个：列出来、带出原因、且「开会话」不可点', async () => {
+    stubFetch({
+      '/api/agents': {
+        body: [
+          agent({ name: 'opencode' }),
+          agent({ name: 'claude', available: false, error: '没有 acp 子命令' }),
+        ],
+      },
+      '/api/devices': { body: [device()] },
+    })
+    const w = mountIn(AgentsPage)
+    await flush(w)
+
+    const rows = Array.from(w.element.querySelectorAll<HTMLElement>('.af-agent'))
+    const broken = rows.find((r) => r.getAttribute('data-usable') === 'false')
+    // 列出来：只给可用的那批，「装坏了」这件事在页面上等于不存在
+    expect(broken, '不可用的那行必须在列表里').toBeTruthy()
+    expect(broken?.textContent).toContain('claude')
+    // 带出原因：只把它灰掉，用户读到的是「我装了它但系统说没有」
+    expect(broken?.textContent).toContain('没有 acp 子命令')
+    // 不可点：点了就会进到一个永远选不到它的新建页
+    expect(broken?.querySelector<HTMLButtonElement>('button')?.disabled).toBe(true)
+
+    const ok = rows.find((r) => r.getAttribute('data-usable') === 'true')
+    expect(ok?.querySelector<HTMLButtonElement>('button')?.disabled).toBe(false)
+  })
+
+  it('设备没给原因时不编一句——只说不能对话', async () => {
+    stubFetch({
+      '/api/agents': { body: [agent({ name: 'claude', available: false })] },
+      '/api/devices': { body: [device()] },
+    })
+    const w = mountIn(AgentsPage)
+    await flush(w)
+
+    expect(w.element.querySelector('.af-agent')?.textContent).toContain('现在不能对话（设备没给原因）')
   })
 
   it('读失败时给可读理由', async () => {

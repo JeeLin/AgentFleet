@@ -15,7 +15,7 @@
 //! - **工作区是会话的字段，不是可获取对象**（设计规范 §7.0）：会话在创建期
 //!   选定路径后锁定，所以没有 `GET /api/workspaces`，也没有路径可改。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use axum::extract::State;
@@ -196,6 +196,12 @@ fn agent_list(caps: &serde_json::Value) -> Vec<String> {
 ///
 /// 保留本函数是为了回答「**这一次心跳**说哪些 agent 可用」——它只描述那一帧，
 /// 不是当前事实。页面目录用 [`agent_list`]（列全部已装，含跑不起来的）。
+///
+/// # 旧形态（裸字符串）不算可用
+///
+/// 与 `persist_agents` 的 `parse_agent_report` 同一口径：只说名字的帧不构成
+/// 「可用」的证据，门禁宁严勿松。两处必须保持一致——否则目录页说它可用、
+/// 点创建却 409，而 409 的错误码还被翻成「这台设备上跑不起来」。
 fn available_agent_names(caps: &serde_json::Value) -> Vec<String> {
     let Some(arr) = caps.get("agents").and_then(serde_json::Value::as_array) else {
         return Vec::new();
@@ -523,31 +529,81 @@ pub async fn list_agents(
         .map_err(|e| ApiError::internal_with("cannot list devices", e))?;
     // 读 `agent_runtime` 表而不是心跳内存：理由见 `device_summary` 的注释
     // （内存那份缺省即保留、没有 `forget`，卸载的 agent 永远留在里面）。
-    let mut out: BTreeSet<String> = BTreeSet::new();
+    //
+    // **带 `available` 一起返回**：只给一堆名字的话，页面无从区分「装了且
+    // 能对话」与「装了但没有 ACP 入口」（`Probe::NotCapable`），而后者的
+    // 存在意义正是让用户看见「为什么我的 agent 不能对话」——不给这个字段，
+    // 那条四态设计在页面上等于没有。
+    //
+    // 同名 agent 在**多台设备**上可能一真一假（这台能对话、那台装坏了）。
+    // 按「有一台可用即显示可用」归并，并把各自的 `error` 拼起来：目录页是
+    // 「这个 agent 存在吗、现在能不能用」的总览，不是某一台设备的清单。
+    // 建会话那一档的判据不在这里——它走 `device_summary` 的 `usable_agents`。
+    let mut out: BTreeMap<String, AgentSummary> = BTreeMap::new();
     for d in &devices {
         match state.agent_runtime().list_for_node(&d.id) {
-            Ok(rows) => out.extend(rows.into_iter().map(|r| r.name)),
+            Ok(rows) => {
+                for r in rows {
+                    merge_agent(&mut out, &r.name, r.available, r.probe_error.as_deref());
+                }
+            }
             Err(e) => {
                 // 退回心跳内存，但**留痕**：静默回落会让「库坏了」看起来像
                 // 「页面上少了几个 agent」。
                 tracing::warn!(node_id = %d.id, error = %e, "cannot read agent_runtime; using the heartbeat report");
                 if let Some(r) = state.reports().get(&d.id) {
-                    out.extend(agent_list(&r.capabilities));
+                    let usable = available_agent_names(&r.capabilities);
+                    for name in agent_list(&r.capabilities) {
+                        // 心跳内存那份没有「为什么不可用」，如实留空而不是编一句
+                        merge_agent(&mut out, &name, usable.contains(&name), None);
+                    }
                 }
             }
         }
     }
-    Ok(Json(
-        out.into_iter()
-            .map(|name| AgentSummary { name })
-            .collect::<Vec<_>>(),
-    ))
+    Ok(Json(out.into_values().collect::<Vec<_>>()))
+}
+
+/// 把一台设备上的一条 agent 记录并进目录。
+///
+/// `available` 取**或**：只要有一台设备上它能对话，目录就标可用。
+/// `error` 取**并**：把所有说它不可用的原因都留着——用户要据此判断
+/// 「是我这台机器的问题吗」。
+fn merge_agent(out: &mut BTreeMap<String, AgentSummary>, name: &str, available: bool, error: Option<&str>) {
+    let entry = out.entry(name.to_string()).or_insert(AgentSummary {
+        name: name.to_string(),
+        available: false,
+        error: None,
+    });
+    if available {
+        entry.available = true;
+        return;
+    }
+    let Some(reason) = error else { return };
+    if reason.is_empty() {
+        return;
+    }
+    match entry.error.as_mut() {
+        // 已经标了可用就没有必要再挂原因：那是另一台设备的事
+        Some(_) if entry.available => {}
+        Some(existing) => {
+            if !existing.contains(reason) {
+                existing.push_str("；");
+                existing.push_str(reason);
+            }
+        }
+        None => entry.error = Some(reason.to_string()),
+    }
 }
 
 /// Agent 目录的一项。
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentSummary {
     pub name: String,
+    /// 现在能不能对话。**至少一台设备上可用即为真**。
+    pub available: bool,
+    /// 说它不可用的原因。设备没给原因时为 `null`——不编一句。
+    pub error: Option<String>,
 }
 
 #[cfg(test)]
@@ -812,6 +868,91 @@ mod tests {
         report_with(&st, &from_hb, json!({}), json!(null));
         assert_eq!(summary_of_device(&st, &from_hb).node_version, "0.1.0");
         assert_eq!(summary_of_device(&st, &with_row).node_version, "");
+    }
+
+    /// 往一台设备上放几条 `agent_runtime` 行。
+    fn detect(st: &AppState, node: &str, rows: &[(&str, bool, Option<&str>)]) {
+        let owned: Vec<(String, String, Option<String>, bool, Option<String>)> = rows
+            .iter()
+            .map(|(id, available, err)| {
+                (
+                    (*id).to_string(),
+                    (*id).to_string(),
+                    Some("2.1.4".to_string()),
+                    *available,
+                    err.map(str::to_string),
+                )
+            })
+            .collect();
+        st.agent_runtime()
+            .replace_detected(node, &owned, "unix:1700000000")
+            .expect("replace_detected");
+    }
+
+    async fn agent_dir(st: &AppState) -> Vec<AgentSummary> {
+        list_agents(State(st.clone())).await.expect("list_agents").0
+    }
+
+    /// **「装了但不能用」必须连原因一起列出来**，而不是被筛掉。
+    ///
+    /// 这是 `Probe::NotCapable` 存在的唯一理由：让用户看见「为什么我的 agent
+    /// 不能对话」。只给一堆名字，那条四态设计在页面上等于没有。
+    #[tokio::test]
+    async fn the_agent_directory_reports_which_agents_can_converse_and_why_not() {
+        let (st, _dir) = state();
+        let n = insert_device(&st, "mbp");
+        detect(
+            &st,
+            &n,
+            &[
+                ("opencode", true, None),
+                ("claude", false, Some("没有 acp 子命令")),
+            ],
+        );
+
+        let got = agent_dir(&st).await;
+        let opencode = got.iter().find(|a| a.name == "opencode").expect("opencode");
+        assert!(opencode.available, "能对话的必须标可用");
+        assert_eq!(opencode.error, None);
+
+        let claude = got.iter().find(|a| a.name == "claude").expect("claude");
+        // 列出来（不被筛掉），但标不可用，并带出原因
+        assert!(!claude.available, "不能对话的不能标可用");
+        assert_eq!(claude.error.as_deref(), Some("没有 acp 子命令"));
+    }
+
+    /// 同名 agent 在多台设备上**一真一假**：目录标可用（有一台能对话即可），
+    /// 但原因要留着——用户要据此判断「是不是我这台机器的问题」。
+    #[tokio::test]
+    async fn one_device_being_broken_does_not_hide_that_another_can_converse() {
+        let (st, _dir) = state();
+        let a = insert_device(&st, "dev-a");
+        let b = insert_device(&st, "dev-b");
+        detect(&st, &a, &[("opencode", true, None)]);
+        detect(&st, &b, &[("opencode", false, Some("退出码 3"))]);
+
+        let got = agent_dir(&st).await;
+        let e = got.iter().find(|x| x.name == "opencode").expect("opencode");
+        assert!(e.available, "有一台能对话，目录就该标可用");
+        assert_eq!(e.error.as_deref(), Some("退出码 3"), "另一台的坏原因要留着");
+    }
+
+    /// **反向验证**：把 `merge_agent` 的 `available` 取「或」改坏（永远写最后一台
+    /// 的结果），这条会红——它证明归并口径真的被测到了，而不是「恰好通过」。
+    #[tokio::test]
+    async fn availability_is_an_or_across_devices_not_last_write_wins() {
+        let (st, _dir) = state();
+        let a = insert_device(&st, "dev-a");
+        let b = insert_device(&st, "dev-b");
+        // 顺序上「坏的那台在后」：若实现是「最后写的覆盖」，可用会被抹掉
+        detect(&st, &a, &[("opencode", true, None)]);
+        detect(&st, &b, &[("opencode", false, Some("退出码 3"))]);
+
+        let got = agent_dir(&st).await;
+        assert!(
+            got.iter().any(|x| x.name == "opencode" && x.available),
+            "后一台说它不可用，也不能抹掉前一台的可用（判据是「或」）"
+        );
     }
 
     /// `Last-Event-ID` 头：畸形 / 缺失 / 正常三种。

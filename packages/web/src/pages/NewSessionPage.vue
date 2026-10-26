@@ -11,11 +11,20 @@
    的选择藏起来。三步都不承接焦点（只是一条进度指示），键盘用户不会为了
    看进度多按三次 Tab。
 
-   ── M1 的 agent 这一步是空的，且要明说 ───────────────────────────
-   `/api/agents` 的数据源是设备心跳上报的 `capabilities.agents`，
-   而 M1 设备侧没有 agent 运行时（ACP 归 M3），所以它恒为 `[]`。
-   这里**不画一个假的 agent 选择器**，也不假装「跳过」——把它做成
-   「M3 起可选」，并在旁边说清现在建出来的会话是什么。
+   ── ② 为什么要在这里选 agent ─────────────────────────────────────
+   会话能不能对话，判据只有 `agent_id`：工作台的「对话」目标在没有
+   `agent_id` 时是不可选的。所以这一步不是装饰——**跳过它建出来的会话
+   是一个永远无法对话的死会话**，而它看起来是「建成功了」。
+
+   ── 不选要显式，不能默认 ──────────────────────────────────────────
+   后端允许 `agent_id` 为空（M1 的会话本来就可以没有 agent，这条不退化），
+   但页面必须让用户**自己点一下「不指定」**，并把后果写在旁边。默认不选
+   等于替用户做了一个他没有做过的决定。
+
+   ── 两档，不是一档 ────────────────────────────────────────────────
+   装了但跑不起来的（`Probe::NotCapable`）**列出来但不可选**，并把设备给的
+   原因带出来。删掉它就回到「用户以为系统没扫到」，而那条四态设计唯一的
+   目的正是让人看见「为什么我的 agent 不能对话」。
    =========================================================================== */
 
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
@@ -36,16 +45,53 @@ const loadError = ref<string | null>(null)
 
 const pickedDeviceId = ref<string | null>(route.value.query.get('device'))
 const pickedPath = ref('')
+/**
+ * 选中的 agent。`null` = **还没选**，`''` = 用户**显式选了「不指定」**。
+ *
+ * 这两态必须分开：都是「空」的话，页面无法区分「用户还没决定」与
+ * 「用户决定不要 agent」，于是「不指定」这个决定的后果（会话不能对话）
+ * 永远说不出来——而那条后果正是本步存在的理由。
+ */
+const pickedAgent = ref<string | null>(null)
 const submitting = ref(false)
 const submitError = ref<string | null>(null)
 
 const pickedDevice = computed(() => devices.value.find((d) => d.id === pickedDeviceId.value) ?? null)
 const deviceUsable = computed(() => pickedDevice.value !== null && canCreateSession(pickedDevice.value))
 const pathValid = computed(() => /^(\/|~)/.test(pickedPath.value.trim()))
+
+/**
+ * 这台设备上**能对话**的 agent 名。
+ *
+ * 取 `usable_agents`（与后端的 409 门禁同源）而不是 `agents`：`agents` 里
+ * 含「装了但跑不起来」的那些，把它们列进可选项等于让用户建一个死会话。
+ */
+const usableOnDevice = computed(() => pickedDevice.value?.usable_agents ?? [])
+/**
+ * 这台设备**装了但现在不能对话**的 agent，连带原因。
+ *
+ * 口径是「这台设备装了的（`agents`）减去能用的（`usable_agents`）」，**不是**
+ * 「目录里没出现在这台设备可用清单里的」——后者会把「装在别的设备上、
+ * 这台根本没装」的那些也算成装坏了，那是谎报。
+ *
+ * 灰显但**不删**：正是这些行在回答「为什么我的 agent 不能对话」。
+ */
+const brokenOnDevice = computed(() => {
+  const usable = new Set(usableOnDevice.value)
+  return (pickedDevice.value?.agents ?? [])
+    .filter((name) => !usable.has(name))
+    .map((name) => {
+      const known = agents.value.find((a) => a.name === name)
+      return { name, error: known?.error ?? null }
+    })
+})
+/** 建出来的会话能不能对话——`agent_id` 是唯一判据。 */
+const willConverse = computed(() => (pickedAgent.value ?? '').length > 0)
 /** 缺哪一项，错误就指哪一项（不是笼统的「请填写完整」）。 */
 const missing = computed(() => {
   const out: string[] = []
   if (!pickedDevice.value) out.push('device')
+  if (pickedAgent.value === null) out.push('agent')
   if (!pathValid.value) out.push('path')
   return out
 })
@@ -98,6 +144,21 @@ function pickDevice(id: string): void {
   pickedDeviceId.value = id
   // 换设备只清路径：路径是「这台设备上的」一个目录，换机器就不成立了。
   pickedPath.value = ''
+  // 但 agent **必须重新选**：能用的那批是「这台设备上的」，换机器之后
+  // 原先选中的那个可能根本没装。留着旧选择等于让门禁去兜一个页面
+  // 本来就能当场发现的错误。
+  pickedAgent.value = null
+  submitError.value = null
+}
+
+/**
+ * 选一个 agent。`''` 是显式的「不指定」。
+ *
+ * 不选不拦着（后端允许空 `agent_id`，M1 的会话本来就可以没有 agent），
+ * 但后果写在页面上——不写的话用户会以为「创建成功 = 能对话」。
+ */
+function pickAgent(name: string): void {
+  pickedAgent.value = name
   submitError.value = null
 }
 
@@ -111,7 +172,13 @@ async function submit(): Promise<void> {
   submitting.value = true
   submitError.value = null
   try {
-    const session = await createSession({ node_id: device.id, path: pickedPath.value.trim() })
+    const session = await createSession({
+      node_id: device.id,
+      path: pickedPath.value.trim(),
+      // `''`（显式不选）要落成 `null` 而不是空串：库里 `agent_id` 是
+      // `NULL` 表示「没有 agent」，空串是一句不同的话（会被当成有值）。
+      agent_id: pickedAgent.value || null,
+    })
     // `replace`：提交过的表单不该留在后退路径上
     navigate(`/sessions/${encodeURIComponent(session.id)}`, { replace: true })
   } catch (err) {
@@ -129,7 +196,7 @@ async function submit(): Promise<void> {
       <div>
         <h1 class="af-page__title">新建会话</h1>
         <p class="af-page__sub">
-          选设备 → 选路径。路径是<b>创建期的一次性输入，建立后只读</b>——
+          选设备 → 选 agent → 选路径。路径是<b>创建期的一次性输入，建立后只读</b>——
           换路径就是换一个会话。这个页面没有任何「打开工作区」的入口。
         </p>
       </div>
@@ -204,30 +271,70 @@ async function submit(): Promise<void> {
           </p>
         </section>
 
-        <!-- ② agent（M1 恒空，明说） -->
+        <!-- ② agent -->
         <section aria-labelledby="h-agent">
           <div class="af-row gap-4 af-sechead">
             <h2 id="h-agent" class="af-t-label">② agent</h2>
-            <span class="af-badge af-badge--off">M3 起可选</span>
+            <span class="af-badge af-badge--agent">决定这个会话能不能对话</span>
             <span class="af-spacer"></span>
-            <span class="af-t-mute af-keyhint">数据源 /api/agents</span>
+            <span class="af-t-mute af-keyhint">数据源 /api/agents · 只看这台设备</span>
           </div>
-          <div class="af-agentnote">
-            <template v-if="agents.length === 0">
+
+          <p v-if="!pickedDevice" class="af-field__hint">先选一台设备：能用的 agent 是「那台机器上装了什么」。</p>
+
+          <template v-else>
+            <div v-if="usableOnDevice.length === 0" class="af-agentnote">
               <p>
-                <b>现在没有可选 agent。</b>M1 没有接 agent 运行时（ACP 归 M3），设备心跳里的
-                <code>capabilities.agents</code> 恒为空，所以这一格是空的——不是加载失败。
+                <b>这台设备上现在没有能对话的 agent。</b>
+                Hub 不替你在设备上装东西——<b>agent 由你自己装</b>，装好后它在下一次心跳里出现。
               </p>
-              <p class="af-t-mute">
-                M1 建出来的会话是一个<b>页面级容器</b>：它有工作区和面板（终端 / 文件 / exec），
-                但没有 ACP 会话与轨迹。agent 在设备侧由你自己启动，Hub 不接管它的生命周期。
-              </p>
-            </template>
-            <template v-else>
-              <span v-for="a in agents" :key="a.name" class="af-badge af-badge--agent">{{ a.name }}</span>
-              <p class="af-t-mute">这一批是设备心跳上报的「已装且就绪」，不是「支持」。</p>
-            </template>
-          </div>
+            </div>
+
+            <div class="af-opts" data-role="agent-choice">
+              <button
+                v-for="a in usableOnDevice"
+                :key="a"
+                class="af-opt"
+                type="button"
+                :data-agent-option="a"
+                :aria-pressed="pickedAgent === a ? 'true' : 'false'"
+                @click="pickAgent(a)"
+              >
+                <span class="af-opt__main">
+                  <span class="af-radio" aria-hidden="true" :data-on="pickedAgent === a ? 'true' : 'false'"></span>
+                  <b>{{ a }}</b>
+                </span>
+              </button>
+              <!-- 「不指定」恒在，连一个可用 agent 都没有时也必须在：
+                   会话没有 agent 仍然成立（终端 / exec 照常可用），
+                   少了这一项就等于「没有 agent 就不能开会话」。 -->
+              <button
+                class="af-opt"
+                type="button"
+                data-agent-option=""
+                :aria-pressed="pickedAgent === '' ? 'true' : 'false'"
+                @click="pickAgent('')"
+              >
+                <span class="af-opt__main">
+                  <span class="af-radio" aria-hidden="true" :data-on="pickedAgent === '' ? 'true' : 'false'"></span>
+                  <b>不指定 agent</b>
+                </span>
+                <span class="af-opt__why">终端 / exec 可用，但不能对话</span>
+              </button>
+            </div>
+
+            <p v-if="brokenOnDevice.length" class="af-field__hint">
+              这台设备上探到但用不了的（<span v-for="a in brokenOnDevice" :key="a.name" class="af-badge af-badge--off">{{
+                a.name
+              }}<span v-if="a.error">：{{ a.error }}</span></span>）——灰在旁边不可选，但不等于看不见。
+            </p>
+            <p v-else-if="usableOnDevice.length" class="af-field__hint">
+              清单来自设备扫描，只列现在能对话的那些（<code>agent_runtime.available</code>）。
+            </p>
+            <p v-if="pickedAgent === ''" class="af-field__error" role="alert">
+              这个会话将<b>不能对话</b>：没有 agent 就没有对话。终端与 exec 照常可用。
+            </p>
+          </template>
         </section>
 
         <!-- ③ 路径 -->
@@ -275,7 +382,13 @@ async function submit(): Promise<void> {
           这台设备已判离线，会话建不起来。等它重新上线，或换一台设备。
         </p>
         <p v-else-if="missing.length && (pickedPath || pickedDevice)" class="af-t-mute af-keyhint">
-          {{ missing.includes('device') ? '还差：选一台设备。' : '还差：填一条路径。' }}
+          {{
+            missing.includes('device')
+              ? '还差：选一台设备。'
+              : missing.includes('agent')
+                ? '还差：选一个 agent（或显式选「不指定」）。'
+                : '还差：填一条路径。'
+          }}
         </p>
       </div>
 
@@ -287,7 +400,9 @@ async function submit(): Promise<void> {
         </div>
         <div class="af-sumrow">
           <span class="af-sum__k">agent</span>
-          <span class="af-sum__v" data-empty="true">{{ agents.length ? '未选' : 'M3 起' }}</span>
+          <span class="af-sum__v" :data-empty="!willConverse">
+            {{ pickedAgent === null ? '未选' : willConverse ? pickedAgent : '不指定（不能对话）' }}
+          </span>
         </div>
         <div class="af-sumrow">
           <span class="af-sum__k">路径</span>
@@ -386,6 +501,19 @@ async function submit(): Promise<void> {
   align-self: center;
   font-size: var(--af-text-sm);
   color: var(--af-danger-fg);
+}
+/* 单选的圆点。用 `aria-pressed` 而不是原生 `<input type=radio>`：这一组里
+   每一项都是完整的一行（带说明文字），原生 radio 只包得住标签本身。 */
+.af-radio {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--af-border-strong);
+  border-radius: 50%;
+}
+.af-radio[data-on='true'] {
+  border-color: var(--af-accent);
+  background: var(--af-accent);
 }
 .af-agentnote {
   padding: var(--af-space-4) var(--af-space-5);

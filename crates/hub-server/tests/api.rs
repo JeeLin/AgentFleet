@@ -562,9 +562,17 @@ async fn the_agent_directory_is_the_deduplicated_union_of_heartbeat_reports() {
     let h = Harness::from_hub(hub).await;
     let r = h.get("/api/agents").await;
     assert_eq!(r.status, StatusCode::OK);
+    // 目录项现在是 `{name, available, error}` 三元组而不是只有名字：
+    // 只有名字的话，「装了但跑不起来」这个状态在页面上无从表达。
+    //
+    // 这里两份心跳都是**旧形态**（裸字符串数组），按 `parse_agent_report`
+    // 的口径记为不可用——旧帧不构成「可用」的证据。所以两条都 `available: false`。
     assert_eq!(
         r.json(),
-        json!([{"name": "claude-code"}, {"name": "opencode"}])
+        json!([
+            {"name": "claude-code", "available": false, "error": null},
+            {"name": "opencode", "available": false, "error": null},
+        ])
     );
 }
 

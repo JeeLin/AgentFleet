@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import NewSessionPage from '@/pages/NewSessionPage.vue'
-import { device, mountIn } from '@/test/mount'
+import { agent, device, mountIn } from '@/test/mount'
 import { settle, stubFetch } from '@/test/http'
 
 async function flush(w: ReturnType<typeof mountIn>): Promise<void> {
@@ -11,7 +11,50 @@ async function flush(w: ReturnType<typeof mountIn>): Promise<void> {
   }
 }
 
-const ONLINE = device({ id: 'n_1', name: 'mbp.local', status: 'online' })
+/** 一台在线设备，上面 opencode 能对话、claude 装了但不能用。 */
+const ONLINE = device({
+  id: 'n_1',
+  name: 'mbp.local',
+  status: 'online',
+  agents: ['opencode', 'claude'],
+  usable_agents: ['opencode'],
+})
+/** 这台设备上没有能对话的 agent：只有装坏的那个。 */
+const NO_USABLE = device({
+  id: 'n_2',
+  name: 'tower.local',
+  status: 'online',
+  agents: ['claude'],
+  usable_agents: [],
+})
+
+/** 勾一个 agent 选项。`''` 是那项显式的「不指定」。 */
+async function pickAgent(w: ReturnType<typeof mountIn>, name: string): Promise<void> {
+  const el = w.element.querySelector<HTMLElement>(`[data-agent-option="${name}"]`)
+  if (!el) throw new Error(`no agent option: ${name}`)
+  await el.click()
+  await flush(w)
+}
+
+type CtxFn = ReturnType<typeof stubFetch>
+
+async function pickDevice(w: ReturnType<typeof mountIn>, index = 0): Promise<void> {
+  await w.element.querySelectorAll<HTMLElement>('.af-opts [data-device-id]')[index]?.click()
+  await flush(w)
+}
+
+function typePath(w: ReturnType<typeof mountIn>, value: string): Promise<void> {
+  const el = w.element.querySelector<HTMLInputElement>('#path')
+  if (!el) throw new Error('no path input')
+  type(el, value)
+  return flush(w)
+}
+
+function submittedBody(fn: CtxFn): Record<string, unknown> {
+  const post = fn.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'POST')
+  if (!post) throw new Error('no POST made')
+  return JSON.parse(String((post[1] as RequestInit).body)) as Record<string, unknown>
+}
 
 function type(input: HTMLInputElement, value: string): void {
   input.value = value
@@ -19,8 +62,8 @@ function type(input: HTMLInputElement, value: string): void {
 }
 
 describe('NewSessionPage：渲染', () => {
-  it('三步都在同一列里，agent 那一步明写 M3 起可选', async () => {
-    stubFetch({ '/api/devices': { body: [ONLINE] }, '/api/agents': { body: [] } })
+  it('三步都在同一列里，agent 那一步是可交互的选择', async () => {
+    stubFetch({ '/api/devices': { body: [ONLINE] }, '/api/agents': { body: [agent()] } })
     const w = mountIn(NewSessionPage)
     await flush(w)
 
@@ -28,12 +71,11 @@ describe('NewSessionPage：渲染', () => {
     expect(text).toContain('① 设备')
     expect(text).toContain('② agent')
     expect(text).toContain('③ 工作区路径')
-    expect(text).toContain('M3 起可选')
-    expect(text).toContain('现在没有可选 agent')
+    expect(text).toContain('决定这个会话能不能对话')
   })
 
   it('路径是创建期的一次性输入，页面上写明建立后只读', async () => {
-    stubFetch({ '/api/devices': { body: [ONLINE] }, '/api/agents': { body: [] } })
+    stubFetch({ '/api/devices': { body: [ONLINE] }, '/api/agents': { body: [agent()] } })
     const w = mountIn(NewSessionPage)
     await flush(w)
 
@@ -44,7 +86,7 @@ describe('NewSessionPage：渲染', () => {
   })
 
   it('这一页没有「打开工作区」入口——工作区不是路由', async () => {
-    stubFetch({ '/api/devices': { body: [ONLINE] }, '/api/agents': { body: [] } })
+    stubFetch({ '/api/devices': { body: [ONLINE] }, '/api/agents': { body: [agent()] } })
     const w = mountIn(NewSessionPage)
     await flush(w)
 
@@ -71,8 +113,13 @@ describe('NewSessionPage：空态', () => {
 describe('NewSessionPage：选设备', () => {
   it('用 ↑↓ 移动、⏎ 选中一台设备（列表是唯一 Tab 落点）', async () => {
     stubFetch({
-      '/api/devices': { body: [device({ id: 'n_1', name: 'a' }), device({ id: 'n_2', name: 'b' })] },
-      '/api/agents': { body: [] },
+      '/api/devices': {
+        body: [
+          device({ id: 'n_1', name: 'a', agents: ['opencode'], usable_agents: ['opencode'] }),
+          device({ id: 'n_2', name: 'b', agents: ['opencode'], usable_agents: ['opencode'] }),
+        ],
+      },
+      '/api/agents': { body: [agent()] },
     })
     const w = mountIn(NewSessionPage)
     await flush(w)
@@ -103,8 +150,13 @@ describe('NewSessionPage：选设备', () => {
 
   it('换设备清掉路径：路径是「这台设备上的」一个目录', async () => {
     stubFetch({
-      '/api/devices': { body: [device({ id: 'n_1', name: 'a' }), device({ id: 'n_2', name: 'b' })] },
-      '/api/agents': { body: [] },
+      '/api/devices': {
+        body: [
+          device({ id: 'n_1', name: 'a', agents: ['opencode'], usable_agents: ['opencode'] }),
+          device({ id: 'n_2', name: 'b', agents: ['opencode'], usable_agents: ['opencode'] }),
+        ],
+      },
+      '/api/agents': { body: [agent()] },
     })
     const w = mountIn(NewSessionPage)
     await flush(w)
@@ -124,27 +176,191 @@ describe('NewSessionPage：选设备', () => {
 })
 
 describe('NewSessionPage：提交', () => {
-  async function pickAndType(w: ReturnType<typeof mountIn>, path: string): Promise<void> {
-    await w.element.querySelector<HTMLElement>('.af-opt')?.click()
-    await flush(w)
-    type(w.element.querySelector<HTMLInputElement>('#path')!, path)
-    await flush(w)
+  /** 选第一台设备、勾第一个可用 agent、填路径。 */
+  async function fill(w: ReturnType<typeof mountIn>, path: string, Agent = 'opencode'): Promise<void> {
+    await pickDevice(w)
+    await pickAgent(w, Agent)
+    await typePath(w, path)
   }
 
   it('三项齐了才能建；缺哪项错误就指哪一项', async () => {
-    stubFetch({ '/api/devices': { body: [ONLINE] }, '/api/agents': { body: [] } })
+    stubFetch({ '/api/devices': { body: [ONLINE] }, '/api/agents': { body: [agent()] } })
     const w = mountIn(NewSessionPage)
     await flush(w)
 
     const submit = w.element.querySelector<HTMLButtonElement>('.af-submit button')
-    expect(submit?.disabled).toBe(true)
+    expect(submit?.disabled, '只填路径也不该能建：agent 那一步还没选').toBe(true)
 
-    await pickAndType(w, 'relative/path')
+    await pickDevice(w)
+    await flush(w)
+    expect(w.element.querySelector<HTMLButtonElement>('.af-submit button')?.disabled, '没填路径').toBe(true)
+
+    await typePath(w, 'relative/path')
     expect(w.element.querySelector('.af-field__error')?.textContent).toContain('以 / 或 ~ 开头')
 
-    type(w.element.querySelector<HTMLInputElement>('#path')!, '/srv/alpha')
-    await flush(w)
+    await typePath(w, '/srv/alpha')
+    expect(
+      w.element.querySelector<HTMLButtonElement>('.af-submit button')?.disabled,
+      'agent 还没选：这一项重则建出一个不能对话的死会话',
+    ).toBe(true)
+
+    await pickAgent(w, 'opencode')
     expect(w.element.querySelector<HTMLButtonElement>('.af-submit button')?.disabled).toBe(false)
+  })
+
+  it('选了 agent 才建得出来，且 `agent_id` 真的进请求体', async () => {
+    const fn = stubFetch({
+      '/api/devices': { body: [ONLINE] },
+      '/api/agents': { body: [agent()] },
+      '/api/sessions': {
+        status: 201,
+        body: {
+          id: 's_new',
+          agent_id: 'opencode',
+          state: 'running',
+          created_at: 'unix:1700000000',
+          ended_at: null,
+          workspace: { node_id: 'n_1', path: '/srv/alpha', path_locked: true },
+        },
+      },
+    })
+    const w = mountIn(NewSessionPage)
+    await flush(w)
+    await fill(w, '/srv/alpha')
+
+    await w.element.querySelector<HTMLButtonElement>('.af-submit button')?.click()
+    await flush(w)
+
+    expect(location.pathname).toBe('/sessions/s_new')
+    expect(submittedBody(fn)).toEqual({ node_id: 'n_1', path: '/srv/alpha', agent_id: 'opencode' })
+  })
+
+  it('显式选「不指定」时落 `agent_id: null`，且页面先说清后果', async () => {
+    const fn = stubFetch({
+      '/api/devices': { body: [ONLINE] },
+      '/api/agents': { body: [agent()] },
+      '/api/sessions': {
+        status: 201,
+        body: {
+          id: 's_new',
+          agent_id: null,
+          state: 'running',
+          created_at: 'unix:1700000000',
+          ended_at: null,
+          workspace: { node_id: 'n_1', path: '/srv/alpha', path_locked: true },
+        },
+      },
+    })
+    const w = mountIn(NewSessionPage)
+    await flush(w)
+    await fill(w, '/srv/alpha', '')
+
+    // 后果要**建之前**就说出来：等建完才发现不能对话，会话已经不可逆了
+    expect(w.element.querySelector('[role="alert"]')?.textContent).toContain('不能对话')
+
+    await w.element.querySelector<HTMLButtonElement>('.af-submit button')?.click()
+    await flush(w)
+
+    // 空串**不进**请求体：库里 `agent_id` 用 NULL 表示「没有 agent」
+    expect(submittedBody(fn)).toEqual({ node_id: 'n_1', path: '/srv/alpha', agent_id: null })
+  })
+
+  it('这台设备没有能对话的 agent 时，仍能用「不指定」建会话', async () => {
+    stubFetch({ '/api/devices': { body: [NO_USABLE] }, '/api/agents': { body: [] } })
+    const w = mountIn(NewSessionPage)
+    await flush(w)
+    await pickDevice(w)
+    await typePath(w, '/srv/beta')
+
+    expect(w.element.textContent).toContain('这台设备上现在没有能对话的 agent')
+    // 「不指定」必须还在：没有 agent 也该能开会话（终端 / exec 照常）
+    await pickAgent(w, '')
+    expect(w.element.querySelector<HTMLButtonElement>('.af-submit button')?.disabled).toBe(false)
+  })
+
+  it('装了但跑不起来的那个不进可选项，但它的原因要写出来', async () => {
+    stubFetch({
+      '/api/devices': { body: [ONLINE] },
+      '/api/agents': { body: [agent({ name: 'claude', available: false, error: '没有 acp 子命令' })] },
+    })
+    const w = mountIn(NewSessionPage)
+    await flush(w)
+    await pickDevice(w)
+
+    // 不可选：让它可选就是让用户建一个永远不能对话的死会话
+    expect(w.element.querySelector('[data-agent-option="claude"]')).toBeNull()
+    expect(w.element.querySelector('[data-agent-option="opencode"]')).not.toBeNull()
+    // 但装坏了这件事必须看得见——这正是 `Probe::NotCapable` 存在的理由
+    expect(w.element.textContent).toContain('claude')
+    expect(w.element.textContent).toContain('没有 acp 子命令')
+  })
+
+  it('换设备要重选 agent：能用清单是「那台机器上的」', async () => {
+    stubFetch({
+      '/api/devices': {
+        body: [
+          device({ id: 'n_1', name: 'a', agents: ['opencode'], usable_agents: ['opencode'] }),
+          device({ id: 'n_2', name: 'b', agents: ['claude'], usable_agents: ['claude'] }),
+        ],
+      },
+      '/api/agents': { body: [agent()] },
+    })
+    const w = mountIn(NewSessionPage)
+    await flush(w)
+    await pickDevice(w, 0)
+    await pickAgent(w, 'opencode')
+    await typePath(w, '/srv/alpha')
+
+    await pickDevice(w, 1)
+    await flush(w)
+    expect(w.element.querySelector<HTMLInputElement>('#path')?.value, '路径也清').toBe('')
+    const texts = Array.from(w.element.querySelectorAll<HTMLElement>('[data-agent-option]')).map(
+      (el) => el.getAttribute('data-agent-option'),
+    )
+    expect(texts).toContain('claude')
+    expect(texts).not.toContain('opencode')
+    // 摘要里不能还留着上一台机器上的那个名字。
+    //
+    // **判据要指向「旧名字不在」，不能写「摘要里有『未选』」**：路径那一格
+    // 空着也是「未选」，而路径本来就会被清——于是 agent 没清这个错误会被
+    // 路径的「未选」兜住（反例 3 实测确实通过了，白跑一轮）。
+    //
+    // 提交按钮禁用同样兜不住：路径清空本身就足以禁用它。
+    expect(w.element.querySelector('.af-summary')?.textContent).not.toContain('opencode')
+  })
+
+  it('换设备后旧选择不残留到请求体里', async () => {
+    const fn = stubFetch({
+      '/api/devices': {
+        body: [
+          device({ id: 'n_1', name: 'a', agents: ['opencode'], usable_agents: ['opencode'] }),
+          device({ id: 'n_2', name: 'b', agents: ['claude'], usable_agents: ['claude'] }),
+        ],
+      },
+      '/api/agents': { body: [agent()] },
+      '/api/sessions': {
+        status: 201,
+        body: {
+          id: 's_new',
+          agent_id: 'claude',
+          state: 'running',
+          created_at: 'unix:1700000000',
+          ended_at: null,
+          workspace: { node_id: 'n_2', path: '/srv/gamma', path_locked: true },
+        },
+      },
+    })
+    const w = mountIn(NewSessionPage)
+    await flush(w)
+    await pickDevice(w, 0)
+    await pickAgent(w, 'opencode')
+    await pickDevice(w, 1)
+    await pickAgent(w, 'claude')
+    await typePath(w, '/srv/gamma')
+
+    await w.element.querySelector<HTMLButtonElement>('.af-submit button')?.click()
+    await flush(w)
+    expect(submittedBody(fn)).toEqual({ node_id: 'n_2', path: '/srv/gamma', agent_id: 'claude' })
   })
 
   it('提交成功后 replace 跳到工作台（后退不该回到提交过的表单）', async () => {
@@ -165,15 +381,13 @@ describe('NewSessionPage：提交', () => {
     })
     const w = mountIn(NewSessionPage)
     await flush(w)
-    await pickAndType(w, '/srv/alpha')
+    await fill(w, '/srv/alpha')
 
     await w.element.querySelector<HTMLButtonElement>('.af-submit button')?.click()
     await flush(w)
 
     expect(location.pathname).toBe('/sessions/s_new')
-    const post = fn.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'POST')
-    expect(post).toBeTruthy()
-    expect(JSON.parse(String((post?.[1] as RequestInit).body))).toEqual({ node_id: 'n_1', path: '/srv/alpha' })
+    expect(submittedBody(fn)).toMatchObject({ node_id: 'n_1', path: '/srv/alpha' })
   })
 
   it('建会话失败时把 Hub 的错误码翻成人话，并留在页面上', async () => {
@@ -184,7 +398,7 @@ describe('NewSessionPage：提交', () => {
     })
     const w = mountIn(NewSessionPage)
     await flush(w)
-    await pickAndType(w, '/srv/alpha')
+    await fill(w, '/srv/alpha')
 
     const before = location.pathname
     await w.element.querySelector<HTMLButtonElement>('.af-submit button')?.click()

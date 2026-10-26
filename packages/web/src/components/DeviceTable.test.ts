@@ -160,6 +160,36 @@ describe('DeviceTable：未上报与推值', () => {
     expect(w.element.textContent).toContain('未上报')
   })
 
+  /**
+   * **装了但跑不起来的要留着，只是不带强调色**。
+   *
+   * 两档不分的话，用户看到的是一串同样颜色的名字，而其中一半点进去会
+   * 409——「为什么我的 agent 不能对话」这条事实在页面上完全不可见。
+   */
+  it('已装 agent 分「能对话 / 不能对话」两档，且不删掉坏的那个', async () => {
+    const w = mountIn(DeviceTable, {
+      props: {
+        devices: [device({ agents: ['opencode', 'claude'], usable_agents: ['opencode'] })],
+        onInspect: vi.fn(),
+        onCreate: vi.fn(),
+      },
+    })
+    const badges = Array.from(w.element.querySelectorAll<HTMLElement>('.af-caps .af-badge'))
+
+    // 不删：删了就回到「用户以为系统没扫到」
+    expect(badges.map((b) => b.textContent?.trim())).toEqual(['opencode', 'claude'])
+
+    const usable = badges.find((b) => b.textContent?.trim() === 'opencode')
+    expect(usable?.getAttribute('data-usable')).toBe('true')
+    expect(usable?.className).toContain('af-badge--agent')
+
+    const broken = badges.find((b) => b.textContent?.trim() === 'claude')
+    expect(broken?.getAttribute('data-usable')).toBe('false')
+    expect(broken?.className).toContain('af-badge--off')
+    // 悬停要能读到「为什么」——只在旁边灰一块是不够的
+    expect(broken?.getAttribute('title')).toContain('不能对话')
+  })
+
   it('derived 为真时给「推」徽标（状态来源比状态本身更容易被误读）', () => {
     const w = mountIn(DeviceTable, {
       props: {

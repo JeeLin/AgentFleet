@@ -33,8 +33,21 @@ export interface DeviceSummary {
   cpu: number | null
   mem: number | null
   gpu: boolean
-  /** 已装且就绪，不是「支持」。 */
+  /**
+   * **已装**的 agent 名（含装了但跑不起来的）。
+   *
+   * 「已装」不是「能对话」：装了但没有 ACP 入口的（`Probe::NotCapable`）也在
+   * 这里面，而它存在的意义就是让用户看见「为什么我的 agent 不能对话」——
+   * 展示时必须按 `usable_agents` 分两档，混在一起等于没接这个字段。
+   */
   agents: string[]
+  /**
+   * **已装且现在能对话**的 agent 名。建会话的可选项。
+   *
+   * 与后端 `POST /api/sessions` 的 409 门禁**同源**（都读 `agent_runtime`，
+   * 都只看 `available`），所以页面在这里见到的名字一定建得成。
+   */
+  usable_agents: string[]
   /** `status` 是否为 Hub 内存推导值（§6.1 的「推」徽标）。 */
   derived: boolean
   /** 前 3 + `***` + 后 3，Hub 已打码。 */
@@ -67,9 +80,13 @@ export interface SessionSummary {
   workspace: WorkspaceRef
 }
 
-/** `GET /api/agents` 的一项。数据源是设备心跳上报的 `capabilities.agents`。 */
+/** `GET /api/agents` 的一项。 */
 export interface AgentSummary {
   name: string
+  /** 现在能不能对话。**至少有一台设备上可用即为真**。 */
+  available: boolean
+  /** 说它不可用的原因；设备没给原因时为 `null`（不编一句）。 */
+  error: string | null
 }
 
 /** `POST /api/sessions` 的请求体。 */
@@ -216,6 +233,8 @@ export function createSessionErrorLabel(code: string): string {
       return '登录已失效，请重新登录。'
     case 'invalid_request_body':
       return '提交的内容不完整：设备、路径都要填。'
+    case 'agent_unavailable':
+      return '这台设备上这个 agent 现在跑不起来（装了但没有可用的 ACP 入口）。换一个 agent，或先在这台设备上装好它。'
     default:
       return `建会话没有成功（${code}）。`
   }

@@ -10,7 +10,7 @@ import { mount, type ComponentMountingOptions } from '@vue/test-utils'
 import type { Component } from 'vue'
 import { afterEach, vi } from 'vitest'
 
-import type { DeviceSummary, SessionSummary } from '@/lib/api'
+import type { AgentSummary, DeviceSummary, SessionSummary } from '@/lib/api'
 
 /**
  * 本文件挂过的组件。每个用例结束时**卸载**它们，而不是只清 DOM。
@@ -41,8 +41,24 @@ export function device(over: Partial<DeviceSummary> = {}): DeviceSummary {
     mem: 40,
     gpu: false,
     agents: [],
+    usable_agents: [],
     derived: false,
     key_fingerprint: '9f3***21b',
+    ...over,
+  }
+}
+
+/**
+ * 一条 agent 目录项。
+ *
+ * 缺省是**可用**：夹具造的是「正常情况」，而「不可用」那档要连带 `error`
+ * 一起显式造出来——没有 error 的不可用在页面上不是一个合法状态。
+ */
+export function agent(over: Partial<AgentSummary> = {}): AgentSummary {
+  return {
+    name: 'opencode',
+    available: true,
+    error: null,
     ...over,
   }
 }

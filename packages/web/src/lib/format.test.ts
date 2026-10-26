@@ -107,6 +107,7 @@ describe('deviceLabel', () => {
     mem: null,
     gpu: false,
     agents: [],
+    usable_agents: [],
     derived: false,
     key_fingerprint: 'abc***xyz',
   }

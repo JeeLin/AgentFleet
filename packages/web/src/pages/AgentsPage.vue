@@ -98,16 +98,28 @@ async function load(): Promise<void> {
 
     <template v-else>
       <div class="af-roster">
-        <div v-for="a in agents" :key="a.name" class="af-agent">
-          <span class="af-badge af-badge--agent">{{ a.name }}</span>
+        <div v-for="a in agents" :key="a.name" class="af-agent" :data-usable="a.available ? 'true' : 'false'">
+          <span class="af-badge" :class="a.available ? 'af-badge--agent' : 'af-badge--off'">{{ a.name }}</span>
+          <!-- 不可用的原因**写在这一行**：只把它灰掉，用户看到的是
+               「我装了它但系统说没有」，而真正的答案是「它跑不起来」。 -->
+          <span v-if="!a.available" class="af-t-mute af-agent__why">
+            {{ a.error ?? '现在不能对话（设备没给原因）' }}
+          </span>
           <span class="af-spacer"></span>
-          <button class="af-btn af-btn--sm" type="button" @click="navigate('/sessions/new')">
+          <button
+            class="af-btn af-btn--sm"
+            type="button"
+            :disabled="!a.available"
+            :title="a.available ? '用它开会话' : '这个 agent 现在不能对话'"
+            @click="navigate('/sessions/new')"
+          >
             用它开会话
           </button>
         </div>
       </div>
       <p class="af-t-mute af-foot">
-        定义来自各设备心跳的上报；本页只读，安装入口不在这一页。
+        定义来自各设备扫描的上报；本页只读，安装入口不在这一页。灰的那批是
+        <b>装了但现在不能对话</b>的——它们留在这里正是为了让你看见自己装坏的那个。
       </p>
     </template>
   </div>
@@ -155,6 +167,17 @@ async function load(): Promise<void> {
 }
 .af-agent:last-child {
   border-bottom: 0;
+}
+/* 不可用的那档整行降亮，但**不删**：原因要看得见 */
+.af-agent[data-usable='false'] {
+  color: var(--af-fg-tertiary);
+}
+.af-agent__why {
+  min-width: 0;
+  font-size: var(--af-text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .af-foot {
   margin-top: var(--af-space-4);
