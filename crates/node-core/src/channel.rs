@@ -70,6 +70,13 @@ pub const EXTERNAL_CONNECTOR_NAME: &str = "acp";
 /// 会在对端不读时无界增长。
 const EXTERNAL_CREDIT_START: u32 = 256;
 
+/// 一条外部源通道最多积压多少条**未读的入站消息**（Hub → 设备）。
+///
+/// worker 每轮 `select!` 都取一次，正常不会有第二条在等。这个上限拦的是
+/// 「worker 卡住 / 通道已死的路径还在收帧」那种情形——没有上限时用户连点
+/// 发送会把设备内存吃光，而症状是「设备变慢」，没人会想到是这条通道。
+const INBOUND_LIMIT: usize = 64;
+
 /// 处理一帧通道帧的结果。
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -80,6 +87,28 @@ pub enum Action {
     Send(Vec<Frame>),
     /// 连接整体该结束了（载荷解不开：这不是「没听懂」，是协议分叉）。
     End,
+    /// 一条 **ACP 对话通道被开出来了**：worker 要去起子进程。
+    ///
+    /// # 为什么这不是 `Action::Send` 的一部分
+    ///
+    /// `channel_ready` 必须先发出去（Hub 在等它，5 s 超时），而**起子进程
+    /// 可能失败**（agent 没装、配置错、agent 不认 ACP）。两件事分开，才能让
+    /// 「通道开了但 agent 起不来」变成一条 `channel_error` 而不是一个 5 秒的
+    /// 静默超时。
+    ///
+    /// 帧**排在起进程之前**发：否则 `session/new` 慢的时候 Hub 先超时，
+    /// 拿到的错误是「不支持」——而真相是「agent 慢」。
+    OpenAcp {
+        frames: Vec<Frame>,
+        channel_id: String,
+        /// 一个 [`ConversationSpec`]：起子进程要的全部东西。
+        ///
+        /// **配置随这条路进来，不查设备侧的表**：`agent_config` 存在 Hub 侧
+        /// （用户裁定「Hub 存，设备读」），设备没有那张表可查。Hub 在建会话
+        /// 时把配置读出来、随 `open_channel.params` 下发——于是设备侧只有
+        /// 一份「这次要用什么命令」的事实，不会出现「设备本地配置与 Hub 不一致」。
+        spec: crate::agent::conversation::ConversationSpec,
+    },
 }
 
 /// 本设备当前打开的通道。
@@ -135,6 +164,17 @@ struct Entry {
     /// 本次连接上已推给 Hub 的数据帧数。**只用于自证流控真的在节流**，
     /// 不参与任何判定——它一旦参与判定就会变成「按帧数收租」。
     sent: u64,
+    /// 外部源通道的**入站**（Hub → 设备）载荷，等 worker 取走去发 `session/prompt`。
+    ///
+    /// # 为什么入站要在这里排队而不是直接给 ACP
+    ///
+    /// 通道帧从 `on_channel_frame` 进来，那是**同步**函数、不持有 ACP 客户端
+    /// （客户端活在 worker 的任务里，而且是 async 的）。在这里直接 await 会
+    /// 把「按一下发送」变成「读循环阻塞到 prompt 返回」，而那正是 M1 的
+    /// `exec` 堵住心跳臂的错误形状。
+    ///
+    /// connector 通道这个字段恒为空。
+    inbound: VecDeque<serde_json::Value>,
 }
 
 /// 开通道失败。**「这台设备没有这个能力」与「这个 connector 没能开起来」
@@ -258,6 +298,7 @@ impl ChannelTable {
                 backlog: VecDeque::new(),
                 backlog_bytes: 0,
                 sent: 0,
+                inbound: VecDeque::new(),
             },
         );
         let mut frames = vec![ready_frame(
@@ -279,6 +320,10 @@ impl ChannelTable {
     }
 
     /// 通道内数据帧 → 交给该通道的 connector，产出帧入队，然后按信用放行。
+    ///
+    /// **外部源通道的输入不走这里**：ACP 的输入是 `session/prompt`，由 worker
+    /// 从 [`Self::take_inbound`] 取走。外部源通道收到 `channel_data` 时**入站
+    /// 排队**而不是报错——用户点发送就是这样进来的。
     fn on_data(
         &mut self,
         channel_id: &str,
@@ -291,6 +336,22 @@ impl ChannelTable {
                 .ok_or(DataError::UnknownChannel)?;
             if !entry.live {
                 return Err(DataError::UnknownChannel);
+            }
+            if entry.resource.is_none() {
+                // 外部源通道：入站排队，等 worker 取。
+                //
+                // **上限与待发同一个量级**：用户一条消息超过 8 MiB 不是「对话」
+                // 而是把文件粘进输入框，那种用法该走工作区上传而不是本通道。
+                // 溢出即关通道（与出站同一条策略），而不是截断。
+                if entry.inbound.len() >= INBOUND_LIMIT {
+                    entry.live = false;
+                    self.release(channel_id);
+                    return Err(DataError::Connector(ConnectorError::internal(format!(
+                        "channel {channel_id} got more than {INBOUND_LIMIT} unread inbound messages"
+                    ))));
+                }
+                entry.inbound.push_back(payload.clone());
+                return Ok(Vec::new());
             }
             let out = entry
                 .resource
@@ -487,7 +548,38 @@ impl ChannelTable {
             }
             entry.backlog.clear();
             entry.backlog_bytes = 0;
+            // 入站也清：通道死了还留着待发消息，会让下一条同名通道
+            // （Hub 重开）取到上一轮的旧消息——用户看到自己没发过的话被
+            // 发出去了，那比丢一条消息更糟。
+            entry.inbound.clear();
         }
+    }
+
+    /// 取走某条外部源通道的入站消息（Hub → 设备的用户消息）。
+    ///
+    /// 返回空 `Vec` 表示没有新消息。**不区分「通道不存在」与「没有消息」**：
+    /// 调用方（worker）对两者的反应一样——什么都不做。而报错会让一个刚被
+    /// 关掉的通道在下一轮 tick 里刷一条没人管的错误日志。
+    fn take_inbound(&mut self, channel_id: &str) -> Vec<serde_json::Value> {
+        match self.channels.get_mut(channel_id) {
+            Some(entry) => entry.inbound.drain(..).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// 一条 ACP 通道起进程失败时的收尾：关通道并回 `channel_error`。
+    ///
+    /// 与 [`Self::release`] 的区别只有一个：这里**要回帧**。Hub 那边已经
+    /// 拿到 `channel_ready` 并在等数据，不告诉它一声，页面会一直显示
+    /// 「正在回复」——而那个状态永远不会结束。
+    fn fail_external(
+        &mut self,
+        channel_id: &str,
+        code: ChannelErrorCode,
+        reason: &str,
+    ) -> Vec<Frame> {
+        self.release(channel_id);
+        vec![error_frame(channel_id, code, reason)]
     }
 
     /// 开一条**外部源驱动**的通道：没有 connector，帧由 [`Self::push_external`] 送入。
@@ -515,6 +607,7 @@ impl ChannelTable {
                 backlog: VecDeque::new(),
                 backlog_bytes: 0,
                 sent: 0,
+                inbound: VecDeque::new(),
             },
         );
         vec![ready_frame(
@@ -523,10 +616,17 @@ impl ChannelTable {
         )]
     }
 
-    /// 把一个外部源产生的事件推进某条通道的待发队列，并立即按信用放行。
+    /// 把一个外部源产生的事件推进某条通道的待发队列。
     ///
-    /// **返回值是本轮真正放行的帧**（信用不够时可能为空）。调用方（worker 的
-    /// ACP 读循环）负责把它们发出去。
+    /// **只入队，不放行**：放行统一由 [`Self::poll_all`]（worker 的 `pump` 臂）
+    /// 做。这一条不是洁癖——ACP 的事件由读循环在**独立 task** 里产生，那个 task
+    /// 手里没有 `Established`，发不出帧。如果这里顺手 flush，帧就被返回给一个
+    /// 没有发送能力的调用方，然后被丢掉。
+    ///
+    /// 这条 bug 真实发生过：第一版在这里 flush 并返回帧，`read_events` 用
+    /// `let _ =` 接住，于是**整条对话一个字节都到不了页面**，而所有单测都是绿的
+    /// ——因为单测自己取返回值。只有真机端到端（`a_real_opencode_turn_...`）
+    /// 才暴露它。
     ///
     /// # 通道不在了怎么办
     ///
@@ -546,7 +646,7 @@ impl ChannelTable {
         channel_id: &str,
         payloads: Vec<serde_json::Value>,
         limit: usize,
-    ) -> Result<Vec<Frame>, DataError> {
+    ) -> Result<(), DataError> {
         let Some(entry) = self.channels.get_mut(channel_id) else {
             return Err(DataError::UnknownChannel);
         };
@@ -562,7 +662,7 @@ impl ChannelTable {
             .collect();
         // 入队走与 connector 同一条路：溢出策略只有一份，两份迟早分叉。
         self.queue_frames(channel_id, out, limit)?;
-        Ok(self.flush(channel_id))
+        Ok(())
     }
 }
 
@@ -588,9 +688,99 @@ fn on_open(frame: &Frame) -> Action {
         Ok(s) => s,
         Err(_) => return Action::End,
     };
+    // **ACP 对话走另一条路**：它不是 connector（约束 3），所以不能进
+    // `connector::create`——那样会拿到 `Unsupported` 并回
+    // `channel_error{unsupported}`，页面看到的是「这台设备不支持对话」，
+    // 而真相是「我们从来没打算把它做成 connector」。
+    if spec.connector == EXTERNAL_CONNECTOR_NAME {
+        return on_open_acp(spec);
+    }
     match lock().open(&spec, req_of(&spec)) {
         Ok(frames) => Action::Send(frames),
         Err(e) => Action::Send(vec![error_frame(&spec.channel_id, e.code(), &e.reason())]),
+    }
+}
+
+/// `open_channel{connector:"acp"}` → 开一条外部源通道，并把「去起子进程」交给 worker。
+///
+/// `params` 要 `agent_id`（用哪个 agent）与 `cwd`（会话工作区根）。**缺一个就回
+/// `bad_request`**：没有 `agent_id` 不知道该起谁，没有 `cwd` 子进程会在设备进程
+/// 自己的 cwd 里跑——那是设备的数据目录，不是用户的工作区，agent 会在那里
+/// 建文件。两者都不能回落成「随便挑一个」。
+fn on_open_acp(spec: OpenChannel) -> Action {
+    let agent_id = match spec.params.get("agent_id").and_then(serde_json::Value::as_str) {
+        Some(v) => v,
+        None => "",
+    };
+    let cwd = match spec.params.get("cwd").and_then(serde_json::Value::as_str) {
+        Some(v) => v,
+        None => "",
+    };
+    if agent_id.is_empty() || cwd.is_empty() {
+        // 码用 `Internal`：`ErrorCode` 是封闭集合，M2 不加协议变体
+        // （`protocol.md` §4.1「M2 为什么没有新增消息类型」）。不加 `BadRequest`
+        // 是为了一个参数校验去改一套两侧共享的枚举——老 Hub 收到不认识的码
+        // 会解不开整帧。`reason` 里说清缺什么，那句才是给人看的。
+        return Action::Send(vec![error_frame(
+            &spec.channel_id,
+            ChannelErrorCode::Internal,
+            "acp channel needs params.agent_id and params.cwd",
+        )]);
+    }
+    // 配置项全部可选：不配就「用扫描到的可执行文件、无参数、继承环境」。
+    // 这是 `agent_config` 那三条端点的空值语义，设备侧不重复定义（`command`
+    // 空串 = 用扫描到的那一个，见 `acp.rs` 的 `spawn`）。
+    //
+    // **每一处缺失都写成显式分支**（不是 `unwrap_or_default`）：这里的默认值
+    // 各有各的含义（空串 = 回落到扫描结果，空列表 = 不追加），把它们统一压成
+    // 「默认值」会让「字段形状错了」与「字段没给」看起来一样。
+    let command = match spec.params.get("command").and_then(serde_json::Value::as_str) {
+        Some(v) => v.to_string(),
+        None => String::new(),
+    };
+    let args: Vec<String> = match spec.params.get("args").and_then(serde_json::Value::as_array) {
+        Some(a) => a
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        None => Vec::new(),
+    };
+    let env: std::collections::BTreeMap<String, String> =
+        match spec.params.get("env").and_then(serde_json::Value::as_object) {
+            Some(o) => o
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect(),
+            None => std::collections::BTreeMap::new(),
+        };
+
+    // **ACP 入口参数由设备侧的清单给**，不由 Hub 下发：「怎么进 ACP 模式」
+    // 是这个 agent 自己的 CLI 契约。不认识的 agent_id 给空列表——那种情况
+    // 起子进程本来就会失败在「没有这个可执行文件」，而不是悄悄地跑成
+    // 一个普通 CLI 然后在 `initialize` 上永远等。
+    let acp_args: Vec<String> = match crate::agent::detect::KNOWN_AGENTS
+        .iter()
+        .find(|a| a.id == agent_id)
+    {
+        Some(spec) => spec.acp_args.iter().map(|s| (*s).to_string()).collect(),
+        None => Vec::new(),
+    };
+
+    let conv = crate::agent::conversation::ConversationSpec {
+        channel_id: spec.channel_id.clone(),
+        agent_id: agent_id.to_string(),
+        cwd: cwd.to_string(),
+        command,
+        args,
+        acp_args,
+        env,
+    };
+    let frames = lock().open_external(&spec.channel_id, EXTERNAL_CREDIT_START);
+    Action::OpenAcp {
+        frames,
+        channel_id: spec.channel_id,
+        spec: conv,
     }
 }
 
@@ -769,21 +959,44 @@ pub fn open_external(channel_id: &str) -> Vec<Frame> {
     lock().open_external(channel_id, EXTERNAL_CREDIT_START)
 }
 
-/// 把一个 ACP 事件推进对话通道，返回本轮放行的帧。
+/// 把一个 ACP 事件推进对话通道。**只入队**，放行由 [`pump`] 做。
 ///
-/// 一批一起推而不是一条一次：`flush` 每帧都要算一次字节账，逐个推等于把同一
-/// 条通道锁 n 次。
+/// 一批一起推而不是一条一次：同一批的溢出判定与字节账是同一把锁。
 ///
-/// # 为什么返回 `Option` 而不是 `Result<_, DataError>`
+/// # 为什么返回 `Option<()>` 而不是 `Option<Vec<Frame>>`
 ///
-/// 调用方（worker 的 ACP 读循环）对失败只有一个有意义的反应：这条通道已经
-/// 没了，把这批事件丢掉。`DataError` 的分档（`UnknownChannel` vs
-/// `Connector`）在这里没有第二种用法，而把私有的错误类型抬成公开 API 会
-/// 让通道表的封装出现一个只为内部直觉服务的缺口。`None` = 通道不在了。
-pub fn push_external(channel_id: &str, payloads: Vec<serde_json::Value>) -> Option<Vec<Frame>> {
+/// 调用方（ACP 读循环）**没有发送能力**——它跑在独立 task 里，手里没有
+/// `Established`。第一版返回帧，调用方用 `let _ =` 接住，结果整条对话一个
+/// 字节都到不了页面。让类型上就拿不到帧，那个 bug 不会再被写出来。
+///
+/// `None` = 通道不在了，这批事件丢掉（已裁决「不承诺补齐」）。
+pub fn push_external(channel_id: &str, payloads: Vec<serde_json::Value>) -> Option<()> {
     lock()
         .push_external(channel_id, payloads, MAX_BACKLOG_BYTES)
         .ok()
+}
+
+/// 取走某条对话通道的入站消息（Hub 发来的用户消息）。
+pub fn take_inbound(channel_id: &str) -> Vec<serde_json::Value> {
+    lock().take_inbound(channel_id)
+}
+
+/// ACP 起进程失败：关通道并把理由回给 Hub。
+pub fn fail_external(channel_id: &str, reason: &str) -> Vec<Frame> {
+    lock().fail_external(channel_id, ChannelErrorCode::Internal, reason)
+}
+
+/// 当前活着的**外部源通道** id。
+///
+/// worker 靠它知道「现在有哪些对话会话该收消息、该送事件」。connector 通道
+/// 不在里面——它们由 `pump` 主动拉，不需要 worker 记账。
+pub fn external_ids() -> Vec<String> {
+    lock()
+        .channels
+        .iter()
+        .filter(|(_, e)| e.live && e.resource.is_none())
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 /// 这一帧是不是通道帧。
@@ -905,6 +1118,19 @@ mod tests {
         reset_for_tests();
     }
 
+    /// 泵一轮，取出**某一条通道**放行的帧。
+    ///
+    /// 生产路径就是这样取帧的（worker 的 `pump` 臂），所以测试用它而不是
+    /// 让 `push_external` 返回帧——后者会让「入队」与「放行」在测试里混成
+    /// 一步，而真机上它们是两个 task 里的事。
+    fn pumped_frames(channel_id: &str) -> Vec<Frame> {
+        pump()
+            .into_iter()
+            .filter(|(id, _)| id == channel_id)
+            .flat_map(|(_, frames)| frames)
+            .collect()
+    }
+
     /// 开一条**真能开起来**的 files 通道（工作区根指向一个真目录）。
     fn open_files(channel_id: &str, credit: u32) -> Frame {
         let spec = OpenChannel {
@@ -948,14 +1174,20 @@ mod tests {
         );
     }
 
-    /// 推事件 → 按信用放行。放行出来的必须是**数据帧**，且载荷原样。
+    /// 推事件 → `pump` 按信用放行。放行出来的必须是**数据帧**，且载荷原样。
+    ///
+    /// **取帧必须走 `pump`**，不是走 `push_external` 的返回值——生产路径就是
+    /// 这样：ACP 读循环只入队，worker 的 `pump` 臂放行并发送。第一版让
+    /// `push_external` 自己 flush 并返回帧，而读循环用 `let _ =` 接住，
+    /// 于是真机上整条对话一个字节都到不了页面，而这条测试是绿的（它自己取了
+    /// 返回值）。走 `pump` 才能让测试与生产同一条路。
     #[test]
     fn pushing_external_events_releases_data_frames_within_credit() {
         let _guard = table_lock();
         reset();
         open_external("ch-acp");
 
-        let out = push_external(
+        push_external(
             "ch-acp",
             vec![
                 serde_json::json!({ "sessionUpdate": "agent_message_chunk", "n": 1 }),
@@ -964,6 +1196,10 @@ mod tests {
         )
         .expect("通道在，必须成功");
 
+        // 入队但还没放行：信用只在 flush 时扣。
+        assert_eq!(backlog_of("ch-acp"), 2, "入队等放行");
+
+        let out = pumped_frames("ch-acp");
         assert_eq!(out.len(), 2, "信用够，两条都该放行");
         assert!(out.iter().all(|f| f.msg_type == types::CHANNEL_DATA));
         let d0: protocol::channel::ChannelData = out[0].payload().unwrap();
@@ -988,7 +1224,7 @@ mod tests {
         reset();
         lock().open_external("ch-tight", 1);
 
-        let out = push_external(
+        push_external(
             "ch-tight",
             vec![
                 serde_json::json!({ "n": 1 }),
@@ -998,6 +1234,7 @@ mod tests {
         )
         .expect("通道在");
 
+        let out = pumped_frames("ch-tight");
         assert_eq!(out.len(), 1, "只剩 1 个信用，只能放 1 条");
         assert_eq!(backlog_of("ch-tight"), 2, "剩下两条排队，不丢");
         assert_eq!(credit_of("ch-tight"), Some(0));
@@ -1020,29 +1257,26 @@ mod tests {
         reset();
         lock().open_external("ch-acp", 1);
 
-        // 第一个信用打掉、第二条排队
-        let first = push_external(
+        push_external(
             "ch-acp",
             vec![serde_json::json!({ "n": 1 }), serde_json::json!({ "n": 2 })],
         )
         .expect("通道在");
-        assert_eq!(first.len(), 1);
+        // 第一个信用打掉、第二条排队
+        assert_eq!(pumped_frames("ch-acp").len(), 1);
         assert_eq!(backlog_of("ch-acp"), 1, "第二条排着");
+        assert_eq!(credit_of("ch-acp"), Some(0), "信用打光");
 
-        // 补信用但不走 flush 的返回（模拟信用帧先到、稍后才泵）
-        {
-            let t = &mut *lock();
-            let e = t.channels.get_mut("ch-acp").unwrap();
-            e.credit = 10;
-        }
-
-        let pumped = pump();
-        let mine: Vec<_> = pumped.iter().filter(|(id, _)| id == "ch-acp").collect();
-        assert_eq!(mine.len(), 1, "泵一轮必须把这条通道排队的帧放出来");
-        assert_eq!(mine[0].1.len(), 1);
-        let d: protocol::channel::ChannelData = mine[0].1[0].payload().unwrap();
+        // 补信用（Hub 会发 `channel_credit`）。**补信用本身就会 flush**——
+        // `credit()` 的注释说了这是必须的（PTY 正是靠这一下才继续推）。所以
+        // 排队的帧从它的返回值里出来，不必等下一轮泵。
+        let mine = lock().credit("ch-acp", 5).expect("补信用");
+        assert_eq!(mine.len(), 1, "补信用必须把排队的帧放出来");
+        let d: protocol::channel::ChannelData = mine[0].payload().unwrap();
         assert_eq!(d.payload["n"], serde_json::json!(2));
         assert_eq!(backlog_of("ch-acp"), 0);
+        // 队列空了之后再泵一轮：没有帧可放，但通道不许被误关。
+        assert!(pumped_frames("ch-acp").is_empty(), "没东西可放就是空的");
         // 没有资源可 poll，通道仍然活着（外部源通道不因泵而关闭）
         assert_eq!(live_count(), 1);
     }
@@ -1107,7 +1341,8 @@ mod tests {
             "ch-acp",
             vec![serde_json::json!({ "n": 1 }), serde_json::json!({ "n": 2 })],
         );
-        assert_eq!(backlog_of("ch-acp"), 1);
+        // `push_external` 只入队（放行归 `pump`），所以两条都还在队列里。
+        assert_eq!(backlog_of("ch-acp"), 2, "入队 2 条，一条都没放行");
 
         let frames = open_external("ch-acp");
         assert_eq!(frames.len(), 1, "重开只回一条 ready");
@@ -1357,6 +1592,7 @@ mod tests {
                     backlog: VecDeque::new(),
                     backlog_bytes: 0,
                     sent: 0,
+                    inbound: VecDeque::new(),
                 },
             );
         }

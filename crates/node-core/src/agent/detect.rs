@@ -50,6 +50,19 @@ pub struct AgentSpec {
     pub bin: &'static str,
     /// 问版本的参数。
     pub version_args: &'static [&'static str],
+    /// 让这个 agent **进入 ACP 模式**的参数。
+    ///
+    /// # 为什么必须有这一项
+    ///
+    /// 实测：`opencode` 不带子命令直接跑是一个普通 CLI，它读 argv 而不是读
+    /// stdin 上的 JSON-RPC。于是 `initialize` 发出去**永远等不到响应**，
+    /// 症状是「点开对话就卡住」——而不是任何一条能读的错误。带 `acp` 才是
+    /// ACP 服务。
+    ///
+    /// 它**不由 Hub 配置下发**（`agent_config.args` 是用户追加的参数）：
+    /// 「怎么进 ACP 模式」是这个 agent 自己的 CLI 契约，与「怎么问版本」同一
+    /// 性质。让用户去配它，等于要求用户读我们没写的文档。
+    pub acp_args: &'static [&'static str],
 }
 
 /// 内置的 agent 清单。
@@ -61,6 +74,7 @@ pub const KNOWN_AGENTS: &[AgentSpec] = &[AgentSpec {
     name: "opencode",
     bin: "opencode",
     version_args: &["--version"],
+    acp_args: &["acp"],
 }];
 
 /// 探测一个 agent 的结果。
@@ -280,6 +294,7 @@ mod tests {
         name: "fake",
         bin: "fake",
         version_args: &["--version"],
+        acp_args: &["acp"],
     };
 
     #[test]

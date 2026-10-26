@@ -14,8 +14,10 @@
 
 pub mod acp;
 pub mod cache;
+pub mod conversation;
 pub mod detect;
 
 pub use acp::{AcpClient, AcpError, Event as AcpEvent, ACP_PROTOCOL_VERSION};
+pub use conversation::{ConversationSpec, Conversations};
 pub use cache::{AgentReport, Detected, Snapshot};
 pub use detect::{detect_all, detect_one, AgentSpec, Probe, DEFAULT_PROBE_TIMEOUT};

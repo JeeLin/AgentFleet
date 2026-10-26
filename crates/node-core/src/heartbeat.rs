@@ -169,14 +169,16 @@ mod tests {
                 version: Some("2.1.4".into()),
                 available: true,
                 error: None,
-            },
+            path: None,
+        },
             crate::agent::AgentReport {
                 id: "broken".into(),
                 name: "broken".into(),
                 version: None,
                 available: false,
                 error: Some("退出码 3".into()),
-            },
+            path: None,
+        },
         ]);
         let list = with["agents"].as_array().expect("agents 是数组");
         assert_eq!(list.len(), 2, "探到几个就报几个");
@@ -202,14 +204,16 @@ mod tests {
                 version: Some("2.1.4".into()),
                 available: true,
                 error: None,
-            },
+            path: None,
+        },
             crate::agent::AgentReport {
                 id: "nocreds".into(),
                 name: "nocreds".into(),
                 version: Some("1.0.0".into()),
                 available: false,
                 error: Some("缺凭据".into()),
-            },
+            path: None,
+        },
         ];
         let caps = capabilities_with_agents(&source);
         let decoded: Vec<crate::agent::AgentReport> = caps["agents"]

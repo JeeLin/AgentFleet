@@ -79,6 +79,12 @@ pub struct Worker {
     /// 心跳节奏取决于本机装了什么 agent）。刷新在 `run_with` 里做，不在
     /// `select!` 的阻塞路径上。
     detected: crate::agent::Detected,
+    /// 本连接的 ACP 对话会话表。
+    ///
+    /// **`Arc` 是因为 `session(&self)` 是不可变借用**，而读事件的 task 要持有
+    /// 客户端的克隆。表本身放在 `Mutex` 里（`Conversations` 内部）而不是放
+    /// worker 上，是为了让「哪条会话在跑」在 `select!` 的每一臂里都查得到。
+    conversations: std::sync::Arc<crate::agent::Conversations>,
 }
 
 /// 主动泵一轮的周期。
@@ -100,6 +106,7 @@ impl Worker {
             hub_url,
             log: Box::new(log),
             detected: crate::agent::Detected::new(),
+            conversations: std::sync::Arc::new(crate::agent::Conversations::new()),
         }
     }
 
@@ -350,6 +357,10 @@ impl Worker {
         let mut ticker = tokio::time::interval(heartbeat_interval);
         ticker.tick().await; // 第一个 tick 由上面那次立即发送承担
         let mut pump = tokio::time::interval(PUMP_INTERVAL);
+        // 入站消息的轮询周期。**比 `pump` 慢一个量级**：它只承载「用户点了
+        // 发送」这种人手速率的动作，30 ms 一轮等于每秒 33 次空查一张表。
+        // 100 ms 在人的感知里仍然是「点了就发」。
+        let mut inbound = tokio::time::interval(Duration::from_millis(100));
         loop {
             tokio::select! {
                 // coverage: excluded — 心跳 tick 臂：需让 ticker 在 session 内触发而
@@ -378,6 +389,18 @@ impl Worker {
                         self.pump_channel(est, &channel_id, &frames).await; // coverage: excluded (racy) — select! 竞争臂，见上。
                     }
                 }
+                // 对话通道的**入站**消息（用户点了发送）。
+                //
+                // 与 `pump` 是相反方向、也必须独立成一条臂：`pump` 只处理
+                // connector 通道的出站，而对话通道的入站消息要交给 ACP
+                // 子进程的 stdin。放在 `pump` 臂里会让「用户发言」依赖于
+                // 「有没有 connector 通道在产出」。
+                //
+                // 本臂同样是一条**竞争臂**（理由同 :347）：llvm-cov 下进不进
+                // 取决于 Tokio 的随机轮询，按确定性行做双向核对会随机红。
+                _ = inbound.tick() => {
+                    self.drain_inbound(est).await; // coverage: excluded (racy) — select! 竞争臂，见上。
+                }
                 incoming = est.next_text() => match incoming {
                     Err(ConnOutcome::Transport { detail }) => return SessionEnd::Transport(detail),
                     // `next_text` 只产出 Transport；这条归类是诚实的降级，
@@ -399,6 +422,48 @@ impl Worker {
                         }
                     },
                 },
+            }
+        }
+    }
+
+    /// 把对话通道里的入站消息取出来，交给 ACP。
+    ///
+    /// # 入站消息的形状（对外契约）
+    ///
+    /// `channel_data.payload` 是 `{ "text": "..." }`。**只认 `text`**：
+    /// 别的一律忽略，而不是当成 prompt 的全部内容——把一个不认识的形状
+    /// 送进 agent，等于让它去解读一段我们没打算说出口的话。
+    ///
+    /// 没有 `text` 的消息**丢弃并留痕**：静默丢弃会让页面看着像「发出去了
+    /// 但没反应」，而那是最难查的一种故障。
+    async fn drain_inbound(&self, est: &mut Established) {
+        for channel_id in channel::external_ids() {
+            for payload in channel::take_inbound(&channel_id) {
+                let Some(text) = payload.get("text").and_then(serde_json::Value::as_str) else {
+                    self.say(&format!(
+                        "dropped an inbound message on {channel_id}: no text field"
+                    ));
+                    continue;
+                };
+                if text.trim().is_empty() {
+                    // 空消息不进 agent：它会被当成一轮空输入，而那一轮的
+                    // `stopReason` 会让页面画出一条没有任何内容的消息。
+                    continue;
+                }
+                if let Err(e) = self.conversations.prompt(&channel_id, text).await {
+                    // 会话没了（通道还在但进程已退）：说出口，并把通道关掉
+                    // ——留着一条永远不会回话的通道，页面会一直等。
+                    self.say(&format!("prompt failed on {channel_id}: {e}"));
+                    for out in channel::fail_external(&channel_id, &e) {
+                        if let Err(e) = est.send(&out).await {
+                            self.say(&format!(
+                                "channel frame send failed ({}): {}",
+                                out.msg_type,
+                                outcome_phrase(&e)
+                            ));
+                        }
+                    }
+                }
             }
         }
     }
@@ -475,6 +540,14 @@ impl Worker {
                 frame.msg_type
             ))),
             channel::Action::Send(frames) => {
+                // **`close_channel` 要连 ACP 子进程一起收掉**：通道关了而进程
+                // 还活着，就是一台设备上一个没人能看见、也没人能管的 agent。
+                // 这与「断连不杀进程」不矛盾——断连是意外，关通道是用户的意图。
+                if frame.msg_type == protocol::message::types::CLOSE_CHANNEL {
+                    if let Ok(spec) = frame.payload::<protocol::channel::CloseChannel>() {
+                        self.conversations.close(&spec.channel_id).await;
+                    }
+                }
                 for out in &frames {
                     if let Err(e) = est.send(out).await {
                         // 通道帧回不回得出去**不**当成断连理由：Hub 判离站靠的是
@@ -488,7 +561,59 @@ impl Worker {
                 }
                 None
             }
+            channel::Action::OpenAcp {
+                frames,
+                channel_id,
+                spec,
+            } => {
+                // **`channel_ready` 先发**：Hub 在等它，5 s 超时。起子进程可能
+                // 慢（agent 启动 + `session/new`），先发 ready 才不会让一个慢
+                // agent 被 Hub 判成「不支持对话」。
+                for out in &frames {
+                    if let Err(e) = est.send(out).await {
+                        self.say(&format!(
+                            "channel frame send failed ({}): {}",
+                            out.msg_type,
+                            outcome_phrase(&e)
+                        ));
+                    }
+                }
+                // 默认可执行文件来自扫描缓存（**不探测**：这条路径在 `select!`
+                // 的读臂上，探测会起子进程并最多等 2s）。
+                let default_command = self.detected_command(&spec.agent_id);
+                if let Err(reason) = self
+                    .conversations
+                    .open(spec, default_command.as_deref())
+                    .await
+                {
+                    self.say(&format!("acp open failed ({channel_id}): {reason}"));
+                    // 通道已经开着但起不来：关掉并把理由回给 Hub。不回的话
+                    // 页面永远显示「正在回复」。
+                    for out in channel::fail_external(&channel_id, &reason) {
+                        if let Err(e) = est.send(&out).await {
+                            self.say(&format!(
+                                "channel frame send failed ({}): {}",
+                                out.msg_type,
+                                outcome_phrase(&e)
+                            ));
+                        }
+                    }
+                }
+                None
+            }
         }
+    }
+
+    /// 扫描缓存里某个 agent 的可执行文件名（`None` = 没扫到或不可用）。
+    ///
+    /// **读缓存不探测**：调用点在 `select!` 的读臂上，探测会起子进程并最多
+    /// 等 2s，那会让「用户点开一条对话」把心跳推迟到超时。
+    fn detected_command(&self, agent_id: &str) -> Option<String> {
+        let snap = self.detected.snapshot();
+        snap.agents
+            .iter()
+            .find(|a| a.id == agent_id && a.available)
+            .and_then(|a| a.path.clone())
     }
 
     /// 发一份心跳。

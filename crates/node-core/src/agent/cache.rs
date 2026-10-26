@@ -43,6 +43,15 @@ pub struct AgentReport {
     pub available: bool,
     /// 探测失败的原因（`failed` 时才有），给人看的一句话。
     pub error: Option<String>,
+    /// 探测到的可执行文件路径（装过才有，含探测失败的情形）。
+    ///
+    /// 保留它有明确用途：**下次能直接执行它**（`PROBE::Ready` 的注释就是这么
+    /// 说的，而 `PATH` 里可能有两份，探测到的那份才算数）。开一条 ACP 对话时
+    /// `agent_config.command` 为空串就用它。
+    ///
+    /// 早先这一列在 `report_of` 里被丢掉，于是「配了空命令」根本无从回落到
+    /// 探测到的那个可执行文件。
+    pub path: Option<String>,
 }
 
 impl AgentReport {
@@ -85,6 +94,8 @@ impl AgentReport {
                 version: None,
                 available: false,
                 error: None,
+                // 旧的纯字符串形态只给了个名字，没有路径可说。
+                path: None,
             });
         }
         let o = v.as_object()?;
@@ -107,6 +118,10 @@ impl AgentReport {
                 .get("error")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
+            // **路径不过网**：`to_json` 不写它，所以这里也读不到。
+            // 它是设备本地事实（哪一份可执行文件），Hub 不执行它、也不该
+            // 在库里存设备上的绝对路径。
+            path: None,
             id,
         })
     }
@@ -157,20 +172,24 @@ fn report_of(spec: &AgentSpec, probe: &Probe) -> AgentReport {
             version: None,
             available: false,
             error: None,
+            path: None,
         },
-        Probe::Ready { version, .. } => AgentReport {
+        Probe::Ready { version, path } => AgentReport {
             id: spec.id.to_string(),
             name: spec.name.to_string(),
             version: Some(version.clone()),
             available: true,
             error: None,
+            path: Some(path.to_string_lossy().into_owned()),
         },
-        Probe::Failed { reason, .. } => AgentReport {
+        Probe::Failed { reason, path } => AgentReport {
             id: spec.id.to_string(),
             name: spec.name.to_string(),
             version: None,
             available: false,
             error: Some(reason.clone()),
+            // 探测失败也留着路径：用户据此能自己去跑一下看看到底怎么了。
+            path: Some(path.to_string_lossy().into_owned()),
         },
     }
 }
@@ -307,6 +326,7 @@ mod tests {
             version: Some("2.1.4".into()),
             available: true,
             error: None,
+            path: None,
         };
         let back = AgentReport::from_json(&a.to_json()).expect("解回来");
         assert_eq!(back, a);
@@ -320,6 +340,7 @@ mod tests {
             version: None,
             available: false,
             error: None,
+            path: None,
         };
         let j = a.to_json();
         assert!(j["version"].is_null(), "没探到版本就是 null，不填 unknown");
