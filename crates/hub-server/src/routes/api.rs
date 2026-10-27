@@ -63,6 +63,30 @@ pub enum DeviceStatus {
     Offline,
 }
 
+impl DeviceStatus {
+    /// 这台设备现在能不能接一个**新会话**。
+    ///
+    /// 接 `Online | Reconnecting`：`Reconnecting` 是 Hub 到设备的 WS 断了
+    /// （`hub_core::Presence::Reconnecting`），不是设备进程死了——它的心跳还在
+    /// 45 秒窗口里（`hub_core::OFFLINE_AFTER`），而工作区路径是 Hub 侧校验的。
+    /// 所以放行的后果只是「会话行落库、等设备重连回来再打开」，而不是一次
+    /// 静默失败。
+    ///
+    /// 更要紧的是**页面已经这么承诺了**：`api.ts::canCreateSession` 是
+    /// `status !== 'offline'`，`NewSessionPage.vue` 的正文里写着「「重连中」仍可
+    /// 建会话」。用户被告知「能建」，点下去却拿到 409 `device_offline`，两句
+    /// 自相矛盾的话会同时出现在屏幕上。
+    ///
+    /// 只收这两态、**不收 `Offline`**：心跳超时 = 没有可信证据说设备还活着，
+    /// 409 才能让页面显示「这台设备现在连不上」。
+    ///
+    /// 写成函数而不是内联 `matches!`：这条判据就是与页面契约对齐的那一处，
+    /// 只应有一个定义点。
+    fn accepts_new_session(self) -> bool {
+        matches!(self, Self::Online | Self::Reconnecting)
+    }
+}
+
 /// `GET /api/devices` 的一项（设计规范 §6.1）。
 ///
 /// **字段名逐字取自 §6.1 的 mock**：页面 mock 形状就是将来 API 的形状。
@@ -461,8 +485,12 @@ pub async fn list_sessions(
 /// 1. `agent_id` 必填——没有就 400。见下面那段「为什么必填」。
 /// 2. 校验工作区路径（绝对或 `~` 开头）。**越界路径在此就拒**，
 ///    不给「先建会话、打开面板时报错」留余地（设计规范 §7.4 要求越界可见）。
-/// 3. 设备在线否——离线建会话回 **409 并带设备状态**，让页面能显示
+/// 3. 设备是否**能接新会话**——只有 `offline` 回 **409 并带设备状态**，让页面能显示
 ///    「这台设备现在连不上」而不是一个没有主语的成功。
+///    **`reconnecting` 放行**（`DeviceStatus::accepts_new_session`）：那是 Hub 到设备的
+///    WS 断了，不是设备死了——心跳还在 45 秒窗口里，工作区路径是 Hub 侧校验的，
+///    而页面（`api.ts::canCreateSession`）本来就把「重连中」算作可用、`NewSessionPage.vue`
+///    的正文也这么对用户说。用户被告知能建，Hub 就必须真能建。
 /// 4. `SessionRepo::create` 在**一个事务**里 upsert 工作区 + 插会话行
 ///    （工作区是主实体，多个会话引用同一行；见 M1 §5c）。
 pub async fn create_session(
@@ -506,7 +534,7 @@ pub async fn create_session(
     };
 
     let status = device_summary(&state, &device).status;
-    if !matches!(status, DeviceStatus::Online) {
+    if !status.accepts_new_session() {
         return Err(ApiError::conflict_with(
             err::OFFLINE,
             || json!({"status": status}),

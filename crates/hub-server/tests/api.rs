@@ -555,6 +555,69 @@ async fn two_sessions_can_share_one_workspace() {
     );
 }
 
+/// 「重连中」的设备**能**建会话（201），且建出来的会话带一个可用 agent。
+///
+/// 这条钉的是前后端的一句共同承诺：`api.ts::canCreateSession` 是
+/// `status !== 'offline'`，`NewSessionPage.vue` 的正文写着「「重连中」仍可建
+/// 会话」。若 Hub 只认 `online`，用户读到的「能建」与点下去拿到的
+/// 409 `device_offline` 会前后脚出现在同一块屏幕上。
+///
+/// 造 `reconnecting` 的办法与前一条 `_is_reconnecting` 用例相同：**drop 掉
+/// 那条真连接**——注册表里不再有它，而心跳上报还新鲜（45s 内）。这不是
+/// 伪造状态，`presence()` 真的会给出 `Reconnecting`。
+#[tokio::test]
+async fn creating_a_session_on_a_reconnecting_device_succeeds() {
+    let hub = common::Hub::boot().await;
+    let (node_id, keepalive) = enrolled_device_reporting(
+        &hub,
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+    )
+    .await;
+    // 先确认造出来的确实是 `reconnecting`，否则「201」可能只是碰巧走了在线路径。
+    assert!(
+        hub.state.connections().get(&node_id).is_some(),
+        "前提：连接此时还在"
+    );
+    drop(keepalive);
+    common::wait_until(Duration::from_secs(2), || {
+        hub.state.connections().get(&node_id).is_none()
+    })
+    .await;
+
+    let h = Harness::from_hub(hub).await;
+    // 状态确实是 `reconnecting`——同一个 `device_summary` 派生出来的那两个值，
+    // 页面读到的与门禁用的是同一份判据。
+    let row = h
+        .get("/api/devices")
+        .await
+        .json()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == json!(node_id))
+        .cloned()
+        .expect("设备行在");
+    assert_eq!(row["status"], json!("reconnecting"), "{row}");
+
+    let r = h
+        .create_session(json!({
+            "node_id": node_id,
+            "path": "~/src/app",
+            "agent_id": "opencode",
+        }))
+        .await;
+    assert_eq!(
+        r.status,
+        StatusCode::CREATED,
+        "重连中的设备必须能建会话（页面就是这么承诺的），body: {}",
+        r.body
+    );
+    let v = r.json();
+    assert_eq!(v["agent_id"], json!("opencode"), "会话要带一个可用的 agent");
+    assert_eq!(v["state"], json!("running"));
+    assert_eq!(v["workspace"]["node_id"], json!(node_id));
+}
+
 /// 设备离线 → 409，且**带上设备状态**（页面要显示「为什么不行」）。
 #[tokio::test]
 async fn creating_a_session_on_an_offline_device_is_a_conflict_with_the_status() {
