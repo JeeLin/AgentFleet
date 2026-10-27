@@ -62,6 +62,44 @@ describe('DevicesPage：渲染', () => {
   })
 })
 
+/**
+ * 身份锚在列表与详情里必须是**同一个值、同一段文字**。
+ *
+ * 这台设备的身份是 `node_id`（`api.ts`：「永不变」），不是 `key_fingerprint`
+ * ——后者是 Hub 打码的（前 3 + `***` + 后 3），拿它跟 `afcli` 输出对不上。
+ * 两处各显示一个的话，用户复制的那一串有一半场合是错的标识。
+ */
+describe('DevicesPage：身份锚在列表与详情里一致', () => {
+  it('两处显示的都是 node_id，指纹只作凭证信息', async () => {
+    stubFetch({
+      '/api/devices': {
+        body: [device({ id: 'n_7f3a9c', name: 'mbp.local', key_fingerprint: '9f3***21b' })],
+      },
+    })
+    const w = mountIn(DevicesPage)
+    await flush(w)
+
+    const row = w.element.querySelector<HTMLElement>('tbody [data-row]')
+    const idCell = row?.querySelector<HTMLElement>('.af-dev-id')
+    expect(idCell?.textContent?.trim()).toBe('n_7f3a9c')
+    // 指纹不在列表里当身份显示，但悬停仍能读到（凭证问题要看它）
+    expect(idCell?.textContent).not.toContain('9f3***21b')
+    expect(idCell?.getAttribute('title')).toContain('9f3***21b')
+
+    row?.focus()
+    row?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await w.vm.$nextTick()
+
+    const inspect = w.element.querySelector<HTMLElement>('.af-inspect')
+    const kv = Array.from(inspect?.querySelectorAll<HTMLElement>('.af-kv__v') ?? []).map((v) =>
+      v.textContent?.trim(),
+    )
+    // 第一项就是 node_id 那一格，与列表里画的是同一个值
+    expect(kv[0]).toBe('n_7f3a9c')
+    expect(kv[1]).toBe('9f3***21b')
+  })
+})
+
 describe('DevicesPage：空态', () => {
   it('一台设备都没有时给出接入命令与 + M3 的差别', async () => {
     stubFetch({ '/api/devices': { body: [] } })

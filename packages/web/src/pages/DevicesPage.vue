@@ -226,9 +226,9 @@ async function remove(device: DeviceSummary): Promise<void> {
           </div>
           <div class="af-kv">
             <span class="af-kv__k">node_id</span>
-            <span class="af-kv__v af-fp af-selectable">{{ inspected.id }}</span>
+            <span class="af-kv__v af-fp af-selectable" title="设备身份锚：与列表里那一行显示的是同一个值">{{ inspected.id }}</span>
             <span class="af-kv__k">密钥指纹</span>
-            <span class="af-kv__v af-fp">{{ inspected.key_fingerprint }}</span>
+            <span class="af-kv__v af-fp" title="Hub 打码后的凭证指纹（前 3 + *** + 后 3）：凭证问题看它，身份看 node_id">{{ inspected.key_fingerprint }}</span>
             <span class="af-kv__k">afcli</span>
             <span class="af-kv__v">{{ inspected.node_version || '未上报' }}</span>
             <span class="af-kv__k">最近心跳</span>

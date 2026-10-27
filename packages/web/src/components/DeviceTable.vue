@@ -13,6 +13,14 @@
    ── 离线行为什么仍可选中 ──────────────────────────────────────────
    `data-inert` 是**降亮但不禁用**（§3.7）：离线设备的 `node_id` 仍然要被
    复制出来排障。真正被禁用的只有「用它开会话」，且按钮旁边写清为什么。
+
+   ── 身份锚是 node_id，不是指纹 ────────────────────────────────────
+   这一行画的身份锚**必须与详情块第一行是同一个值**（`DevicesPage.vue` 的
+   `af-inspect`）。以前这里画的是 `key_fingerprint`、`title` 却是 `d.id`：
+   悬停与眼睛看到的是两个标识，用户拿其中一个去对 `afcli` 输出或报障时
+   有一半对不上。设备的身份是 `node_id`（`api.ts`：「永不变」），而指纹是
+   Hub 打码的（前 3 + `***` + 后 3）。指纹不丢，搬到 `title` 里——它是
+   凭证问题要看的那串，不是身份。
    =========================================================================== */
 
 import { onBeforeUnmount, onMounted, ref } from 'vue'
@@ -86,6 +94,14 @@ function onRowFocus(id: string): void {
   selectedId.value = id
 }
 
+/**
+ * 这一行的身份锚。**与详情块第一行同一个值**（`DevicesPage.vue` 的 `af-inspect`）。
+ * 理由见文件头「身份锚是 node_id，不是指纹」。
+ */
+function anchor(device: DeviceSummary): string {
+  return device.id
+}
+
 function offlineReason(device: DeviceSummary): string {
   return device.status === 'offline'
     ? '设备已判离线：心跳超过 45 秒没到，Hub 连不上它，会话建不起来。等它重新上线。'
@@ -130,7 +146,11 @@ function offlineReason(device: DeviceSummary): string {
           <td><StateBadge :state="d.status" :derived="d.derived" /></td>
           <td class="af-dev-name">
             <span class="af-truncate af-dev-name__name">{{ d.name }}</span>
-            <span class="af-fp af-t-mute af-dev-id" :title="d.id">{{ d.key_fingerprint }}</span>
+            <span
+              class="af-fp af-t-mute af-dev-id"
+              :title="`密钥指纹：${d.key_fingerprint}`"
+              >{{ anchor(d) }}</span
+            >
           </td>
           <td class="af-t-mute">{{ d.platform || '—' }}</td>
           <td data-num class="af-t-mute">{{ d.node_version || '—' }}</td>
@@ -213,8 +233,8 @@ function offlineReason(device: DeviceSummary): string {
 /* 表格外框 `.af-tablewrap` 在 `styles/components.css` §8：两张表共用同一个框，
    各存一份就是两份逐字相同的副本。
 
-   竖向居中而不是基线对齐：两个 span 不同字号（名字 13px / 指纹 10px），
-   baseline 对齐时基线与视觉中心不重合，指纹会偏离格子中心。 */
+   竖向居中而不是基线对齐：两个 span 不同字号（名字 13px / node_id 10px），
+   baseline 对齐时基线与视觉中心不重合，node_id 会偏离格子中心。 */
 .af-dev-name {
   display: flex;
   align-items: center;
