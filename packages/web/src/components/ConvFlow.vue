@@ -207,6 +207,41 @@ const chatBlocked = computed(() => {
 const canChat = computed(() => chatBlocked.value === '')
 
 /**
+ * 发送按钮**为什么**被禁用。空串 = 现在能按。
+ *
+ * 与 `:disabled` 分开绑：一个 `disabled` 属性只说得清「不能按」，说不出是
+ * 「还没打字」还是「这个会话没有 agent」——而这两条的出路完全不同（打一行字
+ * vs 回去补选 agent），页面该给的解释也必须是用户真撞上的那一条。判据顺序
+ * 即优先级：先看会话与设备这两个「不会再变回来」的事实，再看用户自己能改的
+ * （打字 / 换目标）。
+ *
+ * **它不等于 `canSubmit`**：后者是发送路的门禁（`submit()` 用它），不含
+ * 「目标是 chat 而 chat 不可用」这一条——那一条只决定按钮长什么样，因为
+ * `submit()` 内部会各自再判一次。
+ */
+const runBlocked = computed(() => {
+  if (props.ended) return 'ended'
+  if (props.deviceGone) return 'device-removed'
+  if (draft.value.trim().length === 0) return 'empty'
+  if (target.value === 'chat' && !canChat.value) return 'no-agent'
+  return ''
+})
+
+/** 禁用原因的一句话，挂在按钮的 `title` 上——灰着的按钮不说话就是个谜。 */
+const runBlockedWhy = computed(
+  () =>
+    ({
+      ended: '这个会话已结束：不会再建立通道',
+      'device-removed': props.deviceGoneWhy
+        ? `${props.deviceGoneWhy}：发不出消息`
+        : '所属设备已被删除：发不出消息',
+      empty: target.value === 'chat' ? '先写一句话' : '先写一条命令',
+      'no-agent': '这个会话没有选 agent，不能对话',
+      '': '',
+    })[runBlocked.value],
+)
+
+/**
  * 输入区为什么不可用（整段一句，写在提示行里）。两个事实两句话，
  * 顺序与页面两条横幅一致：先说会话自己的状态，再说设备。
  */
@@ -640,6 +675,8 @@ watch(
           class="af-btn af-btn--primary"
           type="submit"
           :disabled="!canSubmit || (target === 'chat' && !canChat)"
+          :data-blocked-by="runBlocked || undefined"
+          :title="runBlockedWhy || undefined"
           data-conv-run
         >
           {{ target === 'chat' ? '发送' : '执行' }}
@@ -744,8 +781,14 @@ watch(
   color: var(--af-fg-tertiary);
 }
 
-/* 阶段横幅。与 AgentCatalog 的同名块同一套语言（§3.11 的「为什么空」）：
-   警告色左边线 + 徽标 + 说明，不跟随滚动，也不是 toast。 */
+/* 阶段横幅。视觉语言与 AgentCatalog 的同名块同源（§3.11 的「为什么空」：
+   警告色左边线 + 徽标 + 说明，不跟随滚动，也不是 toast），**形状是另一回事**，
+   所以这两份各自留在本地、不搬进 `styles/components.css`：
+     目录那份是一张**独立卡片**——四边描边 + 圆角 + `margin-bottom`，正文 md；
+     对话这份是**贴在流上的一条**——只有 `border-bottom`（与滚动区接壤的那一边
+     才需要分界），无圆角无外边距，正文 xs。
+   提到全局按「逐字重复」合并会把其中一个渲染成错的：要真收敛得先定
+   `--af-*` 变体（见 `src/styles/components.test.ts` 那条用例）。 */
 .af-stage-note {
   display: flex;
   align-items: flex-start;

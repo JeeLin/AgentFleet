@@ -487,6 +487,32 @@ describe('ConvFlow：轨迹入口', () => {
 // 输入区不许横向溢出：面板坞打开时对话列只有约 412px，容不下「一行排开」
 // ---------------------------------------------------------------------------
 
+describe('ConvFlow：阶段横幅与 AgentCatalog 的同名块形状不同（不许按「逐字重复」合并）', () => {
+  /** 剥掉注释：注释里写着属性名与值，不剥掉的话删光声明断言照样绿。 */
+  function ruleOf(file: string, selector: string): string {
+    const src = readRepoFile(file).replace(/\/\*[\s\S]*?\*\//g, '')
+    const body = cssRuleOf(src, selector)
+    expect(body, `${file} 的 ${selector} 规则必须存在`).toBeTruthy()
+    return body
+  }
+
+  const CATALOG = 'packages/web/src/components/AgentCatalog.vue'
+  const FLOW = 'packages/web/src/components/ConvFlow.vue'
+
+  it('对话这份是贴在流上的一条：只画 border-bottom，不是四边描边', () => {
+    const here = ruleOf(FLOW, '.af-stage-note')
+    expect(here).toMatch(/border-bottom/)
+    // 四边描边 + 圆角是「独立卡片」那一档的形状，这份不能沾
+    expect(here).not.toMatch(/border-radius/)
+    expect(ruleOf(CATALOG, '.af-stage-note')).toMatch(/border-radius/)
+  })
+
+  it('两处正文不是同一档字号，所以不能合成一条规则', () => {
+    expect(ruleOf(FLOW, '.af-stage-note__body')).toMatch(/--af-text-xs/)
+    expect(ruleOf(CATALOG, '.af-stage-note__body')).toMatch(/--af-text-md/)
+  })
+})
+
 describe('ConvFlow：输入区的行能在窄列里收缩', () => {
   const CSS = readRepoFile('packages/web/src/styles/components.css')
 
@@ -516,5 +542,58 @@ describe('ConvFlow：位置信息重复一次', () => {
     const hint = w.element.querySelector('.af-compose__hint')
     expect(hint?.textContent).toContain('mbp.local')
     expect(hint?.textContent).toContain('/srv/alpha')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 发送按钮：灰着的原因要在 DOM 上分得开
+// ---------------------------------------------------------------------------
+
+describe('ConvFlow：发送按钮的禁用原因分得开（不合成一个 disabled）', () => {
+  /** 按钮为什么被禁用。没有原因时按钮可点，属性不出现。 */
+  function blockedBy(w: ReturnType<typeof mount>): string | undefined {
+    return w.find<HTMLButtonElement>('[data-conv-run]').attributes('data-blocked-by')
+  }
+
+  /**
+   * 每种原因都要能单独被断言：一个 `disabled` 属性只说得清「不能按」，
+   * 而「还没打字」与「没有 agent」的出路完全不同。
+   */
+  it('没打字是 empty（用户自己能改的那一条）', async () => {
+    const w = mount({ agentId: 'opencode' })
+    expect(blockedBy(w)).toBe('empty')
+    await type(w, 'ls')
+    // 打完字就不该再是 empty：这条与下面 no-agent 的区分正是本组要钉的
+    expect(blockedBy(w)).toBeUndefined()
+  })
+
+  it('没有 agent 是 no-agent，与「没打字」不是同一个原因', async () => {
+    const w = mount()
+    expect(blockedBy(w)).toBe('empty')
+    await type(w, 'ls')
+    // 关键：字打了，按钮仍然灰着——但原因是 no-agent 而不是 empty
+    expect(w.find<HTMLButtonElement>('[data-conv-run]').element.disabled).toBe(true)
+    expect(blockedBy(w)).toBe('no-agent')
+  })
+
+  it('会话已结束是 ended，设备已删除是 device-removed（两者不可互换）', async () => {
+    const endedW = mount({ ended: true, agentId: 'opencode' })
+    await type(endedW, 'ls')
+    expect(blockedBy(endedW)).toBe('ended')
+
+    const goneW = mount({ deviceGone: true, deviceGoneWhy: '设备 n_9 已被删除', agentId: 'opencode' })
+    await type(goneW, 'ls')
+    expect(blockedBy(goneW)).toBe('device-removed')
+  })
+
+  /** disabled 只说「不能按」，灰着的按钮不说话就是个谜——原因要挂 title 上。 */
+  it('每种原因都有一句自己的 title（灰着的按钮不说话就是个谜）', async () => {
+    const w = mount({ agentId: 'opencode' })
+    const title = () => w.find<HTMLButtonElement>('[data-conv-run]').attributes('title')
+    expect(title()).toContain('先写一句话')
+
+    await type(w, 'ls')
+    // 能按的时候不挂 title：一个可点的按钮不需要解释自己为什么能点
+    expect(title()).toBeUndefined()
   })
 })

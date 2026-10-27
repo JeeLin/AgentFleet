@@ -133,6 +133,11 @@ defineExpose({ load })
 </template>
 
 <style scoped>
+/* 阶段横幅。**刻意不搬进 `styles/components.css`**：`ConvFlow.vue` 有一份同名
+   块，但那是贴在对话流上的一条（只画 `border-bottom`、正文 xs），这份是页面
+   里的一张独立卡片（四边描边 + 圆角 + `margin-bottom`、正文 md）。两份只有
+   «语言» 同源（警告色左边线 + 徽标），形状不是一回事——按「逐字重复」合并会
+   让其中一个变错。判据钉在 `src/styles/components.test.ts`。 */
 .af-stage-note {
   display: flex;
   align-items: flex-start;
