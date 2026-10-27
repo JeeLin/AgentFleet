@@ -43,6 +43,20 @@
 //! **子进程不随连接死**（`acp.rs` 模块注释的第 3 条硬约束）：断连后重连要
 //! 能续上，而硬杀一个正在跑工具的 agent 会留下半途的副作用。所以这里只由
 //! 两条路收掉进程：`close_channel`（用户关了对话）与设备进程退出。
+//!
+//! # 但「不随连接死」不等于「没有上界」
+//!
+//! `channel::on_disconnect()` 清空通道表之后，Hub 再也不会为那些通道发
+//! `CLOSE_CHANNEL`（它是断的），而 `close` 的唯一生产调用点就在那个分支上。
+//! 重连 N 次就攒 N 份「子进程还在跑、却再也叫不动」的会话。所以断连只做两件
+//! 事，**一件都不杀进程**：把每条会话标成 `orphaned`（`worker::run_established`
+//! 在 `on_disconnect()` 之后调 [`Conversations::mark_orphaned`]），以及给表一个
+//! 上界 [`LIVE_CAP`]——插到超过就**淘汰最旧的孤儿**并真正关掉它，挂在本连接上
+//! 的一条都不动（踢掉用户正在聊的对话比多留一个子进程更坏）。
+//!
+//! 标成孤儿**不等于**弃用：它照样能 `prompt`，重连后 Hub 拿同一个 `channel_id`
+//! 发 `open_channel` 时也能 `session/load` 回到同一个 ACP 会话（那是另一次
+//! `open()`，不是这张表的命中）。丢掉的是**可达性**，不是**上下文**。
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -136,6 +150,13 @@ const BATCH_INTERVAL: Duration = Duration::from_millis(60);
 #[derive(Debug, Default)]
 pub struct Conversations {
     live: Mutex<BTreeMap<String, LiveConversation>>,
+    /// 「它是第几条命」的单调来源，只用于淘汰时排序（见 `LiveConversation::epoch`）。
+    ///
+    /// 不用 `HashMap` 的迭代顺序、也不用 `BTreeMap` 的键序：两者都**不是**
+    /// 「谁先来」。键序是用户/协议给的 id 的字典序，淘汰它等于按字母杀掉会话。
+    epochs: AtomicI64,
+    /// 上界。见 `LIVE_CAP`。
+    cap: usize,
 }
 
 #[derive(Debug)]
@@ -149,6 +170,14 @@ struct LiveConversation {
     /// 与读循环共享的序号发生器。`prompt` 的那条 `turn_end` 也从这里取号，
     /// 否则两条并发路径会撞号（见 [`Seq`] 的注释）。
     seq: Seq,
+    /// 插入顺序。淘汰挑**最旧的孤儿**，所以需要一个「谁先来」的事实，
+    /// 而表本身的迭代顺序不能提供它。
+    epoch: i64,
+    /// 开它的那条连接已经没了（见模块注释「但「不随连接死」不等于「没有上界」」）。
+    ///
+    /// 这**不是**「已弃用」：它照样能 `prompt`、照样能被重连后的同一
+    /// `channel_id` 命中。它只影响一件事——淘汰时优先挑它。
+    orphaned: bool,
 }
 
 impl Conversations {
@@ -163,11 +192,18 @@ impl Conversations {
     ///
     /// `default_command` 是扫描到的那个可执行文件（`agent_config.command`
     /// 为空串时用它）。拿不到就是 `None`，此时只有用户配了命令才起得来。
+    ///
+    /// # 上界在这里执行
+    ///
+    /// 插入之后表若超过 [`LIVE_CAP`]，**最旧的孤儿**会被摘掉并真正关掉
+    /// （abort 读 task + 收子进程，见 [`LiveConversation::close`]）。淘汰只挑
+    /// 孤儿——挂在本连接上的会话一条都不动，理由见 [`supernumerary`]。
     pub async fn open(
         &self,
         spec: ConversationSpec,
         default_command: Option<&str>,
     ) -> Result<(), String> {
+        let epoch = self.epochs.fetch_add(1, Ordering::Relaxed) + 1;
         let program = resolve_command(&spec.command, default_command).ok_or_else(|| {
             format!(
                 "agent {} is not installed and no command is configured",
@@ -222,15 +258,50 @@ impl Conversations {
         let seq = Seq::new(spec.last_seq);
         let reader = tokio::spawn(read_events(spec.channel_id.clone(), client, seq.clone()));
 
-        self.live.lock().await.insert(
-            spec.channel_id,
-            LiveConversation {
-                client: sender,
-                session_id,
-                reader,
-                seq,
-            },
-        );
+        // epoch 在**起进程之前**取（函数开头）：`open()` 里有三次 await，
+        // 后开的那条完全可能先回来，取在插入时的话「最旧的孤儿」就变成了
+        // 「起得最快的孤儿」——淘汰挑错人，而顺序上没人看得出来。
+        let (evicted, closing) = {
+            let mut live = self.live.lock().await;
+            live.insert(
+                spec.channel_id,
+                LiveConversation {
+                    client: sender,
+                    session_id,
+                    reader,
+                    seq,
+                    epoch,
+                    // 刚开的这条挂在**当前**连接上，不是孤儿。
+                    orphaned: false,
+                },
+            );
+            let victims = supernumerary(&live, self.cap);
+            // **先摘表再关**：关是 async 的，而锁不该跨 await 持有。摘表之后
+            // 那条会话已经不可达，`prompt()` 会如实报「没有活会话」，而不是
+            // 把一句话写进一个正在被关掉的 stdin。
+            let mut closing = Vec::with_capacity(victims.len());
+            for id in &victims {
+                if let Some(conv) = live.remove(id) {
+                    closing.push(conv);
+                }
+            }
+            (victims, closing)
+        };
+        if !evicted.is_empty() {
+            // 留痕：被关掉的是用户的对话，事后要查得出「淘汰了哪几条」。
+            // 写 stderr 而不是 `say`（worker 的日志），因为本模块不持有 logger。
+            eprintln!(
+                "acp: live conversations over the cap of {}, reaped {} orphan(s): {}",
+                self.cap,
+                closing.len(),
+                evicted.join(", ")
+            );
+        }
+        // 关在锁外、**在 `open` 返回之前**：退出的 `open()` 必须交出一条真的
+        // 收掉了的子进程，否则「超了上界就收一个」只是记账。
+        for conv in closing {
+            conv.close().await;
+        }
         Ok(())
     }
 
@@ -294,19 +365,23 @@ impl Conversations {
     pub async fn close(&self, channel_id: &str) {
         let removed = self.live.lock().await.remove(channel_id);
         if let Some(conv) = removed {
-            // 先 abort 读 task：它持有 `recv` 的接收端，而 `shutdown` 会关
-            // stdin —— 顺序反了会出现「读 task 还在等一条永远不会来的事件」。
-            conv.reader.abort();
-            conv.client.shutdown().await;
+            conv.close().await;
         }
     }
 
-    /// 关掉**全部**对话。设备进程退出 / 连接结束时用（连接结束**不**调它，
-    /// 见模块注释「子进程不随连接死」）。
+    /// 关掉**全部**对话。设备进程要退出时用（连接结束**不**调它，见模块注释
+    /// 「会话的生死」）。
+    ///
+    /// 生产调用点：`worker::connect_loop` 里 `run_established` 返回 `Err`（记账失败、
+    /// 进程要按 CRASH 退出）——那时留着子进程就成了没人回收的孤儿。断连**不走
+    /// 这里**，走 [`Conversations::mark_orphaned`]。
     pub async fn close_all(&self) {
-        let ids: Vec<String> = self.live.lock().await.keys().cloned().collect();
-        for id in ids {
-            self.close(&id).await;
+        let removed: Vec<LiveConversation> = {
+            let mut live = self.live.lock().await;
+            std::mem::take(&mut *live).into_values().collect()
+        };
+        for conv in removed {
+            conv.close().await;
         }
     }
 
@@ -318,6 +393,97 @@ impl Conversations {
     pub async fn is_empty(&self) -> bool {
         self.live.lock().await.is_empty()
     }
+
+    /// 连接没了：把表里每条会话标成孤儿，**返回这次新标了几条**。
+    ///
+    /// # 为什么是标记而不是 `close_all`
+    ///
+    /// 见模块注释「会话的生死」：杀进程会毁掉重连要续上的上下文，且一个正在
+    /// 跑工具的 agent 被杀会留下半途的副作用。标记只让淘汰知道「这条没人管
+    /// 了」，会话本身仍然可用（还能 `prompt`）。
+    ///
+    /// 幂等：再调一次返回 0。
+    ///
+    /// **调用方必须在 `channel::on_disconnect()` 之后调它**：那个函数清的是
+    /// 通道表，清完这张表里的每条会话才真的不可达。
+    pub fn mark_orphaned(&self) -> usize {
+        let Ok(mut live) = self.live.try_lock() else {
+            // 试锁失败说明有别的臂正持着表。这个调用点在**同步**的断连收尾里
+            // （`run_established` 末尾），等异步锁会把整条连接收尾挂住，所以这里
+            // 宁可这一轮不标——下一次断连还会标，而漏标一轮的后果只是「它在淘汰
+            // 时排不上孤儿」，不会消失。
+            return 0;
+        };
+        let mut n = 0;
+        for conv in live.values_mut() {
+            if !conv.orphaned {
+                conv.orphaned = true;
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// 上界可调的构造。**只给测试用**：生产用 [`Conversations::new`]（上界
+    /// [`LIVE_CAP`]），否则测淘汰就得真起 9 个子进程。
+    #[cfg(test)]
+    fn with_cap(cap: usize) -> Self {
+        Self {
+            cap,
+            ..Self::default()
+        }
+    }
+}
+
+/// `live` 的上界。**必须有**：断连不清表（见模块注释「那张表谁管、上界在哪」），
+/// 每重连一次就多一份「子进程还在跑、却再也没有调用方」的会话，没有上界就是
+/// 无界增长。
+///
+/// 8 是「一台设备上一个用户可能同时摊开的对话数」的量级：超过它就不该是
+/// 正常使用，而是孤儿在攒。淘汰只挑孤儿，所以真正被关掉的就是那些。
+pub const LIVE_CAP: usize = 8;
+
+impl LiveConversation {
+    /// 收掉一条会话：先停读 task，再关子进程。
+    ///
+    /// 顺序不能反：读 task 持有 `recv` 的接收端，而 `shutdown` 会关 stdin——
+    /// 反了会出现「读 task 还在等一条永远不会来的事件」。
+    async fn close(self) {
+        self.reader.abort();
+        self.client.shutdown().await;
+    }
+}
+
+/// 表里超过 `cap` 的那部分该淘汰谁——**只挑孤儿，且先挑最旧的**。
+///
+/// 摘出来单独一个函数，是因为「挑谁」是要被钉住的规则，而它混在 `open()`
+/// 的异步锁里时只能靠端到端用例间接观察。
+///
+/// # 一条挂着的会话都不淘汰是会超界的，这里是故意的
+///
+/// 表里如果全是**当前连接上**的会话（没有孤儿可挑），结果为空，表就停在
+/// `cap + 1`。这不是漏掉了上界，而是两条约束撞在一起时的选择：踢掉一条
+/// 用户正在用的对话，比多留一个子进程更坏。无界增长来自**重连**，而每次
+/// 重连都会先 [`Conversations::mark_orphaned`]，所以「全是挂着的」只可能
+/// 在同一条连接上放超过 `cap` 个对话时出现——用户手速，不是泄漏。
+///
+/// 返回值按淘汰顺序排好（最旧的孤儿在前），调用方照抄即可。
+fn supernumerary(live: &BTreeMap<String, LiveConversation>, cap: usize) -> Vec<String> {
+    let over = live.len().saturating_sub(cap);
+    if over == 0 {
+        return Vec::new();
+    }
+    let mut orphans: Vec<(&String, i64)> = live
+        .iter()
+        .filter(|(_, c)| c.orphaned)
+        .map(|(id, c)| (id, c.epoch))
+        .collect();
+    orphans.sort_by_key(|&(_, epoch)| epoch);
+    orphans
+        .into_iter()
+        .take(over)
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 /// 把 `agent_config.command` 为空串时的回落与 `cwd` 的展开说清楚。
@@ -841,6 +1007,8 @@ for line in sys.stdin:
     with open(LOG, "a") as f:
         f.write(method + "\n")
     if method == "initialize":
+        # 带 `loadSession`：不带的话 `load_session` 会先拒绝，于是「续上原会话」
+        # 这条判据根本走不到（重连续话正是本组测试要钉的东西）。
         send({{"jsonrpc": "2.0", "id": mid, "result": {{"protocolVersion": 1,
               "agentCapabilities": {{"loadSession": True}}}}}})
     elif method == "session/new":
@@ -1132,5 +1300,254 @@ for line in sys.stdin:
             !methods.contains(&"session/new".to_string()),
             "load 失败**不许**悄悄回落成新建（那会静默丢上下文），实际: {methods:?}"
         );
+    }
+
+    // ---- 会话表的上界与「断连留下的是孤儿，不是垃圾」 ----
+
+    /// 等一条会话的 `session_id` 变成 `want`（`open()` 是 async 的，`mark_orphaned`
+    /// 只读表、不改它，所以这里只是把「表里已经插进去了」变成可轮询的事实）。
+    async fn wait_for_session_id(convs: &Conversations, ch: &str, want: &str) -> String {
+        for _ in 0..200 {
+            let got = {
+                let live = convs.live.lock().await;
+                live.get(ch).map(|c| c.session_id.clone())
+            };
+            if let Some(got) = got {
+                assert_eq!(got, want, "{ch} 接上的应该是 {want}");
+                return got;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("{ch} 一直没出现在会话表里");
+    }
+
+    /// 把**指定的**几条标成孤儿（其余保持「挂在本连接上」）。
+    ///
+    /// 用它而不是整表的 `mark_orphaned`，是因为淘汰偏好要验的是「挂着与孤儿
+    /// 混在一张表里时挑谁」——整表标记只能造出「全是孤儿」这一种局面，那样
+    /// 「只挑孤儿」这个过滤器就验不到了（去掉它照样全绿）。
+    async fn mark_only(convs: &Conversations, ids: &[&str]) {
+        let mut live = convs.live.lock().await;
+        for id in ids {
+            if let Some(c) = live.get_mut(*id) {
+                c.orphaned = true;
+            } else {
+                panic!("{id} 不在会话表里");
+            }
+        }
+    }
+
+    /// 表里现在有哪几条（按键序，便于断言）——淘汰是**不存在**的证据，
+    /// 只能靠「表里没有它」来看。
+    async fn ids_of(convs: &Conversations) -> Vec<String> {
+        let live = convs.live.lock().await;
+        live.keys().cloned().collect()
+    }
+
+    /// **上界是硬的：开超过 cap 条，表就停在 cap。**
+    ///
+    /// 挡的是「重连 N 次攒 N 份」：断连不清表（子进程要留给续话），而
+    /// `channel::on_disconnect()` 之后 Hub 再也不会发 `CLOSE_CHANNEL`，
+    /// 于是没有上界的话，每重连一次就多一批「子进程还在跑、谁也再叫不动」的会话。
+    ///
+    /// 反向验证：把 `open()` 里的 `supernumerary(...)` 换成 `Vec::new()`（= 不淘汰），
+    /// 这条会红在 `len()` 上。
+    #[tokio::test]
+    // guard 跨 `await` 存活是本用例要的语义：互斥必须覆盖整个用例体。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    async fn the_live_table_never_grows_past_its_cap() {
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+        let d = tempfile::tempdir().expect("tmp");
+        let (bin, _log) = recording_agent(d.path());
+        let convs = Conversations::with_cap(2);
+
+        for i in 0..5 {
+            let ch = format!("ch_cap_{i}");
+            let _ = channel::open_external(&ch);
+            convs
+                .open(spec_for(&ch, &bin, None), None)
+                .await
+                .expect("假 agent 必须能起来");
+            // 每开一条就断一次：这才是生产中攒孤儿的形态，也是淘汰唯一会动手的
+            // 情形（挂着的会话一律不淘汰，见 `supernumerary`）。
+            convs.mark_orphaned();
+        }
+
+        assert_eq!(
+            convs.len().await,
+            2,
+            "开了 5 条、上界 2：表必须停在 2，否则重连 N 次就是 N 倍的子进程"
+        );
+        convs.close_all().await;
+        assert!(convs.is_empty().await);
+    }
+
+    /// **淘汰只挑孤儿，且不碰挂在本连接上的会话。**
+    ///
+    /// 挡的是「为了压住上界把用户正在聊的会话打死」：那比多留一个子进程坏得多。
+    ///
+    /// 三个断言各钉一件事，且都放在**会打破它的那一步**之后：
+    /// 1. 挂着的那条不许被淘汰（它是最旧的，只按「最旧」挑的实现会先挑它）；
+    /// 2. 有孤儿可挑时，挑的是最旧的那个孤儿；
+    /// 3. 孤儿全没了、只剩挂着的那些时，宁可超界也不踢它们。
+    ///
+    /// 反向验证：把 `supernumerary` 的 `filter(|(_, c)| c.orphaned)` 去掉（= 也
+    /// 把挂着的算进候选），断言 1 与 3 会红。
+    #[tokio::test]
+    async fn eviction_prefers_orphans_and_never_evicts_an_attached_conversation() {
+        let d = tempfile::tempdir().expect("tmp");
+        let (bin, _log) = recording_agent(d.path());
+
+        // --- 断言 1：表里全是挂在本连接上的会话时，宁可超界也不淘汰 ---
+        // cap=1，插两条挂着的 → 超界 1，但一个都不许踢。
+        let attached_only = Conversations::with_cap(1);
+        attached_only
+            .open(spec_for("ch_attached", &bin, None), None)
+            .await
+            .expect("假 agent 必须能起来");
+        attached_only
+            .open(spec_for("ch_attached_2", &bin, None), None)
+            .await
+            .expect("假 agent 必须能起来");
+        let ids = ids_of(&attached_only).await;
+        assert!(
+            ids.contains(&"ch_attached".to_string()) && ids.contains(&"ch_attached_2".to_string()),
+            "全是挂着的时候宁可超界也不许淘汰（淘汰等于在用户聊到一半时打死它），实际表里: {ids:?}"
+        );
+        attached_only.close_all().await;
+
+        // --- 断言 2：有孤儿可挑时，动的是孤儿，不是挂着的 ---
+        // `ch_attached` 最旧且挂着，`ch_orphan` 晚来但已被标成孤儿。只按「最旧」
+        // 挑的实现会先踢 `ch_attached`。
+        let convs = Conversations::with_cap(1);
+        convs
+            .open(spec_for("ch_attached", &bin, None), None)
+            .await
+            .expect("假 agent 必须能起来");
+        convs
+            .open(spec_for("ch_orphan", &bin, None), None)
+            .await
+            .expect("假 agent 必须能起来");
+        mark_only(&convs, &["ch_orphan"]).await;
+        // 再插一条 → 表到 3、cap=1，超 2 条，但孤儿只有 1 个。
+        convs
+            .open(spec_for("ch_attached_2", &bin, None), None)
+            .await
+            .expect("假 agent 必须能起来");
+        let ids = ids_of(&convs).await;
+        assert!(
+            ids.contains(&"ch_attached".to_string()) && ids.contains(&"ch_attached_2".to_string()),
+            "挂在本连接上的会话**绝不能**被淘汰（它比淘汰孤儿更坏），实际表里: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"ch_orphan".to_string()),
+            "有孤儿可挑时淘汰的必须是孤儿，实际表里: {ids:?}"
+        );
+        convs.close_all().await;
+
+        // --- 断言 3：多个孤儿时挑最旧的那个 ---
+        let convs = Conversations::with_cap(2);
+        convs
+            .open(spec_for("ch_keep", &bin, None), None)
+            .await
+            .expect("假 agent 必须能起来");
+        convs
+            .open(spec_for("ch_orphan_old", &bin, None), None)
+            .await
+            .expect("假 agent 必须能起来");
+        convs
+            .open(spec_for("ch_orphan_new", &bin, None), None)
+            .await
+            .expect("假 agent 必须能起来");
+        mark_only(&convs, &["ch_orphan_old", "ch_orphan_new"]).await;
+        // 再插一条挂着的新会话：表到 4、cap=2，超 2 → 淘汰两个最旧的孤儿。
+        convs
+            .open(spec_for("ch_new", &bin, None), None)
+            .await
+            .expect("假 agent 必须能起来");
+        let ids = ids_of(&convs).await;
+        assert!(
+            !ids.contains(&"ch_orphan_old".to_string())
+                && !ids.contains(&"ch_orphan_new".to_string()),
+            "超 2 条就要淘汰两个孤儿，实际表里: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"ch_keep".to_string()),
+            "挂着的不许被淘汰，实际表里: {ids:?}"
+        );
+        assert_eq!(convs.len().await, 2);
+        convs.close_all().await;
+    }
+
+    /// **断连是标记，不是清表**：被标记的会话仍然能接上原 ACP 会话（续话）。
+    ///
+    /// 挡的正是「看起来最省事」的那个改法——把 `close_all` 挂到断连上：它会把
+    /// 子进程连同上下文一起扔掉，重连后用户看到一条空的对话，而这件事在页面上
+    /// 不报错（新会话也能回话），于是没人发现。
+    ///
+    /// 反向验证：把 `mark_orphaned` 改成 `self.close_all().await` 那种清表实现
+    /// （或让 `open` 在插入前先清表），下面第一句 `len()` 就红。
+    #[tokio::test]
+    // guard 跨 `await` 存活是本用例要的语义：互斥必须覆盖整个用例体。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    async fn a_conversation_outlives_a_disconnect_so_it_can_be_resumed() {
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+        let d = tempfile::tempdir().expect("tmp");
+        let (bin, log) = recording_agent(d.path());
+        // cap 大得离谱：这条要证明的是「标记不清表」，与淘汰无关。
+        let convs = Conversations::with_cap(64);
+
+        let _ = channel::open_external("ch_resume");
+        convs
+            .open(spec_for("ch_resume", &bin, Some("ses_keep_me")), None)
+            .await
+            .expect("假 agent 必须能起来");
+        // 断连：通道表清了，会话表只被标记。
+        channel::on_disconnect();
+        assert_eq!(
+            convs.mark_orphaned(),
+            1,
+            "断连要把这条会话标成孤儿（淘汰挑它、日志里数它）"
+        );
+
+        assert_eq!(
+            convs.len().await,
+            1,
+            "断连之后会话必须还在表里：它不是垃圾，它是用户那条对话的上下文"
+        );
+
+        // 真正要守住的东西：**原 ACP 会话还在**。再开一次（重连后 Hub 用同一个
+        // channel_id 回来）时走的是 load，而不是一条空的新会话。
+        let _ = channel::open_external("ch_resume");
+        let n_before = methods_in(&log).len();
+        convs
+            .open(spec_for("ch_resume", &bin, Some("ses_keep_me")), None)
+            .await
+            .expect("重连后必须还能接上原来的会话");
+        let methods_after = methods_in(&log);
+        assert!(
+            !methods_after[n_before..].contains(&"session/new".to_string()),
+            "重连后不许新建会话（那会丢掉上下文），实际新增: {:?}",
+            &methods_after[n_before..]
+        );
+
+        // `prompt()` 仍然找得到会话、且用的是原 session_id——「表里还在」没有
+        // 意义，能用才有意义。
+        let sid = wait_for_session_id(&convs, "ch_resume", "ses_keep_me").await;
+        assert_eq!(sid, "ses_keep_me");
+        convs
+            .prompt("ch_resume", "still there?")
+            .await
+            .expect("孤儿会话仍要能收消息（它没死，只是没人挂在上面）");
+        convs.close_all().await;
+        assert!(convs.is_empty().await);
     }
 }

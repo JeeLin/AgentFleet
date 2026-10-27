@@ -212,7 +212,12 @@ impl Worker {
                     setup_notice_shown = false;
                     match self.run_established(identity, est).await {
                         Ok(end) => end,
-                        Err(code) => return code,
+                        // 本进程要走了（CRASH）：它起的 ACP 子进程没人接手就是孤儿，
+                        // 收掉。断连不走这里——那时进程还在，会话要留给重连续上。
+                        Err(code) => {
+                            self.conversations.close_all().await;
+                            return code;
+                        }
                     }
                 }
                 Err(outcome) => {
@@ -308,7 +313,13 @@ impl Worker {
                 "released {released} channel(s) together with the connection"
             ));
         }
-        Ok(end)
+        // 通道表清了，这些对话再也不会收到 `CLOSE_CHANNEL`：标成孤儿供淘汰挑，
+        // **不杀进程**——重连要能续上（见 `conversation` 模块注释「会话的生死」）。
+        let orphaned = self.conversations.mark_orphaned();
+        if orphaned > 0 {
+            self.say(&format!("{orphaned} acp conversation(s) left orphaned"));
+        }
+        Ok(end) // 上面这段必须在 `on_disconnect()` 之后：清表之后它们才不可达
     }
 
     /// 会话结束之后的处置。
