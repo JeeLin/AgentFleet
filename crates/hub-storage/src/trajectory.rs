@@ -39,6 +39,20 @@ use crate::Db;
 /// chunk 流自己不会说它结束了。
 pub const TURN_END_KIND: &str = "turn_end";
 
+/// `duration_source` 的取值：**设备真的掐了表**（`duration_ms` 非 `NULL`）。
+///
+/// 常量而不是散在的字符串字面量：`none` 与 `measured` 是一对互斥的凭据，
+/// 写错一个字母的行在库里照样存得下（schema 的 `CHECK` 只认这两个词，拼错
+/// 会在**插入时**才炸，那时这一轮已经跑完了）。散写的字面量在 grep 里也找
+/// 不全——本模块此前 `measured` 零赋值点，正是因为只有一处注释提到它。
+pub const MEASURED: &str = "measured";
+
+/// `duration_source` 的取值：**没被计时**。此时 `duration_ms` 必须是 `NULL`。
+///
+/// 这条配对（`none` ⇒ `NULL`）由 `scripts/e2e-m2.sh` 的耗时列断言与
+/// [`NewEvent::new`] 的构造共同守住：本 crate 只写这两个值，不写第三种。
+pub const NONE: &str = "none";
+
 /// `trajectory_event` 的一行。
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrajectoryEvent {
@@ -52,10 +66,22 @@ pub struct TrajectoryEvent {
     pub kind: String,
     /// 原始 JSON（输入 + 输出），原样存。
     pub payload: String,
-    /// 耗时。**结构性无耗时时为 `None`**——实测 ACP 事件全都不带时间戳，
-    /// 拿「收到时刻」相邻差分得到的是**事件间隔**而不是**执行耗时**。
+    /// 耗时。**没被计时就必须是 `None`**。
+    ///
+    /// 「没被计时」有两种，都落 `None`，`duration_source` 才分得开：
+    /// - **结构性无耗时**：实测 ACP 事件全都不带时间戳，拿「收到时刻」相邻
+    ///   差分得到的是**事件间隔**而不是**执行耗时**。
+    /// - **没测到**：设备**有**计时（`session/prompt` 的往返），但这次没拿到
+    ///   凭据（超时 / 出错），于是没有可写的值。
+    ///
+    /// 两种都不许填 0：那会把「没有数」说成「0 毫秒」。
     pub duration_ms: Option<i64>,
-    /// `duration_ms` 的来源（`measured` / `none`），让审计看得懂这一列。
+    /// `duration_ms` 的来源，让审计看得懂这一列。
+    ///
+    /// - `measured`：**设备真的掐了表**（`session/prompt` 发出到响应回来）。
+    ///   `duration_ms` 此刻非 `NULL`，`0` 也是诚实的值（一条瞬间返回的命令）。
+    /// - `none`：没被计时。`duration_ms` **必须** 是 `NULL` —— 一条
+    ///   `duration_ms = 0, source = none` 的行是「一面说没测、一面给个数」。
     pub duration_source: String,
     pub tokens_in: Option<i64>,
     pub tokens_out: Option<i64>,
@@ -179,14 +205,17 @@ pub struct NewEvent {
 }
 
 impl NewEvent {
-    /// 一条普通事件：无耗时（结构性无），计时来源标 `none`。
+    /// 一条普通事件：**没有计时**，来源标 [`NONE`]，`duration_ms` 为 `None`。
+    ///
+    /// 这条是「结构性无耗时」与「这次没测到」共同的落点：两者在库里都必须是
+    /// `none` + `NULL`，而区分它们的信息本来就不在这一行上。
     pub fn new(seq: i64, kind: impl Into<String>, payload: impl Into<String>) -> Self {
         Self {
             seq,
             kind: kind.into(),
             payload: payload.into(),
             duration_ms: None,
-            duration_source: "none".into(),
+            duration_source: NONE.into(),
             tokens_in: None,
             tokens_out: None,
             parent_event_id: None,
@@ -194,12 +223,51 @@ impl NewEvent {
     }
 
     /// 一轮的结束标记。`stop_reason` 原样存进 payload。
+    ///
+    /// **这一条不带计时**：`stopReason` 只说「这一轮怎么结束的」，没说花了多久。
+    /// 带计时的那一版看 [`Self::measured_turn_end`]。
     pub fn turn_end(seq: i64, stop_reason: &str) -> Self {
         Self::new(
             seq,
             TURN_END_KIND,
             serde_json::json!({ "stopReason": stop_reason }).to_string(),
         )
+    }
+
+    /// **设备掐过表的一轮的结束标记**：`duration_ms` 是 `session/prompt` 发出到
+    /// 响应回来的毫秒数，由设备侧测量后随 `turn_end` 帧送上来。
+    ///
+    /// # 为什么调用方传的是 `Option<i64>`，而不是一个 `i64`
+    ///
+    /// 「这一轮走完了」与「测到了它花了多久」不是同一件事：`stopReason` 是
+    /// prompt 响应里的字段，而耗时只有**设备还活着把两个数都拿齐**时才存在。
+    /// 拿不到（`None`）就退回 `none` —— 宁可少一列，也不许把「没测到」写成
+    /// `measured` + `0`（那句话的意思是「它是零毫秒跑完的」）。
+    ///
+    /// # 为什么它单独一个构造器，而不是让调用方自己填两个字段
+    ///
+    /// `measured` 的意思就是「设备真的掐了表」。让调用方自己填两个字段，等于
+    /// 让每一处各自决定「什么时候算是测过」，而那些决定会分叉——分叉的那一处
+    /// 写出的行，与旁边那些长得一模一样、意思却相反。所以「值 + 来源」必须在
+    /// 同一个函数体里成对产出：本模块此前 `measured` 零赋值点（全表恒 `none`）
+    /// 正是这种「谁都能填、于是没人填」的形状。
+    pub fn measured_turn_end(seq: i64, stop_reason: &str, duration_ms: Option<i64>) -> Self {
+        let Some(ms) = duration_ms.filter(|v| *v >= 0) else {
+            return Self::turn_end(seq, stop_reason);
+        };
+        Self {
+            seq,
+            kind: TURN_END_KIND.into(),
+            // `durationMs` 与列一起存：payload 是给页面画的原始 JSON，而列是
+            // 给审计查的。两处都写，是因为页面与审计读的不是同一处——只写列
+            // 的话页面拿不到它，只写 payload 的话审计得解析 JSON。
+            payload: serde_json::json!({ "stopReason": stop_reason, "durationMs": ms }).to_string(),
+            duration_ms: Some(ms),
+            duration_source: MEASURED.into(),
+            tokens_in: None,
+            tokens_out: None,
+            parent_event_id: None,
+        }
     }
 }
 
@@ -704,6 +772,79 @@ mod tests {
         assert_eq!(turns[0].end_seq, Some(2));
         assert_eq!(turns[1].end_seq, Some(4));
         assert_eq!(turns[2].end_seq, None, "第三轮还在跑或断了");
+    }
+
+    // ---- 耗时列的来源 ----
+
+    /// **`measured` 真的被写出来**：带计时的那一轮结束标记必须把毫秒数落进
+    /// `duration_ms` 那一列，而不是「这一列永远为 NULL」。
+    ///
+    /// 这条的存在理由就是那个缺陷本身：`measured` 此前在生产代码里**零赋值点**，
+    /// 于是 `duration_ms` 恒为 NULL。反向验证：把构造器里的 `MEASURED` 改回
+    /// `NONE`，这条会红在「来源该是 measured」。
+    #[test]
+    fn a_measured_turn_end_carries_its_duration_into_the_column() {
+        let (_d, t) = setup();
+        let e = NewEvent::measured_turn_end(4, "end_turn", Some(1_234));
+        assert_eq!(e.duration_source, MEASURED, "这一列决定审计能不能信它");
+        assert_eq!(e.duration_ms, Some(1_234), "毫秒数要进列，不只是进 payload");
+        assert!(t.append("s1", "n1", &e, TS).unwrap());
+
+        let rows = t.list("s1", 0, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, TURN_END_KIND);
+        assert_eq!(rows[0].duration_ms, Some(1_234), "读回来也得在");
+        assert_eq!(rows[0].duration_source, "measured");
+        // payload 里也有一份：页面拿的是 payload，审计查的是列，两处都要有。
+        let payload: serde_json::Value = serde_json::from_str(&rows[0].payload).unwrap();
+        assert_eq!(payload["stopReason"], serde_json::json!("end_turn"));
+        assert_eq!(payload["durationMs"], serde_json::json!(1_234));
+    }
+
+    /// **`0` 毫秒是诚实的值，不许被当成「没测」扔掉**。
+    ///
+    /// 反向验证：把 `filter(|v| *v >= 0)` 改成 `filter(|v| *v > 0)`，这条会红
+    /// 在「0 是 measured，不是 none」。
+    #[test]
+    fn a_zero_duration_is_measured_not_missing() {
+        let e = NewEvent::measured_turn_end(1, "end_turn", Some(0));
+        assert_eq!(
+            e.duration_source, MEASURED,
+            "0 毫秒是「它是瞬间回来的」，不是「没人掐表」"
+        );
+        assert_eq!(e.duration_ms, Some(0));
+    }
+
+    /// **没测到就退回 `none` + NULL**：`turn_end` 是「这一轮走完了」的凭据，它
+    /// 的存在不依赖耗时有没有测到——但不能为了看起来有数就填 0。
+    ///
+    /// 反向验证：把 `filter(|v| *v >= 0)` 删掉（`duration_ms` 直接 Some(d)），
+    /// 这条会红在「None 不该被写成 measured」。
+    #[test]
+    fn a_turn_end_without_a_measurement_stays_none_and_null() {
+        let e = NewEvent::measured_turn_end(1, "end_turn", None);
+        assert_eq!(e.duration_source, NONE, "没测到就是没测到");
+        assert_eq!(e.duration_ms, None, "不许填 0 冒充测过");
+        // payload 里也就不该多出一个 `durationMs`：那会让页面看见一个
+        // 「列上写没测、payload 里有数」的自相矛盾的事件。
+        let payload: serde_json::Value = serde_json::from_str(&e.payload).unwrap();
+        assert_eq!(payload["stopReason"], serde_json::json!("end_turn"));
+        assert!(payload.get("durationMs").is_none(), "{payload}");
+
+        // 负的毫秒数不是「测到了一段负的时间」，是上游算错了。
+        let neg = NewEvent::measured_turn_end(2, "end_turn", Some(-5));
+        assert_eq!(neg.duration_source, NONE, "负数不是测量值，是算错了");
+        assert_eq!(neg.duration_ms, None);
+    }
+
+    /// **普通事件始终是 `none` + NULL**：没人为它们掐表，不许因为新出现了一个
+    /// 带测量的构造器就顺手给它们带上 `measured`。
+    #[test]
+    fn an_ordinary_event_is_never_measured() {
+        let e = NewEvent::new(1, "agent_message_chunk", r#"{"n":1}"#);
+        assert_eq!(e.duration_source, NONE);
+        assert_eq!(e.duration_ms, None);
+        assert_eq!(NewEvent::turn_end(2, "end_turn").duration_source, NONE);
     }
 
     /// `turn_end` 的 payload 里要有 `stopReason` —— 那是「为什么结束」的唯一记录。

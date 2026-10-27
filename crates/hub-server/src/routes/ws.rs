@@ -1070,7 +1070,16 @@ fn persist_trajectory(state: &AppState, node_id: &str, channel_id: &str, payload
             .get("stopReason")
             .and_then(Value::as_str)
             .unwrap_or("");
-        let e = hub_storage::NewEvent::turn_end(seq, reason);
+        // **耗时取设备掐的那个表，不取「这一帧到达的时刻」**：拿到达时刻做
+        // 相邻差分，量到的是**帧间隔**（中间夹着设备侧的聚合窗口与网络往返），
+        // 与「这一轮跑了多久」是两件事。设备已经在 `session/prompt` 的发出与
+        // 响应之间掐过一次，那一趟才是这一轮的耗时。
+        //
+        // 设备没给（`durationMs` 缺失 / `null` / 负数）就是**没测到**，于是
+        // 退回 `none` + NULL——`measured` 的意思是「设备真的掐了表」，没有
+        // 那趟测量就不许写它。
+        let measured_ms = payload.get("durationMs").and_then(Value::as_i64);
+        let e = hub_storage::NewEvent::measured_turn_end(seq, reason, measured_ms);
         if let Err(err) = state.trajectory().append(&session_id, node_id, &e, &now) {
             tracing::error!(node_id = %node_id, channel_id = %channel_id, error = %err,
                 "cannot persist a turn_end");
@@ -1859,6 +1868,142 @@ mod tests {
         assert_eq!(rows[0].kind, "turn_end");
         assert_eq!(rows[0].seq, 7);
         assert!(rows[0].payload.contains("end_turn"), "{}", rows[0].payload);
+    }
+
+    /// **设备掐的表要落进 `duration_ms` 那一列，且来源标 `measured`**。
+    ///
+    /// 这条就是那个缺陷本身：`duration_source` 的 `measured` 此前在生产代码里
+    /// **零赋值点**，于是 `duration_ms` 恒为 NULL，「轨迹可回放」的耗时一列恒空。
+    /// 现在这一列由设备侧 `session/prompt` 的往返计时（经 `turn_end` 帧的
+    /// `durationMs`）接到这里。
+    ///
+    /// **反向验证（实跑过）**：把 `persist_trajectory` 里 `durationMs` 的读取
+    /// 删掉（或把 `NewEvent::measured_turn_end` 换回 `turn_end`），这条会红在
+    /// 「来源该是 measured」——绿的才是真的绿。
+    #[test]
+    fn the_device_measured_duration_reaches_the_duration_column() {
+        let (state, _dir) = stream_state();
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", true),
+        );
+
+        persist_trajectory(
+            &state,
+            "n_a",
+            "ch-1",
+            &serde_json::json!({
+                "type": "turn_end",
+                "stopReason": "end_turn",
+                "seq": 7,
+                "durationMs": 12_450,
+            }),
+        );
+
+        let rows = state.trajectory().list("s_1", 0, 100).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0].duration_source, "measured",
+            "设备给了测量值就必须标 measured：{rows:?}"
+        );
+        assert_eq!(
+            rows[0].duration_ms,
+            Some(12_450),
+            "毫秒数要原样进列，不能恒为 NULL：{rows:?}"
+        );
+    }
+
+    /// **`0` 毫秒也是一次测量**：一条瞬间回来的 prompt，它的耗时是 0 而不是
+    /// 「没测」。`measured` + `0` 是诚实的，`none` + `0` 才是谎话。
+    #[test]
+    fn a_zero_duration_from_the_device_is_stored_as_measured() {
+        let (state, _dir) = stream_state();
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", true),
+        );
+
+        persist_trajectory(
+            &state,
+            "n_a",
+            "ch-1",
+            &serde_json::json!({
+                "type": "turn_end", "stopReason": "end_turn", "seq": 1, "durationMs": 0,
+            }),
+        );
+
+        let rows = state.trajectory().list("s_1", 0, 100).unwrap();
+        assert_eq!(rows[0].duration_source, "measured", "{rows:?}");
+        assert_eq!(rows[0].duration_ms, Some(0), "{rows:?}");
+    }
+
+    /// **设备没给（缺键 / `null` / 负数）就退回 `none` + NULL**：不许为了让这一列
+    /// 看起来有内容就填 0——那是把「没测到」说成「0 毫秒跑完」。
+    #[test]
+    fn a_turn_end_without_a_duration_stays_none_and_null() {
+        let (state, _dir) = stream_state();
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", true),
+        );
+
+        for (n, duration) in [
+            (1, None),                          // 缺这个键
+            (2, Some(serde_json::json!(null))), // 显式 null
+            (3, Some(serde_json::json!(-1))),   // 算错了的负数
+        ] {
+            let mut payload = serde_json::json!({
+                "type": "turn_end", "stopReason": "end_turn", "seq": n,
+            });
+            if let Some(d) = duration {
+                payload
+                    .as_object_mut()
+                    .expect("刚构造的对象")
+                    .insert("durationMs".to_string(), d);
+            }
+            persist_trajectory(&state, "n_a", "ch-1", &payload);
+        }
+
+        let rows = state.trajectory().list("s_1", 0, 100).unwrap();
+        assert_eq!(rows.len(), 3, "三条都要落库：{rows:?}");
+        for r in &rows {
+            assert_eq!(r.duration_source, "none", "没测到不许标 measured：{r:?}");
+            assert_eq!(r.duration_ms, None, "没测到不许填 0：{r:?}");
+        }
+    }
+
+    /// **没有计时的事件类仍然是 `none`**：`measured` 只从设备真正掐过表的那一
+    /// 类事件（`turn_end`）来，不得因为新出现了一条 `measured` 的路就给 ACP
+    /// 的 chunk 顺手补一个「耗时」——那会是拿帧间隔冒充执行耗时。
+    #[test]
+    fn events_the_device_never_timed_are_still_none() {
+        let (state, _dir) = stream_state();
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", true),
+        );
+
+        // 设备就算往 batch 事件里塞了 `durationMs`，那也不是我们认的那趟测量：
+        // 计时只挂在 `turn_end` 上（`session/prompt` 的往返）。
+        persist_trajectory(
+            &state,
+            "n_a",
+            "ch-1",
+            &serde_json::json!({
+                "type": "batch",
+                "events": [
+                    {"seq": 1, "sessionUpdate": "agent_message_chunk", "durationMs": 999},
+                    {"seq": 2, "sessionUpdate": "usage_update"},
+                ],
+            }),
+        );
+
+        let rows = state.trajectory().list("s_1", 0, 100).unwrap();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        for r in &rows {
+            assert_eq!(r.duration_source, "none", "{r:?}");
+            assert_eq!(r.duration_ms, None, "{r:?}");
+        }
     }
 
     /// **没绑过的通道不写**：页面没开过的通道，无从知道它属于哪个会话。

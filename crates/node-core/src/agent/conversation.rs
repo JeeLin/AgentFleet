@@ -20,9 +20,13 @@
 //!
 //! ```json
 //! { "type": "batch",   "events": [ <ACP session/update 的 update 对象>, ... ] }
-//! { "type": "turn_end","stopReason": "end_turn" }
+//! { "type": "turn_end","stopReason": "end_turn", "durationMs": <毫秒数 | null> }
 //! { "type": "ready",   "sessionId": "ses_...", "agentId": "opencode" }
 //! ```
+//!
+//! `durationMs` 是**设备掐的表**（`session/prompt` 发出到响应回来）。它是轨迹
+//! 里「耗时」那一列唯一的真值来源——ACP 事件自身不带时间戳，而 Hub 拿相邻帧的
+//! 到达时刻做差分，量到的是**帧间隔**而不是**这一轮跑了多久**。
 //!
 //! **`events` 里每个元素都是 ACP 原样的 `update` 对象**，不解释、不裁剪：
 //! 新版本 agent 推的类型我们不认识，裁剪就是静默丢消息。类型判定在页面做。
@@ -326,6 +330,11 @@ impl Conversations {
         drop(live);
 
         tokio::spawn(async move {
+            // 表在这里起：它是**这一整轮**的耗时，而一轮的重活全落在
+            // `session/prompt` 的这一问一答上（chunk 流是它的产物）。
+            // 起点取在**发之前**而不是「响应回来之后倒推」：倒推得有一个
+            // 「开始时刻」，而那个时刻只有这里知道。
+            let started = Instant::now();
             match client.prompt(&session_id, &text).await {
                 Ok(result) => {
                     // **`turn_end` 的唯一来源**：`session/prompt` 的响应带
@@ -337,11 +346,7 @@ impl Conversations {
                     // 「这次没拿到凭据」。写一条假的 `turn_end` 会让页面把
                     // 一个还在跑的轮次画成已结束。
                     if let Some(reason) = AcpClient::stop_reason(&result) {
-                        let ev = json!({
-                            "type": "turn_end",
-                            "stopReason": reason,
-                            "seq": seq.next(),
-                        });
+                        let ev = turn_end_frame(&seq, reason, started);
                         let _ = channel::push_external(&ch, vec![ev]);
                     }
                 }
@@ -679,6 +684,33 @@ async fn read_events(channel_id: String, client: AcpClient, seq: Seq) {
     }
     // 循环退出时手里可能还有没发的事件（`recv` 返回 `None` 就是这么来的）。
     flush(&channel_id, &mut batch, &mut bytes);
+}
+
+/// 一帧带计时的 `turn_end`。**帧格式是对外契约**：Hub 侧
+/// `hub-server::routes::ws::persist_trajectory` 按 `type` 认它、按
+/// `durationMs` 取数，页面按 `stopReason` 切消息块。
+///
+/// # 为什么耗时在这里算，而不是交给 Hub 猜
+///
+/// Hub 只见到「这一帧到了」这一个时刻，而它要的是「这一轮跑了多久」。拿
+/// 相邻帧的到达时刻做差分，量出来的是**帧间隔**——中间夹着聚合窗口
+/// （[`BATCH_INTERVAL`]）与网络往返，与「模型跑了多久」是两件事。只有这里
+/// 同时拿着起点与终点。
+///
+/// # 为什么传 `Option`，而不是一个 `i64`
+///
+/// `Instant::elapsed()` 恒非负，**这一侧**不会给出 `None`。留 `Option` 是为了
+/// 让「毫秒数装不进 `i64`」这种退化有一个明确的出口：写 `u64::MAX` 会让审计
+/// 看见一条 5849 亿年的耗时，而写 `null` 的意思是「这一次没测到」。
+/// 一轮跑满 `i64::MAX` 毫秒（2.9 亿年）不可能发生，但这行代码不该依赖那个判断。
+fn turn_end_frame(seq: &Seq, stop_reason: &str, started: Instant) -> Value {
+    let elapsed = started.elapsed();
+    json!({
+        "type": "turn_end",
+        "stopReason": stop_reason,
+        "seq": seq.next(),
+        "durationMs": i64::try_from(elapsed.as_millis()).ok(),
+    })
 }
 
 /// 把攒着的一批发出去。通道没了就**丢掉**（已裁决「不承诺补齐」）。
@@ -1185,6 +1217,84 @@ for line in sys.stdin:
         );
 
         convs.close("ch_seq").await;
+    }
+
+    /// **一轮的耗时由设备掐表，随 `turn_end` 帧发出去。**
+    ///
+    /// 这是轨迹里「耗时」那一列唯一的真值来源：ACP 事件不带时间戳，而 Hub 拿
+    /// 相邻帧的到达时刻做差分，量到的是**帧间隔**而不是「这一轮跑了多久」。
+    /// 只有这里同时拿着 `session/prompt` 的发出与响应两个时刻。
+    ///
+    /// **反向验证（实跑过）**：把 `turn_end_frame` 里的 `"durationMs"` 那一对
+    /// 删掉，这条会红在「turn_end 必须带 durationMs」——「帧里有这个字段」与
+    /// 「Hub 侧读得到它」是两件事，两处各有一条测试钉着。
+    ///
+    /// 判据只要求**这个键存在且是个数**，不断言它 ≥ 某个值：假 agent 是秒回的，
+    /// 而给一个下界会让这条在快机器上红（把「快」判成「没测」）。
+    #[tokio::test]
+    // guard 跨 `await` 存活是本用例要的语义：互斥必须覆盖整个用例体。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    async fn a_turn_end_carries_the_duration_the_device_measured() {
+        // 通道表是进程级单例：不独占就有别的用例在中间 reset，`turn_end` 会被抢走
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+        let d = tempfile::tempdir().expect("tmp");
+        let (bin, _log) = recording_agent(d.path());
+        let convs = Conversations::default();
+
+        let _ = channel::open_external("ch_dur");
+        convs
+            .open(spec_for("ch_dur", &bin, None), None)
+            .await
+            .expect("假 agent 必须能起来");
+        convs
+            .prompt("ch_dur", "hi")
+            .await
+            .expect("prompt 必须发得出去");
+
+        // `prompt()` 是 `tokio::spawn` 出去的（见它的文档：不等回复），所以轮询。
+        let mut found = None;
+        for _ in 0..200 {
+            for (ch, frames) in channel::pump() {
+                if ch != "ch_dur" {
+                    continue;
+                }
+                for fr in frames {
+                    let Ok(data) = fr.payload::<protocol::channel::ChannelData>() else {
+                        continue;
+                    };
+                    if data.payload.get("type").and_then(Value::as_str) == Some("turn_end") {
+                        found = Some(data.payload.clone());
+                    }
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let payload = found.expect("本轮必须有一条 turn_end");
+        let ms = payload
+            .get("durationMs")
+            .expect("turn_end 必须带 durationMs");
+        assert!(
+            ms.is_number() || ms.is_null(),
+            "durationMs 要么是一个毫秒数、要么是 null（没测到），实际: {ms}"
+        );
+        assert!(
+            ms.as_i64().is_some_and(|v| v >= 0),
+            "测到了就必须是非负的毫秒数，实际: {ms}"
+        );
+        // `stopReason` 仍然在：耗时是**多带**的一个字段，不是把它换掉。
+        assert_eq!(
+            payload.get("stopReason").and_then(Value::as_str),
+            Some("end_turn")
+        );
+
+        convs.close("ch_dur").await;
     }
 
     /// **有 `acp_session_id` → 走 `session/load`，且不新建。**

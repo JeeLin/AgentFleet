@@ -785,6 +785,32 @@ if [ -n "$SID" ] && [ "$CONV_READY" -eq 1 ]; then
     else
       bad "$BAD_DUR 条事件的耗时列不合规（源与值矛盾）"
     fi
+    # ---- 上面那条不够，它是可以恒真的 ----
+    #
+    # `duration_source` 在生产代码里若永远都是 `none`，上面那条 `BAD_DUR` 判据
+    # 一行也筛不出来——这是实测发生过的事（缺陷登记：measured 零赋值点）。那时
+    # 这条 ✅ 说的是「没有任何一行写错」，而它想说的是「耗时那一列有用」。
+    # 所以这里补一条**必须有一个 subject 才成立**的断言：本段前面刚跑完一轮真
+    # 对话（断言 4 拿到了 `turn_end`），那一轮必然带一条设备掐过表的
+    # `turn_end`——没有它，就是计时这一段没接上。
+    #
+    # 判据看 `duration_ms` 是一个**数**（不是 null / 不是缺这个键）：本里程碑
+    # 对这一列的铁律是「不测就 null，不许填 0 冒充」，所以「有一个数」恰好是
+    # 「有人真的测了它」的证据。
+    MEASURED_N=$(printf '%s' "$LAST_BODY" | jq -r '
+      [.events[] | select(.duration_source == "measured" and (.duration_ms | type) == "number")] | length')
+    MEASURED_TOTAL=$(printf '%s' "$LAST_BODY" | jq -r '
+      [.events[] | select(.duration_source == "measured")] | length')
+    if [ "${MEASURED_N:-0}" -ge 1 ]; then
+      MS=$(printf '%s' "$LAST_BODY" | jq -r '
+        [.events[] | select(.duration_source == "measured") | .duration_ms] | min')
+      ok "耗时有 ${MEASURED_N} 条是设备测的（duration_source=measured，最小 ${MS} 毫秒）——不是「恒为空的一列」"
+    else
+      bad "轨迹里没有一条 measured：跑了完整一轮却没有 ${MEASURED_TOTAL:-0} 条带 duration_ms 的 measured 事件（设备侧的计时没接进来？）"
+      info "  各 kind 的 duration_source 分布：$(printf '%s' "$LAST_BODY" \
+        | jq -r '.events[] | "\(.kind)=\(.duration_source)/\(.duration_ms)"' 2>/dev/null | sort | uniq -c | tr '\n' ' ')"
+      dump "断言 5 measured"
+    fi
   else
     bad "读轨迹回 $HTTP_CODE：$LAST_BODY"
     dump "断言 5"
