@@ -124,7 +124,18 @@ export function deleteDevice(id: string, options?: RequestOptions): Promise<void
   return del(`/api/devices/${encodeURIComponent(id)}`, options)
 }
 
-/** `GET /api/sessions/{id}/trajectory` 的一项。是 `trajectory_event` 的一行。 */
+/**
+ * `GET /api/sessions/{id}/trajectory` 的一项。是 `trajectory_event` 的一行，
+ * 与 Hub 侧 `hub-server/src/routes/conversation.rs` 的 `EventOut` 逐字段同名。
+ *
+ * # 这是这个行形状的**唯一**声明处
+ *
+ * 组件要用就 `import type` 这一个，不要在组件里再写一份「同形」的接口：
+ * 抄出去的副本缺字段时编译器不会说话（少字段的接口照样接得住多字段的
+ * 对象），于是「后端给了、前端没有」这件事没有任何一处会红——轨迹抽屉
+ * 因此至今画不出 `duration_ms`。`api.test.ts` 把这份声明的字段集与后端
+ * `EventOut` 逐字段对齐，并数着全 src 里还有几处在自己声明这个形状。
+ */
 export interface TrajectoryEvent {
   id: number
   /** 设备侧编的序号。**重连后会从 1 重数**，所以只在一次进程生命周期内单调。 */
@@ -132,6 +143,13 @@ export interface TrajectoryEvent {
   kind: string
   /** **原始 JSON 字符串**：Hub 不解析成对象再序列化，页面自己解。 */
   payload: string
+  /**
+   * 耗时毫秒。**结构性无耗时时为 `null`**——ACP 事件全都不带时间戳，拿
+   * 「收到时刻」相邻差分得到的是事件间隔而不是执行耗时，填 0 是谎报。
+   */
+  duration_ms: number | null
+  /** `duration_ms` 的来源：`measured` / `none`。看这一列才知道上面那个数能不能信。 */
+  duration_source: string
   created_at: string
 }
 

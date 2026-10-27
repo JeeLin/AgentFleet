@@ -50,20 +50,11 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import EmptyState from '@/components/EmptyState.vue'
+import type { TrajectoryEvent } from '@/lib/api'
 import { pop, push, topContainer, trapTab } from '@/lib/focus'
 
 /** 一页取多少条。200 条纯文本行的 DOM 开销是可接受的（见模块注释）。 */
 const PAGE_SIZE = 200
-
-/** Hub 侧 `TrajectoryRepo` 读出的一行。与 `EventOut` 同形。 */
-export interface TrajEvent {
-  id: number
-  seq: number
-  kind: string
-  /** **原始 JSON 字符串**，不在 Hub 侧解析成对象再序列化。 */
-  payload: string
-  created_at: string
-}
 
 /**
  * 一段序号空洞：`[from, to)` 里的 seq 都不在库里。
@@ -93,7 +84,7 @@ const props = withDefaults(
     /** 会话工作区路径（锁定）。 */
     path: string
     /** 已取到的事件（按物理顺序）。 */
-    events?: TrajEvent[]
+    events?: TrajectoryEvent[]
     /** 序号断口。Hub 算好给过来。 */
     gaps?: TrajGap[]
     /** 最后一轮没有 `turn_end`：还在跑，或结尾丢了。 */
@@ -147,7 +138,7 @@ const EMPTY_TEXT =
  */
 type TrajRow =
   | { t: 'gap'; key: string; missing: number; after: number }
-  | { t: 'row'; key: string; ev: TrajEvent }
+  | { t: 'row'; key: string; ev: TrajectoryEvent }
 
 const rows = computed<TrajRow[]>(() => {
   const before = new Map<number, TrajGap>()
@@ -232,7 +223,7 @@ function onKeydown(e: KeyboardEvent): void {
  * **截断只影响显示，不影响数据**——详情在对话区里，这里只是「定位用」的一行。
  * 不截断的话一条 `rawOutput` 能把整屏占满。
  */
-function preview(ev: TrajEvent): string {
+function preview(ev: TrajectoryEvent): string {
   const p = ev.payload
   return p.length > 120 ? `${p.slice(0, 120)}…` : p
 }

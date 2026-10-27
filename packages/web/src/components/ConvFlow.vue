@@ -38,6 +38,7 @@
 import { computed, ref, watch } from 'vue'
 
 import EmptyState from '@/components/EmptyState.vue'
+import type { TrajectoryEvent } from '@/lib/api'
 
 /** 输入区的发送目标。`exec` 是一次性命令，`chat` 才是对话。 */
 export type ConvTarget = 'exec' | 'terminal' | 'chat'
@@ -121,7 +122,7 @@ const props = withDefaults(
      * 累积的对话事件。**按物理顺序**，与 `GET /api/sessions/{id}/trajectory`
      * 返回的 `events` 同形（每条带 `seq` / `kind` / `payload`）。
      */
-    events?: ConvEvent[]
+    events?: TrajectoryEvent[]
     /** 序号断口。Hub 算好给过来，前端不重算。 */
     gaps?: ConvGap[]
     /** 最后一轮没有 `turn_end`：还在跑，或结尾丢了。 */
@@ -140,15 +141,6 @@ const props = withDefaults(
     deviceGoneWhy: '这个会话所属的设备已被删除',
   },
 )
-
-/** Hub 侧 `trajectory_event` 一行的形状（见 `EventOut`）。 */
-export interface ConvEvent {
-  id: number
-  seq: number
-  kind: string
-  /** **原始 JSON 字符串**，这里是 ACP `update` 对象。 */
-  payload: string
-}
 
 const emit = defineEmits<{
   /** 跑一条一次性命令：交给 exec connector。 */
@@ -323,7 +315,7 @@ const hasRows = computed(() => rows.value.length > 0)
  * `payload` 是原始 JSON 字符串：**解开失败就退化成原文**，不整条丢掉。
  * 丢掉的表现是「agent 说了话，页面上什么都没有」，而那比一段看不懂的 JSON 糟。
  */
-function rowOf(ev: ConvEvent): ConvRow | null {
+function rowOf(ev: TrajectoryEvent): ConvRow | null {
   const p = parsePayload(ev.payload)
   switch (ev.kind) {
     case 'turn_end':
@@ -443,7 +435,7 @@ function toolDetail(p: Record<string, unknown> | null): string {
 }
 
 /** 未知类型的兜底文案：带上 `kind`，用户至少能报「哪种事件没在页面上」。 */
-function fallbackText(ev: ConvEvent, p: Record<string, unknown> | null): string {
+function fallbackText(ev: TrajectoryEvent, p: Record<string, unknown> | null): string {
   const head = `${ev.kind}`
   if (!p) return ev.payload
   return `${head} ${JSON.stringify(p)}`

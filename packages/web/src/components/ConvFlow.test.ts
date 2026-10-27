@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import ConvFlow, { type ConvExecRequest, type ConvEvent } from '@/components/ConvFlow.vue'
+import ConvFlow, { type ConvExecRequest } from '@/components/ConvFlow.vue'
+import type { TrajectoryEvent } from '@/lib/api'
 import { cssRuleOf, readRepoFile } from '@/test/css'
 import { mountIn } from '@/test/mount'
 
@@ -31,8 +32,8 @@ async function submit(w: ReturnType<typeof mount>) {
 }
 
 /** 造一条落库的事件（与 `GET /api/sessions/{id}/trajectory` 的 `events` 同形）。 */
-function event(id: number, seq: number, kind: string, payload: unknown): ConvEvent {
-  return { id, seq, kind, payload: JSON.stringify(payload) }
+function event(id: number, seq: number, kind: string, payload: unknown): TrajectoryEvent {
+  return { id, seq, kind, payload: JSON.stringify(payload), duration_ms: null, duration_source: 'none', created_at: 'unix:1' }
 }
 
 // ---------------------------------------------------------------------------
