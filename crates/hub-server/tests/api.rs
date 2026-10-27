@@ -1497,6 +1497,74 @@ async fn the_acp_session_id_from_the_ready_frame_comes_back_on_the_next_open() {
     let _ = node_id;
 }
 
+/// **开对话时把这条会话已落库的最大 `seq` 下发（`last_seq`）**，设备侧据此
+/// 续号，而不是从 1 重数。
+///
+/// # 这条钉的是「轨迹少一半」那个故障
+///
+/// `seq` 的契约是会话内只增（`TrajectoryRepo`：断裂处即丢失处），但计数器
+/// 活在 ACP 子进程里、**每个子进程从 1 重数**。关掉页面再打开、`session/load`
+/// 建新进程，都会让新事件带 `seq=1`，撞上库里已有的 `seq=1`，被
+/// `UNIQUE` + `INSERT OR IGNORE` 静默吞掉——实测让一条 `user_message_chunk`
+/// 整条消失，而 `gaps` 不报警（seq 仍然连续）。
+///
+/// 所以起点必须来自跨进程的真相源（`trajectory_event.MAX(seq)`），由 Hub 下发。
+#[tokio::test]
+async fn opening_a_conversation_sends_the_last_persisted_seq() {
+    let (h, node_id, session_id, mut est) = conversation_ready(
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        Some("opencode"),
+    )
+    .await;
+
+    // 库里已经有 1..3 三条事件（模拟「之前聊过、页面关了」）。
+    let repo = hub_storage::TrajectoryRepo::new(h.hub.state.pool().clone());
+    for seq in 1..=3 {
+        let e = hub_storage::NewEvent::new(
+            seq,
+            "agent_message_chunk",
+            json!({"content": {"type": "text", "text": "旧消息"}, "seq": seq}).to_string(),
+        );
+        repo.append(&session_id, &node_id, &e, "2026-10-27T00:00:00Z")
+            .expect("写轨迹");
+    }
+
+    let r = h.open_conversation(&session_id).await;
+    assert_eq!(r.status, StatusCode::CREATED, "body: {}", r.body);
+    let open = open_channel_on(&mut est).await;
+    let open: protocol::channel::OpenChannel = open.payload().expect("open_channel 载荷");
+    assert_eq!(
+        open.params["last_seq"],
+        json!(3),
+        "必须把已落库的最大 seq 下发，设备侧才能接着编；不发就会从 1 重数并撞号：{}",
+        open.params
+    );
+}
+
+/// **一条事件都没有的会话，`last_seq` 是 `0` 而不是 `null` 或缺失。**
+///
+/// `0` 让设备侧 `Seq::next()` 的第一条正好是 1（`fetch_add(1) + 1`）。下发
+/// `null` 会多出一个「没有起点」的分支，而那个分支与「从 1 开始」是同一件事。
+#[tokio::test]
+async fn a_fresh_conversation_sends_last_seq_zero() {
+    let (h, _node, session_id, mut est) = conversation_ready(
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        Some("opencode"),
+    )
+    .await;
+
+    let r = h.open_conversation(&session_id).await;
+    assert_eq!(r.status, StatusCode::CREATED, "body: {}", r.body);
+    let open = open_channel_on(&mut est).await;
+    let open: protocol::channel::OpenChannel = open.payload().expect("open_channel 载荷");
+    assert_eq!(
+        open.params["last_seq"],
+        json!(0),
+        "没聊过的会话要下发 0（设备侧第一条是 1），不要 null：{}",
+        open.params
+    );
+}
+
 /// **没有配置也要能开**：`command` 是空串（= 用设备扫描到的那个），不是缺字段。
 ///
 /// 这条钉的是「配置是可选的」：把空串发成缺失，设备侧就得区分「没给」与

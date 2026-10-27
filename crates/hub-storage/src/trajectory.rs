@@ -109,6 +109,62 @@ fn row_to_event(r: &Row<'_>) -> std::result::Result<TrajectoryEvent, r2d2_sqlite
 const COLUMNS: &str = "id, session_id, node_id, seq, kind, payload, duration_ms, \
                        duration_source, tokens_in, tokens_out, parent_event_id, created_at";
 
+/// 这个 kind 是「状态快照」吗——即记一遍就够、重复的没有信息量。
+///
+/// # 白名单而不是黑名单
+///
+/// 只把**已知**的快照型事件列进来。写「除了消息 chunk 之外都算快照」会让新
+/// 版本 agent 推来的未知事件默认被按内容去重，而那些事件可能是真实发生的事
+/// （`tool_call` 之类）。宁可多一行，也不要因为不认识就吞掉一条。
+///
+/// 目前只有 `available_commands_update`：实测 `session/load` 回执之后 opencode
+/// 会再推一份同样的命令列表，与 load 之前那条**剔除 `seq` 后逐字相同**。
+///
+/// `usage_update` **不在**里面：它带 `used` / `cost` 计数，两份「内容相同」
+/// 只是恰好同值，而它的意义是「到此刻为止用了多少」——按内容去重会让计数
+/// 长时间不变的那段时间看起来像「没有事件」。
+fn is_state_snapshot(kind: &str) -> bool {
+    matches!(kind, "available_commands_update")
+}
+
+/// 把 payload 里的 `seq` 剔掉，用于「状态快照内容是否相同」的比对。
+///
+/// `seq` 是设备侧编号，每份快照的都不一样；带上它比对永远不相等。剔掉之后
+/// 剩下的才是「这份快照描述的状态」。
+///
+/// 返回 `None` 表示 payload 不是 JSON 对象（数组、标量、坏 JSON）：那种情况下
+/// **不做内容去重**，照原样落库。理由与 [`message_id_of`] 相同——看不懂就不
+/// 假装看懂了，宁可多一行也不要因为解析失败而丢掉一条真实事件。
+fn payload_without_seq(payload: &str) -> Option<String> {
+    let mut v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    match &mut v {
+        serde_json::Value::Object(o) => {
+            o.remove("seq");
+            // `BTreeMap` 序列化键有序，所以两份 JSON 只要内容相同就得到同一串。
+            Some(serde_json::to_string(&v).ok()?)
+        }
+        _ => None,
+    }
+}
+
+/// 从事件 payload 里取 agent 给的 `messageId`；没有、或不是非空字符串，就是 `None`。
+///
+/// 只认**非空**字符串：空串在 JSON 里是合法值，但拿它当消息身份会把两条
+/// 本来无关的事件判成重复（`json_extract` 返回 `''` 与「没有这个键」在
+/// `= ?` 比较里都命中空串）。
+fn message_id_of(payload: &str) -> Option<String> {
+    match serde_json::from_str::<serde_json::Value>(payload) {
+        Ok(v) => match v.get("messageId").and_then(|m| m.as_str()) {
+            Some(s) if !s.is_empty() => Some(s.to_string()),
+            _ => None,
+        },
+        // payload 不是合法 JSON 时**不因此拒写**：`append` 的契约是「存原始
+        // JSON」，校验形状是调用方的事。这里只是拿不到消息身份，退化成
+        // 只按 `seq` 去重——与加这一层之前的行为一致。
+        Err(_) => None,
+    }
+}
+
 /// 一条待写入的事件。
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewEvent {
@@ -158,18 +214,87 @@ impl TrajectoryRepo {
         Self { pool }
     }
 
-    /// 写入一条事件。**重复的 `(session, node, seq)` 被忽略，不报错**。
+    /// 写入一条事件。
     ///
-    /// # 为什么用 `INSERT OR IGNORE` 而不是「先查再插」
+    /// 三层各管一种重复，**都需要**：
     ///
-    /// 先查再插在并发与重连下是 TOCTOU：两个任务可能都查到「不存在」，然后
-    /// 都去插。而设备重连时重发一批未确认的事件是**正常行为**（协议里纯推送
-    /// 帧不重传，但设备侧重连后可能重发自己缓存的那几条），所以重复不是错误，
-    /// 是预期内的事。唯一约束是数据库层的能力，就让它在那里生效。
+    /// 1. **`(session_id, node_id, seq)` 唯一约束**（`INSERT OR IGNORE`）——
+    ///    「同一号写两遍」。这是数据库层的能力，不靠应用层先查再插：那在并发
+    ///    与重连下是 TOCTOU（两个任务都查到「不存在」然后都去插），而设备重连
+    ///    时重发一批未确认的事件是**正常行为**，重复不是错误。
+    /// 2. **agent 的 `messageId`**——「同一消息换了新号」。
+    /// 3. **状态快照按内容**——「同一份快照换了新号，且它没有消息身份」。
     ///
-    /// 返回 `true` 表示真的写进去了，`false` 表示那条 seq 已经在了。
+    /// # 第 2 层：重放事件按 agent 自己的 `messageId` 认
+    ///
+    /// `seq` 只增解决的是「新事件的号被旧事件占了」。它管不了**同一事件被
+    /// 重发**：`session/load` 会把历史重放一遍，而重放的每条都带着**与实时
+    /// 那条逐字相同的 `messageId`**（实测：实时 `seq=2` 与重放 `seq=6` 都是
+    /// `msg_17af87a19001xcrudnts0tSVl3`）。续号之后它们不再撞号，于是全部
+    /// 落库——轨迹里同一段回答出现两遍。
+    ///
+    /// 所以这里多查一次 `(session_id, kind, messageId)`：已经有过就跳过。
+    /// 判据用 agent 自带的 `messageId` 而不是「payload 完全相等」，因为重放
+    /// 的 payload 可能与实时**不完全一样**（`usage_update` 的计数、重放里
+    /// 才出现的事件顺序），而 `messageId` 是 agent 对「这是同一条消息」的
+    /// 明确声明。
+    ///
+    /// # 第 3 层：没有 `messageId` 的状态快照按内容去重
+    ///
+    /// `available_commands_update` 这类事件没有消息身份——它不是「一条消息」，
+    /// 是「此刻可用的命令列表」。实测：`session/load` 的回执之后 opencode 会再
+    /// 推一条同样的快照（内容与 load 之前那条**剔除 `seq` 后逐字相同**），于是
+    /// 轨迹里多一行毫无信息量的重复。
+    ///
+    /// 判据 = **同会话、同 kind、剔除 `seq` 后 payload 相同**。`seq` 必须剔除：
+    /// 它是设备侧编号，每次都不一样，带上它比对永远不相等。
+    ///
+    /// **只在 [`is_state_snapshot`] 白名单里的 kind 上生效**，不扩展到所有事件：
+    /// 那会把「agent 说了两句一模一样的话」当成重复吞掉一条。
+    ///
+    /// 返回 `true` 表示真的写进去了，`false` 表示这条 seq 已经在了（或这条
+    /// 消息/这份快照已经落过库）。
     pub fn append(&self, session_id: &str, node_id: &str, e: &NewEvent, now: &str) -> Result<bool> {
         let conn = self.pool.get()?;
+        // 第 2 层。**只有 agent 给了 `messageId` 才查**：拿空串去查会把「两条
+        // 都没有 messageId 的事件」误判成重复，而那正是 `available_commands_update`
+        // 这种合法重复事件。
+        if let Some(mid) = message_id_of(&e.payload) {
+            let seen: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM trajectory_event
+                 WHERE session_id = ?1 AND kind = ?2
+                   AND json_extract(payload, '$.messageId') = ?3",
+                params![session_id, e.kind, mid],
+                |r| r.get(0),
+            )?;
+            if seen > 0 {
+                return Ok(false);
+            }
+        } else if is_state_snapshot(&e.kind) {
+            if let Some(norm) = payload_without_seq(&e.payload) {
+                // 第 3 层。见上方文档。
+                //
+                // 在 SQL 里逐行取出来比对而不是用 `json_extract`：要剔掉 `seq`
+                // 再比整份 JSON，SQLite 的 JSON 函数做不了「删一个键再整体比较」，
+                // 而 `REPLACE(payload, ...)` 这种字符串替换会在值里恰好含 `"seq"`
+                // 时错位。这一层的量级是「同一会话的同类快照」，不是全表扫描。
+                let mut stmt = conn.prepare(
+                    "SELECT payload FROM trajectory_event
+                     WHERE session_id = ?1 AND kind = ?2 AND json_extract(payload, '$.messageId') IS NULL",
+                )?;
+                let rows = stmt.query_map(params![session_id, e.kind], |r| r.get::<_, String>(0))?;
+                for existing in rows {
+                    let existing = existing?;
+                    if payload_without_seq(&existing).as_deref() == Some(norm.as_str()) {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        // **`INSERT OR IGNORE` 仍然是最后一道闸**（`seq` 的唯一约束）：
+        // 先查再插在并发与重连下是 TOCTOU——两个任务可能都查到「不存在」，
+        // 然后都去插。上面那两层查询挡的是「同一消息/同一快照换了新号」，
+        // 这里挡的是「同一号写两遍」。三层各管一种重复，都需要。
         let n = conn.execute(
             "INSERT OR IGNORE INTO trajectory_event
                  (session_id, node_id, seq, kind, payload, duration_ms, duration_source,
@@ -324,6 +449,109 @@ mod tests {
             "agent_message_chunk",
             serde_json::json!({ "content": { "type": "text", "text": text } }).to_string(),
         )
+    }
+
+    /// 带 `messageId` 的 chunk——真机形状（`session/update` 里每条消息都带它）。
+    fn chunk_with_mid(seq: i64, text: &str, mid: &str) -> NewEvent {
+        NewEvent::new(
+            seq,
+            "agent_message_chunk",
+            serde_json::json!({
+                "content": { "type": "text", "text": text },
+                "messageId": mid,
+            })
+            .to_string(),
+        )
+    }
+
+    /// **`session/load` 的重放不产生重复行——按 agent 的 `messageId` 认。**
+    ///
+    /// 真机实测：实时那条是 `seq=2 / msg_17af87...`，重放那条是
+    /// `seq=6 / msg_17af87...`（同一个 `messageId`，序号不同）。
+    /// 续号之后它们不再撞 `seq` 的唯一约束，于是**必须**由这一层挡住，
+    /// 否则同一段回答在轨迹里出现两遍（实测行数 4 → 7）。
+    ///
+    /// 反向验证：把 `append` 里那段 `messageId` 查询删掉，这条会红在
+    /// 「重放不该产生第二行」。
+    #[test]
+    fn a_replayed_event_with_the_same_message_id_is_not_stored_twice() {
+        let (_d, t) = setup();
+        assert!(t
+            .append("s1", "n1", &chunk_with_mid(2, "好的", "msg_A"), TS)
+            .unwrap());
+        assert!(
+            !t
+                .append("s1", "n1", &chunk_with_mid(6, "好的", "msg_A"), TS)
+                .unwrap(),
+            "同一个 messageId 换了序号再来一次，是重放，不该写第二行"
+        );
+        assert_eq!(t.count("s1").unwrap(), 1, "轨迹里只能有一条这条消息");
+
+        // **不同 messageId 必须各自落库**：只按「文字相同」去重会把两次
+        // 恰好说了同一句话的真实对话吞掉一条。
+        assert!(t
+            .append("s1", "n1", &chunk_with_mid(7, "好的", "msg_B"), TS)
+            .unwrap());
+        assert_eq!(t.count("s1").unwrap(), 2);
+    }
+
+    /// **没有 `messageId` 的事件不受那层去重影响**：`available_commands_update`
+    /// 这种状态快照本来就没有消息身份，重放时再记一遍是合法的。
+    ///
+    /// 反向验证：把 `message_id_of` 的空串特判去掉（空串也当身份），
+    /// 这条会红在「第二条被当成重复」。
+    #[test]
+    fn events_without_a_message_id_are_not_deduped_by_it() {
+        let (_d, t) = setup();
+        // 两份**内容不同**的快照（命令列表不一样）：都必须落库。
+        // 这一条挡住「把状态快照一律当重复」那种过度去重——那样会把真实的状态
+        // 变化吞掉，页面上的命令列表就永远停在第一次的样子。
+        let snapshot = |seq: i64, cmd: &str| {
+            NewEvent::new(
+                seq,
+                "available_commands_update",
+                serde_json::json!({ "availableCommands": [{ "name": cmd }], "seq": seq })
+                    .to_string(),
+            )
+        };
+        assert!(t.append("s1", "n1", &snapshot(1, "init"), TS).unwrap());
+        assert!(
+            t.append("s1", "n1", &snapshot(5, "review"), TS).unwrap(),
+            "内容不同的两份快照都要落库，否则状态变化会被吞掉"
+        );
+        assert_eq!(t.count("s1").unwrap(), 2);
+
+        // **内容相同（剔除 seq 后）的快照只留一行**：实测 `session/load` 的回执
+        // 之后 opencode 会再推一份同样的命令列表，那份是纯噪音。
+        assert!(
+            !t.append("s1", "n1", &snapshot(9, "review"), TS).unwrap(),
+            "剔除 seq 后内容相同的快照是重复，不该再落一行"
+        );
+        assert_eq!(t.count("s1").unwrap(), 2);
+
+        // `messageId: ""` 也不能被当成「同一条消息」：它没有身份，而
+        // `agent_message_chunk` **不是**状态快照（见 `is_state_snapshot`），
+        // 于是走不进内容去重那一路——内容不同的两条都要落库。
+        let empty_mid = |seq: i64, text: &str| {
+            NewEvent::new(
+                seq,
+                "agent_message_chunk",
+                serde_json::json!({ "content": { "type": "text", "text": text }, "messageId": "" })
+                    .to_string(),
+            )
+        };
+        assert!(t.append("s1", "n1", &empty_mid(10, "x"), TS).unwrap());
+        assert!(
+            t.append("s1", "n1", &empty_mid(11, "y"), TS).unwrap(),
+            "空串 messageId 不是消息身份，内容不同的两条都要落库"
+        );
+        // **内容相同也要落库**：这是「按内容去重只作用于快照」的证据。
+        // 若把它扩展到所有事件，同一句话被说两次（agent 没给 messageId）
+        // 就会被静默吞掉一条。
+        assert!(
+            t.append("s1", "n1", &empty_mid(12, "x"), TS).unwrap(),
+            "非快照事件不做内容去重——重复的话也是两次真实发言"
+        );
     }
 
     #[test]

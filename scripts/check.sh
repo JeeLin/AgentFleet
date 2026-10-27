@@ -71,7 +71,8 @@ MILESTONE = [p for p in sorted(glob.glob('.mdflow/milestones/*.md'))
              if not os.path.basename(p).startswith('-')]
 # 仓库自有文档：对外文档 + 根文件 + 夹具说明（这些的锚点归本仓库自己维护）
 OWN = sorted(glob.glob('docs/**/*.md', recursive=True)) + [
-    'README.md', 'AGENTS.md', 'CHANGELOG.md', 'scripts/e2e-m1/README.md']
+    'README.md', 'AGENTS.md', 'CHANGELOG.md', 'scripts/e2e-m1/README.md',
+    'scripts/e2e-m2/README.md']
 OWN = [p for p in OWN if os.path.exists(p)]
 
 # ---- 别名表 ---------------------------------------------------------------

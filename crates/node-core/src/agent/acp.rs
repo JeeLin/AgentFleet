@@ -42,7 +42,7 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -102,6 +102,23 @@ struct Inner {
     /// 没有这张表，响应回来时无法知道该交给谁。
     pending: Mutex<HashMap<u64, oneshot::Sender<Value>>>,
     next_id: AtomicU64,
+    /// 正在 `session/load` 时置真：读循环据此**丢弃** `session/update` 通知。
+    ///
+    /// # 为什么需要它
+    ///
+    /// `session/load` 会把历史以 `session/update` 通知的形式**重放**一遍，而
+    /// 那些通知与实时事件形状完全一样（同样带 `sessionUpdate`、同样带
+    /// `messageId`），从内容上分不开。规格的裁决是「重放只用于恢复 agent
+    /// 侧上下文，**不落轨迹**」（里程碑子任务 8）。不在这儿丢掉的话，重放会
+    /// 被当成新事件编号、落库，轨迹里同一段对话出现两遍。
+    ///
+    /// **在源头丢，而不是在 Hub 丢**：Hub 丢的话重放事件已经占掉了设备侧的
+    /// `seq`，轨迹里会留下一段空洞，页面在每一处都画「此处缺失 N 条」。
+    ///
+    /// 用 `AtomicBool` 而不是 `Mutex<bool>`：读循环每条通知都要读它，而它只
+    /// 在 load 前后各写一次。`Acquire`/`Release` 保证「置真之后到达的通知」
+    /// 一定能看见真值——这条顺序比原子性本身更重要。
+    replaying: AtomicBool,
     /// 事件出口。读循环往里灌。
     ///
     /// 发送端放这里、接收端放 [`AcpClient`] 上（`Mutex<Option<...>>`）：一个
@@ -169,6 +186,8 @@ impl AcpClient {
             child: Mutex::new(Some(child)),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            // 一开始不在重放：`initialize` 阶段没有 `session/update` 可言。
+            replaying: AtomicBool::new(false),
             events: tx.clone(),
         });
 
@@ -283,18 +302,41 @@ impl AcpClient {
     /// 真机上**永远返回 0**，而单测里的假 agent 回了 `{"replayed":1}` 让它显得
     /// 正常。那是一份编出来的事实：调用方会据此以为「没有历史可恢复」。
     ///
-    /// 所以这里只报「load 被 agent 接受了吗」，条数让调用方自己数事件流——
-    /// 那是唯一的真相源。重放事件**不要写 `trajectory_event`**。
+    /// 所以这里只报「load 被 agent 接受了吗」。**重放事件不会进事件流**：
+    /// [`AcpClient::load_session`] 在请求期间把 `replaying` 置真，读循环据此
+    /// 丢弃 `session/update` 通知（见 `Inner::replaying` 的注释）。理由就是上面
+    /// 那一条——重放是重建流，把它当新事件落库会让同一段对话出现两遍。
+    /// 页面历史一律读轨迹表，那是唯一的真相源。
     ///
     /// 跨进程实测结论（这是 V-2 一直欠的那条）：**load 之后 agent 记得上一轮的
     /// 内容**（进程 1 让它记住 7391、进程 2 load 后问它，回 `7391`）。所以
     /// 「新进程 + 同一 sessionId 直接 prompt」不成立，`session/load` 是必需的。
     pub async fn load_session(&self, session_id: &str, cwd: &str) -> Result<(), AcpError> {
-        self.request(
-            "session/load",
-            json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [] }),
-        )
-        .await?;
+        // 重放开关的动作范围就是这一个请求：置真 → 发请求 → 回执到达时由
+        // `dispatch` 解除。
+        //
+        // **置真必须在发请求之前**：重放事件在响应**之前**就开始到（实测顺序
+        // 是 user_message_chunk → agent_message_chunk → RESPONSE）。先发请求
+        // 再置真的话，头几条重放已经漏进事件流了。
+        //
+        // **解除点不在这个函数里**，而在 `dispatch` 处理回执的那一刻——详见
+        // 那里的注释。在这里解除会留下一段窗口：回执之后紧跟着的实时通知可能
+        // 在开关还开着时被丢掉（实测稳定复现）。
+        //
+        // 失败路径仍要在这里兜底解除：请求失败时「回执」可能根本没到（进程没了、
+        // 帧解不开），`dispatch` 那条路就不会走。不兜底的话，这条连接之后的所有
+        // 实时对话都会被当成重放丢掉——症状比 load 失败本身更难受。
+        self.inner.replaying.store(true, Ordering::Release);
+        let res = self
+            .request(
+                "session/load",
+                json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [] }),
+            )
+            .await;
+        // 成功时 `dispatch` 已经换回 false 了，这一句是空的；失败时它才是唯一
+        // 的解除点。用 `swap` 而不是 `store`：能顺手保证不当成「成功解除」。
+        self.inner.replaying.store(false, Ordering::Release);
+        res?;
         Ok(())
     }
 
@@ -453,6 +495,26 @@ async fn dispatch(inner: &Inner, v: Value) {
     match (id, method) {
         // 响应：配对给在途请求
         (Some(id), None) => {
+            // **`session/load` 的回执到了 → 立刻解除重放开关**，就在这里解除，
+            // 不在 `load_session()` 里等 `request()` 返回之后再解除。
+            //
+            // 这不是顺手：实测证明「等 request 返回再解除」是**错的**。
+            // 真机（以及按真机形状写的假 agent）在 load 回执**之后**还会推一条
+            // `available_commands_update`，而读循环处理它的速度可能快于
+            // `load_session` 被唤醒的速度。于是那条合法事件会在开关还开着的
+            // 时候到达，被当成重放丢掉——症状是「load 之后 agent 不说话/状态
+            // 不刷新」，而 `load` 本身看起来完全成功。
+            //
+            // 实测证据：读循环里打印 `dispatch kind=available_commands_update
+            // replaying=true`，稳定复现。
+            //
+            // 解除点放在**同一条消息的处理里**，就把窗口压成了零：读循环是
+            // 单线程按行处理的，回执这条一处理完，下一条必然看到假值。
+            if inner.replaying.swap(false, Ordering::AcqRel) {
+                // 刚刚解除的就一定是 load 的回执；但**不能只看它是不是 load**
+                // ——这里没有方法名可比（响应帧不带 `method`）。用「本来开着」
+                // 作判据足够：只有 `load_session` 会把它开起来。
+            }
             if let Some(n) = id.as_u64() {
                 let tx = inner.pending.lock().await.remove(&n);
                 if let Some(tx) = tx {
@@ -470,6 +532,29 @@ async fn dispatch(inner: &Inner, v: Value) {
         }
         // 通知
         (None, Some(method)) => {
+            // **重放期间丢弃对话事件**（`Inner::replaying` 为真时）。
+            //
+            // 判据是「正在 `session/load`」而不是「事件长什么样」：实测重放
+            // 的事件与实时事件**形状完全一样**（同样带 sessionUpdate、同样带
+            // messageId），从内容上分不开——只有「此刻处于 load 中」这个
+            // 时序事实能分开。
+            //
+            // 实测到达顺序（`session/load` 一个请求期间）：
+            //     NOTIFY user_message_chunk → NOTIFY agent_message_chunk
+            //     → RESPONSE id=2（load 的回执）
+            // 也就是说**重放全部在响应之前到**。所以「响应回来就解除」这条
+            // 边界正好切在重放与后续实时事件之间。
+            //
+            // 为什么不用「忽略到响应为止」的另一种写法（Hub 侧按标记丢弃）：
+            // 那样重放事件已经占掉了设备侧的 `seq`，轨迹里会留下一段空洞，
+            // 页面在每一处都画「此处缺失 N 条」——而其实什么都没丢。
+            // 在源头不编号、不外发，「重放不产生轨迹行」才是结构性成立的。
+            //
+            // 权限请求（上面那个分支）不丢：load 期间理论上也可能来，而丢了
+            // 会让页面看着像 agent 卡住。
+            if method == "session/update" && inner.replaying.load(Ordering::Acquire) {
+                return;
+            }
             // 只把 `session/update` 当对话流。其他通知（`available_commands_update`
             // 之类）也走同一条出口并保留 `method`，让上层自己决定要不要理。
             let params = v.get("params").cloned().unwrap_or(Value::Null);
@@ -812,26 +897,90 @@ for raw in sys.stdin:
         }
     }
 
-    /// `session/load` 的重放走**事件流**；响应里**没有**条数，也不该有。
+    /// **`session/load` 期间的重放不进事件流**；load 之后的实时事件照常放行。
     ///
-    /// 反向验证：把实现改回「读 `r["replayed"]` 并 `unwrap_or(0)`」再让假 agent
-    /// 回 `{"replayed":1}`——这条会红（返回值对不上）。而如果只让假 agent 模拟
-    /// 真机（不带 `replayed`），旧实现会**静默返回 0**，正是不可能被断言抓到的
-    /// 那种「编出来的事实」。所以假 agent 与真机对齐才是这条测试的立足点。
+    /// 这条替换了旧版 `load_session_replays_through_the_event_stream`，旧版断言
+    /// 「重放必须走事件流，它是唯一的真相源」——**与规格相反**。规格的裁决
+    /// （里程碑子任务 8）是「重放只用于恢复 agent 侧上下文，不落轨迹」，
+    /// 而真相源是**轨迹表**，不是重放流。旧断言之所以看起来对，是因为它只问
+    /// 「有没有事件到」，没问「这条事件该不该被当成新数据」。
+    ///
+    /// 实测顺序（真 opencode v2.1.4）：重放的通知**先于** load 的回执到达，
+    /// 所以「回执到了就解除」这条边界正好切在重放与后续实时事件之间。
+    ///
+    /// **两个方向都验**：只验「重放没进来」证明不了实现不是「把所有事件都
+    /// 丢了」——所以还要验 load 之后那条实时的确实到了。
+    ///
+    /// 反向验证：把 `load_session` 里那两句 `replaying.store(...)` 删掉，
+    /// 这条会红在「重放不许进事件流」。
     #[tokio::test]
-    async fn load_session_replays_through_the_event_stream() {
+    async fn a_replay_during_load_never_reaches_the_event_stream() {
         let d = tempfile::tempdir().expect("tmp");
-        let c = client_for(&minimal_agent(d.path())).await;
+        // 假 agent 照抄真机顺序：先推两条重放通知，再回执，再推一条实时通知。
+        let body = format!(
+            r#"{PRELUDE}
+    if method == "initialize":
+        send({{"jsonrpc":"2.0","id":mid,"result":{{"protocolVersion":1,"agentCapabilities":{{"loadSession":True}}}}}})
+    elif method == "session/load":
+        # 重放：**响应之前**到（真机就是这个顺序）。
+        notify("session/update", {{"sessionId":"ses_test_1","update":{{"sessionUpdate":"user_message_chunk","messageId":"msg_REPLAYED_USER","content":{{"type":"text","text":"上一轮的问题"}}}}}})
+        notify("session/update", {{"sessionId":"ses_test_1","update":{{"sessionUpdate":"agent_message_chunk","messageId":"msg_REPLAYED_AGENT","content":{{"type":"text","text":"上一轮的回答"}}}}}})
+        send({{"jsonrpc":"2.0","id":mid,"result":{{"configOptions":[]}}}})
+        # 响应之后的实时事件：**照真机的形状**——真机在这里只推
+        # `available_commands_update`（状态快照，没有 messageId）。实测两次都是
+        # 如此。假 agent 不许比真机多推「带 messageId 的对话事件」，否则测的是
+        # 一个真机不存在的情形（那条会与「回执到达 → 解除开关」抢时序）。
+        notify("session/update", {{"sessionId":"ses_test_1","update":{{"sessionUpdate":"available_commands_update","availableCommands":[]}}}})
+"#
+        );
+        let c = client_for(&fake_agent(d.path(), "replay-agent", &body)).await;
         c.load_session("ses_test_1", "/tmp/proj")
             .await
-            .expect("响应里没有 replayed 不算失败——真机就没有这个字段");
-        let ev = tokio::time::timeout(std::time::Duration::from_secs(5), c.recv())
-            .await
-            .expect("必须收到重放事件")
-            .expect("事件流还在");
+            .expect("只有 configOptions 也是成功");
+
+        // 把事件收到**看见响应之后那条实时通知为止**（或 5s 上限）。
+        //
+        // **不能只等一个「静默窗口」**：`load_session` 的回执一到，假 agent 那
+        // 条实时 `notify` 可能还没被读循环处理完，而「静默 600ms」在空结果上
+        // 立刻成立——于是测试偶发地拿到 `[]` 并误报「开关没解除」。
+        // ACP 的通知本来就是异步的，`recv()` 为空只说明还没到。
+        let mut kinds: Vec<String> = Vec::new();
+        let mut mids: Vec<String> = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let next = tokio::time::timeout(left, c.recv()).await;
+            let Ok(Some(ev)) = next else { break };
+            if let Event::SessionUpdate(params) = ev {
+                let upd = params.get("update").cloned().unwrap_or(params);
+                if let Some(k) = upd.get("sessionUpdate").and_then(Value::as_str) {
+                    kinds.push(k.to_string());
+                    // 真机在 load 回执之后只推 `available_commands_update`。
+                    // 看到它就说明开关已经解除、读循环回到了正常放行状态。
+                    if k == "available_commands_update" {
+                        break;
+                    }
+                }
+                if let Some(m) = upd.get("messageId").and_then(Value::as_str) {
+                    mids.push(m.to_string());
+                }
+            }
+        }
+
         assert!(
-            matches!(ev, Event::SessionUpdate(_)),
-            "重放必须走事件流，它是唯一的真相源"
+            !mids.iter().any(|m| m == "msg_REPLAYED_USER"),
+            "load 期间重放的 user_message_chunk 不许进事件流，实际收到：{mids:?}"
+        );
+        assert!(
+            !mids.iter().any(|m| m == "msg_REPLAYED_AGENT"),
+            "load 期间重放的 agent_message_chunk 不许进事件流，实际收到：{mids:?}"
+        );
+        // 另一个方向：开关必须解除。判据是 load 回执**之后**那条实时通知到了
+        // （真机在这里推 `available_commands_update`）。只验「重放没进来」证明
+        // 不了实现不是「把之后所有事件都丢了」。
+        assert!(
+            kinds.iter().any(|k| k == "available_commands_update"),
+            "load 之后的实时通知必须照常放行（开关要解除），实际收到：{kinds:?}"
         );
         c.shutdown().await;
     }

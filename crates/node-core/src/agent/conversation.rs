@@ -99,6 +99,24 @@ pub struct ConversationSpec {
     /// 没有时间戳、中间态被折叠），写进去等于把同一段对话记两遍且顺序错乱。
     /// 轨迹表是唯一真相源，页面历史只读它。
     pub acp_session_id: Option<String>,
+    /// 这条会话**已经落库的最大 `seq`**；本次开对话的编号从这里续上。
+    ///
+    /// # 为什么设备侧不能自己从 1 数
+    ///
+    /// `seq` 的契约是「会话内只增」（`hub-storage` 的 `TrajectoryRepo`：断裂处
+    /// 即丢失处）。但计数器活在 ACP 子进程里，**每个子进程都从 1 重数**——
+    /// 关掉页面再打开、worker 换代、`session/load` 建新进程，全都会把它清零。
+    /// 于是新事件带 `seq=1`，撞上库里已有的 `seq=1`，被 `INSERT OR IGNORE`
+    /// 静默吞掉：轨迹少一半内容，而 `gaps` 不报警（seq 仍然连续）。
+    ///
+    /// 实测（M2 子任务 13）：第二次开对话走 `session/load`，agent 重放的
+    /// `user_message_chunk` 带 `seq=1`，而库里 `seq=1` 已是
+    /// `available_commands_update`——那条用户消息当场消失。
+    ///
+    /// 所以起点必须来自**跨进程的真相源**（`trajectory_event` 表的
+    /// `MAX(seq)`），由 Hub 在 `open_channel.params.last_seq` 里下发。
+    /// `0` 表示「这条会话还一条都没有」（`Seq::next()` 让第一条是 1）。
+    pub last_seq: i64,
 }
 
 /// 聚合的字节闸：攒够这么多就发一批，不必等时间窗。
@@ -195,7 +213,9 @@ impl Conversations {
         // 读循环必须拿**原始句柄**（`recv` 只在它上面有值）。所以这里先克隆
         // 一个给会话表（发 prompt 用），原始那个进读 task。
         let sender = client.clone();
-        let seq = Seq::new();
+        // 起点是 Hub 下发的 `last_seq`——不是 0。理由见 [`Seq::new`] 与
+        // [`ConversationSpec::last_seq`]：从 1 重数会让重放事件撞号后被静默吞掉。
+        let seq = Seq::new(spec.last_seq);
         let reader = tokio::spawn(read_events(
             spec.channel_id.clone(),
             client,
@@ -359,8 +379,21 @@ pub struct Seq(Arc<AtomicI64>);
 impl Seq {
     /// **生产代码里只有 [`Conversations::open`] 该调它**——见类型文档的
     /// 「这条约束靠什么保证」。其余地方一律 `.clone()` 已有的那一份。
-    pub fn new() -> Self {
-        Self(Arc::new(AtomicI64::new(0)))
+    ///
+    /// `start` 是**这条会话已经落库的最大 `seq`**（Hub 下发，
+    /// 见 [`ConversationSpec::last_seq`]）。传 0 表示一条都还没有。
+    ///
+    /// # 为什么起点不能恒为 0
+    ///
+    /// 计数器活在 ACP 子进程里，每个子进程从 0 数起；而 `seq` 的契约是
+    /// **会话内**只增。重开对话（尤其 `session/load`）会新建子进程，于是
+    /// 新事件从 1 重数、撞上库里已有的 1，被 `UNIQUE` + `INSERT OR IGNORE`
+    /// 静默吞掉。传历史最大值续号，才让那个唯一约束真正表达「同一事件
+    /// 不写两行」而不是「新事件被旧事件顶掉」。
+    pub fn new(start: i64) -> Self {
+        // 负值没有意义（`seq` 只由本模块发），压到 0 而不是照抄：照抄会让
+        // `next()` 吐出 0 或负数，而 0 是「没有序号」的保留值。
+        Self(Arc::new(AtomicI64::new(start.max(0))))
     }
 
     /// 取下一个序号。从 1 开始（`0` 留给「没有序号」）。
@@ -540,7 +573,7 @@ mod tests {
     /// 见类型文档的「这条约束靠什么保证」。
     #[test]
     fn a_cloned_seq_keeps_one_numbering_for_the_whole_conversation() {
-        let seq = Seq::new();
+        let seq = Seq::new(0);
         assert_eq!(seq.last(), 0, "还没取过号");
         assert_eq!(seq.next(), 1, "从 1 开始：0 留给「没有序号」");
         assert_eq!(seq.next(), 2);
@@ -549,6 +582,24 @@ mod tests {
         assert_eq!(for_reader.next(), 3, "克隆的是同一个计数，不是一份拷贝");
         assert_eq!(seq.last(), 3, "原句柄也看见 3");
         assert_eq!(seq.next(), 4, "接着往下编，不回到 1");
+    }
+
+    /// **起点是「这条会话已落库的最大 seq」，不是恒为 0。**
+    ///
+    /// 这条挡的是重开对话时编号从 1 重数：新事件撞上库里已有的 `seq`，
+    /// 被 `UNIQUE` + `INSERT OR IGNORE` 静默吞掉（实测让一条
+    /// `user_message_chunk` 整条消失，见 `ConversationSpec::last_seq`）。
+    ///
+    /// 反向验证：把 `Seq::new(spec.last_seq)` 改回 `Seq::new(0)`，下面第一句
+    /// 会红在「起点没用上」。负值压到 0 那一句是给「别人编了个负号」兜底——
+    /// `seq` 只由本模块发，负值本不该出现，但不该让它吐 0 号事件。
+    #[test]
+    fn a_seq_starts_from_the_given_point_so_reopening_does_not_reuse_numbers() {
+        let seq = Seq::new(7);
+        assert_eq!(seq.last(), 7, "起点就是历史最大值");
+        assert_eq!(seq.next(), 8, "续着往下编，不回到 1");
+        assert_eq!(Seq::new(-3).last(), 0, "负值压到 0：0 是「没有序号」的保留值");
+        assert_eq!(Seq::new(-3).next(), 1);
     }
 
     /// **空串 = 用扫描到的那一个**；两者都空 = 起不来。
@@ -645,6 +696,8 @@ mod tests {
             // 真机这条测的是「一轮问答能不能走通」，不是在测 load，
             // 所以第一次开对话照常新建。
             acp_session_id: None,
+            // 同上：全新会话，库里一条事件都没有，起点 0。
+            last_seq: 0,
         };
         convs
             .open(spec, None)
@@ -781,6 +834,9 @@ for line in sys.stdin:
             acp_args: Vec::new(),
             env: BTreeMap::new(),
             acp_session_id: acp_session_id.map(str::to_string),
+            // 单测里这些会话都是"第一次开"，所以起点 0（= 一条事件都没有）。
+            // 续号的行为由 `a_seq_starts_from_the_given_point...` 单独验。
+            last_seq: 0,
         }
     }
 
@@ -832,6 +888,70 @@ for line in sys.stdin:
         );
 
         convs.close("ch_new").await;
+    }
+
+    /// **`open()` 必须把 Hub 下发的 `last_seq` 灌进 `Seq`，不自己从 0 数。**
+    ///
+    /// 这条挡的是「重开对话时编号从 1 重数」：新事件撞上库里已有的 `seq`，
+    /// 被 `UNIQUE` + `INSERT OR IGNORE` 静默吞掉——实测让一条
+    /// `user_message_chunk` 整条消失，而 `gaps` 不报警（seq 仍然连续）。
+    ///
+    /// **反向验证过**：把 `open()` 里的 `Seq::new(spec.last_seq)` 改回
+    /// `Seq::new(0)`，这条会红在「第一条事件的 seq 应该接着 4 往下」。
+    /// （只测 `Seq::new` 本身是**不够**的——那证明的是构造函数，证明不到
+    /// `open()` 有没有把参数传进去。这一条才是接线判据。）
+    #[tokio::test]
+    async fn open_continues_the_seq_from_the_last_persisted_one() {
+        let d = tempfile::tempdir().expect("tmp");
+        // 这条判据看的是 `turn_end` 的 `seq`，不看方法序，所以日志不用。
+        let (bin, _log) = recording_agent(d.path());
+        let convs = Conversations::default();
+
+        let _ = channel::open_external("ch_seq");
+        let mut spec = spec_for("ch_seq", &bin, None);
+        // 库里这条会话已经有 1..4，设备必须从 5 开始编。
+        spec.last_seq = 4;
+        convs
+            .open(spec, None)
+            .await
+            .expect("假 agent 必须能起来");
+
+        // 发一句话，然后等这一轮的 `turn_end`——它和外发事件共用一个计数器，
+        // 所以它的 seq 就是「open() 的起点有没有生效」的直接证据。
+        //
+        // `prompt()` 是 `tokio::spawn` 出去的（见它的文档：不等回复），所以
+        // 这里必须**轮询 yield** 而不是发完就查。
+        convs.prompt("ch_seq", "hi").await.expect("prompt 必须发得出去");
+        let mut turn_end_seq = None;
+        for _ in 0..200 {
+            // 通道表是进程级单例，别的并发用例也会往 `pump()` 里丢帧；
+            // 只认自己这条通道，别把别人的 `turn_end` 当成自己的。
+            for (ch, frames) in channel::pump() {
+                if ch != "ch_seq" {
+                    continue;
+                }
+                for fr in frames {
+                    let Ok(data) = fr.payload::<protocol::channel::ChannelData>() else {
+                        continue;
+                    };
+                    if data.payload.get("type").and_then(Value::as_str) == Some("turn_end") {
+                        turn_end_seq = data.payload.get("seq").and_then(Value::as_i64);
+                    }
+                }
+            }
+            if turn_end_seq.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let got = turn_end_seq.expect("本轮必须有一条 turn_end");
+        assert!(
+            got > 4,
+            "seq 起点没用上：turn_end 的 seq 是 {got}，应当接着 4 往下（> 4）。\
+             说明 open() 自己从 0 数了，重开对话会与库里已有的 seq 撞号"
+        );
+
+        convs.close("ch_seq").await;
     }
 
     /// **有 `acp_session_id` → 走 `session/load`，且不新建。**

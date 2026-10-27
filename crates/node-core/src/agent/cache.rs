@@ -150,13 +150,38 @@ impl Snapshot {
 /// 探一次的**纯函数**：给定查找表与超时，返回汇总。
 ///
 /// 抽出来是为了单测能不碰 `RwLock` 直接验形状。
+///
+/// # 没装的 agent **不进上报**
+///
+/// [`Probe::NotInstalled`] 不产生上报项（`report_of` 返回 `None`），而不是转成一条
+/// `available: false` 的记录。这是 M2 收尾时实测抓到的真缺陷（子任务 13 的
+/// `--uninstall-drill`）：把 opencode 从 PATH 移走后，它**仍然留在**
+/// `/api/agents` 里，于是「这台机器上有什么」的目录对用户撒谎。
+///
+/// # 为什么不能靠 `available: false` 区分
+///
+/// 上报里 `available: false` 有三种来源，形状却一样：
+/// - `NotInstalled`（从没装过）
+/// - `NotCapable`（装了、能跑、但没有 ACP 入口——**必须列出来**，好让用户
+///   看见「为什么我的 claude 不能对话」，这是四态设计的全部意义）
+/// - `Failed`（装了但跑不起来）
+///
+/// 早先 `NotInstalled` 转成 `{available: false, error: null}`，与另外两种只差
+/// 一个字段；Hub 侧拿到 `agent_runtime` 的一行、按 `available` 判，分不开
+/// 「没装」与「装了但坏」。让它在**源头就不出现**，比在 Hub 侧猜字段可靠：
+/// 心跳的语义是「这台机器上**存在**哪些 agent」，不是「我知道的 9 个 agent
+/// 各自怎么样」。与 `heartbeat::capabilities_with_agents` 的注释一致——「探测
+/// 不到就是空数组，绝不填一个看起来能用的假条目」。
 pub fn probe_once(
     lookup: &dyn Fn(&str) -> Option<std::path::PathBuf>,
     timeout: Duration,
 ) -> Snapshot {
     let mut agents: Vec<AgentReport> = Vec::new();
     for (spec, probe) in detect_all(lookup, timeout) {
-        agents.push(report_of(spec, &probe));
+        // 没装的不上报，理由见本函数的文档。
+        if let Some(report) = report_of(spec, &probe) {
+            agents.push(report);
+        }
     }
     Snapshot {
         agents,
@@ -164,16 +189,16 @@ pub fn probe_once(
     }
 }
 
-fn report_of(spec: &AgentSpec, probe: &Probe) -> AgentReport {
-    match probe {
-        Probe::NotInstalled => AgentReport {
-            id: spec.id.to_string(),
-            name: spec.name.to_string(),
-            version: None,
-            available: false,
-            error: None,
-            path: None,
-        },
+/// 一条探测结果转成上报项；`None` = 这台机器上根本没有它。
+///
+/// 返回 `Option` 而不是在 `report_of` 里静默填一条假的：调用方必须**显式**
+/// 处理「没有」这一态，否则以后加一个消费者（比如写设备本地缓存）时，
+/// 它会默认收到一条不存在的 agent。
+fn report_of(spec: &AgentSpec, probe: &Probe) -> Option<AgentReport> {
+    let report = match probe {
+        // 从没装过 → 不进上报。判据是探测**没找到可执行文件**，不是
+        // 「跑不起来」——后者是 `Failed`，要列出来并带原因。
+        Probe::NotInstalled => return None,
         // **装了、能跑、但不能对话**。它必须出现在上报里（`available: false`
         // + 一句能照做的原因），而不是像早先那样整个消失：用户装了 `claude`，
         // 页面上一个字都不提，他只会以为系统没扫到。
@@ -208,7 +233,8 @@ fn report_of(spec: &AgentSpec, probe: &Probe) -> AgentReport {
             // 探测失败也留着路径：用户据此能自己去跑一下看看到底怎么了。
             path: Some(path.to_string_lossy().into_owned()),
         },
-    }
+    };
+    Some(report)
 }
 
 /// 探测结果的共享缓存。`Clone` 只复制 `Arc`。
@@ -268,14 +294,31 @@ mod tests {
         |_: &str| None
     }
 
+    /// **没装的 agent 不进上报**——空查找表就是空列表。
+    ///
+    /// 这条替换了旧版 `nothing_installed_reports_every_agent_as_unavailable_not_omitted`，
+    /// 旧版断言「已知 agent 都要出现」，理由是「页面上要能显示『这台设备一个
+    /// agent 都没有』，而不是空列表让人分不清『没探』和『没装』」。
+    ///
+    /// **那条理由被实测推翻了**（M2 子任务 13 的 `--uninstall-drill`）：把
+    /// opencode 从 PATH 移走后，它仍然留在 `/api/agents` 里——因为设备上报了
+    /// 一条 `{available:false, error:null}`，而 Hub 侧那一行的形状与「装了但
+    /// 不能对话」(`NotCapable`) 完全相同，分不开。目录对用户撒谎比空列表糟得多。
+    ///
+    /// 「没探」与「没装」的分不清问题，改由心跳的**别处**承担：设备侧探测
+    /// 快照有 `at` 时间戳，Hub 侧看 `agent_runtime.detected_at` 就知道这份事实
+    /// 有多新。不需要为此往上报里塞 9 条不存在的 agent。
+    ///
+    /// 反向验证：把 `report_of` 里 `Probe::NotInstalled => return None` 改回
+    /// 构造一条假记录，这条会红在「空查找表必须上报空列表」。
     #[test]
-    fn nothing_installed_reports_every_agent_as_unavailable_not_omitted() {
-        // 「没装」也要上报：页面上要能显示「这台设备一个 agent 都没有」，
-        // 而不是一个空列表让人分不清「没探」还是「没装」。
+    fn nothing_installed_reports_nothing_rather_than_nine_absent_agents() {
         let snap = probe_once(&empty_lookup(), Duration::from_millis(50));
-        assert!(!snap.agents.is_empty(), "已知 agent 都要出现");
-        assert!(snap.agents.iter().all(|a| !a.available));
-        assert!(snap.agents.iter().all(|a| a.version.is_none()));
+        assert!(
+            snap.agents.is_empty(),
+            "一个都没装就该报空列表，不许把 9 个「没装」也推上去：{:?}",
+            snap.agents.iter().map(|a| &a.id).collect::<Vec<_>>()
+        );
         assert!(!snap.any_available());
     }
 
@@ -318,21 +361,44 @@ mod tests {
         let m: HashMap<String, PathBuf> = [("opencode".to_string(), bin)].into();
         let lookup = move |n: &str| m.get(n).cloned();
         let snap = probe_once(&lookup, Duration::from_millis(500));
-        let oc = &snap.agents[0];
+        let oc = snap
+            .agents
+            .iter()
+            .find(|a| a.id == "opencode")
+            .expect("这个查找表里有 opencode，它必须出现在上报里");
         assert!(!oc.available, "跑不起来不能算可用");
         assert!(oc.error.is_some(), "失败必须带原因：{oc:?}");
     }
 
+    /// **缓存返回上一次刷新的事实，不重新探测。**
+    ///
+    /// 用一个**真的能探到**的假 agent：空查找表现在回空列表（见
+    /// `nothing_installed_reports_nothing_rather_than_nine_absent_agents`），
+    /// 空对空比不出「缓存有没有起作用」。这里要验的是「第二次读拿到的是第一次
+    /// 的结果、而不是又跑了一遍子进程」。
     #[test]
     fn the_cache_serves_the_last_refresh_without_touching_processes() {
+        let d = std::env::temp_dir().join(format!("af-cache-c-{}", std::process::id()));
+        std::fs::create_dir_all(&d).expect("临时目录");
+        let bin = d.join("opencode");
+        std::fs::write(&bin, "#!/bin/sh\necho 2.1.4\n").expect("写");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let m: HashMap<String, PathBuf> = [("opencode".to_string(), bin)].into();
+        let lookup = move |n: &str| m.get(n).cloned();
+
         let det = Detected::new();
         assert!(det.snapshot().agents.is_empty(), "初始缓存是空的");
 
-        let snap = det.refresh_with(&empty_lookup(), Duration::from_millis(50));
-        assert!(!snap.agents.is_empty());
+        let snap = det.refresh_with(&lookup, Duration::from_millis(500));
+        assert_eq!(snap.agents.len(), 1, "只装了 opencode 就只报它一条");
+        assert_eq!(snap.agents.first().map(|a| a.id.as_str()), Some("opencode"));
         // 再读一次：拿到的是上次刷新的事实，不再探测
         let again = det.snapshot();
-        assert_eq!(again.agents.len(), snap.agents.len());
+        assert_eq!(again.agents, snap.agents, "缓存要给回同一份事实");
     }
 
     #[test]
@@ -385,12 +451,37 @@ mod tests {
         assert!(AgentReport::from_json(&serde_json::json!({"id": 5})).is_none());
     }
 
+    /// `capabilities.agents` 是**对象数组**，每一项都有 `id` 与 `available`。
+    ///
+    /// 用直接构造的 `Snapshot` 而不是 `probe_once(&empty_lookup)`：后者现在回
+    /// 空列表（没装的不上报），空数组验不了「每一项的形状」——`for item in arr`
+    /// 会一次都不执行，测试变成永远绿的空壳。
     #[test]
     fn the_snapshot_json_shape_is_an_array_of_objects() {
-        let snap = probe_once(&empty_lookup(), Duration::from_millis(50));
+        let snap = Snapshot {
+            agents: vec![
+                AgentReport {
+                    id: "opencode".into(),
+                    name: "opencode".into(),
+                    version: Some("2.1.4".into()),
+                    available: true,
+                    error: None,
+                    path: None,
+                },
+                AgentReport {
+                    id: "claude".into(),
+                    name: "claude".into(),
+                    version: None,
+                    available: false,
+                    error: Some("没有 ACP 入口".into()),
+                    path: None,
+                },
+            ],
+            at: None,
+        };
         let j = snap.to_json();
         let arr = j.as_array().expect("agents 是数组");
-        assert!(!arr.is_empty());
+        assert_eq!(arr.len(), 2, "两条都要在：{j}");
         for item in arr {
             assert!(item.is_object(), "每一项都是对象：{item}");
             assert!(item["id"].is_string());

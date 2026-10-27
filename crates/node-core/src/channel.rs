@@ -779,6 +779,20 @@ fn on_open_acp(spec: OpenChannel) -> Action {
         _ => None,
     };
 
+    // 这条会话已经落库的最大 `seq`。设备侧编号从这里续上——**不续号就会静默
+    // 丢事件**（`seq` 在每个 ACP 子进程里从 1 重数，`session/load` 建的就是新
+    // 进程，于是重放事件带 `seq=1`，与库里已有的 `seq=1` 撞 `UNIQUE` 被
+    // `INSERT OR IGNORE` 吞掉；实测见 `routes/conversation.rs` 的同名注释）。
+    //
+    // **缺字段或形状不对都当 0**，这是有定义的：0 是「一条都没有」，而
+    // `Seq::next()` 是 `fetch_add(1) + 1`，起点 0 让第一条是 1。旧 Hub 不下发
+    // 这个字段时行为与从前一致（从 1 开始），不会因为升级顺序把对话开挂。
+    // 负数同样当 0：`seq` 是本模块自己发的，负值只可能是别人编的。
+    let last_seq = match spec.params.get("last_seq").and_then(serde_json::Value::as_i64) {
+        Some(v) if v > 0 => v,
+        _ => 0,
+    };
+
     let conv = crate::agent::conversation::ConversationSpec {
         channel_id: spec.channel_id.clone(),
         agent_id: agent_id.to_string(),
@@ -788,6 +802,7 @@ fn on_open_acp(spec: OpenChannel) -> Action {
         acp_args,
         env,
         acp_session_id,
+        last_seq,
     };
     let frames = lock().open_external(&spec.channel_id, EXTERNAL_CREDIT_START);
     Action::OpenAcp {

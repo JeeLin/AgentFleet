@@ -108,6 +108,34 @@ pub async fn open(
         Some(c) => (c.command.clone(), c.args.clone(), c.env.clone()),
         None => (String::new(), Vec::new(), std::collections::BTreeMap::new()),
     };
+
+    // 4. **把这条会话已经用到的最大 `seq` 下发**，让设备接着往下编号。
+    //
+    // # 为什么必须下发
+    //
+    // `seq` 是设备侧计数器，而它在每个 ACP 子进程里**从 1 重数**：关掉页面
+    // 再打开、worker 换代、`session/load` 建了新进程——每一种都让计数器回到
+    // 0。于是新事件带 `seq=1`，与库里已有的 `seq=1` 撞
+    // `UNIQUE(session_id, node_id, seq)`，被 `append` 的 `INSERT OR IGNORE`
+    // 静默吞掉。症状是「轨迹里少了一半对话」，而 `gaps` 不报警（seq 仍然连续）。
+    //
+    // 实测证据（M2 子任务 13）：同一会话第二次开对话走 `session/load`，
+    // agent 重放的 `user_message_chunk` 带 `seq=1`，而库里 `seq=1` 已是
+    // `available_commands_update`——那条用户消息就此消失。
+    //
+    // 所以「会话内只增」这条契约必须由**跨进程的真相源**兜住，而真相源是
+    // `trajectory_event` 表，不是设备内存。下发它，设备侧 `Seq` 才能从历史
+    // 续上，`UNIQUE` 才真正表达「同一事件不写两行」而不是「新事件被旧事件顶掉」。
+    //
+    // 读不到（新会话，一条事件都没有）就下发 `0`：`Seq` 的 `next()` 是
+    // `fetch_add(1) + 1`，起点 0 正好让第一条是 1。**不要下发 `null`**——
+    // 那会让设备侧多一个「没有起点」的分支，而 0 已经表达了同一件事。
+    let last_seq = state
+        .trajectory()
+        .last_seq(&session_id)
+        .map_err(|e| ApiError::internal_with("cannot read the trajectory's last seq", e))?
+        .unwrap_or(0);
+
     let params = json!({
         "agent_id": agent_id,
         // Hub 存的是**原样路径**（可能带 `~`）：Hub 不知道设备家目录，展开只能
@@ -125,9 +153,12 @@ pub async fn open(
         // **不要下发空串**：空串与「没有」在设备侧是两回事，写空串会让设备
         // 去 load 一个叫 "" 的会话。
         "acp_session_id": detail.session.acp_session_id,
+        // 这条会话已经落库的最大 `seq`；设备侧编号从这里续上。见上文的
+        // 实测证据——不续号就会静默丢事件。
+        "last_seq": last_seq,
     });
 
-    // 4. 开通道并把 `open_channel` 下发。`check_reported = false`：`acp`
+    // 5. 开通道并把 `open_channel` 下发。`check_reported = false`：`acp`
     //    不是 connector（见本文件头注释），它的门禁已经在上面第 2 步做过。
     let opened = open_device_channel(&state, &auth, &session_id, ACP_CONNECTOR, params, false).await?;
     Ok((axum::http::StatusCode::CREATED, Json(opened)).into_response())
