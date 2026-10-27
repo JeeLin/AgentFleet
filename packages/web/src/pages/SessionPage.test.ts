@@ -939,6 +939,80 @@ describe('对话：说一句话走专用端点（不是 /api/channels）', () =>
     const urls = fetchMock.mock.calls.map(([u]) => new URL(String(u), 'http://hub.local').pathname)
     expect(urls, `实际请求：${urls.join(', ')}`).not.toContain('/api/sessions/s_1/conversation')
   })
+
+  /*
+    设备已被删除（`workspace.node_id === null`）但**选了 agent**：
+    发送路必须关掉。不关的话输入框能打字、按钮能点，一点就是 `device_removed`
+    409——而同一屏顶上的横幅正写着「设备已被删除」，两句话互相打架。
+
+    判据是 `deviceRemoved`，**不是** `ended`：这个会话的 `state` 仍是 `running`，
+    会话本身没结束（删设备不删会话）。
+
+    反向验证：把 `SessionPage.vue` 里 `convSay` / `terminalInput` / `runCommand`
+    的 `deviceRemoved` 判据，或 `ConvFlow` 的 `deviceGone` 门禁删掉，
+    「发送按钮 / 输入框仍可用」与「真的发出了请求」两条都会红。
+  */
+  it('设备已被删除：输入与发送都关掉，横幅说清原因', async () => {
+    const { w, fetchMock } = await mountWithAgent([
+      session({
+        id: 's_1',
+        agent_id: 'opencode',
+        state: 'running',
+        workspace: { node_id: null, removed_node_id: 'n_9', path: '/srv/alpha', path_locked: true },
+      }),
+    ])
+
+    // 横幅与输入区说的是同一件事：删设备不删会话，但消息发不出去
+    const banner = w.element.querySelector<HTMLElement>('[data-device-removed]')
+    expect(banner, '设备已删除的横幅必须在').not.toBeNull()
+    expect(banner?.textContent).toContain('设备已被删除')
+    expect(banner?.textContent).toContain('n_9')
+
+    const input = w.element.querySelector<HTMLTextAreaElement>('[data-conv-input]')
+    if (!input) throw new Error('no conv input')
+    expect(input.disabled, '设备没了，输入框不该还能打字').toBe(true)
+    // 真把文本塞进 value 再提交：`disabled` 只是界面，发送路本身也必须拦住
+    input.value = '这条不该发出去'
+    input.dispatchEvent(new Event('input'))
+    await w.vm.$nextTick()
+    w.element.querySelector('form')?.dispatchEvent(new Event('submit', { cancelable: true }))
+    await flush(w)
+
+    const runBtn = w.element.querySelector<HTMLButtonElement>('[data-conv-run]')
+    expect(runBtn?.disabled, '发送按钮必须禁用').toBe(true)
+
+    const urls = fetchMock.mock.calls.map(([u]) => new URL(String(u), 'http://hub.local').pathname)
+    expect(urls, `实际请求：${urls.join(', ')}`).not.toContain('/api/sessions/s_1/conversation')
+    expect(urls, `实际请求：${urls.join(', ')}`).not.toContain('/api/channels')
+  })
+
+  it('设备已被删除：界面那一层被绕过时，发送路自己也不开通道', async () => {
+    const { w, fetchMock } = await mountWithAgent([
+      session({
+        id: 's_1',
+        agent_id: 'opencode',
+        state: 'running',
+        workspace: { node_id: null, removed_node_id: 'n_9', path: '/srv/alpha', path_locked: true },
+      }),
+    ])
+
+    /*
+      **不能靠抹 `disabled` 来测这一层**：提交按钮的 `:disabled` 绑在 computed 上，
+      抹掉之后 Vue 下一次 patch 就又写回 `true`（实测被它挡在 `submit()` 之前）。
+      所以直接调页面接在 `@say` / `@run` / `@send` 上的 handler——`disabled` 是
+      界面，handler 里那道判据才是「发不发得出去」。
+    */
+    const flow = w.findComponent({ name: 'ConvFlow' })
+    expect(flow.exists(), 'ConvFlow 必须挂着').toBe(true)
+    flow.vm.$emit('say', '这条不该发出去')
+    flow.vm.$emit('run', { command: 'ls', args: [], cwd: '' })
+    flow.vm.$emit('send', '这条也不该发出去\n')
+    await flush(w)
+
+    const urls = fetchMock.mock.calls.map(([u]) => new URL(String(u), 'http://hub.local').pathname)
+    expect(urls, `实际请求：${urls.join(', ')}`).not.toContain('/api/sessions/s_1/conversation')
+    expect(urls, `实际请求：${urls.join(', ')}`).not.toContain('/api/channels')
+  })
 })
 
 describe('轨迹抽屉：打开即读，读到就画', () => {

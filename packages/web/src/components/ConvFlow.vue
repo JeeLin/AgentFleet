@@ -92,6 +92,17 @@ const props = withDefaults(
     path: string
     /** 会话已结束：输入区不可用（不会再建通道）。 */
     ended?: boolean
+    /**
+     * 会话所属设备已被删除。**与 `ended` 是两个事实**，理由也分两句说：
+     * 「会话结束了」是会话自己的状态，「设备没了」是它落脚的那台机器没了。
+     * 两者都让输入区不可用，但用户读到的原因必须是他实际撞上的那一条。
+     */
+    deviceGone?: boolean
+    /**
+     * 设备已删除时那句原因（页面持有一份，因为它同时写在横幅里）。
+     * 不在这里另写一句：同一个事实在两处用不同措辞，用户会以为说的是两件事。
+     */
+    deviceGoneWhy?: string
     /** 终端面板是否已有可用通道（决定「终端」这个目标能不能选）。 */
     terminalReady?: boolean
     /**
@@ -125,6 +136,8 @@ const props = withDefaults(
     events: () => [],
     gaps: () => [],
     incomplete: false,
+    deviceGone: false,
+    deviceGoneWhy: '这个会话所属的设备已被删除',
   },
 )
 
@@ -169,7 +182,15 @@ const flowEl = ref<HTMLElement | null>(null)
 /** 用户手动往上翻过就先不自动滚——自动滚回去等于抢走他正在读的位置。 */
 let pinnedToBottom = true
 
-const canSubmit = computed(() => !props.ended && draft.value.trim().length > 0)
+/**
+ * 输入区整体不可用。
+ *
+ * 两个理由合在这里只因为「能不能打字」这一个结果是同一个；**原因不合并**
+ * ——`ended` 与 `deviceGone` 各写各的一句（见 `whyBlocked`）。
+ */
+const composeBlocked = computed(() => props.ended || props.deviceGone)
+
+const canSubmit = computed(() => !composeBlocked.value && draft.value.trim().length > 0)
 
 /** 每个目标为什么不可用。不可用时该目标直接不选。 */
 /**
@@ -184,14 +205,30 @@ const canSubmit = computed(() => !props.ended && draft.value.trim().length > 0)
  */
 const chatBlocked = computed(() => {
   if (props.ended) return '会话已结束'
+  // 设备被删：这里不是「等它回来」，而是「它不会再回来了」。说成「会话已结束」
+  // 会把用户引去查会话，而会话好好地在库里。
+  if (props.deviceGone) return '所属设备已被删除'
   if (!props.agentId) return '没有选 agent'
   return ''
 })
 
 const canChat = computed(() => chatBlocked.value === '')
 
+/**
+ * 输入区为什么不可用（整段一句，写在提示行里）。两个事实两句话，
+ * 顺序与页面两条横幅一致：先说会话自己的状态，再说设备。
+ */
+const whyBlocked = computed(() => {
+  if (props.ended) return '这个会话已结束：工作区不再可达，面板与命令都不会再建立通道。'
+  if (props.deviceGone) {
+    return `${props.deviceGoneWhy}：对话与轨迹都保留着，但已经发不出消息，也跑不了命令。`
+  }
+  return ''
+})
+
 const placeholder = computed(() => {
   if (props.ended) return '这个会话已结束：面板与命令都不会再建立通道'
+  if (props.deviceGone) return `${props.deviceGoneWhy}：发不出消息`
   if (target.value === 'chat') {
     return props.agentId
       ? `对 ${props.agentId} 说一句话`
@@ -201,7 +238,7 @@ const placeholder = computed(() => {
 })
 
 const targetHint = computed(() => {
-  if (props.ended) return ''
+  if (composeBlocked.value) return ''
   if (target.value === 'chat') {
     if (!canChat.value) return chatBlocked.value
     // 开通道失败要说出来：输入框已经清空，而用户没看到任何回复——
@@ -582,9 +619,13 @@ watch(
           v-model="draft"
           class="af-textarea af-compose__input"
           rows="1"
-          :disabled="ended"
+          :disabled="composeBlocked"
           :aria-label="
-            ended ? '输入（这个会话已结束：不会再建立通道）' : '输入：按 ⏎ 发送'
+            ended
+              ? '输入（这个会话已结束：不会再建立通道）'
+              : deviceGone
+                ? '输入（所属设备已被删除：发不出消息）'
+                : '输入：按 ⏎ 发送'
           "
           :placeholder="placeholder"
           data-conv-input
@@ -594,7 +635,7 @@ watch(
         <select
           v-model="target"
           class="af-select af-compose__target"
-          :disabled="ended"
+          :disabled="composeBlocked"
           aria-label="发送目标"
           data-conv-target
         >
@@ -636,8 +677,8 @@ watch(
         <span><kbd>t</kbd> 轨迹抽屉</span>
         <span class="af-spacer"></span>
         <span>{{ deviceName }} · <span class="af-fp">{{ path }}</span></span>
-        <span v-if="ended" class="af-compose__why">
-          这个会话已结束：工作区不再可达，面板与命令都不会再建立通道。
+        <span v-if="whyBlocked" class="af-compose__why">
+          {{ whyBlocked }}
         </span>
         <span v-else-if="target === 'exec'" class="af-compose__why">
           这里不是 shell：一行按空白切成程序名与参数，引号只用来把带空格的参数

@@ -119,8 +119,26 @@ function connOf(nodeId: string | null): TabConn {
   return deviceOf(nodeId)?.status ?? 'offline'
 }
 
-/** 会话所属设备是否已被删除（`workspace.node_id` 为 NULL）。 */
+/**
+ * 会话所属设备是否已被删除（`workspace.node_id` 为 NULL）。
+ *
+ * **与 `ended` 是两个事实，所以是两个谓词**：「会话结束了」是会话自己的状态，
+ * 「设备被删了」是它落脚的那台机器没了——页面为两者写的是不同的解释（见
+ * 模板里两条横幅），合成一个的话用户读到的原因是错的那一条。它拦的是
+ * **对话 / 命令这条发送路**：设备没了，`workspace.node_id` 是 NULL，开通道只会
+ * 换回 `device_removed` 409——拦不住的话，横幅说「设备已被删除」而输入框仍可
+ * 打字、按钮仍可点，两句话互相打架。
+ */
 const deviceRemoved = computed(() => current.value?.workspace.node_id === null)
+
+/**
+ * 「设备已被删除」这句话本身。横幅与输入区（`ConvFlow` 的 `deviceGoneWhy`）
+ * 读的是**同一份**：同一个事实在两处换个说法，用户会以为那是两件事。
+ */
+const deviceGoneWhy = computed(() => {
+  const removed = current.value?.workspace.removed_node_id
+  return `这个会话所属的设备已被删除（原设备 ${removed ?? '（未记录）'}）`
+})
 
 /* ---------------------------------------------------------------- tab 状态 */
 
@@ -561,7 +579,7 @@ function closeDock(): void {
  */
 function terminalInput(text: string): void {
   const tab = activeTab.value
-  if (!tab || ended.value) return
+  if (!tab || ended.value || deviceRemoved.value) return
   const handle = ensureChannel(tab, 'terminal')
   if (handle.state() !== 'ready') interact('terminal')
   handle.send(text)
@@ -619,6 +637,9 @@ function ensureChatChannel(tab: TabMeta): ChannelHandle {
 function convSay(text: string): void {
   const tab = activeTab.value
   if (!tab || ended.value || !hub) return
+  // 设备已被删除：「说第一句话才开通道」这条懒建立会当场去开一条，
+  // 而它唯一的结果是 `device_removed` 409。拦在这里，判据与横幅同一份。
+  if (deviceRemoved.value) return
   const handle = ensureChatChannel(tab)
   void handle.open().catch(() => undefined)
   handle.send(text)
@@ -1056,6 +1077,8 @@ function filesDirty(dirty: boolean): void {
 function runCommand(req: ConvExecRequest): void {
   const tab = activeTab.value
   if (!tab || ended.value || !hub) return
+  // exec 与对话同一条发送路：设备没了，`open()` 就是一次 `device_removed`。
+  if (deviceRemoved.value) return
   const key = `${tab.id}\u0000exec\u0000${(execSeq += 1)}`
   const handle = hub.handle(key, {
     sessionId: tab.id,
@@ -1426,8 +1449,8 @@ onBeforeUnmount(() => {
         用户会一直等一台已经删掉的机器重连。
       -->
       <p v-if="deviceRemoved" class="af-wb__banner" role="note" data-device-removed>
-        这个会话所属的设备已被删除：对话与轨迹都保留着，但它的面板无法再建立通道。
-        原设备 {{ current?.workspace.removed_node_id ?? '（未记录）' }}。
+        {{ deviceGoneWhy }}：对话与轨迹都保留着，但它的面板无法再建立通道，
+        消息也发不出去了。
       </p>
 
       <div class="af-wb__body">
@@ -1443,6 +1466,8 @@ onBeforeUnmount(() => {
             :device-name="deviceLabel"
             :path="rootPath"
             :ended="ended"
+            :device-gone="deviceRemoved"
+            :device-gone-why="deviceGoneWhy"
             :terminal-ready="terminalReady"
             :traj-open="activeWs?.traj ?? false"
             :agent-id="current?.agent_id ?? null"
