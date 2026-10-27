@@ -436,9 +436,10 @@ async function submit(): Promise<void> {
 .af-sechead {
   margin-bottom: var(--af-space-4);
 }
-.af-keyhint {
-  font-size: var(--af-text-sm);
-}
+/* 键位提示 `.af-keyhint` 的字号住在 `styles/components.css` §2：新建页与会话
+   列表页共用同一档，各存一份就是两份逐字相同的副本。
+
+   下面 `.af-opts` 是这一页独有的「三步选项行」形状，不跟着搬。 */
 .af-opts {
   display: flex;
   flex-direction: column;

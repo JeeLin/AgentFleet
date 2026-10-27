@@ -1,8 +1,30 @@
 /* ===========================================================================
    components.css —— 组件样式（原型与实现共用）
    ---------------------------------------------------------------------------
-   这个文件只放组件：可复用的形状与状态。页面级布局一律内联在页面
-   <style> 里，且不得超过 30 行——超过说明它本该在这里。
+   这个文件放两类东西：可复用的组件形状与状态；以及**跨页面共用的**那部分
+   页面级布局（.af-page §2 / .af-auth §18 / .af-wb §20 三族）。
+
+   ── 「内联布局不得超过 30 行」这条**已撤回**：不是没人守，是守不了 ──
+   上一版这里写「页面级布局一律内联在页面 <style> 里，且不得超过 30 行——
+   超过说明它本该在这里」。实测它两处都不成立，所以改写而不是补门禁：
+     ① 「一律内联」与本文件矛盾：.af-page / .af-auth / .af-wb 本身就是页面
+        级布局，而且**只能**住在这里——.af-page 是 5 个页面的外壳、
+        .af-auth 是登录 / setup 共用、.af-wb 是工作台与 PanelDock 共用，
+        内联进某一个页面的 scoped 块，别的页面就取不到了。原型页
+        prototype/*.html 也靠这三层是全局的，才能只 link 一个文件就拿到
+        整套页面壳。
+     ② 「不超过 30 行」量错了对象：页面 <style> 装的不只是布局，还有本页
+        私有的组件形状（.af-opt / .af-summary / .af-radio…）。按行数卡会把
+        「该搬进来的布局」与「不该搬进来的私有形状」判成同一件事——实测 17
+        个带 <style> 的 .vue 里有 13 个超过 30 行（NewSessionPage 最多），
+        而其中绝大多数是私有形状。这条规矩没有可判的边界，写成门禁只会
+        卡住合法代码。
+
+   唯一可判、也唯一值得守的那一条：**本文件里**的页面级布局三族合计
+   **≤30 条规则**（实测 24 条：.af-page 5 / .af-auth 6 / .af-wb 13），由
+   `src/styles/components.test.ts` 断言。用「条」不用「行」：一条规则写成
+   一行还是七行只差换行，行数量的是排版、不是规模。超了说明往页面壳里
+   塞了本该是组件的东西——那时该拆组件，不是继续往这三族里堆。
 
    ── 三条组织规则 ──────────────────────────────────────────────────
    ① 每个组件的四态（hover / active / focus / disabled）在同一个块里写完，
@@ -204,6 +226,10 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
   text-transform: uppercase; letter-spacing: var(--af-tracking-label);
 }
 .af-t-mute { color: var(--af-fg-tertiary); }
+/* 键位提示：模板里恒与 `.af-t-mute` 连用（`class="af-t-mute af-keyhint"`），
+   所以这里只定字号、颜色归那边。此前新建页与会话列表页各存一份，改字号
+   要改两处——第二次改的那天必然只改一处。 */
+.af-keyhint { font-size: var(--af-text-sm); }
 .af-t-num { font-variant-numeric: tabular-nums; }
 .af-fp { font-family: var(--af-font-mono); color: var(--af-fg-secondary); }
 .af-truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -412,6 +438,16 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 .af-table tbody tr[aria-selected='true'] td { color: var(--af-fg-primary); }
 .af-table tbody tr[data-inert='true'] td { color: var(--af-fg-tertiary); }
 .af-table tbody tr[data-inert='true'] .af-btn { pointer-events: none; opacity: 0.6; }
+
+/* 表格外框：边框 + 圆角 + 滚动三件一起来。缺圆角时滚到角落，表格的方角会
+   戳出圆角框外；缺 `overflow:auto` 时 `.af-table th` 那层 sticky 会跟着
+   整块一起滚走——`overflow` 是 sticky 的包含块，写在 table 上不生效。
+   设备表与会话表各存一份时，两份都是这三行，所以提到这里。 */
+.af-tablewrap {
+  border: 1px solid var(--af-border-subtle);
+  border-radius: var(--af-radius-md);
+  overflow: auto;
+}
 
 /* ===========================================================================
    9. Tree

@@ -186,9 +186,13 @@ function clearQuery(): void {
 .af-search {
   width: 260px;
 }
-.af-keyhint {
-  font-size: var(--af-text-sm);
-}
+/* 键位提示 `.af-keyhint` 的字号住在 `styles/components.css` §2：会话列表页与
+   新建页共用同一档，各存一份就是两份逐字相同的副本。
+
+   本页另有一个 `.af-hint`（分区说明行），与它同体不同名——那是本页独有的类
+   名，只有这一页用它，所以留在本地不搬。
+
+   下面 `.af-sectionhead` 同理，是本页分区标题行的形状。 */
 .af-sectionhead {
   display: flex;
   align-items: center;

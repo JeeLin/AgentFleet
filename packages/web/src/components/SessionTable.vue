@@ -104,12 +104,10 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.af-tablewrap {
-  border: 1px solid var(--af-border-subtle);
-  border-radius: var(--af-radius-md);
-  overflow: auto;
-}
-/* 标题是真按钮：Enter 的语义属于行，但「点标题进会话」是用户最自然的手势，
+/* 表格外框 `.af-tablewrap` 在 `styles/components.css` §8：两张表共用同一个框，
+   各存一份就是两份逐字相同的副本。
+
+   标题是真按钮：Enter 的语义属于行，但「点标题进会话」是用户最自然的手势，
    而且按钮天然键盘可达，不必再给行内造一条不可见的点击热区。
 
    「画成链接」的那份样式在 `src/page-chrome.css`（全局 `.af-link`）——

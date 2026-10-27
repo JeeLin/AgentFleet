@@ -210,12 +210,10 @@ function offlineReason(device: DeviceSummary): string {
 </template>
 
 <style scoped>
-.af-tablewrap {
-  border: 1px solid var(--af-border-subtle);
-  border-radius: var(--af-radius-md);
-  overflow: auto;
-}
-/* 竖向居中而不是基线对齐：两个 span 不同字号（名字 13px / 指纹 10px），
+/* 表格外框 `.af-tablewrap` 在 `styles/components.css` §8：两张表共用同一个框，
+   各存一份就是两份逐字相同的副本。
+
+   竖向居中而不是基线对齐：两个 span 不同字号（名字 13px / 指纹 10px），
    baseline 对齐时基线与视觉中心不重合，指纹会偏离格子中心。 */
 .af-dev-name {
   display: flex;
