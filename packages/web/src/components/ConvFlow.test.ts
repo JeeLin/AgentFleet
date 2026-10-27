@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import ConvFlow, { type ConvExecRequest, type ConvEvent } from '@/components/ConvFlow.vue'
+import { cssRuleOf, readRepoFile } from '@/test/css'
 import { mountIn } from '@/test/mount'
 
 function mount(props: Partial<Record<string, unknown>> = {}) {
@@ -151,6 +152,27 @@ describe('ConvFlow：把轨迹事件画成对话', () => {
     const msg = w.element.querySelector('[data-conv-msg]')
     expect(msg?.getAttribute('data-who')).toBe('agent')
     expect(msg?.textContent).toContain('你好')
+  })
+
+  /**
+   * 真机实测的载荷：`opencode acp` 的 `agent_message_chunk` 里 `content` 是
+   * **单个对象** `{type, text}`，不是数组。数组形态的夹具走的是另一条分支，
+   * 所以这条必须用对象形态，否则「整串 JSON 上屏」这个缺陷测不出来。
+   */
+  it('content 是单个对象（真机 opencode acp 形态）时只画 text，不画整串 JSON', async () => {
+    const realPayload =
+      '{"sessionUpdate":"agent_message_chunk","messageId":"msg_17d0",' +
+      '"content":{"type":"text","text":"好的，我在。有什么需要我帮忙的吗？"}}'
+    const w = mount({
+      agentId: 'opencode',
+      events: [{ id: 1, seq: 1, kind: 'agent_message_chunk', payload: realPayload }],
+    })
+    await w.vm.$nextTick()
+
+    const msg = w.element.querySelector('[data-conv-msg]')
+    expect(msg?.getAttribute('data-who')).toBe('agent')
+    expect(msg?.textContent).toContain('好的，我在。有什么需要我帮忙的吗？')
+    expect(msg?.textContent).not.toContain('sessionUpdate')
   })
 
   it('用户的一段话画成一行 user 消息', async () => {
@@ -457,6 +479,33 @@ describe('ConvFlow：轨迹入口', () => {
   it('轨迹按钮带 aria-expanded——它的状态要能被读出来', () => {
     const closed = mount({ trajOpen: false })
     expect(closed.find('[data-conv-traj]').attributes('aria-expanded')).toBe('false')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 输入区不许横向溢出：面板坞打开时对话列只有约 412px，容不下「一行排开」
+// ---------------------------------------------------------------------------
+
+describe('ConvFlow：输入区的行能在窄列里收缩', () => {
+  const CSS = readRepoFile('packages/web/src/styles/components.css')
+
+  /**
+   * 断言前**必须去掉注释**：这几条规则的注释里就写着属性名与值（解释为什么
+   * 要这么写），不剥掉的话把声明删了断言照样绿——那是恒真断言。
+   */
+  function declarationsOf(selector: string): string {
+    const rule = cssRuleOf(CSS, selector)
+    expect(rule, `${selector} 规则必须存在`).toBeTruthy()
+    return rule.replace(/\/\*[\s\S]*?\*\//g, '')
+  }
+
+  // happy-dom 不做排版、vitest 也不注入样式，`getComputedStyle` 读不到——只能读样式源。
+  it('输入行允许换行（不许换行就把「发送」「轨迹」推出视口）', () => {
+    expect(declarationsOf('.af-compose__row')).toMatch(/flex-wrap:\s*wrap/)
+  })
+
+  it('输入框的 min-width 归零（textarea 的 cols=20 默认下限会顶住整行）', () => {
+    expect(declarationsOf('.af-compose__input')).toMatch(/min-width:\s*0/)
   })
 })
 

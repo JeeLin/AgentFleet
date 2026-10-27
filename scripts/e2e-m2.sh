@@ -707,8 +707,12 @@ if [ "$CONV_READY" -eq 1 ]; then
   if wait_until 180 turn_done; then
     STOP=$(frames_of "$TCH" | jq -r 'select(.type == "turn_end") | .stopReason // empty' | head -1)
     # 拼出 assistant 的可见文本：ACP 的 `agent_message_chunk` 在 batch 的 events 里。
+    # `content` 实测有两种形态：数组（`session/load` 重放）与**单个对象**
+    # `{"type":"text","text":…}`（opencode acp 的实时 chunk）。只认数组会把
+    # 实时那一轮的空串当成「一个 chunk 都没拼出来」。
     TOKENS_TEXT=$(frames_of "$TCH" \
-      | jq -r 'select(.type == "batch") | .events[]? | select((.sessionUpdate // "") == "agent_message_chunk") | (.content.text // "")' 2>/dev/null \
+      | jq -r 'select(.type == "batch") | .events[]? | select((.sessionUpdate // "") == "agent_message_chunk")
+               | (if (.content | type) == "array" then ([.content[] | .text // ""] | join("")) else (.content.text // "") end)' 2>/dev/null \
       | tr -d '\n')
     if [ "$STOP" = "end_turn" ]; then
       ok "一轮结束 stopReason=end_turn"

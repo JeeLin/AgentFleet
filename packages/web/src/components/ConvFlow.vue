@@ -339,7 +339,10 @@ function str(v: unknown): string {
 }
 
 /**
- * chunk 的文本在 `content` 里，而它可能是数组（多模态）。取 text 段拼起来。
+ * chunk 的文本在 `content` 里。`content` 有三种实测形态，都要认：
+ * 字符串、数组（多模态 / `session/load` 重放）、以及**单个对象**
+ * `{type:"text", text:"…"}`——`opencode acp` 的实时 `agent_message_chunk`
+ * 就是最后这种，只认数组会让整串 payload 原样上屏。
  *
  * `raw` 是**原始 payload 字符串**，专门给「解不开 JSON」那一档用：那一档必须
  * 原样显示出来，而不是退化成一个空对象——`JSON.stringify(p ?? {})` 会得到
@@ -359,6 +362,9 @@ function chunkText(p: Record<string, unknown> | null, raw: string): string {
       })
       .join('')
     if (text) return text
+  }
+  if (c && typeof c === 'object' && typeof (c as Record<string, unknown>).text === 'string') {
+    return (c as Record<string, unknown>).text as string
   }
   if (typeof p.text === 'string') return p.text
   return raw
@@ -666,8 +672,12 @@ watch(
   gap: var(--af-space-3);
   padding: var(--af-space-4) var(--af-space-5);
 }
+/* 从 `.af-select` 的 width:100% 里退出来：宽度全交给内容（选项文字），
+   窄宽度时由 `.af-compose__row` 的换行把它放到单独一行，而不是把按钮挤出去。 */
 .af-compose__target {
   flex: 0 0 auto;
+  width: auto;
+  max-width: 100%;
   height: 44px;
   font-size: var(--af-text-xs);
 }
