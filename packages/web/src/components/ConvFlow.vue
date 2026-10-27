@@ -150,6 +150,11 @@ const emit = defineEmits<{
   /** 说一句话：交给设备的 ACP 子进程。 */
   (e: 'say', text: string): void
   /**
+   * 停止正在跑的那一轮：发 `session/cancel` 到设备，**不关闭会话**。
+   * 只在回复在飞时才可点（`:disabled` 已经拦住了闲着时的点击，这里再兜底一次）。
+   */
+  (e: 'cancel'): void
+  /**
    * 打开轨迹抽屉。`opener` 是触发它的那个元素——抽屉关闭后焦点还给它，
    * 所以触发方必须把它交出来，而不是让抽屉去猜 `activeElement`
    * （Safari 里点按钮不移动焦点，那时猜出来的是 body）。
@@ -184,7 +189,11 @@ const composeBlocked = computed(() => props.ended || props.deviceGone)
 
 const canSubmit = computed(() => !composeBlocked.value && draft.value.trim().length > 0)
 
-/** 每个目标为什么不可用。不可用时该目标直接不选。 */
+/** 「对话」目标为什么不可用。不可用时该目标直接不选。
+ *
+ * 目前只有 `chat` 会在此处被拦截（缺 `agentId` 时）；`exec` / 终端目标
+ * 不在此处判断不可用，它们由各自的 hint 与通道状态另行表达。
+ */
 /**
  * 「对话」这个目标为什么不能用。
  *
