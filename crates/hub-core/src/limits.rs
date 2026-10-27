@@ -37,6 +37,18 @@ pub struct ReadLimiter {
     /// 每片各自截断的话，高频小额读的实际吞吐会低于标称。
     fractional: f64,
     last: Instant,
+    /// 「现在」的出处。生产路径永远是 [`Instant::now`]。
+    ///
+    /// **这条接缝为什么存在**：令牌桶的语义是「时间 × 速率」，而把时间取成
+    /// `Instant::now()` 就等于把「过掉了多久」交给真时钟——于是验证回补速率
+    /// 只能真 `sleep` 一段再断言，而 `sleep 250ms` 并攒出 1/8 帧这类断言在
+    /// 机器繁忙时会直接变红（观测到的失败：CI 并发跑 34 个测试二进制时超时）。
+    /// 把「现在」换成可注入的来源之后，时间由调用方推进，断言变成精确值。
+    ///
+    /// 只存一个函数指针而不是引入 `trait Clock` + mock 实现：本类型唯一需要
+    /// 的时间能力就是「取一次 `Instant`」，而函数指针已经能把「谁来决定现在」
+    /// 这件事交给调用方——多一层 trait 只增加生产路径上的虚调用与样板。
+    now: fn() -> Instant,
 }
 
 impl ReadLimiter {
@@ -44,16 +56,25 @@ impl ReadLimiter {
         Self::with_params(READ_BUCKET_CAPACITY, READ_REFILL_PER_SEC)
     }
 
-    /// 构造非默认限额。**只给测试用**——生产路径一律 `new()`：
-    /// 「默认路径」与「显式 new」走出两套限额时，线上限流器与文档各说各话。
-    fn with_params(capacity: usize, refill_per_sec: usize) -> Self {
+    /// 造一个「现在」由调用方决定的限流器。
+    ///
+    /// **只给测试用**：生产路径一律 `new()`。注入的时钟一旦走偏（停住、倒退），
+    /// 线上限流器会按错误的时间补令牌，而它没有任何自检手段。
+    fn with_clock(capacity: usize, refill_per_sec: usize, now: fn() -> Instant) -> Self {
         Self {
             capacity,
             refill_per_sec,
             tokens: capacity,
             fractional: 0.0,
-            last: Instant::now(),
+            last: now(),
+            now,
         }
+    }
+
+    /// 构造非默认限额。**只给测试用**——生产路径一律 `new()`：
+    /// 「默认路径」与「显式 new」走出两套限额时，线上限流器与文档各说各话。
+    fn with_params(capacity: usize, refill_per_sec: usize) -> Self {
+        Self::with_clock(capacity, refill_per_sec, Instant::now)
     }
 
     /// 尝试消耗 `n` 字节。
@@ -83,8 +104,11 @@ impl ReadLimiter {
     /// 上攒出的令牌是小数，每片各自 `as usize` 会把余数一次次丢掉——实测
     /// 高频小额读的实际吞吐只有名义的 ~62%。
     fn refill(&mut self) {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last);
+        let now = (self.now)();
+        // 时钟**没有**推进时 `duration_since` 会 panic（`Instant` 减出负数）。
+        // 注入时钟的调用方可能一次都不推进，而「时间没动」在限流器里就是
+        // 「没有令牌可补」，不是错误——所以按 0 处理而不是让调用方先算好。
+        let elapsed = now.saturating_duration_since(self.last);
         // `last` 无条件推进：这一段时间已经被计入 `fractional`，再留着它会
         // 在下一次被重复算一遍（凭空生出令牌）。
         self.last = now;
@@ -107,6 +131,50 @@ impl Default for ReadLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    // 假时钟的读数。
+    //
+    // **为什么是线程局部而不是一个 `Clock` trait 的 mock**：限流器的接缝是
+    // 一个 `fn() -> Instant` 指针，而闭包捕获不了任何东西——读数只能存在
+    // 某个静态位置上，由这个自由函数去取。单线程用例下 `Cell` 足够，
+    // 不需要 `Mutex` / `Atomic` 那套并发装置。
+    thread_local! {
+        static FAKE_NOW: Cell<Instant> = Cell::new(Instant::now());
+    }
+
+    /// 交给 [`ReadLimiter::with_clock`] 的那个 `fn() -> Instant`。
+    fn fake_now() -> Instant {
+        FAKE_NOW.with(Cell::get)
+    }
+
+    /// 重置假时钟到真时钟的此刻。
+    ///
+    /// 必须每个用例先调一次：同一个 worker 线程会连着跑多条用例，
+    /// 上一条推进过的时间会漏进下一条。
+    fn reset_clock() {
+        FAKE_NOW.with(|c| c.set(Instant::now()));
+    }
+
+    /// 推进 `d`。**不消耗墙钟时间**——这正是它替代 `sleep` 的地方。
+    fn advance(d: Duration) {
+        FAKE_NOW.with(|c| c.set(c.get() + d));
+    }
+
+    /// 往回调 `d`。`Instant` 早于进程起点时会停在原地（`checked_sub` 返回
+    /// `None`），那不是错误：限流器只关心「相对上一次读数过去了多久」。
+    fn rewind(d: Duration) {
+        FAKE_NOW.with(|c| {
+            let now = c.get();
+            c.set(now.checked_sub(d).unwrap_or(now));
+        });
+    }
+
+    /// 造一台「现在由假时钟说了算」的限流器。
+    fn fake_limiter(capacity: usize, refill_per_sec: usize) -> ReadLimiter {
+        reset_clock();
+        ReadLimiter::with_clock(capacity, refill_per_sec, fake_now)
+    }
 
     #[test]
     fn within_capacity_passes() {
@@ -236,19 +304,75 @@ mod tests {
 
     /// 稳态速率就是每秒一个满帧（`READ_REFILL_PER_SEC = MAX_FRAME_BYTES`）：
     /// 限得再低，正常心跳与通道数据就得排队；限得再高，桶的突发量失去意义。
+    ///
+    /// **时间由假时钟推进，不 `sleep`**：这条量的是「速率 × 时长」这个算术，
+    /// 而墙钟只负责把它拖慢——并发跑测试时 `sleep(250ms)` 实际等到的远不止
+    /// 250ms，于是同一个断言在空闲机器上绿、繁忙机器上红。推进假时钟 250ms
+    /// 是**零墙钟耗时**且精确的：攒出的令牌数只由 `READ_REFILL_PER_SEC` 决定。
     #[test]
     fn the_steady_state_rate_is_one_full_frame_per_second() {
-        let mut r = ReadLimiter::with_params(MAX_FRAME_BYTES, MAX_FRAME_BYTES);
+        let mut r = fake_limiter(MAX_FRAME_BYTES, MAX_FRAME_BYTES);
         r.try_consume(MAX_FRAME_BYTES).unwrap();
         // 桶已排空：之后再放行的每一字节都来自回补，回补速率就是稳态速率
         assert!(r.try_consume(1).is_err());
-        std::thread::sleep(Duration::from_millis(250));
-        // 250ms ≈ 1/4 帧（128 KiB）。给一半的余量防 CI 慢机，仍远小于一整帧
+
+        // ① 时间**没**推进：一字节都不该补进来。
+        assert!(
+            r.try_consume(1).is_err(),
+            "时钟没动就不该有令牌——若这里绿了，限流器读的是真时钟"
+        );
+
+        // ② 推进 250ms = 1/4 秒，按 1 帧/秒应攒出 1/4 帧。
+        advance(Duration::from_millis(250));
         assert!(
             r.try_consume(MAX_FRAME_BYTES / 8).is_ok(),
             "1/4 秒必须攒得出 1/8 帧"
         );
         // 但一整秒的量在 1/4 秒里凑不出来
         assert!(r.try_consume(MAX_FRAME_BYTES).is_err());
+
+        // ③ 再推进到整秒：稳态速率的整帧量这才到齐（扣掉上面已消费的 1/8 帧）。
+        advance(Duration::from_millis(750));
+        assert!(
+            r.try_consume(MAX_FRAME_BYTES - MAX_FRAME_BYTES / 8).is_ok(),
+            "满一秒后余下的 7/8 帧必须补进来"
+        );
+    }
+
+    /// 注入的时钟必须真的被限流器读走：**不推进就补不出令牌**。
+    ///
+    /// 单独一条而不是塞在上面的用例里：那条最终会把时钟推到 1 秒，
+    /// 一旦有人把 `refill()` 改回 `Instant::now()`，它在慢机上**恰好也能绿**
+    /// ——真时钟走过的时间本来就够补出令牌。这条一次都不推进，
+    /// 于是「限流器读了真时钟」必然表现为红灯。
+    #[test]
+    fn an_unadvanced_clock_refills_nothing() {
+        let mut r = fake_limiter(MAX_FRAME_BYTES, MAX_FRAME_BYTES);
+        r.try_consume(MAX_FRAME_BYTES).unwrap();
+        // 空桶 + 时钟不动：无论等多久都不该有令牌进来。
+        for _ in 0..100 {
+            assert!(
+                r.try_consume(1).is_err(),
+                "时钟没推进就不该补令牌——限流器读到的不是注入的时钟"
+            );
+        }
+        // 推进 1ms @1 MiB/s ≈ 1 KiB，攒得出小片但攒不出整帧：
+        // 证明上面的失败来自「时间没走」而不是「桶坏了」。
+        advance(Duration::from_millis(1));
+        assert!(r.try_consume(1024).is_ok());
+        assert!(r.try_consume(MAX_FRAME_BYTES).is_err());
+    }
+
+    /// 时钟**倒退**不补令牌也不 panic：`Instant` 相减出负数会 panic，
+    /// 而注入时钟的调用方完全可能把时间往回调（重放、对账）。
+    #[test]
+    fn a_clock_that_goes_backwards_refills_nothing() {
+        let mut r = fake_limiter(MAX_FRAME_BYTES, MAX_FRAME_BYTES);
+        r.try_consume(MAX_FRAME_BYTES).unwrap();
+        advance(Duration::from_millis(500));
+        assert!(r.try_consume(MAX_FRAME_BYTES / 2).is_ok());
+        // 往回调：既不该补令牌，也不该 panic
+        rewind(Duration::from_millis(500));
+        assert!(r.try_consume(1).is_err());
     }
 }
