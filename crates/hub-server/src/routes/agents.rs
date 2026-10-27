@@ -110,7 +110,10 @@ pub async fn list_config(
 /// - agent 校验会挡掉「先配置、后安装」，而装之前配置恰恰最需要写下来。
 ///
 /// 代价是能写出「指向不存在设备」的孤儿行。那比「配置写不进去」轻得多，
-/// 且设备被删除时 `AgentRuntimeRepo::delete_for_node` 会一并清掉它们。
+/// 且设备被删除时它们会被一并清掉：清理在 `DeviceRepo::delete_and_mark_removed`
+/// 里，与「删设备行」在同一个事务（`DELETE FROM agent_config` 与
+/// `DELETE FROM agent_runtime` 各一条）。它不是由 `AgentRuntimeRepo` 做的——
+/// 那个 repo 只持有连接池，跟事务里那批语句不是同一条路径。
 pub async fn upsert_config(
     State(state): State<AppState>,
     req: axum::extract::Request,

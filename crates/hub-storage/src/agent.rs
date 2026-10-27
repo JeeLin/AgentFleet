@@ -146,13 +146,27 @@ impl AgentRuntimeRepo {
         Ok(row)
     }
 
-    /// 删掉一台设备的全部行（设备被删除时调）。
+    /// 删掉一台设备的全部行（**只由测试使用**）。
     ///
-    /// **会话与轨迹不跟着删**：删除设备只删设备行，会话保留（用户裁定）。
-    /// 这条清的是「agent 扫描事实」——它描述的是那台设备，设备没了就无意义。
+    /// # 生产删设备的路径不经过这里
     ///
-    /// 配置行也一并删：配置是「这台设备上的这个 agent」，设备没了它的
-    /// 启动命令没有意义（而且 `command` 里可能写着那台机器的绝对路径）。
+    /// `DELETE /api/devices/{id}` 走的是 `DeviceRepo::delete_and_mark_removed`，
+    /// 它在**同一个事务**里自己发了这两条逐字相同的 `DELETE`
+    /// （`repo.rs` 的 `agent_runtime` / `agent_config` 两条）。那段清理必须在
+    /// 那个事务里——它还要在同一批语句里把 `removed_node_id` 写进
+    /// `workspace` / `session`，四步要么全成要么一行不动。
+    ///
+    /// 所以本函数是那条路径的**重复实现**，而它自己的注释一度反过来声称
+    /// 生产删设备会调它：那种说法是假的，按它去找清理逻辑的人找不到。
+    ///
+    /// 留着它只为一个用途：集成测试要在**不动内存 `Reports`**的前提下把
+    /// `agent_runtime` 清空，用来反向验证「会话门禁读的是库，不是内存」
+    /// （`hub-server/tests/api.rs` 的 `the_gate_reads_the_table_not_the_in_memory_report`）。
+    /// 那个用例需要的是一个「只清库」的入口，而生产的入口会连带删设备行。
+    ///
+    /// ⚠️ 不要在生产代码里调它：它会绕过「删设备」那一条事务，把
+    /// `workspace.node_id` 置 NULL 那一步留在库外，留下一台设备行还在、
+    /// agent 清单已经没了的中间态。
     pub fn delete_for_node(&self, node_id: &str) -> Result<usize> {
         let mut conn = self.pool.get()?;
         let tx = conn.transaction()?;
