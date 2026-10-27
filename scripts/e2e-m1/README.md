@@ -194,7 +194,7 @@ SIGCONT → 继续观察回到 online
   **Hub** 塞进 params（Hub 从 `session.workspace_id` 查出 `(node_id, path)`）」。
 - 实际：`crates/hub-server/src/routes/stream.rs:574` 的 `open_channel` 如今先调
   `params_with_workspace_root` 把会话工作区根**覆盖**进 params（`:874` 是那个函数），
-  而前端 files 面板发的就是 `{}`（`packages/web/src/pages/SessionPage.vue:280`）。
+  而前端 files 面板发的就是 `{}`（`packages/web/src/pages/SessionPage.vue:354`）。
 - 设备侧：`files` / `exec` 的 `open` 都要求 `OpenReq.workspace_root`
   （`crates/node-core/src/connector/files.rs:193`、`crates/node-core/src/connector/exec.rs:186`），
   缺了就直接回 `channel_error`。
@@ -205,7 +205,7 @@ SIGCONT → 继续观察回到 online
 ### 6.2 files 的取数载荷在 Hub 就被改写成了终端载荷（已修）
 
 - 页面取数走 `channel.send(JSON.stringify({op:"list",…}))`
-  （`packages/web/src/pages/SessionPage.vue:592`）→ `POST /api/channels/{id}/send`。
+  （`packages/web/src/pages/SessionPage.vue:776`）→ `POST /api/channels/{id}/send`。
 - 该端点把**任何**请求体包成 `{"bytes": <text>}`（`crates/hub-server/src/routes/stream.rs:851`）——
   那是 terminal connector 的载荷形状；而 files connector 只认**顶层** `op`
   （`crates/node-core/src/connector/files.rs:219`）。
