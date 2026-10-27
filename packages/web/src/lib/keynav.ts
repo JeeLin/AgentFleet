@@ -77,14 +77,7 @@ export const KEYS: readonly KeyGroup[] = [
     scope: 'global',
     keys: [
       { keys: ['g', 's'], act: 'nav:sessions', label: pageTitle('sessions'), scope: 'global' },
-      {
-        keys: ['g', 'n'],
-        act: 'nav:new-session',
-        label: pageTitle('new-session'),
-        scope: 'global',
-      },
       { keys: ['g', 'd'], act: 'nav:devices', label: pageTitle('devices'), scope: 'global' },
-      { keys: ['g', 'a'], act: 'nav:agents', label: pageTitle('agents'), scope: 'global' },
       { keys: ['g', ','], act: 'nav:settings', label: pageTitle('settings'), scope: 'global' },
     ],
   },

@@ -18,7 +18,6 @@ export const PAGE_TITLE: Readonly<Record<string, string>> = {
   'new-session': '新建会话',
   session: '会话工作台',
   devices: '设备',
-  agents: 'Agent 目录',
   settings: '设置',
   login: '登录',
   setup: '首次 setup',

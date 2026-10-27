@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import DevicesPage from '@/pages/DevicesPage.vue'
 import { device, mountIn } from '@/test/mount'
 import { settle, stubFetch } from '@/test/http'
+import { matchRoute, route } from '@/router'
 
 /** 等 fetch 链 + Vue 渲染队列都走完。 */
 async function flush(w: ReturnType<typeof mountIn>): Promise<void> {
@@ -270,5 +271,75 @@ describe('DevicesPage：移除设备', () => {
     expect(w.element.textContent).toContain('pi.local')
     const alert = w.element.querySelector('[role="alert"]')
     expect(alert?.textContent).toContain('没能移除')
+  })
+})
+
+/* ===========================================================================
+   分段：设备 / Agent 目录
+   ---------------------------------------------------------------------------
+   用户裁定侧栏只留会话 / 设备 / 设置，`/agents` 路由删除、目录并进本页。
+   这一组守三件**会静默坏掉**的事：
+   ① 默认分段是设备（地址不带 `view` 时）；
+   ② `?view=agents` 真的渲染目录，而不是设备表；
+   ③ 分段切换用 `replace`（不进历史栈），否则「后退」变成在分段之间来回跳。
+   =========================================================================== */
+describe('DevicesPage：设备 / Agent 目录分段', () => {
+  /** 把路由状态摆到某个地址。**必须显式设**：`route` 是模块级 ref，
+   *  上一条测试留下的值会让「默认分段」那条悄悄通过。 */
+  function atPath(path: string): void {
+    window.history.replaceState(null, '', path)
+    route.value = matchRoute(path)
+  }
+
+  const SEG_API = {
+    '/api/devices': { body: [device({ id: 'n_1', name: 'mbp.local' })] },
+    '/api/agents': { body: [] },
+  }
+
+  it('地址不带 view 时默认是设备分段', async () => {
+    atPath('/devices')
+    stubFetch(SEG_API)
+    const w = mountIn(DevicesPage)
+    await flush(w)
+
+    expect(w.element.textContent).toContain('mbp.local')
+    // 目录的横幅不在：说明渲染的确实是设备表
+    expect(w.element.querySelector('[role="note"]')).toBeNull()
+  })
+
+  it('?view=agents 渲染 Agent 目录，而不是设备表', async () => {
+    atPath('/devices?view=agents')
+    stubFetch(SEG_API)
+    const w = mountIn(DevicesPage)
+    await flush(w)
+
+    // 目录的常驻横幅在（`role="note"`），设备表不在
+    expect(w.element.querySelector('[role="note"]')).not.toBeNull()
+    expect(w.element.textContent).not.toContain('在线 1')
+  })
+
+  /**
+   * 分段切换是**视图切换**（DECISIONS D10），用 `replaceState`：不进历史栈。
+   *
+   * 反向验证：把 `selectSegment` 里的 `{ replace: true }` 去掉，这条会红在
+   * 「历史长度变了」——而那时的症状是「点两下分段，后退键要按两下才离开本页」。
+   */
+  it('切分段不进历史栈（replace 而不是 push）', async () => {
+    atPath('/devices')
+    stubFetch(SEG_API)
+    const w = mountIn(DevicesPage)
+    await flush(w)
+
+    const before = history.length
+    const tabs = Array.from(w.element.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
+    const agentsTab = tabs.find((t) => t.textContent?.includes('Agent 目录'))
+    expect(agentsTab, '分段条上要有「Agent 目录」').toBeTruthy()
+    agentsTab?.click()
+    await flush(w)
+
+    expect(location.search).toBe('?view=agents')
+    expect(history.length).toBe(before)
+    // 点完之后目录真的出来了
+    expect(w.element.querySelector('[role="note"]')).not.toBeNull()
   })
 })

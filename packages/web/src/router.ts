@@ -39,7 +39,6 @@ export type RouteName =
   | 'new-session'
   | 'session'
   | 'devices'
-  | 'agents'
   | 'settings'
   | 'login'
   | 'setup'
@@ -82,11 +81,25 @@ export const ROUTES: readonly RouteDef[] = [
   { name: 'new-session', pattern: '/sessions/new' },
   { name: 'session', pattern: '/sessions/:id' },
   { name: 'devices', pattern: '/devices' },
-  { name: 'agents', pattern: '/agents' },
   { name: 'settings', pattern: '/settings' },
   { name: 'login', pattern: '/login' },
   { name: 'setup', pattern: '/setup' },
 ]
+
+/**
+ * 已删除路由 → 去处。
+ *
+ * `agent-catalog` 并进设备页后 `/agents` 不再是路由。**不能就这么让它变成
+ * 404**：它是真存在过的地址（§5.2 曾把它列为一级导航），用户的书签、以及
+ * 我们自己在文档里写过的链接都指向它。静默 404 的症状是「点了收藏夹里的
+ * 链接，看到『这个地址没有页面』」——而内容其实就在隔壁。
+ *
+ * 判据放在 `matchRoute` 里（而不是外壳的渲染分支）：「旧地址去哪」是路由
+ * 的知识，让外壳知道它就是把一张不该存在的表塞进视图层。
+ */
+export const LEGACY_PATHS: Readonly<Record<string, string>> = {
+  '/agents': '/devices?view=agents',
+}
 
 /** 根路径落在会话列表：会话是入口（§7.0）。 */
 export const INDEX_PATH = '/sessions'
@@ -105,7 +118,14 @@ export function matchRoute(input: string): Route {
     const params = matchPattern(def.pattern, path)
     if (params) return { name: def.name, params, path, query: url.searchParams }
   }
+  // 已删除的地址：解析成它的去处（见 `LEGACY_PATHS`）。**不在这里做跳转**——
+  // 解析是纯函数，跳转要改历史记录；由 `App.vue` 在挂载/换页时统一处理。
   return { name: 'not-found', params: {}, path, query: url.searchParams }
+}
+
+/** 这条路径是不是一个已删除、但有去处的旧地址。 */
+export function legacyTarget(path: string): string | null {
+  return LEGACY_PATHS[path] ?? null
 }
 
 /** 单条模式匹配。命中返回具名段，不中返回 `null`。 */

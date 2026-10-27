@@ -701,7 +701,7 @@ watch(
   color: var(--af-fg-tertiary);
 }
 
-/* 阶段横幅。与 AgentsPage 的同名块同一套语言（§3.11 的「为什么空」）：
+/* 阶段横幅。与 AgentCatalog 的同名块同一套语言（§3.11 的「为什么空」）：
    警告色左边线 + 徽标 + 说明，不跟随滚动，也不是 toast。 */
 .af-stage-note {
   display: flex;

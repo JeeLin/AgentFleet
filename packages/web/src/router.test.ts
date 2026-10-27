@@ -1,22 +1,51 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { INDEX_PATH, ROUTES, AUTH_ROUTES, interceptLink, matchRoute, navigate, route, startRouter } from '@/router'
+import {
+  INDEX_PATH,
+  ROUTES,
+  AUTH_ROUTES,
+  interceptLink,
+  legacyTarget,
+  matchRoute,
+  navigate,
+  route,
+  startRouter,
+} from '@/router'
 
 describe('路由表：就是 §5.2 的表格', () => {
-  it('八条具名路由：六条导航页 + 两条认证流程，没有工作区路由', () => {
+  it('七条具名路由：五条页面 + 两条认证流程，没有工作区路由', () => {
     // 顺序即匹配语义。`/login` 与 `/setup` 在 §5.2 的表格里「导航」一列
-    // 写的是「认证流程」而不是 ✅——它们在这里，但不进 §5.1 的 5 项一级导航。
+    // 写的是「认证流程」而不是 ✅——它们在这里，但不进 §5.1 的 3 项一级导航。
     // 这两条曾经缺失，后果是 401/403 的落点变成 404 空态（登录页打不开）。
+    //
+    // `/agents` 已删除（并进 `/devices?view=agents`）：用户裁定侧栏只留
+    // 会话 / 设备 / 设置。旧地址由 `LEGACY_PATHS` 接住，见下面那条测试。
     expect(ROUTES.map((r) => `${r.name} ${r.pattern}`)).toEqual([
       'sessions /sessions',
       'new-session /sessions/new',
       'session /sessions/:id',
       'devices /devices',
-      'agents /agents',
       'settings /settings',
       'login /login',
       'setup /setup',
     ])
+  })
+
+  /**
+   * `/agents` 不再是路由，但**不能就这么 404**。
+   *
+   * 它真是一级导航里存在过的地址（§5.2 的旧表格），用户书签、我们自己的
+   * 文档链接都指向它。静默 404 的症状是「点收藏夹，看到『这个地址没有页面』」
+   * ——而内容就在隔壁。
+   *
+   * 反向验证：把 `LEGACY_PATHS` 里那条删掉，这条会红在
+   * 「/agents 必须解析出去处」。
+   */
+  it('/agents 是已删除的地址，解析出去处而不是 404', () => {
+    expect(matchRoute('/agents').name).toBe('not-found')
+    expect(legacyTarget('/agents')).toBe('/devices?view=agents')
+    // 对照：真的不存在的路径没有去处
+    expect(legacyTarget('/nope')).toBeNull()
   })
 
   it('/login 与 /setup 匹配成认证路由，且被标进 AUTH_ROUTES', () => {
@@ -25,7 +54,7 @@ describe('路由表：就是 §5.2 的表格', () => {
     expect(AUTH_ROUTES.has('login')).toBe(true)
     expect(AUTH_ROUTES.has('setup')).toBe(true)
     // 导航页一个都不在认证集合里：误加会让某个页面凭空失去外壳
-    for (const name of ['sessions', 'new-session', 'session', 'devices', 'agents', 'settings'] as const) {
+    for (const name of ['sessions', 'new-session', 'session', 'devices', 'settings'] as const) {
       expect(AUTH_ROUTES.has(name)).toBe(false)
     }
   })
@@ -179,9 +208,9 @@ describe('startRouter', () => {
   it('popstate 时重算路由并把焦点交回 main', async () => {
     document.body.innerHTML = '<main class="af-main" tabindex="-1"></main>'
     const stop = startRouter()
-    history.replaceState(null, '', '/agents')
+    history.replaceState(null, '', '/settings')
     window.dispatchEvent(new PopStateEvent('popstate'))
-    expect(route.value.name).toBe('agents')
+    expect(route.value.name).toBe('settings')
     await new Promise((r) => queueMicrotask(() => r(null)))
     expect(document.activeElement).toBe(document.querySelector('main'))
     stop()

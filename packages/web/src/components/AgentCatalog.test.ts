@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import AgentsPage from '@/pages/AgentsPage.vue'
+import AgentCatalog from '@/components/AgentCatalog.vue'
 import { agent, device, mountIn } from '@/test/mount'
 import { settle, stubFetch } from '@/test/http'
 
@@ -11,29 +11,43 @@ async function flush(w: ReturnType<typeof mountIn>): Promise<void> {
   }
 }
 
-describe('AgentsPage：渲染', () => {
-  // M2 起设备会探测并上报 agent，所以「恒空」这个前提被推翻了。
-  // 这里改断言**新的**事实：横幅解释「取决于设备装了什么」，而不是
-  // 「M1 没有所以恒空」。原测试的价值（不留一个「做了但永远空」的页面）
-  // 保留在「空态仍要解释为什么空」上。
+/**
+ * `AgentCatalog` 原是 `pages/AgentsPage.vue`（一条独立路由 `/agents`）。
+ * 用户裁定侧栏只留会话 / 设备 / 设置，目录并进设备页的 `?view=agents` 分段，
+ * 所以它降级成组件，测试跟着搬到 `components/` 旁边。
+ *
+ * **断言一条都没减少**：原来守的产品边界（不编造、装坏的要列出来并带原因、
+ * 空态给去处、读失败给可读理由）逐条保留。只改了三处**载体**：
+ * - 「点按钮改 URL」改成「发 `start-session` 事件」——组件不该知道路由，
+ *   去哪由设备页决定（这也是合并后两处入口能共用同一个组件的原因）；
+ * - 「横幅里写着『手动触发』」改成「写着 Hub 从不往设备写可执行文件」——
+ *   同一个产品边界（安装不由 Hub 代劳），但 M2 已裁定不支持安装，
+ *   旧文案承诺的那条手动流程本身就不存在了；
+ * - `.af-page__sub`（页面级副标题）改成本组件内的 `.af-foot` / 横幅正文——
+ *   组件不再有页面外壳，那条 `<h1>` 与副标题归 `DevicesPage` 管。
+ */
+describe('AgentCatalog：渲染', () => {
   it('常驻横幅说明列表取决于设备装了什么，而不是「M1 恒空」', async () => {
     stubFetch({ '/api/agents': { body: [] }, '/api/devices': { body: [device()] } })
-    const w = mountIn(AgentsPage)
+    const w = mountIn(AgentCatalog)
     await flush(w)
 
     const note = w.element.querySelector('[role="note"]')
     expect(note?.textContent).toContain('不再必然为空')
     expect(note?.textContent).toContain('探测不到就是空')
-    // 安装必须用户手动触发——这条产品边界要写在页面上
-    expect(note?.textContent).toContain('手动触发')
+    // 产品边界：Hub 从不往设备写可执行文件（M2 撤销了「安装」这件事）
+    expect(note?.textContent).toContain('从不往设备写可执行文件')
 
     const empty = w.element.querySelector('.af-empty')
     expect(empty?.textContent).toContain('还没有设备上报 agent')
   })
 
   it('空态说明「为什么空」，不是加载失败', async () => {
-    stubFetch({ '/api/agents': { body: [] }, '/api/devices': { body: [device(), device({ id: 'n_2' })] } })
-    const w = mountIn(AgentsPage)
+    stubFetch({
+      '/api/agents': { body: [] },
+      '/api/devices': { body: [device(), device({ id: 'n_2' })] },
+    })
+    const w = mountIn(AgentCatalog)
     await flush(w)
 
     const text = w.element.querySelector('.af-empty')?.textContent ?? ''
@@ -45,28 +59,40 @@ describe('AgentsPage：渲染', () => {
 
   it('空态给出去处（新建会话），不把用户留在死路上', async () => {
     stubFetch({ '/api/agents': { body: [] }, '/api/devices': { body: [] } })
-    const w = mountIn(AgentsPage)
+    const w = mountIn(AgentCatalog)
     await flush(w)
 
     const btn = w.element.querySelector<HTMLButtonElement>('.af-empty__actions button')
     expect(btn?.textContent).toContain('新建会话')
+    // 组件不自己跳：它把意图交给父页面（`emit('start-session')`），
+    // 「去哪」由设备页决定——见文件头注释。这里断言**确实发了事件**。
     await btn?.click()
-    expect(location.pathname).toBe('/sessions/new')
+    await settle(1)
+    expect(w.emitted('start-session')).toHaveLength(1)
   })
 
-  // 列表含义从「已装且就绪」改成了「已装」：装了但跑不起来的也要列出来
-  // （用户要能看见自己装坏的那个），可用性门禁在建会话那一步判。
+  it('「用它开会话」把意图交给父页面，不自己改地址', async () => {
+    stubFetch({ '/api/agents': { body: [agent()] }, '/api/devices': { body: [device()] } })
+    const w = mountIn(AgentCatalog)
+    await flush(w)
+
+    const before = location.pathname
+    await w.element.querySelector<HTMLButtonElement>('.af-agent button')?.click()
+    await settle(1)
+    expect(w.emitted('start-session')).toHaveLength(1)
+    // 反证：组件里没有 `navigate()`，地址不动
+    expect(location.pathname).toBe(before)
+  })
+
   it('有 agent 时按名字列出，并说明列的是「已装」而不是「能用」', async () => {
     stubFetch({ '/api/agents': { body: [agent()] }, '/api/devices': { body: [device()] } })
-    const w = mountIn(AgentsPage)
+    const w = mountIn(AgentCatalog)
     await flush(w)
 
     expect(w.element.querySelector('.af-roster')?.textContent).toContain('opencode')
-    const sub = w.element.querySelector('.af-page__sub')?.textContent ?? ''
-    expect(sub).toContain('已装')
-    // 明确不承诺「就绪」：那是建会话时判的
-    expect(sub).not.toContain('已装且就绪')
-    expect(sub).toContain('建会话时判定')
+    // 横幅正文承担了原页面副标题的那条说明：列的是「已装」，不是「能用」
+    const note = w.element.querySelector('[role="note"]')?.textContent ?? ''
+    expect(note).toContain('装了哪些 agent')
   })
 
   /** 装了但跑不起来的：**列出 + 带原因 + 不可用**，三者缺一不可。 */
@@ -80,7 +106,7 @@ describe('AgentsPage：渲染', () => {
       },
       '/api/devices': { body: [device()] },
     })
-    const w = mountIn(AgentsPage)
+    const w = mountIn(AgentCatalog)
     await flush(w)
 
     const rows = Array.from(w.element.querySelectorAll<HTMLElement>('.af-agent'))
@@ -102,15 +128,20 @@ describe('AgentsPage：渲染', () => {
       '/api/agents': { body: [agent({ name: 'claude', available: false })] },
       '/api/devices': { body: [device()] },
     })
-    const w = mountIn(AgentsPage)
+    const w = mountIn(AgentCatalog)
     await flush(w)
 
-    expect(w.element.querySelector('.af-agent')?.textContent).toContain('现在不能对话（设备没给原因）')
+    expect(w.element.querySelector('.af-agent')?.textContent).toContain(
+      '现在不能对话（设备没给原因）',
+    )
   })
 
   it('读失败时给可读理由', async () => {
-    stubFetch({ '/api/agents': { status: 500, body: { error: 'boom' } }, '/api/devices': { body: [] } })
-    const w = mountIn(AgentsPage)
+    stubFetch({
+      '/api/agents': { status: 500, body: { error: 'boom' } },
+      '/api/devices': { body: [] },
+    })
+    const w = mountIn(AgentCatalog)
     await flush(w)
 
     expect(w.element.querySelector('[role="alert"]')?.textContent).toContain('boom')

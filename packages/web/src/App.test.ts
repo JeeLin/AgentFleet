@@ -28,28 +28,23 @@ const EMPTY_API = {
 }
 
 describe('App：外壳骨架', () => {
-  it('一级导航只有 5 项，分三组（会话 / 环境 / 系统）', async () => {
+  // 用户裁定「只要区分会话页、设置页和其他页」，收敛成三项。
+  // `Agent 目录` 并进设备页的 `?view=agents` 分段；`新建会话` 是**动作**
+  // 而不是地方，路由还在（有上下文的两条路要走它），但不进侧栏。
+  it('一级导航只有 3 项（会话 / 设备 / 设置）', async () => {
     stubFetch(EMPTY_API)
     const w = mountApp('/sessions')
     await flush(w)
 
     const items = Array.from(w.element.querySelectorAll<HTMLElement>('.af-sidebar__item'))
-    expect(items.map((el) => el.getAttribute('aria-label'))).toEqual([
-      '会话',
-      '新建会话',
-      '设备',
-      'Agent 目录',
-      '设置',
-    ])
+    expect(items.map((el) => el.getAttribute('aria-label'))).toEqual(['会话', '设备', '设置'])
     expect(items.map((el) => el.querySelector('.af-sidebar__hint')?.textContent)).toEqual([
       'g s',
-      'g n',
       'g d',
-      'g a',
       'g ,',
     ])
     const groups = Array.from(w.element.querySelectorAll('.af-navgroup__title')).map((el) => el.textContent)
-    expect(groups).toEqual(['会话', '环境', '系统'])
+    expect(groups).toEqual(['会话', '节点', '系统'])
   })
 
   it('当前页在导航上有 aria-current，会话工作台仍高亮「会话」', async () => {
@@ -71,7 +66,7 @@ describe('App：外壳骨架', () => {
     const hrefs = Array.from(w.element.querySelectorAll<HTMLAnchorElement>('.af-sidebar__item')).map(
       (a) => a.getAttribute('href'),
     )
-    expect(hrefs).toEqual(['/sessions', '/sessions/new', '/devices', '/agents', '/settings'])
+    expect(hrefs).toEqual(['/sessions', '/devices', '/settings'])
   })
 
   it('main 是 tabindex="-1"（可编程聚焦，但不由键盘穿过）', async () => {
@@ -255,9 +250,27 @@ describe('App：不知道的地址', () => {
 describe('App：文档标题', () => {
   it('每个页面都有独立标题', async () => {
     stubFetch(EMPTY_API)
+    const w = mountApp('/sessions')
+    await flush(w)
+    expect(document.title).toBe('会话 · AgentFleet')
+  })
+
+  /**
+   * `/agents` 已删除，但**不能 404**：它曾是一级导航项，书签与文档链接
+   * 都指向它。外壳在首屏与换页时把它重定向到设备页的目录分段。
+   *
+   * 反向验证：把 `App.vue` 里 `redirectLegacy()` 那两次调用删掉，这条会红在
+   * 「地址没被换掉」。
+   */
+  it('/agents 被重定向到设备页的目录分段，不是 404', async () => {
+    stubFetch(EMPTY_API)
     const w = mountApp('/agents')
     await flush(w)
-    expect(document.title).toBe('Agent 目录 · AgentFleet')
+
+    expect(location.pathname).toBe('/devices')
+    expect(location.search).toBe('?view=agents')
+    // 换成了目录分段：不再是「这个地址没有页面」
+    expect(w.element.querySelector('.af-empty')?.textContent).not.toContain('这个地址没有页面')
   })
 })
 

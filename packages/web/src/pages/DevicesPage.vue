@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /* ===========================================================================
-   DevicesPage —— 设备列表（规范 §5.3）
+   DevicesPage —— 设备与 Agent（规范 §5.1 / §5.3）
    ---------------------------------------------------------------------------
    这一页只有一个会话入口：「用它开会话」。**没有面板 / 工作区入口**：
    终端与文件绑定会话的工作区 `(node_id, path)`，生命周期随会话（约束 3）。
@@ -8,17 +8,55 @@
    状态只看心跳年龄：45 秒内是 `reconnecting`（Hub 内存推导值，带「推」徽标），
    超过 45 秒判 `offline`。这个判据来自 `security-and-lifecycle.md` §5，不是
    页面自己定的。
+
+   ── 为什么「Agent 目录」并到了这里 ────────────────────────────────
+   用户裁定侧栏只留**会话 / 设备 / 设置**三项，`/agents` 路由删除。理由不是
+   「页数少一点」：这两块看的是**同一个对象**——「这台机器上有什么」。设备行
+   说机器在不在线，Agent 目录说它上面装了哪些 agent；分两条路由时用户要在两个
+   地址之间跳，而两者拉的是同一批设备、同一份心跳事实。
+
+   分段用**查询参数** `?view=agents` 表达而不是第二条路由：分段切换是视图切换
+   （DECISIONS D10），不该进历史记录栈——否则「后退」变成在分段之间来回跳。
+   地址栏仍然跟着走，所以「打开 Agent 目录」这件事还能深链接（旧 `/agents`
+   书签由 `App.vue` 重定向到这里，见那里的 `LEGACY_PATHS`）。
    =========================================================================== */
 
 import { computed, onMounted, ref } from 'vue'
 
+import AgentCatalog from '@/components/AgentCatalog.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import DeviceTable from '@/components/DeviceTable.vue'
 import type { DeviceSummary } from '@/lib/api'
 import { deleteDevice, listDevices } from '@/lib/api'
 import { describeReadFailure } from '@/lib/http'
 import { percent, relativeTime } from '@/lib/format'
-import { navigate } from '@/router'
+import { navigate, route } from '@/router'
+
+/**
+ * 当前分段。**从 `route` 读、不另外存一份**：地址栏是真相源，存一份本地
+ * 状态会让「前进/后退」与页面显示的段落不一致，而症状是「地址写着 agents、
+ * 屏幕上却是设备表」。
+ */
+type Segment = 'devices' | 'agents'
+const segment = computed<Segment>(() =>
+  route.value.query.get('view') === 'agents' ? 'agents' : 'devices',
+)
+
+/** 目录组件的句柄：顶部那个「刷新」要同时刷当前分段。 */
+const catalog = ref<InstanceType<typeof AgentCatalog> | null>(null)
+
+function selectSegment(next: Segment): void {
+  // 视图切换：`replaceState` 不进历史栈（见文件头注释）。用 `navigate`
+  // 的 `replace` 而不是 `history` 直改，好让 `route` 这个 ref 跟着更新。
+  const to = next === 'agents' ? '/devices?view=agents' : '/devices'
+  navigate(to, { replace: true })
+}
+
+/** 顶部刷新：只刷当前分段，不替用户做多余请求。 */
+function refreshCurrent(): void {
+  if (segment.value === 'agents') catalog.value?.load()
+  else void load()
+}
 
 const devices = ref<DeviceSummary[]>([])
 const loading = ref(true)
@@ -97,84 +135,126 @@ async function remove(device: DeviceSummary): Promise<void> {
         </p>
       </div>
       <span class="af-spacer"></span>
-      <button class="af-btn af-btn--sm" type="button" :disabled="loading" @click="load">
+      <button class="af-btn af-btn--sm" type="button" :disabled="loading" @click="refreshCurrent">
         刷新
       </button>
     </div>
 
-    <div class="af-row gap-4 af-dev-summary">
-      <span class="af-t-mute"><span class="af-dot" style="color: var(--af-ok)"></span> 在线 {{ online.length }}</span>
-      <span class="af-t-mute"><span class="af-dot" style="color: var(--af-warn)"></span> 重连中 {{ reconnecting.length }}</span>
-      <span class="af-t-mute"><span class="af-dot" style="color: var(--af-danger)"></span> 离线 {{ offline.length }}</span>
+    <!-- 分段条：设备 / Agent。**用 tablist 语义**，因为它在两套内容之间切换
+         而不是跳页；`aria-selected` 让屏幕阅读器知道当前在哪个分段。 -->
+    <div class="af-row gap-2 af-seg" role="tablist" aria-label="设备页分段">
+      <button
+        class="af-btn af-btn--sm"
+        :class="{ 'af-btn--primary': segment === 'devices' }"
+        type="button"
+        role="tab"
+        :aria-selected="segment === 'devices'"
+        @click="selectSegment('devices')"
+      >
+        设备
+      </button>
+      <button
+        class="af-btn af-btn--sm"
+        :class="{ 'af-btn--primary': segment === 'agents' }"
+        type="button"
+        role="tab"
+        :aria-selected="segment === 'agents'"
+        @click="selectSegment('agents')"
+      >
+        Agent 目录
+      </button>
       <span class="af-spacer"></span>
-      <span class="af-t-mute af-t-num" style="font-size: var(--af-text-sm)">共 {{ devices.length }} 台</span>
+      <span class="af-t-mute" style="font-size: var(--af-text-sm)">
+        这两块看的是同一批机器：设备说它在不在线，目录说它上面装了什么
+      </span>
     </div>
 
-    <div v-if="error" class="af-inline-error" role="alert">
-      {{ error }}
-      <button class="af-btn af-btn--sm" type="button" @click="load">重试</button>
-    </div>
-
-    <div v-if="removeError" class="af-inline-error" role="alert">
-      {{ removeError }}
-      <button class="af-btn af-btn--sm" type="button" @click="removeError = null">知道了</button>
-    </div>
-
-    <!-- 加载态是骨架，不是空态：两者混用会让用户以为设备没了（§4.8） -->
-    <div v-else-if="loading" class="af-skel" aria-busy="true" aria-label="正在加载设备">
-      <div v-for="i in 4" :key="i" class="af-skeleton af-skeleton--row"></div>
-    </div>
-
-    <EmptyState
-      v-else-if="devices.length === 0"
-      glyph="▣"
-      title="还没有设备接入"
-      text="在设备上跑一条命令就会出现在这里：afcli run &lt;hub-url&gt;。首次启动会自动注册并生成密钥对，Hub 只存指纹。"
+    <AgentCatalog
+      v-if="segment === 'agents'"
+      ref="catalog"
+      @start-session="navigate('/sessions/new')"
     />
 
     <template v-else>
-      <DeviceTable
-        :devices="devices"
-        :on-inspect="inspect"
-        :on-create="createSession"
-        :on-remove="remove"
+      <div class="af-row gap-4 af-dev-summary">
+        <span class="af-t-mute"><span class="af-dot" style="color: var(--af-ok)"></span> 在线 {{ online.length }}</span>
+        <span class="af-t-mute"><span class="af-dot" style="color: var(--af-warn)"></span> 重连中 {{ reconnecting.length }}</span>
+        <span class="af-t-mute"><span class="af-dot" style="color: var(--af-danger)"></span> 离线 {{ offline.length }}</span>
+        <span class="af-spacer"></span>
+        <span class="af-t-mute af-t-num" style="font-size: var(--af-text-sm)">共 {{ devices.length }} 台</span>
+      </div>
+
+      <div v-if="error" class="af-inline-error" role="alert">
+        {{ error }}
+        <button class="af-btn af-btn--sm" type="button" @click="load">重试</button>
+      </div>
+
+      <div v-if="removeError" class="af-inline-error" role="alert">
+        {{ removeError }}
+        <button class="af-btn af-btn--sm" type="button" @click="removeError = null">知道了</button>
+      </div>
+
+      <!-- 加载态是骨架，不是空态：两者混用会让用户以为设备没了（§4.8） -->
+      <div v-else-if="loading" class="af-skel" aria-busy="true" aria-label="正在加载设备">
+        <div v-for="i in 4" :key="i" class="af-skeleton af-skeleton--row"></div>
+      </div>
+
+      <EmptyState
+        v-else-if="devices.length === 0"
+        glyph="▣"
+        title="还没有设备接入"
+        text="在设备上跑一条命令就会出现在这里：afcli run &lt;hub-url&gt;。首次启动会自动注册并生成密钥对，Hub 只存指纹。"
       />
 
-      <section v-if="inspected" class="af-inspect" aria-label="设备详情">
-        <div class="af-row gap-4">
-          <span class="af-panel__title">{{ inspected.name }}</span>
-          <span class="af-badge">{{ inspected.platform || '平台未上报' }}</span>
-          <span v-if="inspected.gpu" class="af-badge af-badge--ok">GPU</span>
-          <span class="af-spacer"></span>
-          <button class="af-btn af-btn--sm af-btn--ghost" type="button" @click="inspected = null">
-            收起
-          </button>
-        </div>
-        <div class="af-kv">
-          <span class="af-kv__k">node_id</span>
-          <span class="af-kv__v af-fp af-selectable">{{ inspected.id }}</span>
-          <span class="af-kv__k">密钥指纹</span>
-          <span class="af-kv__v af-fp">{{ inspected.key_fingerprint }}</span>
-          <span class="af-kv__k">afcli</span>
-          <span class="af-kv__v">{{ inspected.node_version || '未上报' }}</span>
-          <span class="af-kv__k">最近心跳</span>
-          <span class="af-kv__v">{{ relativeTime(inspected.last_seen) }}</span>
-          <span class="af-kv__k">资源</span>
-          <span class="af-kv__v">
-            CPU {{ percent(inspected.cpu) }} · 内存 {{ percent(inspected.mem) }}
-            <span v-if="inspected.cpu === null" class="af-t-mute">（未上报，不是 0%）</span>
-          </span>
-          <span class="af-kv__k">凭证</span>
-          <span class="af-kv__v af-t-mute">
-            设备私钥只在设备上生成、永不上传；Hub 存的只有上面那串指纹。
-          </span>
-        </div>
-      </section>
+      <template v-else>
+        <DeviceTable
+          :devices="devices"
+          :on-inspect="inspect"
+          :on-create="createSession"
+          :on-remove="remove"
+        />
+
+        <section v-if="inspected" class="af-inspect" aria-label="设备详情">
+          <div class="af-row gap-4">
+            <span class="af-panel__title">{{ inspected.name }}</span>
+            <span class="af-badge">{{ inspected.platform || '平台未上报' }}</span>
+            <span v-if="inspected.gpu" class="af-badge af-badge--ok">GPU</span>
+            <span class="af-spacer"></span>
+            <button class="af-btn af-btn--sm af-btn--ghost" type="button" @click="inspected = null">
+              收起
+            </button>
+          </div>
+          <div class="af-kv">
+            <span class="af-kv__k">node_id</span>
+            <span class="af-kv__v af-fp af-selectable">{{ inspected.id }}</span>
+            <span class="af-kv__k">密钥指纹</span>
+            <span class="af-kv__v af-fp">{{ inspected.key_fingerprint }}</span>
+            <span class="af-kv__k">afcli</span>
+            <span class="af-kv__v">{{ inspected.node_version || '未上报' }}</span>
+            <span class="af-kv__k">最近心跳</span>
+            <span class="af-kv__v">{{ relativeTime(inspected.last_seen) }}</span>
+            <span class="af-kv__k">资源</span>
+            <span class="af-kv__v">
+              CPU {{ percent(inspected.cpu) }} · 内存 {{ percent(inspected.mem) }}
+              <span v-if="inspected.cpu === null" class="af-t-mute">（未上报，不是 0%）</span>
+            </span>
+            <span class="af-kv__k">凭证</span>
+            <span class="af-kv__v af-t-mute">
+              设备私钥只在设备上生成、永不上传；Hub 存的只有上面那串指纹。
+            </span>
+          </div>
+        </section>
+      </template>
     </template>
   </div>
 </template>
 
 <style scoped>
+.af-seg {
+  margin-bottom: var(--af-space-5);
+  align-items: center;
+  gap: var(--af-space-2);
+}
 .af-dev-summary {
   margin-bottom: var(--af-space-5);
   font-size: var(--af-text-sm);

@@ -273,9 +273,11 @@ describe('输入区判定', () => {
 })
 
 describe('g 序列', () => {
-  it('五个跳转目标都指向表内的 act，且窗口是 800ms', () => {
+  // 三项导航各一个跳转键（`g s` / `g d` / `g ,`）。原先还有 `g n`（新建会话）
+  // 与 `g a`（Agent 目录）——两者都已并出导航（见 design-system §5.1）。
+  it('三个跳转目标都指向表内的 act，且窗口是 800ms', () => {
     expect(PREFIX_MS).toBe(800)
-    expect(PREFIX.size).toBe(6)
+    expect(PREFIX.size).toBe(4)
     for (const act of PREFIX.values()) expect(hasAct(act), `${act} 不在 KEYS 表里`).toBe(true)
   })
 

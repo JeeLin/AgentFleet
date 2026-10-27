@@ -2,7 +2,7 @@
 /* ===========================================================================
    App.vue —— 应用外壳（规范 §5.1）
    ---------------------------------------------------------------------------
-   布局：图标轨 + 侧栏 + 顶栏 + 主区 + 状态条。一级导航只有 5 项，分三组。
+   布局：图标轨 + 侧栏 + 顶栏 + 主区 + 状态条。一级导航只有 3 项（会话 / 设备 / 设置）。
 
    ── 这个文件负责的三件事 ─────────────────────────────────────────
    ① 侧栏与顶栏的 chrome；② 键位帮助面板（`?` 由 `KEYS` 渲染，不手写）；
@@ -34,9 +34,8 @@ import { setNotInitializedHandler } from '@/lib/http'
 import { loginPromptOpen, dismissLoginPrompt } from '@/lib/login-prompt'
 import { pageTitle } from '@/lib/page-titles'
 import { bindShell, installShellKeys } from '@/lib/shell-keys'
-import { interceptLink, navigate, route, startRouter, LOGIN_PATH } from '@/router'
+import { interceptLink, legacyTarget, navigate, route, startRouter, LOGIN_PATH } from '@/router'
 
-import AgentsPage from '@/pages/AgentsPage.vue'
 import DevicesPage from '@/pages/DevicesPage.vue'
 import LoginPage from '@/pages/LoginPage.vue'
 import NewSessionPage from '@/pages/NewSessionPage.vue'
@@ -51,7 +50,6 @@ const PAGES = {
   'new-session': NewSessionPage,
   session: SessionPage,
   devices: DevicesPage,
-  agents: AgentsPage,
   settings: SettingsPage,
   login: LoginPage,
   setup: SetupPage,
@@ -59,6 +57,25 @@ const PAGES = {
 
 const page = computed(() => (route.value.name === 'not-found' ? null : PAGES[route.value.name]))
 const pageKey = computed(() => `${route.value.name}:${route.value.params.id ?? ''}`)
+
+/* ---------------------------------------------------------- 已删除的旧地址 */
+
+/**
+ * 撞上一条**已删除但有去处**的旧地址时，重定向过去（`/agents` →
+ * `/devices?view=agents`，表在 `router.ts` 的 `LEGACY_PATHS`）。
+ *
+ * **用 `replace`**：用户从来没有「访问过」那个 404，让后退键回到一条已经
+ * 被取代的地址只会再弹一次重定向。这与 `navigate` 里「新建会话成功后用
+ * `replace`」是同一条理由。
+ *
+ * 判据放在这里而不是 `matchRoute` 里：解析是纯函数（好测、无副作用），
+ * 改历史记录是策略。**`onMounted` 与换页 watch 都要调**——首屏刷新直接
+ * 落在旧地址上时不会触发 watch（初始值不触发）。
+ */
+function redirectLegacy(): void {
+  const target = legacyTarget(route.value.path)
+  if (target) navigate(target, { replace: true })
+}
 
 /* ---------------------------------------------------------------- 认证页 */
 
@@ -78,9 +95,24 @@ const isAuthPage = computed(() => AUTH_ROUTES.has(route.value.name))
 /* ---------------------------------------------------------------- 侧栏 */
 
 /**
- * 一级导航。**标签与键位提示都从 `keynav.ts` / `page-titles.ts` 读**：
- * 手抄一份的话，改了键位表而忘了改这里，侧栏就会显示一个按了没反应的键
- *（症状与「改了 `PREFIX` 而侧栏没跟着变」完全一样）。
+ * 一级导航。**三项**：会话 / 设备 / 设置。
+ *
+ * 标签与键位提示都从 `keynav.ts` / `page-titles.ts` 读：手抄一份的话，改了
+ * 键位表而忘了改这里，侧栏就会显示一个按了没反应的键（症状与「改了 `PREFIX`
+ * 而侧栏没跟着变」完全一样）。
+ *
+ * # 为什么只有三项
+ *
+ * 用户裁定「只要区分会话页、设置页和其他页」，收敛成会话 / 设备 / 设置：
+ * - **`Agent 目录` 并进了设备页**（`?view=agents` 分段）：两者看的是同一个
+ *   对象——「这台机器上有什么」。设备说它在不在线，目录说它上面装了什么，
+ *   分两个地址只是历史原因。旧 `/agents` 地址由 `LEGACY_PATHS` 接住。
+ * - **`新建会话` 不再是导航项**：它不是一个「地方」，是一个**动作**。导航
+ *   项承诺「这里有一块内容」，而新建会话要么从会话页发起、要么从设备行
+ *   「用它开会话」发起——两条路都带着上下文（要建在哪台机器上），而导航项
+ *   带不了上下文。
+ *
+ * 路由 `/sessions/new` 仍然存在（有上下文的那两条路要走它），只是不在这里列。
  */
 const NAV = [
   {
@@ -91,19 +123,12 @@ const NAV = [
         label: pageTitle('sessions'),
         icon: '◈',
         act: 'nav:sessions',
-        match: ['sessions', 'session'],
-      },
-      {
-        to: '/sessions/new',
-        label: pageTitle('new-session'),
-        icon: '✚',
-        act: 'nav:new-session',
-        match: ['new-session'],
+        match: ['sessions', 'session', 'new-session'],
       },
     ],
   },
   {
-    group: '环境',
+    group: '节点',
     items: [
       {
         to: '/devices',
@@ -111,13 +136,6 @@ const NAV = [
         icon: '▣',
         act: 'nav:devices',
         match: ['devices'],
-      },
-      {
-        to: '/agents',
-        label: pageTitle('agents'),
-        icon: '☰',
-        act: 'nav:agents',
-        match: ['agents'],
       },
     ],
   },
@@ -309,6 +327,11 @@ onMounted(() => {
     focusSearch,
   })
   stopRouter = startRouter()
+  // 首屏落在一条已删除的旧地址上（书签、外部链接）：换成它的去处。
+  // 必须在 `startRouter` 之后——`navigate` 会改历史记录，先起监听再改，
+  // 顺序反了会让这次 `replaceState` 发生在监听装好之前（本身无害，但
+  // 「先装监听再改状态」是更不容易出错的那个顺序）。
+  redirectLegacy()
   // 首屏：换页的 watch 不会为初始值触发，所以这里显式落一次
   void nextTick(() => document.querySelector<HTMLElement>('main[tabindex="-1"]')?.focus())
 })
@@ -331,6 +354,9 @@ onBeforeUnmount(() => {
 watch(
   () => route.value.path,
   () => {
+    // 点了一个已删除旧地址的链接（`interceptLink` 走 `navigate`，不整页刷新）：
+    // 换成去处。`replace` 的理由见 `redirectLegacy` 上方。
+    redirectLegacy()
     void nextTick(() => {
       const main = document.querySelector<HTMLElement>('main.af-main[tabindex="-1"]')
       if (!main) return
