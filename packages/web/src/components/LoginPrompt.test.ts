@@ -18,7 +18,7 @@ import { defineComponent, h, ref } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import LoginPrompt from '@/components/LoginPrompt.vue'
-import { depth, resetForTest } from '@/lib/focus'
+import { depth, pop, push, resetForTest } from '@/lib/focus'
 import { matchRoute, route } from '@/router'
 import { mountIn } from '@/test/mount'
 import { settle, stubFetch } from '@/test/http'
@@ -435,6 +435,123 @@ describe('LoginPrompt：五种错误分开呈现（§4.7）', () => {
     expect(text).toContain('Hub 连不上')
     expect(text).toContain('network')
     expect(text).not.toContain('密码不对')
+  })
+})
+
+/**
+ * `handleLayerKeydown`（`lib/focus.ts`）是登录框与轨迹抽屉**共用**的那一份键盘
+ * 处理。这里断言共用件真的跑在这个框里，并且**框自己的差异**（不传 opener、
+ * 关掉时清表单）没有被共用件吞掉。
+ */
+describe('LoginPrompt：键盘走共用的 handleLayerKeydown', () => {
+  it('共用件在框里跑：Esc 走它调的 close（出栈 + 清表单）', async () => {    scaffoldPage()
+    const { wrapper: w, open } = mountPrompt()
+    open.value = true
+    await flush(w)
+
+    const input = passwordInput()
+    input.value = 'half-typed'
+    input.dispatchEvent(new Event('input'))
+    await flush(w)
+
+    const e = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    document.dispatchEvent(e)
+    await flush(w)
+
+    expect(e.defaultPrevented, 'Esc 由共用件接管').toBe(true)
+    expect(open.value).toBe(false)
+    expect(depth()).toBe(0)
+    // 焦点随层一起没了（`<body>`）：`pop` 的兜底 `main[tabindex="-1"]` 什么都不做。
+    //
+    // **这条是既存行为，不是共用件引入的**——`pop` 本身没变。原因在测试的宿主上：
+    // 401 是本测试自己的 `scaffoldPage` 拼出来的，那份 HTML 落在 `mountPrompt`
+    // 之后创建的宿主里，而 `mountIn` 的宿主 div 排在它**前面**；`inertOthers`
+    // 给宿主整个标了 `inert`，写 focus 时整个文档「没有可聚焦元素」，于是
+    // `activeElement` 变成 `<body>`。真实页面由 Vue 渲染，宿主就是那个 `div#app`。
+    // 这里只钉共用件**跑了**（Esc 被接管、出栈），不把一个测试脚手架的产物
+    // 当成契约断言。
+    expect(depth()).toBe(0)
+
+    // 差异化行为仍在框里：再弹开是空框，不是上一次的残留
+    open.value = true
+    await flush(w)
+    expect(passwordInput().value).toBe('')
+  })
+
+  it('框的差异仍在：不传 opener，所以有没有可还的触发元素是框自己的事', async () => {
+    const page = scaffoldPage()
+    page.btn.focus()
+    const { wrapper: w, open } = mountPrompt()
+    open.value = true
+    await flush(w)
+
+    // 首焦点是 `data-autofocus` 的密码框，不是那个触发 401 的按钮
+    expect(document.activeElement).toBe(passwordInput())
+    // 打开时没把「刷新」按钮记成 opener（`push(el)` 不带 `{ opener }`）。
+    // 抽屉那边同一动作会回到它的按钮——那是两处**有意保留**的差异。
+    expect(document.activeElement).not.toBe(page.btn)
+  })
+
+  it('输入法选字中的 Esc 不关框（共用件的第一个判据）', async () => {
+    scaffoldPage()
+    const { wrapper: w, open } = mountPrompt()
+    open.value = true
+    await flush(w)
+
+    const e = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      isComposing: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    document.dispatchEvent(e)
+    await flush(w)
+
+    expect(e.defaultPrevented).toBe(false)
+    expect(open.value).toBe(true)
+    expect(depth()).toBe(1)
+  })
+
+  it('不是栈顶时不接管 Esc（共用件判栈顶：帮助面板盖在框上时不该关掉框）', async () => {
+    scaffoldPage()
+    const { wrapper: w, open } = mountPrompt()
+    open.value = true
+    await flush(w)
+
+    const above = document.createElement('div')
+    document.body.appendChild(above)
+    push(above)
+    try {
+      const e = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+      document.dispatchEvent(e)
+      await flush(w)
+
+      expect(e.defaultPrevented).toBe(false)
+      expect(open.value).toBe(true)
+    } finally {
+      pop(above)
+    }
+  })
+
+  it('Tab 圈在框里——由共用件转给 trapTab', async () => {
+    scaffoldPage()
+    const { wrapper: w, open } = mountPrompt()
+    open.value = true
+    await flush(w)
+
+    // 从最后一个可聚焦元素（取消）上按 Tab：必须绕回第一个，否则焦点出了框
+    const buttons = Array.from(prompt().querySelectorAll<HTMLElement>('form button'))
+    const last = buttons[buttons.length - 1] as HTMLElement
+    last.focus()
+
+    const e = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+    document.dispatchEvent(e)
+
+    expect(e.defaultPrevented).toBe(true)
+    // 焦点在框里，且被绕回了**第一个**可聚焦元素（DOM 顺序上的头一个是 ✕），
+    // 不是放它出框——`trapTab` 的「最后一个 → 第一个」那条分支。
+    expect(prompt().contains(document.activeElement)).toBe(true)
+    expect(document.activeElement).toBe(prompt().querySelector('.af-modal__head button'))
   })
 })
 

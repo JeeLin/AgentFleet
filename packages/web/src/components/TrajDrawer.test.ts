@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import TrajDrawer from '@/components/TrajDrawer.vue'
-import { depth, resetForTest, topContainer } from '@/lib/focus'
+import { depth, pop, push, resetForTest, topContainer } from '@/lib/focus'
 import { mountIn } from '@/test/mount'
 
 /**
@@ -216,6 +216,77 @@ describe('TrajDrawer：父级自己把 open 置回 false 也要出栈', () => {
 
     expect(depth()).toBe(0)
     expect(document.activeElement).toBe(s.opener)
+  })
+})
+
+/**
+ * `handleLayerKeydown`（`lib/focus.ts`）是抽屉与登录框**共用**的那一份键盘处理，
+ * 所以这里断言的是「共用件真的跑在抽屉里」，而不只是「抽屉能关」：
+ * 输入法选字中不关、不是栈顶不关、Tab 由它圈住。
+ */
+describe('TrajDrawer：键盘走共用的 handleLayerKeydown', () => {
+  it('共用件在抽屉里跑：Esc 走它调的 close（焦点栈出栈 + 还焦点）', async () => {
+    const s = scaffold()
+    s.opener.focus()
+    const w = await openDrawer({}, s.opener)
+
+    const e = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    document.dispatchEvent(e)
+    await w.vm.$nextTick()
+
+    expect(e.defaultPrevented, 'Esc 由共用件接管').toBe(true)
+    expect(w.emitted('close')).toHaveLength(1)
+    expect(depth()).toBe(0)
+    expect(document.activeElement).toBe(s.opener)
+  })
+
+  it('输入法选字中的 Esc 不关抽屉（共用件的第一个判据）', async () => {
+    scaffold()
+    const w = await openDrawer({}, null)
+
+    const e = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      isComposing: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    document.dispatchEvent(e)
+    await w.vm.$nextTick()
+
+    expect(e.defaultPrevented).toBe(false)
+    expect(w.emitted('close')).toBeUndefined()
+    expect(depth()).toBe(1)
+  })
+
+  it('不是栈顶时不接管 Esc（共用件判栈顶，帮助面板盖在上面时不该关掉抽屉）', async () => {
+    scaffold()
+    const w = await openDrawer({}, null)
+
+    // 模拟「帮助面板压上来」：栈顶换成别人
+    const above = document.createElement('div')
+    document.body.appendChild(above)
+    push(above)
+    try {
+      const e = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+      document.dispatchEvent(e)
+      await w.vm.$nextTick()
+
+      expect(e.defaultPrevented).toBe(false)
+      expect(w.emitted('close')).toBeUndefined()
+    } finally {
+      pop(above)
+    }
+  })
+
+  it('Tab 圈在抽屉里——由共用件转给 trapTab（阻止默认而不是放焦点出去）', async () => {
+    scaffold()
+    await openDrawer({}, null)
+
+    const e = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+    document.dispatchEvent(e)
+
+    expect(e.defaultPrevented).toBe(true)
+    expect(drawer().contains(document.activeElement)).toBe(true)
   })
 })
 

@@ -194,6 +194,38 @@ export function trapTab(e: KeyboardEvent, root: HTMLElement): boolean {
 }
 
 /**
+ * 浮层的键盘处理：Esc 关本层、Tab 圈在容器里。返回是否接管了这次按键。
+ *
+ * **「本层是栈顶」由本函数自己判**，调用方不必再判一次。判据必须是栈顶而不是
+ * 「我开着」：键盘事件是全站共用的，帮助面板（或另一层浮层）盖在抽屉上时，
+ * 一次 Esc 会把两层一起关掉——而 `pop()` 只按栈顶语义工作。
+ *
+ * `onClose` 要**同步**执行，且必须是组件自己的关闭入口（里面走 `pop`）。
+ * 不在这里 `pop` 是因为组件关闭还要 emit（父级复位 `open`），入口只有一个。
+ *
+ * `e.isComposing` 期间一律让路：中文输入法正在选字时按 Esc 是「撤掉候选词」，
+ * 不该顺手把浮层关掉。
+ */
+export function handleLayerKeydown(
+  e: KeyboardEvent,
+  container: HTMLElement,
+  onClose: () => void,
+): boolean {
+  if (e.isComposing) return false
+  if (topContainer() !== container) return false
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    onClose()
+    return true
+  }
+  if (e.key === 'Tab') {
+    // `trapTab` 内部已经 `preventDefault` 了它接管的那些，这里只看它接没接。
+    return trapTab(e, container)
+  }
+  return false
+}
+
+/**
  * 跳转后的首焦点（规范 §4.3）：把焦点从 `<body>` 拿出来落到 `main`，
  * 并给 `h1` 补上 `tabindex="-1"`，让「⇧Tab 回标题」成为可能。
  *

@@ -51,7 +51,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import EmptyState from '@/components/EmptyState.vue'
 import type { TrajectoryEvent } from '@/lib/api'
-import { pop, push, topContainer, trapTab } from '@/lib/focus'
+import { handleLayerKeydown, pop, push } from '@/lib/focus'
 
 /** 一页取多少条。200 条纯文本行的 DOM 开销是可接受的（见模块注释）。 */
 const PAGE_SIZE = 200
@@ -197,24 +197,13 @@ function onScrim(e: MouseEvent): void {
 }
 
 /**
- * Esc 与 Tab。
- *
- * Esc 只在**本层是栈顶**时才生效：`pop()` 按栈顶语义工作，而键盘事件是
- * 全站共用的——不判栈顶的话，帮助面板盖在抽屉上时一次 Esc 会关掉两层。
+ * Esc 与 Tab。判据（本层是栈顶吗、输入法选字中吗）都在 `handleLayerKeydown`
+ * 里——`LoginPrompt.vue` 有同一份需求，两份实现迟早会漂成两种键位。
  */
 function onKeydown(e: KeyboardEvent): void {
-  if (e.isComposing) return
   const root = rootEl.value
-  if (!root || topContainer() !== root) return
-  if (e.key === 'Escape') {
-    e.preventDefault()
-    close()
-    return
-  }
-  if (e.key === 'Tab') {
-    // 焦点陷阱（§3.10）。`trapTab` 内部已经 `preventDefault` 了它接管的那些。
-    trapTab(e, root)
-  }
+  if (!root) return
+  handleLayerKeydown(e, root, close)
 }
 
 /**

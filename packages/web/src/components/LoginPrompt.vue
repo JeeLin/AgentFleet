@@ -37,7 +37,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import { describeLoginFailure, postLogin, type AuthFailure } from '@/lib/auth'
-import { pop, push, topContainer, trapTab } from '@/lib/focus'
+import { handleLayerKeydown, pop, push } from '@/lib/focus'
 import { SETUP_PATH, navigate } from '@/router'
 
 const props = defineProps<{
@@ -93,20 +93,11 @@ function closeLayer(): void {
   pop(el)
 }
 
-/** Esc / Tab。只在**本层是栈顶**时接管：键盘事件是全站共用的。 */
+/** Esc / Tab。判据都在 `handleLayerKeydown` 里（与 `TrajDrawer.vue` 共用一份）。 */
 function onKeydown(e: KeyboardEvent): void {
-  if (e.isComposing) return
   const root = rootEl.value
-  if (!root || topContainer() !== root) return
-  if (e.key === 'Escape') {
-    e.preventDefault()
-    close()
-    return
-  }
-  if (e.key === 'Tab') {
-    // 焦点陷阱（§3.10）。`trapTab` 内部已经 `preventDefault` 了它接管的那些。
-    trapTab(e, root)
-  }
+  if (!root) return
+  handleLayerKeydown(e, root, close)
 }
 
 /** 点遮罩：只有点在遮罩自己上才算（点在框里不该关）。 */
