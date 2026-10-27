@@ -56,7 +56,6 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 .af-app[data-rail='collapsed'] { grid-template-columns: 52px 1fr; }
 .af-app[data-rail='collapsed'] .af-sidebar__item-text,
 .af-app[data-rail='collapsed'] .af-sidebar__hint,
-.af-app[data-rail='collapsed'] .af-navgroup__title,
 .af-app[data-rail='collapsed'] .af-sidebar__close { display: none; }
 .af-app[data-rail='collapsed'] .af-sidebar { align-items: center; }
 
@@ -118,12 +117,10 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
   border-right: 1px solid var(--af-border-subtle);
   overflow-y: auto;
 }
+/* 只负责 1px 的条目间距。上一版这里还有分组标题（`.af-navgroup__title`），
+   但三个组各只有一项——标题与它唯一的条目说的常常是同一个词，所以标题与
+   分组的字段一起删掉了，布局这一半留着（见 App.vue 模板里的说明）。 */
 .af-navgroup { display: flex; flex-direction: column; gap: 1px; }
-.af-navgroup__title {
-  font-size: var(--af-text-sm); color: var(--af-fg-tertiary);
-  text-transform: uppercase; letter-spacing: var(--af-tracking-label);
-  padding: var(--af-space-3) var(--af-space-3) var(--af-space-1);
-}
 .af-sidebar__item {
   display: flex; align-items: center; gap: var(--af-space-3);
   height: var(--af-row-regular); padding: 0 var(--af-space-3);

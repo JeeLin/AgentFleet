@@ -44,8 +44,35 @@ describe('App：外壳骨架', () => {
       'g d',
       'g ,',
     ])
-    const groups = Array.from(w.element.querySelectorAll('.af-navgroup__title')).map((el) => el.textContent)
-    expect(groups).toEqual(['会话', '节点', '系统'])
+    /*
+      分组标题已删：三个组各只有一项，标题与它唯一的条目常常是同一个词
+      （第一组是「会话 / 会话」）。这里断言**渲染出来的层级里不再有标题这类
+      中间层**——`count` 必须是 0，`toContain` 之类的写法看不见重复。
+
+      反向验证：把 `.af-navgroup__title` 那个 div 加回模板 → `count` 变 1，红。
+    */
+    expect(w.element.querySelectorAll('.af-navgroup__title').length).toBe(0)
+  })
+
+  /*
+    「会话」在侧栏里**只出现一次**：一次是导航项自己的文字，不是「标题 + 条目」。
+
+    必须是「恰好一次」而不是 `toContain`：后者对多出来的那一份视而不见，
+    重复正是这条缺陷本身。数的是侧栏的**直接文字**——`aria-label` 与 `title`
+    是同一句话的属性副本，不算第二次渲染。
+  */
+  it('侧栏里「会话」只出现一次（没有和标题重复）', async () => {
+    stubFetch(EMPTY_API)
+    const w = mountApp('/sessions')
+    await flush(w)
+
+    const sidebar = w.element.querySelector<HTMLElement>('.af-sidebar')
+    if (!sidebar) throw new Error('no sidebar')
+
+    const text = Array.from(sidebar.querySelectorAll<HTMLElement>('*'))
+      .filter((el) => el.children.length === 0)
+      .map((el) => el.textContent ?? '')
+    expect(text.filter((t) => t.includes('会话')).length).toBe(1)
   })
 
   it('当前页在导航上有 aria-current，会话工作台仍高亮「会话」', async () => {

@@ -116,40 +116,25 @@ const isAuthPage = computed(() => AUTH_ROUTES.has(route.value.name))
  */
 const NAV = [
   {
-    group: '会话',
-    items: [
-      {
-        to: '/sessions',
-        label: pageTitle('sessions'),
-        icon: '◈',
-        act: 'nav:sessions',
-        match: ['sessions', 'session', 'new-session'],
-      },
-    ],
+    to: '/sessions',
+    label: pageTitle('sessions'),
+    icon: '◈',
+    act: 'nav:sessions',
+    match: ['sessions', 'session', 'new-session'],
   },
   {
-    group: '节点',
-    items: [
-      {
-        to: '/devices',
-        label: pageTitle('devices'),
-        icon: '▣',
-        act: 'nav:devices',
-        match: ['devices'],
-      },
-    ],
+    to: '/devices',
+    label: pageTitle('devices'),
+    icon: '▣',
+    act: 'nav:devices',
+    match: ['devices'],
   },
   {
-    group: '系统',
-    items: [
-      {
-        to: '/settings',
-        label: pageTitle('settings'),
-        icon: '⚙',
-        act: 'nav:settings',
-        match: ['settings'],
-      },
-    ],
+    to: '/settings',
+    label: pageTitle('settings'),
+    icon: '⚙',
+    act: 'nav:settings',
+    match: ['settings'],
   },
 ]
 
@@ -401,10 +386,18 @@ watch(
         <span class="af-brand__mark" aria-hidden="true"></span>
         <span class="af-brand__name">AGENTFLEET</span>
       </div>
-      <div v-for="g in NAV" :key="g.group" class="af-navgroup">
-        <div class="af-navgroup__title">{{ g.group }}</div>
+      <!--
+        导航项直接排在侧栏这一列里，**没有分组标题**：三个组各只有一项，
+        标题与它唯一的条目说的是同一个词（「会话 / 会话」并排放着），
+        多出来的那一行标签只占地方。
+
+        留一层 `.af-navgroup` 保留 1px 的条目间距：`.af-sidebar` 的 gap 是
+        `space-2`（4px），直接铺进去会让三行之间松动 4 倍。这也是折叠态那条
+        `align-items: center` 的落脚点——这里只丢标题、不丢布局。
+      -->
+      <div class="af-navgroup">
         <a
-          v-for="item in g.items"
+          v-for="item in NAV"
           :key="item.to"
           class="af-sidebar__item"
           :href="item.to"
