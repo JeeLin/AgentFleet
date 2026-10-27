@@ -1071,10 +1071,7 @@ fn persist_trajectory(state: &AppState, node_id: &str, channel_id: &str, payload
             .and_then(Value::as_str)
             .unwrap_or("");
         let e = hub_storage::NewEvent::turn_end(seq, reason);
-        if let Err(err) = state
-            .trajectory()
-            .append(&session_id, node_id, &e, &now)
-        {
+        if let Err(err) = state.trajectory().append(&session_id, node_id, &e, &now) {
             tracing::error!(node_id = %node_id, channel_id = %channel_id, error = %err,
                 "cannot persist a turn_end");
         }
@@ -1098,10 +1095,7 @@ fn persist_trajectory(state: &AppState, node_id: &str, channel_id: &str, payload
             .and_then(Value::as_str)
             .unwrap_or("update");
         let e = hub_storage::NewEvent::new(seq, ev_kind, ev.to_string());
-        if let Err(err) = state
-            .trajectory()
-            .append(&session_id, node_id, &e, &now)
-        {
+        if let Err(err) = state.trajectory().append(&session_id, node_id, &e, &now) {
             tracing::error!(node_id = %node_id, channel_id = %channel_id, error = %err,
                 "cannot persist a trajectory event");
         }
@@ -1220,10 +1214,8 @@ fn persist_agents(state: &AppState, node_id: &str, hb: &protocol::message::Heart
     else {
         return;
     };
-    let rows: Vec<(String, String, Option<String>, bool, Option<String>)> = list
-        .iter()
-        .filter_map(parse_agent_report)
-        .collect();
+    let rows: Vec<(String, String, Option<String>, bool, Option<String>)> =
+        list.iter().filter_map(parse_agent_report).collect();
     let now = hub_core::registry::now_stamp();
     if let Err(e) = state.agent_runtime().replace_detected(node_id, &rows, &now) {
         tracing::error!(node_id = %node_id, error = %e, "cannot persist the reported agents");
@@ -1243,17 +1235,13 @@ fn persist_agents(state: &AppState, node_id: &str, hb: &protocol::message::Heart
 /// 只认对象会让整张 agent 列表静默变空。
 ///
 /// 返回 `(id, name, version, available, error)`。
-fn parse_agent_report(v: &serde_json::Value) -> Option<(String, String, Option<String>, bool, Option<String>)> {
+fn parse_agent_report(
+    v: &serde_json::Value,
+) -> Option<(String, String, Option<String>, bool, Option<String>)> {
     if let Some(name) = v.as_str() {
         // 旧帧只有名字。`available = false` 是刻意的保守值：一个只说名字的
         // 帧不构成「可用」的证据，而门禁宁严勿松。
-        return Some((
-            name.to_string(),
-            name.to_string(),
-            None,
-            false,
-            None,
-        ));
+        return Some((name.to_string(), name.to_string(), None, false, None));
     }
     let o = v.as_object()?;
     let id = o.get("id").and_then(serde_json::Value::as_str)?;
@@ -1825,9 +1813,10 @@ mod tests {
     #[test]
     fn a_batch_of_events_reaches_the_trajectory_table() {
         let (state, _dir) = stream_state();
-        state
-            .bindings()
-            .bind("ch-1", crate::routes::stream::test_binding("n_a", "admin", true));
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", true),
+        );
 
         persist_trajectory(
             &state,
@@ -1855,9 +1844,10 @@ mod tests {
     #[test]
     fn a_turn_end_is_persisted_with_its_stop_reason() {
         let (state, _dir) = stream_state();
-        state
-            .bindings()
-            .bind("ch-1", crate::routes::stream::test_binding("n_a", "admin", true));
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", true),
+        );
 
         persist_trajectory(
             &state,
@@ -1891,9 +1881,10 @@ mod tests {
     #[test]
     fn control_frames_never_reach_the_trajectory() {
         let (state, _dir) = stream_state();
-        state
-            .bindings()
-            .bind("ch-1", crate::routes::stream::test_binding("n_a", "admin", true));
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", true),
+        );
 
         for payload in [
             serde_json::json!({"type": "ready", "sessionId": "ses_1", "agentId": "opencode"}),
@@ -1920,9 +1911,10 @@ mod tests {
     #[test]
     fn a_control_frame_carrying_events_still_writes_nothing() {
         let (state, _dir) = stream_state();
-        state
-            .bindings()
-            .bind("ch-1", crate::routes::stream::test_binding("n_a", "admin", true));
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", true),
+        );
 
         for kind in ["ready", "error", "exited", "request"] {
             persist_trajectory(
@@ -1948,9 +1940,10 @@ mod tests {
     #[test]
     fn an_unknown_event_kind_is_stored_not_dropped() {
         let (state, _dir) = stream_state();
-        state
-            .bindings()
-            .bind("ch-1", crate::routes::stream::test_binding("n_a", "admin", true));
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", true),
+        );
 
         persist_trajectory(
             &state,
@@ -1973,9 +1966,10 @@ mod tests {
     #[test]
     fn events_without_a_seq_are_dropped_not_numbered_zero() {
         let (state, _dir) = stream_state();
-        state
-            .bindings()
-            .bind("ch-1", crate::routes::stream::test_binding("n_a", "admin", true));
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", true),
+        );
 
         // 两条都缺 seq：若写成 0，第二条会被静默丢掉，于是看起来「写进去了」
         persist_trajectory(
@@ -2000,9 +1994,10 @@ mod tests {
     #[test]
     fn replaying_the_same_seq_does_not_duplicate_a_row() {
         let (state, _dir) = stream_state();
-        state
-            .bindings()
-            .bind("ch-1", crate::routes::stream::test_binding("n_a", "admin", true));
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", true),
+        );
         let payload =
             serde_json::json!({"type": "batch", "events": [{"seq": 1, "sessionUpdate": "x"}]});
 

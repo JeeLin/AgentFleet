@@ -132,7 +132,10 @@ pub fn collect_resources() -> serde_json::Value {
 
     let load = read_loadavg(LOADAVG_PATH);
     if let Some(LoadAvg { load1, running }) = load {
-        out.insert("load".into(), serde_json::json!({ "load1": load1, "running": running }));
+        out.insert(
+            "load".into(),
+            serde_json::json!({ "load1": load1, "running": running }),
+        );
         if let Some(cores) = core_count() {
             out.insert("cpu".into(), serde_json::json!({ "cores": cores }));
             // CPU 百分比 = 每核负载。**它是从真测的 load1 与真核数算出来的，
@@ -143,12 +146,19 @@ pub fn collect_resources() -> serde_json::Value {
             // 在这里也封一次会让两层截断互相掩盖。
             let per_core = load1 / cores as f64;
             if per_core.is_finite() && per_core >= 0.0 {
-                out.insert("cpu_percent".into(), serde_json::json!((per_core * 100.0).round() as i64));
+                out.insert(
+                    "cpu_percent".into(),
+                    serde_json::json!((per_core * 100.0).round() as i64),
+                );
             }
         }
     }
 
-    if let Some(MemInfo { total_mb, available_mb }) = read_meminfo(MEMINFO_PATH) {
+    if let Some(MemInfo {
+        total_mb,
+        available_mb,
+    }) = read_meminfo(MEMINFO_PATH)
+    {
         out.insert(
             "memory".into(),
             serde_json::json!({ "total_mb": total_mb, "available_mb": available_mb }),
@@ -322,16 +332,16 @@ mod tests {
                 version: Some("2.1.4".into()),
                 available: true,
                 error: None,
-            path: None,
-        },
+                path: None,
+            },
             crate::agent::AgentReport {
                 id: "broken".into(),
                 name: "broken".into(),
                 version: None,
                 available: false,
                 error: Some("退出码 3".into()),
-            path: None,
-        },
+                path: None,
+            },
         ]);
         let list = with["agents"].as_array().expect("agents 是数组");
         assert_eq!(list.len(), 2, "探到几个就报几个");
@@ -357,16 +367,16 @@ mod tests {
                 version: Some("2.1.4".into()),
                 available: true,
                 error: None,
-            path: None,
-        },
+                path: None,
+            },
             crate::agent::AgentReport {
                 id: "nocreds".into(),
                 name: "nocreds".into(),
                 version: Some("1.0.0".into()),
                 available: false,
                 error: Some("缺凭据".into()),
-            path: None,
-        },
+                path: None,
+            },
         ];
         let caps = capabilities_with_agents(&source);
         let decoded: Vec<crate::agent::AgentReport> = caps["agents"]
@@ -377,10 +387,7 @@ mod tests {
             .collect();
         let mut expect = source.clone();
         expect.sort_by(|a, b| a.id.cmp(&b.id));
-        assert_eq!(
-            decoded, expect,
-            "node 上报的形状必须能被 Hub 的解码器读懂"
-        );
+        assert_eq!(decoded, expect, "node 上报的形状必须能被 Hub 的解码器读懂");
     }
 
     // ---- `resources`：M2 起真采集（文档漂移那条欠账）----

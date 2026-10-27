@@ -48,14 +48,19 @@ fn row_to_runtime(r: &Row<'_>) -> std::result::Result<AgentRuntime, r2d2_sqlite:
         node_id: r.get(0)?,
         agent_id: r.get(1)?,
         name: r.get(2)?,
-        version: if version.is_empty() { None } else { Some(version) },
+        version: if version.is_empty() {
+            None
+        } else {
+            Some(version)
+        },
         available: r.get::<_, i64>(4)? != 0,
         probe_error: r.get(5)?,
         detected_at: r.get(6)?,
     })
 }
 
-const RUNTIME_COLUMNS: &str = "node_id, agent_id, name, version, available, probe_error, detected_at";
+const RUNTIME_COLUMNS: &str =
+    "node_id, agent_id, name, version, available, probe_error, detected_at";
 
 /// `agent_runtime` 的读写。
 #[derive(Debug, Clone)]
@@ -172,7 +177,11 @@ impl AgentRuntimeRepo {
     /// （理由：没上报过不代表不支持）。这里**必须拒**：agent 是会话的
     /// **必要**前提而不是可选项，放行的后果是「建会话 201，开 ACP 时才发现
     /// binary 不存在」——用户拿到一个永远无法对话的死会话。
-    pub fn usable_for_session(&self, node_id: &str, agent_id: &str) -> Result<Option<AgentRuntime>> {
+    pub fn usable_for_session(
+        &self,
+        node_id: &str,
+        agent_id: &str,
+    ) -> Result<Option<AgentRuntime>> {
         let conn = self.pool.get()?;
         let row = conn
             .query_row(
@@ -376,7 +385,10 @@ mod tests {
         let (_d, rt, _c) = setup();
         rt.replace_detected(
             "n_a",
-            &[row("opencode", Some("2.1.4"), true), row("claude", Some("1.0"), true)],
+            &[
+                row("opencode", Some("2.1.4"), true),
+                row("claude", Some("1.0"), true),
+            ],
             TS,
         )
         .unwrap();
@@ -504,7 +516,11 @@ mod tests {
         assert_eq!(rt.delete_for_node("n_a").unwrap(), 1);
         assert!(rt.list_for_node("n_a").unwrap().is_empty());
         assert!(cfg.list_for_node("n_a").unwrap().is_empty(), "配置也要清");
-        assert_eq!(rt.list_for_node("n_b").unwrap().len(), 1, "不许误删别的设备");
+        assert_eq!(
+            rt.list_for_node("n_b").unwrap().len(),
+            1,
+            "不许误删别的设备"
+        );
         assert_eq!(cfg.list_for_node("n_b").unwrap().len(), 1);
     }
 
@@ -518,7 +534,9 @@ mod tests {
             agent_id: "opencode".into(),
             command: "/opt/opencode".into(),
             args: vec!["--acp".into(), "--verbose".into()],
-            env: [("FOO".to_string(), "bar".to_string())].into_iter().collect(),
+            env: [("FOO".to_string(), "bar".to_string())]
+                .into_iter()
+                .collect(),
             updated_at: TS.into(),
         };
         cfg.upsert(&c).unwrap();
@@ -541,7 +559,10 @@ mod tests {
         cfg.upsert(&c).unwrap();
 
         assert_eq!(cfg.list_for_node("n_a").unwrap().len(), 1);
-        assert_eq!(cfg.find("n_a", "opencode").unwrap().expect("在").command, "new");
+        assert_eq!(
+            cfg.find("n_a", "opencode").unwrap().expect("在").command,
+            "new"
+        );
     }
 
     /// 空命令是**合法**的：意思是「用扫描到的那个可执行文件」。

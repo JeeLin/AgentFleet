@@ -202,10 +202,7 @@ pub enum Probe {
     /// 找到了可执行文件、`--version` 也答出来了，但**它没有 ACP 入口**。
     ///
     /// `version` 与 `path` 照常给出：用户要知道「被发现的到底是哪一个」。
-    NotCapable {
-        version: String,
-        path: PathBuf,
-    },
+    NotCapable { version: String, path: PathBuf },
     /// 找到了可执行文件，`--version` 也答出来了。
     Ready {
         version: String,
@@ -417,10 +414,8 @@ mod tests {
     }
 
     fn lookup_of(map: Vec<(&'static str, PathBuf)>) -> impl Fn(&str) -> Option<PathBuf> {
-        let m: HashMap<String, PathBuf> = map
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect();
+        let m: HashMap<String, PathBuf> =
+            map.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
         move |name: &str| m.get(name).cloned()
     }
 

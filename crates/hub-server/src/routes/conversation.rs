@@ -74,9 +74,10 @@ pub async fn open(
     //    没选 agent 的会话直接拒：它没有「用哪个 agent 对话」这个问题的答案，
     //    而挑一个给用户等于替他做了决定，且那个决定会写进他的会话历史。
     let Some(agent_id) = agent_id else {
-        return Err(ApiError::conflict_with(err::AGENT_UNAVAILABLE, || {
-            json!({ "agent_id": null, "reason": "session_has_no_agent" })
-        }));
+        return Err(ApiError::conflict_with(
+            err::AGENT_UNAVAILABLE,
+            || json!({ "agent_id": null, "reason": "session_has_no_agent" }),
+        ));
     };
     let Some(node_id) = detail.workspace.node_id.clone() else {
         return Err(ApiError::conflict(err::DEVICE_REMOVED));
@@ -86,9 +87,10 @@ pub async fn open(
         .usable_for_session(&node_id, &agent_id)
         .map_err(|e| ApiError::internal_with("cannot read agent_runtime", e))?;
     if runtime.is_none() {
-        return Err(ApiError::conflict_with(err::AGENT_UNAVAILABLE, || {
-            json!({ "agent_id": agent_id })
-        }));
+        return Err(ApiError::conflict_with(
+            err::AGENT_UNAVAILABLE,
+            || json!({ "agent_id": agent_id }),
+        ));
     }
 
     // 3. 读出启动配置（**Hub 存，设备读**）。没有配置就用空值走一遍：
@@ -160,7 +162,8 @@ pub async fn open(
 
     // 5. 开通道并把 `open_channel` 下发。`check_reported = false`：`acp`
     //    不是 connector（见本文件头注释），它的门禁已经在上面第 2 步做过。
-    let opened = open_device_channel(&state, &auth, &session_id, ACP_CONNECTOR, params, false).await?;
+    let opened =
+        open_device_channel(&state, &auth, &session_id, ACP_CONNECTOR, params, false).await?;
     Ok((axum::http::StatusCode::CREATED, Json(opened)).into_response())
 }
 
@@ -303,7 +306,10 @@ mod tests {
         assert_eq!(ACP_CONNECTOR, "acp");
         // 与 `node-core::channel::EXTERNAL_CONNECTOR_NAME` 的字面值比对：
         // 那条常量是设备侧的唯一真相源，这里是 Hub 侧的唯一真相源。
-        assert_eq!(ACP_CONNECTOR, "acp", "设备侧的 EXTERNAL_CONNECTOR_NAME 是 acp");
+        assert_eq!(
+            ACP_CONNECTOR, "acp",
+            "设备侧的 EXTERNAL_CONNECTOR_NAME 是 acp"
+        );
     }
 
     /// `EventOut` 原样带出 `payload`，不改写它的内容。

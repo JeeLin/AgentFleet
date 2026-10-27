@@ -282,7 +282,8 @@ impl TrajectoryRepo {
                     "SELECT payload FROM trajectory_event
                      WHERE session_id = ?1 AND kind = ?2 AND json_extract(payload, '$.messageId') IS NULL",
                 )?;
-                let rows = stmt.query_map(params![session_id, e.kind], |r| r.get::<_, String>(0))?;
+                let rows =
+                    stmt.query_map(params![session_id, e.kind], |r| r.get::<_, String>(0))?;
                 for existing in rows {
                     let existing = existing?;
                     if payload_without_seq(&existing).as_deref() == Some(norm.as_str()) {
@@ -322,7 +323,12 @@ impl TrajectoryRepo {
     /// **回放顺序是物理顺序，不是 `seq` 顺序**：`seq` 是设备侧数的，重连后
     /// 会从 0 重数（ACP 子进程重启了），所以 `seq` 只在**一次进程生命周期内**
     /// 单调。物理顺序才是「事情真实发生的顺序」。
-    pub fn list(&self, session_id: &str, after_id: i64, limit: i64) -> Result<Vec<TrajectoryEvent>> {
+    pub fn list(
+        &self,
+        session_id: &str,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<TrajectoryEvent>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(&format!(
             "SELECT {COLUMNS} FROM trajectory_event
@@ -356,9 +362,8 @@ impl TrajectoryRepo {
     /// `turn_end` 在不在，才是末尾有没有丢的判据。
     pub fn gaps(&self, session_id: &str) -> Result<Vec<Gap>> {
         let conn = self.pool.get()?;
-        let mut stmt = conn.prepare(
-            "SELECT seq FROM trajectory_event WHERE session_id = ?1 ORDER BY seq ASC",
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT seq FROM trajectory_event WHERE session_id = ?1 ORDER BY seq ASC")?;
         let seqs: Vec<i64> = stmt
             .query_map(params![session_id], |r| r.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -480,8 +485,7 @@ mod tests {
             .append("s1", "n1", &chunk_with_mid(2, "好的", "msg_A"), TS)
             .unwrap());
         assert!(
-            !t
-                .append("s1", "n1", &chunk_with_mid(6, "好的", "msg_A"), TS)
+            !t.append("s1", "n1", &chunk_with_mid(6, "好的", "msg_A"), TS)
                 .unwrap(),
             "同一个 messageId 换了序号再来一次，是重放，不该写第二行"
         );

@@ -614,8 +614,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         }
         path
     }
@@ -705,7 +704,10 @@ for raw in sys.stdin:
             .expect("事件流还在");
         match ev {
             Event::SessionUpdate(v) => {
-                assert_eq!(v["update"]["sessionUpdate"], json!("available_commands_update"))
+                assert_eq!(
+                    v["update"]["sessionUpdate"],
+                    json!("available_commands_update")
+                )
             }
             other => panic!("应该是 SessionUpdate，实际 {other:?}"),
         }
@@ -791,7 +793,9 @@ for raw in sys.stdin:
             Event::Request { id, method, params } => {
                 assert_eq!(method, "session/request_permission");
                 assert_eq!(params["toolCall"]["title"], json!("rm -rf"));
-                c.respond(&id, json!({"outcome": "denied"})).await.expect("回应答");
+                c.respond(&id, json!({"outcome": "denied"}))
+                    .await
+                    .expect("回应答");
             }
             other => panic!("应该是 Request，实际 {other:?}"),
         }
@@ -1053,15 +1057,9 @@ for raw in sys.stdin:
                 return;
             }
         };
-        let c = AcpClient::spawn(
-            &bin,
-            &["acp".to_string()],
-            &Default::default(),
-            "",
-            None,
-        )
-        .await
-        .expect("与真 opencode 握手");
+        let c = AcpClient::spawn(&bin, &["acp".to_string()], &Default::default(), "", None)
+            .await
+            .expect("与真 opencode 握手");
         let sid = c.new_session("/tmp").await.expect("session/new");
         assert!(!sid.is_empty(), "真 agent 必须回一个 sessionId");
 
@@ -1085,7 +1083,10 @@ for raw in sys.stdin:
                 Err(_) => break,
             }
         }
-        assert!(got.contains("PONG"), "真 agent 应回 PONG，实际收到：{got:?}");
+        assert!(
+            got.contains("PONG"),
+            "真 agent 应回 PONG，实际收到：{got:?}"
+        );
         c.shutdown().await;
     }
 

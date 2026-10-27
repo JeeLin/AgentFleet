@@ -613,7 +613,12 @@ pub async fn list_agents(
 /// `available` 取**或**：只要有一台设备上它能对话，目录就标可用。
 /// `error` 取**并**：把所有说它不可用的原因都留着——用户要据此判断
 /// 「是我这台机器的问题吗」。
-fn merge_agent(out: &mut BTreeMap<String, AgentSummary>, name: &str, available: bool, error: Option<&str>) {
+fn merge_agent(
+    out: &mut BTreeMap<String, AgentSummary>,
+    name: &str,
+    available: bool,
+    error: Option<&str>,
+) {
     let entry = out.entry(name.to_string()).or_insert(AgentSummary {
         name: name.to_string(),
         available: false,

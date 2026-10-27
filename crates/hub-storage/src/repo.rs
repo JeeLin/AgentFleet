@@ -474,7 +474,12 @@ mod tests {
         insert_device(&DeviceRepo::new(pool.clone()), node_id, "fp_x");
         let sr = crate::session::SessionRepo::new(pool.clone());
         let s = sr
-            .create(node_id, "/srv/app", Some("opencode"), "2026-01-01T00:00:00Z")
+            .create(
+                node_id,
+                "/srv/app",
+                Some("opencode"),
+                "2026-01-01T00:00:00Z",
+            )
             .unwrap();
         let conn = pool.get().unwrap();
         conn.execute(
@@ -509,13 +514,21 @@ mod tests {
 
         assert_eq!(dr.delete_and_mark_removed("n_a").unwrap(), 1);
 
-        assert_eq!(count(&pool, "SELECT count(*) FROM device"), 0, "设备行要没了");
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM device"),
+            0,
+            "设备行要没了"
+        );
         assert_eq!(
             count(&pool, "SELECT count(*) FROM workspace"),
             1,
             "工作区要留着：它记录「这台机器上跑过什么」"
         );
-        assert_eq!(count(&pool, "SELECT count(*) FROM session"), 1, "会话要留着");
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM session"),
+            1,
+            "会话要留着"
+        );
         assert_eq!(
             count(&pool, "SELECT count(*) FROM trajectory_event"),
             1,
@@ -539,11 +552,9 @@ mod tests {
 
         let conn = pool.get().unwrap();
         let (node_id, removed): (Option<String>, Option<String>) = conn
-            .query_row(
-                "SELECT node_id, removed_node_id FROM workspace",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+            .query_row("SELECT node_id, removed_node_id FROM workspace", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
             .unwrap();
         assert_eq!(node_id, None, "node_id 要置 NULL：那台设备不存在了");
         assert_eq!(removed.as_deref(), Some("n_a"), "原 id 要留着给页面显示");
@@ -586,7 +597,11 @@ mod tests {
                 .unwrap(),
             0
         );
-        assert_eq!(count(&pool, "SELECT count(*) FROM device"), 1, "别人的行不许动");
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM device"),
+            1,
+            "别人的行不许动"
+        );
         let removed: Option<String> = pool
             .get()
             .unwrap()
@@ -598,7 +613,8 @@ mod tests {
     /// 空库时起点必须是 0，否则第一台设备会拿到 `gen = 0`——而 `0` 正是
     /// 「还没连过」的哨兵值，`last_seen_gen` 兜底会把两者混同。
     #[test]
-    fn max_gen_on_an_empty_library_is_zero() {        let (_d, dr, _s) = repo();
+    fn max_gen_on_an_empty_library_is_zero() {
+        let (_d, dr, _s) = repo();
         assert_eq!(dr.max_gen().unwrap(), 0);
     }
 

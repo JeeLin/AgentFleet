@@ -1203,7 +1203,7 @@ Mock 形状 = 将来 API 的形状。前端只读。
 | `prototype/sessions.html` | 会话列表：进行中 + 历史 | `packages/web/src/pages/SessionsPage.vue` + `components/SessionTable.vue` |
 | `prototype/new-session.html` | 三步建会话，路径锁定 | `packages/web/src/pages/NewSessionPage.vue` |
 | `prototype/devices.html` | 设备列表：三态、能力、资源余量、抽屉详情 | `packages/web/src/pages/DevicesPage.vue` + `components/DeviceTable.vue` |
-| `prototype/agents.html` | Agent 目录：只读聚合，与会话的区别 | `packages/web/src/pages/AgentsPage.vue` |
+| `prototype/agents.html` | Agent 目录：只读聚合，与会话的区别 | `packages/web/src/components/AgentCatalog.vue`（挂在设备页的 `?view=agents` 分段；不再是独立页面，见 §5.1） |
 | `prototype/settings.html` | 设置（M2，控件全禁用） | `packages/web/src/pages/SettingsPage.vue` |
 | `prototype/login.html` / `setup.html` | 认证：五种 / 三种错误态分开呈现 | `packages/web/src/pages/LoginPage.vue` / `SetupPage.vue` + `components/LoginPrompt.vue` |
 | `prototype/panels/terminal.html` | terminal 面板：四态、尺寸协商、丢帧、断线不冻结 | `packages/web/src/components/TerminalPanel.vue` + `lib/channel.ts` |

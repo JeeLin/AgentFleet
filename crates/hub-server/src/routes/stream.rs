@@ -657,8 +657,7 @@ pub(crate) async fn open_device_channel(
 
     let channel_id = identity::random_id();
     let params = params_with_workspace_root(params, &detail.workspace.path);
-    let open =
-        protocol::channel::OpenChannel::with_params(channel_id.clone(), connector, params);
+    let open = protocol::channel::OpenChannel::with_params(channel_id.clone(), connector, params);
     let fallback = protocol::channel::fallback::open(&channel_id, connector);
     let frame = Frame::push(
         types::OPEN_CHANNEL,

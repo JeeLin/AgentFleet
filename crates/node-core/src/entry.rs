@@ -61,13 +61,19 @@ fn now_unix_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
-    fn dir(name: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("afcli-entry-{name}"));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).expect("tempdir");
-        p
+    /// 每个用例一个**独占**目录。
+    ///
+    /// 曾用固定的 `/tmp/afcli-entry-{name}` + 开头 `remove_dir_all`：
+    /// 同一 crate 的测试并行跑时，两个用例撞上同名目录会互删对方刚写的文件
+    /// （`create_dir` 报 `AlreadyExists`、读日志读到空文件）。名字里带用例名
+    /// 不足以避免——cargo 会同时跑同名用例的多个进程（重跑、多 target）。
+    /// `tempfile` 每次给新目录，且随守卫析构自动清理。
+    fn dir(name: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("afcli-entry-{name}-"))
+            .tempdir()
+            .expect("tempdir")
     }
 
     /// 排障时靠 `afcli log` 把 supervisor 与 worker 两边的记录按时间拼起来读，
@@ -75,27 +81,25 @@ mod tests {
     #[test]
     fn a_log_line_leads_with_the_role_and_ends_with_a_newline() {
         let d = dir("role");
-        write(&d, ROLE_WORKER, "info", "connected");
-        let text = std::fs::read_to_string(log::log_path(&d)).expect("log file");
+        write(d.path(), ROLE_WORKER, "info", "connected");
+        let text = std::fs::read_to_string(log::log_path(d.path())).expect("log file");
         assert!(text.ends_with('\n'), "missing newline: {text:?}");
         let line = text.lines().next().expect("one line");
         assert!(line.contains("[worker]"), "got {line}");
         assert!(line.contains("info"), "got {line}");
         assert!(line.contains("connected"), "got {line}");
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// 两个角色各写一行，读回来必须能按角色分开——混着写也不能互相覆盖。
     #[test]
     fn both_roles_append_to_the_same_file_in_order() {
         let d = dir("both");
-        write(&d, ROLE_SUPERVISOR, "info", "spawned");
-        write(&d, ROLE_WORKER, "warn", "retrying");
-        let lines = log::tail(&log::log_path(&d), 10).expect("tail");
+        write(d.path(), ROLE_SUPERVISOR, "info", "spawned");
+        write(d.path(), ROLE_WORKER, "warn", "retrying");
+        let lines = log::tail(&log::log_path(d.path()), 10).expect("tail");
         assert_eq!(lines.len(), 2, "got {lines:?}");
         assert!(lines[0].contains("[supervisor]"), "got {:?}", lines[0]);
         assert!(lines[1].contains("[worker]"), "got {:?}", lines[1]);
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// 写不进去时**不能**让调用方退出：磁盘满或目录被删不该把「排障手段」
@@ -103,11 +107,10 @@ mod tests {
     #[test]
     fn a_failed_write_is_survived_not_fatal() {
         let base = dir("fail");
-        let blocker = base.join("logs");
+        let blocker = base.path().join("logs");
         std::fs::write(&blocker, "not a directory").expect("blocker file");
         // 不 panic、不返回、不静默：stderr 那一路由 eprintln 负责。
-        write(&base, ROLE_SUPERVISOR, "error", "disk is full");
-        let _ = std::fs::remove_dir_all(&base);
+        write(base.path(), ROLE_SUPERVISOR, "error", "disk is full");
     }
 
     /// `rotate_at_startup` 是两个入口（supervisor / worker）唯一的轮转调用点：
@@ -117,16 +120,15 @@ mod tests {
     fn rotate_at_startup_rotates_for_both_roles() {
         for role in [ROLE_SUPERVISOR, ROLE_WORKER] {
             let d = dir("rotate-startup");
-            let path = log::log_path(&d);
+            let path = log::log_path(d.path());
             std::fs::create_dir_all(path.parent().expect("logs dir")).expect("mkdir");
             std::fs::write(&path, vec![b'x'; (log::MAX_LOG_BYTES + 1) as usize]).expect("fill");
-            rotate_at_startup(&d, role);
+            rotate_at_startup(d.path(), role);
             assert!(
                 path.with_file_name("afcli.log.1").exists(),
                 "{role}: oversized log must rotate at startup"
             );
             assert!(!path.exists(), "{role}: current name must be freed");
-            let _ = std::fs::remove_dir_all(&d);
         }
     }
 
@@ -134,11 +136,10 @@ mod tests {
     #[test]
     fn a_small_log_is_not_rotated_at_startup() {
         let d = dir("rotate-skip");
-        write(&d, ROLE_WORKER, "info", "tiny");
-        rotate_at_startup(&d, ROLE_WORKER);
-        let text = std::fs::read_to_string(log::log_path(&d)).expect("log");
+        write(d.path(), ROLE_WORKER, "info", "tiny");
+        rotate_at_startup(d.path(), ROLE_WORKER);
+        let text = std::fs::read_to_string(log::log_path(d.path())).expect("log");
         assert!(text.contains("tiny"), "the original line must stay put");
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// 轮转失败也**必须留下痕迹**：`rotate_at_startup` 是启动路径，失败时
@@ -147,7 +148,7 @@ mod tests {
     #[test]
     fn a_failed_rotation_is_recorded_rather_than_silently_dropped() {
         let d = dir("rotate-fail");
-        let path = log::log_path(&d);
+        let path = log::log_path(d.path());
         std::fs::create_dir_all(path.parent().expect("logs dir")).expect("mkdir");
         std::fs::write(&path, vec![b'x'; (log::MAX_LOG_BYTES + 1) as usize]).expect("fill");
         // 最旧一代换成目录：`remove_file` 对目录必失败（unlink 目录 = EPERM），
@@ -155,7 +156,7 @@ mod tests {
         // 而这个失败与以什么身份运行无关。
         std::fs::create_dir(path.with_file_name("afcli.log.3")).expect("dir blocker");
 
-        rotate_at_startup(&d, ROLE_SUPERVISOR);
+        rotate_at_startup(d.path(), ROLE_SUPERVISOR);
 
         let text = std::fs::read_to_string(&path).expect("log still there");
         assert!(
@@ -166,15 +167,14 @@ mod tests {
             text.contains("remove oldest rotation"),
             "要说清是哪一步失败的，否则这行等于没写：{text:?}"
         );
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// 秒级时间戳：日志不参与判定，也不需要毫秒排序。
     #[test]
     fn the_timestamp_is_seconds() {
         let d = dir("secs");
-        write(&d, ROLE_WORKER, "info", "x");
-        let text = std::fs::read_to_string(log::log_path(&d)).expect("log");
+        write(d.path(), ROLE_WORKER, "info", "x");
+        let text = std::fs::read_to_string(log::log_path(d.path())).expect("log");
         let stamp: u64 = text
             .split_whitespace()
             .next()
@@ -184,6 +184,5 @@ mod tests {
         // 2020-01-01 之后。写死 1.5e9 会随时间变假，所以只断言量级。
         assert!(stamp > 1_577_836_800, "stamp {stamp}");
         assert!(stamp < 100_000_000_000, "stamp {stamp} looks like millis");
-        let _ = std::fs::remove_dir_all(&d);
     }
 }

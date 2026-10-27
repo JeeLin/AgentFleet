@@ -300,8 +300,12 @@ async fn the_device_table_load_columns_come_from_the_real_collection() {
         !res.is_null(),
         "有 /proc 却没采到负载：{res}——这条欠账就是要修这个"
     );
-    let cpu = row["cpu"].as_u64().unwrap_or_else(|| panic!("cpu 不是数：{row}"));
-    let mem = row["mem"].as_u64().unwrap_or_else(|| panic!("mem 不是数：{row}"));
+    let cpu = row["cpu"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("cpu 不是数：{row}"));
+    let mem = row["mem"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("mem 不是数：{row}"));
 
     // 口径：与真读的 `/proc` 对账，而不是与采集器自己的输出对账——
     // 后者只会证明「它把它算出来的数原样交了出去」。
@@ -310,7 +314,9 @@ async fn the_device_table_load_columns_come_from_the_real_collection() {
         let mut total = 0u64;
         let mut avail = 0u64;
         for line in text.lines() {
-            let Some((k, rest)) = line.split_once(':') else { continue };
+            let Some((k, rest)) = line.split_once(':') else {
+                continue;
+            };
             let Ok(kb) = rest.split_whitespace().next().unwrap_or("").parse::<u64>() else {
                 continue;
             };
@@ -747,7 +753,9 @@ async fn an_agent_config_round_trips_through_the_api() {
     assert_eq!(written["args"], json!(["--acp", "--verbose"]));
     assert_eq!(written["env"], json!({"FOO": "bar"}));
     assert!(
-        written["updated_at"].as_str().is_some_and(|s| !s.is_empty()),
+        written["updated_at"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
         "时间戳由 Hub 盖，必须在响应里：{}",
         written
     );
@@ -856,10 +864,7 @@ async fn writing_a_config_without_the_csrf_header_is_rejected() {
                     .header("content-type", "application/json")
                     .header(
                         "cookie",
-                        format!(
-                            "{SESSION_COOKIE}={}; {CSRF_COOKIE}={}",
-                            h.session, h.csrf
-                        ),
+                        format!("{SESSION_COOKIE}={}; {CSRF_COOKIE}={}", h.session, h.csrf),
                     )
                     .body(Body::from(
                         json!({"node_id": "n_cfg", "agent_id": "opencode"}).to_string(),
@@ -951,7 +956,12 @@ async fn deleting_an_absent_device_is_404_and_leaves_the_list_alone() {
     assert_eq!(first.status, StatusCode::NO_CONTENT, "body: {}", first.body);
 
     let second = h.delete_device(&node_id).await;
-    assert_eq!(second.status, StatusCode::NOT_FOUND, "body: {}", second.body);
+    assert_eq!(
+        second.status,
+        StatusCode::NOT_FOUND,
+        "body: {}",
+        second.body
+    );
     assert_eq!(
         h.get("/api/devices").await.json(),
         json!([]),
@@ -973,10 +983,7 @@ async fn deleting_a_device_does_not_delete_its_sessions_trajectory() {
         .create_session(json!({"node_id": node_id, "path": "/srv/app"}))
         .await;
     assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
-    let session_id = created.json()["id"]
-        .as_str()
-        .expect("会话 id")
-        .to_string();
+    let session_id = created.json()["id"].as_str().expect("会话 id").to_string();
 
     assert_eq!(
         h.delete_device(&node_id).await.status,
@@ -1072,8 +1079,7 @@ async fn creating_a_session_with_an_available_agent_succeeds() {
 #[tokio::test]
 async fn creating_a_session_with_an_agent_the_device_never_reported_is_a_conflict() {
     let hub = common::Hub::boot().await;
-    let (node_id, _keepalive) =
-        enrolled_device_reporting(&hub, json!(["opencode"])).await;
+    let (node_id, _keepalive) = enrolled_device_reporting(&hub, json!(["opencode"])).await;
     let h = Harness::from_hub(hub).await;
 
     let r = h
@@ -1243,12 +1249,7 @@ impl Harness {
 async fn conversation_ready(
     agents: Value,
     with_agent: Option<&str>,
-) -> (
-    Harness,
-    String,
-    String,
-    node_core::conn::Established,
-) {
+) -> (Harness, String, String, node_core::conn::Established) {
     let hub = common::Hub::boot().await;
     let (node_id, est) = enrolled_device_reporting(&hub, agents).await;
     let h = Harness::from_hub(hub).await;
@@ -1257,7 +1258,12 @@ async fn conversation_ready(
         body["agent_id"] = json!(a);
     }
     let created = h.create_session(body).await;
-    assert_eq!(created.status, StatusCode::CREATED, "body: {}", created.body);
+    assert_eq!(
+        created.status,
+        StatusCode::CREATED,
+        "body: {}",
+        created.body
+    );
     let session_id = created.json()["id"]
         .as_str()
         .expect("建会话要回 id")
@@ -1383,7 +1389,8 @@ async fn opening_a_conversation_sends_the_agent_config_down_to_the_device() {
     // （`Workspace::path` 的注释明说「不做 `~` 展开」），展开只能在设备侧、
     // 起子进程之前做（`node-core` 的 `expand_home`）。
     assert_eq!(
-        open.params["cwd"], json!("~/src/app"),
+        open.params["cwd"],
+        json!("~/src/app"),
         "cwd 原样下发；`~` 的展开是设备侧的事：{}",
         open.params
     );
@@ -1614,11 +1621,7 @@ async fn an_empty_trajectory_is_empty_and_not_incomplete() {
     let v = r.json();
     assert_eq!(v["events"], json!([]));
     assert_eq!(v["gaps"], json!([]));
-    assert_eq!(
-        v["incomplete"],
-        json!(false),
-        "没有一轮就没有「未完成」"
-    );
+    assert_eq!(v["incomplete"], json!(false), "没有一轮就没有「未完成」");
 }
 
 /// 有 `seq` 断口 → `gaps` 报出来，且带 `missing` 条数。

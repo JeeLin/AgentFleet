@@ -708,7 +708,11 @@ fn on_open(frame: &Frame) -> Action {
 /// 自己的 cwd 里跑——那是设备的数据目录，不是用户的工作区，agent 会在那里
 /// 建文件。两者都不能回落成「随便挑一个」。
 fn on_open_acp(spec: OpenChannel) -> Action {
-    let agent_id = match spec.params.get("agent_id").and_then(serde_json::Value::as_str) {
+    let agent_id = match spec
+        .params
+        .get("agent_id")
+        .and_then(serde_json::Value::as_str)
+    {
         Some(v) => v,
         None => "",
     };
@@ -734,11 +738,19 @@ fn on_open_acp(spec: OpenChannel) -> Action {
     // **每一处缺失都写成显式分支**（不是 `unwrap_or_default`）：这里的默认值
     // 各有各的含义（空串 = 回落到扫描结果，空列表 = 不追加），把它们统一压成
     // 「默认值」会让「字段形状错了」与「字段没给」看起来一样。
-    let command = match spec.params.get("command").and_then(serde_json::Value::as_str) {
+    let command = match spec
+        .params
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+    {
         Some(v) => v.to_string(),
         None => String::new(),
     };
-    let args: Vec<String> = match spec.params.get("args").and_then(serde_json::Value::as_array) {
+    let args: Vec<String> = match spec
+        .params
+        .get("args")
+        .and_then(serde_json::Value::as_array)
+    {
         Some(a) => a
             .iter()
             .filter_map(serde_json::Value::as_str)
@@ -746,14 +758,17 @@ fn on_open_acp(spec: OpenChannel) -> Action {
             .collect(),
         None => Vec::new(),
     };
-    let env: std::collections::BTreeMap<String, String> =
-        match spec.params.get("env").and_then(serde_json::Value::as_object) {
-            Some(o) => o
-                .iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect(),
-            None => std::collections::BTreeMap::new(),
-        };
+    let env: std::collections::BTreeMap<String, String> = match spec
+        .params
+        .get("env")
+        .and_then(serde_json::Value::as_object)
+    {
+        Some(o) => o
+            .iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect(),
+        None => std::collections::BTreeMap::new(),
+    };
 
     // **ACP 入口参数由设备侧的清单给**，不由 Hub 下发：「怎么进 ACP 模式」
     // 是这个 agent 自己的 CLI 契约。不认识的 agent_id 给空列表——那种情况
@@ -788,7 +803,11 @@ fn on_open_acp(spec: OpenChannel) -> Action {
     // `Seq::next()` 是 `fetch_add(1) + 1`，起点 0 让第一条是 1。旧 Hub 不下发
     // 这个字段时行为与从前一致（从 1 开始），不会因为升级顺序把对话开挂。
     // 负数同样当 0：`seq` 是本模块自己发的，负值只可能是别人编的。
-    let last_seq = match spec.params.get("last_seq").and_then(serde_json::Value::as_i64) {
+    let last_seq = match spec
+        .params
+        .get("last_seq")
+        .and_then(serde_json::Value::as_i64)
+    {
         Some(v) if v > 0 => v,
         _ => 0,
     };
@@ -908,6 +927,19 @@ pub fn on_disconnect() -> usize {
 /// 一个设备一个进程的全局状态，没有「重置」这回事。
 pub fn reset_for_tests() {
     lock().channels.clear();
+}
+
+/// 取通道表的**测试互斥锁**。同样只给测试用。
+///
+/// 存在的理由：通道表是进程级单例，两个用例同时 `reset_for_tests()` +
+/// 写帧会互相踩账，表现为「单跑全绿、全量随机红」。凡是动表的用例都必须
+/// 先拿这把锁再重置。它 `pub` 是因为 `agent::conversation` 的帧形状用例
+/// 也要动这张表，而它们在另一个模块里。
+pub fn table_lock_for_tests() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 // 以下一组访问器是**测试与排障 API**：读通道表的内部计数（信用、积压、
@@ -1132,13 +1164,10 @@ mod tests {
     /// 表现为「单跑全绿、全量随机红」。所以每个用例开头都要先拿这把锁，
     /// 拿到之后才 `reset()`——锁只保证互斥，空表由 `reset()` 负责。
     ///
-    /// 锁中毒后仍要能跑完剩下的用例（一个红不该拖垮整批），故用
-    /// `unwrap_or_else` 取回 guard 而不是 `unwrap()`。
+    /// 实现已提到模块级的 `table_lock_for_tests()`：`agent::conversation` 的
+    /// 帧形状用例也在动这张表，**两处必须是同一把锁**，否则互斥不成立。
     fn table_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        table_lock_for_tests()
     }
 
     /// 每个用例都从空表开始：通道表是进程级单例（约束 4）。

@@ -360,6 +360,19 @@ fn apply_winsize(fd: RawFd, size: Size) -> Result<(), PtyError> {
 mod tests {
     use super::*;
 
+    /// 改本进程环境的用例必须互斥。
+    ///
+    /// `std::env::set_var` 动的是**整个进程**的环境：两个用例并行跑时，
+    /// A 刚种下自己的探测键，B 的 `remove_var` 就把它删了，或者 A 的子进程
+    /// 读到的是 B 种的值。症状是「单跑全绿、全量随机红」，而且红的是断言
+    /// 里那句「新键要被追加进去」，看起来像 PTY 的 env 逻辑有问题。
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// 真实 PTY：`stty size` 是内核对尺寸协商的回答，别的都是自说自话。
     ///
     /// 同时验证「真 PTY」这件事本身——管道上跑 `stty` 只会报错。
@@ -537,10 +550,11 @@ mod tests {
     /// 判据是三件事：同名键被页面给的值盖掉、新键被追加、设备原有的键还在。
     #[test]
     fn env_is_appended_and_overrides_rather_than_replacing() {
+        let _guard = env_lock();
         // 覆盖那条臂要一个**设备环境里确定存在**的键：这里自己先在本进程里
         // 种下它，而不是赌某个键一定被继承下来。
         std::env::set_var("AFCLI_PTY_PROBE", "from-device");
-        let first = Pty::spawn_in(
+        let mut first = Pty::spawn_in(
             "/bin/sh",
             &["-c".to_string(), "echo $AFCLI_PTY_PROBE".to_string()],
             Size { cols: 80, rows: 24 },
@@ -559,9 +573,14 @@ mod tests {
             !seen.windows(11).any(|w| w == b"from-device"),
             "页面给的值该盖掉设备的：{text}"
         );
+        // **用完立刻放掉**：cargo test 并行跑整个 crate，PTY 用例有十几个，
+        // 每条都不关就一起占着 master fd 与子进程。堆到一定数量后后来的
+        // 用例 `read_until` 在预算内一个字节都读不到（本机实测 5 轮红 3 轮，
+        // 症状是「新键要被追加进去：」后面是空文本），看起来像 env 逻辑坏了。
+        first.close();
 
         // 追加一个**原本没有**的键同样要生效（走 `None => push` 那条臂）。
-        let second = Pty::spawn_in(
+        let mut second = Pty::spawn_in(
             "/bin/sh",
             &["-c".to_string(), "echo $AFCLI_PTY_NEW_KEY".to_string()],
             Size { cols: 80, rows: 24 },
@@ -575,12 +594,13 @@ mod tests {
             seen.windows(8).any(|w| w == b"appended"),
             "新键要被追加进去：{text}"
         );
+        second.close();
 
         // **设备原有的环境必须还在**：这是「追加」之所以是追加的全部意义。
         // 整体替换会让 `PATH` 消失，而一个没有 `PATH` 的 shell 连 `/bin/sh`
         // 都靠 `execvp` 找不到——那时用户看到的只是「终端打不开」。
         std::env::set_var("AFCLI_PTY_INHERITED", "kept");
-        let third = Pty::spawn_in(
+        let mut third = Pty::spawn_in(
             "/bin/sh",
             &["-c".to_string(), "echo $AFCLI_PTY_INHERITED".to_string()],
             Size { cols: 80, rows: 24 },
@@ -595,6 +615,7 @@ mod tests {
             seen.windows(4).any(|w| w == b"kept"),
             "设备原有的环境变量必须被继承下来（追加，不是替换）：{text}"
         );
+        third.close();
     }
 
     /// `pid()` 给的是那个子进程的号：它是「这个终端后面跑的是谁」的唯一

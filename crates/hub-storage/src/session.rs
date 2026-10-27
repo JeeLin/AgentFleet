@@ -470,9 +470,7 @@ mod tests {
     #[test]
     fn the_acp_session_id_is_none_until_it_is_recorded_then_round_trips() {
         let (_d, sr) = setup();
-        let s = sr
-            .create("n_a", "/srv/app", Some("opencode"), TS)
-            .unwrap();
+        let s = sr.create("n_a", "/srv/app", Some("opencode"), TS).unwrap();
         assert_eq!(
             s.acp_session_id, None,
             "刚建的会话还没有 ACP id，设备侧据此走 session/new"
@@ -504,9 +502,7 @@ mod tests {
     #[test]
     fn recording_the_same_acp_session_id_twice_is_not_an_error() {
         let (_d, sr) = setup();
-        let s = sr
-            .create("n_a", "/srv/app", Some("opencode"), TS)
-            .unwrap();
+        let s = sr.create("n_a", "/srv/app", Some("opencode"), TS).unwrap();
         sr.set_acp_session_id(&s.id, "ses_abc").unwrap();
         sr.set_acp_session_id(&s.id, "ses_abc").unwrap();
         assert_eq!(

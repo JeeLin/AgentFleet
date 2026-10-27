@@ -163,7 +163,11 @@ impl Conversations {
     ///
     /// `default_command` 是扫描到的那个可执行文件（`agent_config.command`
     /// 为空串时用它）。拿不到就是 `None`，此时只有用户配了命令才起得来。
-    pub async fn open(&self, spec: ConversationSpec, default_command: Option<&str>) -> Result<(), String> {
+    pub async fn open(
+        &self,
+        spec: ConversationSpec,
+        default_command: Option<&str>,
+    ) -> Result<(), String> {
         let program = resolve_command(&spec.command, default_command).ok_or_else(|| {
             format!(
                 "agent {} is not installed and no command is configured",
@@ -216,11 +220,7 @@ impl Conversations {
         // 起点是 Hub 下发的 `last_seq`——不是 0。理由见 [`Seq::new`] 与
         // [`ConversationSpec::last_seq`]：从 1 重数会让重放事件撞号后被静默吞掉。
         let seq = Seq::new(spec.last_seq);
-        let reader = tokio::spawn(read_events(
-            spec.channel_id.clone(),
-            client,
-            seq.clone(),
-        ));
+        let reader = tokio::spawn(read_events(spec.channel_id.clone(), client, seq.clone()));
 
         self.live.lock().await.insert(
             spec.channel_id,
@@ -598,7 +598,11 @@ mod tests {
         let seq = Seq::new(7);
         assert_eq!(seq.last(), 7, "起点就是历史最大值");
         assert_eq!(seq.next(), 8, "续着往下编，不回到 1");
-        assert_eq!(Seq::new(-3).last(), 0, "负值压到 0：0 是「没有序号」的保留值");
+        assert_eq!(
+            Seq::new(-3).last(),
+            0,
+            "负值压到 0：0 是「没有序号」的保留值"
+        );
         assert_eq!(Seq::new(-3).next(), 1);
     }
 
@@ -608,23 +612,25 @@ mod tests {
     /// 写错的表现是「配了命令却不生效」或「没配就崩」。
     #[test]
     fn the_command_falls_back_to_the_detected_binary() {
-        assert_eq!(resolve_command("/x/y", Some("/a/b")), Some("/x/y".to_string()));
+        assert_eq!(
+            resolve_command("/x/y", Some("/a/b")),
+            Some("/x/y".to_string())
+        );
         assert_eq!(
             resolve_command("", Some("/a/b")),
             Some("/a/b".to_string()),
             "空串必须回落到扫描到的那个"
         );
-        assert_eq!(resolve_command("   ", Some("/a/b")), Some("/a/b".to_string()));
+        assert_eq!(
+            resolve_command("   ", Some("/a/b")),
+            Some("/a/b".to_string())
+        );
         assert_eq!(
             resolve_command("", None),
             None,
             "没配也没扫到：起不来，不能编一个命令"
         );
-        assert_eq!(
-            resolve_command("", Some("")),
-            None,
-            "扫到空串等于没扫到"
-        );
+        assert_eq!(resolve_command("", Some("")), None, "扫到空串等于没扫到");
     }
 
     /// **`acp_args` 必须排在最前**：`opencode acp --model x` 里 `acp` 是
@@ -641,24 +647,54 @@ mod tests {
         // 没配任何参数时就是 ACP 入口参数本身
         assert_eq!(build_args(&["acp"], &[]), vec!["acp"]);
         // 清单里没有这个 agent：不编参数
-        assert!(build_args(&[], &["--x".to_string()]).is_empty() == false);
         assert_eq!(build_args(&[], &["--x".to_string()]), vec!["--x"]);
     }
 
     /// 帧格式是**对外契约**（页面按 `type` 分派），钉住它。
+    ///
+    /// **必须从通道里把帧收回来断言**，不能只断言 `batch` 被清空：后者在
+    /// `type` 改名、`events` 改名时照样全绿，等于没钉住任何东西。
+    /// 取帧走 `pump()`（生产代码放行积压的同一个出口），所以这里断言的
+    /// 就是设备真的会发出去的那一帧。
     #[test]
     fn the_batch_and_turn_end_shapes_are_pinned() {
+        let _guard = channel::table_lock_for_tests();
+        channel::reset_for_tests();
+        let ch = "ch-shape-pinned";
+        channel::open_external(ch);
+
         let mut batch = vec![json!({ "sessionUpdate": "agent_message_chunk" })];
         let mut bytes = 100;
-        flush("ch", &mut batch, &mut bytes);
-        assert!(batch.is_empty(), "发完要清空");
-        assert_eq!(bytes, 0, "字节账要归零");
+        flush(ch, &mut batch, &mut bytes);
+
+        let pumped = channel::pump();
+        let frames = pumped
+            .iter()
+            .find(|(id, _)| id == ch)
+            .map(|(_, f)| f.clone())
+            .expect("flush 之后通道里必须有一帧待发");
+        assert_eq!(
+            frames[0].c,
+            json!({
+                "channel_id": ch,
+                "payload": {
+                    "type": "batch",
+                    "events": [{ "sessionUpdate": "agent_message_chunk" }]
+                }
+            }),
+            "batch 帧的 wire 形状是对外契约：`channel_data` 信封（协议 §4）+ 页面按 type 分派、按 events 取事件"
+        );
 
         // 空批不发帧（否则页面收到一堆空 batch）
+        channel::reset_for_tests();
+        channel::open_external(ch);
         let mut empty: Vec<Value> = Vec::new();
         let mut z = 0;
-        flush("ch", &mut empty, &mut z);
-        assert!(empty.is_empty());
+        flush(ch, &mut empty, &mut z);
+        assert!(
+            channel::pump().iter().all(|(_, f)| f.is_empty()),
+            "空批不许产生任何帧"
+        );
     }
 
     /// **真机端到端**：开本地通道 → 起真 opencode → 发一句话 → 收到回复。
@@ -672,11 +708,17 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn a_real_opencode_turn_reaches_the_channel_as_a_batch() {
-        let bin = std::env::var("AF_TEST_AGENT_BIN")
-            .unwrap_or_else(|_| "/root/.local/share/mise/installs/npm-opencode-cli/latest/bin/opencode".to_string());
+        let bin = std::env::var("AF_TEST_AGENT_BIN").unwrap_or_else(|_| {
+            "/root/.local/share/mise/installs/npm-opencode-cli/latest/bin/opencode".to_string()
+        });
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
-        // 通道表是进程级单例：这条用例必须独占。
-        let _ = channel::reset_for_tests();
+        // 通道表是进程级单例：这条用例必须独占，且**锁要拿到最后**。
+        // 不在块内释放是对的（整条用例都不能有别人动表），但 guard 跨 await
+        // 持有会被 clippy 报 `await_holding_lock`——这里是有意为之：本用例
+        // `#[ignore]`，真机单跑，独占正是它要的语义。
+        #[allow(clippy::await_holding_lock)]
+        let _guard = channel::table_lock_for_tests();
+        channel::reset_for_tests();
 
         let ch = "ch-e2e-acp";
         let frames = channel::open_external(ch);
@@ -725,7 +767,12 @@ mod tests {
                     let p = &d.payload;
                     match p.get("type").and_then(Value::as_str) {
                         Some("batch") => {
-                            for ev in p.get("events").and_then(Value::as_array).cloned().unwrap_or_default() {
+                            for ev in p
+                                .get("events")
+                                .and_then(Value::as_array)
+                                .cloned()
+                                .unwrap_or_default()
+                            {
                                 if ev.get("sessionUpdate").and_then(Value::as_str)
                                     == Some("agent_message_chunk")
                                 {
@@ -851,6 +898,9 @@ for line in sys.stdin:
     /// **没有 `acp_session_id` → 走 `session/new`，且 `ready` 里是新 id。**
     #[tokio::test]
     async fn a_conversation_without_an_acp_id_creates_a_new_session() {
+        // 通道表是进程级单例：不拿锁就有别的用例在中间 reset，`ready` 会被抢走
+        let _guard = channel::table_lock_for_tests();
+        channel::reset_for_tests();
         let d = tempfile::tempdir().expect("tmp");
         let (bin, log) = recording_agent(d.path());
         let convs = Conversations::default();
@@ -883,7 +933,8 @@ for line in sys.stdin:
             .find(|d| d.payload.get("type").and_then(Value::as_str) == Some("ready"))
             .expect("必须推一条 ready");
         assert_eq!(
-            ready.payload["sessionId"], json!("ses_brand_new"),
+            ready.payload["sessionId"],
+            json!("ses_brand_new"),
             "ready 要把 agent 给的 sessionId 带上去，Hub 靠它回填"
         );
 
@@ -902,6 +953,9 @@ for line in sys.stdin:
     /// `open()` 有没有把参数传进去。这一条才是接线判据。）
     #[tokio::test]
     async fn open_continues_the_seq_from_the_last_persisted_one() {
+        // 通道表是进程级单例：不拿锁就有别的用例在中间 reset，`turn_end` 会被抢走
+        let _guard = channel::table_lock_for_tests();
+        channel::reset_for_tests();
         let d = tempfile::tempdir().expect("tmp");
         // 这条判据看的是 `turn_end` 的 `seq`，不看方法序，所以日志不用。
         let (bin, _log) = recording_agent(d.path());
@@ -911,17 +965,17 @@ for line in sys.stdin:
         let mut spec = spec_for("ch_seq", &bin, None);
         // 库里这条会话已经有 1..4，设备必须从 5 开始编。
         spec.last_seq = 4;
-        convs
-            .open(spec, None)
-            .await
-            .expect("假 agent 必须能起来");
+        convs.open(spec, None).await.expect("假 agent 必须能起来");
 
         // 发一句话，然后等这一轮的 `turn_end`——它和外发事件共用一个计数器，
         // 所以它的 seq 就是「open() 的起点有没有生效」的直接证据。
         //
         // `prompt()` 是 `tokio::spawn` 出去的（见它的文档：不等回复），所以
         // 这里必须**轮询 yield** 而不是发完就查。
-        convs.prompt("ch_seq", "hi").await.expect("prompt 必须发得出去");
+        convs
+            .prompt("ch_seq", "hi")
+            .await
+            .expect("prompt 必须发得出去");
         let mut turn_end_seq = None;
         for _ in 0..200 {
             // 通道表是进程级单例，别的并发用例也会往 `pump()` 里丢帧；
@@ -960,6 +1014,9 @@ for line in sys.stdin:
     /// `new_session`，这条会红在「必须 load」那句。
     #[tokio::test]
     async fn a_conversation_with_an_acp_id_loads_instead_of_creating() {
+        // 通道表是进程级单例：不拿锁就有别的用例在中间 reset，`ready` 会被抢走
+        let _guard = channel::table_lock_for_tests();
+        channel::reset_for_tests();
         let d = tempfile::tempdir().expect("tmp");
         let (bin, log) = recording_agent(d.path());
         let convs = Conversations::default();
@@ -989,7 +1046,8 @@ for line in sys.stdin:
             .find(|d| d.payload.get("type").and_then(Value::as_str) == Some("ready"))
             .expect("必须推一条 ready");
         assert_eq!(
-            ready.payload["sessionId"], json!("ses_existing"),
+            ready.payload["sessionId"],
+            json!("ses_existing"),
             "load 之后要沿用原来的 id，不能换成别的"
         );
 

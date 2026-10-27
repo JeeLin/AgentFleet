@@ -497,7 +497,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            (w_id.as_str(), w_node.as_str(), w_path.as_str(), w_created.as_str()),
+            (
+                w_id.as_str(),
+                w_node.as_str(),
+                w_path.as_str(),
+                w_created.as_str()
+            ),
             ("w1", "n_a", "/srv/app", "unix:10")
         );
         let (s_id, s_ws, s_agent, s_state): (String, String, Option<String>, String) = c
@@ -508,20 +513,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            (s_id.as_str(), s_ws.as_str(), s_agent.as_deref(), s_state.as_str()),
+            (
+                s_id.as_str(),
+                s_ws.as_str(),
+                s_agent.as_deref(),
+                s_state.as_str()
+            ),
             ("s1", "w1", Some("opencode"), "running")
         );
         // 新列在存量行上是 NULL，不是空串
         let removed: Option<String> = c
-            .query_row("SELECT removed_node_id FROM workspace WHERE id='w1'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT removed_node_id FROM workspace WHERE id='w1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(removed, None, "存量工作区的 removed_node_id 必须是 NULL");
         let acp: Option<String> = c
-            .query_row("SELECT acp_session_id FROM session WHERE id='s1'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT acp_session_id FROM session WHERE id='s1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(acp, None, "存量会话没有 acp_session_id");
     }

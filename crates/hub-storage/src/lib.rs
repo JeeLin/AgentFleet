@@ -13,16 +13,14 @@ pub mod session;
 pub mod trajectory;
 pub mod workspace;
 
-pub use db::{data_dir, open, open_in, set_umask_077, Db};
 pub use agent::{AgentConfig, AgentConfigRepo, AgentRuntime, AgentRuntimeRepo};
+pub use db::{data_dir, open, open_in, set_umask_077, Db};
 pub use error::StorageError;
 pub use repo::{
     base64url_decode, base64url_of, Device, DeviceRepo, DeviceStatus, NewDevice, SecretRepo,
 };
 pub use session::{Session, SessionDetail, SessionRepo, SessionState};
-pub use trajectory::{
-    Gap, NewEvent, TrajectoryEvent, TrajectoryRepo, TurnBounds, TURN_END_KIND,
-};
+pub use trajectory::{Gap, NewEvent, TrajectoryEvent, TrajectoryRepo, TurnBounds, TURN_END_KIND};
 pub use workspace::{
     list_sessions, recent_sessions, SessionListItem, Workspace, WorkspaceRepo, WorkspaceSession,
 };

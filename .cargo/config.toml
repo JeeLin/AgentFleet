@@ -1,2 +1,19 @@
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
+
+[env]
+# 本仓库的测试**必须单线程跑**。这不是偏好，是这批用例的构造决定的：
+#
+# 被并行踩到的进程级共享状态至少四处——通道表（`channel.rs` 的进程级单例）、
+# 本进程环境（`pty` 的 `spawn_in` 读 `std::env::vars()`，而用例会 `set_var`）、
+# PATH 探测（`detect.rs`）、以及真 PTY 的 fd/子进程资源。它们在并行执行下
+# 表现为**随机红**，且红的样子极具误导性：报错是「新键要被追加进去：<空>」，
+# 看起来像 env 合并逻辑坏了，实际是对面根本没拿到 CPU 时间片读完。
+#
+# 曾经的做法是「记得手动加 `--test-threads=1`」，但 `mise run test`、
+# `scripts/check-coverage.sh` 与 CI 都直接跑 `cargo test --workspace`，
+# 没人记得住——于是门禁在多核机上必红，而「必红的门禁」等于没有门禁。
+# 所以默认值写在这里（`RUST_TEST_THREADS` 是 libtest 认的环境变量原话）。
+#
+# 代价是全量测试从约 12 秒变成约 34 秒。这个代价换的是「红就是真红」。
+RUST_TEST_THREADS = "1"
