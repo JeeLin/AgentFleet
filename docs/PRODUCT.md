@@ -52,7 +52,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 | 设备接入 | `afcli run <hub-url>` 一条命令，节点生成密钥对、主动建立 WebSocket 外联；**首次启动自动 enroll**，用户无需单独跑 enroll；无需 Hub 入站端口 |
 | 节点身份与状态 | 注册时 Hub 签发 `node_id`；心跳即能力上报（os / arch / hostname / 版本 / 支持的 connector）；在线/离线状态 |
 | AI agent 管理与对话 | 接入各类 agent 软件（不同厂商/协议），在 Web 一个界面里统一配置、启动、对话。**agent 运行时装在节点上、由用户自己安装**（Hub 不代装，2026-10-26 裁定）；Hub 负责**扫描**出节点上装了什么、并保存它们的**启动配置**，见 `docs/architecture/workspace-and-sync.md` §4.4。接入方式见 `docs/architecture/session-and-trajectory.md` |
-| Hub 一键安装 agent | 在 Hub 选设备 + 选 agent 模板 → 节点本地安装 → 自动套用托管配置 → 心跳回报就绪。**必须由用户在页面上手动选择后才执行，不自动安装**；agent 版本升级策略未决。节点进程 afcli 自身的升级是另一条通路：页面显示各设备 afcli 版本号 → **可手动触发升级** → 另有「自动升级」开关可开可关（关时只在页面手动触发）；版本号由 Hub 下发，升级失败自动回滚并回报。两者触发方式对照见 `architecture/workspace-and-sync.md` §4.5 |
+| ~~Hub 一键安装 agent~~ **已撤销（2026-10-26）** | 原计划在 Hub 选设备 + 选 agent 模板 → 节点本地安装。**产品裁定：不代装**——让 Hub 往设备写可执行文件等于「一处配置错、全体设备执行未核对代码」，agent 由用户自己在设备上装，Hub 只做**扫描**（心跳上报这台机器上**存在**哪些 agent）与**启动配置**的读写，见上一行与 `architecture/workspace-and-sync.md` §4.4（原文保留作决策记录）。**afcli 自身的升级是另一条通路，不受此裁定影响**：页面显示各设备 afcli 版本号 → 可手动触发升级 → 另有「自动升级」开关；版本号由 Hub 下发，升级失败自动回滚并回报 |
 | 对话与动作流 | 会话有 Trajectory 视图，逐条展示 User/Assistant/Tool/子agent/压缩记录；**随时可看**本次改动文件与 diff |
 | 文件浏览 | 会话工作区内浏览/读写节点本地目录，写操作限制在工作区根内（**仅约束页面用户**；agent 用自己装的能力，不走这条路径） |
 | Git 操作界面 | 会话工作区的 git 状态 / diff / 提交视图 |
@@ -100,8 +100,9 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 7. **设备掉线**：WS 断开 → 节点自动指数退避重连（1s/2s/4s…上限 30s），UI 显示「重连中」与已重试时长；
    连续心跳丢失 > 45s（= 3 个心跳周期）转为「离线」；离线期间工作区与 agent 会话在设备上仍存活，
    面板转为只读并显示最后已知状态，禁止发起新操作；用户可手动点「立即重连」。
-8. **在新设备上装 agent**：Hub 选设备 + 选 agent 模板 → 下发安装指令 → 节点本地安装 →
-   自动套用托管配置 → 心跳回报就绪 → 即可开会话。
+8. ~~**在新设备上装 agent**~~：**已撤销（2026-10-26）**。用户自己在设备上装 agent，Hub 不代装。
+   现在这条走「**设备启动即上报它上面存在哪些 agent** → 页面显示 → 用户在该设备上开会话」，
+   配置由用户在页面上保存到 Hub、设备读取。
 
 ---
 

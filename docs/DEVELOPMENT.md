@@ -98,7 +98,7 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
 |---|--------|------|--------------|
 | M0 ✅ 已完成 | 设备接入 | `afcli run` 一条命令（首次自动 enroll）；**密钥对在 node 本地生成、Hub 只存指纹**；supervisor/worker 同二进制双角色（`run --worker`，回滚由未被替换的 supervisor 执行，见 `DECISIONS.md` D1/D2）；单条 WS 主动外联；心跳即能力上报；掉线指数退避重连；防重复注册（同一指纹不得新建设备）；`afcli log` 看最近日志；**WS 协议层与 enroll 时序一并设计**（见 `architecture/protocol.md`） | 设备接入、节点身份与状态、存储与启动基座 |
 | M1 ✅ 已完成 | 会话容器与首个演示 | 工作区 `(node_id, path)` 落库；会话创建即挂载工作区；**在树莓派上开一个会话，会话内的 terminal / files / exec 面板可用，零入站端口、不装 openssh-server**；exec connector（一次性命令、无 PTY；**只经会话通道触发**，connector 跑在设备上，Hub 没有旁路入口）随此里程碑落地。**connector 只面向页面用户，不向 agent 暴露**。**「会话」指页面级容器，不是 ACP agent 会话**——ACP 归 M2 | Bash/PTY、文件浏览 |
-| M2 🔄 当前 | ACP 对话 | 接入 ACP（`session-and-trajectory.md`）：设备探测并心跳上报 agent 运行时；Hub 登记 agent 模板并**由用户手动触发**下发安装；建会话可选用该设备上已装且可用的 agent（未装 → 409）；ACP 客户端（`initialize` / `session/new` / `session/prompt` / `session/update` / `session/cancel` / `session/load`）；`session/update` 事件流落 append-only 轨迹表（类型/输入/输出/耗时/归属节点）；对话页面。**删除语义三分离**：卸载 agent 不删会话、删设备不删会话、删工作区有会话则拒。**不用外键**——归属关系由业务层显式检查并给可读错误 | AI agent 管理与对话、对话与动作流、Hub 一键安装 agent |
+| M2 ✅ 已完成 | ACP 对话 | 接入 ACP（`session-and-trajectory.md`）：设备探测并心跳上报 agent 运行时；**agent 由用户自己在设备上安装，Hub 只扫描 + 存启动配置**（2026-10-26 裁定，不代装）；建会话可选用该设备上已装且可用的 agent（未装 → 409）；ACP 客户端（`initialize` / `session/new` / `session/prompt` / `session/update` / `session/cancel` / `session/load`）；`session/update` 事件流落 append-only 轨迹表（类型/输入/输出/耗时/归属节点）；对话页面。**删除语义三分离**：卸载 agent 不删会话、删设备不删会话、删工作区有会话则拒。**不用外键**——归属关系由业务层显式检查并给可读错误 | AI agent 管理与对话、对话与动作流 |
 | M3 | Git 界面 | 会话工作区的 git 状态 / diff / 提交视图；**此时会话面板补齐第三个 git 面板** | Git 操作界面 |
 | M4 | 任务分发与托管配置 | **Hub 新建任务 → 仅节点内编排**：Hub 建任务，**node 决定开几个 sub-task**（按 `DECISIONS.md` D9 收窄为节点内编排，跨设备分发留 M8）；任务工作区来源分发时确认；托管配置覆盖层（skills / 两层权限 / 漂移检测，见 `architecture/workspace-and-sync.md` §4.1–4.3，**暂缓**）；agent 软件本体升级策略（未决，见同文 §4.4） | 统一配置 agent、模型配置一处切换 |
 | M5 | 推理网关 | 一个 OpenAI 兼容端点，背后是 N 台设备各自的全量副本（阶段 1，请求级路由） | —（新增能力） |
@@ -157,7 +157,7 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
 | Git 操作界面 | M3 | `architecture/README.md` §4 |
 | 统一配置 agent | M4（**暂缓**） | `workspace-and-sync.md` §4.1–4.3（托管覆盖层 + 两层权限）。**规格在，实现未排期** |
 | 模型配置一处切换 | M4（**暂缓**） | `workspace-and-sync.md` §4.3；`security-and-lifecycle.md` §3 |
-| Hub 一键安装 agent | M2 | `workspace-and-sync.md` §4.4；`security-and-lifecycle.md` §7 |
+| ~~Hub 一键安装 agent~~ **已撤销（2026-10-26）** | —（不做代装） | 产品裁定 agent 由用户自己安装，Hub 只扫描 + 存启动配置。原规格 `workspace-and-sync.md` §4.4 保留原文作决策记录 |
 
 > **§3.1 里已撤销的两项不再出现在上表**：「工作区供料」与「产物归档」（2026-10-26 裁定）。
 > 它们的架构依据（`workspace-and-sync.md` §3 / §5）保留原文并标注已撤销，作决策记录。
@@ -170,10 +170,10 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
 | `PRODUCT.md` §3.2 后续 | 任务系统 | M8 |
 | `PRODUCT.md` §3.2 后续 | 分布式推理进阶 | M6（阶段 1）+ 后续 |
 | `PRODUCT.md` §3.2 后续 | 自动化 / 社交软件 / 原生客户端 | **无排期**（开工前单独排期，见 §3 下方说明） |
-| `PRODUCT.md` §3.1「Hub 一键安装 agent」行内 | **afcli 自身的升级通路**（页面显示各设备 afcli 版本号 → 手动触发升级 → 「自动升级」开关；版本号由 Hub 下发，失败回滚并回报） | M2（与 agent 托管配置同一节落地，依据 `workspace-and-sync.md` §4.5）。**M1 只交付前半段**：`/api/devices` 给出版本号（`node_version`，即改名前 `agent_version`），触发与回滚不在 M1 |
+| `PRODUCT.md` §3.1「Hub 一键安装 agent」行内 | **afcli 自身的升级通路**（页面显示各设备 afcli 版本号 → 手动触发升级 → 「自动升级」开关；版本号由 Hub 下发，失败回滚并回报） | **未排期**。原写「M2（与 agent 托管配置同一节落地）」，但 agent 代装在 2026-10-26 已撤销，这一行的落地位置随之失去依附——afcli 升级是**另一条通路**，与 agent 托管配置无关。M1 只交付了前半段：`/api/devices` 给出版本号（`node_version`） |
 
 > 「后续」不是编号里程碑，不在 M0–M8 范围内，需在开工前单独排期与编号。
-> 第二阶段从 M5（任务分发与 agent 安装）开始。
+> 第二阶段从 M5（推理网关）开始。「agent 安装」已于 2026-10-26 撤销，不属于任何阶段。
 > "Later" is not a numbered milestone; schedule and number it separately before starting.
 
 ---

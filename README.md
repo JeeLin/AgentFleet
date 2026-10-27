@@ -34,7 +34,7 @@ node, run AI agent sessions, and route tasks to the node best suited to run them
 
 > **当前进度 / Current status：M0、M1、M2 已完成，M3 起未开始。**
 > M1 交付的是**会话容器**（页面级：工作区 + 终端 / 文件 / exec 面板）与 Web 控制台。
-> M2 把 ACP 接进来：设备上报 agent 运行时、Hub 下发安装、选设备上的 agent 对话、轨迹落库。
+> M2 把 ACP 接进来：设备上报 agent 运行时、**扫描 + 配置**（agent 由用户自己装，Hub 不代装）、选设备上的 agent 对话、轨迹落库。
 > 下面每项后面的 `Mx` 是它真正落地的里程碑——**清单描述的是第一版全貌，不是现在就能用的东西**。
 > Shipped today: M0, M1 and M2. The `Mx` tag on each line is the milestone that actually delivers it.
 
@@ -44,7 +44,7 @@ node, run AI agent sessions, and route tasks to the node best suited to run them
 - **AI agent 管理与对话** `M2`：各类 agent 统一配置、启动、对话。Configure, launch and chat with any agent in one place.
 - **对话与动作流** `M2`：dsh 式 Trajectory 逐条可查，列出本次改动的**文件**与 diff。A dsh-style trajectory, step by step, plus changed files and diffs.
 - **会话内 git 面板** `M3`：完整面板集补齐第三个（终端 / 文件 / git）。The third panel (git) completes the set.
-- **Hub 一键安装 agent** `M2`：在 Hub 选设备 + 选 agent 模板 → 节点本地安装 → 心跳回报就绪。**必须用户手动选，不自动安装**。Pick a device and template on the Hub, the node installs it locally, a heartbeat reports readiness. **Always user-initiated.**
+- ~~**Hub 一键安装 agent**~~ **已撤销（2026-10-26）**：agent 由用户自己在设备上装，Hub 只**扫描**节点上装了什么并保存**启动配置**。让 Hub 往设备写可执行文件等于「一处配置错、全体设备执行未核对代码」。Agent install from the Hub was **dropped**: agents are installed on the device by the user, and the Hub only **scans** what is present and stores launch configuration.
 
 > **2026-10-26 范围裁定**：原第一版里的「工作区供料与统一配置」与「产物归档」**整体撤销**——
 > 产品当前只做**每台设备内自己的对话**，不做任务分发，因此没有项目文件传输的需求。
