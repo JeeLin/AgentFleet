@@ -89,9 +89,9 @@ TMPDIR=/tmp/opencode bash scripts/e2e-m1.sh   # 换临时目录根（默认 /tmp
 
 面板参数与前端**逐字一致**（这是断言的一部分）：
 
-- terminal：`{"cwd": <会话路径>, "cols": 80, "rows": 24}` — `packages/web/src/pages/SessionPage.vue:280`
-- files：`{}` — `packages/web/src/pages/SessionPage.vue:280`（工作区根由 Hub 按会话补）
-- exec：`{"command": …, "args": […], "cwd": ""}` — `packages/web/src/pages/SessionPage.vue:897`
+- terminal：`{"cwd": <会话路径>, "cols": 80, "rows": 24}` — `packages/web/src/pages/SessionPage.vue:354`
+- files：`{}` — `packages/web/src/pages/SessionPage.vue:354`（工作区根由 Hub 按会话补）
+- exec：`{"command": …, "args": […], "cwd": ""}` — `packages/web/src/pages/SessionPage.vue:1086`
 
 ---
 
