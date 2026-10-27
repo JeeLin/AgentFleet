@@ -245,6 +245,17 @@ fn available_agent_names(caps: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
+/// 从心跳 `capabilities.agents` 里读出该帧「已装」与「当前可用」两份名单。
+///
+/// 库读失败时的两处回退点（`device_summary` 与 `list_agents`）共用这一份，
+/// 避免把「读库失败→回退心跳」的同一段逻辑写两遍。`NotInstalled` 的 agent
+/// 压根不出现在心跳里（只被探测到的才会上报），所以两份名单都不会把它
+/// 列入：`agent_list` 只收上报的名字，`available_agent_names` 再按
+/// `available == true` 过滤，二者在回退口径上保持一致。
+fn agent_names_from_heartbeat(caps: &serde_json::Value) -> (Vec<String>, Vec<String>) {
+    (agent_list(caps), available_agent_names(caps))
+}
+
 /// `os/arch` 拼成的 `darwin/arm64` 短串。任一缺失就是空串——
 /// 上报前填一个「未知/未知」比空串更难让人判断「是没上报还是没这字段」。
 fn platform_of(os: Option<&str>, arch: Option<&str>) -> String {
@@ -311,7 +322,7 @@ fn device_summary(state: &AppState, device: &hub_storage::repo::Device) -> Devic
             );
             let caps = report.as_ref().map(|r| r.capabilities.clone());
             match caps {
-                Some(c) => (agent_list(&c), available_agent_names(&c)),
+                Some(c) => agent_names_from_heartbeat(&c),
                 None => (Vec::new(), Vec::new()),
             }
         }
@@ -638,10 +649,10 @@ pub async fn list_agents(
                 // 「页面上少了几个 agent」。
                 tracing::warn!(node_id = %d.id, error = %e, "cannot read agent_runtime; using the heartbeat report");
                 if let Some(r) = state.reports().get(&d.id) {
-                    let usable = available_agent_names(&r.capabilities);
-                    for name in agent_list(&r.capabilities) {
-                        // 心跳内存那份没有「为什么不可用」，如实留空而不是编一句
-                        merge_agent(&mut out, &name, usable.contains(&name), None);
+                    // 心跳内存那份没有「为什么不可用」，如实留空而不是编一句
+                    let (all, usable) = agent_names_from_heartbeat(&r.capabilities);
+                    for name in &all {
+                        merge_agent(&mut out, name, usable.contains(name), None);
                     }
                 }
             }

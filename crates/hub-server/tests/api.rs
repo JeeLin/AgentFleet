@@ -1389,6 +1389,19 @@ impl Harness {
         )
         .await
     }
+
+    /// `POST /api/sessions/{id}/conversation/cancel`，带 CSRF 双重提交。
+    async fn cancel_conversation(&self, session_id: &str) -> Reply {
+        self.send(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/conversation/cancel"))
+                .header(CSRF_HEADER, &self.csrf)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
 }
 
 /// 建一个「已选 agent、设备可用」的会话，返回 `(harness, node_id, session_id, est)`。
@@ -1849,6 +1862,79 @@ async fn opening_a_conversation_on_a_removed_device_is_device_removed() {
     r.assert_error_code("device_removed");
 }
 
+/// `POST /api/sessions/{id}/conversation/cancel` 成功下发：204 No Content。
+///
+/// 前提：会话存在、设备在线、对话通道已打开（先 `open` 过）。设备侧收到
+/// `channel_data{ "cancel": true }` 后会发 `session/cancel`，**不关会话**——
+/// 页面停下之后还能接着聊。
+#[tokio::test]
+async fn cancelling_a_running_conversation_returns_204() {
+    let (h, _node, session_id, _est) = conversation_ready(
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        "opencode",
+    )
+    .await;
+
+    // 先打开对话通道（建立 channel 绑定），再按停止。
+    let r = h.open_conversation(&session_id).await;
+    assert_eq!(r.status, StatusCode::CREATED, "body: {}", r.body);
+
+    let r = h.cancel_conversation(&session_id).await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "body: {}", r.body);
+}
+
+/// 对话从未打开过 → 404 `not_found`（不是「停了」，而是「还没开始」）。
+///
+/// 没有 channel 绑定时 Hub 不能下发 cancel，且不许静默 204：页面要能区分
+/// 「这条对话还没开」与「停止发出去了」。
+#[tokio::test]
+async fn cancelling_a_conversation_never_opened_is_404() {
+    let (h, _node, session_id, _est) = conversation_ready(
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        "opencode",
+    )
+    .await;
+
+    // 不调 open_conversation：没有 channel 绑定。
+    let r = h.cancel_conversation(&session_id).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "body: {}", r.body);
+    r.assert_error_code("not_found");
+}
+
+/// 设备已被删除的会话 → 409 `device_removed`（不是 `not_found`）。
+///
+/// 会话行还在，只是归属设备没了。停止也是「发不出去」，但原因是设备没了
+/// 而不是对话没开，两者给的下一步完全不同。
+#[tokio::test]
+async fn cancelling_on_a_removed_device_is_device_removed() {
+    let hub = common::Hub::boot().await;
+
+    let (node_id, _keepalive) = enrolled_device_reporting(
+        &hub,
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+    )
+    .await;
+    let h = Harness::from_hub(hub).await;
+    let created = h
+        .create_session(json!({
+            "node_id": node_id,
+            "path": "~/src/app",
+            "agent_id": "opencode",
+        }))
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let session_id = created.json()["id"].as_str().expect("会话 id").to_string();
+
+    assert_eq!(
+        h.delete_device(&node_id).await.status,
+        StatusCode::NO_CONTENT
+    );
+
+    let r = h.cancel_conversation(&session_id).await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "body: {}", r.body);
+    r.assert_error_code("device_removed");
+}
+
 /// 轨迹空 → `events: []`、`gaps: []`、`incomplete: false`。
 ///
 /// **空轨迹不算未完成**：一个还没说过话的会话没有「一轮」，把它标成未完成
@@ -1978,4 +2064,29 @@ async fn open_channel_on(est: &mut node_core::conn::Established) -> protocol::fr
             return f;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 锁：「acp」标记在 Hub 与设备双侧的定义必须一致
+// ---------------------------------------------------------------------------
+///
+/// `hub-server` 生产依赖里没有 `node-core`（它只出现在 dev-dependencies，
+/// 供 WS 集成测试用），所以 Hub 侧的 `ACP_CONNECTOR` 写在
+/// `crates/hub-server/src/routes/conversation.rs` 而不是从 `node-core` 引入。
+/// 两边各自写死 `"acp"`，若一方改了而另一方没改，对话通道就会在
+/// `open_channel` 后收到 `unsupported`，页面只表现为「对话没反应」。
+///
+/// 本文件已有 `conversation.rs` 里的 `the_acp_marker_matches_what_the_device_expects`
+/// 只锁住 Hub 自己那份常量（对比对象是硬编码的 `"acp"` 字面量），锁不住
+/// 设备侧。这里把设备侧的 `node_core::channel::EXTERNAL_CONNECTOR_NAME` 也钉
+/// 住 `"acp"`：两边各自独立等于 `"acp"`，任意一边单向改动都会让对应用例
+/// 变红，即形成真正的双向锁。不引入新共享 crate，因为 `node-core` 本就已是
+/// hub-server 的 dev-dependency，且为两个字符串新建共享 crate 的成本更高。
+#[test]
+fn the_device_acp_connector_name_is_still_acp() {
+    assert_eq!(
+        node_core::channel::EXTERNAL_CONNECTOR_NAME,
+        "acp",
+        "设备侧 EXTERNAL_CONNECTOR_NAME 与 Hub 侧 ACP_CONNECTOR 必须同为 acp"
+    );
 }

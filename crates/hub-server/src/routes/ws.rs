@@ -1005,6 +1005,23 @@ fn publish_channel_data(state: &AppState, node_id: &str, frame: &Frame) {
 /// `batch.events` 里的每个元素原样存（`kind` 取它的 `sessionUpdate`）。
 /// 新版本 agent 推的类型我们不认识，在这里过滤就是静默丢消息——
 /// 而轨迹是「不承诺完整、但必须可见」，丢掉的那些连可见都做不到。
+/// ACP 帧在 wire 上的字段名与类型名。设备侧
+/// `crates/node-core/src/agent/conversation.rs` 的 `flush` / `turn_end_frame` /
+/// `ready` 构造点发出同一组字符串。两边的字面量若一方改而另一方不改，
+/// `persist_trajectory` 就会静默丢帧而一切现有测试仍绿——
+/// 所以把它们收成常量，并由 `acp_frame_field_names_match_device_side`
+/// 锁住设备侧源码。
+const ACP_FRAME_TYPE_BATCH: &str = "batch";
+const ACP_FRAME_TYPE_TURN_END: &str = "turn_end";
+const ACP_FRAME_TYPE_READY: &str = "ready";
+const ACP_FIELD_TYPE: &str = "type";
+const ACP_FIELD_SESSION_ID: &str = "sessionId";
+const ACP_FIELD_STOP_REASON: &str = "stopReason";
+const ACP_FIELD_DURATION_MS: &str = "durationMs";
+const ACP_FIELD_SESSION_UPDATE: &str = "sessionUpdate";
+const ACP_FIELD_EVENTS: &str = "events";
+const ACP_FIELD_SEQ: &str = "seq";
+
 fn persist_trajectory(state: &AppState, node_id: &str, channel_id: &str, payload: &Value) {
     // 没绑过（页面没开过这条通道、或已摘）就不写。通道绑定是内存表，
     // 断连即清——所以断线期间到达的帧本就无从归属，与「不承诺补齐」一致。
@@ -1012,7 +1029,7 @@ fn persist_trajectory(state: &AppState, node_id: &str, channel_id: &str, payload
         return;
     };
     let session_id = binding.session_id();
-    let Some(kind) = payload.get("type").and_then(Value::as_str) else {
+    let Some(kind) = payload.get(ACP_FIELD_TYPE).and_then(Value::as_str) else {
         // 没有 `type` 的不是对话帧（terminal 的载荷是 `{op, bytes}`）。
         return;
     };
@@ -1027,9 +1044,9 @@ fn persist_trajectory(state: &AppState, node_id: &str, channel_id: &str, payload
     // 不回填的后果是静默的：`acp_session_id` 永远为 NULL，设备每次都走
     // `session/new`，关掉页面再回来 agent 那边就是一条全新会话——页面上
     // 一切正常，只是之前聊的全没了。
-    if kind == "ready" {
+    if kind == ACP_FRAME_TYPE_READY {
         if let Some(acp) = payload
-            .get("sessionId")
+            .get(ACP_FIELD_SESSION_ID)
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
         {
@@ -1050,7 +1067,7 @@ fn persist_trajectory(state: &AppState, node_id: &str, channel_id: &str, payload
         }
         return;
     }
-    if kind != "batch" && kind != "turn_end" {
+    if kind != ACP_FRAME_TYPE_BATCH && kind != ACP_FRAME_TYPE_TURN_END {
         return;
     }
     let now = hub_core::registry::now_stamp();
@@ -1067,7 +1084,7 @@ fn persist_trajectory(state: &AppState, node_id: &str, channel_id: &str, payload
             return;
         };
         let reason = payload
-            .get("stopReason")
+            .get(ACP_FIELD_STOP_REASON)
             .and_then(Value::as_str)
             .unwrap_or("");
         // **耗时取设备掐的那个表，不取「这一帧到达的时刻」**：拿到达时刻做
@@ -1078,7 +1095,7 @@ fn persist_trajectory(state: &AppState, node_id: &str, channel_id: &str, payload
         // 设备没给（`durationMs` 缺失 / `null` / 负数）就是**没测到**，于是
         // 退回 `none` + NULL——`measured` 的意思是「设备真的掐了表」，没有
         // 那趟测量就不许写它。
-        let measured_ms = payload.get("durationMs").and_then(Value::as_i64);
+        let measured_ms = payload.get(ACP_FIELD_DURATION_MS).and_then(Value::as_i64);
         let e = hub_storage::NewEvent::measured_turn_end(seq, reason, measured_ms);
         if let Err(err) = state.trajectory().append(&session_id, node_id, &e, &now) {
             tracing::error!(node_id = %node_id, channel_id = %channel_id, error = %err,
@@ -1087,20 +1104,20 @@ fn persist_trajectory(state: &AppState, node_id: &str, channel_id: &str, payload
         return;
     }
 
-    let Some(events) = payload.get("events").and_then(Value::as_array) else {
+    let Some(events) = payload.get(ACP_FIELD_EVENTS).and_then(Value::as_array) else {
         return;
     };
     for ev in events {
         // 同上：缺 `seq` 的事件**跳过并留痕**，不写 0。与 `turn_end` 同一条
         // 理由，而这里更危险——一批里可能有好几条。
-        let Some(seq) = ev.get("seq").and_then(Value::as_i64) else {
+        let Some(seq) = ev.get(ACP_FIELD_SEQ).and_then(Value::as_i64) else {
             tracing::error!(channel_id = %channel_id, "a trajectory event arrived without a seq; dropped");
             continue;
         };
         // 事件类型名就是 ACP 的 `sessionUpdate` 字段；取不到就用 `update`，
         // 绝不因为不认识而**跳过**这条事件（见本函数文档第 3 条）。
         let ev_kind = ev
-            .get("sessionUpdate")
+            .get(ACP_FIELD_SESSION_UPDATE)
             .and_then(Value::as_str)
             .unwrap_or("update");
         let e = hub_storage::NewEvent::new(seq, ev_kind, ev.to_string());
@@ -1385,6 +1402,58 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
     use protocol::handshake::HandshakeState;
+    use std::path::Path;
+
+    /// 测试级锁：Hub 解析 ACP 帧时认的每个字面量，设备侧
+    /// `crates/node-core/src/agent/conversation.rs` 的构造点（`flush`、
+    /// `turn_end_frame`、`ready` 帧）必须也发出同一个字面量。
+    ///
+    /// 两边只靠人工同步会漂移：一方改了命名而另一方不改，`persist_trajectory`
+    /// 就会静默丢帧，轨迹不再累积，而现有测试仍全绿。本用例把设备侧
+    /// 源码当真相源逐个比对，任意一边单向改动都会让它变红。
+    #[test]
+    fn acp_frame_field_names_match_device_side_construction_site() {
+        let device_src = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../node-core/src/agent/conversation.rs"),
+        )
+        .expect("能读到设备侧 conversation.rs");
+
+        // 只保留生产代码：切掉 `#[cfg(test)] mod tests {` 及其之后。
+        // 该测试模块里会重复同一组字面量作断言，若不切掉，单改构造点
+        // 而留下断言文本，本用例会出现假绿。
+        let production = device_src
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("conversation.rs 必须包含 #[cfg(test)] mod tests");
+
+        // 去掉行注释（含 `//!` 文档注释），避免模块注释里重复的字面量
+        // 导致「只改了构造点、没改注释」时本用例仍绿。
+        let code: String = production
+            .lines()
+            .map(|line| line.find("//").map(|i| &line[..i]).unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // 设备侧实际构造并推给 Hub 的字面量：帧类型 `batch`/`turn_end`/`ready`、
+        // 以及 `turn_end` 的 `stopReason`/`durationMs`/`seq`、`batch` 的 `events`、
+        // `ready` 的 `sessionId`。`sessionUpdate` 是从 agent 原样透传的字段，
+        // 不是设备侧构造的帧字段，故不在本锁内。
+        for lit in [
+            ACP_FRAME_TYPE_BATCH,
+            ACP_FRAME_TYPE_TURN_END,
+            ACP_FRAME_TYPE_READY,
+            ACP_FIELD_SESSION_ID,
+            ACP_FIELD_STOP_REASON,
+            ACP_FIELD_DURATION_MS,
+            ACP_FIELD_EVENTS,
+            ACP_FIELD_SEQ,
+        ] {
+            assert!(
+                code.contains(&format!("\"{lit}\"")),
+                "设备侧 conversation.rs 没有发出 Hub 依赖的字面量 {lit:?}，两边已不一致"
+            );
+        }
+    }
 
     #[test]
     fn origin_header_is_rejected_regardless_of_value() {
