@@ -182,6 +182,21 @@ struct LiveConversation {
     /// 这**不是**「已弃用」：它照样能 `prompt`、照样能被重连后的同一
     /// `channel_id` 命中。它只影响一件事——淘汰时优先挑它。
     orphaned: bool,
+    /// 「第几轮」的单调计数：**每次 `prompt` 开一轮就加一**。
+    ///
+    /// # 为什么需要它（而不是一个 bool）
+    ///
+    /// `prompt()` 是「发出去就不等」的（见它的文档），所以「现在有没有一轮在飞」
+    /// 只能由发的那一方记。`AtomicBool` 不够：一轮结束时要把它清零，而那时
+    /// 可能**下一轮已经开了**——后到的那条 `turn_end` 会把新的一轮误标成
+    /// 「没人跑」，于是停止按钮在真正该亮的时候是灰的。带上代数，收尾只在
+    /// 「我这一轮还是最新那一轮」时才清。
+    turn: Arc<AtomicI64>,
+    /// 最近一轮的 `session/prompt` 结果还**没有**回来时的会话号。
+    ///
+    /// 与 [`Self::turn`] 的比较是原子的一对：`inflight == turn` 才是「有东西
+    /// 在飞」。两者都从 0 起步，所以「从没跑过」天然是「没有东西在飞」。
+    inflight: Arc<AtomicI64>,
 }
 
 impl Conversations {
@@ -277,6 +292,9 @@ impl Conversations {
                     epoch,
                     // 刚开的这条挂在**当前**连接上，不是孤儿。
                     orphaned: false,
+                    // 一条还没有跑过轮次的会话：0 == 0，也就是「没有东西在飞」。
+                    turn: Arc::new(AtomicI64::new(0)),
+                    inflight: Arc::new(AtomicI64::new(0)),
                 },
             );
             let victims = supernumerary(&live, self.cap);
@@ -325,6 +343,14 @@ impl Conversations {
         // **同一个计数器**：`turn_end` 与读循环的事件共用一条编号序列。见
         // [`Seq`] 的注释——各用一个会撞号，而撞号在 Hub 侧是静默丢一条。
         let seq = conv.seq.clone();
+        // 开一轮：代数 +1 并**当场**把它记成「在飞」。标记必须在 `spawn`
+        // 之前、且在同一把锁里做——否则 `cancel()` 可能落在「`prompt()` 已经
+        // 返回、任务还没跑起来」这个窗口上，于是它看见「没有东西在飞」并
+        // 拒绝掉一次用户真的点了的停止。
+        let turn = conv.turn.clone();
+        let inflight = conv.inflight.clone();
+        let this_turn = turn.fetch_add(1, Ordering::AcqRel) + 1;
+        inflight.store(this_turn, Ordering::Release);
         let ch = channel_id.to_string();
         let text = text.to_string();
         drop(live);
@@ -360,8 +386,70 @@ impl Conversations {
                     let _ = channel::push_external(&ch, vec![ev]);
                 }
             }
+            // 这一轮结束（成功、失败、或没有 `stopReason`）：**只在「我还是最新
+            // 那一轮」时才清标记**。晚到的那条收尾若把新一代的标记清掉，停止
+            // 按钮会在真正该亮的时候是灰的——用户以为「停了」，实际上没有一轮
+            // 可以停。
+            let _ = inflight.compare_exchange(
+                this_turn,
+                0, // 0 == 「没有东西在飞」，与 `turn` 从 0 起步的那条不变式一致
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            );
         });
         Ok(())
+    }
+
+    /// 中断某条会话**正在跑的那一轮**：发 `session/cancel`，**不关会话**。
+    ///
+    /// # 三种结局必须分得开（都不许静默成功）
+    ///
+    /// | 事实 | 返回 |
+    /// |---|---|
+    /// | 这个 `channel_id` 上没有活会话 | `Err(NoLiveConversation)` |
+    /// | 有会话，但没有一轮在飞 | `Err(NothingInFlight)` |
+    /// | 中断发出去了 | `Ok(())` |
+    ///
+    /// 前两条都是「什么都没做」，但用户的下一步完全不同：前者是「这条对话
+    /// 还没开（或者说第一句话才会开）」，后者是「它本来就闲着」。合成一个
+    /// `Ok` 会让页面在按了停止之后什么都不显示，而用户合理地以为回复被掐断了。
+    ///
+    /// # 为什么用 `Result<(), CancelError>` 而不是 `Result<(), String>`
+    ///
+    /// 调用方（`worker::drain_inbound`）要把这两条**分别**回给 Hub，而 Hub 要
+    /// 把它们变成两个不同的错误码。字符串在传递途中会被包一层「失败：…」，
+    /// 于是「哪一个」就只剩解析消息这一条路——那是最容易被改坏的一种判据。
+    pub async fn cancel(&self, channel_id: &str) -> Result<(), CancelError> {
+        let live = self.live.lock().await;
+        let Some(conv) = live.get(channel_id) else {
+            return Err(CancelError::NoLiveConversation);
+        };
+        // 「有没有一轮在飞」读的是这一对原子：`inflight == 0` 恒等于「闲着」
+        // （`prompt()` 只写非零值，收尾只写 0）。先读再发，**不在锁里发**——
+        // 写 stdin 是 async 的，把表锁跨在这上面会让同一台设备的其他会话
+        // （乃至 `close()`）一起等一次 IO。
+        let busy = conv.inflight.load(Ordering::Acquire) != 0;
+        let client = conv.client.clone();
+        let session_id = conv.session_id.clone();
+        drop(live);
+        if !busy {
+            return Err(CancelError::NothingInFlight);
+        }
+        client
+            .cancel(&session_id)
+            .await
+            .map_err(|e| CancelError::Acp(e.to_string()))
+    }
+
+    /// 这条通道上有没有一轮在飞。Hub 的停止端点用它把「本来就没在跑」与
+    /// 「停了」分开回（理由同 [`Conversations::cancel`]）。
+    ///
+    /// 与 `cancel()` 分开暴露：判据要在**下发中断之前**读，否则读到的已经是
+    /// 「被我停掉了」——那样「没有东西可停」这条事实永远观测不到。
+    pub async fn turn_in_flight(&self, channel_id: &str) -> Option<bool> {
+        let live = self.live.lock().await;
+        live.get(channel_id)
+            .map(|c| c.inflight.load(Ordering::Acquire) != 0)
     }
 
     /// 关一条对话：停读循环、关子进程、从表里摘掉。
@@ -447,6 +535,30 @@ impl Conversations {
 /// 8 是「一台设备上一个用户可能同时摊开的对话数」的量级：超过它就不该是
 /// 正常使用，而是孤儿在攒。淘汰只挑孤儿，所以真正被关掉的就是那些。
 pub const LIVE_CAP: usize = 8;
+
+/// [`Conversations::cancel`] 的三种结局。**「没这条会话」与「没有一轮在飞」
+/// 必须分开**（见那个方法的表格）：两者都是「什么都没做」，但用户的下一步
+/// 完全不同，而 Hub 要把它们回成两个不同的错误码。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CancelError {
+    /// 这个 `channel_id` 上没有活会话：对话还没开（它是「说第一句话才开」的），
+    /// 或者已经被关掉/淘汰了。
+    NoLiveConversation,
+    /// 会话在，但它现在闲着——没有任何一轮在飞。停下来的东西不存在。
+    NothingInFlight,
+    /// 通知写出去了但设备侧的 stdin 已经不可写（子进程没了）。
+    Acp(String),
+}
+
+impl std::fmt::Display for CancelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CancelError::NoLiveConversation => f.write_str("no live conversation"),
+            CancelError::NothingInFlight => f.write_str("no turn in flight"),
+            CancelError::Acp(detail) => write!(f, "cannot cancel: {detail}"),
+        }
+    }
+}
 
 impl LiveConversation {
     /// 收掉一条会话：先停读 task，再关子进程。
@@ -1410,6 +1522,250 @@ for line in sys.stdin:
             !methods.contains(&"session/new".to_string()),
             "load 失败**不许**悄悄回落成新建（那会静默丢上下文），实际: {methods:?}"
         );
+    }
+
+    // ---- 停止一轮（`session/cancel`）----
+
+    /// 一个**会拖住 `session/prompt` 直到收到 cancel** 的假 agent。
+    ///
+    /// 为什么要拖住：`prompt()` 断言的是「这一轮结束了没有」，而假 agent 秒回的
+    /// 话，`inflight` 在测试读它之前就已经被清掉了——于是「有东西在飞」这条
+    /// 永远观测不到，停止按钮在真正该亮的时候看起来是灰的。真机上「一轮在飞」
+    /// 可以持续几分钟，这里用一个**不会自己结束**的轮次把它变成确定的事实。
+    ///
+    /// `session/cancel` 之后它回一条带 `stopReason: "cancelled"` 的响应——这正是
+    /// 真 agent 的行为（中断的那一轮照样有 `stopReason`），于是 `turn_end` 的
+    /// 「本轮结束」判据不需要为 cancel 另开一条路。
+    fn slow_agent(dir: &Path) -> (PathBuf, PathBuf) {
+        let log = dir.join("methods.log");
+        let path = dir.join("slow-agent");
+        let script = format!(
+            r#"#!/usr/bin/env python3
+import json, sys
+LOG = {log:?}
+HELD = None
+
+def send(o):
+    sys.stdout.write(json.dumps(o) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    m = json.loads(line)
+    method = m.get("method", "")
+    mid = m.get("id")
+    with open(LOG, "a") as f:
+        f.write(method + "\n")
+    if method == "initialize":
+        send({{"jsonrpc": "2.0", "id": mid, "result": {{"protocolVersion": 1}}}})
+    elif method == "session/new":
+        send({{"jsonrpc": "2.0", "id": mid, "result": {{"sessionId": "ses_slow"}}}})
+    elif method == "session/prompt":
+        # **故意不回**：这一轮要一直挂着，直到 cancel 到来。
+        HELD = mid
+    elif method == "session/cancel":
+        if HELD is not None:
+            send({{"jsonrpc": "2.0", "id": HELD, "result": {{"stopReason": "cancelled"}}}})
+            HELD = None
+"#,
+            log = log.to_string_lossy()
+        );
+        std::fs::write(&path, script).expect("写脚本");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).expect("stat").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("chmod");
+        }
+        (path, log)
+    }
+
+    /// **没有这条会话 → `NoLiveConversation`；有会话但闲着 → `NothingInFlight`。**
+    ///
+    /// 两条都是「什么都没做」，但**不许合成一个 `Ok`**：页面在按了停止之后
+    /// 什么都不显示时，用户会合理地以为回复被掐断了，而实际上那一轮还在跑。
+    /// 这正是本用例的第一句与最后一句要分开的原因。
+    ///
+    /// 反向验证：把 `cancel` 里那句 `if !busy { return Err(NothingInFlight) }`
+    /// 删掉，最后一句会红在「闲着时必须报错」。
+    #[tokio::test]
+    // guard 跨 `await` 存活是本用例要的语义：互斥必须覆盖整个用例体。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    async fn cancelling_says_which_kind_of_nothing_happened() {
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+        let d = tempfile::tempdir().expect("tmp");
+        let (bin, _log) = slow_agent(d.path());
+        let convs = Conversations::default();
+
+        // 1. 会话都还没有：不是「闲着」，是「没这条对话」。
+        assert_eq!(
+            convs.cancel("ch_never_opened").await,
+            Err(CancelError::NoLiveConversation),
+            "没开过的通道要如实报「没有活会话」，不许静默成功"
+        );
+        assert_eq!(convs.turn_in_flight("ch_never_opened").await, None);
+
+        // 2. 会话在，但一轮都没跑过。
+        let _ = channel::open_external("ch_idle");
+        convs
+            .open(spec_for("ch_idle", &bin, None), None)
+            .await
+            .expect("假 agent 必须能起来");
+        assert_eq!(
+            convs.turn_in_flight("ch_idle").await,
+            Some(false),
+            "刚开的会话没有一轮在飞"
+        );
+        assert_eq!(
+            convs.cancel("ch_idle").await,
+            Err(CancelError::NothingInFlight),
+            "闲着的时候按停止：要报「没有一轮可以停」，不许假装停了"
+        );
+
+        convs.close("ch_idle").await;
+    }
+
+    /// **一轮在飞 → cancel 发得出去，且只有这一轮被中断，会话照旧活着。**
+    ///
+    /// 这条钉的是「停止」这件事的完整语义，四件事一起验：
+    /// 1. `session/cancel` **真的到了 agent 那一侧**（查 agent 的 method 日志）；
+    /// 2. 被中断的那一轮照样有 `turn_end`（`stopReason: cancelled`）——页面靠它
+    ///    把「正在回复」收尾，否则会一直转；
+    /// 3. cancel 之后 `turn_in_flight` 回到 `false`；
+    /// 4. **会话还在**：`cancel()` 之后还能再 `prompt` 一轮。停止不等于关闭，
+    ///    把 cancel 写成「顺手 close」会让一次停止毁掉整条对话的上下文。
+    ///
+    /// 反向验证：把 `Conversations::cancel` 改成 `self.close(channel_id).await;
+    /// Ok(())`，第 4 条会红在「会话还在」——那正是最坏的一种实现（页面看起来
+    /// 停住了，回到对话却是一张白纸）。
+    #[tokio::test]
+    // guard 跨 `await` 存活是本用例要的语义：互斥必须覆盖整个用例体。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    async fn cancelling_interrupts_the_running_turn_without_closing_the_conversation() {
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+        let d = tempfile::tempdir().expect("tmp");
+        let (bin, log) = slow_agent(d.path());
+        let convs = Conversations::default();
+
+        let _ = channel::open_external("ch_cancel");
+        convs
+            .open(spec_for("ch_cancel", &bin, None), None)
+            .await
+            .expect("假 agent 必须能起来");
+        convs
+            .prompt("ch_cancel", "这一句要被中断")
+            .await
+            .expect("prompt 必须发得出去");
+
+        // 等「有一轮在飞」成为可观测的事实。`prompt()` 的标记是在 spawn
+        // **之前**、在锁里打的（见 `prompt` 的注释：否则 cancel() 可能落在
+        // 「已返回、任务还没跑起来」的窗口里并拒绝一次真实的停止）。所以
+        // `turn_in_flight == true` 不代表 agent 已经收到 `session/prompt`——下一句
+        // 才等那个时点，否则 cancel 可能比 prompt 先到达 stdin，agent 就会
+        // 收到一个 `session/cancel` 而后面那个 `session/prompt` 永远不被响应。
+        let mut busy = false;
+        for _ in 0..200 {
+            if convs.turn_in_flight("ch_cancel").await == Some(true) {
+                busy = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(busy, "prompt 之后必须有一轮在飞，否则停止按钮永远亮不起来");
+
+        // 再等 agent 真的收到了 `session/prompt`：cancel 必须排在 prompt
+        // 之后到达 stdin，否则 agent 把「先收到的 cancel」当空挡忽略，prompt
+        // 永远不被响应，turn_end 永远不会有。
+        for _ in 0..200 {
+            if methods_in(&log).iter().any(|m| m == "session/prompt") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            methods_in(&log).iter().any(|m| m == "session/prompt"),
+            "agent 必须先收到 session/prompt，实际: {:?}",
+            methods_in(&log)
+        );
+
+        convs
+            .cancel("ch_cancel")
+            .await
+            .expect("有一轮在飞时 cancel 必须发得出去");
+
+        // 1. cancel 真的到了 agent 那一侧
+        let mut saw_cancel = false;
+        for _ in 0..200 {
+            if methods_in(&log).iter().any(|m| m == "session/cancel") {
+                saw_cancel = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            saw_cancel,
+            "session/cancel 必须发到 agent，实际收到的方法: {:?}",
+            methods_in(&log)
+        );
+
+        // 2/3. 被中断的那一轮有 turn_end（stopReason 是 agent 给的），
+        //      并且标记回到「闲着」。
+        let mut turn_end = None;
+        for _ in 0..200 {
+            for (ch, frames) in channel::pump() {
+                if ch != "ch_cancel" {
+                    continue;
+                }
+                for fr in frames {
+                    let Ok(data) = fr.payload::<protocol::channel::ChannelData>() else {
+                        continue;
+                    };
+                    if data.payload.get("type").and_then(Value::as_str) == Some("turn_end") {
+                        turn_end = Some(data.payload.clone());
+                    }
+                }
+            }
+            if turn_end.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let payload = turn_end.expect("被中断的那一轮也要有 turn_end，否则页面一直显示「正在回复」");
+        assert_eq!(
+            payload.get("stopReason").and_then(Value::as_str),
+            Some("cancelled"),
+            "turn_end 的 stopReason 来自 agent，不该由设备编一个"
+        );
+        assert_eq!(
+            convs.turn_in_flight("ch_cancel").await,
+            Some(false),
+            "一轮收尾之后必须回到「闲着」"
+        );
+
+        // 4. 会话还在：还能再发一轮。停止**不是**关闭。
+        assert_eq!(convs.len().await, 1, "cancel 不许把关会话当成副作用");
+        convs
+            .prompt("ch_cancel", "停了还能接着说")
+            .await
+            .expect("cancel 之后这条会话必须还能用——停止不等于关闭");
+        assert_eq!(
+            convs.turn_in_flight("ch_cancel").await,
+            Some(true),
+            "新一轮开始了，就又是一轮在飞"
+        );
+
+        convs.close("ch_cancel").await;
     }
 
     // ---- 会话表的上界与「断连留下的是孤儿，不是垃圾」 ----

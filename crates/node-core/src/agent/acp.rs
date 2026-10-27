@@ -714,6 +714,104 @@ for raw in sys.stdin:
         c.shutdown().await;
     }
 
+    /// **`session/cancel` 是一条通知，且必须点名要中断哪条会话。**
+    ///
+    /// 这条钉的是三件在真机上都会坏的事：
+    /// 1. **它是通知不是请求**：`session/cancel` 没有 `id`，等响应会永远等下去
+    ///    （ACP 里没有这条响应）。假 agent 若收到带 `id` 的 cancel 会回一条
+    ///    响应——所以「agent 那一侧没等到 id」正是「我们发的是通知」的证据。
+    /// 2. **`params.sessionId` 必须是我们那条会话**：漏了它 agent 无法判断
+    ///    中断哪一轮，症状是「点了停止，回复照旧继续」而没有任何报错。
+    /// 3. **它不关连接**：cancel 之后同一个客户端还能继续 prompt。判据是
+    ///    cancel 之后 `session/new` 仍然成功——把 cancel 写成「顺手关进程」
+    ///    会让一次停止把整条对话的上下文一起毁掉。
+    ///
+    /// 观测手段是假 agent 把收到的每条消息**原样**写进一个日志文件：cancel 的
+    /// 形状（有没有 `id`、`params` 是什么）只有 agent 那一侧看得见。
+    ///
+    /// 反向验证：把 `cancel()` 改成 `self.request(...)`（发请求而不是通知），
+    /// 第一句断言会红在「cancel 不许带 id」。
+    #[tokio::test]
+    async fn cancel_is_a_notification_that_names_the_session() {
+        let d = tempfile::tempdir().expect("tmp");
+        let log = d.path().join("received.log");
+        let body = format!(
+            r#"
+import sys, json
+LOG = {log:?}
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    msg = json.loads(raw)
+    method = msg.get("method")
+    mid = msg.get("id")
+    with open(LOG, "a") as f:
+        f.write(json.dumps(msg) + "\n")
+    if method == "initialize":
+        send({{"jsonrpc":"2.0","id":mid,"result":{{"protocolVersion":1}}}})
+    elif method == "session/new":
+        send({{"jsonrpc":"2.0","id":mid,"result":{{"sessionId":"ses_to_cancel"}}}})
+    elif method == "session/cancel":
+        # 真 agent 对 cancel **不回任何东西**。这里故意遵守这一点：如果
+        # 客户端把它当请求发（带 id），它会一直等到超时——那正是我们要的
+        # 红，而不是靠日志断言间接发现。
+        pass
+"#,
+            log = log.to_string_lossy()
+        );
+        let c = client_for(&fake_agent(d.path(), "cancellable", &body)).await;
+        let sid = c.new_session("/tmp/proj").await.expect("session/new");
+
+        // 把这个 `Result` 变成一条**有时限**的失败：`cancel()` 若被写成请求，
+        // 它会一直挂着等一个永远不来的响应（本用例第一次实跑就是这么被发现
+        // 的：整个用例没有输出地卡死到命令超时）。红要红得看得懂。
+        let cancelled =
+            tokio::time::timeout(std::time::Duration::from_secs(5), c.cancel(&sid)).await;
+        assert!(
+            cancelled.is_ok(),
+            "cancel 不许等响应：ACP 里没有 session/cancel 的响应，等它等于挂死"
+        );
+
+        // 等 cancel 到达 agent 那一侧（stdin 是异步写的，不能写完就断言）。
+        let mut cancels = Vec::new();
+        for _ in 0..100 {
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            cancels = text
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .filter(|v| v.get("method").and_then(Value::as_str) == Some("session/cancel"))
+                .collect();
+            if !cancels.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(cancels.len(), 1, "agent 那一侧必须收到恰好一条 cancel");
+        let got = &cancels[0];
+        assert!(
+            got.get("id").is_none(),
+            "cancel 是通知：带上 id 客户端就会去等一个永远不会来的响应，实际: {got}"
+        );
+        assert_eq!(
+            got["params"]["sessionId"], json!("ses_to_cancel"),
+            "不点名会话，agent 不知道中断哪一轮（症状是「点了停止、回复照旧」）: {got}"
+        );
+
+        // 连接没关：还能再开一条会话。
+        let again = c.new_session("/tmp/proj").await;
+        assert!(
+            again.is_ok(),
+            "cancel 只中断这一轮，不许把整条对话连根收掉: {again:?}"
+        );
+        c.shutdown().await;
+    }
+
     /// **`session/prompt` 只推 chunks、**永不回** response，chunk 也必须能收到。
     ///
     /// 这是模块注释第 2 条硬约束的落地测试：长回复实测 130 s 不回 response。

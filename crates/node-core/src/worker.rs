@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::agent::conversation::CancelError;
 use crate::channel;
 use crate::conn::{self, ConnOutcome, Established};
 use crate::entry;
@@ -441,18 +442,38 @@ impl Worker {
     ///
     /// # 入站消息的形状（对外契约）
     ///
-    /// `channel_data.payload` 是 `{ "text": "..." }`。**只认 `text`**：
+    /// `channel_data.payload` 有两种，由 `type` 之外的**字段本身**区分：
+    ///
+    /// ```json
+    /// { "text": "..." }   // 用户说的一句话 → session/prompt
+    /// { "cancel": true }  // 用户按了停止   → session/cancel
+    /// ```
+    ///
+    /// 判据是「有没有 `text`」而不是「有没有 `cancel`」：老形状（只有 `text`）
+    /// 必须继续能发话，所以先认 `text`。
+    ///
+    /// # 为什么 cancel 不新增一种 `channel_data` 类型
+    ///
+    /// 协议的消息类型是一个封闭枚举（约束 14），而这次改动不需要新类型：
+    /// `channel_data.payload` 本来就是「connector 私有形状、Hub 只透传」
+    /// （`protocol.md` §4）。与 `resize` 复用同一条路是同一个决定。
+    ///
     /// 别的一律忽略，而不是当成 prompt 的全部内容——把一个不认识的形状
     /// 送进 agent，等于让它去解读一段我们没打算说出口的话。
     ///
-    /// 没有 `text` 的消息**丢弃并留痕**：静默丢弃会让页面看着像「发出去了
-    /// 但没反应」，而那是最难查的一种故障。
+    /// 两种消息**都不回帧**：成功时页面靠 `turn_end`（或停止后 agent 回的那条
+    /// `turn_end`）知道结果；失败时这次的应答已经在 Hub 那侧的 HTTP 响应里
+    /// 给了用户，再补一帧就是同一件事说两遍。
     async fn drain_inbound(&self, est: &mut Established) {
         for channel_id in channel::external_ids() {
             for payload in channel::take_inbound(&channel_id) {
+                if payload.get("cancel").is_some() {
+                    self.cancel_turn(&channel_id).await;
+                    continue;
+                }
                 let Some(text) = payload.get("text").and_then(serde_json::Value::as_str) else {
                     self.say(&format!(
-                        "dropped an inbound message on {channel_id}: no text field"
+                        "dropped an inbound message on {channel_id}: neither a text nor a cancel"
                     ));
                     continue;
                 };
@@ -465,16 +486,59 @@ impl Worker {
                     // 会话没了（通道还在但进程已退）：说出口，并把通道关掉
                     // ——留着一条永远不会回话的通道，页面会一直等。
                     self.say(&format!("prompt failed on {channel_id}: {e}"));
-                    for out in channel::fail_external(&channel_id, &e) {
-                        if let Err(e) = est.send(&out).await {
-                            self.say(&format!(
-                                "channel frame send failed ({}): {}",
-                                out.msg_type,
-                                outcome_phrase(&e)
-                            ));
-                        }
-                    }
+                    self.fail_channel(est, &channel_id, &e).await;
                 }
+            }
+        }
+    }
+
+    /// 用户按了停止：中断这一轮，**不关会话**。
+    ///
+    /// # 为什么这里不 `fail_external`
+    ///
+    /// 停止失败**不是通道坏了**。`fail_external` 会 `release` 通道并把
+    /// `channel_error` 回给 Hub，于是下一次发话要从头开一条通道、`session/load`
+    /// 重放一遍——用户只是想掐掉一句话，代价不该是重建整条对话。所以这里
+    /// 只留痕，通道原样留着。
+    ///
+    /// 「没这条会话」是唯一的例外不成立：那说明通道表里有一条 ACP 通道而会话
+    /// 表里没有它（进程已退/被淘汰），这条通道确实再也不会回话了——这跟
+    /// `prompt` 失败是同一种事实，用同一条路收掉。
+    async fn cancel_turn(&self, channel_id: &str) {
+        match self.conversations.cancel(channel_id).await {
+            Ok(()) => {}
+            // 会话没了：这条通道永远不会再回话，收掉（与 prompt 失败同一条路）。
+            Err(e @ CancelError::NoLiveConversation) => {
+                self.say(&format!("cancel failed on {channel_id}: {e}"));
+                // 这里没有 `est` 可用（见 `cancel_turn` 的调用点），而
+                // `fail_external` 的回帧必须发出去才有意义——所以留痕并让
+                // 下一次 `drain_inbound` 的 `prompt` 失败路径收尾。
+                let frames = channel::fail_external(channel_id, &e.to_string());
+                if frames.is_empty() {
+                    self.say(&format!("channel {channel_id} released after a failed cancel"));
+                }
+            }
+            // 本来就闲着：什么都不用做。用户看到的是「没有一轮在跑」，而
+            // 这句话由 Hub 的 409 说（它在下发之前就判过了）；设备这侧只是
+            // 一个兜底，不值得为它关通道。
+            Err(e @ CancelError::NothingInFlight) => {
+                self.say(&format!("cancel ignored on {channel_id}: {e}"));
+            }
+            Err(e @ CancelError::Acp(_)) => {
+                self.say(&format!("cancel failed on {channel_id}: {e}"));
+            }
+        }
+    }
+
+    /// 收掉一条再也不会回话的通道，并把理由回给 Hub。
+    async fn fail_channel(&self, est: &mut Established, channel_id: &str, reason: &str) {
+        for out in channel::fail_external(channel_id, reason) {
+            if let Err(e) = est.send(&out).await {
+                self.say(&format!(
+                    "channel frame send failed ({}): {}",
+                    out.msg_type,
+                    outcome_phrase(&e)
+                ));
             }
         }
     }

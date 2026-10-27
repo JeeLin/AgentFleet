@@ -250,6 +250,28 @@ const runBlockedWhy = computed(
     })[runBlocked.value],
 )
 
+/** 停止按钮为什么被禁用。空串 = 可以按（有一轮在飞）。 */
+const stopBlocked = computed(() => {
+  // `incomplete` 是页面从轨迹里读来的「最后一轮没 turn_end」：等于「agent
+  // 正在回复」。没有轮次在飞时停止按钮是灰的，理由只有一条。
+  if (!props.incomplete) return 'idle'
+  return ''
+})
+
+/** 停止按钮的禁用原因文案。 */
+const stopBlockedWhy = computed(() => {
+  if (!props.incomplete) {
+    return '没有正在回复的轮次：等 agent 回一句话后，这里才能点'
+  }
+  return ''
+})
+
+/** 把一段文本送进设备的 ACP 子进程，并清空输入框。 */
+function stop(): void {
+  if (stopBlocked.value) return
+  emit('cancel')
+}
+
 /**
  * 输入区为什么不可用（整段一句，写在提示行里）。两个事实两句话，
  * 顺序与页面两条横幅一致：先说会话自己的状态，再说设备。
@@ -689,6 +711,18 @@ watch(
           data-conv-run
         >
           {{ target === 'chat' ? '发送' : '执行' }}
+        </button>
+
+        <button
+          class="af-btn af-btn--sm af-btn--ghost"
+          type="button"
+          :disabled="!!stopBlocked"
+          :data-blocked-by="stopBlocked || undefined"
+          :title="stopBlockedWhy || undefined"
+          data-conv-stop
+          @click="stop"
+        >
+          <span aria-hidden="true">⏹</span> 停止
         </button>
 
         <button

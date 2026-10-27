@@ -20,6 +20,7 @@
 //! `MessageType` 都是 17 个变体，ACP 走的是设备自己的子进程 stdio。
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use axum::Json;
@@ -27,7 +28,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::routes::api::Authenticated;
-use crate::routes::stream::open_device_channel;
+use crate::routes::stream::{open_device_channel, send_channel_data};
 use crate::{err, ApiError, AppState};
 
 /// 设备侧识别对话通道的名字。与 `node-core` 的 `EXTERNAL_CONNECTOR_NAME` 必须一致。
@@ -165,6 +166,64 @@ pub async fn open(
     let opened =
         open_device_channel(&state, &auth, &session_id, ACP_CONNECTOR, params, false).await?;
     Ok((axum::http::StatusCode::CREATED, Json(opened)).into_response())
+}
+
+/// `POST /api/sessions/{id}/conversation/cancel` —— 停止**正在跑的那一轮**，不关闭会话。
+///
+/// 与 `open` 复用同样的门禁：会话存在、设备未被删除、对话通道已开。下发一条
+/// `channel_data { "cancel": true }` 到设备；设备侧的 `drain_inbound` 识别它并
+/// 发 `session/cancel` 给 ACP 子进程，**不关会话**——页面停下之后还能继续聊。
+///
+/// # 可区分的结局（都不许静默 204）
+///
+/// | 事实 | 返回 |
+/// |---|---|
+/// | 会话不存在 | 404 `not_found` |
+/// | 设备已被删除 | 409 `device_removed` |
+/// | 对话通道从未打开（没有 channel 绑定） | 404 `not_found`（“没有这条对话”） |
+/// | 设备离线 | 409 `device_offline`（由 `send_to_device` 回） |
+/// | 下发成功 | 204 No Content |
+///
+/// 「没有这条对话」与「设备已被删除」是两个不同的用户动作：前者是说「还没
+/// 开过对话，按停止也没意义」，后者是说「这台机器不会再回来了」。合成一个
+/// 码会让页面给错下一步。
+///
+/// **不是「从不静默成功」的全部**：「有一轮在飞」 vs「本来就闲着」这两种
+/// 情形，Hub 侧不持续追踪（`say`/`turn_end` 的上报在 WS 读循环里，不在这
+/// 个端点能同步看到）。前端的停止按钮只在回复在飞时才可用，所以它不会
+/// 在「闲着」时调这里；设备侧 `drain_inbound` 若收到 cancel 而没轮次在飞，
+/// 只留痕、不关通道。Hub 的 HTTP 层负责把「能不能发出 cancel」这件事说清。
+pub async fn cancel(
+    State(state): State<AppState>,
+    Extension(auth): Extension<Authenticated>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Response, ApiError> {
+    let detail = hub_storage::SessionRepo::new(state.pool().clone())
+        .detail(&session_id)
+        .map_err(|e| ApiError::internal_with("cannot read the session", e))?;
+    let Some(detail) = detail else {
+        return Err(ApiError::not_found());
+    };
+    let Some(node_id) = detail.workspace.node_id.clone() else {
+        return Err(ApiError::conflict(err::DEVICE_REMOVED));
+    };
+    // 找这条会话的 ACP 通道绑定：没有就说明对话从未打开过，不是「停了」，
+    // 而是「还没开始」。同时校验归属，避免泄漏「会话存在但不在你名下」。
+    let Some((channel_id, _)) = state
+        .bindings()
+        .find_by_session(&session_id, auth.subject())
+    else {
+        return Err(ApiError::not_found());
+    };
+    // node_id 以会话所属的为准（绑定里的 node_id 应与之一致，以会话表的为
+    // 准更保守：设备可能刚被重新注册）。
+    send_channel_data(
+        &state,
+        &node_id,
+        &channel_id,
+        json!({ "cancel": true }),
+    )?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// 一个会话的轨迹响应：`{ events: [...], gaps: [...], incomplete: bool }`。

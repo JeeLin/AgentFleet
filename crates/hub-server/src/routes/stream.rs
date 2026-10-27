@@ -426,6 +426,23 @@ impl Bindings {
         self.0.lock().get(channel_id).cloned()
     }
 
+    /// 按会话 id 找这条会话的 ACP 通道绑定，并校验归属 `subject`。
+    ///
+    /// 返回 `(channel_id, node_id)`：前者用来下发 `channel_data`，后者用来
+    /// 投递到对应的设备连接。没有绑定（对话从未打开）或不是这个 subject
+    /// 开的，都返回 `None`——调用方按 404 处理，不泄漏「有这条会话但不在你
+    /// 名下」的信息。
+    pub(crate) fn find_by_session(
+        &self,
+        session_id: &str,
+        subject: &str,
+    ) -> Option<(String, String)> {
+        let map = self.0.lock();
+        map.iter()
+            .find(|(_, b)| b.session_id == session_id && b.subject == subject)
+            .map(|(id, b)| (id.clone(), b.node_id.clone()))
+    }
+
     /// 设备确认了这条通道：置 `acked` 并回 `(node_id, session_id)`。
     ///
     /// 通道不在（超时已被摘掉）→ `None`。标记与读取在同一把锁里，超时任务
@@ -1119,7 +1136,7 @@ fn send_to_device(state: &AppState, node_id: &str, frame: Frame) -> Result<(), A
 }
 
 /// 给某条通道发一帧 `channel_data`（上行 2/4 与 3/4 共用）。
-fn send_channel_data(
+pub(crate) fn send_channel_data(
     state: &AppState,
     node_id: &str,
     channel_id: &str,

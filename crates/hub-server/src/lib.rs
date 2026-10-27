@@ -666,6 +666,10 @@ pub fn build_app(state: AppState) -> Router {
             axum::routing::post(routes::conversation::open),
         )
         .route(
+            "/api/sessions/{id}/conversation/cancel",
+            axum::routing::post(routes::conversation::cancel),
+        )
+        .route(
             "/api/sessions/{id}/trajectory",
             axum::routing::get(routes::conversation::trajectory),
         )
