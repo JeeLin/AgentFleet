@@ -6,6 +6,7 @@ import { depth, isTabbable } from '@/lib/focus'
 import { matchRoute, route } from '@/router'
 import { device, mountIn, session } from '@/test/mount'
 import { settle, stubFetch } from '@/test/http'
+import { readRepoFile } from '@/test/css'
 
 async function flush(w: ReturnType<typeof mountIn>): Promise<void> {
   for (let i = 0; i < 8; i++) {
@@ -421,3 +422,90 @@ describe('App：登出', () => {
   })
 })
 
+/* ===========================================================================
+   品牌区与一级导航**同一列**（用户裁定，2026-10-27）
+   ---------------------------------------------------------------------------
+   改之前 `.af-app` 的 grid 是 `44px 208px 1fr`，`brand` 与 `sidebar` 是两块
+   独立区域，中间靠 `border-right` 划开。它们本来就同高、同背景色、同受
+   `⌃B` 折叠，分开只多一条分隔线，而竖排 `AGENTFLEET` 挤在 44px 里读不出来。
+
+   这一组守三件事，**都不是「样式表里有几行」那种恒真断言**：
+   ① 品牌区在 DOM 里是 `nav` 的**子节点**（同属一个 flex 容器，折叠时一起管）；
+   ② grid 模板里**不再有** `brand` 这个列名（44px 独立列真的没了）；
+   ③ 折叠态品牌区**退回原来的图标轨形态**（竖排名字留着，不是藏掉）。
+
+   反向验证：把 `.af-brand` 挪回 `nav` 外面 → ①红；把 grid 改回
+   `44px 208px 1fr` → ②红；把折叠态的 `writing-mode: vertical-rl` 删掉或
+   加回 `.af-brand__name { display: none }` → ③红。
+   =========================================================================== */
+describe('App：品牌区与导航合并成一列', () => {
+  it('品牌区是 nav 的子节点，不是并列的另一块', async () => {
+    stubFetch(EMPTY_API)
+    const w = mountApp('/sessions')
+    await flush(w)
+
+    const brand = w.element.querySelector('.af-brand')
+    expect(brand, '品牌区必须存在').toBeTruthy()
+    // 关键：它的父节点就是 nav。挪回 nav 外面这条立刻红。
+    expect(brand?.parentElement?.tagName).toBe('NAV')
+    expect(brand?.parentElement?.classList.contains('af-sidebar')).toBe(true)
+  })
+
+  it('grid 模板里没有 brand 列：44px 独立列已取消', () => {
+    const css = readRepoFile('packages/web/src/styles/components.css')
+    // 取 `.af-app` 的声明体
+    const at = css.indexOf('.af-app {')
+    const close = css.indexOf('}', at)
+    const body = css.slice(at, close)
+
+    // 正面：列名只剩 sidebar / topbar / main / status
+    expect(body).toContain('grid-template-columns: 208px 1fr')
+    expect(body).not.toContain('44px 208px')
+    // `brand` 不再是 grid 区域名。注意 `af-brand` 作为**类名**仍会出现在
+    // 别处，所以这里只查 `grid-template-areas` 那一行里的裸词 `brand`。
+    const areasLine = body
+      .split('\n')
+      .find((l) => l.includes('grid-template-areas'))
+    expect(areasLine, 'grid-template-areas 必须存在').toBeTruthy()
+    expect(areasLine).not.toMatch(/'brand\b/)
+  })
+
+  it('折叠态退回原来的图标轨：竖排名字留着，不是藏掉', () => {
+    const css = readRepoFile('packages/web/src/styles/components.css')
+    const at = css.indexOf("[data-rail='collapsed'] .af-brand {")
+    expect(at, '折叠态品牌区规则必须存在').toBeGreaterThan(-1)
+    const block = css.slice(at, css.indexOf('}', at))
+
+    // 折叠态是竖列：方块在上、名字在下。横排名字在 52px 里会被裁掉一半。
+    expect(block).toContain('flex-direction: column')
+
+    // 名字**必须留着并竖排**——这是「折叠不是藏起来」的具体落点。
+    const nameAt = css.indexOf("[data-rail='collapsed'] .af-brand__name {")
+    expect(nameAt, '折叠态名字竖排规则必须存在').toBeGreaterThan(-1)
+    const nameBlock = css.slice(nameAt, css.indexOf('}', nameAt))
+    expect(nameBlock).toContain('writing-mode: vertical-rl')
+
+    // 反向：折叠态不许把整个品牌区或它的名字 `display: none` 掉。
+    // 只查折叠态那几条规则，别误伤展开态的样式。
+    const collapsedRules = css
+      .split('\n')
+      .filter((l) => l.includes("[data-rail='collapsed']"))
+      .join('\n')
+    expect(collapsedRules).not.toContain('.af-brand { display: none')
+    expect(collapsedRules).not.toContain('.af-brand__name { display: none')
+  })
+
+  it('折叠态：导航图标与品牌方块同轴居中', () => {
+    const css = readRepoFile('packages/web/src/styles/components.css')
+    const at = css.indexOf("[data-rail='collapsed'] .af-sidebar__item {")
+    expect(at, '折叠态导航项规则必须存在').toBeGreaterThan(-1)
+    const block = css.slice(at, css.indexOf('}', at))
+
+    // 定宽 + 居中：不加这两条，导航项缩成内容宽 28px，图标贴左侧 6px，
+    // 与居中的品牌方块不同轴。
+    expect(block).toContain('width: 40px')
+    expect(block).toContain('justify-content: center')
+    // 内边距必须归零，否则 40px 里再减 12px，图标又偏左
+    expect(block).toContain('padding: 0')
+  })
+})

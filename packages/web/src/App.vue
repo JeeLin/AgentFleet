@@ -392,12 +392,15 @@ watch(
   <component :is="page" v-if="isAuthPage && page" :key="pageKey" />
 
   <div v-else class="af-app" :data-rail="rail">
-    <div class="af-brand">
-      <span class="af-brand__mark" aria-hidden="true"></span>
-      <span class="af-brand__name">AGENTFLEET</span>
-    </div>
-
     <nav class="af-sidebar" aria-label="主导航">
+      <!-- 品牌区与导航同一列（用户裁定，2026-10-27）：它们同高、同背景色、
+           同受 `⌃B` 折叠，分开只多一条分隔线。放在 `nav` 内部而不是外面，
+           是为了让「折叠侧栏」这一个 flex 容器同时管住两者——否则折叠时
+           品牌区的位置要单独算一次。 -->
+      <div class="af-brand">
+        <span class="af-brand__mark" aria-hidden="true"></span>
+        <span class="af-brand__name">AGENTFLEET</span>
+      </div>
       <div v-for="g in NAV" :key="g.group" class="af-navgroup">
         <div class="af-navgroup__title">{{ g.group }}</div>
         <a

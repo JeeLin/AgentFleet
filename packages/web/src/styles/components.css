@@ -43,39 +43,71 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 [hidden] { display: none !important; }
 
 /* ===========================================================================
-   1. 应用外壳：图标轨 + 侧栏 + 顶栏 + 主区 + 状态条
+   1. 应用外壳：侧栏（品牌区 + 一级导航）+ 顶栏 + 主区 + 状态条
    =========================================================================== */
 .af-app {
   display: grid;
-  grid-template-columns: 44px 208px 1fr;
+  grid-template-columns: 208px 1fr;
   grid-template-rows: 40px 1fr 24px;
-  grid-template-areas: 'brand sidebar topbar' 'brand sidebar main' 'status status status';
+  grid-template-areas: 'sidebar topbar' 'sidebar main' 'status status';
   height: 100vh;
   background: var(--af-surface-1);
 }
-.af-app[data-rail='collapsed'] { grid-template-columns: 44px 52px 1fr; }
+.af-app[data-rail='collapsed'] { grid-template-columns: 52px 1fr; }
 .af-app[data-rail='collapsed'] .af-sidebar__item-text,
 .af-app[data-rail='collapsed'] .af-sidebar__hint,
 .af-app[data-rail='collapsed'] .af-navgroup__title,
 .af-app[data-rail='collapsed'] .af-sidebar__close { display: none; }
 .af-app[data-rail='collapsed'] .af-sidebar { align-items: center; }
 
-/* 图标轨：折叠后仍有图标 + 悬浮标签，导航不消失 */
+/* 折叠态导航项跟着一起居中（用户裁定，2026-10-27 合并品牌区时发现）。
+   `.af-sidebar` 折叠后是 `align-items: center`，子项不再被 `stretch` 拉满，
+   于是 `.af-sidebar__item` 的宽度缩成内容宽（16px 图标 + 左右各 6px 内边距
+   = 28px），而品牌区居中在 40px 的内容区里。两者基准不同：图标贴着左侧
+   6px，方块在正中。给导航项一个和内容区等宽的定宽，两处才同轴。
+
+   定宽取 40px（侧栏 52px 减去左右 `space-3` 各 6px）——不写 `100%`，因为
+   折叠态父级是 `align-items: center`，`100%` 解析出来仍是内容宽，等于没改。 */
+.af-app[data-rail='collapsed'] .af-sidebar__item {
+  width: 40px; justify-content: center; padding: 0;
+}
+
+/* 品牌区与一级导航**同一列**（用户裁定，2026-10-27）。
+   它们本来就同高、同背景色、同受 `⌃B` 折叠——分开只多一条分隔线，而
+   竖排 `AGENTFLEET` 挤在 44px 里几乎读不出来。合并后品牌横排、字号回到
+   正常档，侧栏总宽从 44+208 降到 208（省下的还给主区）。
+
+   注意这里**不设** `grid-area`：`.af-brand` 是 `.af-sidebar` 的子节点，
+   它跟着侧栏一起被 grid 摆放，自己不再是一个网格区域。 */
 .af-brand {
-  grid-area: brand;
-  display: flex; flex-direction: column; align-items: center;
-  gap: var(--af-space-4); padding: var(--af-space-3) 0;
-  background: var(--af-surface-1);
-  border-right: 1px solid var(--af-border-subtle);
+  display: flex; align-items: center; gap: var(--af-space-3);
+  padding: var(--af-space-3) var(--af-space-3) var(--af-space-2);
+  /* 品牌区不随导航滚动：滚动侧栏时标题必须一直可见 */
+  flex: 0 0 auto;
 }
 .af-brand__mark {
+  flex: 0 0 auto;
   width: 22px; height: 22px; border-radius: var(--af-radius-sm);
   background: var(--af-accent);
   box-shadow: 0 0 0 3px var(--af-accent-bg);
 }
 .af-brand__name {
-  writing-mode: vertical-rl; font-size: var(--af-text-2xs);
+  font-size: var(--af-text-2xs);
   color: var(--af-fg-tertiary); letter-spacing: var(--af-tracking-label);
+  white-space: nowrap;
+}
+
+/* 折叠态的品牌区**保留原来的图标轨形态**（用户裁定，2026-10-27）：
+   竖排 `AGENTFLEET` 回来了，方块在上、名字在下的竖列。理由不是美观——
+   折叠后侧栏只剩 52px，横排名字根本放不下（`white-space: nowrap` 会溢出
+   并被裁掉一半），竖排是唯一能在这个宽度里读完的排法。
+   折叠不是「藏起来」，品牌标识得留下。 */
+.af-app[data-rail='collapsed'] .af-brand {
+  flex-direction: column; align-items: center;
+  gap: var(--af-space-4); padding: var(--af-space-3) 0;
+}
+.af-app[data-rail='collapsed'] .af-brand__name {
+  writing-mode: vertical-rl;
 }
 
 .af-sidebar {
