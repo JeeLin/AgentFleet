@@ -18,9 +18,21 @@
    `declareImplemented(act)` 声明，于是键位表仍然是「承诺」的唯一出处。
 
    ── 与原型 keynav.js 的关系 ──────────────────────────────────────
-   生产实现是真相源；`prototype/assets/keynav.js` 里的同一张表由
-   `packages/web/scripts/gen-prototype-keynav.ts` 从本文件生成
-   （`bun run gen:prototype-keynav`；`--check` 校验是否已同步）。
+   `prototype/assets/keynav.js` 里有一张同名的 `KEYS`。**它是手抄副本，不是
+   生成出来的**：原型是纯静态 HTML，引不了 TS 与 Vue 单文件组件，所以那张表
+   只可能抄。**没有任何生成器**——本文件曾经写过一个（指向
+   `scripts/gen-prototype-keynav.ts` 与 `bun run gen:prototype-keynav`），
+   那个脚本从未存在过，注释本身是这条缺陷。
+
+   真相源是**这里**：`?` 面板由 `KEYS` 渲染、`register` 只认表内 act、
+   `docs/design-system.md` §4.2 由 `keynav.test.ts` grep 对齐到它；而原型那份
+   连一个读它的测试都没有。改键位要改两处，顺序是先改这里再同步过去（原型
+   的文件头也是这个说法）。
+
+   于是两边**会**漂，而且已经漂了：原型仍留着两条已并出导航的 act。
+   `keynav.test.ts` 的「原型表与真相源」一组据此列出两边差集并逐项锁定——
+   它是**记录**而不是修复：`?` 面板照真相源渲染，原型演示页照自己那份，
+   谁也不会自动跟上谁。
    =========================================================================== */
 
 import { pageTitle } from './page-titles'
@@ -414,7 +426,13 @@ export function isActivatable(el: EventTarget | null): boolean {
   return tag === 'BUTTON' || tag === 'A' || node.isContentEditable === true
 }
 
-/** 键位表按扁平形状展开——`?` 面板与测试都按这个形状消费。 */
+/**
+ * 键位表按扁平形状展开。
+ *
+ * **只有测试按这个形状消费**：`?` 面板（`App.vue`）直接按组渲染 `KEYS`
+ * （`v-for="g in KEYS"` → `v-for="k in g.keys"`），它要的就是分组结构，
+ * 不需要扁平表。扁平表是为了测试能一条条走过去而不必先按组展开。
+ */
 export type FlatKey = ReadonlyArray<{
   keys: string[]
   act: string
