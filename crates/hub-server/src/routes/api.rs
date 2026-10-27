@@ -373,9 +373,9 @@ pub async fn delete_device(
 
 /// `POST /api/sessions` 的请求体。
 ///
-/// `agent_id` 本阶段恒不填（M3 起才接 ACP，`session.agent_id` 允许 NULL），
-/// 但字段先收下：前端「新建会话」三步里本来就有选 agent 一步，
-/// 现在不选、以后要选时不用再改一次契约。
+/// `agent_id` **必填**（见 [`create_session`] 的门禁）；`Option` 只为让「键缺失」
+/// 与「`null`」走到我们自己的 400（`err::AGENT_REQUIRED`），而不是 serde 的
+/// 一句 `missing field` 加 422。
 ///
 /// **没有 connector 字段**：connector 是开面板时才指定的（`POST /api/channels`
 /// 的 `connector`），所以「设备能力是否覆盖所需 connector」这道门禁**只能**
@@ -455,14 +455,15 @@ pub async fn list_sessions(
     Ok(Json(items.iter().map(summary_of).collect()))
 }
 
-/// `POST /api/sessions`：建会话（设备 + 工作区路径 + （M3 起）agent）。
+/// `POST /api/sessions`：建会话（设备 + 工作区路径 + agent）。
 ///
 /// 后端流程：
-/// 1. 校验工作区路径（绝对或 `~` 开头）。**越界路径在此就拒**，
+/// 1. `agent_id` 必填——没有就 400。见下面那段「为什么必填」。
+/// 2. 校验工作区路径（绝对或 `~` 开头）。**越界路径在此就拒**，
 ///    不给「先建会话、打开面板时报错」留余地（设计规范 §7.4 要求越界可见）。
-/// 2. 设备在线否——离线建会话回 **409 并带设备状态**，让页面能显示
+/// 3. 设备在线否——离线建会话回 **409 并带设备状态**，让页面能显示
 ///    「这台设备现在连不上」而不是一个没有主语的成功。
-/// 3. `SessionRepo::create` 在**一个事务**里 upsert 工作区 + 插会话行
+/// 4. `SessionRepo::create` 在**一个事务**里 upsert 工作区 + 插会话行
 ///    （工作区是主实体，多个会话引用同一行；见 M1 §5c）。
 pub async fn create_session(
     State(state): State<AppState>,
@@ -478,6 +479,20 @@ pub async fn create_session(
         Ok(b) => b,
         Err(_) => return Err(ApiError::bad_request(err::BAD_BODY)),
     };
+
+    // **agent 是会话的必要前提，所以缺了是 400。** 一个 `agent_id` 为 NULL 的
+    // 会话永远开不了对话（`conversation::open` 直接 409，`ConvFlow` 的 `canChat`
+    // 只看 `agent_id`），也就是说 201 给出去的会是一个看起来建成、实际永远哑的
+    // 会话。空串与缺失同罪——空串不是 agent。
+    //
+    // 400 而不是 409：请求本身就不完整，与设备状态无关，改一个字就能过。
+    //
+    // 放在路径校验**之前**：这是请求形状的门禁，形状不对时路径对不对没有意义。
+    let agent_id = match body.agent_id.as_deref().map(str::trim) {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => return Err(ApiError::bad_request(err::AGENT_REQUIRED)),
+    };
+    let agent_id = agent_id.as_str();
     hub_storage::WorkspaceRepo::validate_path(&body.path)
         .map_err(|_| ApiError::bad_request(err::INVALID_WORKSPACE_PATH))?;
 
@@ -508,25 +523,24 @@ pub async fn create_session(
     // 一个 201 的会话，等到开 ACP 时才发现二进制不存在——一个永远无法对话的
     // 死会话，而它看起来像「建成功了」。
     //
-    // 不选 agent（`None`）仍然放行：M1 的会话本来就可以没有 agent，这条不退化。
-    if let Some(agent_id) = body.agent_id.as_deref() {
-        let usable = state
-            .agent_runtime()
-            .usable_for_session(&body.node_id, agent_id)
-            .map_err(|e| ApiError::internal_with("cannot read agent_runtime", e))?;
-        if usable.is_none() {
-            return Err(ApiError::conflict_with(
-                err::AGENT_UNAVAILABLE,
-                || json!({"agent_id": agent_id}),
-            ));
-        }
+    // `agent_id` 走到这里必然非空（上面已经 400 挡掉了缺失与空串），所以这道门禁
+    // 无条件执行——不再有「不选 agent 就跳过」的分支。
+    let usable = state
+        .agent_runtime()
+        .usable_for_session(&body.node_id, agent_id)
+        .map_err(|e| ApiError::internal_with("cannot read agent_runtime", e))?;
+    if usable.is_none() {
+        return Err(ApiError::conflict_with(
+            err::AGENT_UNAVAILABLE,
+            || json!({"agent_id": agent_id}),
+        ));
     }
 
     let session = hub_storage::SessionRepo::new(state.devices().pool().clone())
         .create(
             &body.node_id,
             &body.path,
-            body.agent_id.as_deref(),
+            Some(agent_id),
             &hub_core::registry::now_stamp(),
         )
         .map_err(|e| ApiError::internal_with("cannot create the session", e))?;
@@ -637,7 +651,7 @@ fn merge_agent(
         Some(_) if entry.available => {}
         Some(existing) => {
             if !existing.contains(reason) {
-                existing.push_str("；");
+                existing.push('；');
                 existing.push_str(reason);
             }
         }
@@ -921,7 +935,7 @@ mod tests {
 
     /// 往一台设备上放几条 `agent_runtime` 行。
     fn detect(st: &AppState, node: &str, rows: &[(&str, bool, Option<&str>)]) {
-        let owned: Vec<(String, String, Option<String>, bool, Option<String>)> = rows
+        let owned: Vec<hub_storage::agent::DetectedRow> = rows
             .iter()
             .map(|(id, available, err)| {
                 (

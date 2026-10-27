@@ -91,6 +91,13 @@ pub mod err {
     /// 判据是 `agent_runtime` 表里有一行且 `available = 1`，见
     /// `routes/api.rs::create_session`。
     pub const AGENT_UNAVAILABLE: &str = "agent_unavailable";
+    /// 建会话时没给 `agent_id`（键缺失、`null`、或空串）。
+    ///
+    /// **和 [`AGENT_UNAVAILABLE`] 是两个 code**：那个是「你说出了要哪个 agent，
+    /// 但这台设备上它跑不起来」（409，设备状态问题），这个是「你根本没说」
+    /// （400，请求形状问题）。合成一个会让页面把「重新选一个」和「去装一个」
+    /// 混成同一句提示。
+    pub const AGENT_REQUIRED: &str = "agent_required";
 }
 
 /// 启动期错误：数据目录写不了 / 数据库读不了，Hub 起不来。

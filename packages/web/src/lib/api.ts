@@ -253,6 +253,8 @@ export function createSessionErrorLabel(code: string): string {
       return '提交的内容不完整：设备、路径都要填。'
     case 'agent_unavailable':
       return '这台设备上这个 agent 现在跑不起来（装了但没有可用的 ACP 入口）。换一个 agent，或先在这台设备上装好它。'
+    case 'agent_required':
+      return '建会话要先选一个 agent：没有 agent 的会话打不开对话。'
     default:
       return `建会话没有成功（${code}）。`
   }

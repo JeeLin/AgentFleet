@@ -477,19 +477,32 @@ async fn listing_sessions_returns_an_empty_array_initially() {
     assert_eq!(r.json(), json!([]));
 }
 
+/// 设备在线（上报了 opencode 且可用）→ 201，形状是会话摘要。
+///
+/// 设备**必须真上报一个可用 agent**：建会话现在要求 `agent_id`，而门禁读
+/// `agent_runtime` 表——`enrolled_device` 那份旧形态的字符串上报在库里是
+/// `available = 0`，用它建会话会 409（那正是另一条用例钉的东西）。
 #[tokio::test]
 async fn creating_a_session_returns_a_detail_with_its_locked_workspace() {
     let hub = common::Hub::boot().await;
-    let (node_id, _keepalive) = enrolled_device(&hub).await;
+    let (node_id, _keepalive) = enrolled_device_reporting(
+        &hub,
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+    )
+    .await;
     let h = Harness::from_hub(hub).await;
 
     let r = h
-        .create_session(json!({"node_id": node_id, "path": "~/src/app"}))
+        .create_session(json!({
+            "node_id": node_id,
+            "path": "~/src/app",
+            "agent_id": "opencode",
+        }))
         .await;
     assert_eq!(r.status, StatusCode::CREATED, "body: {}", r.body);
     let v = r.json();
     assert_eq!(v["state"], json!("running"));
-    assert_eq!(v["agent_id"], Value::Null, "M1 没有 agent 运行时");
+    assert_eq!(v["agent_id"], json!("opencode"));
     assert_eq!(v["workspace"]["node_id"], json!(node_id));
     assert_eq!(v["workspace"]["path"], json!("~/src/app"));
     assert_eq!(v["workspace"]["path_locked"], json!(true));
@@ -507,14 +520,26 @@ async fn creating_a_session_returns_a_detail_with_its_locked_workspace() {
 #[tokio::test]
 async fn two_sessions_can_share_one_workspace() {
     let hub = common::Hub::boot().await;
-    let (node_id, _keepalive) = enrolled_device(&hub).await;
+    let (node_id, _keepalive) = enrolled_device_reporting(
+        &hub,
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+    )
+    .await;
     let h = Harness::from_hub(hub).await;
 
     let a = h
-        .create_session(json!({"node_id": node_id, "path": "/srv/app"}))
+        .create_session(json!({
+            "node_id": node_id,
+            "path": "/srv/app",
+            "agent_id": "opencode",
+        }))
         .await;
     let b = h
-        .create_session(json!({"node_id": node_id, "path": "/srv/app"}))
+        .create_session(json!({
+            "node_id": node_id,
+            "path": "/srv/app",
+            "agent_id": "opencode",
+        }))
         .await;
     assert_eq!(a.status, StatusCode::CREATED, "{}", a.body);
     assert_eq!(b.status, StatusCode::CREATED, "{}", b.body);
@@ -556,7 +581,11 @@ async fn creating_a_session_on_an_offline_device_is_a_conflict_with_the_status()
 
     let h = Harness::from_hub(hub).await;
     let r = h
-        .create_session(json!({"node_id": node_id, "path": "~/src/app"}))
+        .create_session(json!({
+            "node_id": node_id,
+            "path": "~/src/app",
+            "agent_id": "claude-code",
+        }))
         .await;
     assert_eq!(r.status, StatusCode::CONFLICT, "body: {}", r.body);
     let v = r.json();
@@ -573,19 +602,29 @@ async fn creating_a_session_on_an_offline_device_is_a_conflict_with_the_status()
 async fn creating_a_session_on_an_unknown_device_is_a_404() {
     let h = Harness::new().await;
     let r = h
-        .create_session(json!({"node_id": "n_ghost", "path": "/srv/app"}))
+        .create_session(json!({
+            "node_id": "n_ghost",
+            "path": "/srv/app",
+            "agent_id": "claude-code",
+        }))
         .await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
     r.assert_error_code("not_found");
 }
 
 /// 越界形状的路径在建会话时就拒（400），不是等面板打开才报错。
+///
+/// 每条都带一个合法 agent：否则会先在 agent 门禁上 400，路径那条分支根本没走到。
 #[tokio::test]
 async fn a_workspace_path_must_be_absolute_or_home_relative() {
     let h = Harness::new().await;
     for bad in ["src/app", "", "..", "."] {
         let r = h
-            .create_session(json!({"node_id": "n_any", "path": bad}))
+            .create_session(json!({
+                "node_id": "n_any",
+                "path": bad,
+                "agent_id": "claude-code",
+            }))
             .await;
         assert_eq!(r.status, StatusCode::BAD_REQUEST, "{bad:?} 必须 400");
         r.assert_error_code("invalid_workspace_path");
@@ -599,7 +638,11 @@ async fn a_literal_path_reaches_the_device_lookup() {
     let h = Harness::new().await;
     for ok in ["/srv/app", "~/src/app", "~"] {
         let r = h
-            .create_session(json!({"node_id": "n_ghost", "path": ok}))
+            .create_session(json!({
+                "node_id": "n_ghost",
+                "path": ok,
+                "agent_id": "claude-code",
+            }))
             .await;
         assert_eq!(r.status, StatusCode::NOT_FOUND, "{ok:?} 应走到设备查找");
     }
@@ -900,11 +943,20 @@ async fn writing_a_config_without_the_csrf_header_is_rejected() {
 #[tokio::test]
 async fn deleting_a_device_keeps_its_sessions_listed_as_removed() {
     let hub = common::Hub::boot().await;
-    let (node_id, _keepalive) = enrolled_device(&hub).await;
+    // 建会话要一个可用的 agent（门禁读 `agent_runtime`，旧形态的裸字符串上报不算）。
+    let (node_id, _keepalive) = enrolled_device_reporting(
+        &hub,
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+    )
+    .await;
     let h = Harness::from_hub(hub).await;
 
     let created = h
-        .create_session(json!({"node_id": node_id, "path": "/srv/app"}))
+        .create_session(json!({
+            "node_id": node_id,
+            "path": "/srv/app",
+            "agent_id": "opencode",
+        }))
         .await;
     assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
 
@@ -976,11 +1028,20 @@ async fn deleting_an_absent_device_is_404_and_leaves_the_list_alone() {
 #[tokio::test]
 async fn deleting_a_device_does_not_delete_its_sessions_trajectory() {
     let hub = common::Hub::boot().await;
-    let (node_id, _keepalive) = enrolled_device(&hub).await;
+    // 建会话要一个可用的 agent（门禁读 `agent_runtime`，旧形态的裸字符串上报不算）。
+    let (node_id, _keepalive) = enrolled_device_reporting(
+        &hub,
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+    )
+    .await;
     let h = Harness::from_hub(hub).await;
 
     let created = h
-        .create_session(json!({"node_id": node_id, "path": "/srv/app"}))
+        .create_session(json!({
+            "node_id": node_id,
+            "path": "/srv/app",
+            "agent_id": "opencode",
+        }))
         .await;
     assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
     let session_id = created.json()["id"].as_str().expect("会话 id").to_string();
@@ -1161,18 +1222,43 @@ async fn creating_a_session_with_an_agent_on_a_silent_device_is_a_conflict() {
     assert_eq!(r.json()["error"], json!("agent_unavailable"));
 }
 
-/// 不选 agent 仍然放行，`agent_id` 为 NULL。**这条不能退化**。
+/// **没给 `agent_id` 一律 400 `agent_required`**：键缺失、`null`、空串三种。
+///
+/// 与 `agent_unavailable`（409）分开：那是「你说要 X，X 在这台设备上跑不起来」
+/// （设备状态问题），这是「你根本没说」（请求形状问题）。400 也不是 409：
+/// 补上一个名字就能过，没有任何状态需要等。
+///
+/// 空串必须与缺失同罪——否则「填了个空的下拉框」会造出一条空 agent 的会话，
+/// 而那条会话在 `conversation::open` 里是另一个（更难读的）409。
 #[tokio::test]
-async fn creating_a_session_without_an_agent_still_works() {
+async fn creating_a_session_without_an_agent_id_is_rejected() {
     let hub = common::Hub::boot().await;
     let (node_id, _keepalive) = enrolled_device_reporting(&hub, json!([])).await;
     let h = Harness::from_hub(hub).await;
 
-    let r = h
-        .create_session(json!({"node_id": node_id, "path": "~/src/app"}))
-        .await;
-    assert_eq!(r.status, StatusCode::CREATED, "body: {}", r.body);
-    assert_eq!(r.json()["agent_id"], Value::Null, "不选就是 NULL");
+    // 设备**没上报任何 agent**：若拒绝来自 agent 门禁，这里会是 409
+    // `agent_unavailable`。所以这一条同时钉住了「400 发生在门禁之前」。
+    for (what, body) in [
+        ("键缺失", json!({"node_id": node_id, "path": "~/src/app"})),
+        (
+            "null",
+            json!({"node_id": node_id, "path": "~/src/app", "agent_id": null}),
+        ),
+        (
+            "空串",
+            json!({"node_id": node_id, "path": "~/src/app", "agent_id": ""}),
+        ),
+    ] {
+        let r = h.create_session(body).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{what}: {}", r.body);
+        r.assert_error_code("agent_required");
+    }
+
+    assert_eq!(
+        h.get("/api/sessions").await.json(),
+        json!([]),
+        "被拒的请求不许留下任何会话"
+    );
 }
 
 /// **反向验证「粘滞」**：库里的行被清掉，但内存 `Reports` 里还留着旧清单 → 必须 409。
@@ -1246,18 +1332,24 @@ impl Harness {
 ///
 /// `est` 是那条真连接：对话端点会往它上面下发 `open_channel`，而 `_keepalive`
 /// 的名字在别处——这里必须**返回**它，否则连接一 drop Hub 就判设备离站。
+///
+/// `agent_id` 必填（`POST /api/sessions` 现在是这么要求的），所以这条 helper
+/// 永远带 agent 建会话。要造「没有 agent 的会话」得直接插库，见
+/// [`seed_session_without_an_agent`]。
 async fn conversation_ready(
     agents: Value,
-    with_agent: Option<&str>,
+    agent_id: &str,
 ) -> (Harness, String, String, node_core::conn::Established) {
     let hub = common::Hub::boot().await;
     let (node_id, est) = enrolled_device_reporting(&hub, agents).await;
     let h = Harness::from_hub(hub).await;
-    let mut body = json!({"node_id": node_id, "path": "~/src/app"});
-    if let Some(a) = with_agent {
-        body["agent_id"] = json!(a);
-    }
-    let created = h.create_session(body).await;
+    let created = h
+        .create_session(json!({
+            "node_id": node_id,
+            "path": "~/src/app",
+            "agent_id": agent_id,
+        }))
+        .await;
     assert_eq!(
         created.status,
         StatusCode::CREATED,
@@ -1271,13 +1363,51 @@ async fn conversation_ready(
     (h, node_id, session_id, est)
 }
 
-/// **会话没选 agent → 409 `agent_unavailable`，`detail.agent_id` 是 null。**
+// `agent_id` 在**建会话**时已必填，所以走 HTTP 再也造不出「有会话、没 agent」
+// 的新会话。那条状态仍要测：库里的存量行就是这样（`SessionRepo::create` 仍收
+// `Option`，NULL 列也仍然允许），开对话时对它的处置不变。造法只能是绕过 API
+// 直接插库，并且用一个不与别处撞车的 node_id——工作区按 `(node_id, path)`
+// 去重，撞了会把别的用例的会话挂到本用例的设备上。
+const NO_AGENT_NODE: &str = "n_legacy_no_agent";
+
+/// 建一条 `agent_id` 为 NULL 的存量会话（等价于 M1 时代 POST 建出来的那种）。
+fn seed_session_without_an_agent(hub: &common::Hub, node_id: &str) -> String {
+    let device = hub
+        .state
+        .registry()
+        .enroll(
+            &identity::KeyPair::generate().public_key_bytes(),
+            hub_storage::repo::NewDevice {
+                id: node_id.to_string(),
+                name: "legacy".into(),
+                key_fingerprint: String::new(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                hostname: "legacy".into(),
+                node_version: "0.1.0".into(),
+            },
+        )
+        .expect("enroll")
+        .node_id()
+        .to_string();
+    hub_storage::SessionRepo::new(hub.state.pool().clone())
+        .create(&device, "~/src/app", None, &hub_core::registry::now_stamp())
+        .expect("插一条 no-agent 会话")
+        .id
+}
+
+/// **存量的 no-agent 会话 → 开对话 409 `agent_unavailable`，`detail.agent_id` 是 null。**
 ///
 /// 判据是 null 而不是某个 agent 名：这不是「那个 agent 不可用」，是「这个会话
 /// 没有可用的对话对象」。挑一个代进去等于替用户做了会写进历史的决定。
+///
+/// 这条是**存量数据**的行为，不是可建状态：新建会话已经不可能没有 agent
+/// （`POST /api/sessions` 回 400 `agent_required`）。
 #[tokio::test]
 async fn opening_a_conversation_on_a_session_without_an_agent_is_a_conflict() {
-    let (h, _node, session_id, _est) = conversation_ready(json!([]), None).await;
+    let hub = common::Hub::boot().await;
+    let session_id = seed_session_without_an_agent(&hub, NO_AGENT_NODE);
+    let h = Harness::from_hub(hub).await;
 
     let r = h.open_conversation(&session_id).await;
     assert_eq!(r.status, StatusCode::CONFLICT, "body: {}", r.body);
@@ -1304,7 +1434,7 @@ async fn opening_a_conversation_with_an_unavailable_agent_is_a_conflict() {
     // 第一步：可用，建会话（建不出就说明门禁把这条测试挡在门外了）
     let (h, node_id, session_id, mut est) = conversation_ready(
         json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
-        Some("opencode"),
+        "opencode",
     )
     .await;
 
@@ -1353,7 +1483,7 @@ async fn opening_a_conversation_with_an_unavailable_agent_is_a_conflict() {
 async fn opening_a_conversation_sends_the_agent_config_down_to_the_device() {
     let (h, node_id, session_id, mut est) = conversation_ready(
         json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
-        Some("opencode"),
+        "opencode",
     )
     .await;
 
@@ -1409,7 +1539,7 @@ async fn opening_a_conversation_sends_the_agent_config_down_to_the_device() {
 async fn the_first_conversation_sends_a_null_acp_session_id() {
     let (h, _node, session_id, mut est) = conversation_ready(
         json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
-        Some("opencode"),
+        "opencode",
     )
     .await;
 
@@ -1443,7 +1573,7 @@ async fn the_first_conversation_sends_a_null_acp_session_id() {
 async fn the_acp_session_id_from_the_ready_frame_comes_back_on_the_next_open() {
     let (h, node_id, session_id, mut est) = conversation_ready(
         json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
-        Some("opencode"),
+        "opencode",
     )
     .await;
 
@@ -1520,7 +1650,7 @@ async fn the_acp_session_id_from_the_ready_frame_comes_back_on_the_next_open() {
 async fn opening_a_conversation_sends_the_last_persisted_seq() {
     let (h, node_id, session_id, mut est) = conversation_ready(
         json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
-        Some("opencode"),
+        "opencode",
     )
     .await;
 
@@ -1556,7 +1686,7 @@ async fn opening_a_conversation_sends_the_last_persisted_seq() {
 async fn a_fresh_conversation_sends_last_seq_zero() {
     let (h, _node, session_id, mut est) = conversation_ready(
         json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
-        Some("opencode"),
+        "opencode",
     )
     .await;
 
@@ -1580,7 +1710,7 @@ async fn a_fresh_conversation_sends_last_seq_zero() {
 async fn a_conversation_opens_even_when_no_config_was_ever_written() {
     let (h, _node, session_id, mut est) = conversation_ready(
         json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
-        Some("opencode"),
+        "opencode",
     )
     .await;
 
@@ -1606,13 +1736,58 @@ async fn opening_a_conversation_on_a_missing_session_is_404() {
     assert_eq!(r.status, StatusCode::NOT_FOUND, "body: {}", r.body);
 }
 
+/// **设备已被删除的会话 → 409 `device_removed`**（不是 `agent_unavailable`）。
+///
+/// 这是存量数据才会出现的组合（M1 时代的会话行 + 删设备不删会话），所以经真实
+/// 路径造：建会话 → 删设备。
+///
+/// 两个 code 的次序要钉住：agent 必须**先**过门禁（这里 agent 是可用的），
+/// 然后才轮到归属。反过来的话，存量会话最常见的两种残缺就无法在页面上区分。
+#[tokio::test]
+async fn opening_a_conversation_on_a_removed_device_is_device_removed() {
+    let hub = common::Hub::boot().await;
+
+    // 走真 HTTP 建会话：设备得在线（真连接），agent 得可用。
+    let (node_id, _keepalive) = enrolled_device_reporting(
+        &hub,
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+    )
+    .await;
+    let h = Harness::from_hub(hub).await;
+    let created = h
+        .create_session(json!({
+            "node_id": node_id,
+            "path": "~/src/app",
+            "agent_id": "opencode",
+        }))
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let session_id = created.json()["id"].as_str().expect("会话 id").to_string();
+
+    // 删设备会把 workspace.node_id 置 NULL，会话行保留（「删除语义三分离」）。
+    // agent_runtime 那几行保留：「设备扫到了什么」与「设备还在不在」是两件事，
+    // 而这条测试要的正是「agent 仍可用、归属已经没了」。
+    assert_eq!(
+        h.delete_device(&node_id).await.status,
+        StatusCode::NO_CONTENT
+    );
+
+    let r = h.open_conversation(&session_id).await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "body: {}", r.body);
+    r.assert_error_code("device_removed");
+}
+
 /// 轨迹空 → `events: []`、`gaps: []`、`incomplete: false`。
 ///
 /// **空轨迹不算未完成**：一个还没说过话的会话没有「一轮」，把它标成未完成
 /// 会让每个新会话一打开就带一条警告。
 #[tokio::test]
 async fn an_empty_trajectory_is_empty_and_not_incomplete() {
-    let (h, _node, session_id, _est) = conversation_ready(json!([]), None).await;
+    let (h, _node, session_id, _est) = conversation_ready(
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        "opencode",
+    )
+    .await;
 
     let r = h
         .get(&format!("/api/sessions/{session_id}/trajectory"))
@@ -1630,7 +1805,11 @@ async fn an_empty_trajectory_is_empty_and_not_incomplete() {
 /// 丢掉的那段**不补齐**（已裁决），但页面必须能画出「此处缺失 N 条」。
 #[tokio::test]
 async fn a_trajectory_with_a_hole_reports_the_gap() {
-    let (h, node_id, session_id, _est) = conversation_ready(json!([]), None).await;
+    let (h, node_id, session_id, _est) = conversation_ready(
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        "opencode",
+    )
+    .await;
 
     let repo = hub_storage::TrajectoryRepo::new(h.hub.state.pool().clone());
     // 故意跳过 seq = 3、4：这段就是「丢掉的那截」
@@ -1667,7 +1846,11 @@ async fn a_trajectory_with_a_hole_reports_the_gap() {
 /// `gaps` 看不见它（序号没断），只有「最后一轮没收口」这一条判据看得见。
 #[tokio::test]
 async fn a_trajectory_whose_last_turn_never_ended_is_incomplete() {
-    let (h, node_id, session_id, _est) = conversation_ready(json!([]), None).await;
+    let (h, node_id, session_id, _est) = conversation_ready(
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        "opencode",
+    )
+    .await;
 
     let repo = hub_storage::TrajectoryRepo::new(h.hub.state.pool().clone());
     for (seq, kind) in [(1_i64, "user_message"), (2, "agent_message_chunk")] {
