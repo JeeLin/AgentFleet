@@ -198,6 +198,15 @@ impl WorkspaceRepo {
     /// 它是「根 + 相对子路径」这套语义的**唯一完整判据**，而 M1 之后 Hub 侧
     /// 要接系统调用时（见 `docs/architecture/README.md` §4.1）第一件事就是它。
     /// 删掉它等于把判据从仓库里抹掉，只留分散在 connector 里的两次 `validate_path`。
+    ///
+    /// 它由 [`Self::validate_path`] 与 [`Self::validate_relative`] 合成，而
+    /// `validate_relative` 的**唯一**调用者就是它——所以删这三者中的任何一个，
+    /// 剩下两个立刻变成一套没人用的判据。改这里连同另外两个一起看。
+    ///
+    /// deadcode-on-purpose: 零生产调用是**已知且有意**的。加这个标记是为了让
+    /// 下一轮「零生产调用的 pub fn」扫描能 grep 到它并跳过，而不是再登记一次。
+    /// 唯一正当的下线理由是「Hub 侧接了系统调用、真的用上它」——那时删掉本
+    /// 标记，不要留着它继续解释一件已经不成立的事。
     pub fn validate_workspace_path(root: &str, rel: &str) -> Result<()> {
         Self::validate_path(root)?;
         Self::validate_relative(rel)
@@ -238,6 +247,9 @@ pub(crate) fn row_to_workspace_at(
 }
 
 /// 给定时刻的工作区与它上面「最近一次创建」的会话，供 Hub 拼 API 响应。
+///
+/// 与 [`WorkspaceSession`] 一起是「按工作区聚合」这套读法的**唯一**完整
+/// 实现，当前只被本文件的测试用——见 [`recent_sessions`] 上那段说明。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceSession {
     #[serde(flatten)]
@@ -252,6 +264,18 @@ pub struct WorkspaceSession {
 /// 一个工作区可以同时开着好几个会话，而这条列表是给「我有哪些项目」用的概览，
 /// 不是运行态监控（运行态在 SSE 的 `session.state`）。
 /// 全删光会话的工作区不出现在这里——它是孤儿，`list_for_node` 才管得到。
+///
+/// # 当前没有生产调用点，是**有意保留**
+///
+/// `GET /api/sessions` 走 [`list_sessions`]（`api.rs` 的 `list_sessions` →
+/// `SessionRepo::list`）：那条路径要**全部**会话，而这里每个工作区只给
+/// **一个**代表，两者语义不可互换，`recent_sessions` 因此没有任何生产路径
+/// 可用——不是漏接，是它表达的聚合方式与当前页面的契约不同。
+///
+/// 留着它的理由：这是「同一 `(node_id, path)` 上的 N 个会话要折叠成一项」
+/// 这条规则的唯一实现，`a_workspace_with_two_sessions_appears_once_with_its_newest`
+/// 靠它钉住。删掉函数等于连同那条规则一起删——而 §6.2 的「工作区不是可寻址
+/// 对象」正要求这个折叠存在，只是当前没有页面消费它。
 pub fn recent_sessions(
     repo: &WorkspaceRepo,
     node_id: Option<&str>,

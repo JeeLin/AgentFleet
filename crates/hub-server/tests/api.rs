@@ -1632,6 +1632,15 @@ async fn the_first_conversation_sends_a_null_acp_session_id() {
 ///
 /// **只用 HTTP 观测，不查库**：这条功能的用户可见结果是「第二次开对话时
 /// 下发的是 load 而不是 new」，它可能断在帧解析、绑定表查询或仓储任一层。
+///
+/// 唯一的例外是下面那个 `wait_until`——它读 `SessionRepo::find` 只为等
+/// 「Hub 的读循环已经把这一帧处理完」这一个时序条件，不是为了断言业务
+/// 结果（业务结果由紧随其后的 HTTP 断言判）。固定 sleep 在慢机器上会
+/// flakes，而这里的等待条件就是「落库了吗」本身。
+///
+/// 它也顺带说明 `SessionRepo::find` 为什么留着：它是**测试**读单行会话的
+/// 入口（生产读会话走 `detail`，因为开通道还要工作区的 `node_id` / `path`）。
+/// 判据要写成 HTTP 观测而非库查询，所以断言本身不依赖它。
 #[tokio::test]
 async fn the_acp_session_id_from_the_ready_frame_comes_back_on_the_next_open() {
     let (h, node_id, session_id, mut est) = conversation_ready(

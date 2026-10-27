@@ -322,7 +322,6 @@ fn is_executable(p: &Path) -> bool {
 ///
 /// 超时后 `kill()` 子进程并返回 `Err`——**杀掉而不是放着**，否则一个挂死的
 /// agent 会一直占着一个进程槽，每轮探测再起一个。
-/// 跑 `<path> <args>` 取第一行输出（去空白）。
 fn run_version(path: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
     let mut child = Command::new(path)
         .args(args)

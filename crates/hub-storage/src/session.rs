@@ -203,7 +203,18 @@ impl SessionRepo {
         Ok(())
     }
 
-    /// 按 id 取会话。
+    /// 按 id 取会话，**不带工作区**。
+    ///
+    /// # 生产侧不用它：那里要的是 [`Self::detail`]
+    ///
+    /// 开会话、开对话、`open_channel` 都要工作区的 `node_id` 与 `path`
+    /// （通道键是 `(node_id, channel_id)`），所以生产读单行一律走 `detail`
+    /// （`conversation.rs` / `stream.rs`）。本函数的列与 `detail` 的会话段
+    /// 重叠，单看它没有额外语义——它是 `detail` 的「只要会话那一段」版本。
+    ///
+    /// 留着是给测试用的：集成测试要在固定 sleep 之外等一个时序条件
+    /// （`hub-server/tests/api.rs` 用它轮询 `acp_session_id` 是否已回填），
+    /// 同文件的单元测试也用它读回刚写的行。删掉它那批读回就得自己拼 SQL。
     pub fn find(&self, id: &str) -> Result<Option<Session>> {
         let conn = self.pool.get()?;
         conn.query_row(

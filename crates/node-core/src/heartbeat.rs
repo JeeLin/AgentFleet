@@ -54,6 +54,16 @@ use crate::connector;
 pub fn capabilities() -> serde_json::Value {
     capabilities_with_agents(&[])
 }
+// ↑ **生产路径不经过这个包装**：设备的每一次心跳都带探测结果，`worker.rs`
+// 直接调 `capabilities_with_agents`（见同处的 `heartbeat_with_agents`）。
+//
+// 它不是「给不带 agent 的设备留的」——那种设备从来不会出现：心跳要么带着
+// 上次探到的清单，要么（探测还没跑完）不上报 `agents` 键，而缺键在 Hub 侧
+// 的语义是「这次没报」，也不是「一个都没有」。
+//
+// 它真正的用途是**测试**里那条「不传探测结果时仍然是空数组」的判据
+// （本文件 `agents_are_empty_only_when_nothing_was_detected` 与
+// `tests/capabilities.rs`）：「不许编造」这条不变式需要一个零入参入口才测得动。
 
 /// 同 [`capabilities`]，但带上探测到的 agent。
 ///
@@ -88,7 +98,9 @@ pub fn workspace_roots(roots: &[&Path]) -> Vec<String> {
 
 /// 组一份心跳，`resources` 由 [`collect_resources`] 现采。
 ///
-/// 不带 agent：需要上报探测结果时用 [`heartbeat_with_agents`]。
+/// 不带 agent。**生产路径不经过它**：设备上报永远带探测结果，`worker.rs`
+/// 调的是 [`heartbeat_with_agents`]。它只给测试用（协议往返、可缺省字段清单
+/// 都要一份「最简心跳」，而传空 agents 与传 agents 在这两件事上等价）。
 pub fn heartbeat(workspace_roots: Vec<String>) -> Heartbeat {
     heartbeat_with_agents(workspace_roots, &[])
 }
