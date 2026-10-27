@@ -843,6 +843,64 @@ describe('找不到的会话', () => {
     expect(empty?.textContent).toContain('这个会话不存在')
     expect(w.element.querySelector('.af-wb__head')).toBeNull()
   })
+
+  /**
+   * 「归属设备已被删除」（`workspace.node_id === null`，会话还在列表里）与
+   * 「这个会话根本不知道是谁的」（id 不在列表里）**是两件事**。
+   *
+   * 它们曾经共用 `TabMeta.nodeId = null`，于是后者从 sessionStorage 读回来时
+   * 被 `isTabMeta` 的 `typeof nodeId === 'string'` 拦掉：刷新一次，tab 就静默
+   * 消失，「这个会话不存在」这句结论跟着一起没了。断言必须落到「刷新之后」
+   * 才抓得到——首屏的 fallback 本来就不经过读回。
+   */
+  it('会话未知（不在列表里）时明说「归属未知」，而不说成「设备已被删除」', async () => {
+    stubFetch({ '/api/sessions': { body: [] }, '/api/devices': { body: [] } })
+    sessionStorage.removeItem(STORAGE_KEY)
+    window.history.replaceState(null, '', '/sessions/s_gone')
+    route.value = matchRoute('/sessions/s_gone')
+    const w = mountIn(SessionPage)
+    await flush(w)
+
+    // 首屏：页面是「找不到」，原因写的是「不在列表里 / 归属设备未知」
+    const empty = w.element.querySelector('.af-empty')
+    expect(empty?.textContent).toContain('不在会话列表里')
+    expect(empty?.textContent).toContain('不是「设备已被删除」')
+    expect(w.element.querySelector('[data-device-removed]')).toBeNull()
+
+    // 刷新一次（同一份 sessionStorage，页面重新挂载）：结论必须还在。
+    // 这一半才是本条用例的判据——首屏的 fallback 不经过读回，落回 `null`
+    // 也能过；只有刷新后 tab 被 `isTabMeta` 丢掉时它才红。
+    w.unmount()
+    const w2 = mountIn(SessionPage)
+    await flush(w2)
+    expect(w2.element.querySelector('.af-empty')?.textContent).toContain('不在会话列表里')
+    expect(w2.element.querySelector('.af-empty')?.textContent).toContain('不是「设备已被删除」')
+  })
+
+  it('归属设备已被删除的会话：说「设备已删除」，不说成「会话未知」', async () => {
+    const sessions = [
+      session({
+        id: 's_1',
+        workspace: { node_id: null, removed_node_id: 'n_9', path: '/srv/alpha', path_locked: true },
+      }),
+    ]
+    stubFetch({ '/api/sessions': { body: sessions }, '/api/devices': { body: [] } })
+    sessionStorage.removeItem(STORAGE_KEY)
+    window.history.replaceState(null, '', '/sessions/s_1')
+    route.value = matchRoute('/sessions/s_1')
+    const w = mountIn(SessionPage)
+    await flush(w)
+
+    expect(w.element.querySelector('[data-device-removed]')).not.toBeNull()
+    expect(w.element.querySelector('[data-tab-unknown]')).toBeNull()
+
+    // 刷新一次：设备已删这一态也要活得下来
+    w.unmount()
+    const w2 = mountIn(SessionPage)
+    await flush(w2)
+    expect(w2.element.querySelector('[data-device-removed]')).not.toBeNull()
+    expect(w2.element.querySelector('[data-tab-unknown]')).toBeNull()
+  })
 })
 
 /* ------------------------------------------------------------------ 对话端到端 */

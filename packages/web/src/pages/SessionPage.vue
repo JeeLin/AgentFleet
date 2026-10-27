@@ -1166,6 +1166,46 @@ function metaOf(session: SessionSummary): TabMeta {
   }
 }
 
+/**
+ * 打开页时路由指向一个**会话列表里没有的 id**（深链接打错 / 会话已被删）。
+ *
+ * 它也要有一条 tab 元信息，页面才能说「这个会话不存在」而不是一片空白。
+ * 但它的 `nodeId` **不能写 `null`**：`TabMeta.nodeId` 的 `null` 已经被
+ * 「这台设备已被删除」占用（见 `TabMeta` 与本文件 `connOf`），而这条 id
+ * 根本还没有会话、更谈不上归属设备。两个事实共用一个 `null` 的后果是
+ * 具体的：`loadTabs` 的校验据 `typeof nodeId === 'string'` 拦掉它，于是
+ * 这条 tab 从 sessionStorage 读回来时被静默丢掉——刷新一次「找不到」的
+ * 结论就变成「没有打开任何东西」。
+ *
+ * `path` 空串是「未知」（这条 id 没有工作区），`nodeId` 空串是同一个意思：
+ * 空串不指向任何设备，`deviceOf('')` 得 `null` → `connOf('')` 退到
+ * `offline`，与「设备已删除」那一态在类型上仍然分得开。
+ */
+function unknownTabMeta(id: string): TabMeta {
+  return { id, title: `会话 ${id}`, path: '', nodeId: '' }
+}
+
+/** 一个 tab 的设备归属是否已知。判据只看 `nodeId`，不认识 `path` / `title`。 */
+function isKnownTab(tab: TabMeta): boolean {
+  return tab.nodeId !== ''
+}
+
+/**
+ * 「这个会话不存在」这句话为什么。
+ *
+ * 归属未知（`isKnownTab` 为假）时说得出**是哪一种**不知道：这条 id 不在会话
+ * 列表里，所以它也可能是「那一行存在但我们没读到」。两种原因都指向同一个
+ * 下一步（回列表），但原因写错会让人去查错的东西——「设备被删」与「链接打错」
+ * 是两个人做两件事。
+ */
+const unknownWhy = computed(() => {
+  const tab = activeTab.value
+  if (!tab || isKnownTab(tab)) {
+    return '它可能已经被删掉，或者这条链接指向一个从未建成的会话。回到会话列表看看现在有哪些。'
+  }
+  return `会话 ${tab.id} 不在会话列表里，所以它的归属设备也不得而知——这不是「设备已被删除」。这条链接可能打错了，或者它指向的会话已被删掉。回到会话列表看看现在有哪些。`
+})
+
 /** 地址栏跟随当前 tab，但**不制造历史条目**（见文件头）。 */
 function syncUrl(id: string): void {
   if (typeof history === 'undefined') return
@@ -1288,12 +1328,11 @@ async function load(): Promise<void> {
     sessions.value = list
     devices.value = devs
     // 路由里的 id 是「激活这个会话」，即使它不在列表里也要建一份 tab 元信息，
-    // 好让页面能给出「找不到 / 已结束」而不是一片空白。
+    // 好让页面能给出「找不到 / 已结束」而不是一片空白。这份元信息的形状见
+    // `unknownTabMeta`——它的 `nodeId` 是 `''` 而不是 `null`，不会被读回时丢掉。
     const id = route.value.params.id
     const known = list.find((s) => s.id === id)
-    const fallback: TabMeta[] = known
-      ? [metaOf(known)]
-      : [{ id, title: id, path: '', nodeId: null }]
+    const fallback: TabMeta[] = known ? [metaOf(known)] : [unknownTabMeta(id)]
     const restored = loadTabs(storage(), fallback)
     tabs.value = restored
     ensureWorkspaces(restored.tabs)
@@ -1376,7 +1415,7 @@ onBeforeUnmount(() => {
       v-else-if="!current"
       glyph="◈"
       title="这个会话不存在"
-      text="它可能已经被删掉，或者这条链接指向一个从未建成的会话。回到会话列表看看现在有哪些。"
+      :text="unknownWhy"
     >
       <button class="af-btn af-btn--primary af-btn--sm" type="button" @click="navigate('/sessions')">
         回到会话列表
@@ -1437,6 +1476,22 @@ onBeforeUnmount(() => {
         @activate="activate"
         @close="closeOneTab"
       />
+
+      <!--
+        这条 tab 的归属未知（见 `unknownTabMeta`）。**与下面「设备已被删除」
+        那条横幅是两个事实**：那个会话存在、只是它的设备没了；这个 id 连
+        会话都没有。不分开写的话，刷新之后用户读到的是「设备没了」，而真正
+        的原因是他手上那条链接指向一个不存在的会话。
+      -->
+      <p
+        v-if="activeTab && !isKnownTab(activeTab)"
+        class="af-wb__banner"
+        role="note"
+        data-tab-unknown
+      >
+        会话 {{ activeTab.id }} 不在会话列表里：这条链接可能打错了，或者它指向的会话已被删掉。
+        归属设备也因此未知——这不是「设备已被删除」。
+      </p>
 
       <p v-if="ended" class="af-wb__banner" role="note">
         这个会话已结束：工作区不再可达，面板不会再建立通道。列表里仍然保留它，是为了能查到
