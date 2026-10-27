@@ -6,7 +6,7 @@
 //! 事，三件都不能写在 `channel.rs` 里（那里是同步的、不持有 async 客户端）：
 //!
 //! 1. **起子进程**：读 `agent_config` 下发的命令/参数/环境，`session/new`
-//! 拿 `sessionId`。
+//!    拿 `sessionId`。
 //! 2. **收事件**：ACP 的 `session/update` 是通知，从 stdout 流里出来。**必须
 //!    在独立任务里读**——放进 `select!` 的任何一臂都会让心跳取决于 agent 有
 //!    没有吐字（M1 的 `exec` 堵住心跳臂就是这个形状）。
@@ -707,17 +707,18 @@ mod tests {
     /// 任何一环写法错，这里都拿不到一条带文字的 `batch`。
     #[tokio::test]
     #[ignore]
+    // guard 跨 `await` 存活是本用例要的语义：互斥必须覆盖整个用例体。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
     async fn a_real_opencode_turn_reaches_the_channel_as_a_batch() {
         let bin = std::env::var("AF_TEST_AGENT_BIN").unwrap_or_else(|_| {
             "/root/.local/share/mise/installs/npm-opencode-cli/latest/bin/opencode".to_string()
         });
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
-        // 通道表是进程级单例：这条用例必须独占，且**锁要拿到最后**。
-        // 不在块内释放是对的（整条用例都不能有别人动表），但 guard 跨 await
-        // 持有会被 clippy 报 `await_holding_lock`——这里是有意为之：本用例
-        // `#[ignore]`，真机单跑，独占正是它要的语义。
-        #[allow(clippy::await_holding_lock)]
-        let _guard = channel::table_lock_for_tests();
+        // 通道表是进程级单例：这条用例必须独占（`_guard` 活到用例结束）。
+        let _guard = channel::table_serial_for_tests();
         channel::reset_for_tests();
 
         let ch = "ch-e2e-acp";
@@ -897,9 +898,14 @@ for line in sys.stdin:
 
     /// **没有 `acp_session_id` → 走 `session/new`，且 `ready` 里是新 id。**
     #[tokio::test]
+    // guard 跨 `await` 存活是本用例要的语义：互斥必须覆盖整个用例体。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
     async fn a_conversation_without_an_acp_id_creates_a_new_session() {
-        // 通道表是进程级单例：不拿锁就有别的用例在中间 reset，`ready` 会被抢走
-        let _guard = channel::table_lock_for_tests();
+        // 通道表是进程级单例：不独占就有别的用例在中间 reset，`ready` 会被抢走
+        let _guard = channel::table_serial_for_tests();
         channel::reset_for_tests();
         let d = tempfile::tempdir().expect("tmp");
         let (bin, log) = recording_agent(d.path());
@@ -952,9 +958,14 @@ for line in sys.stdin:
     /// （只测 `Seq::new` 本身是**不够**的——那证明的是构造函数，证明不到
     /// `open()` 有没有把参数传进去。这一条才是接线判据。）
     #[tokio::test]
+    // guard 跨 `await` 存活是本用例要的语义：互斥必须覆盖整个用例体。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
     async fn open_continues_the_seq_from_the_last_persisted_one() {
-        // 通道表是进程级单例：不拿锁就有别的用例在中间 reset，`turn_end` 会被抢走
-        let _guard = channel::table_lock_for_tests();
+        // 通道表是进程级单例：不独占就有别的用例在中间 reset，`turn_end` 会被抢走
+        let _guard = channel::table_serial_for_tests();
         channel::reset_for_tests();
         let d = tempfile::tempdir().expect("tmp");
         // 这条判据看的是 `turn_end` 的 `seq`，不看方法序，所以日志不用。
@@ -1013,9 +1024,14 @@ for line in sys.stdin:
     /// 这条是子任务 8 的核心判据。反向验证：把 `open()` 改回恒走
     /// `new_session`，这条会红在「必须 load」那句。
     #[tokio::test]
+    // guard 跨 `await` 存活是本用例要的语义：互斥必须覆盖整个用例体。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
     async fn a_conversation_with_an_acp_id_loads_instead_of_creating() {
-        // 通道表是进程级单例：不拿锁就有别的用例在中间 reset，`ready` 会被抢走
-        let _guard = channel::table_lock_for_tests();
+        // 通道表是进程级单例：不独占就有别的用例在中间 reset，`ready` 会被抢走
+        let _guard = channel::table_serial_for_tests();
         channel::reset_for_tests();
         let d = tempfile::tempdir().expect("tmp");
         let (bin, log) = recording_agent(d.path());

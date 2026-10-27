@@ -583,7 +583,7 @@ impl Worker {
                 let default_command = self.detected_command(&spec.agent_id);
                 if let Err(reason) = self
                     .conversations
-                    .open(spec, default_command.as_deref())
+                    .open(*spec, default_command.as_deref())
                     .await
                 {
                     self.say(&format!("acp open failed ({channel_id}): {reason}"));

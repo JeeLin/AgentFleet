@@ -1214,7 +1214,7 @@ fn persist_agents(state: &AppState, node_id: &str, hb: &protocol::message::Heart
     else {
         return;
     };
-    let rows: Vec<(String, String, Option<String>, bool, Option<String>)> =
+    let rows: Vec<hub_storage::agent::DetectedRow> =
         list.iter().filter_map(parse_agent_report).collect();
     let now = hub_core::registry::now_stamp();
     if let Err(e) = state.agent_runtime().replace_detected(node_id, &rows, &now) {
@@ -1235,9 +1235,7 @@ fn persist_agents(state: &AppState, node_id: &str, hb: &protocol::message::Heart
 /// 只认对象会让整张 agent 列表静默变空。
 ///
 /// 返回 `(id, name, version, available, error)`。
-fn parse_agent_report(
-    v: &serde_json::Value,
-) -> Option<(String, String, Option<String>, bool, Option<String>)> {
+fn parse_agent_report(v: &serde_json::Value) -> Option<hub_storage::agent::DetectedRow> {
     if let Some(name) = v.as_str() {
         // 旧帧只有名字。`available = false` 是刻意的保守值：一个只说名字的
         // 帧不构成「可用」的证据，而门禁宁严勿松。

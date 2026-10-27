@@ -42,6 +42,12 @@ pub struct AgentRuntime {
     pub detected_at: String,
 }
 
+/// `replace_detected` 的一行：`(agent_id, name, version, available, probe_error)`。
+///
+/// 起别名而不是直接写五元组：`&[(String, String, Option<String>, bool,
+/// Option<String>)]` 作为参数类型读者要停下来数位，而且改一位就得在两处一起改。
+pub type DetectedRow = (String, String, Option<String>, bool, Option<String>);
+
 fn row_to_runtime(r: &Row<'_>) -> std::result::Result<AgentRuntime, r2d2_sqlite::rusqlite::Error> {
     let version: String = r.get(3)?;
     Ok(AgentRuntime {
@@ -86,12 +92,7 @@ impl AgentRuntimeRepo {
     ///
     /// 设备卸载 agent 之后，它的配置**保留**（`agent_config` 不在这条事务里）：
     /// 用户可能装回来，配置重填一遍没有理由。这与「删设备不删会话」同一个取向。
-    pub fn replace_detected(
-        &self,
-        node_id: &str,
-        rows: &[(String, String, Option<String>, bool, Option<String>)],
-        now: &str,
-    ) -> Result<()> {
+    pub fn replace_detected(&self, node_id: &str, rows: &[DetectedRow], now: &str) -> Result<()> {
         let mut conn = self.pool.get()?;
         let tx = conn.transaction()?;
         tx.execute(
@@ -238,21 +239,12 @@ pub struct AgentConfig {
 fn row_to_config(r: &Row<'_>) -> std::result::Result<AgentConfig, r2d2_sqlite::rusqlite::Error> {
     let args_json: String = r.get(2)?;
     let env_json: String = r.get(3)?;
-    // 解析失败退化成默认值而不是报错：JSON 列是我们自己写的，坏掉只可能是
-    // 外来改动。此时给一个「能启动」的默认配置，比让整页 500 好——而
-    // 用户看到的是「参数没了」，改一下就能恢复。
-    //
-    // **写成显式 `match` 而不是 `unwrap_or_default()`**：后者把「解析失败」
-    // 与「本来就是空数组/空对象」压成同一个值，读者看不出这里有分支。
-    // 生产代码禁用它是仓库规则（`scripts/check.sh` 的 C4），不是风格偏好。
-    let args: Vec<String> = match serde_json::from_str(&args_json) {
-        Ok(v) => v,
-        Err(_) => Vec::new(),
-    };
-    let env: std::collections::BTreeMap<String, String> = match serde_json::from_str(&env_json) {
-        Ok(v) => v,
-        Err(_) => std::collections::BTreeMap::new(),
-    };
+    // 缺字段或形状不对都读成空参数/空环境：JSON 列是我们自己写的，坏掉只可能
+    // 是外来改动。给一份「能启动」的默认配置比让整页 500 好——用户看到的只是
+    // 「参数没了」，改一下就能恢复。
+    let args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
+    let env: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(&env_json).unwrap_or_default();
     Ok(AgentConfig {
         node_id: r.get(0)?,
         agent_id: r.get(1)?,

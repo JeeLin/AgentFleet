@@ -120,10 +120,20 @@ match T.get(idx) { Some(&c) => out.push(c as char), None => break }
 
 `clippy --all-targets` 必须**零 warning**，所以上面每条都是 deny 而非 warn。
 
-**`unwrap_or_default` 不在这张表里**：clippy 没有这条规则，它由
-`scripts/check.sh` 的 **C4** 承担（扫 `crates/*/src/**`，按每个 `#[cfg(test)]`
-块分别划生产/测试分界——块内放行，块外即生产代码）。改那条规则要改 `check.sh`，
-不是改 `Cargo.toml`。
+**`unwrap_or_default` 允许用**（这条规则已收窄）。
+
+真正要禁的是**静默吞掉一个错误**——`let _ =`、`.ok()` 后不管、把 `Err` 分支
+压成默认值继续跑。`unwrap_or_default()` 只在**默认值本身就是正确语义**时用，
+比如「Hub 没下发某个可选的 JSON 字符串字段」= 空串、「可选的数组字段没给」=
+空列表：那里 `None` 与默认值说的是同一件事，写成 `match { Some(v) => v, None
+=> Default::default() }` 只是把同一件事多写四行。
+
+反过来，**`None` / `Err` 各自有不同含义时不许压成默认值**，要写成显式分支并
+在注释里说清每个分支的含义（`channel.rs` 的 `on_open_acp` 就是这种：空串 =
+回落到扫描结果，空列表 = 不追加参数，与「字段形状错了」不是一回事）。
+
+这条不在 `Cargo.toml` 的 lint 表里（clippy 没有对应规则），也不在
+`scripts/check.sh` 里（原先的 C4 grep 已删除，见该处注释）。判断靠读代码。
 
 **测试代码豁免由根目录 `clippy.toml` 的 `allow-*-in-tests` 承担，不要手写
 `#[allow]` 豁免头**——测试里 `unwrap` 失败就该炸，panic 消息比 `match`

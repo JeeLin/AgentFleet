@@ -107,7 +107,11 @@ pub enum Action {
         /// （用户裁定「Hub 存，设备读」），设备没有那张表可查。Hub 在建会话
         /// 时把配置读出来、随 `open_channel.params` 下发——于是设备侧只有
         /// 一份「这次要用什么命令」的事实，不会出现「设备本地配置与 Hub 不一致」。
-        spec: crate::agent::conversation::ConversationSpec,
+        ///
+        /// 装箱：`Action` 走的是低频控制路径，但枚举的大小等于最大变体，
+        /// 不装箱的话每个 `Action::None` / `Action::End` 也要背一个
+        /// `ConversationSpec`（九个字段、含两个 `String` 与三个容器）。
+        spec: Box<crate::agent::conversation::ConversationSpec>,
     },
 }
 
@@ -708,18 +712,16 @@ fn on_open(frame: &Frame) -> Action {
 /// 自己的 cwd 里跑——那是设备的数据目录，不是用户的工作区，agent 会在那里
 /// 建文件。两者都不能回落成「随便挑一个」。
 fn on_open_acp(spec: OpenChannel) -> Action {
-    let agent_id = match spec
+    let agent_id = spec
         .params
         .get("agent_id")
         .and_then(serde_json::Value::as_str)
-    {
-        Some(v) => v,
-        None => "",
-    };
-    let cwd = match spec.params.get("cwd").and_then(serde_json::Value::as_str) {
-        Some(v) => v,
-        None => "",
-    };
+        .unwrap_or_default();
+    let cwd = spec
+        .params
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
     if agent_id.is_empty() || cwd.is_empty() {
         // 码用 `Internal`：`ErrorCode` 是封闭集合，M2 不加协议变体
         // （`protocol.md` §4.1「M2 为什么没有新增消息类型」）。不加 `BadRequest`
@@ -735,9 +737,10 @@ fn on_open_acp(spec: OpenChannel) -> Action {
     // 这是 `agent_config` 那三条端点的空值语义，设备侧不重复定义（`command`
     // 空串 = 用扫描到的那一个，见 `acp.rs` 的 `spawn`）。
     //
-    // **每一处缺失都写成显式分支**（不是 `unwrap_or_default`）：这里的默认值
-    // 各有各的含义（空串 = 回落到扫描结果，空列表 = 不追加），把它们统一压成
-    // 「默认值」会让「字段形状错了」与「字段没给」看起来一样。
+    // **这几处刻意写成显式分支而不是 `unwrap_or_default`**：默认值一个都不
+    // 「平凡」——空串 = 回落到扫描结果、空列表 = 不追加、`None` = 新建会话，
+    // 与「字段形状错了」不是一回事。唯一平凡的两处（`agent_id` / `cwd`）在
+    // 上面用 `unwrap_or_default`：缺了它们这条通道直接报错，默认值就是空串。
     let command = match spec
         .params
         .get("command")
@@ -827,7 +830,7 @@ fn on_open_acp(spec: OpenChannel) -> Action {
     Action::OpenAcp {
         frames,
         channel_id: spec.channel_id,
-        spec: conv,
+        spec: Box::new(conv),
     }
 }
 
@@ -935,11 +938,49 @@ pub fn reset_for_tests() {
 /// 写帧会互相踩账，表现为「单跑全绿、全量随机红」。凡是动表的用例都必须
 /// 先拿这把锁再重置。它 `pub` 是因为 `agent::conversation` 的帧形状用例
 /// 也要动这张表，而它们在另一个模块里。
+///
+/// **返回的 guard 不实现 `Send`**（底层是 `std::sync::Mutex`），所以跨
+/// `await` 持有它会被 clippy 的 `await_holding_lock` 拦下——这是有意的门闩，
+/// 不是障碍：真要在 `async` 用例里持有整个用例体，就显式写
+/// `#[expect(clippy::await_holding_lock, reason = "…")]` 说明理由。`agent::conversation`
+/// 那几个 `#[tokio::test]` 正是这么做的，拿的也是同一条锁（[`table_serial_for_tests`]）。
 pub fn table_lock_for_tests() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    table_mutex()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// 通道表锁本体。[`table_lock_for_tests`] 与 [`try_table_lock_for_tests`]
+/// 都从这一个 `OnceLock` 取，换成两个 `OnceLock` 就成了两把锁、互斥不成立。
+fn table_mutex() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// 取通道表的**测试互斥锁**，给 `async` 用例用：`let _guard = ...;` 绑住，
+/// 互斥期与用例体同寿；拿到后自己 `reset_for_tests()`。
+///
+/// 与 [`table_lock_for_tests`] 是**同一条锁**：换成另一种锁类型就会让「同步
+/// 用例」与「`async` 用例」各锁各的，互斥随即不成立。
+///
+/// 契约：**必须绑成命名变量且活到用例结束**（`let _guard = ...`）。写成
+/// `drop(table_serial_for_tests())` / `let _ = ...` 会当场释放，互斥归零——
+/// 看起来像「拿了锁」，实际是无锁裸奔。
+///
+/// 调用方的 `#[tokio::test]` 因此要 `#[expect(clippy::await_holding_lock)]`：
+/// 那里 guard 跨 `await` 存活是**故意的**（互斥正是要覆盖整个用例体），
+/// 运行时是 current-thread，`await` 换不出去也就不会有人在这期间等这把锁。
+pub fn table_serial_for_tests() -> std::sync::MutexGuard<'static, ()> {
+    table_lock_for_tests()
+}
+
+/// 非阻塞地试拿通道表锁：`true` = 此刻没人持有。
+///
+/// 只给「互斥是否真的成立」这类探针用——`lock()` 问不出这个问题（同一线程
+/// 重入会直接自锁，别的线程则会被挂住）。生产路径不调用。
+pub fn try_table_lock_for_tests() -> bool {
+    // 与 `table_lock_for_tests` 共用同一个 `LOCK`：探针问的必须是被验的那把锁。
+    table_mutex().try_lock().is_ok()
 }
 
 // 以下一组访问器是**测试与排障 API**：读通道表的内部计数（信用、积压、
@@ -1159,15 +1200,44 @@ pub fn ready_frame(channel_id: &str, capabilities: serde_json::Value) -> Frame {
 mod tests {
     use super::*;
 
-    /// 通道表是**进程级单例**（约束 4），而 cargo test 默认多线程跑用例：
-    /// 两个用例同时调 `reset()` / `on_channel_frame()` 会互相踩对方的账，
-    /// 表现为「单跑全绿、全量随机红」。所以每个用例开头都要先拿这把锁，
+    /// 通道表是**进程级单例**（约束 4）：两个用例同时调 `reset()` /
+    /// `on_channel_frame()` 会互相踩对方的账。所以每个用例开头都要先拿这把锁，
     /// 拿到之后才 `reset()`——锁只保证互斥，空表由 `reset()` 负责。
     ///
+    /// 这把锁**不依赖** `.cargo/config.toml` 的 `RUST_TEST_THREADS = "1"`。
+    /// 那个设置只覆盖 cargo 起的测试进程；下面 `the_table_lock_*` 自己起线程
+    /// 验互斥，`#[ignore]` 的真机用例也常常被单独拉起——单线程假设一旦不成立，
+    /// 空表就会在断言中途被清掉，表现为「单跑全绿、全量随机红」。
+    ///
     /// 实现已提到模块级的 `table_lock_for_tests()`：`agent::conversation` 的
-    /// 帧形状用例也在动这张表，**两处必须是同一把锁**，否则互斥不成立。
+    /// `async` 用例也在动这张表，**两处必须是同一把锁**，否则互斥不成立。
     fn table_lock() -> std::sync::MutexGuard<'static, ()> {
         table_lock_for_tests()
+    }
+
+    /// 另一条线程若还能拿到这把锁，互斥就是假的——「拿到锁」变成原地丢掉
+    /// guard 时，两个用例会同时动表，症状是随机红而非稳定红，极难归因。
+    ///
+    /// 反向验证：把 `table_serial_for_tests` 改回丢掉 guard，或把调用点写成
+    /// `drop(channel::table_serial_for_tests());`，这里都会红。
+    #[test]
+    fn the_table_lock_is_held_across_the_caller_body() {
+        let _guard = table_serial_for_tests();
+        let free = std::thread::spawn(try_table_lock_for_tests)
+            .join()
+            .expect("探测线程不该 panic");
+        assert!(!free, "调用方仍持有通道表锁时，别的线程必须拿不到它");
+    }
+
+    /// `std::sync::Mutex` 不可重入：guard 真被持有的话，同线程再试也拿不到。
+    /// 用非阻塞探测而不是再 `lock()`，否则在坏实现下会把用例挂死而不是报红。
+    #[test]
+    fn the_table_lock_is_not_reentrant() {
+        let _guard = table_serial_for_tests();
+        assert!(
+            !try_table_lock_for_tests(),
+            "std::sync::Mutex 不可重入：持有期内同线程再拿必须失败"
+        );
     }
 
     /// 每个用例都从空表开始：通道表是进程级单例（约束 4）。
