@@ -161,9 +161,9 @@ impl Worker {
             .build()
         {
             Ok(rt) => rt,
-            // coverage: excluded — 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）时
-            // Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
             Err(e) => {
+                // coverage: excluded — 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）
+                // 时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
                 self.say(&format!("error: cannot start the async runtime: {e}"));
                 return std::process::ExitCode::FAILURE;
             }
@@ -375,9 +375,9 @@ impl Worker {
         let mut inbound = tokio::time::interval(Duration::from_millis(100));
         loop {
             tokio::select! {
-                // coverage: excluded — 心跳 tick 臂：需让 ticker 在 session 内触发而
-                // read 不返回。
                 _ = ticker.tick() => {
+                    // coverage: excluded — 心跳 tick 臂：需让 ticker 在 session
+                    // 内触发而 read 不返回。
                     if let Err(e) = self.send_heartbeat(est).await {
                         self.say(&format!("heartbeat send failed: {}", outcome_phrase(&e)));
                     }

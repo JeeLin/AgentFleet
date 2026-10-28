@@ -408,6 +408,9 @@ impl AcpClient {
                 Ok(_) => {}
                 // 超过宽限还在跑：强杀。**这不是「正常路径」**，所以留一行日志。
                 Err(_) => {
+                    // coverage: excluded — 要构造「子进程无视 stdin 关闭还活过
+                    // 5 s」的 agent；那需要一条真的不肯退出的进程，而单测里能起
+                    // 的假 agent 都是读到 EOF 就退。这是防御性兜底，不是业务分支。
                     let _ = child.start_kill();
                     let _ = child.wait().await;
                 }
@@ -470,6 +473,9 @@ async fn read_loop(
                 dispatch(&inner, v).await;
             }
             Ok(None) => break "stdout closed".to_string(),
+            // coverage: excluded — 读 stdout 本身出错（非 EOF）。管道读错误要
+            // 让内核把 fd 弄坏才构造得出，单测里起不出来；这是诚实的降级出口，
+            // 与 `Ok(None)`（正常 EOF）分开只是为了让理由里能带出错因。
             Err(e) => break format!("read error: {e}"),
         }
     };
@@ -491,6 +497,10 @@ async fn read_loop(
         Some(c) => match tokio::time::timeout(std::time::Duration::from_secs(5), c.wait()).await {
             Ok(Ok(status)) => status.code(),
             // 超时或被回收失败：真的不知道，如实报 `None`，不要编。
+            //
+            // coverage: excluded — 要 `wait()` 在 5 s 宽限内既不等完也不报错；
+            // 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败），
+            // 单测里构造不出。这是「宁可说不知道也不编」的兜底。
             Ok(Err(_)) | Err(_) => None,
         },
         None => None,
@@ -1340,6 +1350,44 @@ for raw in sys.stdin:
             Some("HAS_PATH=True"),
             "env 是**追加**不是替换，PATH 不能丢：{text}"
         );
+        c.shutdown().await;
+    }
+
+    /// 非 `session/update` 的通知也进事件流，并**保留它的 method**。
+    ///
+    /// 实测 opencode 会推 `available_commands_update` 这类通知。丢掉它们会让
+    /// 上层无从得知「agent 说了别的事」；而把它们的参数当成 `session/update`
+    /// 的形状解析，会让一句命令列表被当成一段对话正文画到页面上。
+    #[tokio::test]
+    async fn a_non_session_update_notification_keeps_its_method() {
+        let d = tempfile::tempdir().expect("tmp");
+        let body = format!(
+            r#"{PRELUDE}
+    if method == "initialize":
+        send({{"jsonrpc":"2.0","id":mid,"result":{{"protocolVersion":1}}}})
+        notify("available_commands_update", {{"commands":["/help"]}})
+"#
+        );
+        let c = client_for(&fake_agent(d.path(), "other-notify", &body)).await;
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(5), c.recv())
+            .await
+            .expect("必须收到通知")
+            .expect("事件流还在");
+        match ev {
+            Event::SessionUpdate(v) => {
+                assert_eq!(
+                    v.get("sessionUpdate").and_then(Value::as_str),
+                    Some("available_commands_update"),
+                    "method 必须保留在 sessionUpdate 字段上：{v}"
+                );
+                assert_eq!(
+                    v.get("raw").and_then(|r| r.get("commands")),
+                    Some(&serde_json::json!(["/help"])),
+                    "原始参数要原样带上，不许改写：{v}"
+                );
+            }
+            other => panic!("任何通知都走同一个出口，实际 {other:?}"),
+        }
         c.shutdown().await;
     }
 
