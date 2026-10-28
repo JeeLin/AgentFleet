@@ -359,9 +359,14 @@ fn run_version(path: &Path, args: &[&str], timeout: Duration) -> Result<String, 
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(e) => {
-                // coverage: excluded — `try_wait()` 本身失败（子进程句柄已被
-                // 内核回收 / 权限被撤）。要构造它得让内核在探测窗口里拒绝对
-                // 自己刚起的子进程做 wait，单测里没有可控手段。诚实报错，不编。
+                // coverage: excluded (racy) — `try_wait()` 本身失败（子进程句柄
+                // 已被内核回收 / 权限被撤）。要构造它得让内核在探测窗口里拒绝
+                // 对自己刚起的子进程做 wait，单测里没有可控手段，这一臂永不执行。
+                //
+                // 标 `(racy)` 而不是普通例外：同一份源码连跑两次，llvm-cov 把
+                // 这一臂归到 `Err(e) => {` 与 `return Err(...)` 两个不同的行号上
+                // （实测 361 / 365 各出现一次），于是「集合相等」的严格比对会
+                // 随机红。臂本身不可达这件事没变，变的是它被记在哪一行。
                 return Err(format!("等待进程失败：{e}"));
             }
         }
