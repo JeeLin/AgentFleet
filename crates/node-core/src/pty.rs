@@ -563,20 +563,14 @@ mod tests {
         )
         .expect("spawn");
         std::env::remove_var("AFCLI_PTY_PROBE");
-        let seen = crate::pty::testutil::read_until(&first, b"overridden");
+        let seen = crate::pty::testutil::expect_needle(&first, b"overridden", "同名键要覆盖");
         let text = String::from_utf8_lossy(&seen);
-        assert!(
-            seen.windows(10).any(|w| w == b"overridden"),
-            "同名键要覆盖：{text}"
-        );
         assert!(
             !seen.windows(11).any(|w| w == b"from-device"),
             "页面给的值该盖掉设备的：{text}"
         );
         // **用完立刻放掉**：cargo test 并行跑整个 crate，PTY 用例有十几个，
-        // 每条都不关就一起占着 master fd 与子进程。堆到一定数量后后来的
-        // 用例 `read_until` 在预算内一个字节都读不到（本机实测 5 轮红 3 轮，
-        // 症状是「新键要被追加进去：」后面是空文本），看起来像 env 逻辑坏了。
+        // 每条都不关就一起占着 master fd 与子进程。
         first.close();
 
         // 追加一个**原本没有**的键同样要生效（走 `None => push` 那条臂）。
@@ -588,12 +582,7 @@ mod tests {
             &[("AFCLI_PTY_NEW_KEY".to_string(), "appended".to_string())],
         )
         .expect("spawn");
-        let seen = crate::pty::testutil::read_until(&second, b"appended");
-        let text = String::from_utf8_lossy(&seen);
-        assert!(
-            seen.windows(8).any(|w| w == b"appended"),
-            "新键要被追加进去：{text}"
-        );
+        crate::pty::testutil::expect_needle(&second, b"appended", "新键要被追加进去");
         second.close();
 
         // **设备原有的环境必须还在**：这是「追加」之所以是追加的全部意义。
@@ -609,11 +598,10 @@ mod tests {
         )
         .expect("spawn");
         std::env::remove_var("AFCLI_PTY_INHERITED");
-        let seen = crate::pty::testutil::read_until(&third, b"kept");
-        let text = String::from_utf8_lossy(&seen);
-        assert!(
-            seen.windows(4).any(|w| w == b"kept"),
-            "设备原有的环境变量必须被继承下来（追加，不是替换）：{text}"
+        crate::pty::testutil::expect_needle(
+            &third,
+            b"kept",
+            "设备原有的环境变量必须被继承下来（追加，不是替换）",
         );
         third.close();
     }
@@ -780,8 +768,46 @@ pub(crate) mod testutil {
         // `read`，于是永远看不到代表「子进程退了」的那个 0 字节。
         rc > 0 && pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
     }
+    /// 一个子进程从 `forkpty` 到吐出第一行，正常情况下是毫秒级（本机实测
+    /// `forkpty` 往返中位数 1.1 ms、最慢 1.8 ms）。这个预算约为它的四千倍，
+    /// 为的是**把「代码坏了」与「机器忙」分开**：
+    ///
+    /// 预算按「绝对时间」给，就必然有一个能把两者混起来的上界——高负载下
+    /// 子进程排不上 CPU，于是读到 0 字节，而断言把它报成「env 没合并」。
+    /// 本机实测过这一路：`-Cinstrument-coverage` 下跑整套 crate、同时还有
+    /// cargo 在编译时，这条用例红在「新键要被追加进去：」，`{text}` 是
+    /// **空的**——看起来像 env 逻辑坏了，实则子进程一行都还没写出来
+    /// （同一份代码、同一台机器，8 轮里红 2 轮；单独跑 30 轮全绿）。
+    ///
+    /// 所以真正要保证的不是「预算够大」（没有哪个数是够大的），而是
+    /// **超时的时候说得清是超时**：`read_until` 只在读到字节后才可能
+    /// 命中 needle，而命中与否由断言判；一个字节都没读到属于**另一种
+    /// 失败**，不能与「合并逻辑错了」共用同一句报错。
+    pub(crate) const READ_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
     pub(crate) fn read_until(pty: &Pty, needle: &[u8]) -> Vec<u8> {
-        read_until_within(pty, needle, std::time::Duration::from_secs(5))
+        read_until_within(pty, needle, READ_BUDGET)
+    }
+
+    /// 等 `needle` 出现，且**必须真的出现**——等不到就按超时失败。
+    ///
+    /// 与 [`read_until`] 的差别只在失败时说什么：这条给「我等了多久、
+    /// 一个字节都没等到」和「等到了字节但没有 needle」两种情形分开的报错。
+    /// 两者指向的原因完全不同（前者是机器/子进程没起来，后者才是被测逻辑）。
+    pub(crate) fn expect_needle(pty: &Pty, needle: &[u8], what: &str) -> Vec<u8> {
+        let started = std::time::Instant::now();
+        let seen = read_until(pty, needle);
+        assert!(
+            seen.windows(needle.len()).any(|w| w == needle),
+            "{what}：{:?} 内没有出现 {needle:?}。读到 {} 字节：{:?}。\
+             读到 0 字节说明子进程一行都还没写出来——先怀疑机器忙 / 子进程没起来，\
+             再怀疑被测逻辑；读到了字节却没有 needle，读到的就是子进程实际说的话，\
+             那才是「合并逻辑错了」",
+            started.elapsed(),
+            seen.len(),
+            String::from_utf8_lossy(&seen),
+        );
+        seen
     }
 
     /// 同 [`read_until`]，超时由调用方给。
