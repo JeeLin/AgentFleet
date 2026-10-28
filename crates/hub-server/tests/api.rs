@@ -981,6 +981,44 @@ async fn a_config_can_be_written_before_the_agent_is_installed() {
     );
 }
 
+/// 坏 body 与空 id 都是同一个错误码 `invalid_request_body`，**不是 422 正文**。
+///
+/// `/api/*` 的错误体只有 `{"error": "<code>"}` 一种形状（见 `create_session`
+/// 的注释）：axum 的 `Json` 拒绝体会回 422 + text/plain，前端解析不了。所以
+/// 这里自己读 body 再判——这条用例钉的正是那个「自己读」的分支。
+#[tokio::test]
+async fn an_unparsable_or_empty_agent_config_body_is_a_bad_request() {
+    let h = Harness::new().await;
+
+    // 根本不是 JSON。
+    let r = h
+        .send(
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents/config")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, &h.csrf)
+                .body(Body::from("{not json"))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "body: {}", r.body);
+    r.assert_error_code("invalid_request_body");
+
+    // 是 JSON，但 id 是空白串：写进去也路由不到任何设备/agent。
+    let r = h
+        .post_config(json!({"node_id": "   ", "agent_id": "opencode"}))
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "body: {}", r.body);
+    r.assert_error_code("invalid_request_body");
+
+    let r = h
+        .post_config(json!({"node_id": "n_cfg", "agent_id": ""}))
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "body: {}", r.body);
+    r.assert_error_code("invalid_request_body");
+}
+
 /// 同一 (node, agent) 写两次只有一行，后写的覆盖前写的。
 #[tokio::test]
 async fn posting_the_same_config_twice_overwrites_instead_of_duplicating() {
