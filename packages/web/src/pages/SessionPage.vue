@@ -687,7 +687,8 @@ function convCancel(): void {
 }
 
 /** 说一句话：交给设备的 ACP 子进程。回复从事件流回来，不在这里等。 */
-function convSay(text: string): void {  const tab = activeTab.value
+function convSay(text: string): void {
+  const tab = activeTab.value
   if (!tab || ended.value || !hub) return
   // 设备已被删除：「说第一句话才开通道」这条懒建立会当场去开一条，
   // 而它唯一的结果是 `device_removed` 409。拦在这里，判据与横幅同一份。

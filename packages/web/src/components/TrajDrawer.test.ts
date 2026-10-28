@@ -4,6 +4,7 @@ import TrajDrawer from '@/components/TrajDrawer.vue'
 import { depth, pop, push, resetForTest, topContainer } from '@/lib/focus'
 import type { TrajectoryEvent } from '@/lib/api'
 import { mountIn } from '@/test/mount'
+import { cssRuleOf, readRepoFile } from '@/test/css'
 
 /**
  * 测试里的页面骨架（规范 §4.1 的浮层形状）：
@@ -490,6 +491,51 @@ describe('TrajDrawer：把轨迹事件画成行', () => {
 
     const shown = drawer().querySelector('.af-traj__payload')?.textContent ?? ''
     expect(shown, '正好 120 不该被截').toBe(payload)
+  })
+})
+
+/**
+ * `.af-traj__row` 声明了几列。
+ *
+ * 与同类断言一样走 `readRepoFile` + `cssRuleOf`：vitest 不开 CSS，`happy-dom`
+ * 也不排版，任何 `getComputedStyle` 在这里都是空串。而这里要拦的是
+ * 「**声明了但少一列**」，所以取不到规则必须红在本断言上，不能退化成 0。
+ */
+function declaredGridColumns(): number {
+  const source = readRepoFile('packages/web/src/components/TrajDrawer.vue')
+  const body = cssRuleOf(source, '.af-traj__row')
+  expect(body, '.af-traj__row 这条规则必须存在').not.toBe('')
+  const decl = /grid-template-columns\s*:\s*([^;}]+)/.exec(body)
+  expect(decl, '.af-traj__row 必须声明 grid-template-columns').not.toBeNull()
+  return decl![1].trim().split(/\s+/).length
+}
+
+describe('TrajDrawer：行网格装得下行内的列', () => {
+  it('声明的列数不少于实际子元素数', async () => {
+    scaffold()
+    await openDrawer(
+      {
+        events: [
+          {
+            id: 1,
+            seq: 1,
+            kind: 'agent_message_chunk',
+            payload: '{"ok":true}',
+            duration_ms: 12,
+            duration_source: 'measured',
+            created_at: '2026-10-26 10:00:00',
+          },
+        ],
+      },
+      null,
+    )
+
+    const row = drawer().querySelector<HTMLElement>('[data-traj-row]')
+    expect(row, '至少要画出一行').not.toBeNull()
+
+    // seq / kind / dur / payload：少一列就把 payload 挤到隐式第二行，
+    // 于是耗时那一列看着像 payload 的位置。
+    expect(declaredGridColumns(), '声明的列数').toBeGreaterThanOrEqual(row!.children.length)
   })
 })
 

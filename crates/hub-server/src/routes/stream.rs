@@ -1168,8 +1168,9 @@ pub(crate) fn test_binding(node_id: &str, subject: &str, acked: bool) -> Channel
 
 /// 测试用：同上，但会话 id 由调用方指定。
 ///
-/// 单独一个函数而不是给 `test_binding` 加参数：那个已有十几处调用点，而它
-/// 们全都只关心「绑定属于哪个 subject」，给它们多加一个不用看的参数是噪音。
+/// 单独一个函数而不是给 `test_binding` 加参数：`test_binding` 现有 16 处调用
+/// 点，全都不关心会话 id，给它们多加一个不看的实参是把噪音塞进 16 行。代价是
+/// 这个函数目前只有一个使用者——等它长到第二个再说也不迟。
 #[cfg(test)]
 pub(crate) fn test_binding_for_session(
     node_id: &str,

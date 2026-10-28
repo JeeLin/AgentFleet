@@ -407,7 +407,9 @@ onBeforeUnmount(() => {
 }
 .af-traj__row {
   display: grid;
-  grid-template-columns: 4ch auto 1fr;
+  /* 4 个子元素 -> 4 列：seq / kind / dur / payload。曾经声明 3 列而模板里
+     输出 4 个 span，第 4 个掉到隐式第二行的第一列，耗时列看着像 payload。 */
+  grid-template-columns: 4ch auto 5ch 1fr;
   gap: var(--af-space-2) var(--af-space-3);
   align-items: baseline;
   padding: var(--af-space-2) var(--af-space-5);

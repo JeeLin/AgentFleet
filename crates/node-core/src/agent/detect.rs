@@ -561,11 +561,9 @@ mod tests {
     /// 而不是 `if installed { ... }` 之后什么都不做——那样没装时就等于没测。
     #[test]
     fn a_real_opencode_install_is_detected_end_to_end() {
-        // coverage: excluded — 本机若**真装了** opencode，就走 `Ready` 臂；
-        // CI 上通常没装，走 `NotInstalled` 臂。两条臂互斥，同一次运行只能
-        // 覆盖其中一条，于是剩下那条恒被报成未覆盖。`Failed` / `NotCapable`
-        // 臂更是只在「装了但坏了」或「acp_args 被清空」时才执行——那两种
-        // 都是本用例要**报红**的异常，绿的时候永远不会走到。
+        // coverage: excluded — 本机若**真装了** opencode 就走 `Ready` 臂，CI 上
+        // 通常没装就走 `NotInstalled` 臂。两条臂互斥，同一次运行只能覆盖其中一条，
+        // 于是剩下那条恒被报成未覆盖——换了台机器跑就会翻转，不是漏测。
         let lookup = path_lookup;
         let probe = detect_one(&KNOWN_AGENTS[0], &lookup, DEFAULT_PROBE_TIMEOUT);
         match probe {
@@ -585,8 +583,12 @@ mod tests {
                 assert!(probe.is_available());
             }
             Probe::Failed { ref reason, .. } => {
+                // coverage: excluded — 与上面那两条互斥臂**成因不同**：这两臂是
+                // 断言失败时的出口（走进来就是红），绿的时候永远不会执行。混进
+                // 同一段理由会让「换台机器就翻转」与「红了才走」变成同一句话。
                 panic!("本机装了 opencode 却探测失败，这是真问题：{reason}");
             }
+            // coverage: excluded — 与 `Failed` 臂同因：走到这里就是红。
             Probe::NotCapable { ref version, .. } => {
                 // `KNOWN_AGENTS[0]` 是 opencode，它**有** ACP 入口（`acp_args`
                 // 非空），所以不该走到这里。真走到说明有人把 `acp_args` 清空了

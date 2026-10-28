@@ -756,9 +756,11 @@ async fn read_events(channel_id: String, client: AcpClient, seq: Seq) {
             ev = client.recv() => match ev {
                 // coverage: excluded — `AcpClient` 内部（`acp.rs` 的 `spawn`）
                 // 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以
-                // `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的。
-                // 这一臂结构上不可达，留着是因为 `recv()` 的签名是
-                // `Option<Event>`，这里必须穷尽。
+                // `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的，
+                // 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完**
+                // ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回
+                // `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。
+                // 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
                 None => break,
                 Some(Event::SessionUpdate(params)) => {
                     let mut update = params.get("update").cloned().unwrap_or(params);
@@ -829,8 +831,6 @@ async fn read_events(channel_id: String, client: AcpClient, seq: Seq) {
             }
         }
     }
-    // 循环退出时手里可能还有没发的事件（`recv` 返回 `None` 就是这么来的）。
-    flush(&channel_id, &mut batch, &mut bytes);
 }
 
 /// 一帧带计时的 `turn_end`。**帧格式是对外契约**：Hub 侧
@@ -2579,9 +2579,12 @@ notify("session/update", {"sessionId":"s","update":{"sessionUpdate":"agent_messa
     ///
     /// 攒批是为了减少帧数，不是为了延迟：一条 8 KiB 的更新若还等着「下一批
     /// 再来一起发」，用户会看见一段停顿——而停顿的长度取决于 agent 多久再吐
-    /// 一个字，那最坏是无限久。反向验证：去掉 `if bytes >= BATCH_BYTES` 那一臂，
-    /// 这条用例仍会过（定时器最终也会 flush），所以断言取在**帧的顺序**上：
-    /// 大更新必须在**同一次 pump 之前**就已经成批，而不是靠后面的定时器补。
+    /// 一个字，那最坏是无限久。
+    ///
+    /// 反向验证：把 `bytes >= BATCH_BYTES` 那一臂变成恒假，本用例**当场红**
+    /// （大更新与后面那条合进同一批，`实收 1 批` 而断言要 2）。早前的注释写成
+    /// 「这条用例仍会过」，与实测相反——它把一条咬得住的用例说成咬不住，照它
+    /// 去改代码的人会以为这里没有保护。
     #[tokio::test]
     async fn a_large_update_is_flushed_without_waiting_for_the_idle_timer() {
         // 一条远大于 4 KiB 的 update：'x' 重复 8000 次。
