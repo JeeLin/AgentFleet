@@ -969,6 +969,36 @@ mod tests {
         assert_eq!(resolve_command("", Some("")), None, "扫到空串等于没扫到");
     }
 
+    /// 起不来时，**错误里要有是哪个 agent**——否则用户只看到「没装」，
+    /// 却不知道是哪一个没装（一台设备上通常装了不止一个）。
+    ///
+    /// 反向验证：把 `format!` 换成固定字符串，`contains("opencode")` 立刻红。
+    #[tokio::test]
+    async fn opening_without_a_usable_command_names_the_agent() {
+        let convs = Conversations::default();
+        let spec = ConversationSpec {
+            channel_id: "ch-nocmd".to_string(),
+            agent_id: "opencode".to_string(),
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            // 空 = 用扫描到的那个，而这里也没给 default_command。
+            command: String::new(),
+            args: Vec::new(),
+            acp_args: Vec::new(),
+            env: BTreeMap::new(),
+            acp_session_id: None,
+            last_seq: 0,
+        };
+        let err = convs
+            .open(spec, None)
+            .await
+            .expect_err("没有可执行文件就不该开");
+        assert!(err.contains("opencode"), "错误里要指名是哪个 agent：{err}");
+        assert!(
+            err.contains("not installed") || err.contains("no command"),
+            "要说得清是「没装」还是「没配」：{err}"
+        );
+    }
+
     /// **`acp_args` 必须排在最前**：`opencode acp --model x` 里 `acp` 是
     /// 子命令，必须紧跟程序名。反过来的 `opencode --model x acp` 会被当成
     /// 未知参数，症状是「发起去了但永远等不到 initialize 响应」。
@@ -2478,6 +2508,45 @@ notify("session/update", {"sessionId":"s","update":{"sessionUpdate":"agent_messa
                 .and_then(Value::as_i64),
             Some(1),
             "起点 0 → 第一条 seq 是 1"
+        );
+    }
+
+    /// 一条更新**超过 `BATCH_BYTES`** 时立刻 flush，不等 60 ms 的空闲定时器。
+    ///
+    /// 攒批是为了减少帧数，不是为了延迟：一条 8 KiB 的更新若还等着「下一批
+    /// 再来一起发」，用户会看见一段停顿——而停顿的长度取决于 agent 多久再吐
+    /// 一个字，那最坏是无限久。反向验证：去掉 `if bytes >= BATCH_BYTES` 那一臂，
+    /// 这条用例仍会过（定时器最终也会 flush），所以断言取在**帧的顺序**上：
+    /// 大更新必须在**同一次 pump 之前**就已经成批，而不是靠后面的定时器补。
+    #[tokio::test]
+    async fn a_large_update_is_flushed_without_waiting_for_the_idle_timer() {
+        // 一条远大于 4 KiB 的 update：'x' 重复 8000 次。
+        let big = "x".repeat(8000);
+        let payload = format!(
+            r#"
+notify("session/update", {{"sessionId":"s","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{big}"}}}}}})
+notify("session/update", {{"sessionId":"s","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"after"}}}}}})
+"#
+        );
+        let frames = frames_from_read_events("ch_re_big", &payload, 0).await;
+        let batches: Vec<_> = frames
+            .iter()
+            .filter(|f| f.get("type").and_then(Value::as_str) == Some("batch"))
+            .collect();
+        assert!(
+            batches.len() >= 2,
+            "超过 BATCH_BYTES 就该当场落一批，而不是和后面那条合成一批；实收 {} 批：{frames:?}",
+            batches.len()
+        );
+        // 第一批必须只装着那条大的，它是体积触发的那一批。
+        let first_len = batches[0]
+            .get("events")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0);
+        assert_eq!(
+            first_len, 1,
+            "体积触发的那一批应该只有它自己：{first_len} 条"
         );
     }
 
