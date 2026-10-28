@@ -1779,4 +1779,193 @@ mod tests {
             serde_json::to_value(&spec).unwrap(),
         )
     }
+
+    // ---- `open_channel{connector:"acp"}` 的参数解码 ----
+    //
+    // 这一组测的是 `on_open_acp` 把 `params` 翻成 `ConversationSpec` 的那段。
+    // 它是**唯一**一条「Hub 说的话 → 设备起哪个子进程」的翻译，而在此之前
+    // 没有任何用例走过它：整段只由真实 Hub 开对话时执行，于是参数语义
+    // （空串算什么、缺字段算什么、哪些字段设备侧说了算）全靠读代码保证。
+
+    fn open_acp(channel_id: &str, params: serde_json::Value) -> Frame {
+        let spec = OpenChannel {
+            channel_id: channel_id.to_string(),
+            connector: EXTERNAL_CONNECTOR_NAME.to_string(),
+            params,
+            credit_start: 4,
+        };
+        Frame::push(types::OPEN_CHANNEL, 1, serde_json::to_value(&spec).unwrap())
+    }
+
+    /// 取 `open_channel{acp}` 的 `ConversationSpec`，断言它走到了
+    /// `Action::OpenAcp`（而不是某个错误帧）。
+    fn acp_spec(params: serde_json::Value) -> crate::agent::conversation::ConversationSpec {
+        match on_open_acp(OpenChannel {
+            channel_id: "ch-acp".to_string(),
+            connector: EXTERNAL_CONNECTOR_NAME.to_string(),
+            params,
+            credit_start: 4,
+        }) {
+            Action::OpenAcp { spec, .. } => *spec,
+            other => panic!("acp 的 open_channel 必须走到 OpenAcp，实际是 {other:?}"),
+        }
+    }
+
+    /// 缺 `agent_id` 或 `cwd` 就回错误帧，**不回落成「随便挑一个」**。
+    ///
+    /// 两条都测：只有一条缺也会误起一个在设备数据目录里乱建文件的 agent。
+    #[test]
+    fn an_acp_channel_without_an_agent_or_a_cwd_is_refused() {
+        let _guard = table_lock();
+        reset();
+        for (name, params) in [
+            ("两个都缺", serde_json::json!({})),
+            ("缺 agent_id", serde_json::json!({"cwd": "/tmp"})),
+            ("缺 cwd", serde_json::json!({"agent_id": "opencode"})),
+            (
+                "给的是空串",
+                serde_json::json!({"agent_id": "", "cwd": "/tmp"}),
+            ),
+        ] {
+            match on_channel_frame(&open_acp("ch-acp", params)) {
+                Action::Send(frames) => {
+                    assert_eq!(frames.len(), 1, "{name}：回一帧错误就够了");
+                    let f = frames.first().expect("回了一帧");
+                    let text = serde_json::to_string(&f.c).unwrap_or_default();
+                    assert!(
+                        text.contains("agent_id") && text.contains("cwd"),
+                        "{name}：理由里要点名缺的是哪个参数，实际 {text}"
+                    );
+                }
+                other => panic!("{name}：应当回错误帧，实际 {other:?}"),
+            }
+        }
+    }
+
+    /// 配置项缺省时的语义：`command` 空串 = 用扫描到的那个、`args` 空 =
+    /// 不追加、`env` 空 = 继承环境、`acp_session_id` 空 = 新建会话。
+    #[test]
+    fn an_acp_channel_without_config_asks_for_the_scanned_binary() {
+        let _guard = table_lock();
+        reset();
+        let spec = acp_spec(serde_json::json!({"agent_id": "opencode", "cwd": "/tmp"}));
+        assert_eq!(spec.channel_id, "ch-acp");
+        assert_eq!(spec.agent_id, "opencode");
+        assert_eq!(spec.cwd, "/tmp");
+        assert_eq!(spec.command, "", "空 command = 用扫描到的那一个");
+        assert!(spec.args.is_empty());
+        assert!(spec.env.is_empty());
+        assert_eq!(spec.acp_session_id, None);
+        assert_eq!(spec.last_seq, 0);
+    }
+
+    /// `acp_args` 由**设备侧清单**给，不由 Hub 下发；不认识的 agent 给空列表。
+    #[test]
+    fn the_acp_entry_args_come_from_the_device_manifest_not_the_hub() {
+        let _guard = table_lock();
+        reset();
+        let known = acp_spec(serde_json::json!({"agent_id": "opencode", "cwd": "/tmp"}));
+        assert!(
+            !known.acp_args.is_empty(),
+            "opencode 有 ACP 入口，清单里该有 acp_args"
+        );
+
+        // Hub 即使塞了 `acp_args` 也不该被采信：怎么进 ACP 模式是这个
+        // agent 自己的 CLI 契约。
+        let unknown = acp_spec(serde_json::json!({
+            "agent_id": "not-a-real-agent",
+            "cwd": "/tmp",
+            "acp_args": ["--hijacked"],
+        }));
+        assert!(
+            unknown.acp_args.is_empty(),
+            "不认识的 agent 给空列表，不是把 Hub 下发的塞进去"
+        );
+    }
+
+    /// `last_seq` 的三种坏输入都当 0——包括负数与字符串。
+    #[test]
+    fn a_last_seq_that_is_missing_or_nonsense_starts_from_zero() {
+        let _guard = table_lock();
+        reset();
+        for bad in [
+            serde_json::json!(null),
+            serde_json::json!(-5),
+            serde_json::json!("12"),
+            serde_json::json!(0),
+        ] {
+            let spec = acp_spec(serde_json::json!({
+                "agent_id": "opencode", "cwd": "/tmp", "last_seq": bad,
+            }));
+            assert_eq!(spec.last_seq, 0, "last_seq={bad} 必须当 0");
+        }
+        let spec = acp_spec(serde_json::json!({
+            "agent_id": "opencode", "cwd": "/tmp", "last_seq": 42,
+        }));
+        assert_eq!(
+            spec.last_seq, 42,
+            "正的 last_seq 要原样带上，否则会静默丢事件"
+        );
+    }
+
+    /// 空串的 `acp_session_id` 当「没有」：`Some("")` 会让 `open()` 去 load
+    /// 一个叫空字符串的会话，必然失败。
+    #[test]
+    fn an_empty_acp_session_id_means_a_new_session() {
+        let _guard = table_lock();
+        reset();
+        let empty = acp_spec(serde_json::json!({
+            "agent_id": "opencode", "cwd": "/tmp", "acp_session_id": "",
+        }));
+        assert_eq!(empty.acp_session_id, None);
+
+        let given = acp_spec(serde_json::json!({
+            "agent_id": "opencode", "cwd": "/tmp", "acp_session_id": "ses_abc",
+        }));
+        assert_eq!(given.acp_session_id.as_deref(), Some("ses_abc"));
+    }
+
+    /// `args` / `env` 里的**非字符串元素被丢掉**，不是整条拒绝。
+    ///
+    /// `args` 里的 `null` 交给 `execvp` 就是一次空指针；`env` 的值不是字符串
+    /// 同理。丢弃比拒绝好：一个坏元素不该让整场对话打不开。
+    #[test]
+    fn non_string_args_and_env_entries_are_dropped_not_fatal() {
+        let _guard = table_lock();
+        reset();
+        let spec = acp_spec(serde_json::json!({
+            "agent_id": "opencode",
+            "cwd": "/tmp",
+            "command": "/usr/bin/custom",
+            "args": ["--model", 7, null, "fast"],
+            "env": {"A": "1", "B": 2, "C": "3"},
+        }));
+        assert_eq!(spec.command, "/usr/bin/custom");
+        assert_eq!(spec.args, vec!["--model".to_string(), "fast".to_string()]);
+        assert_eq!(
+            spec.env
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("A", "1"), ("C", "3")],
+            "值不是字符串的 env 项要丢掉"
+        );
+    }
+
+    /// `connector:"acp"` 走的是 ACP 那条路，**不进 `connector::create`**：
+    /// 进去会拿到 `Unsupported`，页面看到「这台设备不支持对话」，
+    /// 而真相是「我们从来没打算把它做成 connector」。
+    #[test]
+    fn an_acp_open_frame_never_reaches_the_connector_registry() {
+        let _guard = table_lock();
+        reset();
+        let action = on_channel_frame(&open_acp(
+            "ch-acp",
+            serde_json::json!({"agent_id": "opencode", "cwd": "/tmp"}),
+        ));
+        assert!(
+            matches!(action, Action::OpenAcp { .. }),
+            "acp 的 open_channel 必须走 OpenAcp，实际 {action:?}"
+        );
+    }
 }
