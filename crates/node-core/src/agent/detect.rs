@@ -561,6 +561,11 @@ mod tests {
     /// 而不是 `if installed { ... }` 之后什么都不做——那样没装时就等于没测。
     #[test]
     fn a_real_opencode_install_is_detected_end_to_end() {
+        // coverage: excluded — 本机若**真装了** opencode，就走 `Ready` 臂；
+        // CI 上通常没装，走 `NotInstalled` 臂。两条臂互斥，同一次运行只能
+        // 覆盖其中一条，于是剩下那条恒被报成未覆盖。`Failed` / `NotCapable`
+        // 臂更是只在「装了但坏了」或「acp_args 被清空」时才执行——那两种
+        // 都是本用例要**报红**的异常，绿的时候永远不会走到。
         let lookup = path_lookup;
         let probe = detect_one(&KNOWN_AGENTS[0], &lookup, DEFAULT_PROBE_TIMEOUT);
         match probe {

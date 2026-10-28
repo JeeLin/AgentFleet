@@ -161,7 +161,9 @@ def strip_comment(lines, start, end, marker_line):
         else:
             if not s.startswith('//'):
                 continue
-            s = s[2:]
+            # 文档注释是 `///`，只剥两个斜杠会把第三个留在理由开头（`/ xxx`），
+            # 读起来像残缺。统一剥掉全部前导斜杠与紧随的一个空格。
+            s = s.lstrip('/')
             if s.startswith(' '):
                 s = s[1:]
         if s:
