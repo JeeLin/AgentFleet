@@ -217,12 +217,7 @@ pub async fn cancel(
     };
     // node_id 以会话所属的为准（绑定里的 node_id 应与之一致，以会话表的为
     // 准更保守：设备可能刚被重新注册）。
-    send_channel_data(
-        &state,
-        &node_id,
-        &channel_id,
-        json!({ "cancel": true }),
-    )?;
+    send_channel_data(&state, &node_id, &channel_id, json!({ "cancel": true }))?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -299,6 +294,22 @@ fn default_limit() -> i64 {
     200
 }
 
+/// 轨迹分页的两个边界。**生产与测试都引用这一对常量**：把 `1000` 抄进断言里，
+/// 改生产那份时测试仍然绿，等于没锁。
+///
+/// 上限 1000 是「一屏虚拟滚动够用」与「一次查询别太重」之间的折中；下限 1 是因为
+/// `?limit=0` 只会让页面拿到空数组，那不是分页而是故障。
+const TRAJECTORY_LIMIT_MIN: i64 = 1;
+const TRAJECTORY_LIMIT_MAX: i64 = 1000;
+
+/// 把页面给的 `limit` 夹进 [`TRAJECTORY_LIMIT_MIN`]..=[`TRAJECTORY_LIMIT_MAX`]。
+///
+/// 抽成函数不是为了复用（只调用一次），而是为了让测试**测到生产那一行**：
+/// 测试里自己再写一遍 `v.clamp(min, max)` 的话，生产那行没跟上常量也照样绿。
+fn clamp_limit(limit: i64) -> i64 {
+    limit.clamp(TRAJECTORY_LIMIT_MIN, TRAJECTORY_LIMIT_MAX)
+}
+
 /// 一个**会话**的轨迹必须有归属节点这条硬要求：只按 `session_id` 查会把
 /// 另一台设备上碰巧同名的会话的事件混进来（`channel_id` 只在设备内唯一，
 /// 但 `session_id` 由 Hub 生成，是全局的——所以这条要求是为了防「会话换过
@@ -318,9 +329,8 @@ pub async fn trajectory(
 
     let repo = hub_storage::TrajectoryRepo::new(state.pool().clone());
     // 分页上限**由服务端夹**：`limit` 是页面给的，不夹的话一个 `?limit=1e9`
-    // 会把整张表读进内存。1000 是「一屏虚拟滚动够用」与「一次查询别太重」
-    // 之间的折中。
-    let limit = q.limit.clamp(1, 1000);
+    // 会把整张表读进内存。边界是上面那对 `TRAJECTORY_LIMIT_*` 常量。
+    let limit = clamp_limit(q.limit);
     let events = repo
         .list(&session_id, q.after, limit)
         .map_err(|e| ApiError::internal_with("cannot read the trajectory", e))?;
@@ -355,19 +365,19 @@ pub async fn trajectory(
 mod tests {
     use super::*;
 
-    /// 对话通道的标记**必须**与设备侧认的名字一致。
+    /// 对话通道的标记**必须**是 `"acp"`。
     ///
-    /// 两边写死同一个字符串是刻意的（Hub 不引入 `node-core` 当依赖），
-    /// 所以这条测试是唯一的锁：改一边不改另一边，会话会在 `open_channel`
-    /// 之后拿到 `unsupported`，而页面只会显示「对话没反应」。
+    /// 这条锁的是 **Hub 自己那份** `ACP_CONNECTOR`。它与设备侧的
+    /// `node_core::channel::EXTERNAL_CONNECTOR_NAME` 是两个各自写死的字符串
+    /// （`node-core` 只是 hub-server 的 dev-dependency，生产里没法引用它），
+    /// 所以这里**比不出**「两边一致」——那需要设备侧那份也被断言住，而它由
+    /// `tests/api.rs` 的 `the_device_acp_connector_name_is_still_acp` 锁。
+    /// 两条用例合起来才是双向锁：改一边不改另一边，会有一条变红。
     #[test]
     fn the_acp_marker_matches_what_the_device_expects() {
-        assert_eq!(ACP_CONNECTOR, "acp");
-        // 与 `node-core::channel::EXTERNAL_CONNECTOR_NAME` 的字面值比对：
-        // 那条常量是设备侧的唯一真相源，这里是 Hub 侧的唯一真相源。
         assert_eq!(
             ACP_CONNECTOR, "acp",
-            "设备侧的 EXTERNAL_CONNECTOR_NAME 是 acp"
+            "Hub 侧的 ACP_CONNECTOR 必须是 acp；设备侧那份由 tests/api.rs 锁"
         );
     }
 
@@ -398,11 +408,29 @@ mod tests {
         assert_eq!(out.duration_source, "none");
     }
 
+    /// 分页边界：默认值与夹逼范围都是**模块常量**，这里不重抄数字。
+    ///
+    /// 反向验证：把生产那行改成 `q.limit.clamp(TRAJECTORY_LIMIT_MIN, 2000)`（常量不动），
+    /// 这条会红——它比的是 `clamp_limit` 的结果，不是常量等于它自己。
     #[test]
     fn the_default_limit_is_bounded_and_the_clamp_holds() {
         assert_eq!(default_limit(), 200);
-        // 服务端夹的范围（路由里用的是同一对数字）
-        assert_eq!(0i64.clamp(1, 1000), 1);
-        assert_eq!(1_000_000i64.clamp(1, 1000), 1000);
+        // **测的是生产那个函数**（路由里写的是 `clamp_limit(q.limit)`）。测试自己
+        // 再写一遍 `v.clamp(A, B)` 的话，生产那行没跟上常量也照样绿——那样锁住的
+        // 是常量与它自己，不是行为。
+        assert_eq!(clamp_limit(0), TRAJECTORY_LIMIT_MIN, "低于下限夹到下限");
+        assert_eq!(clamp_limit(-1), TRAJECTORY_LIMIT_MIN);
+        // 这条是真正的目的：**超过上限的请求被夹到上限**。
+        assert_eq!(clamp_limit(TRAJECTORY_LIMIT_MAX + 1), TRAJECTORY_LIMIT_MAX);
+        assert_eq!(
+            clamp_limit(i64::MAX),
+            TRAJECTORY_LIMIT_MAX,
+            "`?limit=1e9` 不许把整张表读进内存"
+        );
+        assert_eq!(
+            clamp_limit(TRAJECTORY_LIMIT_MAX),
+            TRAJECTORY_LIMIT_MAX,
+            "上限本身是允许的"
+        );
     }
 }
