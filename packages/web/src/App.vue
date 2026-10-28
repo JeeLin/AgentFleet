@@ -412,9 +412,20 @@ watch(
         </a>
       </div>
       <span class="af-spacer"></span>
-      <button class="af-sidebar__close" type="button" @click="toggleRail">
-        <span class="af-sidebar__icon" aria-hidden="true">⇤</span>
-        <span class="af-sidebar__item-text">折叠侧栏</span>
+      <!-- 折叠后**保留**这个按钮：`.af-spacer` 把它顶在侧栏底部，而它正是折叠
+           态唯一的就地展开入口（顶栏那个也能展开，但用户的手这会儿在侧栏上）。
+           折叠时只藏文字、换图标与 aria-label，按钮本身留着——否则 `.af-spacer`
+           的 `flex:1` 会把一块没有内容的空白带撑在底部，看起来像残留的拖拽区。 -->
+      <button
+        class="af-sidebar__close"
+        type="button"
+        :aria-label="rail === 'collapsed' ? '展开侧栏' : '折叠侧栏'"
+        @click="toggleRail"
+      >
+        <span class="af-sidebar__icon" aria-hidden="true">{{
+          rail === 'collapsed' ? '⇥' : '⇤'
+        }}</span>
+        <span class="af-sidebar__item-text">{{ rail === 'collapsed' ? '展开侧栏' : '折叠侧栏' }}</span>
       </button>
     </nav>
 

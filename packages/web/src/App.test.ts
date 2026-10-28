@@ -6,7 +6,7 @@ import { depth, isTabbable } from '@/lib/focus'
 import { matchRoute, route } from '@/router'
 import { device, mountIn, session } from '@/test/mount'
 import { settle, stubFetch } from '@/test/http'
-import { readRepoFile } from '@/test/css'
+import { cssRuleOf, readRepoFile } from '@/test/css'
 
 async function flush(w: ReturnType<typeof mountIn>): Promise<void> {
   for (let i = 0; i < 8; i++) {
@@ -481,9 +481,7 @@ describe('App：品牌区与导航合并成一列', () => {
   it('grid 模板里没有 brand 列：44px 独立列已取消', () => {
     const css = readRepoFile('packages/web/src/styles/components.css')
     // 取 `.af-app` 的声明体
-    const at = css.indexOf('.af-app {')
-    const close = css.indexOf('}', at)
-    const body = css.slice(at, close)
+    const body = cssRuleOf(css, '.af-app')
 
     // 正面：列名只剩 sidebar / topbar / main / status
     expect(body).toContain('grid-template-columns: 208px 1fr')
@@ -499,17 +497,15 @@ describe('App：品牌区与导航合并成一列', () => {
 
   it('折叠态退回原来的图标轨：竖排名字留着，不是藏掉', () => {
     const css = readRepoFile('packages/web/src/styles/components.css')
-    const at = css.indexOf("[data-rail='collapsed'] .af-brand {")
-    expect(at, '折叠态品牌区规则必须存在').toBeGreaterThan(-1)
-    const block = css.slice(at, css.indexOf('}', at))
+    const block = cssRuleOf(css, "[data-rail='collapsed'] .af-brand")
+    expect(block, '折叠态品牌区规则必须存在').not.toBe('')
 
     // 折叠态是竖列：方块在上、名字在下。横排名字在 52px 里会被裁掉一半。
     expect(block).toContain('flex-direction: column')
 
     // 名字**必须留着并竖排**——这是「折叠不是藏起来」的具体落点。
-    const nameAt = css.indexOf("[data-rail='collapsed'] .af-brand__name {")
-    expect(nameAt, '折叠态名字竖排规则必须存在').toBeGreaterThan(-1)
-    const nameBlock = css.slice(nameAt, css.indexOf('}', nameAt))
+    const nameBlock = cssRuleOf(css, "[data-rail='collapsed'] .af-brand__name")
+    expect(nameBlock, '折叠态名字竖排规则必须存在').not.toBe('')
     expect(nameBlock).toContain('writing-mode: vertical-rl')
 
     // 反向：折叠态不许把整个品牌区或它的名字 `display: none` 掉。
@@ -524,9 +520,8 @@ describe('App：品牌区与导航合并成一列', () => {
 
   it('折叠态：导航图标与品牌方块同轴居中', () => {
     const css = readRepoFile('packages/web/src/styles/components.css')
-    const at = css.indexOf("[data-rail='collapsed'] .af-sidebar__item {")
-    expect(at, '折叠态导航项规则必须存在').toBeGreaterThan(-1)
-    const block = css.slice(at, css.indexOf('}', at))
+    const block = cssRuleOf(css, "[data-rail='collapsed'] .af-sidebar__item")
+    expect(block, '折叠态导航项规则必须存在').not.toBe('')
 
     // 定宽 + 居中：不加这两条，导航项缩成内容宽 28px，图标贴左侧 6px，
     // 与居中的品牌方块不同轴。
@@ -534,5 +529,24 @@ describe('App：品牌区与导航合并成一列', () => {
     expect(block).toContain('justify-content: center')
     // 内边距必须归零，否则 40px 里再减 12px，图标又偏左
     expect(block).toContain('padding: 0')
+  })
+
+  it('折叠态：底部那个按钮留着，不是被藏掉留一条空白', () => {
+    const css = readRepoFile('packages/web/src/styles/components.css')
+
+    // 用户反馈「侧栏收起来以后怎么底下还有拖拉的位置」：`.af-spacer` 是
+    // `flex: 1`，它的作用就是把底部按钮顶到下边界。按钮一旦 `display: none`，
+    // 这块被 `flex: 1` 吃掉的剩余空间仍在，看起来像残留的可拖拽区。
+    // 所以折叠态**只许藏文字**，按钮本身必须留着（它也是唯一的就地展开入口）。
+    const collapsedRules = css
+      .split('\n')
+      .filter((l) => l.includes("[data-rail='collapsed']"))
+      .join('\n')
+    expect(collapsedRules).not.toContain('.af-sidebar__close { display: none')
+
+    // 按钮留着就得给它和导航项同一档定宽，否则折叠态里它比别的项宽一截。
+    const closeBlock = cssRuleOf(css, ".af-app[data-rail='collapsed'] .af-sidebar__close")
+    expect(closeBlock, '折叠态底部按钮规则必须存在').not.toBe('')
+    expect(closeBlock).toContain('width: 40px')
   })
 })

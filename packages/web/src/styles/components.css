@@ -76,10 +76,15 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
   background: var(--af-surface-1);
 }
 .af-app[data-rail='collapsed'] { grid-template-columns: 52px 1fr; }
+/* 折叠只看文字与提示，**按钮本身留着**：`.af-sidebar__close` 是折叠态唯一的
+   就地展开入口，而 `.af-spacer` 的 `flex:1` 会把它的位置撑成一块没有内容的
+   空白带——用户把这读成「残留的拖拽区」（2026-10-27 反馈）。 */
 .af-app[data-rail='collapsed'] .af-sidebar__item-text,
-.af-app[data-rail='collapsed'] .af-sidebar__hint,
-.af-app[data-rail='collapsed'] .af-sidebar__close { display: none; }
+.af-app[data-rail='collapsed'] .af-sidebar__hint { display: none; }
 .af-app[data-rail='collapsed'] .af-sidebar { align-items: center; }
+.af-app[data-rail='collapsed'] .af-sidebar__close {
+  width: 40px; justify-content: center; padding: 0;
+}
 
 /* 折叠态导航项跟着一起居中（用户裁定，2026-10-27 合并品牌区时发现）。
    `.af-sidebar` 折叠后是 `align-items: center`，子项不再被 `stretch` 拉满，
@@ -276,14 +281,6 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 
 /* 分段控件：互斥选项，选中的那格必须比 hover 更亮（否则分不出） */
 .af-seg { display: inline-flex; background: var(--af-surface-2); border-radius: var(--af-radius-sm); padding: 1px; }
-.af-seg__b {
-  background: none; border: 0; cursor: pointer; font-family: inherit;
-  font-size: var(--af-text-sm); color: var(--af-fg-tertiary);
-  padding: var(--af-space-1) var(--af-space-3); border-radius: var(--af-radius-sm);
-  transition: background-color var(--af-dur-instant) linear, color var(--af-dur-instant) linear;
-}
-.af-seg__b:hover { color: var(--af-fg-primary); }
-.af-seg__b[aria-pressed='true'] { background: var(--af-surface-3); color: var(--af-fg-primary); }
 
 /* ===========================================================================
    4. Input / Select / Textarea / 字段
