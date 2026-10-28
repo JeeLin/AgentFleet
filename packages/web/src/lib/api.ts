@@ -225,6 +225,28 @@ export function createSession(input: CreateSessionInput): Promise<SessionSummary
 }
 
 /**
+ * 停止**正在跑的那一轮**，不关闭会话。
+ *
+ * 204 只说明「这一帧已经发到设备」，**不说明设备上真有一轮被掐掉了**：
+ * Hub 判不出「轮次在不在飞」（设备侧的 `turn_in_flight` 没有 Hub 调用方），
+ * 它只校验这条会话有没有通道绑定（没有 → 404）。所以设备侧收到 cancel 而
+ * 轮次本就闲着时，它会只留痕、不回话，页面看起来毫无反应——那是协议边界，
+ * 不是请求失败。404 则是「对话根本没开过 / 会话不在你名下」。
+ *
+ * **不能用 `postJson`**：它无条件 `r.json()`，而这条端点回 **204 空体**。
+ * 按 `Response.json()` 的规范，空体是 reject（`SyntaxError`）——那样「成功
+ * 停止」会被当成错误报给用户。注意 jsdom 对空体宽容（返回 `null`），所以
+ * 这条**在单测里看不出区别**，是照着规范与同仓 `del()` 的先例（它明写
+ * 「服务端可能回 204，所以不解析响应体」）写的，不是被某条用例证出来的。
+ * 走 `request` 只为发出请求（与 `logout` 同一形态）。
+ */
+export function cancelConversation(sessionId: string): Promise<void> {
+  return request(`/api/sessions/${sessionId}/conversation/cancel`, { method: 'POST' }).then(
+    () => undefined,
+  )
+}
+
+/**
  * 登出：让 Hub 把两条 cookie 清成立即过期。
  *
  * **这不是「服务端拉黑票据」**——session 是自证的签名串，Hub 没有会话表可删；

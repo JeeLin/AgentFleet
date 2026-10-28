@@ -229,6 +229,8 @@ CREATE TABLE IF NOT EXISTS trajectory_event (
     duration_ms     INTEGER,                 -- 耗时；结构性无耗时为 NULL
     duration_source TEXT NOT NULL DEFAULT 'none'
                     CHECK (duration_source IN ('measured', 'none')),
+    -- 下面三列**当前恒 NULL**（无生产者，见 `trajectory.rs::TrajectoryEvent` 的
+    -- 字段注释）：留着是给将来的槽位，审计不该指望它们有值。
     tokens_in       INTEGER,
     tokens_out      INTEGER,
     parent_event_id INTEGER,                 -- 子 agent 事件挂父事件

@@ -199,13 +199,7 @@ const composeBlocked = computed(() => props.ended || props.deviceGone)
 
 const canSubmit = computed(() => !composeBlocked.value && draft.value.trim().length > 0)
 
-/** 「对话」目标为什么不可用。不可用时该目标直接不选。
- *
- * 目前只有 `chat` 会在此处被拦截（缺 `agentId` 时）；`exec` / 终端目标
- * 不在此处判断不可用，它们由各自的 hint 与通道状态另行表达。
- */
-/**
- * 「对话」这个目标为什么不能用。
+/** 「对话」这个目标为什么不能用。
  *
  * **判据只有 `agentId`**：对话通道是**说第一句话时才开**的（见页面
  * `ensureChatChannel`），所以「通道还没建」不是不能发，而是**还没发**——
@@ -262,8 +256,11 @@ const runBlockedWhy = computed(
 
 /** 停止按钮为什么被禁用。空串 = 可以按（有一轮在飞）。 */
 const stopBlocked = computed(() => {
-  // `incomplete` 是页面从轨迹里读来的「最后一轮没 turn_end」：等于「agent
-  // 正在回复」。没有轮次在飞时停止按钮是灰的，理由只有一条。
+  // 判据是 `incomplete`：**最后一轮没有 `turn_end`**。注意它**不等于**
+  // 「agent 正在回复」——协议上「还在跑」与「结尾丢了」长得一样
+  // （`session-and-trajectory.md` 已裁定不承诺补齐），所以 `turn_end` 一旦
+  // 丢失，这个按钮会一直可点，而按下去设备只会留痕、不回话。那是协议边界，
+  // 不是这个判据写错了；不按 `incomplete` 判就没有别的信号可用。
   if (!props.incomplete) return 'idle'
   return ''
 })
@@ -276,7 +273,12 @@ const stopBlockedWhy = computed(() => {
   return ''
 })
 
-/** 把一段文本送进设备的 ACP 子进程，并清空输入框。 */
+/**
+ * 请求掐掉正在跑的那一轮（`session/cancel`），**不关闭会话**。
+ *
+ * 不发文本、也不碰输入框——那是 `submit()` 的事；这个按钮只是把「停止」
+ * 这件事交给页面，由它去调 Hub 的 cancel 端点。
+ */
 function stop(): void {
   if (stopBlocked.value) return
   emit('cancel')

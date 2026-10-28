@@ -61,13 +61,11 @@ const PAGE_SIZE = 200
  *
  * 与 `hub-storage/src/trajectory.rs` 的 `Gap` 同一套坐标，`missing` 由 Hub 算好
  * ——前端不重算，两处各算一份会分叉。
+ *
+ * 形状直接用 `api.ts` 的 `TrajectoryGap`，**不在本文件另声明一份同形类型**：
+ * `SessionPage` 传给本组件和 `ConvFlow` 的是同一个数组，本地那份不增加任何
+ * 类型信息，只多一个会跟着漂的副本。
  */
-/*
-  断口形状直接用 `api.ts` 的 `TrajectoryGap`：原先自己声明同形的 `TrajGap`，
-  而 `SessionPage` 传给本组件和 `ConvFlow` 的是同一个数组，本地那份不增加
-  任何类型信息，只多一个会跟着漂的副本。
-*/
-
 const props = withDefaults(
   defineProps<{
     /** 抽屉开吗。本组件是受控的：不自己记住「关了」。 */
@@ -303,6 +301,15 @@ onBeforeUnmount(() => {
                   <li v-else class="af-traj__row" data-traj-row>
                     <span class="af-traj__seq">{{ row.ev.seq }}</span>
                     <span class="af-traj__kind">{{ row.ev.kind }}</span>
+                    <!--
+                      耗时（`AGENTS.md` 审查维度 7 要求轨迹可回放的五项之一）。
+                      `duration_ms === null` **不等于 0 毫秒**：ACP 的多数事件
+                      payload 里根本没有时间戳，设备侧只能记 `duration_source:
+                      'none'`。所以这里必须画成「没测到」，而不是画个 0 骗人。
+                    -->
+                    <span class="af-traj__dur" data-traj-dur>
+                      {{ row.ev.duration_ms === null ? '—' : `${row.ev.duration_ms}ms` }}
+                    </span>
                     <span class="af-traj__payload af-fp">{{ preview(row.ev) }}</span>
                   </li>
                 </template>
@@ -415,6 +422,15 @@ onBeforeUnmount(() => {
 .af-traj__kind {
   color: var(--af-fg-secondary);
   white-space: nowrap;
+}
+
+/* 耗时列：等宽 + 右对齐，好让一列数字扫一眼就能比大小。 */
+.af-traj__dur {
+  color: var(--af-fg-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 5ch;
+  text-align: right;
 }
 .af-traj__payload {
   min-width: 0;

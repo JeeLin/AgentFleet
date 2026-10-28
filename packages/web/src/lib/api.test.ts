@@ -80,6 +80,11 @@ describe('trajectory_event 的行形状只声明一次', () => {
   it('`duration_ms` / `duration_source` 在前端只出现在这一个声明里（零额外副本）', () => {
     // 数的是**类型声明**而非使用点：测试夹具里的字面量不算一份声明，
     // 而组件里再写一份接口必然同时写出这两个字段名之一。
+    //
+    // **这条只管「别抄第二份」，管不了「声明了但没人画」**：`duration_ms`
+    // 曾经正是这样——类型里有、字段集门禁也过，而三个视图谁都没渲染它，
+    // 于是「轨迹可回放」少了耗时一项却全绿。那种缺口由渲染侧的用例守
+    // （`components/TrajDrawer.test.ts` 的「每行画出耗时」）。
     const declarers = sourceFiles().filter((f) =>
       /^\s*(duration_ms|duration_source)\s*\??:/m.test(readFileSync(f, 'utf-8')),
     )

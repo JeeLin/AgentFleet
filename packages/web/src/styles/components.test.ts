@@ -25,18 +25,27 @@ import { describe, expect, it } from 'vitest'
 import { readRepoFile } from '@/test/css'
 
 /**
- * 可能有这些规则的全部文件：全局表 + 四个用到它们的组件 / 页面。
+ * 可能有这些规则的全部文件：全局表 + 用到它们的组件 / 页面。
  *
  * 只列**本里程碑归属范围内**的 .vue——`ConvFlow.vue` 不在其中（见
  * `src/components/ConvFlow.vue` 的 `.af-stage-note` 待办），所以不接受
  * 「把某个文件从这份名单里删掉」当作通过方式。
+ *
+ * **名单本身就是门禁的边界**：`countRule` 只遍历这里，所以漏掉一个文件等于
+ * 那条规则在它身上完全不受管——而症状是数出来变**小**，不会变红。这份名单
+ * 曾漏掉 `TrajDrawer.vue`（自带十几条 `.af-traj__*` 规则）与 `SessionPage.vue`
+ * / `DevicesPage.vue`，而文件头当时已经自称「跨全部可能有它的文件」。
+ * 加新组件时**先加进这里**，再写它的 scoped 规则。
  */
 const OWNED = [
   'packages/web/src/styles/components.css',
   'packages/web/src/components/AgentCatalog.vue',
   'packages/web/src/components/DeviceTable.vue',
   'packages/web/src/components/SessionTable.vue',
+  'packages/web/src/components/TrajDrawer.vue',
+  'packages/web/src/pages/DevicesPage.vue',
   'packages/web/src/pages/NewSessionPage.vue',
+  'packages/web/src/pages/SessionPage.vue',
   'packages/web/src/pages/SessionsPage.vue',
 ]
 
@@ -110,7 +119,10 @@ describe('一条规则只有一个家（跨受管文件数次数，toContain 看
    * 一个渲染成错的。要收敛得先定 `--af-*` 变体，或让两份各自留本地只共用
    * 真正相同的那几条——那需要同时改 `ConvFlow.vue`（不在本文件受管范围内）。
    *
-   * 这里只钉住「两份确实不同」这个事实，免得后来人照旧结论直接合并。
+   * 这里钉两件事：两份**确实不同**（免得后来人照旧结论直接合并），而且
+   * 差异是**双向**的——不只「目录有卡片味、对话没有」，也要钉住「对话那一份
+   * 不能长出卡片味」。只钉单向时，给 `flow` 补一句 `border-radius` 就能把
+   * 「贴在流上的一条」悄悄变成「第二张卡片」，而六条断言一条都不红。
    */
   it('.af-stage-note 的两份不是逐字重复（合并前必须先定变体）', () => {
     const catalog = stripComments(readRepoFile('packages/web/src/components/AgentCatalog.vue'))
@@ -119,8 +131,12 @@ describe('一条规则只有一个家（跨受管文件数次数，toContain 看
     expect(catalog).toMatch(/\.af-stage-note__body\s*\{[^}]*--af-text-md/)
     expect(flow).toMatch(/\.af-stage-note\s*\{[^}]*border-bottom/)
     expect(flow).toMatch(/\.af-stage-note__body\s*\{[^}]*--af-text-xs/)
-    // 反证：两份不能有对方那条差异声明
+
+    // 反证**双向**：两边都不能出现对方的形态。少写 `flow` 那两条反向断言时，
+    // 给 `flow` 补 `border-radius` 会让两份长得一样而测试全绿。
     expect(catalog).not.toMatch(/\.af-stage-note\s*\{[^}]*border-bottom/)
+    expect(flow).not.toMatch(/\.af-stage-note\s*\{[^}]*border-radius/)
+    expect(catalog).not.toMatch(/\.af-stage-note__body\s*\{[^}]*--af-text-xs/)
     expect(flow).not.toMatch(/\.af-stage-note__body\s*\{[^}]*--af-text-md/)
   })
 })

@@ -83,8 +83,17 @@ pub struct TrajectoryEvent {
     /// - `none`：没被计时。`duration_ms` **必须** 是 `NULL` —— 一条
     ///   `duration_ms = 0, source = none` 的行是「一面说没测、一面给个数」。
     pub duration_source: String,
+    /// token 记账。**当前恒 `NULL`**：没有任何生产者填它——ACP 的
+    /// `usage_update` 带 `used`/`size`/`cost`，那是**上下文窗口的占用量**，
+    /// 不是「这一轮的输入/输出 token」，把前者写进这两列会是假数据。
+    /// 页面的用量提示直接读 `usage_update`，不经过这里。
     pub tokens_in: Option<i64>,
+    /// 见 [`Self::tokens_in`]。
     pub tokens_out: Option<i64>,
+    /// 子 agent 事件挂到父事件上。**当前恒 `NULL`**：Hub 只观测 agent 运行时
+    /// 内部的父子关系（`AGENTS.md` 约束 8），不编排它，所以没有可信的父子
+    /// 映射可写。留着这一列是给「将来 ACP 给出父子关系」用的槽位，
+    /// **不读它判任何事**。
     pub parent_event_id: Option<i64>,
     pub created_at: String,
 }
@@ -149,6 +158,15 @@ const COLUMNS: &str = "id, session_id, node_id, seq, kind, payload, duration_ms,
 /// `usage_update` **不在**里面：它带 `used` / `cost` 计数，两份「内容相同」
 /// 只是恰好同值，而它的意义是「到此刻为止用了多少」——按内容去重会让计数
 /// 长时间不变的那段时间看起来像「没有事件」。
+///
+/// # 往这里加一个 kind 之前必须确认它不带 `messageId`
+///
+/// 第 3 层去重的 SQL 是 `... AND json_extract(payload, '$.messageId') IS NULL`：
+/// 带 `messageId` 的行归第 2 层管（按消息 id 去重），第 3 层**主动跳过**它们
+/// 以免两层抢同一批行。所以一个既在快照白名单里、又带 `messageId` 的 kind
+/// 会两位不管——同一份快照换了新 `seq` 就会双写。
+/// 今天没有这种 kind（`available_commands_update` 不带 `messageId`），
+/// 加新的那条时按这句核一遍即可。
 fn is_state_snapshot(kind: &str) -> bool {
     matches!(kind, "available_commands_update")
 }

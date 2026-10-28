@@ -65,7 +65,7 @@ import type {
   TrajectoryEvent,
   TrajectoryGap,
 } from '@/lib/api'
-import { getTrajectory, listDevices, listSessions } from '@/lib/api'
+import { cancelConversation, getTrajectory, listDevices, listSessions } from '@/lib/api'
 import {
   ChannelHub,
   DEFAULT_COLS,
@@ -666,9 +666,28 @@ function ensureChatChannel(tab: TabMeta): ChannelHandle {
   return handle
 }
 
-/** 说一句话：交给设备的 ACP 子进程。回复从事件流回来，不在这里等。 */
-function convSay(text: string): void {
+/**
+ * 停止正在跑的那一轮（`ConvFlow` 的停止按钮）。
+ *
+ * 这里**不关通道**：`session/cancel` 只掐一轮，会话还能继续聊。
+ *
+ * 失败要说出来，成功则**不假装**「已经停了」：Hub 回的 204 只代表帧发到了
+ * 设备，它判不出设备上到底有没有一轮在飞（见 `cancelConversation` 的注释）。
+ * 所以成功时什么横幅都不加——真停了，轨迹里会出现 `turn_end`；没停，
+ * 页面本来也没承诺过。
+ */
+function convCancel(): void {
   const tab = activeTab.value
+  const ws = activeWs.value
+  if (!tab || !ws) return
+  void cancelConversation(tab.id).catch((err: unknown) => {
+    // 404 = 对话根本没开过 / 会话不在你名下；其余（含网络）一并如实说。
+    ws.convError = err instanceof ApiError ? err.code : 'cancel_failed'
+  })
+}
+
+/** 说一句话：交给设备的 ACP 子进程。回复从事件流回来，不在这里等。 */
+function convSay(text: string): void {  const tab = activeTab.value
   if (!tab || ended.value || !hub) return
   // 设备已被删除：「说第一句话才开通道」这条懒建立会当场去开一条，
   // 而它唯一的结果是 `device_removed` 409。拦在这里，判据与横幅同一份。
@@ -1619,6 +1638,7 @@ onBeforeUnmount(() => {
             @run="runCommand"
             @send="convSend"
             @say="convSay"
+            @cancel="convCancel"
             @open-traj="toggleTraj"
           />
           <div class="af-wb__convhint af-field__hint">

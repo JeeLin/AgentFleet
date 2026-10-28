@@ -222,12 +222,36 @@ async fn a_killed_worker_comes_back_with_the_same_identity() {
     // 判「库里有几行」而不是「某个采样窗口里连接表有没有出现过两条」：
     // 后者在慢机器上恒真（窗口里没采到不等于没发生过），而 enroll 落库是
     // 累积事实，与时钟无关。
-    let devices = hub.state.devices().list().unwrap();
+    // 判据写成「**这台**设备只占一行」，不是「库里只有一行」：后者读的是
+    // 全局表长，任何遗留数据 / 同进程复用的 Hub 都会让它数出成立不成立之外
+    // 的原因——那正是「拿全局状态代表本次实验」的形状。
+    let mine: Vec<String> = hub
+        .state
+        .devices()
+        .list()
+        .unwrap()
+        .iter()
+        .filter(|d| d.id == first)
+        .map(|d| d.id.clone())
+        .collect();
     assert_eq!(
-        devices.len(),
+        mine.len(),
+        1,
+        "同一个 node_id 在库里必须只占一行，实际：{mine:?}"
+    );
+    // 顺带把「没有冒出第二个身份」也钉住：本用例只 enroll 过一台，多出来的
+    // 行就是换了身份的痕迹。
+    assert_eq!(
+        hub.state.devices().list().unwrap().len(),
         1,
         "换 worker 之后出现了多个 node_id：{:?}",
-        devices.iter().map(|d| &d.id).collect::<Vec<_>>()
+        hub.state
+            .devices()
+            .list()
+            .unwrap()
+            .iter()
+            .map(|d| d.id.clone())
+            .collect::<Vec<_>>()
     );
 
     let _ = child.kill();

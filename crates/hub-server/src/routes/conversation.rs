@@ -192,7 +192,8 @@ pub async fn open(
 /// 情形，Hub 侧不持续追踪（`say`/`turn_end` 的上报在 WS 读循环里，不在这
 /// 个端点能同步看到）。前端的停止按钮只在回复在飞时才可用，所以它不会
 /// 在「闲着」时调这里；设备侧 `drain_inbound` 若收到 cancel 而没轮次在飞，
-/// 只留痕、不关通道。Hub 的 HTTP 层负责把「能不能发出 cancel」这件事说清。
+/// 只留痕、不关通道。所以这个端点**只说得出两件事**：404「没绑过通道」与
+/// 204「帧已发出」——它判不出、也不承诺「设备上真有一轮被掐掉」。
 pub async fn cancel(
     State(state): State<AppState>,
     Extension(auth): Extension<Authenticated>,
@@ -209,14 +210,22 @@ pub async fn cancel(
     };
     // 找这条会话的 ACP 通道绑定：没有就说明对话从未打开过，不是「停了」，
     // 而是「还没开始」。同时校验归属，避免泄漏「会话存在但不在你名下」。
-    let Some((channel_id, _)) = state
+    let Some((channel_id, bound_node)) = state
         .bindings()
         .find_by_session(&session_id, auth.subject())
     else {
         return Err(ApiError::not_found());
     };
-    // node_id 以会话所属的为准（绑定里的 node_id 应与之一致，以会话表的为
-    // 准更保守：设备可能刚被重新注册）。
+    // **绑定里的 node_id 必须与会话所属的一致**，不一致就当作「没有可用绑定」。
+    //
+    // `send_channel_data` 是**按 node_id 路由**的，所以这里要是照会话的
+    // node_id 发、而绑定指向另一台设备，这一帧就发到了错误的设备上（那条
+    // 通道 id 在它那儿多半不存在，于是帧无声消失，页面却收到了 204）。
+    // 注释原先只写「应与之一致」——那是一句愿望，不是检查。设备重新注册
+    // 或绑定没清干净时它不成立，而症状是「按了停止什么都没发生」。
+    if bound_node != node_id {
+        return Err(ApiError::not_found());
+    }
     send_channel_data(&state, &node_id, &channel_id, json!({ "cancel": true }))?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }

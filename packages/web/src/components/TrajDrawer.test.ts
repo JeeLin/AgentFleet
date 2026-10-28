@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import TrajDrawer from '@/components/TrajDrawer.vue'
 import { depth, pop, push, resetForTest, topContainer } from '@/lib/focus'
+import type { TrajectoryEvent } from '@/lib/api'
 import { mountIn } from '@/test/mount'
 
 /**
@@ -328,9 +329,30 @@ describe('TrajDrawer：空态不含假行', () => {
 })
 
 describe('TrajDrawer：把轨迹事件画成行', () => {
-  /** 造一条轨迹事件。 */
-  function ev(id: number, seq: number, kind: string, payload: unknown = {}) {
-    return { id, seq, kind, payload: JSON.stringify(payload), created_at: '2026-10-26 10:00:00' }
+  /**
+   * 造一条轨迹事件。
+   *
+   * **返回类型必须是 `TrajectoryEvent`**：不加标注时这份夹具是「结构上碰巧
+   * 对得上」的匿名对象，后端往事件里加字段（例如 `duration_ms`）编译器不会
+   * 叫住它，于是「加了字段但没人渲染」能静悄悄地活下来——`duration_ms`
+   * 就是这么漏的（见 `组件测试：耗时列`）。
+   */
+  function ev(
+    id: number,
+    seq: number,
+    kind: string,
+    payload: unknown = {},
+    duration_ms: number | null = null,
+  ): TrajectoryEvent {
+    return {
+      id,
+      seq,
+      kind,
+      payload: JSON.stringify(payload),
+      duration_ms,
+      duration_source: duration_ms === null ? 'none' : 'measured',
+      created_at: '2026-10-26 10:00:00',
+    }
   }
 
   it('每行带 seq / kind / payload，条数写在脚注里', async () => {
@@ -350,6 +372,40 @@ describe('TrajDrawer：把轨迹事件画成行', () => {
     expect(el.textContent).toContain('agent_message_chunk')
     expect(el.textContent).toContain('turn_end')
     expect(el.querySelector('.af-traj__foot')?.textContent).toContain('2 条')
+  })
+
+  /**
+   * 耗时列必须真的上屏。
+   *
+   * `AGENTS.md` 审查维度 7 把「耗时」列为轨迹可回放的五项之一（类型 / 输入 /
+   * 输出 / 耗时 / 归属节点）。这一列此前**只存在于类型声明里**：`duration_ms`
+   * 在 `lib/api.ts` 有定义、`api.test.ts` 有字段集门禁，但三个视图谁都没画它，
+   * 于是「可回放」缺了一项而所有测试全绿。
+   *
+   * 反向验证：把 `TrajDrawer.vue` 里那个 `<span data-traj-dur>` 删掉 → 红。
+   */
+  it('每行画出耗时；没测到的画「—」而不是 0', async () => {
+    scaffold()
+    await openDrawer(
+      {
+        events: [
+          // 设备侧掐过表的：12_450ms
+          ev(1, 1, 'turn_end', { stopReason: 'end_turn' }, 12_450),
+          // ACP 的多数事件 payload 里没有时间戳，设备只能记 `none`
+          ev(2, 2, 'agent_message_chunk', { content: [] }, null),
+        ],
+        gaps: [],
+      },
+      null,
+    )
+
+    const durs = [...drawer().querySelectorAll('[data-traj-dur]')].map((n) =>
+      n.textContent?.trim(),
+    )
+    expect(durs, '两条事件各要有一格耗时').toHaveLength(2)
+    expect(durs[0], '测到的必须把数字画出来').toBe('12450ms')
+    // **「没测到」不许画成 0**：那会让审计以为这一轮跑了 0 毫秒。
+    expect(durs[1], '没测到的要画成「—」').toBe('—')
   })
 
   it('断口画在缺的那截上，写明缺几条', async () => {
@@ -407,14 +463,33 @@ describe('TrajDrawer：把轨迹事件画成行', () => {
     expect(drawer().querySelector('[data-traj-more]')).toBeNull()
   })
 
+  /**
+   * 截断阈值必须**逐字钉死**，不能只写一个上界。
+   *
+   * 原来的断言是 `toBeLessThan(140)`：任何落在 `[1, 139]` 的截断长度都能过，
+   * 把实现的 `120` 改成 `3`（抽屉里只剩 `xxx…`）整份测试照样全绿——上界只
+   * 挡住「整条上屏」，不锚定 120 这个契约值。
+   *
+   * `preview()` 看的是**存进库的 payload 串**，而夹具把字符串再 `JSON.stringify`
+   * 一次，所以开头会多一个引号：这里按「引号 + 120 个 x + …」逐字比。
+   */
   it('payload 过长时截断显示（只影响显示，不影响数据）', async () => {
     scaffold()
-    const long = 'x'.repeat(400)
-    await openDrawer({ events: [{ id: 1, seq: 1, kind: 'tool_call', payload: long, created_at: '' }] }, null)
+    await openDrawer({ events: [ev(1, 1, 'tool_call', 'x'.repeat(400))] }, null)
 
     const shown = drawer().querySelector('.af-traj__payload')?.textContent ?? ''
-    expect(shown.length).toBeLessThan(140)
-    expect(shown).toContain('…')
+    expect(shown, '从引号起截到 120 字符，再加省略号').toBe(`${JSON.stringify('x'.repeat(400)).slice(0, 120)}…`)
+  })
+
+  it('不超阈值时一个字都不动', async () => {
+    scaffold()
+    // 118 个 x → 加两侧引号正好 120，是「不截」的边界值本身。
+    const payload = JSON.stringify('x'.repeat(118))
+    expect(payload).toHaveLength(120)
+    await openDrawer({ events: [ev(1, 1, 'tool_call', 'x'.repeat(118))] }, null)
+
+    const shown = drawer().querySelector('.af-traj__payload')?.textContent ?? ''
+    expect(shown, '正好 120 不该被截').toBe(payload)
   })
 })
 

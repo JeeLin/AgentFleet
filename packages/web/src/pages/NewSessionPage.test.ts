@@ -280,8 +280,29 @@ describe('NewSessionPage：提交', () => {
     expect(submittedBody(fn)).toEqual({ node_id: 'n_1', path: '/srv/alpha', agent_id: null })
   })
 
+  /**
+   * 「没有能对话的 agent 时仍能用『不指定』建会话」。
+   *
+   * 判据必须是**真的发出了 POST、且 body 里 `agent_id` 是 `null`**：
+   * 只断言「按钮没灰」证明不了会话建得成——按钮可点而提交路径写错
+   * （例如 `pickedAgent.value || 'default'`）时，旧写法照样绿。
+   */
   it('这台设备没有能对话的 agent 时，仍能用「不指定」建会话', async () => {
-    stubFetch({ '/api/devices': { body: [NO_USABLE] }, '/api/agents': { body: [] } })
+    const fn = stubFetch({
+      '/api/devices': { body: [NO_USABLE] },
+      '/api/agents': { body: [] },
+      '/api/sessions': {
+        status: 201,
+        body: {
+          id: 's_new',
+          agent_id: null,
+          state: 'running',
+          created_at: 'unix:1700000000',
+          ended_at: null,
+          workspace: { node_id: 'n_2', path: '/srv/beta', path_locked: true },
+        },
+      },
+    })
     const w = mountIn(NewSessionPage)
     await flush(w)
     await pickDevice(w)
@@ -291,6 +312,16 @@ describe('NewSessionPage：提交', () => {
     // 「不指定」必须还在：没有 agent 也该能开会话（终端 / exec 照常）
     await pickAgent(w, '')
     expect(w.element.querySelector<HTMLButtonElement>('.af-submit button')?.disabled).toBe(false)
+
+    // 真的按下去：按钮可点 ≠ 会话建成了。
+    await w.element.querySelector<HTMLButtonElement>('.af-submit button')?.click()
+    await flush(w)
+
+    expect(submittedBody(fn)).toEqual({
+      node_id: 'n_2',
+      path: '/srv/beta',
+      agent_id: null,
+    })
   })
 
   it('装了但跑不起来的那个不进可选项，但它的原因要写出来', async () => {

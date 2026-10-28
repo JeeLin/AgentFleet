@@ -98,6 +98,8 @@ async function mountWorkbench(seed: TabMeta[] = TWO_TABS, id = 's_1'): Promise<C
       status: 201,
       body: { channel_id: 'ch-acp', node_id: 'n_1', session_id: 's_1' },
     },
+    // 停止一轮：Hub 回 204 **空体**（所以前端不能用 `postJson` 解它）。
+    '/api/sessions/s_1/conversation/cancel': { empty: true },
     '/api/sessions/s_1/trajectory': {
       body: {
         events: [
@@ -1212,5 +1214,71 @@ describe('轨迹抽屉：打开即读，读到就画', () => {
     const rows = document.querySelectorAll('[data-traj-row]')
     expect(rows.length, '轨迹行要画出来').toBe(1)
     expect(rows[0]?.textContent).toContain('agent_message_chunk')
+  })
+})
+
+describe('停止按钮：真的有前端链路（不是只画了个按钮）', () => {
+  /**
+   * 判据必须是**发出去的请求**，不是「按钮存在」或「点了没抛错」。
+   *
+   * 修前这条路径整条是空的：`ConvFlow` `emit('cancel')`，而 `SessionPage`
+   * 的 `<ConvFlow>` 只有 `@run/@send/@say/@open-traj` 四个监听器，没有
+   * `@cancel`；`api.ts` 里也没有任何 cancel 函数。于是按钮可点、点了什么
+   * 都不发生，而当时的测试**没有任何一条**碰过 `[data-conv-stop]`。
+   *
+   * 反向验证：删掉 `SessionPage.vue` 模板里那行 `@cancel="convCancel"`
+   * → 这里收不到 POST，红。
+   */
+  it('点停止 → POST /api/sessions/{id}/conversation/cancel', async () => {
+    const fetchMock = stubFetch({
+      '/api/sessions': { body: WITH_AGENT },
+      '/api/devices': { body: DEVICES },
+      '/api/sessions/s_1/conversation': {
+        status: 201,
+        body: { channel_id: 'ch-acp', node_id: 'n_1', session_id: 's_1' },
+      },
+      '/api/channels/ch-acp': { empty: true },
+      '/api/channels/ch-acp/send': { empty: true },
+      // 有一点还没收口 → 停止按钮可点。`incomplete` 就是它的唯一判据。
+      '/api/sessions/s_1/trajectory': {
+        body: {
+          events: [
+            { id: 1, seq: 1, kind: 'agent_message_chunk', payload: '{"content":[{"type":"text","text":"hi"}]}', duration_ms: null, duration_source: 'none', created_at: 'unix:1' },
+          ],
+          gaps: [],
+          incomplete: true,
+        },
+      },
+      '/api/sessions/s_1/conversation/cancel': { empty: true },
+    })
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify([TWO_TABS[0]]))
+    window.history.replaceState(null, '', '/sessions/s_1')
+    route.value = matchRoute('/sessions/s_1')
+    const w = mountIn(SessionPage)
+    await flush(w)
+
+    // 先把轨迹读进来：`incomplete` 由它决定，按钮是否可点取决于它。
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 't', bubbles: true, cancelable: true }))
+    await flush(w)
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 't', bubbles: true, cancelable: true }))
+    await flush(w)
+
+    const stop = document.querySelector<HTMLElement>('[data-conv-stop]')
+    expect(stop, '停止按钮要渲染出来').toBeTruthy()
+    expect(stop!.hasAttribute('disabled'), '有未收口的一轮时停止按钮必须可点').toBe(false)
+
+    stop!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flush(w)
+
+    const calls = fetchMock.mock.calls.map(([url, init]) => ({
+      url: new URL(String(url), 'http://hub.local').pathname,
+      method: ((init as RequestInit | undefined)?.method ?? 'GET').toUpperCase(),
+    }))
+    const cancel = calls.filter((c) => c.url === '/api/sessions/s_1/conversation/cancel')
+    expect(
+      cancel.length,
+      `点停止必须发出 cancel 请求，实收：${JSON.stringify(calls)}`,
+    ).toBe(1)
+    expect(cancel[0]!.method, 'cancel 是 POST').toBe('POST')
   })
 })

@@ -1958,7 +1958,7 @@ async fn opening_a_conversation_on_a_removed_device_is_device_removed() {
 /// 页面停下之后还能接着聊。
 #[tokio::test]
 async fn cancelling_a_running_conversation_returns_204() {
-    let (h, _node, session_id, _est) = conversation_ready(
+    let (h, _node, session_id, mut est) = conversation_ready(
         json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
         "opencode",
     )
@@ -1967,9 +1967,38 @@ async fn cancelling_a_running_conversation_returns_204() {
     // 先打开对话通道（建立 channel 绑定），再按停止。
     let r = h.open_conversation(&session_id).await;
     assert_eq!(r.status, StatusCode::CREATED, "body: {}", r.body);
+    // 把 `open_channel` 消费掉：不消费的话下面可能先读到它，于是「收到了
+    // cancel」这件事会被一张不相干的帧蒙过去。
+    let _ = open_channel_on(&mut est).await;
 
     let r = h.cancel_conversation(&session_id).await;
     assert_eq!(r.status, StatusCode::NO_CONTENT, "body: {}", r.body);
+
+    // **204 只说明 Hub 回了状态码，不等于帧真的发出去了。** 这条用例原来
+    // 把 `est` 直接丢掉、只断言状态码——那样即使 `send_channel_data` 短路
+    // 或者绑定是陈旧的，它照样全绿（打不到它要守的东西）。所以真去读设备
+    // 那一侧收到了什么。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let cd = loop {
+        let text = tokio::time::timeout_at(deadline, est.next_text())
+            .await
+            .expect("3s 内设备必须收到 cancel 帧")
+            .expect("连接不许断")
+            .expect("必须是文本帧");
+        let f: protocol::frame::Frame =
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("解不开的帧 {text}: {e}"));
+        if f.msg_type == protocol::message::types::CHANNEL_DATA {
+            break f
+                .payload::<protocol::channel::ChannelData>()
+                .expect("channel_data 载荷");
+        }
+    };
+    assert_eq!(
+        cd.payload["cancel"],
+        json!(true),
+        "设备收到的必须是 `cancel: true`，实收：{}",
+        cd.payload
+    );
 }
 
 /// 对话从未打开过 → 404 `not_found`（不是「停了」，而是「还没开始」）。
