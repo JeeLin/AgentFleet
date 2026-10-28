@@ -2395,8 +2395,11 @@ for line in sys.stdin:
 
     /// 握手后**主动吐 `payload` 再退出**的假 agent。
     ///
-    /// 主动退出是本组测试的终止信号：`read_events` 在 `recv()` 返回 `None`
-    /// 时自己结束，于是「假 agent 说完就退」正好把退出路径也走到。
+    /// 主动退出是本组测试的终止信号：`read_events` 收到 `Event::Exited` 就
+    /// 结束。**不是靠 `recv()` 返回 `None`**——`AcpClient` 内部自己持着事件
+    /// 发送端的一个克隆（见 `acp.rs` 的 `spawn`），那个克隆活到客户端被丢弃，
+    /// 所以 `recv()` 永远等不到 `None`，`read_events` 里对应的那一臂因此
+    /// 结构上不可达（已登记）。
     fn scripted_agent(dir: &Path, payload: &str) -> PathBuf {
         let path = dir.join("scripted-agent");
         let script = format!(
@@ -2485,6 +2488,58 @@ for line in sys.stdin:
             .collect()
     }
 
+    /// 与 [`frames_from_read_events`] 同路，但**在 agent 还活着的时候就取帧**。
+    ///
+    /// 那个版本会等读循环自己结束才取，于是只能在 agent 退出的用例里用。而
+    /// 「定时臂把攒着的那批推出去」恰恰要求 agent **不退出**：一退出，
+    /// `Exited` 那条路径也会 flush，就分不清到底是谁推的。
+    ///
+    /// 所以这里给读循环一段固定预算（远大于 `BATCH_INTERVAL`），到点就取帧、
+    /// 然后 `abort` 读任务。每轮都 `await` 一次 sleep：单线程运行时下紧凑
+    /// 循环会把读任务整个饿死。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    async fn frames_from_read_events_while_alive(
+        ch: &str,
+        payload: &str,
+        last_seq: i64,
+    ) -> Vec<Value> {
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+        channel::open_external(ch);
+
+        let d = tempfile::tempdir().expect("tmp");
+        let bin = scripted_agent(d.path(), payload);
+        let client = AcpClient::spawn(
+            bin.to_str().expect("路径"),
+            &[],
+            &BTreeMap::new(),
+            "",
+            Some(d.path()),
+        )
+        .await
+        .expect("握手应成功");
+        let seq = Seq::new(last_seq);
+        let reader = tokio::spawn(read_events(ch.to_string(), client, seq));
+
+        // 4 × 60 ms 的定时窗口，足够定时臂至少走两轮。
+        for _ in 0..4 {
+            tokio::time::sleep(BATCH_INTERVAL).await;
+        }
+        let frames = channel::pump()
+            .into_iter()
+            .filter(|(id, _)| id == ch)
+            .flat_map(|(_, frames)| frames)
+            .filter_map(|f| f.payload::<protocol::channel::ChannelData>().ok())
+            .map(|d| d.payload)
+            .collect();
+        reader.abort();
+        let _ = reader.await;
+        frames
+    }
+
     /// `session/update` 攒成一批：**一条 `batch` 里带着它的 `seq`**。
     #[tokio::test]
     async fn read_events_batches_updates_and_numbers_them() {
@@ -2547,6 +2602,50 @@ notify("session/update", {{"sessionId":"s","update":{{"sessionUpdate":"agent_mes
         assert_eq!(
             first_len, 1,
             "体积触发的那一批应该只有它自己：{first_len} 条"
+        );
+    }
+
+    /// 空闲时也必须发得出去：**一条小更新靠 60 ms 的定时器落批**。
+    ///
+    /// 攒批是为了少发帧，不是为了延迟。只看「事件到达」是不够的——最后
+    /// 一句话永远在等下一个事件，而 agent 可能再也不说下一句。没有这条
+    /// 定时臂，页面会一直停在「agent 正在想」。
+    ///
+    /// 所以假 agent 吐一条**小**更新（远不到 `BATCH_BYTES`）之后**不退出**、
+    /// 只是不再说话：把「体积触发的 flush」与「握手的 flush」都排除掉，
+    /// 能把它发出去的只剩定时臂。
+    ///
+    /// 反向验证：把 `_ = tick.tick()` 那一臂的 `flush` 去掉，这里收不到任何 `batch`。
+    #[tokio::test]
+    async fn read_events_flushes_a_lone_update_on_the_idle_timer() {
+        // 脚本：吐一条更新，然后**挂着读 stdin**（既不说话也不退出）。
+        let payload = r#"
+notify("session/update", {"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"solo"}}})
+for _ in sys.stdin:
+    pass
+"#;
+        let frames = frames_from_read_events_while_alive("ch_re_tick", payload, 0).await;
+        let batches: Vec<_> = frames
+            .iter()
+            .filter(|f| f.get("type").and_then(Value::as_str) == Some("batch"))
+            .collect();
+        assert_eq!(
+            batches.len(),
+            1,
+            "那条小更新必须靠定时臂落批（agent 一直不说话、也不退出）：{frames:?}"
+        );
+        let events = batches[0]
+            .get("events")
+            .and_then(Value::as_array)
+            .expect("events");
+        assert_eq!(events.len(), 1, "这一批里就它一条");
+        assert_eq!(
+            events[0]
+                .get("content")
+                .and_then(|c| c.get("text"))
+                .and_then(Value::as_str),
+            Some("solo"),
+            "载荷原样，不得改写"
         );
     }
 
