@@ -339,6 +339,20 @@ const execHandles = new Set<ChannelHandle>()
  */
 const chatHandles = new Map<string, ChannelHandle>()
 
+/**
+ * 这张表还剩几条，**只给测试看**（`SessionPage.test.ts`）。
+ *
+ * 对话释放不能只靠 DELETE 断言：`close()` 发 DELETE，而「删掉表项」不发任何
+ * 请求。于是「关了但没删」在网络上与「关了且删了」**一模一样**——只断言
+ * DELETE 的用例在漏掉 `delete` 时照样绿（本里程碑实测过）。
+ * 这里只读一个数，不暴露句柄，也不给测试改状态的入口。
+ */
+function chatHandleCount(): number {
+  return chatHandles.size
+}
+
+defineExpose({ chatHandleCount })
+
 function ensureChannel(tab: TabMeta, panel: PanelName): ChannelHandle {
   const key = channelKey(tab.id, panel)
   const existing = channels.get(key)
@@ -475,6 +489,23 @@ async function releaseTab(tabId: string): Promise<void> {
   const ws = workspaces.get(tabId)
   const panels = ws ? [...ws.mounted] : (['terminal', 'files'] as PanelName[])
   for (const panel of panels) await releaseChannel(tabId, panel)
+  // 对话通道不挂在 `ws.mounted` 上（它在对话列、没有坞位），所以必须在这里
+  // 单独释放：`releaseChannel` 按面板名找键，永远找不到 `tabId␀chat`。
+  // 顺序与 `releaseChannel` 一致——先删表再 `close()`：只关不删的话，键还在，
+  // 关掉 tab 后重开同一个会话会拿回一个已经 `closed` 的句柄，`open()` 不再生效。
+  const chatKey = `${tabId}\u0000chat`
+  const chat = chatHandles.get(chatKey)
+  if (chat) {
+    chatHandles.delete(chatKey)
+    await chat.close()
+  }
+  // 关 tab 时还挂在窗口里的轨迹重读也要撤掉：它读的是一个已经不在工作区里的
+  // 会话，读回来的结果只会写进马上要丢掉的 `ws`。
+  const trajPending = trajTimers.get(tabId)
+  if (trajPending !== undefined) {
+    clearTimeout(trajPending)
+    trajTimers.delete(tabId)
+  }
 }
 
 /* ---------------------------------------------------------------- 面板坞 */
@@ -627,8 +658,10 @@ function ensureChatChannel(tab: TabMeta): ChannelHandle {
   })
   // 对话的帧只用来判「还在动」：内容一律读轨迹表（`GET .../trajectory`），
   // 因为帧在断线期间会丢，而轨迹是库里的。页面不靠帧补历史。
+  // 读的动作走 `scheduleTrajectory`：一次回复的帧是成批到的，每帧一读会把
+  // 请求数抬到帧数那么多，而新内容往往只有几个字。
   handle.onFrame(() => {
-    void refreshTrajectory(tab.id)
+    scheduleTrajectory(tab.id)
   })
   return handle
 }
@@ -650,6 +683,10 @@ function convSay(text: string): void {
  *
  * **每次有帧到达就重读一次**，而不是把帧直接拼进列表：帧是「此刻流过的事」，
  * 断线期间会丢；轨迹是「库里的事实」，两者拼起来会有两套顺序。页面只信后者。
+ *
+ * `trajLoading` 只挡住**同时**发起的读。同一 tick 里涌进来的几帧确实会被它
+ * 合成一次，但真机上帧是隔几百毫秒到的：上一读已完成，下一帧又是一次整表重读，
+ * 长回复的请求数仍≈帧数。跨帧的合并要在 [`scheduleTrajectory`] 里做。
  */
 async function refreshTrajectory(tabId: string): Promise<void> {
   const ws = workspaces.get(tabId)
@@ -670,6 +707,34 @@ async function refreshTrajectory(tabId: string): Promise<void> {
   } finally {
     ws.trajLoading = false
   }
+}
+
+/**
+ * 帧驱动的那次重读：**尾沿合并**，不是每帧一发。
+ *
+ * 为什么需要合并：agent 流式输出时设备把 `session/update` 聚成 `batch` 推上来，
+ * 一次长回复会送上几十上百帧。每帧读一次整表，请求数就等于帧数——而每一帧
+ * 带来的新内容往往只有几个字。读的次数降下来，页面看到的仍是「库里的事实」。
+ *
+ * 为什么是尾沿（reset 定时器）而不是节流：突发结束后**必定**还多读一次，
+ * 最后一次写入不会因为落在窗口里被吞掉；节流会留下「最后一帧没读」的窗口。
+ *
+ * 定时器按 tab 分开记：两个会话并排时，一个的突发不该推迟另一个的可读时间。
+ * 卸载时要清掉（见 `onBeforeUnmount`），否则定时器会打到已卸载的页面状态上。
+ */
+const TRAJ_DEBOUNCE_MS = 120
+const trajTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function scheduleTrajectory(tabId: string): void {
+  const pending = trajTimers.get(tabId)
+  if (pending !== undefined) clearTimeout(pending)
+  trajTimers.set(
+    tabId,
+    setTimeout(() => {
+      trajTimers.delete(tabId)
+      void refreshTrajectory(tabId)
+    }, TRAJ_DEBOUNCE_MS),
+  )
 }
 
 /**
@@ -1123,6 +1188,19 @@ const startedLabel = computed(() =>
 )
 
 /**
+ * 工作台头的 agent 标记。
+ *
+ * `SessionSummary` 只带 `agent_id`（没有 agent 的显示名），所以选过 agent 时
+ * 显示的就是那个 id——与 `SessionTable` 的 agent 列同一份数据、同一个口径。
+ * 没有 agent 时说的是**此刻的事实**：这个会话没有 agent，因而不能对话
+ * （判据与 `ConvFlow` 的 `:agent-id` 同一个值）。
+ */
+const agentLabel = computed(() => {
+  const id = current.value?.agent_id
+  return id ? id : '未选 agent（不能对话）'
+})
+
+/**
  * 会话工作区路径：面板 / 抽屉的「工作区」「根」都用它。
  *
  * 路径是**会话的字段**（§7.0：工作区不是路由），没有第二个根，所以它是
@@ -1389,6 +1467,14 @@ onBeforeUnmount(() => {
   // 仍要跟着走一条完整的关闭路径，否则设备上会留着跑完没回收的通道。
   for (const handle of execHandles) void handle.close()
   execHandles.clear()
+  // 对话句柄同理，但不是一次性的：它是这张表里唯一会跨「说好几句话」活着的条目，
+  // 所以也要在这里清掉，否则卸载后表里留着一个已关的句柄（键 `tabId␀chat`）。
+  // `hub.dispose()` 已经先 `close()` 过它一次，这里只清账。
+  chatHandles.clear()
+  // 还在窗口里的轨迹重读：定时器不会自己消失，留着会在页面卸载后调
+  // `refreshTrajectory`，写进已经没人看的 `workspaces`。
+  for (const t of trajTimers.values()) clearTimeout(t)
+  trajTimers.clear()
 })
 </script>
 
@@ -1438,7 +1524,7 @@ onBeforeUnmount(() => {
             <span class="af-badge" title="建会话时确定，之后不可改">路径锁定</span>
           </span>
           <span class="af-t-mute">·</span>
-          <span class="af-t-mute">agent 未选（M3 起可选）</span>
+          <span class="af-t-mute" data-agent-badge>{{ agentLabel }}</span>
           <span class="af-t-mute">·</span>
           <span>{{ startedLabel }}</span>
         </span>
@@ -1659,21 +1745,6 @@ onBeforeUnmount(() => {
 .af-wb__conv:focus-visible {
   outline: 2px solid var(--af-accent);
   outline-offset: -2px;
-}
-.af-wb__convvoid {
-  flex: 1 1 auto;
-  overflow: auto;
-  padding: var(--af-space-5);
-  display: flex;
-  flex-direction: column;
-  gap: var(--af-space-3);
-}
-.af-wb__convtxt {
-  margin: 0;
-  max-width: 68ch;
-  font-size: var(--af-text-md);
-  line-height: var(--af-leading-base);
-  color: var(--af-fg-secondary);
 }
 .af-wb__convhint {
   flex: 0 0 auto;

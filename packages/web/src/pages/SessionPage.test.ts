@@ -230,12 +230,15 @@ describe('工作台：结构与默认值', () => {
     expect((w.element.querySelector<HTMLElement>('.af-wb__conv') as HTMLElement).style.flex).toContain('56%')
   })
 
-  it('工作台头写明路径锁定与「agent 未选」（M1 不接 ACP）', async () => {
+  it('工作台头写明路径锁定，以及这个会话的 agent 现状', async () => {
     const { w } = await mountWorkbench()
     const text = w.element.textContent ?? ''
     expect(text).toContain('/srv/alpha')
     expect(text).toContain('路径锁定')
-    expect(text).toContain('agent 未选（M3 起可选）')
+    // 这个夹具的两个会话都没选 agent：标记说的是**此刻的事实**（不能对话），
+    // 不是一个里程碑承诺（旧文案写的是「M3 起可选」）。
+    expect(text).toContain('未选 agent（不能对话）')
+    expect(text).not.toContain('M3')
   })
 
   it('已结束的会话明写面板不会再建通道，且入口禁用', async () => {
@@ -1070,6 +1073,129 @@ describe('对话：说一句话走专用端点（不是 /api/channels）', () =>
     const urls = fetchMock.mock.calls.map(([u]) => new URL(String(u), 'http://hub.local').pathname)
     expect(urls, `实际请求：${urls.join(', ')}`).not.toContain('/api/sessions/s_1/conversation')
     expect(urls, `实际请求：${urls.join(', ')}`).not.toContain('/api/channels')
+  })
+})
+
+describe('工作台头：agent 标记说真话', () => {
+  /*
+    这两条按**值**断言，不按「有那个 class」断言：`af-t-mute` 在同一行里出现
+    好几次（分隔点、开始时间），用选择器挑出来的可能根本不是这一格。
+  */
+  it('选了 agent：显示它的 id，与 ConvFlow 拿到的是同一个值', async () => {
+    const { w } = await mountWithAgent()
+    const badge = w.element.querySelector<HTMLElement>('[data-agent-badge]')
+    expect(badge?.textContent?.trim()).toBe('opencode')
+    expect(w.findComponent({ name: 'ConvFlow' }).props('agentId')).toBe('opencode')
+  })
+
+  it('没选 agent：说明这个会话不能对话（不写任何里程碑号）', async () => {
+    const { w } = await mountWithAgent([
+      session({ id: 's_1', agent_id: null, workspace: { node_id: 'n_1', path: '/srv/alpha', path_locked: true } }),
+    ])
+    const badge = w.element.querySelector<HTMLElement>('[data-agent-badge]')
+    expect(badge?.textContent).toContain('未选 agent')
+    expect(badge?.textContent).toContain('不能对话')
+    expect(badge?.textContent).not.toMatch(/M\d/)
+    expect(w.findComponent({ name: 'ConvFlow' }).props('agentId')).toBeNull()
+  })
+})
+
+describe('对话通道：关 tab 时释放，不只是一直往表里加', () => {
+  /** 在这个会话里说一句话：这是**唯一**会建对话通道的路径（懒建立）。 */
+  async function say(w: ReturnType<typeof mountIn>, text = '帮我看看测试为什么红'): Promise<void> {
+    const input = w.element.querySelector<HTMLTextAreaElement>('[data-conv-input]')
+    if (!input) throw new Error('no conv input')
+    input.value = text
+    input.dispatchEvent(new Event('input'))
+    await w.vm.$nextTick()
+    w.element.querySelector('form')?.dispatchEvent(new Event('submit', { cancelable: true }))
+    await flush(w)
+  }
+
+  /*
+    `chatHandles` 不进 `channels`（见页面里那张表的头注释），所以 `releaseTab`
+    里那条按面板名遍历的释放路径**碰不到它**。不补这一步的话，每开一个会话说一句
+    话，表里就多一条永不回收的记录，关 tab 也不减。
+
+    **不能只断言 DELETE**：`close()` 会发 DELETE，而「删掉表项」不发任何请求，
+    所以「关了但没删」与「关了且删了」在网络上完全一样——前者正是这个 bug，
+    断言 `deleted` 时它会红，断言 DELETE 时它照样绿（实测：把 `chatHandles.delete`
+    删掉，DELETE `/api/channels/ch-acp` 仍然发生）。所以这里读页面暴露的表长度。
+  */
+  it('关掉说过话的 tab → 对话句柄从表里释放（不只是 close() 了一下）', async () => {
+    const { w, fetchMock } = await mountWithAgent()
+    await say(w)
+
+    const urls = () => fetchMock.mock.calls.map(([u]) => new URL(String(u), 'http://hub.local').pathname)
+    expect(urls(), '先说清楚这一句真的开了对话通道').toContain('/api/sessions/s_1/conversation')
+    expect(urls()).not.toContain('/api/channels/ch-acp')
+
+    const count = (): number =>
+      (w.vm as unknown as { chatHandleCount: () => number }).chatHandleCount()
+    expect(count(), '说了一句话，表里应当有且只有一条对话句柄').toBe(1)
+
+    const closer = w.element.querySelector<HTMLElement>('[data-tab-close="s_1"]')
+    expect(closer, '关 tab 的按钮必须在').not.toBeNull()
+    await closer?.click()
+    await flush(w)
+
+    expect(count(), '关 tab 必须把对话句柄从表里删掉，否则这条记录永不回收').toBe(0)
+
+    // 顺带锁住「关」这件事本身：表项没了，设备侧那条通道也必须被关掉
+    const deletes = fetchMock.mock.calls
+      .filter(([, init]) => (init as RequestInit | undefined)?.method === 'DELETE')
+      .map(([u]) => new URL(String(u), 'http://hub.local').pathname)
+    expect(deletes).toContain('/api/channels/ch-acp')
+  })
+})
+
+describe('对话帧驱动的轨迹重读：成批到达时合并', () => {
+  /*
+    真机一次长回复会把 `session/update` 聚成一批一批的帧推上来。每帧读一次
+    整表，`GET .../trajectory` 的次数就等于帧数——而每帧带来的新内容往往只有
+    几个字。这里连发 8 帧，断言读的次数**远小于**帧数（合并窗口内只读一次）。
+
+    用真实时间等一个窗口：本套件的 `flush()` 靠 `requestAnimationFrame` 推进，
+    混入 fake timers 会让它停摆，代价比多等 200ms 大。
+  */
+  it('连发 8 帧只读一次轨迹，而不是 8 次', async () => {
+    const { w, fetchMock, src } = await mountWithAgent()
+
+    // 先说话，把对话通道建起来——帧只在这个通道上送达。
+    const input = w.element.querySelector<HTMLTextAreaElement>('[data-conv-input]')
+    if (!input) throw new Error('no conv input')
+    input.value = '帮我看看'
+    input.dispatchEvent(new Event('input'))
+    await w.vm.$nextTick()
+    w.element.querySelector('form')?.dispatchEvent(new Event('submit', { cancelable: true }))
+    await flush(w)
+
+    const trajReads = (): number =>
+      fetchMock.mock.calls.filter(
+        ([u]) => new URL(String(u), 'http://hub.local').pathname === '/api/sessions/s_1/trajectory',
+      ).length
+    const before = trajReads()
+
+    // 八帧几乎同时到达（同一轮同步发完，都在一个合并窗口里）。
+    for (let i = 0; i < 8; i++) {
+      src()?.emit('channel.frame', {
+        node_id: 'n_1',
+        channel_id: 'ch-acp',
+        payload: { kind: 'session/update', update: { sessionUpdate: 'agent_message_chunk' } },
+      })
+      // 帧之间让上一次读跑完：真机上帧是隔几百毫秒到的，不是同一个 tick 里涌进来。
+      // 若不等，`trajLoading` 会把整批合并成一次，测不到「每帧一读」的缺陷。
+      await flush(w)
+      await new Promise((r) => setTimeout(r, 10))
+      await flush(w)
+    }
+    // 合并窗口过去之后应当**恰好**多读一次。
+    await new Promise((r) => setTimeout(r, 260))
+    await flush(w)
+
+    const reads = trajReads() - before
+    expect(reads, `八帧触发了 ${reads} 次整表重读；未合并时每一帧都会读一次（实测 8）`).toBeLessThanOrEqual(2)
+    expect(reads, '合并不能把读全吞掉：突发结束后必须还读一次').toBeGreaterThanOrEqual(1)
   })
 })
 

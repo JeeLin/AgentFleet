@@ -85,10 +85,11 @@ describe('SessionTable：会话的显示口径', () => {
     expect(text).toContain('n_2')
   })
 
-  it('M1 的会话不绑 agent：agent 列显示「—」并说明原因', () => {
+  it('没有选 agent 的会话：agent 列显示「—」并说明原因', () => {
     const { w } = mountTable()
-    const dash = w.element.querySelector('[title*="M1 不接 agent"]')
+    const dash = w.element.querySelector('[title*="没有选 agent"]')
     expect(dash?.textContent?.trim()).toBe('—')
+    expect(dash?.getAttribute('title')).toBe('建会话时没有选 agent，这个会话不能对话')
   })
 
   it('会话 id 与路径都是普通文本，没有第二条工作区入口', () => {

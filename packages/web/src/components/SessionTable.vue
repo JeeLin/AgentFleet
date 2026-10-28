@@ -89,7 +89,7 @@ onBeforeUnmount(() => {
           <td>{{ deviceName(s.workspace.node_id, s.workspace.removed_node_id) }}</td>
           <td>
             <span v-if="s.agent_id" class="af-badge af-badge--agent">{{ s.agent_id }}</span>
-            <span v-else class="af-t-mute" title="M1 不接 agent 运行时（ACP 归 M3），会话不绑 agent">—</span>
+            <span v-else class="af-t-mute" title="建会话时没有选 agent，这个会话不能对话">—</span>
           </td>
           <td class="af-fp af-truncate" :title="s.workspace.path">{{ s.workspace.path }}</td>
           <td><StateBadge :state="pageSessionState(s.state)" /></td>
