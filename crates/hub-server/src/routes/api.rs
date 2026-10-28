@@ -126,6 +126,10 @@ pub struct DeviceSummary {
     ///
     /// 判据与 `POST /api/sessions` 的 409 门禁**同源**（都读 `agent_runtime`，
     /// 都只看 `available`），所以页面上选得到的一定建得成。
+    ///
+    /// 「同源」现在是可点开的：这一档由 `AgentRuntimeRepo::usable_list` 算（SQL 的
+    /// `available = 1`），门禁是旁边的 `usable_for_session`（同一条谓词）。**别在
+    /// `device_summary` 里再判一遍 `r.available`**——那等于把判据写成两份。
     pub usable_agents: Vec<String>,
     pub derived: bool,
     /// 设备密钥指纹，**已按「前 3 + `***` + 后 3」掩过**（约束 13）。
@@ -298,24 +302,20 @@ fn device_summary(state: &AppState, device: &hub_storage::repo::Device) -> Devic
     };
     // 列全部已装的（含跑不起来的）：目录页要能显示「装了但坏了」，
     // 那正是用户需要看见的东西。门禁另用 `usable_agents`。
-    let (agents, usable_agents) = match state.agent_runtime().list_for_node(&device.id) {
-        Ok(rows) => {
-            let mut all: BTreeSet<String> = BTreeSet::new();
-            let mut usable: BTreeSet<String> = BTreeSet::new();
-            for r in rows {
-                all.insert(r.name.clone());
-                // 只有 `available` 一个判据（不再有「正在装」这个中间态）：
-                // agent 由用户自己装，Hub 没有「正在操作它」的窗口。
-                if r.available {
-                    usable.insert(r.name.clone());
-                }
-            }
-            (
-                all.into_iter().collect::<Vec<_>>(),
-                usable.into_iter().collect::<Vec<_>>(),
-            )
-        }
-        Err(e) => {
+    //
+    // 「可用」那一档**不在这里再判一遍 `available`**：两次查询读的是同一张表、
+    // 同一个 `available = 1` 谓词，判据只能有一份——`AgentRuntimeRepo::usable_list`，
+    // 与建会话 / 开对话用的 `usable_for_session` 并排放着。在 Rust 里重写一遍，
+    // 就又把「页面上选得到、点创建 409」变成可能。
+    let (agents, usable_agents) = match (
+        state.agent_runtime().list_for_node(&device.id),
+        state.agent_runtime().usable_list(&device.id),
+    ) {
+        (Ok(rows), Ok(usable_rows)) => (
+            rows.iter().map(|r| r.name.clone()).collect(),
+            usable_rows.iter().map(|r| r.name.clone()).collect(),
+        ),
+        (Err(e), _) | (_, Err(e)) => {
             tracing::warn!(
                 node_id = %device.id, error = %e,
                 "cannot read agent_runtime; falling back to the heartbeat report"

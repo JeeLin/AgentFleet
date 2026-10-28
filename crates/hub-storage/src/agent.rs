@@ -186,6 +186,9 @@ impl AgentRuntimeRepo {
     ///
     /// 判据：库里有一行且 `available = 1`。
     ///
+    /// 「这台设备上可用的**列表**」是同文件里的 [`Self::usable_list`]，两条 SQL
+    /// 的谓词逐字相同——列表与门禁不能各判一套，否则页面选得到、创建 409。
+    ///
     /// # 与 M1 的 connector 门禁显式不同
     ///
     /// `stream.rs` 的 `unreported_connector` 对「从没上报过」是**放行**
@@ -215,6 +218,15 @@ impl AgentRuntimeRepo {
     ///
     /// 与 [`Self::usable_for_session`] 同一套判据：下拉里能选到的，建会话时
     /// 一定过得了门禁。两处判据若各写一份，症状是「页面上选得到、点创建 409」。
+    ///
+    /// 生产调用点只有 `hub-server` 的 `device_summary`（`GET /api/devices` 的
+    /// `usable_agents` 那一档）。**`/api/agents` 不走这里**：那条是跨设备目录，
+    /// 按名字归并成一个 `available | error`，问的是另一个问题，读的是
+    /// `list_for_node`。
+    ///
+    /// 返回顺序是 `ORDER BY agent_id`，与 `list_for_node` 一致，所以
+    /// `device_summary` 里两份列表按下标一一对应地取名字是安全的；它也**不再**
+    /// 靠 `BTreeSet` 去重排序——`(node_id, agent_id)` 是主键，行本来就不重复。
     pub fn usable_list(&self, node_id: &str) -> Result<Vec<AgentRuntime>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(&format!(
