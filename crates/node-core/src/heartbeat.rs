@@ -440,6 +440,20 @@ mod tests {
         assert_eq!(parse_meminfo("MemTotal:  kB\nMemAvailable: 100 kB\n"), None);
     }
 
+    /// 没有冒号的行**跳过**，不是让整份解析失败。
+    ///
+    /// `/proc/meminfo` 将来加一行注释或 `HugePages_Total: 0` 这种没单位的行，
+    /// 都不该让设备从此报「内存未知」——那是把一个格式小变化放大成一条
+    /// 消失的事实。
+    #[test]
+    fn meminfo_skips_lines_that_are_not_key_value_pairs() {
+        let text =
+            "HugePages without a colon\nMemTotal:        1000 kB\nMemAvailable:     400 kB\n";
+        let got = parse_meminfo(text).expect("无冒号的行不该让整份解析失败");
+        assert_eq!(got.total_mb, 0, "1000 kB 不足 1 MB，整除后是 0");
+        assert_eq!(got.available_mb, 0);
+    }
+
     /// 上报形状：`cpu_percent` / `mem_percent` 是**扁平数字**，因为 Hub 侧的
     /// `load_percent` 只读顶层字段（嵌套对象会让它恒返回 `None`，设备表那两列
     /// 就继续是 `—`——正是这条欠账要修的东西）；明细另放在 `load` / `memory` 里。

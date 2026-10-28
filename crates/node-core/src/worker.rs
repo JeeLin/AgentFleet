@@ -686,6 +686,13 @@ impl Worker {
             .and_then(|a| a.path.clone())
     }
 
+    /// 换掉扫描缓存。**只给测试用**：生产代码的缓存由 `run_with` 里的
+    /// 一次 `refresh()` 填，没有第二个写入者。
+    #[cfg(test)]
+    fn set_detected_for_tests(&mut self, snap: crate::agent::cache::Snapshot) {
+        self.detected = crate::agent::Detected::with_snapshot(snap);
+    }
+
     /// 发一份心跳。
     ///
     /// 工作区根留空：M0 还没有「用户配置的工作区」这个概念，而本模块
@@ -2215,6 +2222,62 @@ mod tests {
             max_gap < std::time::Duration::from_millis(1500),
             "心跳最大间隔 {max_gap:?} 远超周期 300ms"
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ---- 默认可执行文件取自扫描缓存 ----
+
+    fn report(id: &str, available: bool, path: Option<&str>) -> crate::agent::cache::AgentReport {
+        crate::agent::cache::AgentReport {
+            id: id.to_string(),
+            name: id.to_string(),
+            version: Some("1.0.0".to_string()),
+            available,
+            error: None,
+            path: path.map(str::to_string),
+        }
+    }
+
+    fn snapshot_of(agents: Vec<crate::agent::cache::AgentReport>) -> crate::agent::cache::Snapshot {
+        crate::agent::cache::Snapshot {
+            agents,
+            at: Some(Instant::now()),
+        }
+    }
+
+    /// `open_channel{acp}` 没给 `command` 时，设备回落到**扫描到的那个**
+    /// 可执行文件——这是「扫描 + 配置」里「扫描」那一半真正起作用的地方。
+    #[test]
+    fn the_default_command_is_the_scanned_path_of_an_available_agent() {
+        let (d, mut w) = worker("detected-cmd");
+        w.set_detected_for_tests(snapshot_of(vec![report(
+            "opencode",
+            true,
+            Some("/opt/opencode"),
+        )]));
+        assert_eq!(
+            w.detected_command("opencode").as_deref(),
+            Some("/opt/opencode")
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 不可用的 agent **不给**默认可执行文件。
+    ///
+    /// 它扫到了但缺 ACP 入口（`claude` 那种）：回落给它等于让会话在
+    /// `initialize` 上永远等不到回答，而页面只会显示「正在回复」。
+    /// 这里回 `None`，`Conversations::open` 才会报「没有可执行文件」。
+    #[test]
+    fn an_unavailable_agent_yields_no_default_command() {
+        let (d, mut w) = worker("detected-unavail");
+        w.set_detected_for_tests(snapshot_of(vec![
+            report("opencode", true, Some("/opt/opencode")),
+            report("claude", false, Some("/opt/claude")),
+            report("bare", true, None),
+        ]));
+        assert_eq!(w.detected_command("claude"), None, "不可用就不给命令");
+        assert_eq!(w.detected_command("bare"), None, "没扫到路径也给不出命令");
+        assert_eq!(w.detected_command("never-heard-of-it"), None);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

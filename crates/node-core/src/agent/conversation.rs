@@ -1729,6 +1729,17 @@ for line in sys.stdin:
         );
         assert_eq!(convs.turn_in_flight("ch_never_opened").await, None);
 
+        // 1b. 往一条没有的对话发消息：要**当场**报错，不许 spawn 完就装作发了。
+        //     静默成功比崩溃更糟——页面上那条消息会一直停在「已发送」。
+        let err = convs
+            .prompt("ch_never_opened", "有人吗")
+            .await
+            .expect_err("没有活会话就不该接受消息");
+        assert!(
+            err.contains("ch_never_opened"),
+            "错误里要带上是哪条通道：{err}"
+        );
+
         // 2. 会话在，但一轮都没跑过。
         let _ = channel::open_external("ch_idle");
         convs
@@ -1747,6 +1758,22 @@ for line in sys.stdin:
         );
 
         convs.close("ch_idle").await;
+    }
+
+    /// `CancelError` 的三句话**是给人看的**，各有各的意思，不能合并成一句。
+    ///
+    /// 「没有活会话」与「没有一轮在飞」在日志里必须分得开：前者说明用户点的
+    /// 那条对话已经死了（关掉/被淘汰），后者说明它好好活着、只是闲着。把两者
+    /// 说成同一句「取消失败」，排障时就看不出该往哪查。
+    #[test]
+    fn each_cancel_error_says_a_different_thing() {
+        let dead = CancelError::NoLiveConversation.to_string();
+        let idle = CancelError::NothingInFlight.to_string();
+        let broken = CancelError::Acp("stdin 已关".to_string()).to_string();
+        assert_eq!(dead, "no live conversation");
+        assert_eq!(idle, "no turn in flight");
+        assert_eq!(broken, "cannot cancel: stdin 已关", "要带上底层原因");
+        assert_ne!(dead, idle, "「没这条对话」与「它闲着」不是一回事");
     }
 
     /// **一轮在飞 → cancel 发得出去，且只有这一轮被中断，会话照旧活着。**
@@ -1926,6 +1953,25 @@ for line in sys.stdin:
     async fn ids_of(convs: &Conversations) -> Vec<String> {
         let live = convs.live.lock().await;
         live.keys().cloned().collect()
+    }
+
+    /// 表被别的臂占着时，`mark_orphaned` **这一轮不标、返回 0**，也不卡住。
+    ///
+    /// 这不是「不重要」的分支：调用点在同步的断连收尾里，等异步锁会把整条
+    /// 连接收尾挂住。宁可漏标一轮（下次断连还会标），也不能让收尾卡死。
+    /// 反向验证：把 `try_lock` 的失败臂改成 `unwrap_or_else(|_| panic!(..))`
+    /// 或改成 `lock().await`（那就不是同步函数了），本用例都会立刻变红。
+    #[tokio::test]
+    async fn mark_orphaned_skips_a_busy_table_instead_of_blocking() {
+        let convs = Conversations::default();
+        // 拿着表不放：这正是「别的臂正持着表」的形态。
+        let held = convs.live.lock().await;
+        assert_eq!(
+            convs.mark_orphaned(),
+            0,
+            "表被占着时只能如实报「这一轮没标」"
+        );
+        drop(held);
     }
 
     /// **上界是硬的：开超过 cap 条，表就停在 cap。**
