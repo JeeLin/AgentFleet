@@ -72,7 +72,10 @@ export interface WorkspaceRef {
 /** `GET /api/sessions` 的一项；也是 `POST /api/sessions` 的响应。 */
 export interface SessionSummary {
   id: string
-  /** M1 恒 `null`（ACP 归 M3）。 */
+  /**
+   * 建会话时选定的 agent（`agent_id`）。M2 起建会话时**必填**，所以新会话里它不会是
+   * `null`；老会话（M2 之前建的）仍是 `null`，那类会话不能对话。
+   */
   agent_id: string | null
   state: 'running' | 'ended'
   created_at: string

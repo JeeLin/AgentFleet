@@ -23,8 +23,8 @@
 
 **核心原则一句话：不同步「文件夹」，同步「内容」。**
 ~~Hub 是唯一真相源，一个内容寻址仓库（CAS）统一供料，三样东西共用同一个 blob store，
-只是寻址方式不同。~~（2026-10-26 撤销：现在只剩 **agent 安装包** 走内容寻址存储，
-项目文件不传、产物不归档、托管配置暂缓。）
+只是寻址方式不同。~~（2026-10-26 撤销：**内容寻址存储一处不剩**——项目文件不传、产物不归档、
+托管配置暂缓，而当时唯一残存的用途「agent 安装包」也随安装一起取消，`blob` 表没进 v3 schema。）
 
 > Feed devices with **content**, not with a mirrored folder tree.
 > Hub is the single source of truth; one content-addressed store serves all three needs.

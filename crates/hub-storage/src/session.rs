@@ -50,8 +50,9 @@ impl FromStr for SessionState {
 pub struct Session {
     pub id: String,
     pub workspace_id: String,
-    /// M1 恒 `None`：本阶段没有 agent 运行时（ACP 归 M3），建会话时选不选
-    /// agent 都成立。字段先落下来，M3 才不必再动一次 schema。
+    /// 建会话时选定的 agent。**M2 起是必填项**（`POST /api/sessions` 缺它直接 400），
+    /// 所以新行不会是 `None`；M2 之前建的老行仍是 `None`，那类会话无法对话
+    /// （用户 2026-10-27 裁定：老行不补选，只约束新建）。
     pub agent_id: Option<String>,
     /// ACP 侧的会话 id（opencode 形如 `ses_...`）。**第一次开对话时为空**，
     /// 由设备侧 `session/new` 现取、Hub 收到 `ready` 帧后回填。
@@ -446,7 +447,9 @@ mod tests {
         assert_eq!(d.workspace.path, "/srv/app");
         assert_eq!(d.workspace.created_at, TS);
         assert_eq!(d.session.workspace_id, d.workspace.id);
-        assert_eq!(d.session.agent_id, None, "M1 没有 agent 运行时");
+        // 存储层不拦「没有 agent」：400 门禁在 API 层（`POST /api/sessions`）。
+        // 老行本来就是 `None`，读回来仍是 `None`，这是这里要钉住的事实。
+        assert_eq!(d.session.agent_id, None, "没给 agent 的会话读回来仍是 None");
         assert_eq!(d.session.created_at, TS);
         assert!(sr.detail("s_missing").unwrap().is_none());
     }

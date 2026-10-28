@@ -60,8 +60,9 @@ CREATE INDEX IF NOT EXISTS idx_workspace_node ON workspace(node_id);
 -- 「用户在某个设备的某个目录里开着的那个工作台」。工作区在创建时选定后锁定
 -- （design-system.md §6.2 的 `path_locked`），所以这一行此后不再改 path。
 --
--- `agent_id` 可空：M1 没有 agent 运行时（ACP 归 M3），建会话时选不选 agent
--- 都成立。`ON DELETE RESTRICT` 而非 CASCADE：删工作区要显式走仓储层的检查，
+-- `agent_id` 在 v2 里一直是 NULL（那时还没有 agent 运行时）。v3 起建会话必填，
+-- 老行仍为 NULL 且不可对话——见 `schema_v3.sql` 与 `session.rs` 的字段注释。
+-- `ON DELETE RESTRICT` 而非 CASCADE：删工作区要显式走仓储层的检查，
 -- 「关一个面板」不该悄悄连带删掉别的会话正在用的工作区。
 CREATE TABLE IF NOT EXISTS session (
     id            TEXT PRIMARY KEY,

@@ -95,7 +95,8 @@ fn the_reported_list_is_sorted_so_heartbeats_diff_cleanly() {
     assert_eq!(got, sorted, "上报顺序不稳定，联调时的 diff 读不懂");
 }
 
-/// **`agents` 保持空**：M1 没有任何 agent 运行时可探测（ACP 归 M3）。
+/// **零入参时 `agents` 是空数组**：M2 的心跳带的是**探测结果**，而
+/// [`heartbeat::capabilities`] 是不传结果的入口。
 ///
 /// 这条锁住的是「**未探测到就上报空，不得编造**」——不是「忘了填」。
 /// 填一个「就绪」会让 Hub 把任务派给一台根本没装那个 agent 的机器。
@@ -105,7 +106,7 @@ fn agents_are_reported_empty_when_nothing_is_detected() {
     let agents = caps["agents"].as_array().expect("agents 是数组");
     assert!(
         agents.is_empty(),
-        "M1 没有 agent 运行时；上报一个编出来的「就绪」正是子任务 11 要修的那类撒谎：{agents:?}"
+        "零入参就得是空数组；上报一个编出来的「就绪」正是子任务 11 要修的那类撒谎：{agents:?}"
     );
 }
 
