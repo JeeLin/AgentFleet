@@ -15,5 +15,14 @@ linker = "aarch64-linux-gnu-gcc"
 # 没人记得住——于是门禁在多核机上必红，而「必红的门禁」等于没有门禁。
 # 所以默认值写在这里（`RUST_TEST_THREADS` 是 libtest 认的环境变量原话）。
 #
+# `RUST_TEST_THREADS` 是 **libtest** 认的变量，作用域是**单个测试二进制内部**
+# 的线程数。`cargo test --workspace` 仍会**并行跑多个测试二进制**（那是 cargo
+# 的 target 并行度，不是 libtest 的），下面这行管不到。所以它保证的是「同一
+# 个套件里不互相踩」，不是「全仓串行」——跨套件的共享状态必须另行隔离
+# （本里程碑已把四处跨套件共享源全部改成各自隔离）。
+#
+# 另外：本机 3.7 GiB 零 swap，**不要跑 `cargo test --workspace`**——同时链接并
+# 运行多个测试二进制会 OOM。按 crate 分开跑。
+#
 # 代价是全量测试从约 12 秒变成约 34 秒。这个代价换的是「红就是真红」。
 RUST_TEST_THREADS = "1"
