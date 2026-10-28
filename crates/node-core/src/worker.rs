@@ -2280,4 +2280,224 @@ mod tests {
         assert_eq!(w.detected_command("never-heard-of-it"), None);
         let _ = std::fs::remove_dir_all(&d);
     }
+
+    // ---- 入站消息的分派（`channel_data.payload` 的对外契约）----
+
+    /// 往一条外部通道里塞一条入站消息，走**真实那条路**（`on_channel_frame`）——
+    /// 直接改表内队列会绕过 `on_data` 的「外部源通道才排队」判定，测的就不是
+    /// 生产路径了。
+    fn push_inbound(channel_id: &str, payload: serde_json::Value) {
+        let f = frame_of(
+            "channel_data",
+            serde_json::json!({"channel_id": channel_id, "payload": payload}),
+        );
+        // 外部源通道收下行数据只入队：回的是**空帧列表**（`Action::Send([])`），
+        // 不是 `Action::None`——两者在 worker 那边都表现为「没有要发的东西」。
+        match channel::on_channel_frame(&f) {
+            channel::Action::Send(frames) => {
+                assert!(frames.is_empty(), "外部源通道的用户消息不该产生回帧");
+            }
+            channel::Action::None => {}
+            other => panic!("外部源通道的用户消息只该入队，实际 {other:?}"),
+        }
+    }
+
+    /// 一个把收到的方法名逐行追加到 `methods.log` 的假 agent。
+    ///
+    /// 断言要落在「agent 到底收到了什么」上：`drain_inbound` 的所有分支在
+    /// **本进程**里都只表现为一次 `say()`，从外面看不出它是 prompt 还是丢弃。
+    fn method_logging_agent(dir: &Path) -> (PathBuf, PathBuf) {
+        let log = dir.join("worker-methods.log");
+        let path = dir.join("worker-rec-agent");
+        let script = format!(
+            r#"#!/usr/bin/env python3
+import json, sys
+LOG = {log:?}
+
+def send(o):
+    sys.stdout.write(json.dumps(o) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    m = json.loads(line)
+    method = m.get("method", "")
+    mid = m.get("id")
+    with open(LOG, "a") as f:
+        f.write(method + "\n")
+    if method == "initialize":
+        send({{"jsonrpc": "2.0", "id": mid, "result": {{"protocolVersion": 1}}}})
+    elif method == "session/new":
+        send({{"jsonrpc": "2.0", "id": mid, "result": {{"sessionId": "ses_worker"}}}})
+    elif method == "session/prompt":
+        send({{"jsonrpc": "2.0", "id": mid, "result": {{"stopReason": "end_turn"}}}})
+"#,
+            log = log.to_string_lossy()
+        );
+        std::fs::write(&path, script).expect("写脚本");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).expect("stat").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("chmod");
+        }
+        (path, log)
+    }
+
+    fn spec_for_worker(ch: &str, bin: &Path) -> crate::agent::ConversationSpec {
+        crate::agent::ConversationSpec {
+            channel_id: ch.to_string(),
+            agent_id: "opencode".to_string(),
+            // `cwd` 必须真实存在：`AcpClient::spawn` 会 `current_dir(cwd)`。
+            cwd: bin
+                .parent()
+                .expect("脚本必有父目录")
+                .to_string_lossy()
+                .into_owned(),
+            command: bin.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            acp_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            acp_session_id: None,
+            last_seq: 0,
+        }
+    }
+
+    /// **一次 `drain_inbound` 里三种形状各走各的**：cancel 走取消、有 `text`
+    /// 走 prompt、别的形状**丢掉且不 prompt**。
+    ///
+    /// 关键在最后一条：把一个不认识的 payload 当成 prompt 送进 agent，等于让
+    /// agent 去解读一段我们没打算说出口的话——而页面上看不出区别，只会奇怪
+    /// 「它怎么回了这句」。所以这里断言的不是「没崩」，是**没有任何消息被送出**。
+    /// **一次 `drain_inbound` 里三种形状各走各的**：cancel 走取消、有 `text`
+    /// 走 prompt、别的形状**丢掉且不 prompt**。
+    ///
+    /// 判据必须落在**agent 收到了什么方法**上。只看 Hub 收到几帧 `channel_error`
+    /// 不够：一条认不出的 payload 若被误当成 prompt，会去调一个已经没会话的
+    /// 通道，产出与 cancel 完全相同的一句 `no live conversation`——条数与理由
+    /// 都一样，那种断言分辨不出对错（这一版的初稿就是这么写的，反向验证当场
+    /// 证明它恒真）。所以这里真起一个记录 agent，开一条**活会话**：
+    /// 被误送的话，`session/prompt` 会真的出现在它的方法日志里。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    #[tokio::test]
+    async fn drain_inbound_routes_each_payload_shape_by_its_own_field() {
+        let (d, w) = worker("drain-shapes");
+        let (mut est, _recorded) = established_recording_frames(&d).await;
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+
+        // 真起一个只记方法名的 agent，并把一条**活会话**挂到 ch-drain 上。
+        let (bin, log) = method_logging_agent(&d);
+        let _ = channel::open_external("ch-drain");
+        w.conversations
+            .open(spec_for_worker("ch-drain", &bin), None)
+            .await
+            .expect("记录 agent 必须能起来");
+        // 起进程本身就会打 initialize / session/new，先把基线读走。
+        let baseline = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            baseline.contains("initialize"),
+            "握手应发生在开会话时：{baseline}"
+        );
+
+        // 1. 认不出的形状：既没有 `text` 也没有 `cancel`。
+        push_inbound("ch-drain", serde_json::json!({"bytes": "ls -la"}));
+        // 2. 空文本：算不出一轮话，必须丢。
+        push_inbound("ch-drain", serde_json::json!({"text": "   "}));
+        // 3. 一条真的话：必须变成 session/prompt。
+        push_inbound("ch-drain", serde_json::json!({"text": "你好"}));
+
+        w.drain_inbound(&mut est).await;
+
+        // prompt 是 spawn 出去的，等它落到 agent 那边。
+        let mut prompts = 0;
+        for _ in 0..60 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            let now = std::fs::read_to_string(&log).unwrap_or_default();
+            prompts = now.matches("session/prompt").count();
+            if prompts >= 1 {
+                break;
+            }
+        }
+        let now = std::fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(
+            prompts, 1,
+            "只有带 text 的那一条该变成一轮 prompt；认不出的形状与空文本必须静默丢掉。\
+             agent 实收方法：{now}"
+        );
+        // 顺带钉住：认不出的 payload 里的内容**没有**被当成 prompt 发出去。
+        assert!(
+            !now.contains("session/cancel"),
+            "这一轮里没有 cancel 消息，不该出现 session/cancel：{now}"
+        );
+
+        w.conversations.close("ch-drain").await;
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 队列被取走之后**不会重复投递**：`take_inbound` 是 drain 语义。
+    ///
+    /// 这条钉的是「一轮消息只说一次」。若把 `take_inbound` 写成借用/拷贝，
+    /// 每次 `drain_inbound` 都会把同一句用户消息再发一遍，而在页面上那表现为
+    /// 「agent 自己重复回答」——最难归因的一类 bug。
+    ///
+    /// **通道必须活着**，所以这里用一条活会话而不是「cancel 一条没开过的
+    /// 通道」：后者第一轮就把通道收掉了，第二轮本来就无事可做，那条断言
+    /// 无论 drain 还是拷贝都会通过（初稿即如此，反向验证当场证明它恒真）。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    #[tokio::test]
+    async fn drain_inbound_does_not_replay_the_same_message_twice() {
+        let (d, w) = worker("drain-once");
+        let (mut est, _recorded) = established_recording_frames(&d).await;
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+
+        let (bin, log) = method_logging_agent(&d);
+        let _ = channel::open_external("ch-once");
+        w.conversations
+            .open(spec_for_worker("ch-once", &bin), None)
+            .await
+            .expect("记录 agent 必须能起来");
+
+        push_inbound("ch-once", serde_json::json!({"text": "只此一句"}));
+
+        // 连跑三轮：队列若没被取走，就会发出三轮 prompt。
+        for _ in 0..3 {
+            w.drain_inbound(&mut est).await;
+            // 每轮都等一会儿，让 spawn 出去的 prompt 落到 agent 那边，
+            // 否则第二轮可能在第一轮取走之前就读到了同一个队列。
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        }
+        // 再给最后一个 prompt 一点时间落地。
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            if std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .contains("session/prompt")
+            {
+                break;
+            }
+        }
+
+        let now = std::fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(
+            now.matches("session/prompt").count(),
+            1,
+            "同一条消息只许说一次；三轮 drain 里出现多次就说明队列没被取走。agent 实收：{now}"
+        );
+
+        w.conversations.close("ch-once").await;
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
