@@ -188,6 +188,56 @@ describe('ConvFlow：把轨迹事件画成对话', () => {
   })
 
   /**
+   * 真机一轮回复固定推三条：`available_commands_update` / `agent_message_chunk`
+   * / `usage_update`（`scripts/e2e-m2.sh` 的实测注释）。前两条里两条是元数据。
+   *
+   * 缺陷原样：它们落进 `default` 臂，画成「系统 available_commands_update
+   * {"sessionUpdate":…}」——用户先看到两坨协议 JSON 才看到回复。
+   */
+  it('元数据事件压成一句人话，不把原始 JSON 端上对话区', async () => {
+    const w = mount({
+      agentId: 'opencode',
+      events: [
+        event(1, 1, 'available_commands_update', {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [{ name: 'init' }, { name: 'compact' }],
+        }),
+        event(2, 2, 'agent_message_chunk', { content: { type: 'text', text: '好的，我在。' } }),
+        event(3, 3, 'usage_update', { sessionUpdate: 'usage_update', used: 1234, size: 200000 }),
+      ],
+    })
+    await w.vm.$nextTick()
+
+    const metas = Array.from(w.element.querySelectorAll('[data-conv-meta]')).map(
+      (e) => e.textContent ?? '',
+    )
+    expect(metas).toHaveLength(2)
+    expect(metas[0]).toContain('可用命令')
+    expect(metas[0]).toContain('init')
+    expect(metas[1]).toContain('1234')
+    expect(metas[1]).toContain('200000')
+
+    // 元数据不许再冒充对话行，也不许出现原始 JSON。
+    const text = w.element.textContent ?? ''
+    expect(text).not.toContain('sessionUpdate')
+    expect(text).not.toContain('"availableCommands"')
+    // 正文那一条照旧可见——这才是用户真正要看的东西。
+    const msg = w.element.querySelector('[data-conv-msg]')
+    expect(msg?.textContent).toContain('好的，我在。')
+  })
+
+  it('认不出的元数据形状说不撒谎的一句话，而不是退回原始 JSON', async () => {
+    const w = mount({
+      agentId: 'opencode',
+      events: [event(1, 1, 'usage_update', { guess: 'no used/size here' })],
+    })
+    await w.vm.$nextTick()
+    const meta = w.element.querySelector('[data-conv-meta]')
+    expect(meta?.textContent).toContain('token 用量')
+    expect(meta?.textContent).not.toContain('{')
+  })
+
+  /**
    * **连收 N 个 chunk 要拼成一条消息**，而不是 N 条。
    *
    * 这是子任务 7 点名的硬断言（「消息体为拼接结果，且**不重复、不丢**」）。

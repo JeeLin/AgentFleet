@@ -84,6 +84,14 @@ export type ConvRow =
     }
   | { kind: 'turn'; key: string; reason: string; incomplete?: false }
   | { key: string; kind: 'incomplete' }
+  /**
+   * 元数据事件（可用命令清单、token 用量）压成的一行小字。
+   *
+   * 与 `msg` 分开是因为它不是「谁说了句话」：它占一行但**不该抢走对话的注意力**。
+   * 真机一轮回复固定推 `available_commands_update` 与 `usage_update` 两条，
+   * 若按未知类型兜底成 `系统 <原始 JSON>`，用户先看到两坨协议文本才看到回复。
+   */
+  | { kind: 'meta'; key: string; text: string }
 
 const props = withDefaults(
   defineProps<{
@@ -400,6 +408,10 @@ function rowOf(ev: TrajectoryEvent): ConvRow | null {
         status: str(p?.status) || 'running',
         detail: toolDetail(p),
       }
+    case 'available_commands_update':
+      return { kind: 'meta', key: `${ev.id}`, text: commandsNote(p) }
+    case 'usage_update':
+      return { kind: 'meta', key: `${ev.id}`, text: usageNote(p) }
     default:
       // 未知事件类型照样画（`dynamic_system.md` 的要求与此一致）：它也是
       // agent 说过的话的一部分，静默丢掉就是让用户看不见。
@@ -505,6 +517,38 @@ function fallbackText(ev: TrajectoryEvent, p: Record<string, unknown> | null): s
   const head = `${ev.kind}`
   if (!p) return ev.payload
   return `${head} ${JSON.stringify(p)}`
+}
+
+/**
+ * `available_commands_update` 的一句话：这台 agent 现在能用哪些命令。
+ *
+ * 命令清单是**元数据**，不是 agent 说的话：它对用户的意义是「这些斜杠命令可用」，
+ * 数值本身（每个命令的 `description` / `input`）留在轨迹抽屉里看原文。
+ * 认不出 `availableCommands` 的形状时退回一句不撒谎的说明，不打印原始 JSON。
+ */
+function commandsNote(p: Record<string, unknown> | null): string {
+  const list = p?.availableCommands
+  if (!Array.isArray(list)) return 'agent 更新了可用命令清单'
+  const names = list
+    .map((c) => (c && typeof c === 'object' ? str((c as Record<string, unknown>).name) : ''))
+    .filter((n) => n !== '')
+  if (names.length === 0) return 'agent 更新了可用命令清单（当前为空）'
+  return `可用命令：${names.join('、')}`
+}
+
+/**
+ * `usage_update` 的一句话：这一轮大概用掉多少 context。
+ *
+ * `used` / `size` 都是 token 数。只报「用了多少 / 一共多少」，不算百分比——
+ * `size` 未必是这一轮的窗口上限，自己除出来的百分比会像一句承诺。
+ */
+function usageNote(p: Record<string, unknown> | null): string {
+  const used = typeof p?.used === 'number' ? p.used : null
+  const size = typeof p?.size === 'number' ? p.size : null
+  if (used === null && size === null) return 'agent 更新了 token 用量'
+  if (size === null) return `token 用量：${used}`
+  if (used === null) return `token 用量：上限 ${size}`
+  return `token 用量：${used} / ${size}`
 }
 
 /**
@@ -647,6 +691,8 @@ watch(
             <span class="af-msg__who">{{ whoLabel(row.who) }}</span>
             <div class="af-msg__body">{{ row.text }}</div>
           </div>
+
+          <p v-else-if="row.kind === 'meta'" class="af-conv-meta" data-conv-meta>{{ row.text }}</p>
 
           <details v-else-if="row.kind === 'tool'" class="af-tool" data-open="false" data-conv-tool>
             <summary class="af-tool__head">
@@ -822,6 +868,14 @@ watch(
   margin: 0;
   font-size: var(--af-text-xs);
   color: var(--af-fg-tertiary);
+}
+
+/* 元数据行（可用命令 / token 用量）。比 `.af-turn` 再淡一档、不换行挤压：
+   它是背景信息，读到就够，不该和对话正文争注意力。 */
+.af-conv-meta {
+  margin: 0;
+  font-size: var(--af-text-xs);
+  color: var(--af-fg-disabled);
 }
 
 /* 阶段横幅。视觉语言与 AgentCatalog 的同名块同源（§3.11 的「为什么空」：
