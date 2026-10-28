@@ -1246,4 +1246,125 @@ for raw in sys.stdin:
         // 再关一次是幂等的
         c.shutdown().await;
     }
+
+    /// agent 的 `session/new` 回了一个**没有 `sessionId`** 的 result → `Rpc`，
+    /// 且错误里带着 agent 实际回的东西。
+    ///
+    /// 不许把空 id 当成功：拿空 id 去 `session/prompt`，agent 那边多半回
+    /// 「没这个会话」，而页面只会显示「正在回复」。错误要能让人看出是
+    /// agent 回的形状不对，而不是设备这侧哪里坏了。
+    #[tokio::test]
+    async fn a_new_session_without_an_id_reports_what_the_agent_said() {
+        let d = tempfile::tempdir().expect("tmp");
+        let body = format!(
+            r#"{PRELUDE}
+    if method == "initialize":
+        send({{"jsonrpc":"2.0","id":mid,"result":{{"protocolVersion":1}}}})
+    elif method == "session/new":
+        # 真机里见过的一种坏形状：只回了个 configOptions。
+        send({{"jsonrpc":"2.0","id":mid,"result":{{"configOptions":[]}}}})
+"#
+        );
+        let c = client_for(&fake_agent(d.path(), "no-sid", &body)).await;
+        match c.new_session("/tmp/proj").await {
+            Err(AcpError::Rpc { method, detail }) => {
+                assert_eq!(method, "session/new");
+                assert!(
+                    detail.contains("configOptions"),
+                    "要把 agent 实际回的形状带上，否则没法判断是它坏了还是我们读错了：{detail}"
+                );
+            }
+            other => panic!("缺 sessionId 必须是 Rpc 错误，实际 {other:?}"),
+        }
+        c.shutdown().await;
+    }
+
+    /// **`env` 与 `cwd` 真的传到了子进程**，而不只是存进结构体。
+    ///
+    /// 这条钉的是「追加到继承环境之上，不是替换」：替换会让子进程丢掉 `PATH`，
+    /// 于是用户配的 agent 一启动就找不到任何东西，而错因看起来像「命令不存在」。
+    #[tokio::test]
+    async fn spawn_passes_env_and_cwd_to_the_child() {
+        let d = tempfile::tempdir().expect("tmp");
+        let workdir = d.path().join("proj");
+        std::fs::create_dir_all(&workdir).expect("mkdir");
+        let seen = d.path().join("seen.txt");
+        // 子进程把**它自己看到的** cwd 与环境写到文件，再正常握手：
+        // 从父进程侧只能看到结构体，看得见真实效果的地方只有子进程内部。
+        let body = format!(
+            r#"{PRELUDE}
+    if method == "initialize":
+        import os
+        with open({seen:?}, "w") as f:
+            f.write(os.getcwd() + "\n")
+            f.write(os.environ.get("AF_TEST_MINE","<unset>") + "\n")
+            f.write("HAS_PATH=" + str(bool(os.environ.get("PATH"))))
+        send({{"jsonrpc":"2.0","id":mid,"result":{{"protocolVersion":1}}}})
+"#,
+            seen = seen.to_string_lossy()
+        );
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("AF_TEST_MINE".to_string(), "hello-from-test".to_string());
+        let script = fake_agent(d.path(), "env-write", &body);
+        let c = AcpClient::spawn(
+            script.to_str().expect("路径"),
+            &[],
+            &env,
+            "",
+            Some(&workdir),
+        )
+        .await
+        .expect("握手应成功");
+
+        let mut text = String::new();
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            text = std::fs::read_to_string(&seen).unwrap_or_default();
+            if text.lines().count() >= 3 {
+                break;
+            }
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines.first().copied(),
+            Some(workdir.to_string_lossy().as_ref()),
+            "子进程的 cwd 必须是 Hub 下发的那个：{text}"
+        );
+        assert_eq!(
+            lines.get(1).copied(),
+            Some("hello-from-test"),
+            "配的 env 必须到得了子进程：{text}"
+        );
+        assert_eq!(
+            lines.get(2).copied(),
+            Some("HAS_PATH=True"),
+            "env 是**追加**不是替换，PATH 不能丢：{text}"
+        );
+        c.shutdown().await;
+    }
+
+    /// 关掉之后读循环得到的是**先 `Exited`**：这是读循环赖以收尾的那条事件。
+    ///
+    /// 调用方靠 `Exited` 把「子进程没了」告诉 Hub，所以这里钉的是它一定会来、
+    /// 且带着真实的退出理由。**不收尾成 `None`**：`Inner` 自己持着
+    /// `events` 发送端的一个克隆（`spawn` 里 `events: tx.clone()`），那个克隆
+    /// 活得和客户端一样久，于是发送端永远不会全部销毁，接收端也就永远等不到
+    /// `None`。`read_events` 里 `None => break` 那一臂因此**结构上不可达**
+    /// （已就地标注、见登记表）——读循环靠 `Exited` 退出，不靠流关闭。
+    #[tokio::test]
+    async fn shutdown_delivers_exit_so_the_read_loop_can_stop() {
+        let d = tempfile::tempdir().expect("tmp");
+        let c = client_for(&minimal_agent(d.path())).await;
+        c.shutdown().await;
+
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(5), c.recv())
+            .await
+            .expect("关了之后 recv 不许挂住");
+        match ev {
+            Some(Event::Exited { reason, .. }) => {
+                assert!(!reason.is_empty(), "退出得给个理由，别让上层猜");
+            }
+            other => panic!("stdio 关掉后必须收到 Exited，实际 {other:?}"),
+        }
+    }
 }
