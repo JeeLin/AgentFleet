@@ -95,6 +95,21 @@ describe('NewSessionPage：渲染', () => {
     const hrefs = Array.from(w.element.querySelectorAll('a')).map((a) => a.getAttribute('href'))
     expect(hrefs.some((h) => h?.includes('/w/') || h?.includes('workspace'))).toBe(false)
   })
+
+  it('说明文字只讲现在成立的事：供料整体撤销、装 agent 不归我们做', async () => {
+    stubFetch({ '/api/devices': { body: [ONLINE] }, '/api/agents': { body: [agent()] } })
+    const w = mountIn(NewSessionPage)
+    await flush(w)
+
+    const text = w.element.textContent ?? ''
+    // 工作区供料在 2026-10-26 被整体撤销，不是「改期到 M2」——所以不许再出现
+    // 「M2 才有」这种把撤销说成排期的写法。
+    expect(text).toContain('供料能力已整体撤出，不在任何阶段')
+    expect(text).not.toContain('M2 才有')
+    // 装 agent 从未被排进任何里程碑（撤销，不是挪期）：写的是「用户自己装」。
+    expect(text).toContain('agent 由用户自己装在这台设备上')
+    expect(text).not.toContain('装 agent 是 M5')
+  })
 })
 
 describe('NewSessionPage：空态', () => {
