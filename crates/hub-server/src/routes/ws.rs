@@ -1294,11 +1294,11 @@ fn parse_agent_report(v: &serde_json::Value) -> Option<hub_storage::agent::Detec
 /// 但它**必须留痕**（「帧没发出去」正是排查协议不一致的唯一线索）。
 ///
 /// 单独抽出来而不是 11 处各写一遍：11 份 `if let Err` 加日志会漂移，
-// coverage: excluded — `send_best_effort` 的失败留痕行：所有握手失败帧
-// 发送失败的共同路径，需对端在收失败帧前消失。
 /// 而「错误帧没送达」这类问题恰恰只在其中一处被记录时最难查。
 async fn send_best_effort(socket: &mut WebSocket, frame: Frame, conn_id: &str) {
     if let Err(reason) = send_frame(socket, frame).await {
+        // coverage: excluded — `send_best_effort` 的失败留痕行：所有握手失败帧
+        // 发送失败的共同路径，需对端在收失败帧前消失。
         tracing::info!(conn_id = %conn_id, reason = %reason, "cannot deliver failure frame");
     }
 }
