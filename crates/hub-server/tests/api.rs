@@ -163,16 +163,29 @@ impl Reply {
 /// 就是 WS 断开，页面侧立刻从 online 变 reconnecting（那正是另一条用例要测的）。
 /// 「在线」这个状态只有真连接才造得出来，所以建会话的成功路径必须走它。
 async fn enrolled_device(hub: &common::Hub) -> (String, node_core::conn::Established) {
-    enrolled_device_reporting(hub, json!(["claude-code"])).await
+    // 旧形态字符串数组：`claude-code` 一项。
+    enrolled_device_reporting(hub, json!(["claude-code"]), 1).await
 }
 
 /// 同上，但 agent 上报内容由调用方给。
 ///
 /// `agents` 既是旧形态（字符串数组）也是新形态（对象数组）的入口——Hub 两种都认。
 /// 门禁测试需要精确控制「这台设备上报了什么」，所以不能复用写死的那一份。
+///
+/// # 为什么要显式传 `expect_rows`
+///
+/// 门禁读的是**库**（子任务 5 的核心判据），所以夹具必须等到行的确落库。
+/// 但「落库了」这件事**无法只靠读库观测**：空清单走 `replace_detected` 是
+/// `DELETE` 之后再无 `INSERT`，跑完之后与「还没跑」在库里**完全一致**。
+/// （`on_heartbeat` 是先 `reports().record(..)` 再 `persist_agents`，所以等内存
+/// 也不够——`wait_until` 首查即为真就立刻返回，那一刻库里还没写。）
+/// 于是把期望行数交给调用方：非空清单等「行数达标」，空清单只能等内存那份
+/// 报告到达（它此时是唯一可观测的信号，且对本文件的两条空清单用例足够——
+/// 它们只关心 400/409 的判定顺序，不读 `agent_runtime`）。
 async fn enrolled_device_reporting(
     hub: &common::Hub,
     agents: Value,
+    expect_rows: usize,
 ) -> (String, node_core::conn::Established) {
     let (mut est, node_id, _kp) = common::connect_enrolled(hub).await;
     common::send_heartbeat(
@@ -185,12 +198,24 @@ async fn enrolled_device_reporting(
         }),
     )
     .await;
-    // 等**库**里有行，不是等内存 `Reports`：门禁读的是库（子任务 5 的核心判据）。
-    // 等内存会让测试在一条「库还没写完」的窗口上跑，于是时红时绿。
-    common::wait_until(Duration::from_secs(2), || {
-        hub.state.reports().get(&node_id).is_some()
-    })
-    .await;
+    if expect_rows == 0 {
+        // 只能等「心跳被处理过」：库里的一份空清单与「没写过」不可区分。
+        common::wait_until(Duration::from_secs(2), || {
+            hub.state.reports().get(&node_id).is_some()
+        })
+        .await;
+    } else {
+        // 真去读库，且要求行数达标：门禁读的就是这里，等内存会在
+        // 「行还没写进库」的窗口上返回，测试便靠后续请求的耗时侥幸躲过竞态。
+        common::wait_until(Duration::from_secs(2), || {
+            hub.state
+                .agent_runtime()
+                .list_for_node(&node_id)
+                .map(|rows| rows.len() == expect_rows)
+                .unwrap_or(false)
+        })
+        .await;
+    }
     (node_id, est)
 }
 
@@ -402,12 +427,14 @@ async fn usable_agents_lists_only_what_the_gate_would_accept() {
     let (node_ok, _est_ok) = enrolled_device_reporting(
         &hub,
         json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        1,
     )
     .await;
     let (node_broken, _est_broken) = enrolled_device_reporting(
         &hub,
         json!([{"id": "claude", "name": "claude", "version": "1.0", "available": false,
                "error": "no ACP entry point"}]),
+        1,
     )
     .await;
 
@@ -541,6 +568,7 @@ async fn creating_a_session_returns_a_detail_with_its_locked_workspace() {
     let (node_id, _keepalive) = enrolled_device_reporting(
         &hub,
         json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        1,
     )
     .await;
     let h = Harness::from_hub(hub).await;
@@ -576,6 +604,7 @@ async fn two_sessions_can_share_one_workspace() {
     let (node_id, _keepalive) = enrolled_device_reporting(
         &hub,
         json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        1,
     )
     .await;
     let h = Harness::from_hub(hub).await;
@@ -624,6 +653,7 @@ async fn creating_a_session_on_a_reconnecting_device_succeeds() {
     let (node_id, keepalive) = enrolled_device_reporting(
         &hub,
         json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        1,
     )
     .await;
     // 先确认造出来的确实是 `reconnecting`，否则「201」可能只是碰巧走了在线路径。
@@ -1063,6 +1093,7 @@ async fn deleting_a_device_keeps_its_sessions_listed_as_removed() {
     let (node_id, _keepalive) = enrolled_device_reporting(
         &hub,
         json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        1,
     )
     .await;
     let h = Harness::from_hub(hub).await;
@@ -1148,6 +1179,7 @@ async fn deleting_a_device_does_not_delete_its_sessions_trajectory() {
     let (node_id, _keepalive) = enrolled_device_reporting(
         &hub,
         json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        1,
     )
     .await;
     let h = Harness::from_hub(hub).await;
@@ -1237,6 +1269,7 @@ async fn creating_a_session_with_an_available_agent_succeeds() {
     let (node_id, _keepalive) = enrolled_device_reporting(
         &hub,
         json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        1,
     )
     .await;
     let h = Harness::from_hub(hub).await;
@@ -1256,7 +1289,7 @@ async fn creating_a_session_with_an_available_agent_succeeds() {
 #[tokio::test]
 async fn creating_a_session_with_an_agent_the_device_never_reported_is_a_conflict() {
     let hub = common::Hub::boot().await;
-    let (node_id, _keepalive) = enrolled_device_reporting(&hub, json!(["opencode"])).await;
+    let (node_id, _keepalive) = enrolled_device_reporting(&hub, json!(["opencode"]), 1).await;
     let h = Harness::from_hub(hub).await;
 
     let r = h
@@ -1291,6 +1324,7 @@ async fn creating_a_session_with_a_broken_agent_is_a_conflict() {
             "id": "opencode", "name": "opencode", "version": "2.1.4",
             "available": false, "error": "exit status 3"
         }]),
+        1,
     )
     .await;
     let h = Harness::from_hub(hub).await;
@@ -1319,7 +1353,7 @@ async fn creating_a_session_with_a_broken_agent_is_a_conflict() {
 #[tokio::test]
 async fn creating_a_session_with_an_agent_on_a_silent_device_is_a_conflict() {
     let hub = common::Hub::boot().await;
-    let (node_id, _keepalive) = enrolled_device_reporting(&hub, json!([])).await;
+    let (node_id, _keepalive) = enrolled_device_reporting(&hub, json!([]), 0).await;
     let h = Harness::from_hub(hub).await;
 
     let r = h
@@ -1349,7 +1383,7 @@ async fn creating_a_session_with_an_agent_on_a_silent_device_is_a_conflict() {
 #[tokio::test]
 async fn creating_a_session_without_an_agent_id_is_rejected() {
     let hub = common::Hub::boot().await;
-    let (node_id, _keepalive) = enrolled_device_reporting(&hub, json!([])).await;
+    let (node_id, _keepalive) = enrolled_device_reporting(&hub, json!([]), 0).await;
     let h = Harness::from_hub(hub).await;
 
     // 设备**没上报任何 agent**：若拒绝来自 agent 门禁，这里会是 409
@@ -1388,7 +1422,7 @@ async fn creating_a_session_without_an_agent_id_is_rejected() {
 #[tokio::test]
 async fn the_gate_reads_the_table_not_the_in_memory_report() {
     let hub = common::Hub::boot().await;
-    let (node_id, _keepalive) = enrolled_device_reporting(&hub, json!(["opencode"])).await;
+    let (node_id, _keepalive) = enrolled_device_reporting(&hub, json!(["opencode"]), 1).await;
 
     // 先确认内存里**确实**还有那份旧清单，否则这条测不出任何东西
     let in_memory = hub.state.reports().get(&node_id).expect("心跳已进内存");
@@ -1470,7 +1504,8 @@ async fn conversation_ready(
     agent_id: &str,
 ) -> (Harness, String, String, node_core::conn::Established) {
     let hub = common::Hub::boot().await;
-    let (node_id, est) = enrolled_device_reporting(&hub, agents).await;
+    // 建会话成功 = 该 agent 可用 = 库里必有一行。
+    let (node_id, est) = enrolled_device_reporting(&hub, agents, 1).await;
     let h = Harness::from_hub(hub).await;
     let created = h
         .create_session(json!({
@@ -1889,6 +1924,7 @@ async fn opening_a_conversation_on_a_removed_device_is_device_removed() {
     let (node_id, _keepalive) = enrolled_device_reporting(
         &hub,
         json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        1,
     )
     .await;
     let h = Harness::from_hub(hub).await;
@@ -1965,6 +2001,7 @@ async fn cancelling_on_a_removed_device_is_device_removed() {
     let (node_id, _keepalive) = enrolled_device_reporting(
         &hub,
         json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        1,
     )
     .await;
     let h = Harness::from_hub(hub).await;
