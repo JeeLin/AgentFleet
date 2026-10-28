@@ -50,7 +50,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import EmptyState from '@/components/EmptyState.vue'
-import type { TrajectoryEvent } from '@/lib/api'
+import type { TrajectoryEvent, TrajectoryGap } from '@/lib/api'
 import { handleLayerKeydown, pop, push } from '@/lib/focus'
 
 /** 一页取多少条。200 条纯文本行的 DOM 开销是可接受的（见模块注释）。 */
@@ -62,11 +62,11 @@ const PAGE_SIZE = 200
  * 与 `hub-storage/src/trajectory.rs` 的 `Gap` 同一套坐标，`missing` 由 Hub 算好
  * ——前端不重算，两处各算一份会分叉。
  */
-export interface TrajGap {
-  from: number
-  to: number
-  missing: number
-}
+/*
+  断口形状直接用 `api.ts` 的 `TrajectoryGap`：原先自己声明同形的 `TrajGap`，
+  而 `SessionPage` 传给本组件和 `ConvFlow` 的是同一个数组，本地那份不增加
+  任何类型信息，只多一个会跟着漂的副本。
+*/
 
 const props = withDefaults(
   defineProps<{
@@ -86,7 +86,7 @@ const props = withDefaults(
     /** 已取到的事件（按物理顺序）。 */
     events?: TrajectoryEvent[]
     /** 序号断口。Hub 算好给过来。 */
-    gaps?: TrajGap[]
+    gaps?: TrajectoryGap[]
     /** 最后一轮没有 `turn_end`：还在跑，或结尾丢了。 */
     incomplete?: boolean
     /** 还有更多没取回来吗（决定「加载更多」在不在）。 */
@@ -141,7 +141,7 @@ type TrajRow =
   | { t: 'row'; key: string; ev: TrajectoryEvent }
 
 const rows = computed<TrajRow[]>(() => {
-  const before = new Map<number, TrajGap>()
+  const before = new Map<number, TrajectoryGap>()
   for (const g of props.gaps) before.set(g.to, g)
 
   const out: TrajRow[] = []

@@ -38,7 +38,7 @@
 import { computed, ref, watch } from 'vue'
 
 import EmptyState from '@/components/EmptyState.vue'
-import type { TrajectoryEvent } from '@/lib/api'
+import type { TrajectoryEvent, TrajectoryGap } from '@/lib/api'
 
 /** 输入区的发送目标。`exec` 是一次性命令，`chat` 才是对话。 */
 export type ConvTarget = 'exec' | 'terminal' | 'chat'
@@ -63,11 +63,13 @@ export interface ConvExecRequest {
  * **那个存在的 seq**、充当排他上界，所以「缺几条」是 `to - from`。前端不自己
  * 算这个减法——Hub 已经把它算进 `missing` 字段里了，两处各算一份会分叉。
  */
-export interface ConvGap {
-  from: number
-  to: number
-  missing: number
-}
+/**
+ * 断口形状直接用 `api.ts` 的 `TrajectoryGap`。
+ *
+ * 本组件曾经自己声明一份同形的 `ConvGap`：两份字段一样、注释一样，而
+ * `SessionPage` 传给 `ConvFlow` 与 `TrajDrawer` 的是**同一个数组实例**，
+ * 本地那份不增加任何类型信息，只多一个会跟着漂的副本。
+ */
 
 /** 一条待渲染的对话事件。已按 `seq` 排好、断口已插进去。 */
 export type ConvRow =
@@ -132,7 +134,7 @@ const props = withDefaults(
      */
     events?: TrajectoryEvent[]
     /** 序号断口。Hub 算好给过来，前端不重算。 */
-    gaps?: ConvGap[]
+    gaps?: TrajectoryGap[]
     /** 最后一轮没有 `turn_end`：还在跑，或结尾丢了。 */
     incomplete?: boolean
   }>(),
@@ -334,7 +336,7 @@ const rows = computed<ConvRow[]>(() => {
   // 按 `from` 索引是错的，而且错得很隐蔽：断口里的 seq 都不在库里，
   // 于是「找到 seq == from 的那条事件」永远找不到，标记一个也不画——
   // 页面看起来就是连续的。这正是这条功能要防的事。
-  const gapBefore = new Map<number, ConvGap>()
+  const gapBefore = new Map<number, TrajectoryGap>()
   for (const g of props.gaps) {
     gapBefore.set(g.to, g)
   }

@@ -933,35 +933,12 @@ kbd, .kbd {
 .af-diff__row[data-kind='add'] .af-diff__sign { color: var(--af-ok-fg); }
 .af-diff__row[data-kind='del'] .af-diff__sign { color: var(--af-danger-fg); }
 
-/* 轨迹抽屉 */
-.af-traj {
-  position: fixed; top: 40px; right: 0; bottom: 24px; width: min(460px, 100%);
-  display: flex; flex-direction: column;
-  background: var(--af-surface-2); border-left: 1px solid var(--af-border-default);
-  box-shadow: var(--af-shadow-3); z-index: var(--af-z-drawer);
-}
-.af-traj__head {
-  display: flex; align-items: center; gap: var(--af-space-3);
-  padding: var(--af-space-3) var(--af-space-4); border-bottom: 1px solid var(--af-border-subtle);
-  flex: 0 0 auto;
-}
-.af-traj__body { flex: 1 1 auto; overflow: auto; }
-.af-traj__row {
-  display: grid; grid-template-columns: 44px 14px 1fr auto; gap: var(--af-space-3);
-  align-items: baseline; width: 100%; padding: var(--af-space-2) var(--af-space-4);
-  background: none; border: 0; border-bottom: 1px solid var(--af-border-subtle);
-  text-align: left; font-family: inherit; font-size: var(--af-text-md);
-  color: var(--af-fg-secondary); cursor: pointer;
-}
-.af-traj__row:hover { background: var(--af-surface-3); }
-.af-traj__row[aria-selected='true'] { background: var(--af-accent-bg); color: var(--af-fg-primary); }
-.af-traj__seq { color: var(--af-fg-tertiary); font-variant-numeric: tabular-nums; }
-.af-traj__kind { font-size: var(--af-text-sm); }
-.af-traj__kind[data-kind='say']  { color: var(--af-accent-fg); }
-.af-traj__kind[data-kind='tool'] { color: var(--af-info-fg); }
-.af-traj__kind[data-kind='note'] { color: var(--af-fg-tertiary); }
-.af-traj__ms { color: var(--af-fg-tertiary); font-variant-numeric: tabular-nums;   font-size: var(--af-text-xs);
-}
+/* 轨迹抽屉的样式**只住在 `TrajDrawer.vue` 的 scoped 块里**。
+   这里曾经有一份同名的全局副本（.af-traj / __head / __body / __row / __seq /
+   __kind / __ms），定位与列数与组件那份都不同（`top:40px; right:0; width:460px`
+   对 `inset:0` 的遮罩 + 520px 面板）。scoped 胜出，所以全局那份从来没生效过，
+   却会把「抽屉长什么样」的答案指向错的数字。删掉它，真相源只剩一处。
+   注意 `.af-traj__ms` 从未被任何模板引用——它是这份副本里的孤儿。 */
 
 /* 状态模拟条（原型专用：让「断线三态」可一键看到） */
 .af-sim {
