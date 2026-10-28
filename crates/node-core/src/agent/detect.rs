@@ -358,7 +358,12 @@ fn run_version(path: &Path, args: &[&str], timeout: Duration) -> Result<String, 
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            Err(e) => return Err(format!("等待进程失败：{e}")),
+            Err(e) => {
+                // coverage: excluded — `try_wait()` 本身失败（子进程句柄已被
+                // 内核回收 / 权限被撤）。要构造它得让内核在探测窗口里拒绝对
+                // 自己刚起的子进程做 wait，单测里没有可控手段。诚实报错，不编。
+                return Err(format!("等待进程失败：{e}"));
+            }
         }
     }
 }

@@ -114,6 +114,9 @@ impl AgentRuntimeRepo {
                     i64::from(*available),
                     error,
                     now,
+                    // coverage: excluded — llvm-cov 区域产物：`?` 的短路分支
+                    // 单独成行，而同一条 `execute` 的成功路径已被上面的用例
+                    // 走到。写不出「让这一句失败但整表仍可读」的用例。
                 ])?;
             }
         }
@@ -313,6 +316,9 @@ impl AgentConfigRepo {
                 serde_json::to_string(&c.env)?,
                 c.updated_at
             ],
+            // coverage: excluded — llvm-cov 区域产物：`?` 的短路分支单独成行，
+            // 成功路径有用例覆盖。让这条 upsert 失败只会得到 SQLite 的错，
+            // 造不出「可区分且稳定」的用例。
         )?;
         Ok(())
     }

@@ -185,6 +185,9 @@ pub fn collect_resources() -> serde_json::Value {
     }
 
     if out.is_empty() {
+        // coverage: excluded — 只在**读不到 `/proc`** 的机器上才会走到（非 Linux、
+        // 或被裁掉的容器）。本项目的目标平台是 Linux，`/proc/loadavg` 恒在，
+        // 出参不可能为空；这是给「什么也没测到」留的诚实出口，不是业务分支。
         return serde_json::Value::Null;
     }
     serde_json::Value::Object(out)

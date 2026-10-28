@@ -644,6 +644,10 @@ fn expand_home(cwd: &str) -> String {
         Some(home) => format!("{}{rest}", home.to_string_lossy()),
         // 拿不到家目录：原样传下去，让 `current_dir` 自己报错。编一个路径只会
         // 让 agent 在一个不存在的目录里失败，而错误指向的是我们编的那个。
+        //
+        // coverage: excluded — 要在用例里走到这一臂，只能把进程的 `HOME` 拿掉，
+        // 而设/删环境变量是**进程全局**的：测试并行跑时会把别的用例一起带偏。
+        // 仓库明令禁止在测试里 `set_var`，故无合法构造手段。
         None => cwd.to_string(),
     }
 }
@@ -750,6 +754,11 @@ async fn read_events(channel_id: String, client: AcpClient, seq: Seq) {
     loop {
         tokio::select! {
             ev = client.recv() => match ev {
+                // coverage: excluded — `AcpClient` 内部（`acp.rs` 的 `spawn`）
+                // 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以
+                // `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的。
+                // 这一臂结构上不可达，留着是因为 `recv()` 的签名是
+                // `Option<Event>`，这里必须穷尽。
                 None => break,
                 Some(Event::SessionUpdate(params)) => {
                     let mut update = params.get("update").cloned().unwrap_or(params);

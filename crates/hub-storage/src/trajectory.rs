@@ -465,6 +465,8 @@ impl TrajectoryRepo {
                     });
                 }
             }
+            // coverage: excluded — llvm-cov 区域产物：`if let [a, b]` 块尾的
+            // 闭合括号被单独算作一个区域，块内语句均已覆盖。
         }
         Ok(out)
     }

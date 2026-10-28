@@ -92,6 +92,8 @@ impl WorkspaceRepo {
             "SELECT EXISTS(SELECT 1 FROM device WHERE id = ?1)",
             params![node_id],
             |r| r.get(0),
+            // coverage: excluded — llvm-cov 区域产物：`?` 的短路分支单独成行，
+            // 存在性查询成功的那条路已由「工作区挂在不存在的设备上」用例走到。
         )?;
         if !device_exists {
             return Err(StorageError::NoSuchDevice(node_id.to_string()));
