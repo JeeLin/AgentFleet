@@ -1067,4 +1067,104 @@ mod tests {
         h.insert("last-event-id", "not-a-number".parse().unwrap());
         assert_eq!(crate::routes::last_event_id(&h), None);
     }
+
+    // ---- 心跳回退口径：装了 ≠ 能对话 ----
+
+    /// `available_agent_names` 只收 `available == true` 的，且**旧形态一律不算**。
+    ///
+    /// 与 `parse_agent_report` 同一口径：一个只说名字的帧不构成「可用」的
+    /// 证据。两处若漂移，目录页会说它可用，而用户点创建拿到 409「这台设备上
+    /// 跑不起来」——同一件事两套说法。
+    #[test]
+    fn available_agent_names_requires_an_explicit_true() {
+        let caps = serde_json::json!({
+            "agents": [
+                {"id": "opencode", "name": "opencode", "available": true},
+                {"id": "claude", "name": "claude", "available": false},
+                {"id": "nokey", "name": "nokey"},
+                {"id": "str-avail", "name": "str-avail", "available": "yes"},
+                {"id": "idonly", "available": true},
+                "legacy-bare-string",
+                42,
+            ]
+        });
+        assert_eq!(
+            available_agent_names(&caps),
+            vec!["idonly".to_string(), "opencode".to_string()],
+            "只有显式 true 的算可用；缺 name 时退回 id"
+        );
+    }
+
+    /// 没有 `agents` 字段 / 不是数组 → 空，而不是 panic 或「全可用」。
+    #[test]
+    fn available_agent_names_is_empty_when_the_field_is_absent_or_wrong() {
+        for caps in [
+            serde_json::json!({}),
+            serde_json::json!({"agents": "opencode"}),
+            serde_json::json!({"agents": null}),
+            serde_json::json!({"agents": []}),
+        ] {
+            assert!(
+                available_agent_names(&caps).is_empty(),
+                "{caps} 不该给出任何可用名字"
+            );
+        }
+    }
+
+    /// 回退口径的两份名单必须**自洽**：可用集合是已装集合的子集。
+    ///
+    /// 读库失败时页面用这份回退渲染，两份名单若不自洽，会出现「列出了
+    /// 一个不在可用列表里的 agent，且没有任何原因说明」。
+    #[test]
+    fn the_heartbeat_fallback_keeps_usable_within_all() {
+        let caps = serde_json::json!({
+            "agents": [
+                {"id": "opencode", "name": "opencode", "available": true},
+                {"id": "claude", "name": "claude", "available": false},
+            ]
+        });
+        let (all, usable) = agent_names_from_heartbeat(&caps);
+        assert_eq!(all, vec!["claude".to_string(), "opencode".to_string()]);
+        assert_eq!(usable, vec!["opencode".to_string()]);
+        assert!(
+            usable.iter().all(|n| all.contains(n)),
+            "可用的必须是已装的子集：all={all:?} usable={usable:?}"
+        );
+    }
+
+    /// `merge_agent`：`available` 取**或**、`error` 取**并**且去重。
+    ///
+    /// 这两条方向相反是有意的——「有一台能用」就是能用，而「为什么不能用」
+    /// 要全留着，否则用户换一台设备测就看不到另一台上那条原因。
+    #[test]
+    fn merge_agent_unions_availability_and_collects_reasons() {
+        let mut out = BTreeMap::new();
+        merge_agent(&mut out, "opencode", false, Some("退出码 3"));
+        merge_agent(&mut out, "opencode", false, Some("缺少 acp 入口"));
+        let one = out.get("opencode").expect("一条");
+        assert!(one.error.as_deref().unwrap_or("").contains("退出码 3"));
+        assert!(
+            one.error.as_deref().unwrap_or("").contains("缺少 acp 入口"),
+            "两条原因都要留下：{:?}",
+            one.error
+        );
+
+        // 另一台设备说它可用 → 整体可用，且重复原因不再重复追加。
+        let before = out.get("opencode").and_then(|e| e.error.clone());
+        merge_agent(&mut out, "opencode", true, Some("退出码 3"));
+        let one = out.get("opencode").expect("一条");
+        assert!(one.available, "有一台能用就是能用");
+        assert_eq!(one.error, before, "标了可用之后不再追加原因");
+    }
+
+    /// `merge_agent` 的空原因与缺原因**都不该**制造一条错误说明。
+    #[test]
+    fn merge_agent_ignores_a_missing_or_empty_reason() {
+        let mut out = BTreeMap::new();
+        merge_agent(&mut out, "a", false, None);
+        merge_agent(&mut out, "b", false, Some(""));
+        assert_eq!(out.get("a").and_then(|e| e.error.clone()), None);
+        assert_eq!(out.get("b").and_then(|e| e.error.clone()), None);
+        assert!(!out.get("a").expect("a").available);
+    }
 }
