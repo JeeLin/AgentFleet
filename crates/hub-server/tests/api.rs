@@ -388,6 +388,59 @@ async fn a_connected_device_is_reported_as_online_with_its_agents() {
     assert_eq!(v[0]["agents"], json!(["claude-code"]));
 }
 
+/// **设备摘要里的 `usable_agents` 与建会话门禁同源。**
+///
+/// 挡的是「页面上选得到、点创建 409」：两台设备的心跳里各有一个 agent，
+/// 一台可用、一台装了但跑不起来。`agents`（已装目录）两台都要列出来，
+/// `usable_agents`（建会话可选项）只能有可用的那个。
+///
+/// 反向验证：把 `device_summary` 里那一档换成「照抄 `agents`」（即不再走
+/// `AgentRuntimeRepo::usable_list` 的 `available = 1`），这里立刻红。
+#[tokio::test]
+async fn usable_agents_lists_only_what_the_gate_would_accept() {
+    let hub = common::Hub::boot().await;
+    let (node_ok, _est_ok) = enrolled_device_reporting(
+        &hub,
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+    )
+    .await;
+    let (node_broken, _est_broken) = enrolled_device_reporting(
+        &hub,
+        json!([{"id": "claude", "name": "claude", "version": "1.0", "available": false,
+               "error": "no ACP entry point"}]),
+    )
+    .await;
+
+    let h = Harness::from_hub(hub).await;
+    let v = h.get("/api/devices").await.json();
+    let rows = v.as_array().expect("/api/devices 是数组");
+    let ok = rows
+        .iter()
+        .find(|r| r["id"] == json!(node_ok))
+        .expect("可用设备在");
+    let broken = rows
+        .iter()
+        .find(|r| r["id"] == json!(node_broken))
+        .expect("坏设备在");
+
+    assert_eq!(ok["agents"], json!(["opencode"]));
+    assert_eq!(
+        ok["usable_agents"],
+        json!(["opencode"]),
+        "可用的那个必须进可选项"
+    );
+    assert_eq!(
+        broken["agents"],
+        json!(["claude"]),
+        "装了但跑不起来的也要列进目录（用户要看见它）"
+    );
+    assert_eq!(
+        broken["usable_agents"],
+        json!([]),
+        "跑不起来的不能进可选项：选得到就只能拿到 409"
+    );
+}
+
 /// WS 断了但心跳还新鲜 → `reconnecting`（§6.1 的三态与 `derived` 徽标）。
 #[tokio::test]
 async fn a_device_whose_socket_dropped_but_is_heartbeating_is_reconnecting() {
@@ -2047,6 +2100,61 @@ async fn the_trajectory_of_a_missing_session_is_404() {
     let h = Harness::new().await;
     let r = h.get("/api/sessions/s_does_not_exist/trajectory").await;
     assert_eq!(r.status, StatusCode::NOT_FOUND, "body: {}", r.body);
+}
+
+/// **`?limit=` 的上限是服务端夹的，而且夹的就是那个模块常量。**
+///
+/// 走的是**真的路由**（`GET /api/sessions/{id}/trajectory` → `clamp_limit`），
+/// 不是常量自己跟自己比。
+///
+/// **写法上绕开过一次假绿**：早先这条只写「请求 `?limit=1000`，要拿回 3 条」。
+/// 那个断言在**完全删掉夹逼**时也照样绿——库里只有 3 条，`LIMIT 1000` 也返回 3 条，
+/// 夹没夹看不出来。要看得见，必须让上限**真的咬住**：先写进比上限多几条的事件，
+/// 再请求一个远超上限的值，然后数回了几条。
+///
+/// 反向验证：把路由里的 `clamp_limit(q.limit)` 换成 `q.limit`（保留原样），
+/// 这里会拿回 `TRAJECTORY_LIMIT_MAX + 5` 条而不是 `TRAJECTORY_LIMIT_MAX` 条，红。
+#[tokio::test]
+async fn the_trajectory_limit_is_clamped_by_the_router_itself() {
+    // 与 `routes/conversation.rs` 里的常量同一个数。测试 crate 引不到那个私有常量，
+    // 所以这里只能抄一份——**但它在断言里只用来「多写几条」，不用来自证**：
+    // 真正的判据是「请求 1000000 条，拿回的不许超过 1000」。
+    const CAP: usize = 1000;
+
+    let (h, node_id, session_id, _est) = conversation_ready(
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        "opencode",
+    )
+    .await;
+
+    let repo = hub_storage::TrajectoryRepo::new(h.hub.state.pool().clone());
+    let total = CAP + 5;
+    for seq in 1..=total as i64 {
+        repo.append(
+            &session_id,
+            &node_id,
+            &hub_storage::NewEvent::new(seq, "agent_message_chunk", r#"{"n":1}"#),
+            &hub_core::registry::now_stamp(),
+        )
+        .expect("写轨迹");
+    }
+    assert_eq!(repo.count(&session_id).expect("count"), total as i64);
+
+    let r = h
+        .get(&format!(
+            "/api/sessions/{session_id}/trajectory?limit=1000000"
+        ))
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "body: {}", r.body);
+    let v = r.json();
+    let events = v["events"].as_array().expect("events 是数组");
+    assert_eq!(
+        events.len(),
+        CAP,
+        "库里有 {total} 条、请求 1000000 条：只有夹到上限才该拿回 {CAP} 条。\
+         拿回 {total} 条说明上限没夹（一次 `?limit=1e9` 能把整张表读进内存）: {}",
+        events.len()
+    );
 }
 
 /// 等一帧 `open_channel`（跳过心跳等其他帧）。
