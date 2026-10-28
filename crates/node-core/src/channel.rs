@@ -1968,4 +1968,92 @@ mod tests {
             "acp 的 open_channel 必须走 OpenAcp，实际 {action:?}"
         );
     }
+
+    // ---- 外部源通道的入站队列 ----
+
+    /// 入站消息**取走即清空**，且再取是空——`take_inbound` 是 drain 语义。
+    ///
+    /// 若改成借用/拷贝，worker 每一轮 tick 都会把同一句用户消息再送进 agent，
+    /// 页面上表现为「它自己又答了一遍」——最难归因的一类 bug。
+    #[test]
+    fn take_inbound_drains_the_queue_and_then_yields_nothing() {
+        let _guard = table_lock();
+        reset();
+        let _ = open_external("ch-in");
+
+        let f = data_frame("ch-in", serde_json::json!({ "text": "你好" }));
+        let _ = on_channel_frame(&f);
+
+        let first = take_inbound("ch-in");
+        assert_eq!(first.len(), 1, "入队的消息要取得到：{first:?}");
+        assert_eq!(first[0]["text"], serde_json::json!("你好"), "载荷原样");
+
+        assert!(
+            take_inbound("ch-in").is_empty(),
+            "取过一次之后必须清空，不能重复投递"
+        );
+    }
+
+    /// 通道**不存在**时取入站消息 → 空，而不是报错或 panic。
+    ///
+    /// 调用方（worker）对「通道不在」与「没有消息」的反应完全一样，都是什么
+    /// 都不做。报错会让一条刚被关掉的通道在下一轮 tick 里刷一条没人管的日志。
+    #[test]
+    fn take_inbound_on_an_unknown_channel_is_empty_not_an_error() {
+        let _guard = table_lock();
+        reset();
+        assert!(take_inbound("ch-never-opened").is_empty());
+
+        // 开过又关掉的通道走的是同一个 None 分支（关 = 从表里摘掉）。
+        let _ = open_external("ch-closed");
+        let _ = on_channel_frame(&close_frame("ch-closed", "done"));
+        assert!(
+            take_inbound("ch-closed").is_empty(),
+            "已关掉的通道不该还有入站消息"
+        );
+    }
+
+    /// 入站积压**超过上限就关通道并报错**，不是无限吞下去。
+    ///
+    /// 上限与待发同一个量级：用户一条消息超过 8 MiB 不是「对话」而是把文件
+    /// 粘进输入框，那种用法该走工作区上传。溢出即关（与出站同一条策略），
+    /// 因为**截断**会让用户看到一句被砍掉的话而毫无提示。
+    #[test]
+    fn too_many_unread_inbound_messages_close_the_channel() {
+        let _guard = table_lock();
+        reset();
+        let _ = open_external("ch-flood");
+
+        // 塞满上限：每一条都要成功入队。
+        for i in 0..INBOUND_LIMIT {
+            let f = data_frame("ch-flood", serde_json::json!({ "text": format!("m{i}") }));
+            let _ = on_channel_frame(&f);
+        }
+        assert_eq!(
+            take_inbound("ch-flood").len(),
+            INBOUND_LIMIT,
+            "上限内的消息全都该在"
+        );
+
+        // 重新填满，再多来一条：这条必须被拒，并且通道被关掉。
+        let _ = open_external("ch-flood2");
+        for i in 0..INBOUND_LIMIT {
+            let f = data_frame("ch-flood2", serde_json::json!({ "text": format!("m{i}") }));
+            let _ = on_channel_frame(&f);
+        }
+        let over = data_frame("ch-flood2", serde_json::json!({ "text": "one too many" }));
+        // 溢出走 `DataError::Connector`：`dispatch` 把它翻成一帧 `channel_error`
+        // 发回 Hub（而不是 `Action::End`——那条是协议解析失败的出口）。
+        match on_channel_frame(&over) {
+            Action::Send(frames) => {
+                assert_eq!(frames.len(), 1, "溢出要回恰好一帧：{frames:?}");
+                assert_eq!(frames[0].msg_type, types::CHANNEL_ERROR, "要说得出口");
+            }
+            other => panic!("入站溢出必须回 channel_error，实际 {other:?}"),
+        }
+        assert!(
+            !external_ids().contains(&"ch-flood2".to_string()),
+            "溢出的通道必须从活通道表里摘掉，否则它会一直占着槽位"
+        );
+    }
 }
