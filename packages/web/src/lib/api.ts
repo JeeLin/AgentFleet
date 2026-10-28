@@ -185,22 +185,6 @@ export interface OpenedChannel {
 }
 
 /**
- * 开一条对话通道。
- *
- * 只负责「开」：消息走既有的 `POST /api/channels/{id}/send`，与终端、文件
- * 同一个机制（M2 没有新增消息类型）。
- *
- * 可能 409：`agent_unavailable`（那台设备上这个 agent 现在跑不起来），
- * 也可能 404（会话不存在）。
- */
-export function openConversation(
-  sessionId: string,
-  options?: RequestOptions,
-): Promise<OpenedChannel> {
-  return postJson<OpenedChannel>(`/api/sessions/${sessionId}/conversation`, undefined, options)
-}
-
-/**
  * 读一页轨迹。**会话不存在时 404。**
  *
  * `after` 是**物理 id 不是 `seq`**：回放顺序是物理顺序，而 `seq` 在设备侧 ACP
@@ -224,7 +208,13 @@ export async function getTrajectory(
   return { ...view, hasMore: view.events.length >= limit }
 }
 
-/** 读 Agent 目录。M1 恒空（没有 agent 运行时可探测）。 */
+/**
+ * 读 Agent 目录。
+ *
+ * **不再恒空**：M2 起设备会探测本机装了哪些 agent 并上报，所以这个列表可以
+ * 真的有内容。每项带 `available` / `error`——「装了但没有 ACP 入口」与「装了
+ * 且能对话」是两种事实，页面必须分得开。
+ */
 export function listAgents(options?: RequestOptions): Promise<AgentSummary[]> {
   return getJson<AgentSummary[]>('/api/agents', options)
 }

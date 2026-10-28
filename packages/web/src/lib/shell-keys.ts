@@ -73,7 +73,9 @@ export function installShellKeys(): void {
   })
 
   registerInternal('nav:sessions', () => nav('/sessions'))
-  registerInternal('nav:new-session', () => nav('/sessions/new'))
+  // 不注册 `nav:new-session`：`KEYS` 里没有键序列映射到它（`g n` 已随导航收敛
+  // 一起删掉），而 `shell-keys` 的派发只走 `KEYS` 推导出的 `PREFIX`。注册了也
+  // 永远不会被调用——与先前删掉的 `nav:agents` 是同一种死注册。
   registerInternal('nav:devices', () => nav('/devices'))
   registerInternal('nav:settings', () => nav('/settings'))
 

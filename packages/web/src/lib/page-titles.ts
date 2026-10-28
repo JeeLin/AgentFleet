@@ -26,8 +26,8 @@ export const PAGE_TITLE: Readonly<Record<string, string>> = {
 
 /**
  * 一个页面的中文名。表里没有的名字**原样返回**——
- * 路由名是闭集（9 个），落到表外说明调用方传错了，而把错的路由名原样
- * 显示出来比编一个「找不到页面」更接近真相。
+ * 路由名是闭集（`ROUTES` 的 7 条 + `not-found`，共 8 个），落到表外说明调用方
+ * 传错了，而把错的路由名原样显示出来比编一个「找不到页面」更接近真相。
  */
 export function pageTitle(name: string): string {
   return PAGE_TITLE[name] ?? name
