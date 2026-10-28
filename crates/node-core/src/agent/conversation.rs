@@ -478,13 +478,26 @@ impl Conversations {
         }
     }
 
-    /// 当前活着的会话数（测试与排障用）。
+    /// 当前活着的会话数。
+    ///
+    /// **生产代码里零调用方**；读它的只有测试：
+    /// - `#[ignore]` 的真机端到端用例 `a_real_opencode_turn_reaches_the_channel_as_a_batch`；
+    /// - 两条在 CI 里真的跑的单测的**反向验证点**——`the_live_table_never_grows_past_its_cap`
+    ///   与 `a_conversation_outlives_a_disconnect_so_it_can_be_resumed` 的注释都写着
+    ///   「改坏某处，这句 `len()` 会红」。
+    ///
+    /// 换句话说它是「计数」而不是「查询」：要断言表里**有哪几条**用 `ids_of`，
+    /// 别把这个数当门禁读。
+    // 不留 `is_empty()`：它一个调用方都没有（两处 `convs.is_empty()` 是同文件测试里
+    // 的断言，已改成 `ids_of(..).is_empty()`），留着就是一段没人读的代码。代价是
+    // clippy 的 `len_without_is_empty` 会响——这里成对出现的 `is_empty()` 也只是
+    // 测试用的第三个相等物，删掉更诚实。
+    #[expect(
+        clippy::len_without_is_empty,
+        reason = "len() 只被测试读（含 #[ignore] 真机用例），生产零调用方"
+    )]
     pub async fn len(&self) -> usize {
         self.live.lock().await.len()
-    }
-
-    pub async fn is_empty(&self) -> bool {
-        self.live.lock().await.is_empty()
     }
 
     /// 连接没了：把表里每条会话标成孤儿，**返回这次新标了几条**。
@@ -758,17 +771,22 @@ async fn read_events(channel_id: String, client: AcpClient, seq: Seq) {
                     // 权限请求：**本里程碑不回**（ACP 允许请求方超时）。
                     // 但要让用户看见，否则页面看着像 agent 卡住了。
                     //
+                    // **`id` 随帧一起走**（`requestId`），不是丢掉：ACP 的应答必须
+                    // 带着这个 id 回（`AcpClient::respond`），而它是**读循环里才有**
+                    // 的东西——出了这一帧就再也拿不到了。留在这里是为了下个里程碑
+                    // 能接应答；本里程碑只是**刻意不回**，而不是「没有 id 可回」。
+                    //
                     // 它**占用一个序号**：这是设备上真实发生过的事件，跳过它
                     // 会让 `gaps` 在每一处权限请求上报警告——用户会以为丢了东西。
                     let n = seq.next();
                     let ev = json!({
                         "type": "request",
                         "seq": n,
+                        "requestId": id,
                         "method": method,
                         "params": params,
                         "pending": true,
                     });
-                    let _ = id;
                     let _ = channel::push_external(&channel_id, vec![ev]);
                 }
                 Some(Event::Exited { code, reason }) => {
@@ -1206,6 +1224,51 @@ for line in sys.stdin:
             .lines()
             .map(str::to_string)
             .collect()
+    }
+
+    /// 假 agent：一轮 prompt 里**反手问一句权限请求**（带固定 id `9001`）。
+    ///
+    /// 与 `recording_agent` 分开写而不是给它加开关：`recording_agent` 被十几条
+    /// 用例共用，改它等于同时改动那些用例的前提（多出一条 `request` 事件会让
+    /// 断言事件条数的用例红）。这里要的只是「设备侧真的会收到一条
+    /// `Event::Request`」这一个事实。
+    fn asking_agent(dir: &Path) -> PathBuf {
+        let path = dir.join("ask-agent");
+        let script = r#"#!/usr/bin/env python3
+import json, sys
+
+def send(o):
+    sys.stdout.write(json.dumps(o) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    m = json.loads(line)
+    method = m.get("method", "")
+    mid = m.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1,
+              "agentCapabilities": {"loadSession": True}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "ses_ask"}})
+    elif method == "session/prompt":
+        # 请求方是 agent：它要客户端批准一次工具调用，然后**不等**就结束这一轮
+        # （`session/prompt` 的回执照发）。设备侧因此只会看到一条 request。
+        send({"jsonrpc": "2.0", "id": 9001, "method": "session/request_permission",
+              "params": {"sessionId": "ses_ask", "toolCall": {"title": "rm -rf"}}})
+        send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
+"#;
+        std::fs::write(&path, script).expect("写脚本");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).expect("stat").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("chmod");
+        }
+        path
     }
 
     /// **没有 `acp_session_id` → 走 `session/new`，且 `ready` 里是新 id。**
@@ -1741,7 +1804,8 @@ for line in sys.stdin:
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        let payload = turn_end.expect("被中断的那一轮也要有 turn_end，否则页面一直显示「正在回复」");
+        let payload =
+            turn_end.expect("被中断的那一轮也要有 turn_end，否则页面一直显示「正在回复」");
         assert_eq!(
             payload.get("stopReason").and_then(Value::as_str),
             Some("cancelled"),
@@ -1849,7 +1913,7 @@ for line in sys.stdin:
             "开了 5 条、上界 2：表必须停在 2，否则重连 N 次就是 N 倍的子进程"
         );
         convs.close_all().await;
-        assert!(convs.is_empty().await);
+        assert!(ids_of(&convs).await.is_empty());
     }
 
     /// **淘汰只挑孤儿，且不碰挂在本连接上的会话。**
@@ -2014,6 +2078,78 @@ for line in sys.stdin:
             .await
             .expect("孤儿会话仍要能收消息（它没死，只是没人挂在上面）");
         convs.close_all().await;
-        assert!(convs.is_empty().await);
+        assert!(ids_of(&convs).await.is_empty());
+    }
+
+    /// **权限请求的 `id` 必须随帧一起出去**（`requestId`），本里程碑只是不回它。
+    ///
+    /// 挡的是「看得见但永远答不了」：`Event::Request` 的 `id` 只在读循环里存在，
+    /// 出了这一帧就再也拿不到。早先那句 `let _ = id;` 把它显式丢掉，于是**即便**
+    /// 下个里程碑要做应答，事件流里也没有可用于回传的 id——只能重造一个，而重造的
+    /// id 与 agent 等的那一条对不上。
+    ///
+    /// 反向验证：把 `"requestId": id` 从 `json!` 里删掉（或恢复 `let _ = id;`），
+    /// 这条会红在「帧上必须带 original id」。
+    #[tokio::test]
+    // guard 跨 `await` 存活是本用例要的语义：互斥必须覆盖整个用例体。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    async fn a_permission_request_reaches_the_page_with_its_id() {
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+        let d = tempfile::tempdir().expect("tmp");
+        let bin = asking_agent(d.path());
+        let convs = Conversations::default();
+
+        let _ = channel::open_external("ch_ask");
+        convs
+            .open(spec_for("ch_ask", &bin, None), None)
+            .await
+            .expect("假 agent 必须能起来");
+        // 先清掉 `ready`，免得下面把那条也当成 request。
+        let _ = channel::pump();
+
+        convs.prompt("ch_ask", "do it").await.expect("会话在");
+
+        // request 与 turn_end 都是异步推出来的：给到 5s，而不是赌一个时序。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut req: Option<Value> = None;
+        while Instant::now() < deadline && req.is_none() {
+            for (_, frames) in channel::pump() {
+                for f in frames {
+                    let Ok(cd) = f.payload::<protocol::channel::ChannelData>() else {
+                        continue;
+                    };
+                    if cd.payload.get("type").and_then(Value::as_str) == Some("request") {
+                        req = Some(cd.payload);
+                    }
+                }
+            }
+            if req.is_none() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+        let req = req.expect("权限请求必须推到页面上（否则页面看着像 agent 卡住了）");
+
+        assert_eq!(req["method"], json!("session/request_permission"));
+        assert_eq!(
+            req["pending"],
+            json!(true),
+            "本里程碑不回，页面要能画出「等你点头」"
+        );
+        assert_eq!(
+            req["requestId"],
+            json!(9001),
+            "agent 那条请求的 id 必须原样带出来——应答靠它配对，`let _ = id;` \
+             丢掉之后就没有第二条路了：{req}"
+        );
+        assert!(
+            req.get("seq").and_then(Value::as_i64).is_some(),
+            "它仍要占一个序号，否则 `gaps` 会在每处权限请求上报警告: {req}"
+        );
+
+        convs.close("ch_ask").await;
     }
 }
