@@ -536,7 +536,6 @@ describe('整体释放', () => {
     const deletes = sentCalls(fetchMock).filter((c) => c.init.method === 'DELETE')
     expect(deletes).toHaveLength(2)
     expect(source().closed).toBe(true)
-    expect(hub.openCount()).toBe(0)
   })
 })
 

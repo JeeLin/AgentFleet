@@ -75,7 +75,6 @@ export function installShellKeys(): void {
   registerInternal('nav:sessions', () => nav('/sessions'))
   registerInternal('nav:new-session', () => nav('/sessions/new'))
   registerInternal('nav:devices', () => nav('/devices'))
-  registerInternal('nav:agents', () => nav('/agents'))
   registerInternal('nav:settings', () => nav('/settings'))
 
   document.addEventListener('keydown', onKeydown)

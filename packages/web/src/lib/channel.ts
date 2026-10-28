@@ -162,7 +162,6 @@ export class ChannelHub {
   private streamState: StreamState = 'connecting'
   private readonly byChannel = new Map<string, ChannelHandleImpl>()
   private readonly byKey = new Map<string, ChannelHandleImpl>()
-  private readonly streamListeners = new Set<(s: StreamState) => void>()
 
   constructor(opts: HubOptions = {}) {
     this.streamPath = opts.streamPath ?? '/api/stream'
@@ -179,12 +178,6 @@ export class ChannelHub {
   /** 现在的下行连接状态。 */
   state(): StreamState {
     return this.streamState
-  }
-
-  /** 下行状态变化（面板头上的「连接中 / 已连接 / 已断开」）。 */
-  onStreamState(fn: (s: StreamState) => void): () => void {
-    this.streamListeners.add(fn)
-    return () => this.streamListeners.delete(fn)
   }
 
   /** 建 SSE。重复调用是空操作——一个页面只需要一条。 */
@@ -211,7 +204,6 @@ export class ChannelHub {
     this.byKey.clear()
     this.source?.close()
     this.source = null
-    this.streamListeners.clear()
   }
 
   /** 取（或建）一个键对应的通道句柄。**不建通道**，只是拿到句柄。 */
@@ -221,11 +213,6 @@ export class ChannelHub {
     const ch = new ChannelHandleImpl(key, spec, this)
     this.byKey.set(key, ch)
     return ch
-  }
-
-  /** 已开着的通道数（tab 上的面板数徽标用它）。 */
-  openCount(): number {
-    return [...this.byKey.values()].filter((c) => c.state() === 'ready').length
   }
 
   // ---- 内部 ----------------------------------------------------------------
@@ -252,7 +239,6 @@ export class ChannelHub {
       // 最新一次就是对的（`send` 不同，所以那条一律丢弃，见 `send`）。
       for (const ch of this.byKey.values()) ch.flushPending()
     }
-    for (const fn of this.streamListeners) fn(s)
   }
 
   private onFrame(ev: Event): void {
