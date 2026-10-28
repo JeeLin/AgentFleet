@@ -38,6 +38,18 @@ use tower::ServiceExt;
 const PASSWORD: &str = "correct horse battery";
 /// 一个真实浏览器一定会带的 Origin。
 const BROWSER_ORIGIN: &str = "http://127.0.0.1:8080";
+/// 本文件用例用的 agent：既写进心跳上报（`capabilities.agents`），也用作建会话
+/// 的 `agent_id`，两处必须是同一个名字，否则 `POST /api/sessions` 会以
+/// 「设备上没有这个 agent」400 / 409。
+///
+/// **必须是对象形态且 `available: true`**：`parse_agent_report` 对纯字符串
+/// 形态取 `available = false`（「只说名字不构成可用的证据」），而可用性门禁
+/// 读的就是这个值——写成 `"terminal-fake"` 会让建会话回 409 `agent_unavailable`。
+const TEST_AGENT: &str = "terminal-fake";
+/// 见 [`TEST_AGENT`]：上报时所带的对象。
+fn test_agent_report() -> serde_json::Value {
+    json!({"id": TEST_AGENT, "name": TEST_AGENT, "version": "0.0.1", "available": true})
+}
 
 /// 页面侧请求夹具：一份真跑起来的 Hub + 同状态路由 + 已登录的两条 cookie。
 ///
@@ -115,9 +127,16 @@ impl Page {
     }
 
     /// 建一个真会话（返回 id）。
+    ///
+    /// **`agent_id` 是必填的**（M2：缺了是 400 `agent_required`）。一个
+    /// `agent_id` 为 NULL 的会话永远开不了对话，所以 Hub 直接拒绝建立。
+    /// 本文件的用例测的是**通道记账**，不测对话，但会话仍得是个真会话——
+    /// 所以这里带上 `report_connectors` 上报的那个 agent。
     async fn make_session(&self, node_id: &str) -> String {
         let mut req = self.req("POST", "/api/sessions");
-        *req.body_mut() = Body::from(json!({"node_id": node_id, "path": "/tmp"}).to_string());
+        *req.body_mut() = Body::from(
+            json!({"node_id": node_id, "path": "/tmp", "agent_id": TEST_AGENT}).to_string(),
+        );
         let resp = self.app.clone().oneshot(req).await.expect("app responds");
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -149,7 +168,7 @@ async fn report_connectors(hub: &Hub, est: &mut node_core::conn::Established) {
         0,
         json!({
             "node_version": "0.1.0",
-            "capabilities": {"connectors": ["terminal", "files", "git"], "agents": []},
+            "capabilities": {"connectors": ["terminal", "files", "git"], "agents": [test_agent_report()]},
             "resources": null,
             "workspace_roots": [],
         }),

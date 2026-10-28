@@ -39,6 +39,16 @@ use tower::ServiceExt;
 const PASSWORD: &str = "correct horse battery";
 /// 一个真实浏览器一定会带的 Origin。
 const BROWSER_ORIGIN: &str = "http://127.0.0.1:8080";
+/// 本文件用例用的 agent：心跳上报（`capabilities.agents`）与建会话的
+/// `agent_id` 必须是同一个名字，否则 `POST /api/sessions` 会以
+/// 「设备上没有这个 agent」拒绝（M2 起 agent 是会话的必要前提）。
+///
+/// **必须是对象形态且 `available: true`**：`parse_agent_report` 对纯字符串
+/// 取 `available = false`，而可用性门禁读的就是它。
+const TEST_AGENT: &str = "stream-fake";
+fn test_agent_report() -> Value {
+    json!({"id": TEST_AGENT, "name": TEST_AGENT, "version": "0.0.1", "available": true})
+}
 
 /// 一个真跑起来的 Hub + 一份同状态的路由 + 已登录的两条 cookie。
 ///
@@ -180,7 +190,7 @@ async fn enrolled_device(hub: &common::Hub) -> (String, node_core::conn::Establi
         &mut est,
         json!({
             "node_version": "0.1.0",
-            "capabilities": {"connectors": ["terminal"], "agents": []},
+            "capabilities": {"connectors": ["terminal"], "agents": [test_agent_report()]},
             "resources": null,
             "workspace_roots": [],
         }),
@@ -194,12 +204,18 @@ async fn enrolled_device(hub: &common::Hub) -> (String, node_core::conn::Establi
 }
 
 /// 建一个真会话（返回 id）。
+///
+/// **`agent_id` 必填**（M2）：缺了是 400 `agent_required`。本文件的用例测的是
+/// 通道 / SSE / 鉴权，不测对话，但会话仍得是个真会话。
 async fn make_session(h: &Harness, node_id: &str) -> String {
     let r = h
         .call_with(
             "POST",
             "/api/sessions",
-            Body::from(json!({"node_id": node_id, "path": "~/src/app"}).to_string()),
+            Body::from(
+                json!({"node_id": node_id, "path": "~/src/app", "agent_id": TEST_AGENT})
+                    .to_string(),
+            ),
         )
         .await;
     assert_eq!(r.status, StatusCode::CREATED, "body: {}", r.body);
