@@ -468,7 +468,7 @@ impl Worker {
         for channel_id in channel::external_ids() {
             for payload in channel::take_inbound(&channel_id) {
                 if payload.get("cancel").is_some() {
-                    self.cancel_turn(&channel_id).await;
+                    self.cancel_turn(est, &channel_id).await;
                     continue;
                 }
                 let Some(text) = payload.get("text").and_then(serde_json::Value::as_str) else {
@@ -503,22 +503,15 @@ impl Worker {
     ///
     /// 「没这条会话」是唯一的例外不成立：那说明通道表里有一条 ACP 通道而会话
     /// 表里没有它（进程已退/被淘汰），这条通道确实再也不会回话了——这跟
-    /// `prompt` 失败是同一种事实，用同一条路收掉。
-    async fn cancel_turn(&self, channel_id: &str) {
+    /// `prompt` 失败是同一种事实，用同一条路收掉（`fail_channel` 会真的把
+    /// `channel_error` 发给 Hub，页面才不会一直停在「正在回复」）。
+    async fn cancel_turn(&self, est: &mut Established, channel_id: &str) {
         match self.conversations.cancel(channel_id).await {
             Ok(()) => {}
             // 会话没了：这条通道永远不会再回话，收掉（与 prompt 失败同一条路）。
             Err(e @ CancelError::NoLiveConversation) => {
                 self.say(&format!("cancel failed on {channel_id}: {e}"));
-                // 这里没有 `est` 可用（见 `cancel_turn` 的调用点），而
-                // `fail_external` 的回帧必须发出去才有意义——所以留痕并让
-                // 下一次 `drain_inbound` 的 `prompt` 失败路径收尾。
-                let frames = channel::fail_external(channel_id, &e.to_string());
-                if frames.is_empty() {
-                    self.say(&format!(
-                        "channel {channel_id} released after a failed cancel"
-                    ));
-                }
+                self.fail_channel(est, channel_id, &e.to_string()).await;
             }
             // 本来就闲着：什么都不用做。用户看到的是「没有一轮在跑」，而
             // 这句话由 Hub 的 409 说（它在下发之前就判过了）；设备这侧只是
@@ -1645,6 +1638,107 @@ mod tests {
             "channel_id":"ch-hb",
             "payload":{"bytes": cmd}
         }})
+    }
+
+    /// 一次**握手成功**、且把 worker 发出的每一帧都记下来的连接。
+    ///
+    /// 已有的 `fake_hub` 只记心跳到达时刻，看得到「发了几次心跳」却看不到
+    /// 「发了哪些帧」。而 `cancel_turn` 的失败臂要证明的恰恰是**某一帧真的
+    /// 发出去了**（`channel_error`），不是「有个副作用发生了」——那个副作用
+    /// 在修复前就是被绑到局部变量上丢掉的，任何只看本进程状态的断言都测不出。
+    async fn established_recording_frames(d: &Path) -> (Established, Arc<Mutex<Vec<Frame>>>) {
+        let frames: Arc<Mutex<Vec<Frame>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&frames);
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        std_listener.set_nonblocking(true).expect("nonblocking");
+        let addr = std_listener.local_addr().expect("addr");
+        let listener = tokio::net::TcpListener::from_std(std_listener).expect("listener");
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            rt.block_on(async move {
+                // coverage: excluded — 测试夹具：accept / upgrade 失败臂在测试
+                // 自己起的监听器上构造不出（同 `fake_hub`）。
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                    return;
+                };
+                let _ = ws.next().await;
+                let _ = send(&mut ws, challenge()).await;
+                let _ = ws.next().await;
+                let _ = send(&mut ws, auth_ok_with_interval(60_000)).await;
+                // 一直读到对端关闭：每条上行帧都记下来，**除心跳**——心跳按
+                // 周期刷，留着会把断言淹没在噪音里。
+                while let Some(msg) = ws.next().await {
+                    let Ok(tokio_tungstenite::tungstenite::Message::Text(text)) = msg else {
+                        continue;
+                    };
+                    // coverage: excluded — 同上：worker 只会发 `Frame::push` 造得
+                    // 出的 JSON，这条 continue 在夹具上构造不出。
+                    let Ok(frame) = serde_json::from_str::<Frame>(&text) else {
+                        continue;
+                    };
+                    if frame.msg_type != "heartbeat" {
+                        sink.lock().unwrap_or_else(|e| e.into_inner()).push(frame);
+                    }
+                }
+            });
+        });
+        let url = format!("ws://{addr}/ws");
+        let id = Identity::load_or_create(d).expect("identity");
+        let est = conn::connect_once(&url, id.key(), None, None, device_info())
+            .await
+            .expect("handshake");
+        (est, frames)
+    }
+
+    /// **`cancel` 撞上「没有活会话」时，必须把 `channel_error` 真的发给 Hub。**
+    ///
+    /// 修复前的形状是：`channel::fail_external(...)` 的返回帧被绑到局部变量
+    /// 上，既没 `send` 也没 `drop` 掉说明——而它旁边那句注释还写着「回帧必须
+    /// 发出去才有意义」。于是 Hub 那头永远等不到 `channel_error`，页面停在
+    /// 「正在回复」，直到超时。同一次修复前还有一个 `if frames.is_empty()`
+    /// 分支：`fail_external` 恒返回恰好一帧，那个分支永远不成立，是死代码。
+    ///
+    /// 判据**必须在网络上**：绑到变量上和真发出去，在本进程里都表现为「没有
+    /// panic、没有日志差异」，只有对端收到了那一帧才能区分。所以夹具是
+    /// [`established_recording_frames`]，断言的是对端**收到的帧**。
+    ///
+    /// 反向验证：把 `self.fail_channel(est, ...)` 换回绑局部变量的老写法，
+    /// 这里收不到任何 `channel_error` 帧，`expect` 当场失败。
+    #[tokio::test]
+    async fn a_cancel_with_no_live_conversation_actually_tells_the_hub() {
+        let (d, w) = worker("cancel-no-live");
+        let (mut est, recorded) = established_recording_frames(&d).await;
+
+        // 这条通道上从没开过对话：`cancel()` 走 `NoLiveConversation` 那一臂。
+        w.cancel_turn(&mut est, "ch-never-opened").await;
+
+        // 帧由夹具那个线程异步推过来，读之前给它一点时间。
+        let mut got = Vec::new();
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if !got.is_empty() {
+                break;
+            }
+        }
+        let err = got
+            .iter()
+            .find(|f| f.msg_type == "channel_error")
+            .unwrap_or_else(|| {
+                panic!("没收掉一条没有活会话的通道时，Hub 必须收到 channel_error，实收：{got:?}")
+            });
+        assert_eq!(
+            err.c.get("channel_id").and_then(|v| v.as_str()),
+            Some("ch-never-opened"),
+            "channel_error 必须指着那条通道"
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// 一次**握手成功、随后对端正常关闭**的连接。
