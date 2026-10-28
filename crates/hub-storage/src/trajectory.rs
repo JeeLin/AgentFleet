@@ -542,6 +542,37 @@ mod tests {
         )
     }
 
+    /// 两个「看不懂就退化成不判」的兜底：payload **不是 JSON 对象**时
+    /// 取不出消息身份，也剔不掉 `seq`。
+    ///
+    /// 这两条不是「不可能发生」：`append` 的契约是**存原始 payload**，形状校验
+    /// 是调用方的事（见两个函数的注释）。坏形状要能落库，只是去重那一层
+    /// 退化成「只按 seq」。若让它们 panic 或拒写，一条形状意外的事件就会
+    /// 把整轮对话的轨迹写不进去——那比不去重严重得多。
+    ///
+    /// 反向验证：把 `payload_without_seq` 的 `_ => None` 改成
+    /// `_ => Some(payload.to_string())`，本用例的红点会落在「非对象要返回 None」
+    /// 那条断言上。
+    #[test]
+    fn a_payload_that_is_not_an_object_falls_back_to_no_identity_and_no_seq_strip() {
+        // 合法 JSON，但不是对象：取不出 messageId，也剔不掉 seq。
+        assert_eq!(message_id_of("[1,2,3]"), None, "数组没有 messageId");
+        assert_eq!(message_id_of("42"), None, "标量没有 messageId");
+        assert_eq!(
+            payload_without_seq("[1,2,3]"),
+            None,
+            "非对象没法「剔除 seq 再比较」，只能退化成不去重"
+        );
+
+        // 压根不是 JSON。
+        assert_eq!(
+            message_id_of("not json"),
+            None,
+            "坏 JSON 不许拒写，只是拿不到身份"
+        );
+        assert_eq!(payload_without_seq("not json"), None);
+    }
+
     /// 带 `messageId` 的 chunk——真机形状（`session/update` 里每条消息都带它）。
     fn chunk_with_mid(seq: i64, text: &str, mid: &str) -> NewEvent {
         NewEvent::new(
