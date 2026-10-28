@@ -264,6 +264,21 @@ impl AcpClient {
     }
 
     /// 回一个**请求**的响应（权限请求等）。
+    ///
+    /// `id` 必须原样回传（ACP 的响应靠它配对）。调用方从
+    /// [`Event::Request`] 的 `id` 拿到它——这条链现在是**通的**：
+    /// `conversation.rs` 把 id 装进事件帧的 `requestId`。
+    ///
+    /// # 本里程碑没有生产调用方
+    ///
+    /// 权限请求在 M2 里「看得见但答不了」：`conversation.rs` 只把请求推给页面
+    /// （`pending: true`）并**刻意不回**（ACP 允许请求方超时）。所以这里目前
+    /// 只有 `acp.rs` 的假 agent 用例
+    /// `a_request_from_the_agent_reaches_the_caller_and_can_be_answered` 在读它，
+    /// 生产路径为零。
+    ///
+    /// 不加 `#[allow(dead_code)]`：`agent::acp` 是 `pub` 模块，公开方法本来就不会
+    /// 触发那条 lint——加了反而会掩盖「它真的没人调」这个事实。
     pub async fn respond(&self, id: &Value, result: Value) -> Result<(), AcpError> {
         self.write_line(&json!({"jsonrpc": "2.0", "id": id, "result": result}))
             .await
@@ -510,11 +525,14 @@ async fn dispatch(inner: &Inner, v: Value) {
             //
             // 解除点放在**同一条消息的处理里**，就把窗口压成了零：读循环是
             // 单线程按行处理的，回执这条一处理完，下一条必然看到假值。
-            if inner.replaying.swap(false, Ordering::AcqRel) {
-                // 刚刚解除的就一定是 load 的回执；但**不能只看它是不是 load**
-                // ——这里没有方法名可比（响应帧不带 `method`）。用「本来开着」
-                // 作判据足够：只有 `load_session` 会把它开起来。
-            }
+            // 刚换下来的旧值：`true` 说明这次解除的就是 load 的回执。但**不能只看
+            // 它是不是 load**——这里没有方法名可比（响应帧不带 `method`）。用
+            // 「本来开着」作判据足够：只有 `load_session` 会把它开起来。
+            //
+            // 这里**没有别的事要做**：动作就是这次 swap 本身（把开关换回 false），
+            // 所以它是一个 `let` 而不是一个分支——写成空 `if` 会让读者去找那个
+            // 「if 里面」的逻辑。换下来的旧值不参与后续判断（正因为上面那条）。
+            let _was_replaying = inner.replaying.swap(false, Ordering::AcqRel);
             if let Some(n) = id.as_u64() {
                 let tx = inner.pending.lock().await.remove(&n);
                 if let Some(tx) = tx {
@@ -799,7 +817,8 @@ for raw in sys.stdin:
             "cancel 是通知：带上 id 客户端就会去等一个永远不会来的响应，实际: {got}"
         );
         assert_eq!(
-            got["params"]["sessionId"], json!("ses_to_cancel"),
+            got["params"]["sessionId"],
+            json!("ses_to_cancel"),
             "不点名会话，agent 不知道中断哪一轮（症状是「点了停止、回复照旧」）: {got}"
         );
 

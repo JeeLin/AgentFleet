@@ -45,12 +45,16 @@ pub struct AgentReport {
     pub error: Option<String>,
     /// 探测到的可执行文件路径（装过才有，含探测失败的情形）。
     ///
-    /// 保留它有明确用途：**下次能直接执行它**（`PROBE::Ready` 的注释就是这么
-    /// 说的，而 `PATH` 里可能有两份，探测到的那份才算数）。开一条 ACP 对话时
-    /// `agent_config.command` 为空串就用它。
+    /// # 它是设备本地事实，**不过网**
     ///
-    /// 早先这一列在 `report_of` 里被丢掉，于是「配了空命令」根本无从回落到
-    /// 探测到的那个可执行文件。
+    /// [`AgentReport::to_json`] **不写**这个字段，[`AgentReport::from_json`] 也就
+    /// 恒读回 `None`：Hub 不执行这个文件，库里也不该存设备上的绝对路径。
+    /// 所以「保留它是为了下次能直接执行它」这句话**只在本进程内成立**——
+    /// 进程重启之后它是空的，由重新探测填充，而不是从 Hub 带回来。
+    ///
+    /// 进程内它确实有用：`PATH` 里可能有两份同名可执行文件，探测到的那份
+    /// 才算数；`agent_config.command` 为空串时就回落到它
+    /// （`worker::detected_command` 读这里，再交给 `conversation::resolve_command`）。
     pub path: Option<String>,
 }
 

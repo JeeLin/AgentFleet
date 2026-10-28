@@ -515,7 +515,9 @@ impl Worker {
                 // 下一次 `drain_inbound` 的 `prompt` 失败路径收尾。
                 let frames = channel::fail_external(channel_id, &e.to_string());
                 if frames.is_empty() {
-                    self.say(&format!("channel {channel_id} released after a failed cancel"));
+                    self.say(&format!(
+                        "channel {channel_id} released after a failed cancel"
+                    ));
                 }
             }
             // 本来就闲着：什么都不用做。用户看到的是「没有一轮在跑」，而
