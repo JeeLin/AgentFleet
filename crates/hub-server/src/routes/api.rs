@@ -1167,4 +1167,27 @@ mod tests {
         assert_eq!(out.get("b").and_then(|e| e.error.clone()), None);
         assert!(!out.get("a").expect("a").available);
     }
+
+    /// 已经标成可用之后，**不再往它身上挂原因**。
+    ///
+    /// 顺序在这里是有意义的：先有一台说「不可用 + 原因」，再来一台说「可用」
+    /// 就整体可用了；此后又有一台报错，也不能把那条原因挂到一条已经可用的
+    /// 记录上——那会让页面显示「可用，但：退出码 3」，用户无从判断该信哪个。
+    #[test]
+    fn merge_agent_stops_collecting_reasons_once_it_is_available() {
+        let mut out = BTreeMap::new();
+        merge_agent(&mut out, "opencode", false, Some("退出码 3"));
+        merge_agent(&mut out, "opencode", true, None);
+        let err_when_usable = out.get("opencode").and_then(|e| e.error.clone());
+        assert!(out.get("opencode").expect("一条").available);
+        assert_eq!(err_when_usable.as_deref(), Some("退出码 3"));
+
+        // 第三台设备也报错：原因不该再追加。
+        merge_agent(&mut out, "opencode", false, Some("缺少 acp 入口"));
+        assert_eq!(
+            out.get("opencode").and_then(|e| e.error.clone()),
+            err_when_usable,
+            "已经可用的记录不再追加原因"
+        );
+    }
 }
