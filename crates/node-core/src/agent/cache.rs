@@ -22,16 +22,19 @@ use super::detect::{detect_all, path_lookup, AgentSpec, Probe, DEFAULT_PROBE_TIM
 
 /// 心跳 `capabilities.agents` 里的一项。
 ///
-/// # 形态是对象，不是字符串——这会**打破**现有 Hub 侧解析
+/// # 形态是对象，不是字符串——这会**打破**当时的 Hub 侧解析
 ///
-/// v2 的 `agents` 是 `["opencode", ...]`，而 `api.rs` 的 `agent_list()` 用
-/// `filter_map(as_str)` 只认字符串，**非字符串一律跳过**。改成对象数组而不改
-/// `agent_list` 的话，页面上 agent 会**静默消失**（不报错、不警告，只是列表空了）。
+/// v2 的 `agents` 是 `["opencode", ...]`。改成对象数组时若不同步改 Hub 侧
+/// 解析，页面上 agent 会**静默消失**（不报错、不警告，只是列表空了）。
+/// 当时 `agent_list()` 用 `filter_map(as_str)` 只认字符串，正是这个风险。
 ///
-/// 之所以还是要改：字符串装不下「版本」「可用」「探测时间」，而子任务 5 的
-/// 409 门禁判的是「已装**且**可用」——那三个字段缺一个都判不了。所以配套改
-/// `agent_list`（见 `hub-server` 侧），并且**保留对旧字符串形态的兼容读取**，
-/// 让升级窗口里的旧帧不至于把列表打空。
+/// **现状（M2 之后）**：`agent_list()` 已经两种形态都认——先试 `as_str()`，
+/// 再走 `as_object()` 取 `name`/`id`。所以升级窗口里的旧字符串帧不会把列表
+/// 打空；这段告警保留是因为它解释了**为什么**那条兼容分支必须留着，而不是
+/// 因为缺陷还在。
+///
+/// 之所以还是要改成对象：字符串装不下「版本」「可用」「探测时间」，而子任务 5
+/// 的 409 门禁判的是「已装**且**可用」——那三个字段缺一个都判不了。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentReport {
     /// 稳定标识（`agent_runtime.agent_id`）。

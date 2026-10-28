@@ -613,10 +613,10 @@ pub async fn create_session(
 
 /// `GET /api/agents`：Agent 目录（只读聚合，设计规范 §7.6）。
 ///
-/// 数据源是**设备心跳上报的 `capabilities.agents`**（§6.1：「已装且就绪」
-/// 不是「支持」），**不读库**：上报在 `Reports` 里，而它才是路由该读的
-/// 那一份（`scheduling.md` §2.2）。一台设备都没上报过时列表是空的，
-/// 那是对的——编一个「装了什么」等于把任务派给没有它的机器。
+/// 数据源是 `agent_runtime` 表（M2 起，见函数体第一段注释为什么不是心跳内存）；
+/// 只有读库失败时才退回到**设备心跳上报的 `capabilities.agents`**。一台设备都
+/// 没有上报过、库里也没有行时列表是空的，那是对的——编一个「装了什么」等于把
+/// 任务派给没有它的机器。
 pub async fn list_agents(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<AgentSummary>>, ApiError> {

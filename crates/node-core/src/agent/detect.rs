@@ -22,7 +22,7 @@
 //! 超时就杀进程并记成「已装但探测失败」——**不让任何 agent 二进制把心跳拖死**。
 //!
 //! 另外，探测**本身也不在心跳路径上跑**：`heartbeat.rs` 只消费探测结果
-//! （一份缓存），不在这里调 [`detect_all`]。见 [`super::runtime::Detected`]。
+//! （一份缓存），不在这里调 [`detect_all`]。见 [`crate::agent::cache::Detected`]。
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 ///
 /// 2 秒是量出来的：本机 opencode v2.1.4 的 `--version` 立即返回（十几毫秒）。
 /// 留两个数量级的余量给慢机器 / 冷缓存，同时保证即使某个 agent 挂死，
-/// 一次全量探测也不会拖过心跳超时（`OFLINE_AFTER` 是 45 秒）。
+/// 一次全量探测也不会拖过心跳超时（`OFFLINE_AFTER` 是 45 秒）。
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 一个已知的 agent 种类：显示名 + 可执行文件名 + 怎么问版本。
