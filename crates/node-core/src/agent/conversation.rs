@@ -2310,4 +2310,218 @@ for line in sys.stdin:
             "上线顺序必须与 seq 序一致（seq 断裂处即丢失处），实收 {seen:?}"
         );
     }
+
+    // ---- `read_events` 的四种事件形态 ----
+    //
+    // 这些用例直接驱动读循环（传一个自己造的 `AcpClient`、一个自己造的
+    // `Seq`），而不是走 `open()`——`open()` 会顺带建会话、建 catalog，
+    // 那些不是这里要钉的东西，混进去只会让失败点变得模糊。
+
+    /// 握手后**主动吐 `payload` 再退出**的假 agent。
+    ///
+    /// 主动退出是本组测试的终止信号：`read_events` 在 `recv()` 返回 `None`
+    /// 时自己结束，于是「假 agent 说完就退」正好把退出路径也走到。
+    fn scripted_agent(dir: &Path, payload: &str) -> PathBuf {
+        let path = dir.join("scripted-agent");
+        let script = format!(
+            r#"#!/usr/bin/env python3
+import json, sys
+
+def send(o):
+    sys.stdout.write(json.dumps(o) + "\n")
+    sys.stdout.flush()
+
+def notify(method, params):
+    send({{"jsonrpc": "2.0", "method": method, "params": params}})
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    m = json.loads(line)
+    if m.get("method") == "initialize":
+        send({{"jsonrpc": "2.0", "id": m.get("id"), "result": {{"protocolVersion": 1,
+              "agentCapabilities": {{"loadSession": True}}}}}})
+        break
+
+{payload}
+
+"#
+        );
+        std::fs::write(&path, script).expect("写脚本");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).expect("stat").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("chmod");
+        }
+        path
+    }
+
+    /// 把 `read_events` 跑起来，取回它推进通道的全部帧载荷。
+    ///
+    /// 通道表是进程级单例，`_guard` 必须活到用例结束，于是它跨 `await`
+    /// 存活——这正是本组用例要的语义（互斥覆盖整个用例体），
+    /// 与 `channel.rs` 里那几处的写法一致。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    async fn frames_from_read_events(ch: &str, payload: &str, last_seq: i64) -> Vec<Value> {
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+        channel::open_external(ch);
+
+        let d = tempfile::tempdir().expect("tmp");
+        let bin = scripted_agent(d.path(), payload);
+        let client = AcpClient::spawn(
+            bin.to_str().expect("路径"),
+            &[],
+            &BTreeMap::new(),
+            "",
+            Some(d.path()),
+        )
+        .await
+        .expect("握手应成功");
+        let seq = Seq::new(last_seq);
+        let reader = tokio::spawn(read_events(ch.to_string(), client, seq));
+
+        // 60ms 的批窗口 + 假 agent 的退出，给足预算；但**每轮都要 await**
+        // 一次 sleep，否则单线程运行时下 `read_events` 任务会被饿死。
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            if reader.is_finished() {
+                break;
+            }
+        }
+        let _ = reader.await;
+        // 读循环推的是**外发**帧：它们入队等信用放行，`channel::pump()`
+        // 才是取出它们的那条路（`take_inbound` 拿的是 Hub 发下来的消息，
+        // 方向相反）。外层是帧信封（`channel_data{channel_id, payload}`），
+        // 里层的 `payload` 才是读循环写的那个 JSON。
+        channel::pump()
+            .into_iter()
+            .filter(|(id, _)| id == ch)
+            .flat_map(|(_, frames)| frames)
+            .filter_map(|f| f.payload::<protocol::channel::ChannelData>().ok())
+            .map(|d| d.payload)
+            .collect()
+    }
+
+    /// `session/update` 攒成一批：**一条 `batch` 里带着它的 `seq`**。
+    #[tokio::test]
+    async fn read_events_batches_updates_and_numbers_them() {
+        let payload = r#"
+notify("session/update", {"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}})
+"#;
+        let frames = frames_from_read_events("ch_re_1", payload, 0).await;
+        let batch = frames
+            .iter()
+            .find(|f| f.get("type").and_then(Value::as_str) == Some("batch"))
+            .expect("应当有一批更新");
+        let events = batch
+            .get("events")
+            .and_then(Value::as_array)
+            .expect("events");
+        assert_eq!(events.len(), 1, "一条更新就是一批里的一个事件");
+        assert_eq!(
+            events
+                .first()
+                .and_then(|e| e.get("seq"))
+                .and_then(Value::as_i64),
+            Some(1),
+            "起点 0 → 第一条 seq 是 1"
+        );
+    }
+
+    /// `seq` 从 `last_seq` 续上，不是从 1 重数。
+    ///
+    /// 从 1 重数的后果是**静默丢事件**：续话时重放的事件带 `seq=1`，与库里
+    /// 已有的 `seq=1` 撞 `UNIQUE`，被 `INSERT OR IGNORE` 吞掉。
+    #[tokio::test]
+    async fn read_events_continues_numbering_from_last_seq() {
+        let payload = r#"
+notify("session/update", {"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}})
+"#;
+        let frames = frames_from_read_events("ch_re_2", payload, 41).await;
+        let seq = frames
+            .iter()
+            .filter_map(|f| f.get("events"))
+            .filter_map(Value::as_array)
+            .flatten()
+            .filter_map(|e| e.get("seq").and_then(Value::as_i64))
+            .next()
+            .expect("应当有一条带 seq 的事件");
+        assert_eq!(seq, 42, "last_seq=41 → 下一条是 42");
+    }
+
+    /// 权限请求：**先 flush 攒着的那批，再发请求**，且请求占一个序号。
+    #[tokio::test]
+    async fn read_events_flushes_the_batch_before_a_permission_request() {
+        let payload = r#"
+notify("session/update", {"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"before"}}})
+send({"jsonrpc":"2.0","id":"req_1","method":"session/request_permission","params":{"sessionId":"s"}})
+"#;
+        let frames = frames_from_read_events("ch_re_3", payload, 0).await;
+        let types: Vec<&str> = frames
+            .iter()
+            .filter_map(|f| f.get("type").and_then(Value::as_str))
+            .collect();
+        let batch_at = types.iter().position(|t| *t == "batch");
+        let req_at = types.iter().position(|t| *t == "request");
+        assert!(
+            batch_at.is_some() && req_at.is_some(),
+            "既要有 batch 也要有 request，实收 {types:?}"
+        );
+        assert!(
+            batch_at.expect("batch") < req_at.expect("request"),
+            "batch 必须先上线：否则 seq 1 会排到 seq 2 后面，断口被算在错的位置。实收 {types:?}"
+        );
+        let req = frames
+            .iter()
+            .find(|f| f.get("type").and_then(Value::as_str) == Some("request"))
+            .expect("request");
+        assert_eq!(
+            req.get("requestId").and_then(Value::as_str),
+            Some("req_1"),
+            "requestId 必须随帧走：出了读循环就再也拿不到，下个里程碑没法回"
+        );
+        assert_eq!(req.get("pending").and_then(Value::as_bool), Some(true));
+        assert!(
+            req.get("seq").and_then(Value::as_i64).is_some(),
+            "权限请求也要占一个序号，否则 gaps 会在每处请求上报警告"
+        );
+    }
+
+    /// 子进程退出：**先 flush 再发 `exited`**，且 `exited` 不占序号。
+    #[tokio::test]
+    async fn read_events_flushes_before_reporting_exit_without_a_seq() {
+        let payload = r#"
+notify("session/update", {"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"last words"}}})
+send({"jsonrpc":"2.0","id":"req_9","method":"session/request_permission","params":{"sessionId":"s"}})
+"#;
+        let frames = frames_from_read_events("ch_re_4", payload, 0).await;
+        let types: Vec<&str> = frames
+            .iter()
+            .filter_map(|f| f.get("type").and_then(Value::as_str))
+            .collect();
+        let exited = frames
+            .iter()
+            .find(|f| f.get("type").and_then(Value::as_str) == Some("exited"));
+        assert!(
+            exited.is_some(),
+            "agent 退出必须报一条 exited，实收 {types:?}"
+        );
+        let exited = exited.expect("exited");
+        assert!(
+            exited.get("seq").is_none(),
+            "exited 不是对话事件，给它序号会让重连时序号从错位开始（实收 seq={:?}）",
+            exited.get("seq")
+        );
+        assert!(
+            types.iter().position(|t| *t == "exited").expect("exited") == types.len() - 1,
+            "exited 必须是最后一条：先 flush 再报退出，否则最后半句话丢掉。实收 {types:?}"
+        );
+    }
 }
