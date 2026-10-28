@@ -179,4 +179,4 @@ Gateway 复用约束 9 的调度范式（能力硬过滤 + 有序打分），且
 
 SQLite（WAL + busy_timeout）存 device / 会话元数据 / 任务状态 / 轨迹事件引用。
 轨迹事件与工作区产物的存储位置与保留策略见 `session-and-trajectory.md`。
-~~内容寻址仓库（blob / snapshot / artifact / managed_file）~~：**部分撤销（2026-10-26）**——现只保留 agent 安装包的 `blob` 最小形态，见 `workspace-and-sync.md` §7。
+~~内容寻址仓库（blob / snapshot / artifact / managed_file）~~：**已撤销（2026-10-26）**——agent 安装取消后 `blob` 表也没建，四张表一张都不存在，见 `workspace-and-sync.md` §7。

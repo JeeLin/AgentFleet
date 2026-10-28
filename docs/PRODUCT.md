@@ -132,7 +132,8 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 - **断点可恢复**：任务 = 持久化的状态机 + 事件日志；节点执行带「检查点（checkpoint）」，
   重连后从最后一个成功检查点续跑，不重做。
 - ~~**工作区/产物定位用内容寻址或稳定引用**~~：跨节点续跑属任务系统里程碑，**暂缓**。
-  仍然有效的是：**不做设备间 P2P 直传**；唯一保留的内容寻址存储是 agent 安装包。
+  仍然有效的是：**不做设备间 P2P 直传**；**内容寻址存储（CAS）一处不剩**——agent 安装已于
+  2026-10-26 撤销，`blob` 表随之从 schema 去掉，没有别的用途。
 - **ACP 的 `session/load` 作为对话恢复机制**：agent 会话恢复走 ACP，而非自建。
 - **轨迹 append-only**：所有动作写入 dsh 式事件流，既是 UI 回放源，也是断点续跑的审计源。
 
@@ -188,7 +189,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 | ~~artifact~~ | **已撤销（2026-10-26）**：原指任务产出的最终制品归档到 Hub。随产物归档一起撤销 |
 | channel_id | 通道号：一条设备 WebSocket 上的子通道，通道键为 `(node_id, channel_id)`，每通道独立流控。Channel id: a sub-channel on one node WebSocket, keyed `(node_id, channel_id)`, with per-channel flow control |
 | ~~baseline~~ | **暂缓**：原指会话开始时记录的工作区初始状态，用于算改动文件与 diff。专门的 diff 视图留到 M3 git 面板 |
-| CAS | 内容寻址存储：Hub 侧以内容哈希存 blob。**现只用于 agent 安装包**（`put` / `get` + 校验），不再供料项目文件 / 配置 / 产物（2026-10-26 裁定）。CAS: content-addressed blob storage, now used only for agent install packages |
+| CAS | 内容寻址存储：Hub 侧以内容哈希存 blob。**现已完全撤销**（2026-10-26）：agent 安装取消后 `blob` 表也从 schema 去掉，项目文件 / 配置 / 产物早就不再供料。CAS: content-addressed blob storage — fully withdrawn; with agent install cancelled the `blob` table was removed from the schema |
 | supervisor | 守护进程的父进程：不碰业务与 WebSocket，只负责拉起 / 监控 / 替换 / 回滚 worker——**执行回滚的代码不参与被回滚**。Supervisor: the parent process that touches neither business logic nor the WebSocket, only starting, monitoring, swapping and rolling back the worker — the code performing a rollback is never itself replaced |
 | worker | 工作进程：持有设备身份与 WebSocket，实际执行 connector 与 agent；升级时更换，`node_id` 不变。Worker: the process holding device identity and the WebSocket that actually runs connectors and agents; swapped on upgrade, `node_id` unchanged |
 | worktree | Git 工作树：同一仓库的多个独立工作目录，用于隔离并行任务，共享 object store。Worktree: independent working directories of one repository, isolating parallel tasks while sharing the object store |

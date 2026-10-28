@@ -55,8 +55,10 @@ AgentFleet 是**个人自托管的设备 / Agent 平台**：把自己拥有的�
     规格留在 `docs/architecture/workspace-and-sync.md` 作决策记录）。
     **仍然有效的是**：Hub 是唯一真相源，**不引入设备间 P2P 直传，不用 Syncthing 当主同步通道**，
     **不同步 `node_modules` 等依赖目录**，**节点密钥永不上传**。
-    **唯一保留的内容寻址存储是 agent 安装包**（`workspace-and-sync.md` §4.4）：
-    `put(bytes) -> sha256` / `get(sha256) -> bytes` + 校验，不做 snapshot / manifest 差分 / 四档传输。
+    **内容寻址存储（CAS）现在一处都不剩**：agent 安装已于 2026-10-26 撤销（Hub 不再把
+    agent 安装包送给设备），`blob` 表随之从 schema 里去掉——`schema_v3.sql` 建的五张表
+    是 `workspace_v3` / `session_v3` / `agent_runtime` / `agent_config` / `trajectory_event`。
+    决策记录留在 `docs/architecture/workspace-and-sync.md` §4.4 / §7。
 11. **设备密钥对在 node 本地生成，Hub 只存指纹。** 若 Hub 生成设备私钥，
     则 Hub 等于持有全部设备私钥，密钥对的意义归零。
 12. **node 分 supervisor / worker 两层，身份由 supervisor 持有。**
