@@ -1166,6 +1166,24 @@ pub(crate) fn test_binding(node_id: &str, subject: &str, acked: bool) -> Channel
     }
 }
 
+/// 测试用：同上，但会话 id 由调用方指定。
+///
+/// 单独一个函数而不是给 `test_binding` 加参数：那个已有十几处调用点，而它
+/// 们全都只关心「绑定属于哪个 subject」，给它们多加一个不用看的参数是噪音。
+#[cfg(test)]
+pub(crate) fn test_binding_for_session(
+    node_id: &str,
+    session_id: &str,
+    subject: &str,
+) -> ChannelBinding {
+    ChannelBinding {
+        node_id: node_id.to_string(),
+        session_id: session_id.into(),
+        subject: subject.into(),
+        acked: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

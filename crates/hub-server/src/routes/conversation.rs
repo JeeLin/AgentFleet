@@ -442,4 +442,106 @@ mod tests {
             "上限本身是允许的"
         );
     }
+
+    // ---- `cancel` 的两条 404 出路 ----
+    //
+    // 这两处都直接调 handler，而不是走 HTTP：要造出「绑定指向别的设备」这种
+    // 不一致，只能碰绑定表，而它是 `pub(crate)` 的。走 HTTP 反而要为了这一
+    // 个判据把内部结构开成公开 API。
+
+    /// 会话属于 A，绑定却指向 B → 404，**不把停止发到 B 上**。
+    ///
+    /// `send_channel_data` 按 node_id 路由。照会话的 node 发、绑定却指向另一台
+    /// 设备时，那一帧会落到错的设备上（通道 id 在它那儿多半不存在，于是无声
+    /// 消失），页面却收到 204——症状是「按了停止什么都没发生」。所以宁可当
+    /// 「没有可用绑定」。
+    ///
+    /// 生产里的来路是设备重新注册后旧绑定没被 `drop_node` 清干净；单测直接
+    /// 造出这种局面。反向验证：去掉 `bound_node != node_id` 这个判断，本用例
+    /// 会拿到 204。
+    #[tokio::test]
+    async fn cancelling_with_a_binding_for_another_node_is_404() {
+        let d = tempfile::tempdir().expect("tmp");
+        let pool = hub_storage::db::open_in(d.path()).expect("db").1;
+        let state = crate::AppState::bootstrap_with(
+            pool,
+            d.path(),
+            hub_core::auth::AuthParams {
+                m_cost: 8192,
+                t_cost: 1,
+                p_cost: 1,
+            },
+            std::time::Duration::from_millis(50),
+            hub_core::auth::LoginRateLimiter::new(10, 60),
+        )
+        .expect("state");
+
+        // 会话要挂在一台真设备上（`session.workspace` 有外键）。
+        let enrolled = hub_core::registry::Registry::new(state.pool().clone())
+            .enroll(
+                &[7u8; 32],
+                hub_storage::repo::NewDevice {
+                    id: String::new(),
+                    name: "dev".into(),
+                    key_fingerprint: String::new(),
+                    os: "linux".into(),
+                    arch: "x86_64".into(),
+                    hostname: "h".into(),
+                    node_version: "0.1.0".into(),
+                },
+            )
+            .expect("enroll");
+        let home = enrolled.node_id();
+
+        let seat = hub_storage::SessionRepo::new(state.pool().clone())
+            .create(home, "~/src/app", Some("opencode"), "t0")
+            .expect("建会话");
+
+        // 绑定的 node 与这条会话所属的不一致。
+        state.bindings().bind(
+            "ch_mismatched",
+            super::super::stream::test_binding_for_session("n_elsewhere", &seat.id, "admin"),
+        );
+
+        let r = super::cancel(
+            axum::extract::State(state.clone()),
+            axum::Extension(Authenticated::new("admin".to_string())),
+            axum::extract::Path(seat.id.clone()),
+        )
+        .await;
+        let err = r.expect_err("绑定指向别的设备时必须拒绝，不许假装发出去");
+        assert_eq!(
+            err.into_response().status(),
+            StatusCode::NOT_FOUND,
+            "要回 404，而不是 204 或 500"
+        );
+    }
+
+    /// 会话 id 不存在 → 404，且与「没绑定」同一个错误码（不泄漏存在性）。
+    #[tokio::test]
+    async fn cancelling_an_unknown_session_is_404() {
+        let d = tempfile::tempdir().expect("tmp");
+        let pool = hub_storage::db::open_in(d.path()).expect("db").1;
+        let state = crate::AppState::bootstrap_with(
+            pool,
+            d.path(),
+            hub_core::auth::AuthParams {
+                m_cost: 8192,
+                t_cost: 1,
+                p_cost: 1,
+            },
+            std::time::Duration::from_millis(50),
+            hub_core::auth::LoginRateLimiter::new(10, 60),
+        )
+        .expect("state");
+
+        let r = super::cancel(
+            axum::extract::State(state),
+            axum::Extension(Authenticated::new("admin".to_string())),
+            axum::extract::Path("sess_never_existed".to_string()),
+        )
+        .await;
+        let err = r.expect_err("不存在的会话必须 404");
+        assert_eq!(err.into_response().status(), StatusCode::NOT_FOUND);
+    }
 }
