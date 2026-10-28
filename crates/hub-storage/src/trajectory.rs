@@ -346,11 +346,14 @@ impl TrajectoryRepo {
         // 都没有 messageId 的事件」误判成重复，而那正是 `available_commands_update`
         // 这种合法重复事件。
         if let Some(mid) = message_id_of(&e.payload) {
+            // **`node_id` 必须在判据里**：`session_id` 不是全局唯一的命名空间，
+            // 同一张表按 `(node_id, …)` 分区（第 1 层的唯一约束与 `list()` 都带）。
+            // 少了这一条，一台设备上的去重会跨设备咬人。
             let seen: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM trajectory_event
-                 WHERE session_id = ?1 AND kind = ?2
-                   AND json_extract(payload, '$.messageId') = ?3",
-                params![session_id, e.kind, mid],
+                 WHERE session_id = ?1 AND node_id = ?2 AND kind = ?3
+                   AND json_extract(payload, '$.messageId') = ?4",
+                params![session_id, node_id, e.kind, mid],
                 |r| r.get(0),
             )?;
             if seen > 0 {
@@ -366,10 +369,12 @@ impl TrajectoryRepo {
                 // 时错位。这一层的量级是「同一会话的同类快照」，不是全表扫描。
                 let mut stmt = conn.prepare(
                     "SELECT payload FROM trajectory_event
-                     WHERE session_id = ?1 AND kind = ?2 AND json_extract(payload, '$.messageId') IS NULL",
+                     WHERE session_id = ?1 AND node_id = ?2 AND kind = ?3
+                       AND json_extract(payload, '$.messageId') IS NULL",
                 )?;
-                let rows =
-                    stmt.query_map(params![session_id, e.kind], |r| r.get::<_, String>(0))?;
+                let rows = stmt.query_map(params![session_id, node_id, e.kind], |r| {
+                    r.get::<_, String>(0)
+                })?;
                 for existing in rows {
                     let existing = existing?;
                     if payload_without_seq(&existing).as_deref() == Some(norm.as_str()) {
@@ -542,6 +547,44 @@ mod tests {
             "agent_message_chunk",
             serde_json::json!({ "content": { "type": "text", "text": text } }).to_string(),
         )
+    }
+
+    /// **去重的两层都按 `(session_id, node_id)` 判定，不能只按 `session_id`**。
+    ///
+    /// `session_id` 不是全局命名空间——Hub 侧连通道都按 `(node_id, channel_id)`
+    /// 记账（`stream.rs`）。少了 `node_id` 这层过滤，设备 A 写过的同名快照会把
+    /// 设备 B 的同一条判成重复而丢掉：两台设备各自的轨迹互相吃掉。
+    #[test]
+    fn dedup_does_not_leak_across_nodes() {
+        let (_d, t) = setup();
+        let snap = r#"{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"init"}]}"#;
+        let mk = |seq| NewEvent::new(seq, "available_commands_update", snap.to_string());
+
+        // 第 3 层（状态快照按内容）：同一 session_id 下两台设备各自的快照都要落库。
+        assert!(t.append("s1", "nodeA", &mk(1), TS).unwrap());
+        assert!(
+            t.append("s1", "nodeB", &mk(2), TS).unwrap(),
+            "别的设备的同名快照不该把我这条吃掉"
+        );
+
+        // 第 2 层（按 `messageId`）：同理。
+        let msg = || {
+            NewEvent::new(
+                3,
+                "agent_message_chunk",
+                serde_json::json!({
+                    "sessionUpdate": "agent_message_chunk",
+                    "messageId": "m1",
+                    "content": {"type": "text", "text": "hi"},
+                })
+                .to_string(),
+            )
+        };
+        assert!(t.append("s2", "nodeA", &msg(), TS).unwrap());
+        assert!(
+            t.append("s2", "nodeB", &msg(), TS).unwrap(),
+            "别的设备的同 messageId 不该把我这条吃掉"
+        );
     }
 
     /// 两个「看不懂就退化成不判」的兜底：payload **不是 JSON 对象**时

@@ -91,7 +91,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 
 1. **接入一台设备**：在设备上跑 `afcli run <hub-url>` → 首次自动 enroll、生成密钥对并外联 → Hub 显示新节点（真实 os/arch/hostname）→ 在线。之后排障用 `afcli log` 看最近日志。
 2. **在某个设备上开 agent 对话**：选节点 → 选工作区路径（设备上已有的目录）→ 选该设备上已装且可用的 agent →
-   会话建立，terminal / files 面板挂到这个工作区上（git 面板在 M4 加入）→
+   会话建立，terminal / files 面板挂到这个工作区上（git 面板在 M3 加入）→
    在面板里对话 → Trajectory 逐条可查。
 3. **看它改了什么**：会话进行中，ACP 的 `tool_call` 事件逐条展示工具名、状态与输出摘要（改动内容从这里看）。专门的 diff 视图留到 M3 的 git 面板。
 4. **操作文件 / git / bash**：在**该会话内**用对应面板，直接作用于该会话的工作区。
