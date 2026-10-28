@@ -778,6 +778,14 @@ async fn read_events(channel_id: String, client: AcpClient, seq: Seq) {
                     //
                     // 它**占用一个序号**：这是设备上真实发生过的事件，跳过它
                     // 会让 `gaps` 在每一处权限请求上报警告——用户会以为丢了东西。
+                    //
+                    // **先 flush，再发**：`push_external` 是立刻上线的，而前面
+                    // 攒在 `batch` 里的事件要等下一次 flush 才走。不先 flush 的话
+                    // 线序会变成「seq 2 先到、seq 1 后到」，而 `gaps()` 的判据是
+                    // 「seq 断裂处即丢失处」（`trajectory.rs` 对 `seq` 的定义），
+                    // 它假定线序与 seq 序一致——顺序一反，断口就被算在错的位置。
+                    flush(&channel_id, &mut batch, &mut bytes);
+                    last_flush = Instant::now();
                     let n = seq.next();
                     let ev = json!({
                         "type": "request",
@@ -1258,6 +1266,52 @@ for line in sys.stdin:
         # （`session/prompt` 的回执照发）。设备侧因此只会看到一条 request。
         send({"jsonrpc": "2.0", "id": 9001, "method": "session/request_permission",
               "params": {"sessionId": "ses_ask", "toolCall": {"title": "rm -rf"}}})
+        send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
+"#;
+        std::fs::write(&path, script).expect("写脚本");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).expect("stat").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("chmod");
+        }
+        path
+    }
+
+    /// 一个先推 **sessionUpdate**、再推 **权限请求** 的假 agent。
+    ///
+    /// 造这个形状是为了证明「线序 == seq 序」：先到的那条进 `batch` 等着，
+    /// 后到的 request 若直接 `push_external` 就会**抢在它前面上线**。
+    fn update_then_request_agent(dir: &Path) -> PathBuf {
+        let path = dir.join("update-then-ask");
+        let script = r#"#!/usr/bin/env python3
+import json, sys
+
+def send(o):
+    sys.stdout.write(json.dumps(o) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    m = json.loads(line)
+    method = m.get("method", "")
+    mid = m.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1,
+              "agentCapabilities": {"loadSession": True}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "ses_uq"}})
+    elif method == "session/prompt":
+        # 先一条普通更新（会被攒进 batch），再一条权限请求（立刻外推）。
+        send({"jsonrpc": "2.0", "method": "session/update",
+              "params": {"sessionId": "ses_uq",
+                         "update": {"sessionUpdate": "agent_message_chunk",
+                                    "content": [{"type": "text", "text": "thinking"}]}}})
+        send({"jsonrpc": "2.0", "id": 9001, "method": "session/request_permission",
+              "params": {"sessionId": "ses_uq", "toolCall": {"title": "rm -rf"}}})
         send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
 "#;
         std::fs::write(&path, script).expect("写脚本");
@@ -2151,5 +2205,109 @@ for line in sys.stdin:
         );
 
         convs.close("ch_ask").await;
+    }
+
+    /// **「线序 == seq 序」：权限请求不能抢在已攒进 `batch` 的事件前面上线。**
+    ///
+    /// `sessionUpdate` 先到、被攒进 `batch` 等下一次 flush；`Request` 后到，
+    /// 但它走的是 `push_external`（立刻上线）。修前那一段**没有先 flush**，
+    /// 于是 seq 1 还没发、seq 2 已经发了——线上顺序变成 2, 1。
+    ///
+    /// 这条为什么重要：`gaps()` 的判据是「`seq` 断裂处即丢失处」
+    /// （`trajectory.rs` 对 `seq` 的定义），它默认「先到的 seq 也先到 Hub」。
+    /// 顺序一反，断口就算在错的位置，页面会指着一段其实没丢的区间说「这里丢了」。
+    ///
+    /// 判据必须是**收到帧的顺序**（不是「都收到了」）：两种写法都能收齐，
+    /// 只有顺序能区分。反向验证：去掉 `Request` 分支里那句 `flush(...)`
+    /// → 这里实测得到 `[2, 1, ...]`，断言当场红。
+    #[tokio::test]
+    // guard 跨 `await` 存活是本用例要的语义：互斥必须覆盖整个用例体。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    async fn a_request_never_overtakes_the_events_already_in_the_batch() {
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+        let d = tempfile::tempdir().expect("tmp");
+        let bin = update_then_request_agent(d.path());
+        let convs = Conversations::default();
+
+        let _ = channel::open_external("ch_uq");
+        convs
+            .open(spec_for("ch_uq", &bin, None), None)
+            .await
+            .expect("假 agent 必须能起来");
+        // 先清掉 `ready`，免得它混进下面收的帧里。
+        let _ = channel::pump();
+
+        convs.prompt("ch_uq", "do it").await.expect("会话在");
+
+        // 收集「带 seq 的帧」的上线顺序。
+        //
+        // **不能一到 `turn_end` 就停**：`batch` 是按 60ms 的时间窗发的
+        // （`BATCH_INTERVAL`），而 `turn_end` 与 request 是立刻外推的——
+        // 先到的是它们。要等到那批 `batch` 真的上线，否则看不到 seq 1，
+        // 断言就成了「只比较剩下的两条」而不自知（这正是本条第一版的错法）。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen: Vec<(i64, String)> = Vec::new();
+        let mut ended = false;
+        while Instant::now() < deadline && !(ended && seen.iter().any(|(_, k)| k == "batch")) {
+            for (_, frames) in channel::pump() {
+                for f in frames {
+                    let Ok(cd) = f.payload::<protocol::channel::ChannelData>() else {
+                        continue;
+                    };
+                    let p = &cd.payload;
+                    if p.get("type").and_then(Value::as_str) == Some("turn_end") {
+                        ended = true;
+                    }
+                    // `batch` 里的每一条与 `request` 都带 seq。
+                    if let Some(n) = p.get("seq").and_then(Value::as_i64) {
+                        let kind = p
+                            .get("type")
+                            .or_else(|| p.get("sessionUpdate"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("?")
+                            .to_string();
+                        seen.push((n, kind));
+                    }
+                    // 一批里可能有多条，`batch` 帧的 `events` 才是载荷。
+                    if p.get("type").and_then(Value::as_str) == Some("batch") {
+                        seen.push((-1, "batch".to_string()));
+                    }
+                    if let Some(evs) = p.get("events").and_then(Value::as_array) {
+                        for e in evs {
+                            if let Some(n) = e.get("seq").and_then(Value::as_i64) {
+                                let kind = e
+                                    .get("sessionUpdate")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("?")
+                                    .to_string();
+                                seen.push((n, kind));
+                            }
+                        }
+                    }
+                }
+            }
+            // **每轮都必须 await**：`read_events` 是 `tokio::spawn` 出来的任务，
+            // 单线程运行时下这个紧凑循环如果不再让出，就会把它整个饿死——
+            // `batch` 的 60ms 窗口一次也不会走，于是「收不到 batch」被误读成
+            // 「实现没 flush」。这不是超时设置的问题，是测试自己不让别人跑。
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        convs.close("ch_uq").await;
+
+        let seqs: Vec<i64> = seen.iter().map(|(n, _)| *n).filter(|n| *n >= 0).collect();
+        assert!(
+            seqs.len() >= 2,
+            "这一轮至少要收到「更新」与「请求」两条带 seq 的帧，实收 {seqs:?}"
+        );
+        let mut sorted = seqs.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            seqs, sorted,
+            "上线顺序必须与 seq 序一致（seq 断裂处即丢失处），实收 {seen:?}"
+        );
     }
 }
