@@ -1072,14 +1072,14 @@ fn persist_trajectory(state: &AppState, node_id: &str, channel_id: &str, payload
     }
     let now = hub_core::registry::now_stamp();
 
-    if kind == "turn_end" {
+    if kind == ACP_FRAME_TYPE_TURN_END {
         // `turn_end` 是一条事件，不是一批。它的 `seq` 由设备侧那条共享
         // 计数器给（与读循环同一条序列，见 `node-core` 的 `Seq`）。
         //
         // **缺 `seq` 就整条不写**，不写 0：两条都缺的帧会都落 `seq = 0`，
         // 第二条被 `UNIQUE` 的 `INSERT OR IGNORE` 吃掉——丢一条且看不出来
         // （序号仍然连续，`gaps` 不报警）。宁可少一条，也不要一个错号。
-        let Some(seq) = payload.get("seq").and_then(Value::as_i64) else {
+        let Some(seq) = payload.get(ACP_FIELD_SEQ).and_then(Value::as_i64) else {
             tracing::error!(channel_id = %channel_id, "a turn_end arrived without a seq; dropped");
             return;
         };
