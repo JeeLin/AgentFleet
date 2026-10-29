@@ -17,12 +17,11 @@
    是页面说的，因为句柄在页面手里；这里只负责把「关闭」这个意图报上去。
    =========================================================================== */
 
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 import type { ChannelState } from '@/lib/channel'
 import { CHANNEL_STATE_LABEL, channelErrorLabel } from '@/lib/channel'
-
-export type PanelName = 'terminal' | 'files'
+import { PANEL_ORDER, type PanelName } from '@/lib/panel'
 
 export interface ChannelView {
   state: ChannelState
@@ -54,8 +53,12 @@ const emit = defineEmits<{
   (e: 'interact', panel: PanelName): void
 }>()
 
-const PANEL_LABEL: Record<PanelName, string> = { terminal: '终端', files: '文件' }
-const PANEL_ICON: Record<PanelName, string> = { terminal: '▶', files: '▤' }
+/**
+ * 标签与图标。类型是 `Record<PanelName, string>`：扩 `PanelName` 时漏一项
+ * 就编译不过，而不是运行时渲染出 `undefined`——这正是扩枚举时想要的失败方式。
+ */
+const PANEL_LABEL: Record<PanelName, string> = { terminal: '终端', files: '文件', git: 'Git' }
+const PANEL_ICON: Record<PanelName, string> = { terminal: '▶', files: '▤', git: '⑂' }
 
 /** 状态 → 徽标色。`failed` 用 danger：它是唯一需要用户处理的态。 */
 const STATE_BADGE: Record<ChannelState, string> = {
@@ -83,6 +86,28 @@ const lines = computed(() => {
   const text = props.output.replace(/\r\n/g, '\n')
   return text.length ? text.split('\n') : []
 })
+
+/**
+ * 「＋」是否展开着候选。
+ *
+ * **放在组件里而不是页面上**：它是纯粹的视觉瞬时态（展开 / 收起），
+ * 不跨渲染保存、也不影响通道——通道由页面的 `mounted` 决定。搬上页面
+ * 只会让页面多一个与业务无关的字段。
+ */
+const adding = ref(false)
+
+/**
+ * 「＋」的候选：**还没挂进坞的面板**。
+ *
+ * 已挂载的不列出来：它已经在标签条上了，再列一遍会让「点它切换」与
+ * 「点它再挂一个」两种语义撞在一起。
+ */
+const candidates = computed(() => PANEL_ORDER.filter((n) => !props.mounted.includes(n)))
+
+function addPanel(name: PanelName): void {
+  adding.value = false
+  emit('open', name)
+}
 
 function onInteract(e: Event): void {
   if (!props.panel) return
@@ -113,6 +138,44 @@ function onInteract(e: Event): void {
       </button>
       <span v-if="!mounted.length" class="af-docktabs__empty af-t-mute">没有打开的面板</span>
       <span class="af-docktabs__spacer"></span>
+      <!-- 「＋」展开尚未挂载的面板候选。
+           **不弹浮层**：全仓没有 popover 组件，为两三个按钮新建一套浮层的
+           代价高于收益；而行内展开在 412px 窄列（§7.1 覆盖式展开）下不需要
+           处理贴边与超出视口，浮层则要。
+           候选里**必须有终端**——坞的缺省面板是 git，这是终端唯一的入口。 -->
+      <template v-if="adding">
+        <button
+          v-for="name in candidates"
+          :key="name"
+          class="af-docktabs__add"
+          type="button"
+          :data-add="name"
+          :aria-label="`打开${PANEL_LABEL[name]}面板`"
+          @click="addPanel(name)"
+        >
+          <span aria-hidden="true">{{ PANEL_ICON[name] }}</span> {{ PANEL_LABEL[name] }}
+        </button>
+        <button
+          class="af-docktabs__add"
+          type="button"
+          data-add="cancel"
+          aria-label="收起面板候选"
+          @click="adding = false"
+        >
+          收起
+        </button>
+      </template>
+      <button
+        v-else
+        class="af-docktabs__add"
+        type="button"
+        data-add="toggle"
+        aria-label="打开其它面板"
+        :aria-expanded="'false'"
+        @click="adding = true"
+      >
+        ＋
+      </button>
       <button
         class="af-docktabs__close"
         type="button"
@@ -132,7 +195,7 @@ function onInteract(e: Event): void {
       @keydown="onInteract"
     >
       <div v-if="!panel" class="af-panelhost__void af-t-mute">
-        从上面的标签选一个面板，或按 <kbd>o</kbd> 打开终端。
+        从上面的标签选一个面板，或按 <kbd>o</kbd> 打开 Git。
       </div>
 
       <template v-else>
@@ -203,6 +266,15 @@ function onInteract(e: Event): void {
              </div>
              <div class="af-fpane__body af-panelhost__void af-t-mute">
                文件树与预览由 13c 挂入。工作区根就是会话的路径——文件面板没有第二个根。
+             </div>
+           </div>
+         </slot>
+
+         <slot name="git">
+           <div v-if="panel === 'git'" class="af-gpane">
+             <div class="af-fpane__body af-panelhost__void af-t-mute" data-git-placeholder>
+               改动与历史由 GitPanel 挂入（v0.4.0 后续子任务）。它读的是会话工作区的
+               `status` / `diff` / `log`，**只读**——面板里没有提交按钮，也不会有。
              </div>
            </div>
          </slot>

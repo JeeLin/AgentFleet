@@ -887,7 +887,14 @@ kbd, .kbd {
 .af-compose__input:focus { border-color: var(--af-accent); box-shadow: 0 0 0 3px var(--af-accent-bg); }
 
 /* 面板坞标签 */
-.af-docktabs { display: flex; gap: 1px; background: var(--af-surface-1); border-bottom: 1px solid var(--af-border-subtle); flex: 0 0 auto; }
+/* `flex-wrap: wrap` + `min-width: 0`：v0.4.0 起坞里有三个面板，标签条加「＋」
+   候选后宽度明显超过 412px 窄列。不换行就会横向溢出——那正是 v0.3.0 刚修过的
+   「窄列里按钮被顶出去」的同一类问题（`.af-compose__target` 的 `min-width: 0`）。
+   换行而不是压缩：标签上的中文被压到折字比换行难读。 */
+.af-docktabs {
+  display: flex; flex-wrap: wrap; min-width: 0; gap: 1px;
+  background: var(--af-surface-1); border-bottom: 1px solid var(--af-border-subtle); flex: 0 0 auto;
+}
 .af-docktabs__b {
   display: flex; align-items: center; gap: var(--af-space-2);
   padding: var(--af-space-2) var(--af-space-4); border: 0; background: none;
@@ -904,6 +911,15 @@ kbd, .kbd {
   cursor: pointer; color: var(--af-fg-tertiary); font-family: inherit; font-size: var(--af-text-sm);
 }
 .af-docktabs__close:hover { color: var(--af-danger-fg); }
+/* 「＋」与它展开的候选。与 `__close` 同形（都是**对坞整体的操作**，不是对
+   某个面板的操作），只是常态是强调色：它在缺省状态下是终端与文件的唯一入口，
+   灰到看不见等于没有入口。 */
+.af-docktabs__add {
+  padding: var(--af-space-2) var(--af-space-3); border: 0; background: none;
+  cursor: pointer; color: var(--af-fg-secondary); font-family: inherit; font-size: var(--af-text-sm);
+  white-space: nowrap;
+}
+.af-docktabs__add:hover { background: var(--af-surface-2); color: var(--af-fg-primary); }
 
 /* 面板体 */
 .af-panelhost { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }

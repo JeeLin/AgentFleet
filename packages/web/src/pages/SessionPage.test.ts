@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import SessionPage from '@/pages/SessionPage.vue'
 import { device, mountIn, session } from '@/test/mount'
 import { settle, stubFetch } from '@/test/http'
+import { cssRuleOf, readRepoFile } from '@/test/css'
 import { STORAGE_KEY, type TabMeta } from '@/lib/tabs'
 import { matchRoute, route } from '@/router'
 
@@ -167,21 +168,87 @@ function tabLabel(w: ReturnType<typeof mountIn>, id: string): HTMLElement {
 }
 
 /**
+ * 确保面板坞开着。**幂等**。
+ *
+ * v0.4.0 起进会话就是「坞已展开、缺省 git」（用户拍板：打开就是 git 界面），
+ * 所以这里多数时候什么都不做——但保留「没开就点页面头那个按钮」的分支，
+ * 因为 `closeDock()` 之后的用例仍要能从关着的状态打开。
+ */
+async function openDock(w: ReturnType<typeof mountIn>): Promise<void> {
+  if (w.element.querySelector('.af-docktabs')) return
+  await w.element.querySelector<HTMLElement>('.af-wb__head button')?.click()
+  await flush(w)
+}
+
+/**
  * 把文件面板拉进坞并显示它。**到此为止不碰面板正文**——通道因此还没建
  * （§5.5.1 的懒建立：点 / 聚焦坞标签都**不**算交互，只有碰正文才算）。
  *
- * 走 `]`（cyclePanel）而不是「点坞标签」：坞里只有一个面板时没有第二个
- * 标签可点，而 `[` / `]` 的语义正是「把另一个拉进来」（§5.4：坞能同时放
- * 终端与文件）。
+ * v0.4.0 改走坞头的「＋」：进会话时坞里只有 git，而 `]`（cyclePanel）在
+ * 单面板下是「拉**下一个**面板进来」——按 `PANEL_ORDER` 那是 terminal，
+ * 不是 files。走「＋」挑名字既确定，又顺带覆盖了那个入口本身。
  */
 async function openFiles(w: ReturnType<typeof mountIn>): Promise<void> {
-  await w.element.querySelector<HTMLElement>('.af-wb__head button')?.click()
+  await openDock(w)
+  const add = w.element.querySelector<HTMLElement>('[data-add="toggle"]')
+  if (!add) throw new Error('the add button is missing')
+  await add.click()
   await flush(w)
-  document.dispatchEvent(new KeyboardEvent('keydown', { key: ']', bubbles: true, cancelable: true }))
+  const candidate = w.element.querySelector<HTMLElement>('[data-add="files"]')
+  if (!candidate) throw new Error('files is not among the add candidates')
+  await candidate.click()
   await flush(w)
   const tab = w.element.querySelector<HTMLElement>('[data-panel="files"]')
   if (!tab) throw new Error('files panel did not mount')
   await tab.click()
+  await flush(w)
+}
+
+/**
+ * 用坞头「＋」把终端拉进坞并选中它。
+ *
+ * v0.4.0 起缺省面板是 git，页面头那个「打开面板」按钮开的也是 git——所以
+ * 「给我一个终端」这条路径现在只剩「＋」。这也正是它必须留在候选里的理由：
+ * 它是终端唯一的入口。
+ */
+async function openTerminal(w: ReturnType<typeof mountIn>): Promise<void> {
+  await openDock(w)
+  const add = w.element.querySelector<HTMLElement>('[data-add="toggle"]')
+  if (!add) throw new Error('the add button is missing')
+  await add.click()
+  await flush(w)
+  const candidate = w.element.querySelector<HTMLElement>('[data-add="terminal"]')
+  if (!candidate) throw new Error('terminal is not among the add candidates')
+  await candidate.click()
+  await flush(w)
+}
+
+/** 在 document 上按一个键（键位表监听在那里）。 */
+function press(key: string): void {
+  document.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+}
+
+/**
+ * 用「＋」把一个具名面板拉进坞并选中它。
+ *
+ * 面板还没挂载时必须走「＋」——那是缺省状态下唯一的入口；已挂载的则直接点
+ * 它的标签（「＋」的候选里本来就不含已挂载的）。
+ */
+async function openPanelNamed(w: ReturnType<typeof mountIn>, name: string): Promise<void> {
+  await openDock(w)
+  const existing = w.element.querySelector<HTMLElement>(`[data-panel="${name}"]`)
+  if (existing) {
+    await existing.click()
+    await flush(w)
+    return
+  }
+  const add = w.element.querySelector<HTMLElement>('[data-add="toggle"]')
+  if (!add) throw new Error('the add button is missing')
+  await add.click()
+  await flush(w)
+  const candidate = w.element.querySelector<HTMLElement>(`[data-add="${name}"]`)
+  if (!candidate) throw new Error(`${name} is not among the add candidates`)
+  await candidate.click()
   await flush(w)
 }
 
@@ -215,11 +282,24 @@ beforeEach(() => {
 })
 
 describe('工作台：结构与默认值', () => {
-  it('对话区默认 56%，坞没开时没有把手也没有面板', async () => {
+  it('对话区默认 56%，且进会话就是 git 面板（v0.4.0 起坞默认展开）', async () => {
+    // 这条原来断言「坞没开时没有把手也没有面板」。v0.4.0 推翻了那个缺省
+    // （用户拍板：会话里最常看的是「这次改了什么」，git 比终端更值得常驻），
+    // 于是断言翻过来——**并且翻的不只是"存在"**：缺省的必须是 git，
+    // 否则「打开就是 git 界面」就不成立。
     const { w } = await mountWorkbench()
     expect(w.element.querySelector('.af-wb__conv')).not.toBeNull()
-    expect(w.element.querySelector('[role="separator"]')).toBeNull()
-    expect(w.element.querySelector('[data-panelhost]')).toBeNull()
+    expect(w.element.querySelector('[role="separator"]')).not.toBeNull()
+    expect(w.element.querySelector('[data-panelhost]')).not.toBeNull()
+
+    const tabs = Array.from(w.element.querySelectorAll<HTMLElement>('[data-panel]'))
+    expect(tabs.map((t) => t.dataset.panel)).toEqual(['git'])
+    expect(
+      w.element.querySelector<HTMLElement>('[data-panel="git"]')?.getAttribute('aria-selected'),
+    ).toBe('true')
+    // 正文真的渲染了，不是空壳：占位说明在，且面板头写的是 Git。
+    expect(w.element.textContent).toContain('Git')
+    expect(w.element.querySelector('.af-panelhead')?.textContent).toContain('Git')
   })
 
   it('打开面板后出现把手，并把对话区宽度写成 flex-basis（默认 56%）', async () => {
@@ -274,17 +354,17 @@ describe('通道生命周期：懒建立', () => {
     // 没有任何地方写着。现在「选中终端面板」本身就算建立时机，只有「展开坞
     // 但选中 files / 还没选」才不建（见下一条）。
     const { w, posts } = await mountWorkbench()
-    await w.element.querySelector<HTMLElement>('.af-wb__head button')?.click()
-    await flush(w)
+    await openTerminal(w)
     expect(posts()).toBe(1)
   })
 
   it('把 files 拉进坞不建第二条通道：它的首个动作（列目录）自己会开', async () => {
-    // files 面板**不**由 `openPanel` 预建通道——`af-wb__head` 先建了终端那一条
-    // （选中终端即建），把 files 拉进来本身不该再多一条。
+    // files 面板**不**由 `openPanel` 预建通道——把 files 拉进来本身不该多一条。
+    // v0.4.0 起进会话就有 git 那条（`mounted: ['git']`，不建通道），所以这里
+    // 数的是「除了 git 之外没多出终端那条」：openFiles 之后仍是 0 条。
     const { w, posts } = await mountWorkbench()
     await openFiles(w)
-    expect(posts()).toBe(1)
+    expect(posts()).toBe(0)
   })
 
   it('第一次与面板正文交互才 POST /api/channels，并建一条 SSE', async () => {
@@ -311,8 +391,7 @@ describe('通道生命周期：懒建立', () => {
     // 连上」。判据取**面板头里那块状态徽标的文字**——它是用户能看见的唯一
     // 连接状态，也正是原来一直停在「未建立」的那个地方。
     const { w } = await mountWorkbench()
-    await w.element.querySelector<HTMLElement>('.af-wb__head button')?.click()
-    await flush(w)
+    await openTerminal(w)
 
     const head = w.element.querySelector<HTMLElement>('.af-panelhead')
     if (!head) throw new Error('dock header did not render')
@@ -348,14 +427,16 @@ describe('通道生命周期：懒建立', () => {
 describe('通道生命周期：切 tab 不释放', () => {
   it('切到另一个 tab 再切回来，通道只建过一次，也没有 DELETE', async () => {
     const { w, posts, deletes } = await mountWorkbench()
-    await w.element.querySelector<HTMLElement>('.af-wb__head button')?.click()
-    await flush(w)
+    await openTerminal(w)
     await interact(w)
     expect(posts()).toBe(1)
 
+    // s_2 也有它自己的 git 面板（v0.4.0 起每个 tab 都这样），所以这里不能再
+    // 断言「没有面板」——要断言的是**它的面板是 git 且没带走 s_1 的终端**。
     await tabLabel(w, 's_2').click()
     await flush(w)
-    expect(w.element.querySelector('[data-panelhost]')).toBeNull()
+    expect(w.element.querySelector<HTMLElement>('.af-panelhead')?.textContent).toContain('Git')
+    expect(w.element.querySelector<HTMLElement>('.af-panelhead')?.textContent).not.toContain('终端')
 
     await tabLabel(w, 's_1').click()
     await flush(w)
@@ -366,8 +447,7 @@ describe('通道生命周期：切 tab 不释放', () => {
 
   it('切走再切回来，终端缓冲还在（状态挂在 tab 上，不是全局一份）', async () => {
     const { w } = await mountWorkbench()
-    await w.element.querySelector<HTMLElement>('.af-wb__head button')?.click()
-    await flush(w)
+    await openTerminal(w)
     await interact(w)
 
     await frame(w, FakeEventSource.instances[0], { bytes: 'hello from pty' })
@@ -375,7 +455,8 @@ describe('通道生命周期：切 tab 不释放', () => {
 
     await tabLabel(w, 's_2').click()
     await flush(w)
-    expect(w.element.querySelector('[data-panelhost]')).toBeNull()
+    // s_2 显示的是它自己的 git 面板，s_1 的终端不在画面里。
+    expect(w.element.querySelector('.xterm')).toBeNull()
 
     await tabLabel(w, 's_1').click()
     await flush(w)
@@ -414,8 +495,7 @@ describe('通道生命周期：切 tab 不释放', () => {
 describe('通道生命周期：断线丢弃不排队', () => {
   it('流断开时 send 只计数，面板头显示「有 N 条已丢」', async () => {
     const { w, fetchMock } = await mountWorkbench()
-    await w.element.querySelector<HTMLElement>('.af-wb__head button')?.click()
-    await flush(w)
+    await openTerminal(w)
     await interact(w)
 
     const src = FakeEventSource.instances[0]
@@ -438,19 +518,22 @@ describe('通道生命周期：断线丢弃不排队', () => {
 describe('多 tab 的代价可见', () => {
   it('开过面板的 tab 在条上有面板数徽标', async () => {
     const { w } = await mountWorkbench()
-    await w.element.querySelector<HTMLElement>('.af-wb__head button')?.click()
-    await flush(w)
+    await openTerminal(w)
 
+    // v0.4.0 起每个 tab 进会话就带 git，所以这里开过的是终端那个——
+    // 徽标数的是「这个 tab 挂了几块面板」，不是「用户手动开过几次」。
     const tab = w.element.querySelector<HTMLElement>('[data-sid="s_1"]')
-    expect(tab?.querySelector('.af-badge')?.textContent?.trim()).toBe('1')
+    expect(tab?.querySelector('.af-badge')?.textContent?.trim()).toBe('2')
   })
 
-  it('没开过面板的 tab 没有徽标', async () => {
+  it('每个 tab 进会话就带一个面板徽标（v0.4.0：缺省 git）', async () => {
+    // 这条原来是「没开过面板的 tab 没有徽标」。那个前提随「进会话即 git」
+    // 一起作废了：s_2 没被点过，但它有自己的 git 面板，所以它有徽标。
     const { w } = await mountWorkbench()
-    await w.element.querySelector<HTMLElement>('.af-wb__head button')?.click()
-    await flush(w)
 
-    expect(w.element.querySelector('[data-sid="s_2"] .af-badge')).toBeNull()
+    expect(
+      w.element.querySelector('[data-sid="s_2"] .af-badge')?.textContent?.trim(),
+    ).toBe('1')
   })
 })
 
@@ -480,15 +563,21 @@ describe('键盘', () => {
     probe.focus()
     probe.dispatchEvent(new KeyboardEvent('keydown', { key: 'o', bubbles: true, cancelable: true }))
     await flush(w)
-    expect(w.element.querySelector('[data-panelhost]')).toBeNull()
+    // v0.4.0 起进会话就有面板（缺省 git），所以判据不能是「没有面板」。
+    // 这条要钉的是「输入框里按 o 不抢键」：面板状态**一点没变**——仍是 git、
+    // 仍只有一个标签、也没有因此建通道。
+    const tabs = Array.from(w.element.querySelectorAll<HTMLElement>('[data-panel]'))
+    expect(tabs.map((t) => t.dataset.panel)).toEqual(['git'])
+    expect(
+      w.element.querySelector<HTMLElement>('[data-panel="git"]')?.getAttribute('aria-selected'),
+    ).toBe('true')
   })
 })
 
 describe('面板正文是 13b / 13c 的真组件，不是 13a 的占位', () => {
   it('终端位挂着真 xterm 面板（占位那句「13b 挂入」不再出现）', async () => {
     const { w } = await mountWorkbench()
-    await w.element.querySelector<HTMLElement>('.af-wb__head button')?.click()
-    await flush(w)
+    await openTerminal(w)
 
     expect(w.element.querySelector('[data-terminal]')).not.toBeNull()
     expect(w.element.textContent).not.toContain('终端内容由 13b 挂入')
@@ -1307,5 +1396,179 @@ describe('停止按钮：真的有前端链路（不是只画了个按钮）', (
       `点停止必须发出 cancel 请求，实收：${JSON.stringify(calls)}`,
     ).toBe(1)
     expect(cancel[0]!.method, 'cancel 是 POST').toBe('POST')
+  })
+})
+
+/* ===========================================================================
+   v0.4.0 子任务 4：面板坞接入第三个面板（git），并修「文件面板没有入口」
+   ---------------------------------------------------------------------------
+   这一组同时是 Bug 表里那条 🔴 的守门测试：加 git 之前 `mounted` 是空数组，
+   而标签由 `mounted` 渲染、`mounted` 只由点标签填充——空数组下画不出标签，
+   于是点不到标签、也就永远填不满。任何面板（包括 files 与 git 自己）都不可达。
+   =========================================================================== */
+describe('面板坞：三个面板与「＋」入口', () => {
+  it('缺省进会话就是 git 面板（打开就是 git 界面）', async () => {
+    const { w, posts } = await mountWorkbench()
+
+    const tabs = Array.from(w.element.querySelectorAll<HTMLElement>('[data-panel]'))
+    expect(tabs.map((t) => t.dataset.panel)).toEqual(['git'])
+    expect(
+      w.element.querySelector<HTMLElement>('[data-panel="git"]')?.getAttribute('aria-selected'),
+    ).toBe('true')
+
+    // 正文不是空壳：面板头写着 Git，正文里有 git 面板自己的那块。
+    const head = w.element.querySelector<HTMLElement>('.af-panelhead')
+    expect(head?.textContent).toContain('Git')
+    expect(w.element.querySelector('[data-git-placeholder]')).not.toBeNull()
+
+    // 面板挂着 ≠ 通道建了：git 也走懒建立（碰正文才算）。
+    expect(posts()).toBe(0)
+  })
+
+  it('三个面板都有标签与图标，扩枚举时漏一项会编译不过', async () => {
+    // `PANEL_LABEL` / `PANEL_ICON` 是 `Record<PanelName, string>`，类型层已保证
+    // 三项齐全；这里再在运行时核一遍，防的是有人把它们改成 `Partial<...>`
+    // 或 `Record<string, string>` —— 那时漏项会静默渲染成空字符串。
+    const { w } = await mountWorkbench()
+    for (const name of ['terminal', 'files', 'git']) {
+      await openPanelNamed(w, name)
+      const tab = w.element.querySelector<HTMLElement>(`[data-panel="${name}"]`)
+      if (!tab) throw new Error(`${name} 面板没有标签`)
+      const text = (tab.textContent ?? '').trim()
+      expect(text, `${name} 的标签与图标都不能为空`).not.toBe('')
+    }
+  })
+
+  it('「＋」在缺省状态下列出终端与文件（不含已挂载的 git）', async () => {
+    const { w } = await mountWorkbench()
+
+    const add = w.element.querySelector<HTMLElement>('[data-add="toggle"]')
+    if (!add) throw new Error('坞头没有「＋」')
+    await add.click()
+    await flush(w)
+
+    const names = Array.from(w.element.querySelectorAll<HTMLElement>('[data-add]'))
+      .map((el) => el.dataset.add)
+      .filter((n) => n !== 'toggle' && n !== 'cancel')
+    expect(names).toEqual(['terminal', 'files'])
+    // 已挂载的不出现在候选里：它已经在标签条上了。
+    expect(names).not.toContain('git')
+  })
+
+  it('点「＋」里的文件 → files 挂上并成为当前面板（🔴 文件面板入口）', async () => {
+    // 这条就是 Bug 表那条 🔴 的守门测试：把「＋」删掉它必须红。
+    const { w } = await mountWorkbench()
+
+    await openFiles(w)
+
+    const tabs = Array.from(w.element.querySelectorAll<HTMLElement>('[data-panel]'))
+    expect(tabs.map((t) => t.dataset.panel)).toEqual(['git', 'files'])
+    expect(
+      w.element.querySelector<HTMLElement>('[data-panel="files"]')?.getAttribute('aria-selected'),
+    ).toBe('true')
+    expect(w.element.querySelector('[data-role="tree"]')).not.toBeNull()
+  })
+
+  it('点「＋」里的终端 → 终端挂上并建通道（终端唯一的入口）', async () => {
+    // 缺省面板改成 git 之后，「＋」是终端唯一的路。漏掉它等于把终端弄没了。
+    const { w, posts } = await mountWorkbench()
+
+    await openTerminal(w)
+
+    expect(
+      w.element.querySelector<HTMLElement>('[data-panel="terminal"]')?.getAttribute('aria-selected'),
+    ).toBe('true')
+    expect(w.element.querySelector('[data-terminal]')).not.toBeNull()
+    expect(posts(), '选中终端面板就该建通道（v0.3.0 的口径）').toBe(1)
+  })
+
+  it('候选随挂载变化：挂上 files 之后只剩终端', async () => {
+    const { w } = await mountWorkbench()
+    await openFiles(w)
+
+    const add = w.element.querySelector<HTMLElement>('[data-add="toggle"]')
+    if (!add) throw new Error('坞头没有「＋」')
+    await add.click()
+    await flush(w)
+
+    const names = Array.from(w.element.querySelectorAll<HTMLElement>('[data-add]'))
+      .map((el) => el.dataset.add)
+      .filter((n) => n !== 'toggle' && n !== 'cancel')
+    expect(names).toEqual(['terminal'])
+  })
+
+  it('「收起」不改变挂载，只把候选收回去', async () => {
+    const { w } = await mountWorkbench()
+    const add = w.element.querySelector<HTMLElement>('[data-add="toggle"]')
+    await add?.click()
+    await flush(w)
+
+    await w.element.querySelector<HTMLElement>('[data-add="cancel"]')?.click()
+    await flush(w)
+
+    expect(w.element.querySelector('[data-add="cancel"]')).toBeNull()
+    const tabs = Array.from(w.element.querySelectorAll<HTMLElement>('[data-panel]'))
+    expect(tabs.map((t) => t.dataset.panel)).toEqual(['git'])
+  })
+
+  it('`]` 轮转顺序是 terminal → files → git → terminal', async () => {
+    // 三面板之后「另一个」不再唯一，`otherPanel` 改成按固定顺序轮转。
+    // 这条锁的是那个行为改变——它同时是「＋」候选的排列顺序。
+    const { w } = await mountWorkbench()
+    await openTerminal(w)
+    await openFiles(w)
+    // 现在三个都挂上了，当前是 files。
+
+    const selected = (): string | null | undefined =>
+      w.element
+        .querySelector<HTMLElement>('[data-panel][aria-selected="true"]')
+        ?.getAttribute('data-panel')
+
+    expect(selected()).toBe('files')
+    press(']')
+    await flush(w)
+    expect(selected(), 'files 之后是 git').toBe('git')
+    press(']')
+    await flush(w)
+    expect(selected(), 'git 之后回环到 terminal').toBe('terminal')
+  })
+
+  it('关掉坞之后按 `o` 回到只有 git 的干净状态', async () => {
+    const { w, deletes } = await mountWorkbench()
+    await openTerminal(w)
+    await interact(w)
+    expect(deletes()).toEqual([])
+
+    // `\` 收起坞 = 释放它托管的面板。
+    press('\\')
+    await flush(w)
+    expect(w.element.querySelector('[data-panelhost]')).toBeNull()
+    expect(deletes()).toEqual(['/api/channels/ch-1'])
+
+    press('o')
+    await flush(w)
+    const tabs = Array.from(w.element.querySelectorAll<HTMLElement>('[data-panel]'))
+    expect(tabs.map((t) => t.dataset.panel), 'o 回到缺省的 git，不是原来的多面板').toEqual(['git'])
+  })
+})
+
+describe('面板坞：窄列不溢出（412px）', () => {
+  it('标签条会换行且允许收缩，三面板加候选不会横向溢出', () => {
+    // 源文本断言：vitest 不处理 CSS，只能读源（`readRepoFile` 的先例）。
+    // 这条锁的是 v0.3.0 刚修过的同一类问题（`.af-compose__target` 的
+    // `min-width: 0`）：三面板 + 「＋」候选在 412px 窄列里必然超宽。
+    const css = readRepoFile('packages/web/src/styles/components.css')
+    const tabs = cssRuleOf(css, '.af-docktabs')
+    expect(tabs, '标签条规则必须存在').not.toBe('')
+
+    // 换行：超宽时往下排，而不是把横向撑开。
+    expect(tabs, '标签条必须允许换行').toContain('flex-wrap: wrap')
+    // 收缩：作为 flex 子项不被内容撑开。
+    expect(tabs, '标签条必须能收缩到容器宽度').toContain('min-width: 0')
+
+    // 「＋」与候选都是一行文字，不能自己折字（折字比换行难读）。
+    const add = cssRuleOf(css, '.af-docktabs__add')
+    expect(add, '「＋」规则必须存在').not.toBe('')
+    expect(add).toContain('white-space: nowrap')
   })
 })

@@ -57,7 +57,8 @@ import FilesPanel, {
   type FilePreview,
   type FilesError,
 } from '@/components/FilesPanel.vue'
-import PanelDock, { type ChannelView, type PanelName } from '@/components/PanelDock.vue'
+import PanelDock, { type ChannelView } from '@/components/PanelDock.vue'
+import { PANEL_ORDER, type PanelName } from '@/lib/panel'
 import SplitHandle from '@/components/SplitHandle.vue'
 import StateBadge from '@/components/StateBadge.vue'
 import TabBar, { type TabConn } from '@/components/TabBar.vue'
@@ -233,9 +234,18 @@ const workspaces = reactive(new Map<string, TabWorkspace>())
 
 function blankWorkspace(): TabWorkspace {
   return {
-    dock: false,
-    panel: null,
-    mounted: [],
+    // 进会话即展开坞、缺省显示 git（v0.4.0，用户拍板）：会话里最常要看的是
+    // 「这次改了什么」。这一条推翻了 `design-system.md` 原「坞默认关着、
+    // 不预开」——那条的理由是「对话列独占全宽」，而 git 面板给出的信息
+    // （改动 + 历史）比一次终端占用更值。
+    //
+    // 顺带它是文件面板入口的**前提**：坞标签由 `mounted` 渲染，而 `mounted`
+    // 唯一的写入点是 `openPanel`（只由点标签触发）——`mounted: []` 时一个标签
+    // 都画不出来，于是点不到标签、也就永远填不满 `mounted`。加面板之前必须
+    // 先有一条非空的初值，否则新面板和 files 一样不可达。
+    dock: true,
+    panel: DEFAULT_PANEL,
+    mounted: [DEFAULT_PANEL],
     output: '',
     cwd: [],
     listings: new Map(),
@@ -259,6 +269,9 @@ function blankWorkspace(): TabWorkspace {
     views: {
       terminal: { state: 'idle', error: null, dropped: 0 },
       files: { state: 'idle', error: null, dropped: 0 },
+      // 类型是 `Record<PanelName, ChannelView>`：扩 `PanelName` 时漏一项
+      // 编译不过，而不是运行时读到 `undefined` 再把 `.state` 炸出来。
+      git: { state: 'idle', error: null, dropped: 0 },
     },
   }
 }
@@ -522,6 +535,16 @@ async function releaseTab(tabId: string): Promise<void> {
 
 /* ---------------------------------------------------------------- 面板坞 */
 
+/**
+ * 坞的缺省面板。**一处定义，四处使用**。
+ *
+ * v0.4.0 起缺省是 git（用户拍板：打开就是 git 界面）。它出现在四个回落点上：
+ * `blankWorkspace` 的初值、`o` 键、`toggleDock`、`cyclePanel` 的「坞没开」分支。
+ * 各写一份字面量的后果不是编译错，而是「关掉坞按 `o` 是 git、按 `\` 打开却是
+ * 终端」这种半吊子一致——实测撞上过一处（`o` 的回落），所以收敛到这里。
+ */
+const DEFAULT_PANEL: PanelName = 'git'
+
 const split = ref(SPLIT_DEFAULT)
 
 function openPanel(panel: PanelName): void {
@@ -576,27 +599,35 @@ function focusPanelBody(): void {
   })
 }
 
+/**
+ * 下一个面板（按 `PANEL_ORDER` 轮转）。
+ *
+ * v0.3.0 时这里是「两个面板里的另一个」，三个面板之后那句话没有意义了：
+ * 「另一个」不再唯一。轮转保住原语义——`]` 在三个面板下仍然是一个有确定
+ * 含义的键（下一个，回环）。
+ */
 function otherPanel(name: PanelName): PanelName {
-  return name === 'terminal' ? 'files' : 'terminal'
+  const i = PANEL_ORDER.indexOf(name)
+  return PANEL_ORDER[(i + 1) % PANEL_ORDER.length] as PanelName
 }
 
 function cyclePanel(delta: number): void {
   const ws = activeWs.value
   if (!ws) return
   if (!ws.dock) {
-    openPanel(ws.panel ?? 'terminal')
+    openPanel(ws.panel ?? DEFAULT_PANEL)
     return
   }
   const order = ws.mounted
   if (!order.length) {
-    openPanel('terminal')
+    openPanel(DEFAULT_PANEL)
     return
   }
   if (order.length < 2) {
     // 只挂过一个面板时 `[` / `]` 是**开另一个**（原型 `cyclePanel` 的同一条）：
     // 在这两个键的语义里「切换」包括了「把另一个拉进坞」——否则坞里永远
     // 只有终端，而「坞能同时放两个」这条（§5.4）在键盘上就走不到。
-    openPanel(otherPanel(ws.panel ?? order[0] ?? 'terminal'))
+    openPanel(otherPanel(ws.panel ?? order[0] ?? DEFAULT_PANEL))
     return
   }
   const idx = ws.panel ? order.indexOf(ws.panel) : 0
@@ -608,7 +639,7 @@ function toggleDock(): void {
   const ws = activeWs.value
   if (!ws) return
   if (ws.dock) closeDock()
-  else openPanel(ws.panel ?? 'terminal')
+  else openPanel(ws.panel ?? DEFAULT_PANEL)
 }
 
 /**
@@ -1400,7 +1431,13 @@ function storage(): Storage | null {
 const HANDLERS: Readonly<Record<string, () => boolean>> = {
   'panel:open': () => {
     if (!activeTab.value) return false
-    openPanel(activeWs.value?.panel ?? 'terminal')
+    // 回落值是 **git** 而不是 terminal（v0.4.0）：`closeDock()` 会把 `panel`
+    // 清成 `null`，所以「关掉坞再按 `o`」走的就是这条回落。用户拍板的形状是
+    // 「打开就是 git 界面」——关掉再打开不该变成终端。
+    //
+    // 里程碑文档原判断「这条不必改，因为它优先用 `activeWs.panel`」漏了
+    // `closeDock()` 清空 `panel` 这一层，是被上面这条用例抓出来的。
+    openPanel(activeWs.value?.panel ?? DEFAULT_PANEL)
     return true
   },
   'panel:prev': () => {
@@ -1587,8 +1624,8 @@ onBeforeUnmount(() => {
           class="af-btn af-btn--sm"
           type="button"
           :disabled="ended"
-          :title="ended ? '会话已结束：面板不会再建立通道' : '打开终端面板（o）'"
-          @click="openPanel('terminal')"
+          :title="ended ? '会话已结束：面板不会再建立通道' : '打开 Git 面板（o）'"
+          @click="openPanel('git')"
         >
           <span aria-hidden="true">▤</span> 打开面板
           <kbd>o</kbd>
