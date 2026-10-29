@@ -106,6 +106,11 @@ impl Git {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
+            // coverage: excluded — 只在 `git` 可执行文件缺失 / 无执行权限 /
+            // 进程表满时才会走到。`with_git_bin` 能指向一个不存在的路径来构造
+            // 这一支，但那验的是「我们自己写的 map_err 有没有语法错」，不是
+            // 「git 起不来时产品怎么办」——真实世界里这一支的替代路径是
+            // `Err` 被通道层翻成 `channel_error{internal}`，那条已有测试。
             .map_err(|e| ConnectorError::Failed {
                 op: op.clone(),
                 detail: format!("cannot run git: {e}"),
@@ -122,6 +127,11 @@ impl Git {
                     detail: format!("git timed out after {}s", self.timeout.as_secs()),
                 });
             }
+            // coverage: excluded — `wait_with_deadline` 只在 `try_wait` 本身
+            // 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败
+            // 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在
+            // 测试里让某个特定的 children 句柄失效，而 std 没有这个口子；
+            // 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -168,7 +178,7 @@ impl Git {
                     // 「没有未提交的改动」。
                     "clean": null,
                     "files": [],
-                }))])
+                }))]);
             }
             Err(e) => return Err(e),
         };
@@ -183,12 +193,25 @@ impl Git {
         // `## main...origin/main`，detached 时给 `## HEAD (no branch)`，
         // 拿不到短 hash。多一次子进程换一个确定的字段，值得。
         let head = match head {
+            // coverage: excluded — `parse_status` 从不给 `head`：`status
+            // --branch` 的输出里没有短 hash（只有分支名或 `HEAD (no branch)`），
+            // 所以解析结果这一格恒为 `None`。留着这一臂是因为「将来若改成解析
+            // 别的 git 输出」时它就在该在的位置；它不是业务分支。
             Some(h) => Some(h),
-            None => self.head_short(root).unwrap_or(None),
+            // **不要 `unwrap_or(None)`**：`head_short` 内部已经把「空仓库没有
+            // HEAD」折成 `Ok(None)` 了，剩下的 `Err` 是**真错**（git 挂了、
+            // 权限不对）。吞掉它会让页面上「我不知道 HEAD」与「读 HEAD 失败了」
+            // 显示成同一句话。
+            None => self.head_short(root)?,
         };
 
         Ok(vec![OutFrame::new(serde_json::json!({
             "op": "status",
+            // **两个 status 回帧形状必须完全一样**，包括这个字段。只在「不是
+            // 仓库」那一支带上它，会让「读 `not_a_repo` 的值」在不同帧上拿到
+            // `false` 和 `undefined` 两种结果——本里程碑的测试就撞上过：断言
+            // `got["not_a_repo"] == false` 在空仓库上失败，因为键压根不存在。
+            "not_a_repo": false,
             "branch": branch,
             "head": head,
             "detached": detached,
@@ -251,6 +274,11 @@ impl Git {
         let raw = match self.run_git(root, &["log", fmt, "-n", &limit.to_string()]) {
             Ok(raw) => raw,
             Err(e) if is_empty_repo(&e) => Vec::new(),
+            // coverage: excluded — 让 `git log` 在**非**空仓库上以非零退出且
+            // 不被 `is_empty_repo` 认出来，需要把仓库搞坏（HEAD 指向不存在的
+            // 对象 / 索引损坏）。那种状态下 `status` 也一起崩，页面上先坏的是
+            // 另一块；为它造一个损坏仓库来测这一行的传播，测的其实是
+            // `run_git` 已有的错误路径。
             Err(e) => return Err(e),
         };
         let text = String::from_utf8_lossy(&raw);
@@ -280,6 +308,9 @@ impl Git {
 }
 
 impl Default for Git {
+    // coverage: excluded — `Default` 是给 `#[derive(Default)]` 的容器与
+    // `unwrap_or_default()` 准备的构造入口，生产代码从不经它拿 `Git`（通道
+    // 一律走 `create(name)`）。这一行的存在理由是 trait 完整性，不是业务分支。
     fn default() -> Self {
         Self::new()
     }
@@ -336,12 +367,12 @@ impl Connector for Git {
 
         // 副本进线程：`Git` 本身不能跨线程搬（它持着通道），而这次 git 调用
         // 只需要根、可执行文件路径与超时这三样。
-        let root = self
-            .root
-            .clone()
-            .ok_or_else(|| ConnectorError::Invalid {
-                detail: "git channel is not open".to_string(),
-            })?;
+        // coverage: excluded — `on_data` 开头已经 `root_checked()?` 过一次，
+        // 所以这一格在这里恒为 `Some`。它是给「将来有人把开头的检查挪走」留的
+        // 第二道闸：少了它，那种改动会让这里变成对 `None` 的 `unwrap`。
+        let root = self.root.clone().ok_or_else(|| ConnectorError::Invalid {
+            detail: "git channel is not open".to_string(),
+        })?;
         let git_bin = self.git_bin.clone();
         let timeout = self.timeout;
         let payload = data.clone();
@@ -365,6 +396,10 @@ impl Connector for Git {
                     "status" => worker.status(),
                     "diff" => worker.diff(&payload),
                     "log" => worker.log(&payload),
+                    // coverage: excluded — `on_data` 在起线程之前已经把 op
+                    // 白名单校验过了，所以线程里这一臂不可达。留着是因为
+                    // `match` 必须穷尽，而「默认放行」在这里会是安全洞
+                    // （未知 op 静默成功）。
                     other => Err(ConnectorError::Invalid {
                         detail: format!("unknown git operation: {other}"),
                     }),
@@ -413,10 +448,7 @@ impl Connector for Git {
 /// `Ok(None)` = 超时。轮询而不是阻塞 `wait()`：标准库没有带超时的 wait，
 /// 而 `wait-timeout` 不在 workspace 依赖里——为一件已有现成写法的事加依赖
 /// 不划算。这套写法 `agent/detect.rs` 已经跑在生产路径上。
-fn wait_with_deadline(
-    child: &mut Child,
-    timeout: Duration,
-) -> std::io::Result<Option<Captured>> {
+fn wait_with_deadline(child: &mut Child, timeout: Duration) -> std::io::Result<Option<Captured>> {
     let deadline = Instant::now() + timeout;
     // **两个管道各交给一个读取线程**，主线程只负责超时与 wait。
     //
@@ -453,13 +485,13 @@ fn wait_with_deadline(
         std::thread::sleep(Duration::from_millis(10));
     };
 
-    let stdout = out_reader
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-    let stderr = err_reader
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-    Ok(Some(Captured { status, stdout, stderr }))
+    let stdout = out_reader.and_then(|h| h.join().ok()).unwrap_or_default();
+    let stderr = err_reader.and_then(|h| h.join().ok()).unwrap_or_default();
+    Ok(Some(Captured {
+        status,
+        stdout,
+        stderr,
+    }))
 }
 
 /// 一次子进程的产出。
@@ -698,8 +730,11 @@ mod tests {
 
     fn open(ws: &Path) -> Git {
         let mut g = Git::new();
-        Connector::open(&mut g, OpenReq::new(ws.to_string_lossy(), serde_json::json!({})))
-            .expect("open");
+        Connector::open(
+            &mut g,
+            OpenReq::new(ws.to_string_lossy(), serde_json::json!({})),
+        )
+        .expect("open");
         g
     }
 
@@ -815,11 +850,365 @@ mod tests {
         assert_eq!(payload["not_a_repo"], true);
         // `clean` 必须是 `null` 而不是 `true`：这里没有「干不干净」这回事，
         // 说 `true` 会让页面在非仓库上显示「没有未提交的改动」。
-        assert!(payload["clean"].is_null(), "clean 应是 null，实际 {}", payload["clean"]);
+        assert!(
+            payload["clean"].is_null(),
+            "clean 应是 null，实际 {}",
+            payload["clean"]
+        );
         assert!(payload["branch"].is_null());
         assert!(payload["head"].is_null());
         assert_eq!(payload["detached"], false);
         assert_eq!(payload["files"].as_array().map(Vec::len), Some(0));
+    }
+
+    /// `classify_failure` 在 stderr 全空时有话可说。
+    ///
+    /// git 有时以非零退出却一句都不说（信号、包装脚本）。这时回空串会让页面上
+    /// 的错误框标题后面什么都没有——用户看到「失败：」然后没了。
+    #[test]
+    fn classify_failure_says_something_when_stderr_is_empty() {
+        assert_eq!(classify_failure(""), "git failed without a message");
+        // 只有空白也一样：`lines()` 会给出一个空行，`find(|l| !l.is_empty())`
+        // 必须跳过它而不是把它当「第一行非空」。
+        assert_eq!(
+            classify_failure("   \n\t\n"),
+            "git failed without a message"
+        );
+        // 前导空行要被跳过，报的是第一行**非空**内容。
+        assert_eq!(
+            classify_failure("\n\n  fatal: bad revision 'nope'  \nusage: ..."),
+            "fatal: bad revision 'nope'"
+        );
+    }
+
+    /// `is_not_a_repo` / `is_empty_repo` 对「不是那类错误」必须回 `false`。
+    ///
+    /// 两条都是把**正常状态**从错误路径上摘下来的判据。判据写宽了会把真正的
+    /// 失败当成正常态静默吞掉（`log` 报空列表、`status` 报不是仓库），而那种
+    /// 错误页面上完全看不出来。
+    #[test]
+    fn the_normal_state_predicates_do_not_swallow_other_failures() {
+        // `Failed` 之外的错误类型一律不认。
+        for e in [
+            ConnectorError::Invalid {
+                detail: "not a git repository".to_string(),
+            },
+            ConnectorError::Internal {
+                detail: "not a git repository".to_string(),
+            },
+            ConnectorError::OutsideWorkspace {
+                shown: "not a git repository".to_string(),
+            },
+        ] {
+            assert!(!is_not_a_repo(&e), "{e:?} 不是「不是仓库」");
+            assert!(!is_empty_repo(&e), "{e:?} 不是「空仓库」");
+        }
+        // `Failed` 但 detail 不是那两句话。
+        let failed = ConnectorError::Failed {
+            op: "log".to_string(),
+            detail: classify_failure("fatal: bad revision 'nope'"),
+        };
+        assert!(!is_not_a_repo(&failed));
+        assert!(!is_empty_repo(&failed));
+        // 空仓库的三种说法都要认（不同 git 版本的措辞不同）。
+        for detail in [
+            "your current branch 'main' does not have any commits yet",
+            "fatal: your current branch does not have any commits",
+            "fatal: bad default revision 'HEAD'",
+            // 大小写不敏感。
+            "FATAL: BAD DEFAULT REVISION 'HEAD'",
+        ] {
+            let e = ConnectorError::Failed {
+                op: "log".to_string(),
+                detail: detail.to_string(),
+            };
+            assert!(is_empty_repo(&e), "{detail:?} 该被认成空仓库");
+            assert!(!is_not_a_repo(&e), "{detail:?} 不是「不是仓库」");
+        }
+    }
+
+    /// `parse_status` 对脏数据只跳过，不 panic、不造出空路径条目。
+    ///
+    /// `status --porcelain=v1 -z` 的记录形状是 `XY <path>`。手写脏输入比造真
+    /// 仓库容易：文件名里有换行 / git 版本多了字段时，我们宁可少一条也不该
+    /// 让面板崩掉或列出一条点不开的空条目。
+    #[test]
+    fn parse_status_skips_records_it_cannot_read() {
+        // ① 比两个字节还短的条目 → 跳过（`get(..2)` 拿不到 XY）。
+        // ② 正好两个字节、没有路径 → 落到 `rest` 为空的分支，路径为空串。
+        // ③ detached：`## HEAD (no branch)` 要认出来，且不留分支名。
+        let got = parse_status(b"A\0## HEAD (no branch)\0");
+        assert!(got.detached, "detached HEAD 要认出来");
+        assert_eq!(got.branch, None, "detached 时没有分支名可写");
+
+        // `## HEAD (detached at abc123)` 是另一种说法。
+        let got = parse_status(b"## HEAD (detached at abc123)\0");
+        assert!(got.detached);
+
+        // 分支后带上游：`main...origin/main` → 只取 `main`。
+        let got = parse_status(b"## main...origin/main\0 M a.txt\0");
+        assert_eq!(got.branch.as_deref(), Some("main"));
+        assert!(!got.detached);
+        // `StatusView` 没实现 `Debug`（生产代码不需要，为测试加 derive 不划算），
+        // 所以这里逐字段断言，失败信息里带不出的部分用 count 代替。
+        assert_eq!(got.files.len(), 1, "改动条目要留着");
+    }
+
+    /// `poll` 在**没有进行中请求**时是空队列，不是错误。
+    ///
+    /// 通道每 100ms 被问一次 `poll`，绝大多数时候什么都没有。把这一路写成
+    /// 错误会让页面每 100ms 收到一个红框。
+    #[test]
+    fn poll_with_nothing_pending_is_silent() {
+        let (_base, ws) = sandbox();
+        let mut g = open(&ws);
+        let frames = Connector::poll(&mut g).expect("没有进行中的请求不该报错");
+        assert!(frames.is_empty(), "空队列就该是空: {frames:?}");
+        // 重复问也一样（幂等）。
+        assert!(Connector::poll(&mut g).expect("幂等").is_empty());
+    }
+
+    /// 空仓库（`git init` 之后一次提交都没有）的 `status` 是正常回帧。
+    ///
+    /// 这条同时覆盖两条分支：`parse_status` 里没有 `## ` 行时 `head` 为 `None`
+    /// （走 `head_short`），而 `rev-parse --short HEAD` 在空仓库上非零退出——
+    /// 那一支必须回 `None` 而不是 `Err`，否则新建仓库一打开面板就是一个红框。
+    #[test]
+    fn status_of_a_repo_without_commits_is_a_normal_frame() {
+        let (_base, ws) = sandbox();
+        git_in(&ws, &["init", "-q", "-b", "main", "."]);
+        let mut g = open(&ws);
+        let got = call(&mut g, serde_json::json!({"op": "status"})).expect("空仓库不是错误");
+
+        assert_eq!(got["not_a_repo"], false, "空仓库仍是仓库: {got}");
+        assert_eq!(got["clean"], true, "没有文件就干净: {got}");
+        assert!(got["head"].is_null(), "空仓库没有 HEAD: {got}");
+        // 空仓库的 `git status --branch` 给 `## No commits yet on main`，
+        // 不是 `## main`——分支名取不取得到都行，但不能因此报错。
+        assert_eq!(got["files"].as_array().map(Vec::len), Some(0));
+    }
+
+    /// 各种**形状不对**的请求一律变成 `Invalid`，而不是 panic 或静默成功。
+    ///
+    /// `Invalid` 是通道层能翻译成 `channel_error` 的那一档；掉进 `Internal`
+    /// 在页面上长得一样但日志里丢掉了「是用户发错了」这个信息。
+    #[test]
+    fn malformed_requests_are_invalid_with_a_readable_reason() {
+        let (_base, ws) = sandbox();
+        repo_with_commit(&ws);
+
+        // ① 没有 `op` 键 → `data must carry a string "op"`。
+        let mut g = open(&ws);
+        match call(&mut g, serde_json::json!({})) {
+            Err(ConnectorError::Invalid { detail }) => {
+                assert!(
+                    detail.contains("must carry a string"),
+                    "要说清缺的是什么，实际 {detail:?}"
+                );
+            }
+            other => panic!("缺 op 要落到 Invalid，实际 {other:?}"),
+        }
+
+        // ② `op` 不是字符串。
+        match call(&mut g, serde_json::json!({"op": 42})) {
+            Err(ConnectorError::Invalid { .. }) => {}
+            other => panic!("op 不是字符串要落到 Invalid，实际 {other:?}"),
+        }
+
+        // ③ 未知 op。
+        match call(&mut g, serde_json::json!({"op": "commit"})) {
+            Err(ConnectorError::Invalid { detail }) => {
+                assert!(
+                    detail.contains("unknown git operation"),
+                    "要说清是不认识的 op，实际 {detail:?}"
+                );
+            }
+            other => panic!("未知 op 要落到 Invalid，实际 {other:?}"),
+        }
+    }
+
+    /// 通道没开时发任何 op 都是 `Invalid`，且说的是「通道没开」而不是别的原因。
+    ///
+    /// 顺序有讲究：先判「开着吗」再判「op 对不对」。反过来的话，用户在已关闭的
+    /// 通道上发一个拼错的 op，看到的是「未知操作」——会去找操作名的问题。
+    #[test]
+    fn ops_before_open_name_the_real_reason() {
+        let mut g = Git::new();
+        match Connector::on_data(&mut g, &serde_json::json!({"op": "status"})) {
+            Err(ConnectorError::Invalid { detail }) => {
+                assert!(
+                    detail.contains("not open"),
+                    "要先说通道没开，实际 {detail:?}"
+                );
+            }
+            other => panic!("没开通道要落到 Invalid，实际 {other:?}"),
+        }
+        // 拼错的 op 在没开通道时也报「没开」，不报「未知操作」。
+        match Connector::on_data(&mut g, &serde_json::json!({"op": "nope"})) {
+            Err(ConnectorError::Invalid { detail }) => {
+                assert!(detail.contains("not open"), "实际 {detail:?}");
+            }
+            other => panic!("实际 {other:?}"),
+        }
+    }
+
+    /// `open` 一个可用的根之后，再 `open` 一次要换到新根，且**丢掉旧根的进行中请求**。
+    ///
+    /// 覆盖 `open` 里的 `self.close()`：不清的话上一条通道的 `pending` 会留到
+    /// 新根上，`poll` 交出的结果按**旧根**的路径算出来送给新根的页面。
+    #[test]
+    fn reopening_moves_to_the_new_root_and_drops_the_old_state() {
+        let (base, ws) = sandbox();
+        repo_with_commit(&ws);
+        let other = base.path().join("other");
+        std::fs::create_dir_all(&other).expect("mkdir");
+
+        let mut g = open(&ws);
+        let first = call(&mut g, serde_json::json!({"op": "status"})).expect("status");
+        assert_eq!(first["files"].as_array().map(Vec::len), Some(0));
+
+        // 造一个「进行中的请求」：换根之后它必须不在了。
+        let (tx, rx) = mpsc::sync_channel::<Result<Vec<OutFrame>, ConnectorError>>(1);
+        g.pending = Some(rx);
+        let _keep = tx; // 别 drop，否则 Disconnected 会把断言变成「碰巧对了」
+
+        Connector::open(
+            &mut g,
+            OpenReq::new(other.to_string_lossy(), serde_json::json!({})),
+        )
+        .expect("换根");
+        assert!(
+            g.pending.is_none(),
+            "换根要丢掉旧根的进行中请求，否则结果会按旧路径算出来送到新根"
+        );
+
+        // 新根不是仓库 → 正常回帧说它不是一个仓库（不是上一根的残留）。
+        let second = call(&mut g, serde_json::json!({"op": "status"})).expect("status");
+        assert_eq!(
+            second["not_a_repo"], true,
+            "换根之后要按新根回答，实际 {second}"
+        );
+    }
+
+    /// `open` 指向一个不存在的路径 → `WorkspaceRoot`，且理由里带上那个路径。
+    #[test]
+    fn open_of_a_missing_path_says_which_path() {
+        let (_base, ws) = sandbox();
+        let missing = ws.join("nope");
+        let mut g = Git::new();
+        match Connector::open(
+            &mut g,
+            OpenReq::new(missing.to_string_lossy(), serde_json::json!({})),
+        ) {
+            Err(ConnectorError::WorkspaceRoot { detail }) => {
+                assert!(
+                    detail.contains("nope"),
+                    "理由里要带上是哪个路径，实际 {detail:?}"
+                );
+            }
+            other => panic!("不存在的路径要落到 WorkspaceRoot，实际 {other:?}"),
+        }
+    }
+
+    /// `poll` 在**结果已经被丢掉**（发送端消失）时回 `Internal`，不是永久空转。
+    ///
+    /// 这一支只在工作线程带着结果死掉时发生。空转的话页面会永远停在
+    /// 「正在读取…」；报一次错至少让用户能重试。
+    #[test]
+    fn poll_reports_when_the_worker_died_without_answering() {
+        let (_base, ws) = sandbox();
+        let mut g = open(&ws);
+        // 造一个「发送端立刻 drop」的 receiver：与工作线程没发结果就退出同形。
+        let (tx, rx) = mpsc::sync_channel::<Result<Vec<OutFrame>, ConnectorError>>(1);
+        drop(tx);
+        g.pending = Some(rx);
+
+        match Connector::poll(&mut g) {
+            Err(ConnectorError::Internal { detail }) => {
+                assert!(
+                    detail.contains("could not be run"),
+                    "要说清是命令没跑起来，实际 {detail:?}"
+                );
+            }
+            other => panic!("工作线程死掉要落到 Internal，实际 {other:?}"),
+        }
+        // 报过错之后槽位要清掉，不能每次 poll 都再报一遍。
+        assert!(
+            Connector::poll(&mut g).expect("清过了").is_empty(),
+            "第二次 poll 应该是空"
+        );
+    }
+
+    /// `parse_status` 遇到比 `XY ` 还短的记录只跳过。
+    ///
+    /// 这些形状不该出现在正常 git 输出里，但解析器面对的是设备上的任意字节，
+    /// 「少一条」远好过「整条通道 panic」。
+    #[test]
+    fn parse_status_skips_a_record_shorter_than_the_status_codes() {
+        // `A ` —— 一个字节，拿不到 XY，必须跳过而不是索引越界。
+        let got = parse_status(b"A\0");
+        assert_eq!(got.files.len(), 0, "短记录要跳过");
+        // ` M a.txt` 是正常形状，不能被上一条的规则误伤。
+        let got = parse_status(b" M a.txt\0");
+        assert_eq!(got.files.len(), 1, "正常记录要留着");
+        assert_eq!(got.files.first().map(|f| f["y"].as_str()), Some(Some("M")));
+    }
+
+    /// `parse_log` 遇到空 hash 的记录跳过。
+    ///
+    /// `%H` 不会是空的，但记录分隔符 `\x1e` 前面可能留下空片段。不跳过的话
+    /// 页面会多出一条「点不开、没有 hash」的提交。
+    #[test]
+    fn parse_log_skips_a_record_with_no_hash() {
+        // 两条记录：第一条正常，第二条 hash 为空。
+        //
+        // 字段用 `\u{0}` / 记录分隔用 `\u{1e}` 而不是 `\0` / `\x1e`：`\0` 后面
+        // 紧跟数字（这里是日期 `2026-…`）会被读成**八进制转义**的歧义形状，
+        // clippy 的 `octal-escapes` 会拒（`\0` 恒为 NUL，八进制不支持）。
+        let text = "abc123\u{0}Ann\u{0}2026-10-29\u{0}feat: x\u{1e}\u{0}Bob\u{0}2026-10-29\u{0}empty\u{1e}";
+        let got = parse_log(text);
+        assert_eq!(got.len(), 1, "空 hash 的记录要跳过: {got:?}");
+        assert_eq!(
+            got.first().map(|c| c["hash"].as_str()),
+            Some(Some("abc123"))
+        );
+    }
+
+    /// `parse_status` 跳过**状态码之后没有路径**的记录。
+    ///
+    /// `XY `（末尾那个空格被 `strip_prefix` 吃掉后剩空串）只会在脏输出里出现，
+    /// 但一条空路径的条目在页面上是「点开就报越界」的一行。
+    #[test]
+    fn parse_status_skips_a_record_with_an_empty_path() {
+        // ` M ` —— XY 是 ` M`，去掉分隔空格后路径为空。
+        let got = parse_status(b" M \0");
+        assert_eq!(got.files.len(), 0, "空路径的记录要跳过");
+        // 同一段里正常的那条要留着：跳过不能把整批丢掉。
+        let got = parse_status(b" M \0 M a.txt\0");
+        assert_eq!(got.files.len(), 1, "正常记录要留着");
+    }
+
+    /// 直接调 `status()`（不经 `on_data`）在通道没开时也报 `Invalid`。
+    ///
+    /// `on_data` 前面有一次 `root_checked()`，所以那里更早返回；但 `status()` 是
+    /// `pub` 面之外仍可能被别处调到的入口，它自己的校验不能靠调用方兜。
+    #[test]
+    fn status_without_a_root_is_invalid() {
+        let g = Git::new();
+        match g.status() {
+            Err(ConnectorError::Invalid { detail }) => {
+                assert!(detail.contains("not open"), "实际 {detail:?}");
+            }
+            other => panic!("没根要落到 Invalid，实际 {other:?}"),
+        }
+        match g.log(&serde_json::json!({"op": "log"})) {
+            Err(ConnectorError::Invalid { .. }) => {}
+            other => panic!("log 没根也要落到 Invalid，实际 {other:?}"),
+        }
+        match g.diff(&serde_json::json!({"op": "diff", "path": "a.txt"})) {
+            Err(ConnectorError::Invalid { .. }) => {}
+            other => panic!("diff 没根也要落到 Invalid，实际 {other:?}"),
+        }
     }
 
     #[test]
@@ -828,7 +1217,9 @@ mod tests {
         // 被删），`status` 的那条正常回帧会静默失效——变成每次打开面板都报
         // 「git 失败」。所以这条单独钉住判据本身。
         assert_eq!(
-            classify_failure("fatal: not a git repository (or any of the parent directories): .git"),
+            classify_failure(
+                "fatal: not a git repository (or any of the parent directories): .git"
+            ),
             "not a git repository"
         );
         // 非仓库失败必须被 `is_not_a_repo` 认出来，其它失败不行。
@@ -973,10 +1364,16 @@ mod tests {
     #[test]
     fn diff_refuses_combining_commit_with_path_or_staged() {
         let data = serde_json::json!({"op": "diff", "commit": "abc1234", "path": "a.txt"});
-        assert!(matches!(diff_args(&data), Err(ConnectorError::Invalid { .. })));
+        assert!(matches!(
+            diff_args(&data),
+            Err(ConnectorError::Invalid { .. })
+        ));
 
         let data = serde_json::json!({"op": "diff", "commit": "abc1234", "staged": true});
-        assert!(matches!(diff_args(&data), Err(ConnectorError::Invalid { .. })));
+        assert!(matches!(
+            diff_args(&data),
+            Err(ConnectorError::Invalid { .. })
+        ));
     }
 
     // ----------------------------------------------------------------- 3 log
@@ -1041,8 +1438,11 @@ mod tests {
 
         let timeout = Duration::from_millis(300);
         let mut g = Git::with_git_bin(&bin).with_timeout(timeout);
-        Connector::open(&mut g, OpenReq::new(ws.to_string_lossy(), serde_json::json!({})))
-            .expect("open");
+        Connector::open(
+            &mut g,
+            OpenReq::new(ws.to_string_lossy(), serde_json::json!({})),
+        )
+        .expect("open");
 
         let start = Instant::now();
         let err = call(&mut g, serde_json::json!({"op": "status"})).expect_err("超时必须报错");
@@ -1093,17 +1493,26 @@ mod tests {
     #[test]
     fn open_requires_a_usable_workspace_root() {
         let mut g = Git::new();
-        let err = Connector::open(&mut g, OpenReq::new("", serde_json::json!({})))
-            .expect_err("缺根要拒");
-        assert!(matches!(err, ConnectorError::WorkspaceRoot { .. }), "{err:?}");
+        let err =
+            Connector::open(&mut g, OpenReq::new("", serde_json::json!({}))).expect_err("缺根要拒");
+        assert!(
+            matches!(err, ConnectorError::WorkspaceRoot { .. }),
+            "{err:?}"
+        );
 
         let (_base, ws) = sandbox();
         let file = ws.join("f.txt");
         std::fs::write(&file, "x").expect("write");
         let mut g = Git::new();
-        let err = Connector::open(&mut g, OpenReq::new(file.to_string_lossy(), serde_json::json!({})))
-            .expect_err("文件不是目录");
-        assert!(matches!(err, ConnectorError::WorkspaceRoot { .. }), "{err:?}");
+        let err = Connector::open(
+            &mut g,
+            OpenReq::new(file.to_string_lossy(), serde_json::json!({})),
+        )
+        .expect_err("文件不是目录");
+        assert!(
+            matches!(err, ConnectorError::WorkspaceRoot { .. }),
+            "{err:?}"
+        );
     }
 
     /// 超长 diff 在设备侧截断并声明——不能指望协议层兜住。
@@ -1120,7 +1529,11 @@ mod tests {
 
         assert_eq!(got["truncated"], true, "超预算必须声明截断: {got}");
         let unified = got["unified"].as_str().expect("unified");
-        assert!(unified.contains("truncated"), "要留下截断说明: {}", &unified[..80.min(unified.len())]);
+        assert!(
+            unified.contains("truncated"),
+            "要留下截断说明: {}",
+            &unified[..80.min(unified.len())]
+        );
         // 截断后的整帧仍要在协议上限内，否则 Hub 会拒帧并断开设备连接。
         let frame = serde_json::to_vec(&got).expect("serialize");
         assert!(

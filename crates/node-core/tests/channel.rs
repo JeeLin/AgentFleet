@@ -135,7 +135,15 @@ fn the_ready_frame_is_channel_ready_never_channel_opened() {
 #[test]
 fn an_unknown_connector_is_refused_with_an_error_frame() {
     let _g = reset();
-    for name in ["ssh", "db", "", "TERMINAL", "termina", "git"] {
+    // **不要在这里列「已注册的」名字**：`git` 曾在列表里，子任务 2 把它注册进来
+    // 之后这条断言就把「能开」当成了「该拒」，而 `cargo test --lib` 跑不到集成
+    // 测试，于是绿了整整一个星期。判据反过来写：列表里每一项都必须是**没注册**
+    // 的名字，注册表里有什么由 `names::ALL` 回答。
+    for name in ["ssh", "db", "", "TERMINAL", "termina"] {
+        assert!(
+            !connector::names::ALL.contains(&name),
+            "{name} 已在注册表里，不该出现在「未知 connector」的用例里"
+        );
         let action = channel::on_channel_frame(&open_frame("ch-x", name, 8));
         let f = expect_frame(&action, types::CHANNEL_ERROR);
         assert_eq!(f.c["channel_id"], "ch-x");
@@ -160,14 +168,29 @@ fn an_unknown_connector_is_refused_with_an_error_frame() {
 #[test]
 fn every_registered_connector_either_opens_or_says_why_not() {
     let _g = reset();
-    let cases = [
-        (connector::names::TERMINAL, serde_json::json!({})),
-        (connector::names::FILES, serde_json::json!({})),
-        (
-            connector::names::EXEC,
-            serde_json::json!({ "command": "/bin/true" }),
-        ),
-    ];
+    // **遍历 `names::ALL` 而不是手写数组**：手写数组加 connector 时必然漏写一项，
+    // 而漏写不会让任何测试变红——`git` 就这么漏过一次（本次步骤6 的全量
+    // `cargo test --workspace` 才撞出来）。每个 connector 的 open 参数由它自己的
+    // 契约决定，所以这里只给「裸开也够用」的那几个；其余用 `params_for` 补。
+    let cases: Vec<(&str, serde_json::Value)> = connector::names::ALL
+        .iter()
+        .map(|name| {
+            let params = match *name {
+                // exec 一次性命令没有「先开再发」两步，命令随 open 来（子任务 10）。
+                connector::names::EXEC => serde_json::json!({ "command": "/bin/true" }),
+                _ => serde_json::json!({}),
+            };
+            (*name, params)
+        })
+        .collect();
+    // 「遍历了 ALL」这件事本身要能被证伪：`cases` 是从 `ALL` 一对一映射来的，
+    // 所以长度必须相等；ALL 空了的话下面的循环一次都不跑。断言紧跟在构造之后，
+    // 中间不许有任何 `take` / `filter`——否则这条断言就被用来兜住那个截断。
+    assert_eq!(
+        cases.len(),
+        connector::names::ALL.len(),
+        "每个注册的 connector 都必须在 cases 里"
+    );
     for (i, (name, params)) in cases.iter().enumerate() {
         let id = format!("ch-real-{i}");
         // **根与 connector 私有参数平级**（`OpenReq` 的形状）：`workspace_root`

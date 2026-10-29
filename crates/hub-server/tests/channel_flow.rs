@@ -1134,9 +1134,8 @@ async fn opening_git_without_the_capability_is_refused() {
     let session_id = page.make_session(&node_id).await;
 
     let mut req = page.req("POST", "/api/channels");
-    *req.body_mut() = Body::from(
-        json!({"session_id": session_id, "connector": "git", "params": {}}).to_string(),
-    );
+    *req.body_mut() =
+        Body::from(json!({"session_id": session_id, "connector": "git", "params": {}}).to_string());
     let resp = page.app.clone().oneshot(req).await.expect("app responds");
     assert_eq!(
         resp.status(),

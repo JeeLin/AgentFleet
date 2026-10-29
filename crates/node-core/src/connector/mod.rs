@@ -327,10 +327,7 @@ mod tests {
         // 遍历 `names::ALL` 而不是手写数组：写死的那一版在 `git` 落地后
         // 仍然全绿，因为它没把 `git` 列进去（v0.4.0 的反向验证实测）。
         for name in names::ALL {
-            assert!(
-                create(name).is_some(),
-                "{name} 在 names::ALL 里却建不出来"
-            );
+            assert!(create(name).is_some(), "{name} 在 names::ALL 里却建不出来");
             assert!(supports(name), "{name} 能建却没上报");
         }
         // 负样本：根本不存在的名字，既不该建得出也不该上报。

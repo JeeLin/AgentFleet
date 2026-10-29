@@ -362,7 +362,14 @@ fn there_is_no_way_to_enumerate_or_invoke_connectors_for_a_local_agent() {
     // node-core 的公开面里**没有**任何形如 `call_connector` / `list_connectors`
     // 的自由函数可供 agent 使用；connector 只能经 `create(name)` 拿实例，
     // 而那个函数是 Hub 下发 `open_channel` 时走的路。
-    assert_eq!(node_core::connector::registered_count(), 3);
+    // **不写死数字**：写死 3 时，加第四个 connector（v0.4.0 的 `git`）会让这条
+    // 测试红，而它红的原因与「有没有给 agent 一条枚举入口」毫无关系——于是修它
+    // 的人只会把 3 改成 4，判据本身一次都没被验过。真正的判据是「注册表就是
+    // `names::ALL` 那一批」，所以与它比。
+    assert_eq!(
+        node_core::connector::registered_count(),
+        node_core::connector::names::ALL.len()
+    );
     assert!(node_core::connector::create("agent-bridge").is_none());
 }
 

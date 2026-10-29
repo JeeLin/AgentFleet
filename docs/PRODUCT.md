@@ -73,8 +73,8 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 
 ### 3.2 后续（非第一版）/ Later (not first release)
 
-> 「第一版」指**首个可用版本（里程碑 v0.1.0–v0.5.0）**。v0.6.0 起为第二阶段。
-> "First release" = the first usable version (milestones v0.1.0–v0.5.0). v0.6.0 onward is the next stage.
+> 「第一版」指**首个可用版本（里程碑 v0.1.0–v0.6.0）**。v0.7.0 起为第二阶段。
+> "First release" = the first usable version (milestones v0.1.0–v0.6.0). v0.7.0 onward is the next stage.
 
 - **任务系统**：完整任务的定义、状态、进度与续跑（见 §5 设计问题一）
 - **自动化**：定时 / 事件触发的任务编排
@@ -88,7 +88,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 - **Hub 统一配置 agent**：在 Hub 统一管理所有设备上的 agent 配置（专家 agent 定义、技能、
   `opencode.json`）。实现为**托管覆盖层**：Hub 记录托管清单，文件在节点上只读，
   心跳顺带检测漂移并给出 push / pull。**节点密钥（`identity.json`）永不上传。**
-  任务的跨设备分发（新建任务 → 路由到某台 node）是 Hub 层的事（v0.5.0「任务分发与托管配置」，其中跨设备那一半排在 v0.9.0 之后），与 agent 运行时
+  任务的跨设备分发（新建任务 → 路由到某台 node）是 Hub 层的事（v0.6.0「任务分发与托管配置」，其中跨设备那一半排在 v0.9.0 之后），与 agent 运行时
   内部的父子 agent 无关。见 `docs/architecture/workspace-and-sync.md`。
 
 ### 3.3 用户可见流程（第一版）/ Key flows (first release)

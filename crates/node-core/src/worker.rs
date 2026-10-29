@@ -148,8 +148,10 @@ impl Worker {
         let node_id = identity.node_id();
         self.say(&format!(
             "{BIN_NAME} worker starting, node_id={}, hub={}",
-            // coverage: excluded — 见 `run_with` 上的标注：进程入口，只能由
-            // 真进程触达。
+            // 这一行的豁免由 `run_with` 上的标注（`:141`）给出：它是同一段
+            // 「进程入口」代码。**不在这里再写一条 `coverage: excluded`**——
+            // 一条指向别处的标注不带自己的理由，`--check` 会把它记成孤儿
+            // （没有登记行引用它），门禁就永远红。
             node_id.as_deref().unwrap_or("<none: will enroll>"),
             self.hub_url
         ));

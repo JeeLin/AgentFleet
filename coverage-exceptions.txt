@@ -204,8 +204,6 @@ crates/node-core/src/agent/acp.rs:479: 读 stdout 本身出错（非 EOF）。�
 crates/node-core/src/agent/acp.rs:504: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
 crates/node-core/src/agent/acp.rs:551: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
 crates/node-core/src/agent/acp.rs:598: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:820: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:821: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
 crates/node-core/src/agent/acp.rs:870: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
 crates/node-core/src/agent/acp.rs:882: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
 crates/node-core/src/agent/acp.rs:913: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
@@ -453,6 +451,42 @@ crates/node-core/src/connector/files.rs:324: 元数据读不到要求该项在 `
 crates/node-core/src/connector/files.rs:678: 元数据读不到要求该项在 `read_dir` 之后被另一个进程删掉，同样是竞态而非分支。
 crates/node-core/src/connector/files.rs:1247: mkfifo 只可能因 umask/路径/已存在而失败， 这里传的是刚由 tempfile 建出的目录下的新名字。
 crates/node-core/src/connector/files.rs:1317: mkfifo 只可能因 umask/路径/已存在而失败， 这里传的是刚由 tempfile 建出的目录下的新名字。
+crates/node-core/src/connector/git.rs:115: 只在 `git` 可执行文件缺失 / 无执行权限 / 进程表满时才会走到。`with_git_bin` 能指向一个不存在的路径来构造 这一支，但那验的是「我们自己写的 map_err 有没有语法错」，不是 「git 起不来时产品怎么办」——真实世界里这一支的替代路径是 `Err` 被通道层翻成 `channel_error{internal}`，那条已有测试。
+crates/node-core/src/connector/git.rs:116: 只在 `git` 可执行文件缺失 / 无执行权限 / 进程表满时才会走到。`with_git_bin` 能指向一个不存在的路径来构造 这一支，但那验的是「我们自己写的 map_err 有没有语法错」，不是 「git 起不来时产品怎么办」——真实世界里这一支的替代路径是 `Err` 被通道层翻成 `channel_error{internal}`，那条已有测试。
+crates/node-core/src/connector/git.rs:117: 只在 `git` 可执行文件缺失 / 无执行权限 / 进程表满时才会走到。`with_git_bin` 能指向一个不存在的路径来构造 这一支，但那验的是「我们自己写的 map_err 有没有语法错」，不是 「git 起不来时产品怎么办」——真实世界里这一支的替代路径是 `Err` 被通道层翻成 `channel_error{internal}`，那条已有测试。
+crates/node-core/src/connector/git.rs:135: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
+crates/node-core/src/connector/git.rs:136: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
+crates/node-core/src/connector/git.rs:137: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
+crates/node-core/src/connector/git.rs:138: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
+crates/node-core/src/connector/git.rs:139: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
+crates/node-core/src/connector/git.rs:140: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
+crates/node-core/src/connector/git.rs:141: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
+crates/node-core/src/connector/git.rs:200: `parse_status` 从不给 `head`：`status --branch` 的输出里没有短 hash（只有分支名或 `HEAD (no branch)`）， 所以解析结果这一格恒为 `None`。留着这一臂是因为「将来若改成解析 别的 git 输出」时它就在该在的位置；它不是业务分支。
+crates/node-core/src/connector/git.rs:282: 让 `git log` 在**非**空仓库上以非零退出且 不被 `is_empty_repo` 认出来，需要把仓库搞坏（HEAD 指向不存在的 对象 / 索引损坏）。那种状态下 `status` 也一起崩，页面上先坏的是 另一块；为它造一个损坏仓库来测这一行的传播，测的其实是 `run_git` 已有的错误路径。
+crates/node-core/src/connector/git.rs:314: `Default` 是给 `#[derive(Default)]` 的容器与 `unwrap_or_default()` 准备的构造入口，生产代码从不经它拿 `Git`（通道 一律走 `create(name)`）。这一行的存在理由是 trait 完整性，不是业务分支。
+crates/node-core/src/connector/git.rs:315: `Default` 是给 `#[derive(Default)]` 的容器与 `unwrap_or_default()` 准备的构造入口，生产代码从不经它拿 `Git`（通道 一律走 `create(name)`）。这一行的存在理由是 trait 完整性，不是业务分支。
+crates/node-core/src/connector/git.rs:316: `Default` 是给 `#[derive(Default)]` 的容器与 `unwrap_or_default()` 准备的构造入口，生产代码从不经它拿 `Git`（通道 一律走 `create(name)`）。这一行的存在理由是 trait 完整性，不是业务分支。
+crates/node-core/src/connector/git.rs:374: 副本进线程：`Git` 本身不能跨线程搬（它持着通道），而这次 git 调用 只需要根、可执行文件路径与超时这三样。 `on_data` 开头已经 `root_checked()?` 过一次， 所以这一格在这里恒为 `Some`。它是给「将来有人把开头的检查挪走」留的 第二道闸：少了它，那种改动会让这里变成对 `None` 的 `unwrap`。
+crates/node-core/src/connector/git.rs:375: 副本进线程：`Git` 本身不能跨线程搬（它持着通道），而这次 git 调用 只需要根、可执行文件路径与超时这三样。 `on_data` 开头已经 `root_checked()?` 过一次， 所以这一格在这里恒为 `Some`。它是给「将来有人把开头的检查挪走」留的 第二道闸：少了它，那种改动会让这里变成对 `None` 的 `unwrap`。
+crates/node-core/src/connector/git.rs:403: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:404: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:405: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:768: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:856: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:1009: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:1015: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:1026: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:1044: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:1051: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:1109: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:1133: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:1202: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:1206: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:1210: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:1261: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:1456: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:1542: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:1535: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
 crates/node-core/src/connector/terminal.rs:222: 0 视作「没给」：页面刚挂载、还没量到尺寸时会发 0， 而 0 对内核是「未设置」，`stty size` 会报 `0 0`。回落到默认比 报错更接近用户要的——他要的是一个能看见提示符的终端。 `?` 的那条 Err 因此**结构上不可达**：`non_zero` 只放行 ≥1，而 `MIN_DIM` 也是 1，两个入口都不会让 `checked` 失败。下面的 `?` 留着是因为「以后若把 MIN_DIM 调大，这里要立刻跟着拒绝」。 理由见上：`checked` 在 `open` 里恒成功。
 crates/node-core/src/connector/terminal.rs:277: 上面 `self.pty()?` 已经确认开着，同一 函数里 `self.pty` 不可能从 Some 变成 None（改它的 `close` / `detach` 都是别的入口），所以这个 None 臂结构上不可达。
 crates/node-core/src/connector/terminal.rs:278: 上面 `self.pty()?` 已经确认开着，同一 函数里 `self.pty` 不可能从 Some 变成 None（改它的 `close` / `detach` 都是别的入口），所以这个 None 臂结构上不可达。
@@ -475,13 +509,13 @@ crates/node-core/src/connector/terminal.rs:744: `poll` 失败需 fd 无效或 `n
 crates/node-core/src/connector/terminal.rs:745: `poll` 失败需 fd 无效或 `nfds` 超范围， 这里传的都是内核刚给的 fd（防御性兜底）。
 crates/node-core/src/connector/terminal.rs:746: `poll` 失败需 fd 无效或 `nfds` 超范围， 这里传的都是内核刚给的 fd（防御性兜底）。
 crates/node-core/src/connector/terminal.rs:747: `poll` 失败需 fd 无效或 `nfds` 超范围， 这里传的都是内核刚给的 fd（防御性兜底）。
-crates/node-core/src/heartbeat.rs:166: 只在**读不到 `/proc`** 的机器上才会走到（非 Linux、 或被裁掉的容器）。本项目的目标平台是 Linux，`/proc/loadavg` 恒在， 出参不可能为空；这是给「什么也没测到」留的诚实出口，不是业务分支。
 crates/node-core/src/heartbeat.rs:167: 只在**读不到 `/proc`** 的机器上才会走到（非 Linux、 或被裁掉的容器）。本项目的目标平台是 Linux，`/proc/loadavg` 恒在， 出参不可能为空；这是给「什么也没测到」留的诚实出口，不是业务分支。
-crates/node-core/src/heartbeat.rs:184: 只在**读不到 `/proc`** 的机器上才会走到（非 Linux、 或被裁掉的容器）。本项目的目标平台是 Linux，`/proc/loadavg` 恒在， 出参不可能为空；这是给「什么也没测到」留的诚实出口，不是业务分支。
+crates/node-core/src/heartbeat.rs:168: 只在**读不到 `/proc`** 的机器上才会走到（非 Linux、 或被裁掉的容器）。本项目的目标平台是 Linux，`/proc/loadavg` 恒在， 出参不可能为空；这是给「什么也没测到」留的诚实出口，不是业务分支。
 crates/node-core/src/heartbeat.rs:185: 只在**读不到 `/proc`** 的机器上才会走到（非 Linux、 或被裁掉的容器）。本项目的目标平台是 Linux，`/proc/loadavg` 恒在， 出参不可能为空；这是给「什么也没测到」留的诚实出口，不是业务分支。
-crates/node-core/src/heartbeat.rs:191: 只在**读不到 `/proc`** 的机器上才会走到（非 Linux、 或被裁掉的容器）。本项目的目标平台是 Linux，`/proc/loadavg` 恒在， 出参不可能为空；这是给「什么也没测到」留的诚实出口，不是业务分支。
-crates/node-core/src/heartbeat.rs:479: 只在**读不到 `/proc`** 的机器上才会走到（非 Linux、 或被裁掉的容器）。本项目的目标平台是 Linux，`/proc/loadavg` 恒在， 出参不可能为空；这是给「什么也没测到」留的诚实出口，不是业务分支。
-crates/node-core/src/heartbeat.rs:546: 只在**读不到 `/proc`** 的机器上才会走到（非 Linux、 或被裁掉的容器）。本项目的目标平台是 Linux，`/proc/loadavg` 恒在， 出参不可能为空；这是给「什么也没测到」留的诚实出口，不是业务分支。
+crates/node-core/src/heartbeat.rs:186: 只在**读不到 `/proc`** 的机器上才会走到（非 Linux、 或被裁掉的容器）。本项目的目标平台是 Linux，`/proc/loadavg` 恒在， 出参不可能为空；这是给「什么也没测到」留的诚实出口，不是业务分支。
+crates/node-core/src/heartbeat.rs:192: 只在**读不到 `/proc`** 的机器上才会走到（非 Linux、 或被裁掉的容器）。本项目的目标平台是 Linux，`/proc/loadavg` 恒在， 出参不可能为空；这是给「什么也没测到」留的诚实出口，不是业务分支。
+crates/node-core/src/heartbeat.rs:486: 只在**读不到 `/proc`** 的机器上才会走到（非 Linux、 或被裁掉的容器）。本项目的目标平台是 Linux，`/proc/loadavg` 恒在， 出参不可能为空；这是给「什么也没测到」留的诚实出口，不是业务分支。
+crates/node-core/src/heartbeat.rs:553: 只在**读不到 `/proc`** 的机器上才会走到（非 Linux、 或被裁掉的容器）。本项目的目标平台是 Linux，`/proc/loadavg` 恒在， 出参不可能为空；这是给「什么也没测到」留的诚实出口，不是业务分支。
 crates/node-core/src/identity.rs:316: 见 :298：内层 `if let Ok(d)` 的 else 不可达， 这里是它的收尾行。
 crates/node-core/src/identity.rs:394: 见 :298：内层 `if let Ok(d)` 的 else 不可达， 这里是它的收尾行。
 crates/node-core/src/log.rs:83: 收紧日志目录权限：目录已存在（create_dir_all 成功）即 set_permissions 必成功，正常文件系统构造不出失败（防御性兜底）。
@@ -518,94 +552,96 @@ crates/node-core/src/worker.rs:147: 身份已备好之后的全部流程。 与 
 crates/node-core/src/worker.rs:148: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
 crates/node-core/src/worker.rs:149: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
 crates/node-core/src/worker.rs:150: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:151: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:152: 见 `run_with` 上的标注：进程入口，只能由 真进程触达。
-crates/node-core/src/worker.rs:153: 见 `run_with` 上的标注：进程入口，只能由 真进程触达。
-crates/node-core/src/worker.rs:154: 见 `run_with` 上的标注：进程入口，只能由 真进程触达。
-crates/node-core/src/worker.rs:155: 见 `run_with` 上的标注：进程入口，只能由 真进程触达。
-crates/node-core/src/worker.rs:159: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
-crates/node-core/src/worker.rs:160: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
+crates/node-core/src/worker.rs:151: 见 `run_with` 上的标注：进程入口，只能由 真进程触达。
+crates/node-core/src/worker.rs:152: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
+crates/node-core/src/worker.rs:153: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
+crates/node-core/src/worker.rs:154: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
+crates/node-core/src/worker.rs:155: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
+crates/node-core/src/worker.rs:156: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
+crates/node-core/src/worker.rs:157: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
 crates/node-core/src/worker.rs:161: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
+crates/node-core/src/worker.rs:162: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
 crates/node-core/src/worker.rs:163: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
-crates/node-core/src/worker.rs:164: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
-crates/node-core/src/worker.rs:167: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限） 时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
-crates/node-core/src/worker.rs:168: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限） 时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
-crates/node-core/src/worker.rs:174: 退出码协议里的三个非零码都带「这一版坏了」的语义， 而 worker 自己不打算判自己坏——它只会「正常停下」。 同上：`block_on` 是进程入口路径。
-crates/node-core/src/worker.rs:175: 退出码协议里的三个非零码都带「这一版坏了」的语义， 而 worker 自己不打算判自己坏——它只会「正常停下」。 同上：`block_on` 是进程入口路径。
+crates/node-core/src/worker.rs:165: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
+crates/node-core/src/worker.rs:166: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
+crates/node-core/src/worker.rs:169: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限） 时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
+crates/node-core/src/worker.rs:170: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限） 时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
 crates/node-core/src/worker.rs:176: 退出码协议里的三个非零码都带「这一版坏了」的语义， 而 worker 自己不打算判自己坏——它只会「正常停下」。 同上：`block_on` 是进程入口路径。
-crates/node-core/src/worker.rs:321: 退出码协议里的三个非零码都带「这一版坏了」的语义， 而 worker 自己不打算判自己坏——它只会「正常停下」。 同上：`block_on` 是进程入口路径。
-crates/node-core/src/worker.rs:382: 心跳 tick 臂：需让 ticker 在 session 内触发而 read 不返回。
-crates/node-core/src/worker.rs:422: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
-crates/node-core/src/worker.rs:471: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
-crates/node-core/src/worker.rs:472: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
-crates/node-core/src/worker.rs:488: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
-crates/node-core/src/worker.rs:489: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
-crates/node-core/src/worker.rs:510: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
-crates/node-core/src/worker.rs:519: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
-crates/node-core/src/worker.rs:520: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
+crates/node-core/src/worker.rs:177: 退出码协议里的三个非零码都带「这一版坏了」的语义， 而 worker 自己不打算判自己坏——它只会「正常停下」。 同上：`block_on` 是进程入口路径。
+crates/node-core/src/worker.rs:178: 退出码协议里的三个非零码都带「这一版坏了」的语义， 而 worker 自己不打算判自己坏——它只会「正常停下」。 同上：`block_on` 是进程入口路径。
+crates/node-core/src/worker.rs:323: 退出码协议里的三个非零码都带「这一版坏了」的语义， 而 worker 自己不打算判自己坏——它只会「正常停下」。 同上：`block_on` 是进程入口路径。
+crates/node-core/src/worker.rs:384: 心跳 tick 臂：需让 ticker 在 session 内触发而 read 不返回。
+crates/node-core/src/worker.rs:424: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
+crates/node-core/src/worker.rs:473: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
+crates/node-core/src/worker.rs:474: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
+crates/node-core/src/worker.rs:490: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
+crates/node-core/src/worker.rs:491: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
+crates/node-core/src/worker.rs:512: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
 crates/node-core/src/worker.rs:521: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
 crates/node-core/src/worker.rs:522: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
 crates/node-core/src/worker.rs:523: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
 crates/node-core/src/worker.rs:524: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
-crates/node-core/src/worker.rs:532: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
-crates/node-core/src/worker.rs:533: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
+crates/node-core/src/worker.rs:525: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
+crates/node-core/src/worker.rs:526: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
 crates/node-core/src/worker.rs:534: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
 crates/node-core/src/worker.rs:535: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
 crates/node-core/src/worker.rs:536: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
-crates/node-core/src/worker.rs:619: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
-crates/node-core/src/worker.rs:635: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
-crates/node-core/src/worker.rs:636: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
+crates/node-core/src/worker.rs:537: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
+crates/node-core/src/worker.rs:538: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
+crates/node-core/src/worker.rs:621: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:637: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
-crates/node-core/src/worker.rs:642: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
-crates/node-core/src/worker.rs:643: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
+crates/node-core/src/worker.rs:638: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
+crates/node-core/src/worker.rs:639: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:644: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:645: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:646: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:647: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:648: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:649: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
-crates/node-core/src/worker.rs:653: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
-crates/node-core/src/worker.rs:654: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
+crates/node-core/src/worker.rs:650: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
+crates/node-core/src/worker.rs:651: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:655: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:656: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:657: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
+crates/node-core/src/worker.rs:658: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:659: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
-crates/node-core/src/worker.rs:662: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
-crates/node-core/src/worker.rs:663: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
+crates/node-core/src/worker.rs:661: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:664: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:665: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:666: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:667: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:668: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:669: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
+crates/node-core/src/worker.rs:670: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:671: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
-crates/node-core/src/worker.rs:672: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
-crates/node-core/src/worker.rs:709: heartbeat 编码失败需构造 serde 失败的 Heartbeat。
-crates/node-core/src/worker.rs:710: heartbeat 编码失败需构造 serde 失败的 Heartbeat。
-crates/node-core/src/worker.rs:864: 只在断言失败时执行；`panic!` 的格式串行被 llvm-cov 记为 miss（多行宏已知现象）。
-crates/node-core/src/worker.rs:896: 同上：只在断言失败时执行的 `panic!` 参数行。
-crates/node-core/src/worker.rs:929: `assert!` 的格式串参数行（多行宏已知现象）。
-crates/node-core/src/worker.rs:938: 同上：`assert!` 的格式串参数行。
-crates/node-core/src/worker.rs:1083: 测试夹具 `fake_hub`：fixture 只在测试自己起的 监听器上跑，accept / upgrade 失败臂构造不出。
-crates/node-core/src/worker.rs:1087: 同上：fixture 的 upgrade 失败臂。
-crates/node-core/src/worker.rs:1105: `unreachable!`：上面已经 return，结构上不可达。
-crates/node-core/src/worker.rs:1106: `unreachable!`：上面已经 return，结构上不可达。
-crates/node-core/src/worker.rs:1584: 测试夹具：accept 失败臂在测试自己起的 监听器上构造不出。
-crates/node-core/src/worker.rs:1588: 同上：upgrade 失败臂。
-crates/node-core/src/worker.rs:1612: 真 PTY 通道上的断言：worker 只会发 自己造的 JSON 帧，这条「解析不动」的 continue 在 `fake_hub_recording_heartbeats` 上构造不出（对端发的 每帧都由 `Frame::push` 保证可解析）。
-crates/node-core/src/worker.rs:1672: 测试夹具：accept / upgrade 失败臂在测试 自己起的监听器上构造不出（同 `fake_hub`）。
-crates/node-core/src/worker.rs:1675: 测试夹具：accept / upgrade 失败臂在测试 自己起的监听器上构造不出（同 `fake_hub`）。
-crates/node-core/src/worker.rs:1690: 同上：worker 只会发 `Frame::push` 造得 出的 JSON，这条 continue 在夹具上构造不出。
-crates/node-core/src/worker.rs:1694: 同上：worker 只会发 `Frame::push` 造得 出的 JSON，这条 continue 在夹具上构造不出。
-crates/node-core/src/worker.rs:1735: 同上：worker 只会发 `Frame::push` 造得 出的 JSON，这条 continue 在夹具上构造不出。
-crates/node-core/src/worker.rs:1741: 同上：worker 只会发 `Frame::push` 造得 出的 JSON，这条 continue 在夹具上构造不出。
-crates/node-core/src/worker.rs:1953: 只在上面这条断言失败时执行；`panic!` 的 参数行被 llvm-cov 记为 miss（多行宏已知现象）。
-crates/node-core/src/worker.rs:2170: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
-crates/node-core/src/worker.rs:2215: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
-crates/node-core/src/worker.rs:2300: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
-crates/node-core/src/worker.rs:2301: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
-crates/node-core/src/worker.rs:2426: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
-crates/node-core/src/worker.rs:2489: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
+crates/node-core/src/worker.rs:673: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
+crates/node-core/src/worker.rs:674: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
+crates/node-core/src/worker.rs:711: heartbeat 编码失败需构造 serde 失败的 Heartbeat。
+crates/node-core/src/worker.rs:712: heartbeat 编码失败需构造 serde 失败的 Heartbeat。
+crates/node-core/src/worker.rs:866: 只在断言失败时执行；`panic!` 的格式串行被 llvm-cov 记为 miss（多行宏已知现象）。
+crates/node-core/src/worker.rs:898: 同上：只在断言失败时执行的 `panic!` 参数行。
+crates/node-core/src/worker.rs:931: `assert!` 的格式串参数行（多行宏已知现象）。
+crates/node-core/src/worker.rs:940: 同上：`assert!` 的格式串参数行。
+crates/node-core/src/worker.rs:1085: 测试夹具 `fake_hub`：fixture 只在测试自己起的 监听器上跑，accept / upgrade 失败臂构造不出。
+crates/node-core/src/worker.rs:1089: 同上：fixture 的 upgrade 失败臂。
+crates/node-core/src/worker.rs:1107: `unreachable!`：上面已经 return，结构上不可达。
+crates/node-core/src/worker.rs:1108: `unreachable!`：上面已经 return，结构上不可达。
+crates/node-core/src/worker.rs:1586: 测试夹具：accept 失败臂在测试自己起的 监听器上构造不出。
+crates/node-core/src/worker.rs:1590: 同上：upgrade 失败臂。
+crates/node-core/src/worker.rs:1614: 真 PTY 通道上的断言：worker 只会发 自己造的 JSON 帧，这条「解析不动」的 continue 在 `fake_hub_recording_heartbeats` 上构造不出（对端发的 每帧都由 `Frame::push` 保证可解析）。
+crates/node-core/src/worker.rs:1674: 测试夹具：accept / upgrade 失败臂在测试 自己起的监听器上构造不出（同 `fake_hub`）。
+crates/node-core/src/worker.rs:1677: 测试夹具：accept / upgrade 失败臂在测试 自己起的监听器上构造不出（同 `fake_hub`）。
+crates/node-core/src/worker.rs:1692: 同上：worker 只会发 `Frame::push` 造得 出的 JSON，这条 continue 在夹具上构造不出。
+crates/node-core/src/worker.rs:1696: 同上：worker 只会发 `Frame::push` 造得 出的 JSON，这条 continue 在夹具上构造不出。
+crates/node-core/src/worker.rs:1737: 同上：worker 只会发 `Frame::push` 造得 出的 JSON，这条 continue 在夹具上构造不出。
+crates/node-core/src/worker.rs:1743: 同上：worker 只会发 `Frame::push` 造得 出的 JSON，这条 continue 在夹具上构造不出。
+crates/node-core/src/worker.rs:1955: 只在上面这条断言失败时执行；`panic!` 的 参数行被 llvm-cov 记为 miss（多行宏已知现象）。
+crates/node-core/src/worker.rs:2172: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
+crates/node-core/src/worker.rs:2217: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
+crates/node-core/src/worker.rs:2302: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
+crates/node-core/src/worker.rs:2303: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
+crates/node-core/src/worker.rs:2428: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
+crates/node-core/src/worker.rs:2491: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
 crates/protocol/src/handshake.rs:834: 测试失败路径：这条分支只在「载荷本该是 enroll」时才执行。
 crates/protocol/src/handshake.rs:1142: 走不到：上面那条 `assert!` 已经钉住形态。 测试失败路径：这条分支只在「上面那条断言本该红」时才执行。
 crates/protocol/src/handshake.rs:1159: 测试失败路径：这条分支只在「上面那条断言本该红」时才执行。
