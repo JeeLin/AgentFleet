@@ -75,7 +75,7 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
 | 文件 | 作用 | 状态 |
 |---|---|---|
 | `.github/workflows/ci.yml` | 门禁（= `mise run ci`），**仅 tag 触发** | **已有** |
-| 发布 workflow（多平台二进制 / 镜像 / Release） | 上述发布全流程 | 未落地（M1 不需要） |
+| 发布 workflow（多平台二进制 / 镜像 / Release） | 上述发布全流程 | 未落地（v0.2.0 不需要） |
 | `Dockerfile.hub` | Hub 镜像；`COPY dist/nodes/ /app/node-binaries/` | 未落地 |
 | `Dockerfile.node` | afcli 镜像；`COPY dist/afcli-${TARGETARCH}` | 未落地 |
 | `docker-compose.hub.yaml` / `.agent.yaml` | 自托管部署 | 未落地 |
@@ -94,38 +94,44 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
 
 状态词汇三态：`✅ 已完成` / `🔄 当前` / 无标记（未开始）。
 
-| # | 里程碑 | 目标 | 承接 §3.1 能力 |
-|---|--------|------|--------------|
-| M0 ✅ 已完成 | 设备接入 | `afcli run` 一条命令（首次自动 enroll）；**密钥对在 node 本地生成、Hub 只存指纹**；supervisor/worker 同二进制双角色（`run --worker`，回滚由未被替换的 supervisor 执行，见 `DECISIONS.md` D1/D2）；单条 WS 主动外联；心跳即能力上报；掉线指数退避重连；防重复注册（同一指纹不得新建设备）；`afcli log` 看最近日志；**WS 协议层与 enroll 时序一并设计**（见 `architecture/protocol.md`） | 设备接入、节点身份与状态、存储与启动基座 |
-| M1 ✅ 已完成 | 会话容器与首个演示 | 工作区 `(node_id, path)` 落库；会话创建即挂载工作区；**在树莓派上开一个会话，会话内的 terminal / files / exec 面板可用，零入站端口、不装 openssh-server**；exec connector（一次性命令、无 PTY；**只经会话通道触发**，connector 跑在设备上，Hub 没有旁路入口）随此里程碑落地。**connector 只面向页面用户，不向 agent 暴露**。**「会话」指页面级容器，不是 ACP agent 会话**——ACP 归 M2 | Bash/PTY、文件浏览 |
-| M2 ✅ 已完成 | ACP 对话 | 接入 ACP（`session-and-trajectory.md`）：设备探测并心跳上报 agent 运行时；**agent 由用户自己在设备上安装，Hub 只扫描 + 存启动配置**（2026-10-26 裁定，不代装）；建会话可选用该设备上已装且可用的 agent（未装 → 409）；ACP 客户端（`initialize` / `session/new` / `session/prompt` / `session/update` / `session/cancel` / `session/load`）；`session/update` 事件流落 append-only 轨迹表（类型/输入/输出/耗时/归属节点）；对话页面。**删除语义三分离**：卸载 agent 不删会话、删设备不删会话、删工作区有会话则拒。**不用外键**——归属关系由业务层显式检查并给可读错误 | AI agent 管理与对话、对话与动作流 |
-| M3 🔄 当前 | Git 界面 | 会话工作区的 git 状态 / diff / 提交视图；**此时会话面板补齐第三个 git 面板**。设备侧补上 `git` connector（此前 `connector/` 里从未实现——M0 的心跳曾硬编码上报过它，`heartbeat.rs` 的注释与 `the_registered_set_is_exactly_the_three_m1_connectors` 都记着这件事）：**只读子集** `status` / `diff` / `log`，经 `git` 子进程读取工作区。**不做 `commit` 及其它写操作**：M3 的目标是「看它改了什么」，而写操作要连带解决提交者身份、钩子与失败回滚，属另一件事，有明确需求再排期 | Git 操作界面 |
-| M4 | 任务分发与托管配置 | **Hub 新建任务 → 仅节点内编排**：Hub 建任务，**node 决定开几个 sub-task**（按 `DECISIONS.md` D9 收窄为节点内编排，跨设备分发留 M8）；任务工作区来源分发时确认；托管配置覆盖层（skills / 两层权限 / 漂移检测，见 `architecture/workspace-and-sync.md` §4.1–4.3，**暂缓**）；agent 软件本体升级策略（未决，见同文 §4.4） | 统一配置 agent、模型配置一处切换 |
-| M5 | 推理网关 | 一个 OpenAI 兼容端点，背后是 N 台设备各自的全量副本（阶段 1，请求级路由） | —（新增能力） |
-| M6 | connector 插件化 | 把协议族做成插件按需加载 + 抓包插件 + 端口转发插件 | —（`PRODUCT.md` §3.2 后续项） |
-| M7 | 任务系统 | 完整任务定义 / 状态 / 进度 / 断点续跑（跨节点任务连贯性，见 `architecture/task-continuity.md`） | —（`PRODUCT.md` §3.2 后续项） |
+| 版本 | 里程碑 | 目标 | 承接 §3.1 能力 |
+|------|--------|------|--------------|
+| v0.1.0 ✅ 已完成 | 设备接入 | `afcli run` 一条命令（首次自动 enroll）；**密钥对在 node 本地生成、Hub 只存指纹**；supervisor/worker 同二进制双角色（`run --worker`，回滚由未被替换的 supervisor 执行，见 `DECISIONS.md` D1/D2）；单条 WS 主动外联；心跳即能力上报；掉线指数退避重连；防重复注册（同一指纹不得新建设备）；`afcli log` 看最近日志；**WS 协议层与 enroll 时序一并设计**（见 `architecture/protocol.md`） | 设备接入、节点身份与状态、存储与启动基座 |
+| v0.2.0 ✅ 已完成 | 会话容器与首个演示 | 工作区 `(node_id, path)` 落库；会话创建即挂载工作区；**在树莓派上开一个会话，会话内的 terminal / files / exec 面板可用，零入站端口、不装 openssh-server**；exec connector（一次性命令、无 PTY；**只经会话通道触发**，connector 跑在设备上，Hub 没有旁路入口）随此里程碑落地。**connector 只面向页面用户，不向 agent 暴露**。**「会话」指页面级容器，不是 ACP agent 会话**——ACP 归 v0.3.0 | Bash/PTY、文件浏览 |
+| v0.3.0 ✅ 已完成 | ACP 对话 | 接入 ACP（`session-and-trajectory.md`）：设备探测并心跳上报 agent 运行时；**agent 由用户自己在设备上安装，Hub 只扫描 + 存启动配置**（2026-10-26 裁定，不代装）；建会话可选用该设备上已装且可用的 agent（未装 → 409）；ACP 客户端（`initialize` / `session/new` / `session/prompt` / `session/update` / `session/cancel` / `session/load`）；`session/update` 事件流落 append-only 轨迹表（类型/输入/输出/耗时/归属节点）；对话页面。**删除语义三分离**：卸载 agent 不删会话、删设备不删会话、删工作区有会话则拒。**不用外键**——归属关系由业务层显式检查并给可读错误 | AI agent 管理与对话、对话与动作流 |
+| v0.4.0 🔄 当前 | Git 界面 | 会话工作区的 git 状态 / diff / 提交视图；**此时会话面板补齐第三个 git 面板**。设备侧补上 `git` connector（此前 `connector/` 里从未实现——v0.1.0 的心跳曾硬编码上报过它，`heartbeat.rs` 的注释与 `the_registered_set_is_exactly_the_three_m1_connectors` 都记着这件事）：**只读子集** `status` / `diff` / `log`，经 `git` 子进程读取工作区。**不做 `commit` 及其它写操作**：v0.4.0 的目标是「看它改了什么」，而写操作要连带解决提交者身份、钩子与失败回滚，属另一件事，有明确需求再排期 | Git 操作界面 |
+| v0.5.0 | 任务分发与托管配置 | **Hub 新建任务 → 仅节点内编排**：Hub 建任务，**node 决定开几个 sub-task**（按 `DECISIONS.md` D9 收窄为节点内编排，跨设备分发留 v0.9.0）；任务工作区来源分发时确认；托管配置覆盖层（skills / 两层权限 / 漂移检测，见 `architecture/workspace-and-sync.md` §4.1–4.3，**暂缓**）；agent 软件本体升级策略（未决，见同文 §4.4） | 统一配置 agent、模型配置一处切换 |
+| v0.6.0 | 推理网关 | 一个 OpenAI 兼容端点，背后是 N 台设备各自的全量副本（阶段 1，请求级路由） | —（新增能力） |
+| v0.7.0 | connector 插件化 | 把协议族做成插件按需加载 + 抓包插件 + 端口转发插件 | —（`PRODUCT.md` §3.2 后续项） |
+| v0.8.0 | 任务系统 | 完整任务定义 / 状态 / 进度 / 断点续跑（跨节点任务连贯性，见 `architecture/task-continuity.md`） | —（`PRODUCT.md` §3.2 后续项） |
 | 后续 | 后续能力 | 自动化、社交软件接入、原生客户端、分布式推理进阶（RPC 层切分 / MoE 分片） | —（`PRODUCT.md` §3.2 后续项） |
 
-> 首个演示是 M1：在树莓派上开一个**会话**（页面级容器，不是 ACP agent 会话——ACP 归 M2），会话里的 shell 与文件浏览就能用，且零入站端口。
+> 首个演示是 v0.2.0：在树莓派上开一个**会话**（页面级容器，不是 ACP agent 会话——ACP 归 v0.3.0），会话里的 shell 与文件浏览就能用，且零入站端口。
 > 终端 / 文件 / git 都在会话内，因此演示必须经由会话，不能脱离会话直接开终端。
 >
-> **2026-10-26 范围裁定**：原 M2「工作区供料与同步」整体撤销——产品当前只做**每台设备内自己的对话**，
+> **编号说明（2026-10-29）**：本里程碑表原用 `M0`–`M8` 编号，现改为版本号
+> （`M0`→`v0.1.0`、`M1`→`v0.2.0`、`M2`→`v0.3.0`、`M3`→`v0.4.0`，此后依次顺延）。
+> 下面几段**历史裁定**描述的是**当时的排期**，不是今天的排期；其中指向「当时叫 Mn 的那个里程碑」
+> 一律保留 `Mn` 的引述写法而不换算成版本号——`M3` 当时是 ACP，今天的 `v0.4.0` 是 Git，
+> 换算只会让读者以为它在说今天那个。
+
+> **2026-10-26 范围裁定**：原「工作区供料与同步」里程碑整体撤销——产品当前只做**每台设备内自己的对话**，
 > 不做任务分发，因此没有项目文件传输的需求（原 CAS / manifest 差分 / A-B-C-D 四档规格留在
-> `architecture/workspace-and-sync.md` 作决策记录）。原 M3 的 ACP 对话与轨迹**整个提前**为现在的 M2；
-> 原 M5 的「Hub 一键把 agent 装到设备」也并入 M2。
+> `architecture/workspace-and-sync.md` 作决策记录）。原 M3 的 ACP 对话与轨迹**整个提前**为现在的 v0.3.0；
+> 原 M5 的「Hub 一键把 agent 装到设备」也并入 v0.3.0。
 >
 > **原 M2 与 Git 的先后顺序已不适用**：那条理由（「工作区必须先能被喂进去」）随传输面一起撤销。
-> M3（Git 界面）现在只需 M1 的工作区绑定即可开工。
+> v0.4.0（Git 界面）现在只需 v0.2.0 的工作区绑定即可开工。
 
-> **M3 的范围（2026-10-29 规划）**：**子任务预估 6 个**（git connector 的设备侧实现 / git 帧协议与注册表接线 /
+> **v0.4.0 的范围（2026-10-29 规划）**：**子任务预估 6 个**（git connector 的设备侧实现 / git 帧协议与注册表接线 /
 Hub 侧透传与能力校验 / 会话页第三个面板的注册与布局 / 状态与 diff 视图 / log 视图与真机端到端）。
-**依赖 M1**（工作区绑定、面板坞、`files` 面板的既有形态全部复用）。
+**依赖 v0.2.0**（工作区绑定、面板坞、`files` 面板的既有形态全部复用）。
 **版本类型：minor**（新增能力，向后兼容）。**缺陷池 bug**：0 个。
 > 只读是**范围决定**而非实现取舍：写操作（commit / checkout / stage）要连带决定提交者身份来源、
-> 钩子执行与失败回滚，与 M3 的目标「看它改了什么」无关，因此不在本里程碑内。
+> 钩子执行与失败回滚，与 v0.4.0 的目标「看它改了什么」无关，因此不在本里程碑内。
 
-> 第一版 = M0–M4（首个可用版本）。M5 起为第二阶段。
-> The first usable version is M0–M4; M5 onward is the next stage.
+> 第一版 = v0.1.0–v0.5.0（首个可用版本）。v0.6.0 起为第二阶段。
+> The first usable version is v0.1.0–v0.5.0; v0.6.0 onward is the next stage.
 
 ---
 
@@ -144,7 +150,7 @@ Hub 侧透传与能力校验 / 会话页第三个面板的注册与布局 / 状�
 4. **不产生「承诺了但没排期」或「排了期但没承诺」的项**
 5. **每个里程碑必须有存储/进程入口基座**——子任务里若出现写 `device` 表、
    用 `secret` 表、起 `main.rs`，就必须有一个前置子任务产出 schema + 迁移 + 进程入口。
-   M0 第 1 轮设计审查即漏此条（9 个子任务无人建表）。
+   v0.1.0 第 1 轮设计审查即漏此条（9 个子任务无人建表）。
 
 > 这份文档已三次出现漂移（Xshell 对标基调、「Hub 一键配置 agent」推后与否、
 > git 面板在哪个里程碑），全部源于两份文档各写各的、靠人工对齐。
@@ -154,16 +160,16 @@ Hub 侧透传与能力校验 / 会话页第三个面板的注册与布局 / 状�
 
 | PRODUCT §3.1 能力 | 承接里程碑 | 架构依据 |
 |------------------|-----------|---------|
-| 设备接入 | M0 | `security-and-lifecycle.md` §4（supervisor/worker、身份） |
-| 节点身份与状态 | M0 | `security-and-lifecycle.md` §4.0/§5；`scheduling.md` §2 |
-| 存储与启动基座 | M0（新增，非 §3.1 能力） | `architecture/README.md` §3/§8；`security-and-lifecycle.md` §2.1（强制防护） |
-| Bash / PTY | M1 | `architecture/README.md` §4.1（工作区绑定）；`design-system.md` §7.0（入口是会话） |
-| 文件浏览 | M1 | 同上 |
-| AI agent 管理与对话 | M2 | `session-and-trajectory.md`（ACP 会话）。**M1 的会话容器不是 agent 会话**，见 §3 M1 行 |
-| 对话与动作流 | M2 | `session-and-trajectory.md` §3/§7（轨迹表） |
-| Git 操作界面 | M3（**只读子集**：status / diff / log；`commit` 未排期） | `architecture/README.md:95` §4（git 是四个内置 connector 之一）；`architecture/README.md:126`（面板绑会话工作区，**工作区不是路由**）。**M3 的 `commit` 不在本里程碑**，见 `PRODUCT.md` §3.1 该行 |
-| 统一配置 agent | M4（**暂缓**） | `workspace-and-sync.md` §4.1–4.3（托管覆盖层 + 两层权限）。**规格在，实现未排期** |
-| 模型配置一处切换 | M4（**暂缓**） | `workspace-and-sync.md` §4.3；`security-and-lifecycle.md` §3 |
+| 设备接入 | v0.1.0 | `security-and-lifecycle.md` §4（supervisor/worker、身份） |
+| 节点身份与状态 | v0.1.0 | `security-and-lifecycle.md` §4.0/§5；`scheduling.md` §2 |
+| 存储与启动基座 | v0.1.0（新增，非 §3.1 能力） | `architecture/README.md` §3/§8；`security-and-lifecycle.md` §2.1（强制防护） |
+| Bash / PTY | v0.2.0 | `architecture/README.md` §4.1（工作区绑定）；`design-system.md` §7.0（入口是会话） |
+| 文件浏览 | v0.2.0 | 同上 |
+| AI agent 管理与对话 | v0.3.0 | `session-and-trajectory.md`（ACP 会话）。**v0.2.0 的会话容器不是 agent 会话**，见 §3 v0.2.0 行 |
+| 对话与动作流 | v0.3.0 | `session-and-trajectory.md` §3/§7（轨迹表） |
+| Git 操作界面 | v0.4.0（**只读子集**：status / diff / log；`commit` 未排期） | `architecture/README.md:95` §4（git 是四个内置 connector 之一）；`architecture/README.md:126`（面板绑会话工作区，**工作区不是路由**）。**v0.4.0 的 `commit` 不在本里程碑**，见 `PRODUCT.md` §3.1 该行 |
+| 统一配置 agent | v0.5.0（**暂缓**） | `workspace-and-sync.md` §4.1–4.3（托管覆盖层 + 两层权限）。**规格在，实现未排期** |
+| 模型配置一处切换 | v0.5.0（**暂缓**） | `workspace-and-sync.md` §4.3；`security-and-lifecycle.md` §3 |
 | ~~Hub 一键安装 agent~~ **已撤销（2026-10-26）** | —（不做代装） | 产品裁定 agent 由用户自己安装，Hub 只扫描 + 存启动配置。原规格 `workspace-and-sync.md` §4.4 保留原文作决策记录 |
 
 > **§3.1 里已撤销的两项不再出现在上表**：「工作区供料」与「产物归档」（2026-10-26 裁定）。
@@ -173,14 +179,14 @@ Hub 侧透传与能力校验 / 会话页第三个面板的注册与布局 / 状�
 
 | 来源 | 项 | 承接 |
 |------|---|---|
-| `PRODUCT.md` §3.2 后续 | connector 插件化 | M7 |
-| `PRODUCT.md` §3.2 后续 | 任务系统 | M8 |
-| `PRODUCT.md` §3.2 后续 | 分布式推理进阶 | M6（阶段 1）+ 后续 |
+| `PRODUCT.md` §3.2 后续 | connector 插件化 | v0.8.0 |
+| `PRODUCT.md` §3.2 后续 | 任务系统 | v0.9.0 |
+| `PRODUCT.md` §3.2 后续 | 分布式推理进阶 | v0.7.0（阶段 1）+ 后续 |
 | `PRODUCT.md` §3.2 后续 | 自动化 / 社交软件 / 原生客户端 | **无排期**（开工前单独排期，见 §3 下方说明） |
-| `PRODUCT.md` §3.1「Hub 一键安装 agent」行内 | **afcli 自身的升级通路**（页面显示各设备 afcli 版本号 → 手动触发升级 → 「自动升级」开关；版本号由 Hub 下发，失败回滚并回报） | **未排期**。原写「M2（与 agent 托管配置同一节落地）」，但 agent 代装在 2026-10-26 已撤销，这一行的落地位置随之失去依附——afcli 升级是**另一条通路**，与 agent 托管配置无关。M1 只交付了前半段：`/api/devices` 给出版本号（`node_version`） |
+| `PRODUCT.md` §3.1「Hub 一键安装 agent」行内 | **afcli 自身的升级通路**（页面显示各设备 afcli 版本号 → 手动触发升级 → 「自动升级」开关；版本号由 Hub 下发，失败回滚并回报） | **未排期**。原写「v0.3.0（与 agent 托管配置同一节落地）」，但 agent 代装在 2026-10-26 已撤销，这一行的落地位置随之失去依附——afcli 升级是**另一条通路**，与 agent 托管配置无关。v0.2.0 只交付了前半段：`/api/devices` 给出版本号（`node_version`） |
 
-> 「后续」不是编号里程碑，不在 M0–M8 范围内，需在开工前单独排期与编号。
-> 第二阶段从 M5（推理网关）开始。「agent 安装」已于 2026-10-26 撤销，不属于任何阶段。
+> 「后续」不是编号里程碑，不在 v0.1.0–v0.9.0 范围内，需在开工前单独排期与编号。
+> 第二阶段从 v0.6.0（推理网关）开始。「agent 安装」已于 2026-10-26 撤销，不属于任何阶段。
 > "Later" is not a numbered milestone; schedule and number it separately before starting.
 
 ---

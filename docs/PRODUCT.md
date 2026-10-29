@@ -59,7 +59,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 | [已放弃] | ~~Hub 一键安装 agent~~ **已撤销（2026-10-26）** | 原计划在 Hub 选设备 + 选 agent 模板 → 节点本地安装。**产品裁定：不代装**——让 Hub 往设备写可执行文件等于「一处配置错、全体设备执行未核对代码」，agent 由用户自己在设备上装，Hub 只做**扫描**（心跳上报这台机器上**存在**哪些 agent）与**启动配置**的读写，见上一行与 `architecture/workspace-and-sync.md` §4.4（原文保留作决策记录）。**afcli 自身的升级是另一条通路，不受此裁定影响**：页面显示各设备 afcli 版本号 → 可手动触发升级 → 另有「自动升级」开关；版本号由 Hub 下发，升级失败自动回滚并回报 |
 | [x] | 对话与动作流 | 会话有 Trajectory 视图，逐条展示 User/Assistant/Tool/子agent/压缩记录；**随时可看**本次改动文件与 diff |
 | [x] | 文件浏览 | 会话工作区内浏览/读写节点本地目录，写操作限制在工作区根内（**仅约束页面用户**；agent 用自己装的能力，不走这条路径） |
-| [已规划] | Git 操作界面 | 会话工作区的 git 状态 / diff / 提交视图。**M3 只交付只读部分（状态 / diff / log）**：「提交视图」指**查看历史提交**，不是从页面发起 commit；从页面提交属写操作，未排期 |
+| [已规划] | Git 操作界面 | 会话工作区的 git 状态 / diff / 提交视图。**v0.4.0 只交付只读部分（状态 / diff / log）**：「提交视图」指**查看历史提交**，不是从页面发起 commit；从页面提交属写操作，未排期 |
 | [x] | Bash / PTY | 会话工作区内的本地 shell；不装 openssh-server，Hub 不拨入 |
 | [已放弃] | ~~工作区供料~~ **已撤销（2026-10-26）** | 原计划 Hub 把项目文件喂进设备。**产品裁定只做每台设备内自己的对话，不做任务分发**，因此没有项目文件传输需求。规格留 `architecture/workspace-and-sync.md` 作决策记录 |
 | [待规划] | 统一配置 agent | 在 Hub 统一管理各设备的 agent 配置（专家 agent 定义、技能）；托管文件在节点上只读，本地改动标记为「漂移」，可 push / pull |
@@ -73,8 +73,8 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 
 ### 3.2 后续（非第一版）/ Later (not first release)
 
-> 「第一版」指**首个可用版本（里程碑 M0–M4）**。M5 起为第二阶段。
-> "First release" = the first usable version (milestones M0–M4). M5 onward is the next stage.
+> 「第一版」指**首个可用版本（里程碑 v0.1.0–v0.5.0）**。v0.6.0 起为第二阶段。
+> "First release" = the first usable version (milestones v0.1.0–v0.5.0). v0.6.0 onward is the next stage.
 
 - **任务系统**：完整任务的定义、状态、进度与续跑（见 §5 设计问题一）
 - **自动化**：定时 / 事件触发的任务编排
@@ -88,16 +88,16 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 - **Hub 统一配置 agent**：在 Hub 统一管理所有设备上的 agent 配置（专家 agent 定义、技能、
   `opencode.json`）。实现为**托管覆盖层**：Hub 记录托管清单，文件在节点上只读，
   心跳顺带检测漂移并给出 push / pull。**节点密钥（`identity.json`）永不上传。**
-  任务的跨设备分发（新建任务 → 路由到某台 node）是 Hub 层的事（M5），与 agent 运行时
+  任务的跨设备分发（新建任务 → 路由到某台 node）是 Hub 层的事（v0.5.0「任务分发与托管配置」，其中跨设备那一半排在 v0.9.0 之后），与 agent 运行时
   内部的父子 agent 无关。见 `docs/architecture/workspace-and-sync.md`。
 
 ### 3.3 用户可见流程（第一版）/ Key flows (first release)
 
 1. **接入一台设备**：在设备上跑 `afcli run <hub-url>` → 首次自动 enroll、生成密钥对并外联 → Hub 显示新节点（真实 os/arch/hostname）→ 在线。之后排障用 `afcli log` 看最近日志。
 2. **在某个设备上开 agent 对话**：选节点 → 选工作区路径（设备上已有的目录）→ 选该设备上已装且可用的 agent →
-   会话建立，terminal / files 面板挂到这个工作区上（git 面板在 M3 加入）→
+   会话建立，terminal / files 面板挂到这个工作区上（git 面板在 v0.4.0 加入）→
    在面板里对话 → Trajectory 逐条可查。
-3. **看它改了什么**：会话进行中，ACP 的 `tool_call` 事件逐条展示工具名、状态与输出摘要（改动内容从这里看）。专门的 diff 视图留到 M3 的 git 面板。
+3. **看它改了什么**：会话进行中，ACP 的 `tool_call` 事件逐条展示工具名、状态与输出摘要（改动内容从这里看）。专门的 diff 视图留到 v0.4.0 的 git 面板。
 4. **操作文件 / git / bash**：在**该会话内**用对应面板，直接作用于该会话的工作区。
 5. ~~**统一配置 agent**~~：**暂缓**（规格在 `architecture/workspace-and-sync.md` §4.1–4.3，实现未排期）。
 6. ~~**取回产物**~~：**已撤销（2026-10-26）**，随产物归档一起撤销。
@@ -188,11 +188,11 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 | connector | 节点上提供的一类**有类型**的能力（terminal / files / git / exec / ssh / db / …），可插件化 |
 | task | 一个完整任务；sub-task 是任务下可独立执行/续跑的单元，在某台 node 上由 agent 会话执行 |
 | trajectory | dsh 式的会话动作事件流，Web 逐条回放 |
-| 会话 / 会话页 | 会话容器：一个页面（`/sessions/:id`），持有对话流与面板坞。**M1 的会话不含 ACP；M2 起会话可选挂一个 agent**，拥有 `acp_session_id`，对话走 ACP。挂 agent 时 `session.agent_id` 非 NULL，且建会话当时该 agent 在目标节点上必须**可用**（否则 409 `agent_unavailable`）；不挂时仍为 NULL，M1 的行为不变。Session page: the container page `/sessions/:id`; M1 sessions carried no ACP, M2 sessions may bind an agent and carry an `acp_session_id` |
+| 会话 / 会话页 | 会话容器：一个页面（`/sessions/:id`），持有对话流与面板坞。**v0.2.0 的会话不含 ACP；v0.3.0 起会话可选挂一个 agent**，拥有 `acp_session_id`，对话走 ACP。挂 agent 时 `session.agent_id` 非 NULL，且建会话当时该 agent 在目标节点上必须**可用**（否则 409 `agent_unavailable`）；不挂时仍为 NULL，v0.2.0 的行为不变。Session page: the container page `/sessions/:id`; v0.2.0 sessions carried no ACP, v0.3.0 sessions may bind an agent and carry an `acp_session_id` |
 | workspace | 工作区：设备上的一个 `(node_id, path)`，**会话的一个字段**，不是路由、不是页面；可被多个会话引用（同一条路径可被两个会话同时打开，各自持有自己的通道）。Workspace: a `(node_id, path)` on a device, carried as a field on a session — not a route and not a page |
 | ~~artifact~~ | **已撤销（2026-10-26）**：原指任务产出的最终制品归档到 Hub。随产物归档一起撤销 |
 | channel_id | 通道号：一条设备 WebSocket 上的子通道，通道键为 `(node_id, channel_id)`，每通道独立流控。Channel id: a sub-channel on one node WebSocket, keyed `(node_id, channel_id)`, with per-channel flow control |
-| ~~baseline~~ | **暂缓**：原指会话开始时记录的工作区初始状态，用于算改动文件与 diff。专门的 diff 视图留到 M3 git 面板 |
+| ~~baseline~~ | **暂缓**：原指会话开始时记录的工作区初始状态，用于算改动文件与 diff。专门的 diff 视图留到 v0.4.0 git 面板 |
 | CAS | 内容寻址存储：Hub 侧以内容哈希存 blob。**现已完全撤销**（2026-10-26）：agent 安装取消后 `blob` 表也从 schema 去掉，项目文件 / 配置 / 产物早就不再供料。CAS: content-addressed blob storage — fully withdrawn; with agent install cancelled the `blob` table was removed from the schema |
 | supervisor | 守护进程的父进程：不碰业务与 WebSocket，只负责拉起 / 监控 / 替换 / 回滚 worker——**执行回滚的代码不参与被回滚**。Supervisor: the parent process that touches neither business logic nor the WebSocket, only starting, monitoring, swapping and rolling back the worker — the code performing a rollback is never itself replaced |
 | worker | 工作进程：持有设备身份与 WebSocket，实际执行 connector 与 agent；升级时更换，`node_id` 不变。Worker: the process holding device identity and the WebSocket that actually runs connectors and agents; swapped on upgrade, `node_id` unchanged |

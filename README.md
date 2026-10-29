@@ -29,21 +29,21 @@ node, run AI agent sessions, and route tasks to the node best suited to run them
 
 ## 第一版范围 / First Release Scope
 
-> 「第一版」指**首个可用版本（里程碑 M0–M4）**。M5 起为第二阶段。
-> "First release" = the first usable version (M0–M4). M5 onward is the next stage.
+> 「第一版」指**首个可用版本（里程碑 v0.1.0–v0.5.0）**。v0.6.0 起为第二阶段。
+> "First release" = the first usable version (v0.1.0–v0.5.0). v0.6.0 onward is the next stage.
 
-> **当前进度 / Current status：M0、M1、M2 已完成，M3 起未开始。**
-> M1 交付的是**会话容器**（页面级：工作区 + 终端 / 文件 / exec 面板）与 Web 控制台。
-> M2 把 ACP 接进来：设备上报 agent 运行时、**扫描 + 配置**（agent 由用户自己装，Hub 不代装）、选设备上的 agent 对话、轨迹落库。
-> 下面每项后面的 `Mx` 是它真正落地的里程碑——**清单描述的是第一版全貌，不是现在就能用的东西**。
-> Shipped today: M0, M1 and M2. The `Mx` tag on each line is the milestone that actually delivers it.
+> **当前进度 / Current status：v0.1.0–v0.3.0 已完成，v0.4.0（会话内 git 面板，只读）进行中。**
+> v0.2.0 交付的是**会话容器**（页面级：工作区 + 终端 / 文件 / exec 面板）与 Web 控制台。
+> v0.3.0 把 ACP 接进来：设备上报 agent 运行时、**扫描 + 配置**（agent 由用户自己装，Hub 不代装）、选设备上的 agent 对话、轨迹落库。
+> 下面每项后面的版本号是它真正落地的里程碑——**清单描述的是第一版全貌，不是现在就能用的东西**。
+> Shipped today: v0.1.0 through v0.3.0; v0.4.0 (read-only git panel) is in progress. The version tag on each line is the milestone that actually delivers it.
 
-- **设备接入** `M0`：一条 CLI 命令注册，单条 WebSocket 主动外联；心跳即能力上报。One CLI command, one outbound WebSocket, heartbeats carry capabilities.
-- **节点身份与状态** `M0`：Hub 签发 `node_id`，设备密钥对认证，不用静态共享 token。Hub-issued `node_id`, key-pair auth, no static shared token.
-- **Web 控制台与会话面板** `M1`：设备 / 会话列表与工作台；终端（PTY，含 resize）/ 文件浏览 / 一次性 exec，全部绑定会话工作区 `(node_id, path)`，**零入站端口**。Devices and sessions, a workbench with terminal (PTY, resizable), file browser and one-shot exec—all bound to the session workspace, **zero inbound ports**.
-- **AI agent 管理与对话** `M2`：各类 agent 统一配置、启动、对话。Configure, launch and chat with any agent in one place.
-- **对话与动作流** `M2`：dsh 式 Trajectory 逐条可查，列出本次改动的**文件**与 diff。A dsh-style trajectory, step by step, plus changed files and diffs.
-- **会话内 git 面板** `M3`：完整面板集补齐第三个（终端 / 文件 / git）。The third panel (git) completes the set.
+- **设备接入** `v0.1.0`：一条 CLI 命令注册，单条 WebSocket 主动外联；心跳即能力上报。One CLI command, one outbound WebSocket, heartbeats carry capabilities.
+- **节点身份与状态** `v0.1.0`：Hub 签发 `node_id`，设备密钥对认证，不用静态共享 token。Hub-issued `node_id`, key-pair auth, no static shared token.
+- **Web 控制台与会话面板** `v0.2.0`：设备 / 会话列表与工作台；终端（PTY，含 resize）/ 文件浏览 / 一次性 exec，全部绑定会话工作区 `(node_id, path)`，**零入站端口**。Devices and sessions, a workbench with terminal (PTY, resizable), file browser and one-shot exec—all bound to the session workspace, **zero inbound ports**.
+- **AI agent 管理与对话** `v0.3.0`：各类 agent 统一配置、启动、对话。Configure, launch and chat with any agent in one place.
+- **对话与动作流** `v0.3.0`：dsh 式 Trajectory 逐条可查，列出本次改动的**文件**与 diff。A dsh-style trajectory, step by step, plus changed files and diffs.
+- **会话内 git 面板** `v0.4.0`：完整面板集补齐第三个（终端 / 文件 / git）。The third panel (git) completes the set.
 - ~~**Hub 一键安装 agent**~~ **已撤销（2026-10-26）**：agent 由用户自己在设备上装，Hub 只**扫描**节点上装了什么并保存**启动配置**。让 Hub 往设备写可执行文件等于「一处配置错、全体设备执行未核对代码」。Agent install from the Hub was **dropped**: agents are installed on the device by the user, and the Hub only **scans** what is present and stores launch configuration.
 
 > **2026-10-26 范围裁定**：原第一版里的「工作区供料与统一配置」与「产物归档」**整体撤销**——
