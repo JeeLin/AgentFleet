@@ -167,7 +167,7 @@ Hub 侧透传与能力校验 / 会话页第三个面板的注册与布局 / 状�
 | 文件浏览 | v0.2.0 | 同上 |
 | AI agent 管理与对话 | v0.3.0 | `session-and-trajectory.md`（ACP 会话）。**v0.2.0 的会话容器不是 agent 会话**，见 §3 v0.2.0 行 |
 | 对话与动作流 | v0.3.0 | `session-and-trajectory.md` §3/§7（轨迹表） |
-| Git 操作界面 | v0.4.0（**只读子集**：status / diff / log；`commit` 未排期） | `architecture/README.md:95` §4（git 是四个内置 connector 之一）；`architecture/README.md:126`（面板绑会话工作区，**工作区不是路由**）。**v0.4.0 的 `commit` 不在本里程碑**，见 `PRODUCT.md` §3.1 该行 |
+| Git 操作界面 | v0.4.0（**只读子集**：status / diff / log；`commit` 未排期） | `architecture/README.md:95` §4（git 是四个内置 connector 之一）；`architecture/README.md:127`（面板绑会话工作区，**工作区不是路由**）。**v0.4.0 的 `commit` 不在本里程碑**，见 `PRODUCT.md` §3.1 该行 |
 | 统一配置 agent | v0.5.0（**暂缓**） | `workspace-and-sync.md` §4.1–4.3（托管覆盖层 + 两层权限）。**规格在，实现未排期** |
 | 模型配置一处切换 | v0.5.0（**暂缓**） | `workspace-and-sync.md` §4.3；`security-and-lifecycle.md` §3 |
 | ~~Hub 一键安装 agent~~ **已撤销（2026-10-26）** | —（不做代装） | 产品裁定 agent 由用户自己安装，Hub 只扫描 + 存启动配置。原规格 `workspace-and-sync.md` §4.4 保留原文作决策记录 |

@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod exec;
 pub mod files;
+pub mod git;
 pub mod terminal;
 
 /// terminal connector 名。**注册表与心跳上报共用这批常量**（约束 14）。

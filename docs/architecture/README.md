@@ -98,7 +98,8 @@ secret(          -- M0 建：Hub 自身的秘密（登录密码哈希、session 
 > 本地 agent 完全依赖设备上安装的 agent 自带能力（MCP / 内建工具 / 它自己的权限系统），
 > 我们**不向 agent 暴露 connector**。
 
-- 第一版内置：**terminal**（本地 PTY）、**files**（工作区根内读写）、**git**（状态/diff/提交）、**exec**（一次性命令，无 PTY；**只经会话通道触发**——connector 跑在设备上，Hub 没有旁路入口）。
+- 第一版内置：**terminal**（本地 PTY）、**files**（工作区根内读写）、**git**（状态/diff/log，**只读**；v0.4.0）、**exec**（一次性命令，无 PTY；**只经会话通道触发**——connector 跑在设备上，Hub 没有旁路入口）。
+  **git 为什么只有只读三件**（v0.4.0 范围决定，不是实现取舍）：commit / stage / checkout 要连带决定提交者身份从哪来、钩子要不要跑、失败怎么回滚，三件都不是「看它改了什么」需要的；而「看它改了什么」正是这个面板存在的理由。
 - 后续插件：SSH / SFTP / MySQL / PostgreSQL / Redis / SQLite / S3。
 - 额外插件：**网络抓包**（pcap）、**端口转发**。
 - 插件是独立、有类型的能力，各自独立演进；**不引入多态 Resource 抽象**。
