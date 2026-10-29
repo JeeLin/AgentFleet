@@ -1066,3 +1066,93 @@ async fn forty_uplink_frames_get_credit_refill_and_no_error() {
         "回填之后要按新余额继续记账，余额应是 32-8=24"
     );
 }
+
+// ------------------------------------------------------------------ git 面板
+//
+// v0.4.0 子任务 3：**证明 Hub 侧不需要为 `git` 写任何代码**。
+//
+// Hub 不认识任何具体的 connector 名——`open_channel` 把 `connector` 当自由
+// 字符串原样下发，唯一的门禁是「设备上报过它吗」。所以 `git` 能跑通这件事
+// 是注册表那个改动的下游后果，Hub 侧一行没动。下面两条把这件事钉住：
+// 能开、且没上报时**仍然会被过滤**（否则「一行没动」就退化成「谁都能过」）。
+
+/// `connector:"git"` 能开通道，且设备侧收到的帧里 `connector` 逐字是 `git`。
+///
+/// 只断言 `channel_id` 对得上是不够的：`open_channel` 的载荷里 `connector`
+/// 若在透传中被换成别的名字（或掉了），设备会拿它去查注册表并回
+/// `channel_error{unsupported}`——那正是 `v0.2.0` 那种「两侧各自全绿、
+/// 真机全坏」的形状。所以这里断言名字本身。
+#[tokio::test]
+async fn the_git_connector_opens_a_channel_end_to_end() {
+    let hub = Hub::boot().await;
+    let (mut est, node_id, _kp) = connect_enrolled(&hub).await;
+    report_connectors(&hub, &mut est).await;
+
+    let page = Page::new(hub).await;
+    let session_id = page.make_session(&node_id).await;
+    let channel_id = page.open_channel(&session_id, "git").await;
+
+    let spec = open_spec_on(&mut est).await;
+    assert_eq!(
+        spec.channel_id, channel_id,
+        "设备收到的必须是页面上那条通道"
+    );
+    assert_eq!(
+        spec.connector, "git",
+        "Hub 必须原样透传 connector 名；换成别的名字设备会回 unsupported"
+    );
+}
+
+/// 设备**没上报** git 时，开 git 通道回 409 `connector_not_reported`。
+///
+/// 这是能力硬过滤作用在 git 上的证据。没有这条，「Hub 不需要改」也可能是
+/// 因为那层过滤压根不生效——而一个不生效的过滤会让任务被派给做不到的机器
+/// （约束 9），症状是「点开面板永远空着」。
+#[tokio::test]
+async fn opening_git_without_the_capability_is_refused() {
+    let hub = Hub::boot().await;
+    let (mut est, node_id, _kp) = connect_enrolled(&hub).await;
+    // 只上报 terminal：**明确不含 git**。
+    est.send(&Frame::push(
+        types::HEARTBEAT,
+        0,
+        json!({
+            "node_version": "0.1.0",
+            "capabilities": {"connectors": ["terminal"], "agents": [test_agent_report()]},
+            "resources": null,
+            "workspace_roots": [],
+        }),
+    ))
+    .await
+    .expect("heartbeat must send");
+    common::wait_until(Duration::from_secs(2), || {
+        common::device_row(&hub, &node_id, "last_seen_at").is_some_and(|v| !v.is_empty())
+    })
+    .await;
+
+    let page = Page::new(hub).await;
+    let session_id = page.make_session(&node_id).await;
+
+    let mut req = page.req("POST", "/api/channels");
+    *req.body_mut() = Body::from(
+        json!({"session_id": session_id, "connector": "git", "params": {}}).to_string(),
+    );
+    let resp = page.app.clone().oneshot(req).await.expect("app responds");
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "没上报的 connector 必须被拒，而不是下发一帧注定失败的 open_channel"
+    );
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).expect("json body");
+    // 错误体形状是 `{error, detail}`（`ApiError::conflict_with` 的口径）。
+    assert_eq!(
+        body["error"], "connector_not_reported",
+        "错误码要是那一个，前端只写一套分支: {body}"
+    );
+    assert_eq!(
+        body["detail"]["reported"],
+        json!(["terminal"]),
+        "要把设备实际报了什么带回去，用户才知道该去修哪台机器: {body}"
+    );
+}
