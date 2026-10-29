@@ -1025,6 +1025,35 @@ kbd, .kbd {
   background: var(--af-surface-2); color: var(--af-warn-fg);
   font-size: var(--af-text-xs); border-top: 1px solid var(--af-border-subtle);
 }
+/* 分段条：改动 / 历史。放在头一行下面，占满宽度、左对齐。 */
+.af-git__seg { margin: var(--af-space-2) var(--af-space-4); flex: 0 0 auto; align-self: flex-start; }
+/* 历史分段的左栏是提交列表，不是文件列表——宽度给多一点（「作者 · 时间 · 消息」
+   比两字母状态码 + 路径更需要横向空间），并且不需要它自己的滚动边框。 */
+.af-git__files--log { flex: 0 0 46%; border-right: 1px solid var(--af-border-subtle); }
+.af-glog { display: flex; flex-direction: column; min-height: 0; }
+.af-glog__list { margin: 0; padding: 0; list-style: none; }
+.af-glog__row {
+  display: grid; grid-template-columns: 4.2rem auto auto 1fr auto;
+  align-items: baseline; gap: var(--af-space-2); width: 100%;
+  padding: var(--af-space-2) var(--af-space-3); border: 0; background: none;
+  cursor: pointer; font-family: inherit; font-size: var(--af-text-sm);
+  color: var(--af-fg-secondary); text-align: left;
+}
+.af-glog__row:hover { background: var(--af-surface-2); color: var(--af-fg-primary); }
+.af-glog__row[aria-selected='true'] { background: var(--af-surface-0); color: var(--af-fg-primary); }
+.af-glog__hash { color: var(--af-fg-tertiary); white-space: nowrap; }
+.af-glog__author { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.af-glog__when { white-space: nowrap; font-size: var(--af-text-xs); }
+/* 首行消息是这一行里唯一要读的内容，允许它被截断但不能把别的挤出去。 */
+.af-glog__subject { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--af-fg-primary); }
+.af-glog__busy { white-space: nowrap; font-size: var(--af-text-xs); }
+/* 截断提示用中性色：这不是故障，只是「更早的没列出来」。 */
+.af-glog__trunc {
+  margin: 0; padding: var(--af-space-2) var(--af-space-3);
+  background: var(--af-surface-2); color: var(--af-fg-secondary);
+  font-size: var(--af-text-xs); border-top: 1px solid var(--af-border-subtle);
+}
+
 /* 窄列：列表与 diff 上下叠，各占一半高度。 */
 @media (max-width: 720px) {
   .af-git__split { flex-direction: column; }

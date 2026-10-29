@@ -58,6 +58,7 @@ import FilesPanel, {
   type FilesError,
 } from '@/components/FilesPanel.vue'
 import GitPanel from '@/components/GitPanel.vue'
+import type { GitCommit } from '@/components/GitLog.vue'
 import PanelDock, { type ChannelView } from '@/components/PanelDock.vue'
 import { PANEL_ORDER, type PanelName } from '@/lib/panel'
 import SplitHandle from '@/components/SplitHandle.vue'
@@ -177,6 +178,19 @@ interface GitView {
   diff: GitDiffView | null
   /** 正在取 diff 的路径（点开后才发，防重入）。 */
   reading: string | null
+  /**
+   * 历史提交。`null` = 还没问过（切到历史分段时才问）。
+   *
+   * **与 `files` 用 `null`/`[]` 区分「没问过」和「没有」是同一条纪律**
+   * （§3.12）：空数组是「这个仓库还没有提交」，`null` 是「还没问」。
+   */
+  commits: GitCommit[] | null
+  /** 还有更早的提交没列出来。 */
+  logTruncated: boolean
+  /** 正在读取哪条提交的 diff（完整 hash）。 */
+  logReading: string | null
+  /** 当前 diff 属于哪条提交。`null` = 展示的不是历史 diff。 */
+  logSelected: string | null
   /** 问 status / diff 被拒的原因。与 `notARepo` 分开：那是事实，这是故障。 */
   error: string | null
 }
@@ -332,6 +346,10 @@ function blankWorkspace(): TabWorkspace {
       notARepo: false,
       diff: null,
       reading: null,
+      commits: null,
+      logTruncated: false,
+      logReading: null,
+      logSelected: null,
       error: null,
     },
   }
@@ -1140,8 +1158,38 @@ function gitRefresh(tab: TabMeta): void {
 function gitShowDiff(tab: TabMeta, path: string): void {
   const ws = workspaces.get(tab.id)
   if (!ws) return
+  // 从改动分段取 diff 时清掉「这份 diff 属于哪条提交」——不清的话 diff 面板
+  // 会把它当历史 diff 渲染，`stale` 判据也就跟着错（见 `GitPanel` 的 `logReading`）。
+  ws.git.logSelected = null
+  ws.git.logReading = null
   ws.git.reading = path
   gitRequest(tab, 'diff', { path })
+}
+
+/**
+ * 用户切到历史分段：问最近 30 条提交。
+ *
+ * `limit` 写死 30 而不是做成可调的「加载更多」：v0.4.0 只要「历史提交可查」，
+ * 而一个没有总数（git 不给）的分页控件比一次给 30 条更难用也对不了账。
+ * 超过时设备回 `truncated:true`，页面明说「更早的没有列出」。
+ */
+function gitShowLog(tab: TabMeta): void {
+  gitRequest(tab, 'log', { limit: 30 })
+}
+
+/**
+ * 用户点了某条提交：问**该提交**的 diff。
+ *
+ * 发 `commit`（完整 hash），不是 `path`——`path` 回的是「工作区现在改了什么」，
+ * 而用户点的是历史上的一条提交。设备侧对 `commit` 用
+ * `git show --format= --patch`（`git diff <hash>` 比的是 hash 与工作区，是另一件事）。
+ */
+function gitOpenCommit(tab: TabMeta, hash: string): void {
+  const ws = workspaces.get(tab.id)
+  if (!ws) return
+  ws.git.logReading = hash
+  ws.git.logSelected = hash
+  gitRequest(tab, 'diff', { commit: hash })
 }
 
 /**
@@ -1153,7 +1201,7 @@ function gitShowDiff(tab: TabMeta, path: string): void {
  */
 function gitRequest(
   tab: TabMeta,
-  op: 'status' | 'diff',
+  op: 'status' | 'diff' | 'log',
   payload: Record<string, unknown> = {},
 ): void {
   const handle = channels.get(channelKey(tab.id, 'git'))
@@ -1168,6 +1216,7 @@ function gitRequest(
     const ws = workspaces.get(tab.id)
     if (!ws) return
     ws.git.reading = null
+    ws.git.logReading = null
     // 静默失败就是一块永远不动的面板：git 没有第二条反馈路径。
     ws.git.error =
       err instanceof ApiError
@@ -1197,6 +1246,9 @@ function applyGitFrame(ws: TabWorkspace, payload: unknown): void {
       return
     case 'diff':
       applyGitDiff(ws.git, frame)
+      return
+    case 'log':
+      applyGitLog(ws.git, frame)
       return
     case 'error':
       // git connector 目前不产生 `op:"error"`（失败走 `channel_error`），
@@ -1255,11 +1307,37 @@ function applyGitStatus(git: GitView, frame: Record<string, unknown>): void {
 /** `op:"diff"`：一份 unified diff。 */
 function applyGitDiff(git: GitView, frame: Record<string, unknown>): void {
   git.reading = null
+  git.logReading = null
   git.diff = {
     path: typeof frame.path === 'string' ? frame.path : null,
     unified: typeof frame.unified === 'string' ? frame.unified : '',
     truncated: frame.truncated === true,
   }
+}
+
+/**
+ * `op:"log"`：历史提交列表。
+ *
+ * **`commits` 从 `null` 变数组是「问过了」的唯一标志**：空数组是「这个仓库
+ * 还没有提交」（设备侧对无提交仓库回空列表，那不是错误，见 `git.rs` 的
+ * `is_empty_repo`），`null` 是「还没问」。混成一档的话新建仓库上会一直写
+ * 「正在读取提交历史…」。
+ */
+function applyGitLog(git: GitView, frame: Record<string, unknown>): void {
+  const raw = Array.isArray(frame.commits) ? frame.commits : []
+  git.commits = raw.flatMap((entry) => {
+    const c = asRecord(entry)
+    if (!c || typeof c.hash !== 'string' || !c.hash) return []
+    return [
+      {
+        hash: c.hash,
+        author: typeof c.author === 'string' ? c.author : '',
+        when: typeof c.when === 'string' ? c.when : '',
+        subject: typeof c.subject === 'string' ? c.subject : '',
+      },
+    ]
+  })
+  git.logTruncated = frame.truncated === true
 }
 
 /**
@@ -2024,8 +2102,14 @@ onBeforeUnmount(() => {
                 :diff="activeWs.git.diff"
                 :reading="activeWs.git.reading"
                 :error="activeWs.git.error"
+                :commits="activeWs.git.commits"
+                :log-truncated="activeWs.git.logTruncated"
+                :log-reading="activeWs.git.logReading"
+                :log-selected="activeWs.git.logSelected"
                 @refresh="activeTab && gitRefresh(activeTab)"
                 @diff="(path: string) => activeTab && gitShowDiff(activeTab, path)"
+                @log="activeTab && gitShowLog(activeTab)"
+                @open-commit="(hash: string) => activeTab && gitOpenCommit(activeTab, hash)"
               />
             </template>
           </PanelDock>

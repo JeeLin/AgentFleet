@@ -1761,3 +1761,130 @@ describe('git 面板：status 与 diff', () => {
     ).toBe(1)
   })
 })
+
+/* ===========================================================================
+   v0.4.0 子任务 6：历史提交（log）分段
+   ---------------------------------------------------------------------------
+   帧形状以 `crates/node-core/src/connector/git.rs` 的 `log` 回帧为准：
+   `{ op:'log', commits:[{hash,author,when,subject}], truncated }`。
+   =========================================================================== */
+describe('git 面板：历史分段', () => {
+  /** 切到「历史」分段。 */
+  async function toLog(w: ReturnType<typeof mountIn>): Promise<void> {
+    await w.element.querySelector<HTMLElement>('[data-git-seg="log"]')?.click()
+    await flush(w)
+  }
+
+  /** 取所有发往通道的 send body。 */
+  function sentBodies(fetchMock: ReturnType<typeof stubFetch>): Array<Record<string, unknown>> {
+    return fetchMock.mock.calls
+      .filter(([url]) => String(url).includes('/send'))
+      .map(([, init]) => JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>)
+  }
+
+  const COMMIT_A = {
+    hash: 'a'.repeat(40),
+    author: 'Ann',
+    when: '2026-10-29T10:00:00+00:00',
+    subject: 'feat: 加 A',
+  }
+  const COMMIT_B = {
+    hash: 'b'.repeat(40),
+    author: 'Bob',
+    when: '2026-10-28T10:00:00+00:00',
+    subject: 'fix: 改 B',
+  }
+
+  it('切到历史发 {"op":"log","limit":30} 并渲染提交列表', async () => {
+    const { w, fetchMock } = await mountWorkbench()
+    await interact(w)
+    await toLog(w)
+
+    const logReq = sentBodies(fetchMock).find((b) => b.op === 'log')
+    expect(logReq, `切历史时要发 log 请求，实发：${JSON.stringify(sentBodies(fetchMock))}`).toBeTruthy()
+    // `limit` 必须真的发出去：不发的话设备用它的缺省值，而页面写着「只显示最近的」——
+    // 两处各有一份上限，迟早对不上。
+    expect(logReq?.limit).toBe(30)
+
+    await frame(w, FakeEventSource.instances[0], {
+      op: 'log',
+      commits: [COMMIT_A, COMMIT_B],
+      truncated: false,
+    })
+
+    const rows = Array.from(w.element.querySelectorAll<HTMLElement>('[data-git-commit]'))
+    // 顺序原样保留：git 给的就是新→旧，重排会让「最近改了什么」变成要算的问题。
+    expect(rows.map((r) => r.dataset.gitCommit)).toEqual([COMMIT_A.hash, COMMIT_B.hash])
+    expect(rows[0]?.textContent).toContain('aaaaaaa')
+    expect(rows[0]?.textContent).toContain('Ann')
+    expect(rows[0]?.textContent).toContain('feat: 加 A')
+  })
+
+  it('点某条提交发 {"op":"diff","commit":"<完整 hash>"} 并渲染该提交的改动', async () => {
+    // 这条要能抓到「取错基线」：只断言「渲染非空」的话，发 `path` 拿到工作区
+    // 改动也会通过。所以断言**内容只含该提交改过的文件**。
+    const { w, fetchMock } = await mountWorkbench()
+    await interact(w)
+    await toLog(w)
+    const src = FakeEventSource.instances[0]
+    await frame(w, src, { op: 'log', commits: [COMMIT_A, COMMIT_B], truncated: false })
+
+    await w.element
+      .querySelector<HTMLElement>(`[data-git-commit="${COMMIT_A.hash}"]`)
+      ?.click()
+    await flush(w)
+
+    const diffReq = sentBodies(fetchMock).find((b) => b.op === 'diff')
+    expect(diffReq, '点提交要发 diff 请求').toBeTruthy()
+    // **必须是完整 hash**：短 hash 在歧义时会指向另一条提交，而 `git show`
+    // 接受短 hash——静默取错比报错难查得多。
+    expect(diffReq?.commit).toBe(COMMIT_A.hash)
+    // 不能带 `path`：那是「工作区未提交改动」的取法，与点的这条提交无关。
+    expect(diffReq?.path).toBeUndefined()
+
+    await frame(w, src, {
+      op: 'diff',
+      path: 'src/a.rs',
+      unified: '--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1,2 @@\n one\n+A_TWO\n',
+      truncated: false,
+    })
+
+    const body = w.element.querySelector('[data-git-diff-body]')
+    expect(body, '该提交的 diff 要渲染出来').not.toBeNull()
+    expect(body?.textContent).toContain('A_TWO')
+    // 另一条提交改过的文件不该出现在这里——出现就说明取错了基线。
+    expect(body?.textContent).not.toContain('B_ONLY')
+  })
+
+  it('log 的 truncated:true 时明说更早的没有列出', async () => {
+    const { w } = await mountWorkbench()
+    await interact(w)
+    await toLog(w)
+    await frame(w, FakeEventSource.instances[0], {
+      op: 'log',
+      commits: [COMMIT_A],
+      truncated: true,
+    })
+
+    const note = w.element.querySelector('[data-git-log-truncated]')
+    expect(note, '只给了一部分就必须说出来').not.toBeNull()
+    expect(note?.textContent).toContain('更早')
+  })
+
+  it('空仓库（commits 为空）写「还没有提交」，与「还没问」分开', async () => {
+    // §3.12：空列表是结论，`null` 才是「还没问」。混成一档的话新建仓库上
+    // 会一直写「正在读取提交历史…」。
+    const { w } = await mountWorkbench()
+    await interact(w)
+    await toLog(w)
+
+    // 还没回帧：是「正在读取」。
+    expect(w.element.querySelector('[data-git-log-loading]')).not.toBeNull()
+
+    await frame(w, FakeEventSource.instances[0], { op: 'log', commits: [], truncated: false })
+    expect(w.element.querySelector('[data-git-log-loading]')).toBeNull()
+    const empty = w.element.querySelector('[data-git-log-empty]')
+    expect(empty, '空仓库要有明确结论').not.toBeNull()
+    expect(empty?.textContent).toContain('还没有提交')
+  })
+})

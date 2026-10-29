@@ -2,10 +2,13 @@
 /* ===========================================================================
    GitPanel —— git 面板：分支 + 改动列表 + 逐文件 diff（规范 §5.4 / §3.14）
    ---------------------------------------------------------------------------
-   这一版是 **v0.4.0 的只读视图**：`status` 与 `diff`。log（历史提交）在
-   同一里程碑的下一步接进来，所以这里的布局已经给它留了位置——但没有
-   提交 / 暂存 / 切分支的按钮，也不会有：那要决定提交者身份从哪来、钩子
-   要不要跑、失败怎么回滚，三件都不是「看它改了什么」需要的。
+   两个分段：**改动**（`status` + 逐文件 `diff`）与**历史**（`log` + 某提交的
+   `diff`）。它们是同一个工作区、同一份 git 状态的两种看法，所以是同一个
+   面板内的视图切换（`docs/DECISIONS.md` D10），不是第二个面板、也不是路由。
+
+   **没有任何写操作，且这不是「暂未实现」**：commit / stage / checkout 要连带
+   决定提交者身份从哪来、钩子要不要跑、失败怎么回滚——三件都不是「看它改了什么」
+   需要的，而做错任何一件都会改到用户的工作区。
 
    ── 这个组件不知道通道 ──────────────────────────────────────────────
    与 `FilesPanel` 同一条纪律（§5.5.1）：数据从 props 进，意图从 emits 出。
@@ -26,9 +29,10 @@
    会让用户回头去对照 git 输出才能确认，等于把一次翻译变成两次。
    =========================================================================== */
 
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 import GitDiff from '@/components/GitDiff.vue'
+import GitLog, { type GitCommit } from '@/components/GitLog.vue'
 import type { ChannelState } from '@/lib/channel'
 
 /** `status` 回帧里的一个文件条目。两列状态码原样保留。 */
@@ -59,6 +63,14 @@ const props = defineProps<{
   reading: string | null
   /** 问 status / diff 被拒的原因。 */
   error: string | null
+  /** 历史提交。`null` = 还没问过（切到历史分段时才问）。 */
+  commits: GitCommit[] | null
+  /** 还有更早的提交没列出来。 */
+  logTruncated: boolean
+  /** 正在读取哪条提交的 diff（完整 hash）。 */
+  logReading: string | null
+  /** 当前展示的 diff 属于哪条提交（完整 hash）。`null` = 不是历史 diff。 */
+  logSelected: string | null
 }>()
 
 const emit = defineEmits<{
@@ -66,7 +78,45 @@ const emit = defineEmits<{
   (e: 'refresh'): void
   /** 用户点某个文件：取它的 diff。 */
   (e: 'diff', path: string): void
+  /** 用户切到历史分段：问一次 log。 */
+  (e: 'log'): void
+  /** 用户点某条提交：取它的 diff（**完整** hash）。 */
+  (e: 'open-commit', hash: string): void
 }>()
+
+/**
+ * 分段：改动 / 历史。
+ *
+ * **切到历史时才问 log**：`status` 是打开面板就要看的，历史不是——每次打开
+ * 面板都跑一次 `git log` 只是替用户做了一个他没要的请求。
+ */
+type Segment = 'changes' | 'log'
+
+const segment = ref<Segment>('changes')
+
+function selectSegment(next: Segment): void {
+  if (segment.value === next) return
+  segment.value = next
+  if (next === 'log') emit('log')
+}
+
+/**
+ * 分段条的方向键。
+ *
+ * 写了 `role="tablist"` 就得让左右键能用——否则屏幕阅读器会报「tablist 里
+ * 方向键无反应」。与 `DevicesPage` 的分段条同一套语义。
+ */
+function onSegKey(e: KeyboardEvent): void {
+  if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return
+  const next = e.key === 'ArrowRight' ? 'log' : 'changes'
+  // 两端不环绕：两项的分段条上环绕只会让「已经到头了」看不出来。
+  if (next === segment.value) {
+    e.preventDefault()
+    return
+  }
+  selectSegment(next)
+  e.preventDefault()
+}
 
 /**
  * 头一行的写法。
@@ -111,7 +161,7 @@ function codeTitle(f: GitFile): string {
   return `index: ${x} / 工作区: ${y}`
 }
 
-/** 只挂载一次 diff 时它属于哪个文件（用来高亮被点中的行）。 */
+/** 改动分段里，diff 属于哪个文件（用来高亮被点中的行）。 */
 const selected = computed(() => props.diff?.path ?? props.reading)
 </script>
 
@@ -140,7 +190,8 @@ const selected = computed(() => props.diff?.path ?? props.reading)
     </div>
 
     <!-- 「不是 git 仓库」是**正常状态**，所以它前面不画红色、不加 role="alert"。
-         这里也不写「错误」「失败」——它没有失败，只是这个工作区不走 git。 -->
+         这里也不写「错误」「失败」——它没有失败，只是这个工作区不走 git。
+         分段条也不画：没有历史可切。 -->
     <div v-if="notARepo" class="af-git__void" data-git-not-a-repo>
       <p>这个工作区不是 git 仓库，所以没有改动与历史可看。</p>
       <p class="af-t-mute">
@@ -149,59 +200,112 @@ const selected = computed(() => props.diff?.path ?? props.reading)
     </div>
 
     <template v-else>
-      <p v-if="error" class="af-panel__state" role="alert" data-git-error>{{ error }}</p>
-
-      <!-- ① 还没问过：状态未知。不能声称「干净」，也不能画空列表。 -->
-      <p
-        v-else-if="clean === null"
-        class="af-git__void af-t-mute"
-        data-git-loading
+      <!-- 分段：改动 / 历史。同一份 git 状态的两种看法，不是两个面板。 -->
+      <div
+        class="af-row gap-2 af-seg af-git__seg"
+        role="tablist"
+        aria-label="git 面板分段"
+        @keydown="onSegKey"
       >
-        正在读取工作区状态…
-      </p>
-
-      <!-- ② 问过了，没有改动：这是**结论**，要明写。 -->
-      <p
-        v-else-if="clean"
-        class="af-git__void af-t-mute"
-        data-git-clean
-      >
-        没有未提交的改动。
-      </p>
-
-      <!-- ③ 有改动：列表 + 右侧 diff。 -->
-      <div v-else class="af-git__split">
-        <ul class="af-git__files" role="listbox" aria-label="改动的文件">
-          <li v-for="f in files" :key="f.path">
-            <button
-              class="af-git__file"
-              type="button"
-              role="option"
-              :aria-selected="selected === f.path ? 'true' : 'false'"
-              :data-git-file="f.path"
-              :title="codeTitle(f)"
-              @click="emit('diff', f.path)"
-            >
-              <span class="af-git__code af-fp" aria-hidden="true">{{ codeOf(f) }}</span>
-              <span class="af-git__path af-fp">{{ f.path }}</span>
-            </button>
-          </li>
-        </ul>
-
-        <div class="af-git__diffpane">
-          <p v-if="!diff && !reading" class="af-git__void af-t-mute" data-git-no-diff>
-            点左边任一文件看它的改动。
-          </p>
-          <p v-else-if="!diff" class="af-git__void af-t-mute">正在读取 diff…</p>
-          <GitDiff
-            v-else
-            :unified="diff.unified"
-            :truncated="diff.truncated"
-            :path="diff.path"
-            :stale="reading !== null"
-          />
-        </div>
+        <button
+          class="af-btn af-btn--sm"
+          :class="{ 'af-btn--primary': segment === 'changes' }"
+          type="button"
+          role="tab"
+          :aria-selected="segment === 'changes'"
+          data-git-seg="changes"
+          @click="selectSegment('changes')"
+        >
+          改动
+        </button>
+        <button
+          class="af-btn af-btn--sm"
+          :class="{ 'af-btn--primary': segment === 'log' }"
+          type="button"
+          role="tab"
+          :aria-selected="segment === 'log'"
+          data-git-seg="log"
+          @click="selectSegment('log')"
+        >
+          历史
+        </button>
       </div>
+
+      <!-- ================== 历史分段 ================== -->
+      <template v-if="segment === 'log'">
+        <div class="af-git__split">
+          <div class="af-git__files af-git__files--log">
+            <GitLog
+              :commits="commits"
+              :truncated="logTruncated"
+              :reading="logReading"
+              :selected="logSelected"
+              @open="(hash: string) => emit('open-commit', hash)"
+            />
+          </div>
+          <div class="af-git__diffpane">
+            <p v-if="!diff" class="af-git__void af-t-mute" data-git-log-no-diff>
+              点左边任一提交看它改了什么。
+            </p>
+            <GitDiff
+              v-else
+              :unified="diff.unified"
+              :truncated="diff.truncated"
+              :path="diff.path"
+              :stale="logReading !== null"
+            />
+          </div>
+        </div>
+      </template>
+
+      <!-- ================== 改动分段 ================== -->
+      <template v-else>
+        <p v-if="error" class="af-panel__state" role="alert" data-git-error>{{ error }}</p>
+
+        <!-- ① 还没问过：状态未知。不能声称「干净」，也不能画空列表。 -->
+        <p v-else-if="clean === null" class="af-git__void af-t-mute" data-git-loading>
+          正在读取工作区状态…
+        </p>
+
+        <!-- ② 问过了，没有改动：这是**结论**，要明写。 -->
+        <p v-else-if="clean" class="af-git__void af-t-mute" data-git-clean>
+          没有未提交的改动。
+        </p>
+
+        <!-- ③ 有改动：列表 + 右侧 diff。 -->
+        <div v-else class="af-git__split">
+          <ul class="af-git__files" role="listbox" aria-label="改动的文件">
+            <li v-for="f in files" :key="f.path">
+              <button
+                class="af-git__file"
+                type="button"
+                role="option"
+                :aria-selected="selected === f.path ? 'true' : 'false'"
+                :data-git-file="f.path"
+                :title="codeTitle(f)"
+                @click="emit('diff', f.path)"
+              >
+                <span class="af-git__code af-fp" aria-hidden="true">{{ codeOf(f) }}</span>
+                <span class="af-git__path af-fp">{{ f.path }}</span>
+              </button>
+            </li>
+          </ul>
+
+          <div class="af-git__diffpane">
+            <p v-if="!diff && !reading" class="af-git__void af-t-mute" data-git-no-diff>
+              点左边任一文件看它的改动。
+            </p>
+            <p v-else-if="!diff" class="af-git__void af-t-mute">正在读取 diff…</p>
+            <GitDiff
+              v-else
+              :unified="diff.unified"
+              :truncated="diff.truncated"
+              :path="diff.path"
+              :stale="reading !== null"
+            />
+          </div>
+        </div>
+      </template>
     </template>
   </div>
 </template>
