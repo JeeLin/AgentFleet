@@ -16,13 +16,18 @@
 //!
 //! # 帧格式（对外契约）
 //!
-//! 推给 Hub 的 `channel_data.payload` 是一个对象，`type` 区分三类：
+//! 推给 Hub 的 `channel_data.payload` 是一个对象，`type` 区分四类：
 //!
 //! ```json
-//! { "type": "batch",   "events": [ <ACP session/update 的 update 对象>, ... ] }
-//! { "type": "turn_end","stopReason": "end_turn", "durationMs": <毫秒数 | null> }
-//! { "type": "ready",   "sessionId": "ses_...", "agentId": "opencode" }
+//! { "type": "batch",      "events": [ <ACP session/update 的 update 对象>, ... ] }
+//! { "type": "turn_start", "seq": <i64> }
+//! { "type": "turn_end",   "stopReason": "end_turn", "seq": <i64>, "durationMs": <毫秒数 | null> }
+//! { "type": "ready",      "sessionId": "ses_...", "agentId": "opencode" }
 //! ```
+//!
+//! `turn_start` 与 `turn_end` 之间才是「一轮」。前者的唯一用途是让 Hub 分得清
+//! 「这一轮正在跑」与「这一轮的结尾丢了」：Hub 只看有没有 `turn_end`，而一个
+//! 健康的轮次可能跑上一百多秒，那段时间里两者从帧流上看不出区别。
 //!
 //! `durationMs` 是**设备掐的表**（`session/prompt` 发出到响应回来）。它是轨迹
 //! 里「耗时」那一列唯一的真值来源——ACP 事件自身不带时间戳，而 Hub 拿相邻帧的
@@ -354,6 +359,16 @@ impl Conversations {
         let ch = channel_id.to_string();
         let text = text.to_string();
         drop(live);
+
+        // **同步**推一帧 `turn_start`（在 `spawn` 之前）：Hub 判「最后一轮走没走完」
+        // 只看有没有 `turn_end`，而一轮可以跑上一百多秒（见本方法的文档），那整段
+        // 时间里页面只能标「本轮未完成」——一个健康正在跑的轮次与一次丢失的结尾
+        // 长得一样。「这一轮开跑了」是设备侧才有的事实，所以只有这里能说。
+        //
+        // 推不出去就**忽略**（与 `turn_end` 同一条）：通道没了说明 Hub 已经走了，
+        // 那时把 `prompt()` 变成 `Err` 只会让调用方以为消息没发出去，而它其实已
+        // 经进了 agent 的 stdin。
+        let _ = channel::push_external(&ch, vec![turn_start_frame(&seq)]);
 
         tokio::spawn(async move {
             // 表在这里起：它是**这一整轮**的耗时，而一轮的重活全落在
@@ -862,6 +877,20 @@ fn turn_end_frame(seq: &Seq, stop_reason: &str, started: Instant) -> Value {
         "seq": seq.next(),
         "durationMs": i64::try_from(elapsed.as_millis()).ok(),
     })
+}
+
+/// 一帧不带计时的 `turn_start`：**这一轮开跑了**。帧格式同样是对外契约。
+///
+/// # 为什么它要占一个序号
+///
+/// 它和 `batch` / `request` / `turn_end` 共用**同一条** `Seq`（见 [`Seq`]）。
+/// 另起一个计数器去编号就等于给同一条对话造第二条序列，而 Hub 侧按
+/// `(session_id, seq)` 唯一——撞号那条会被 `INSERT OR IGNORE` 静默吞掉。
+///
+/// 它**必须真的取号**，不能拿 `last()`：0 是「没有序号」的保留值，而不取号的
+/// 写法在积分器刚从 0 起步时正好吐出 0，看起来只是「小了一号」。
+fn turn_start_frame(seq: &Seq) -> Value {
+    json!({ "type": "turn_start", "seq": seq.next() })
 }
 
 /// 把攒着的一批发出去。通道没了就**丢掉**（已裁决「不承诺补齐」）。
@@ -1567,6 +1596,180 @@ for line in sys.stdin:
         );
 
         convs.close("ch_dur").await;
+    }
+
+    /// 收 `ch` 通道上 `type` 为 `ty` 的帧载荷，最多轮询 10 s。
+    ///
+    /// # 为什么是「一次收齐」而不是「每轮只要第一条」
+    ///
+    /// 帧是**取出即消费**的：`pump()` 放行过的帧不会再出现第二次。而 `pump()`
+    /// 又只在通道**信用**没用完时出队（`ChannelTable::flush` 的 `while credit > 0`），
+    /// 外部源通道开出来时那笔信用是有限的（[`channel::EXTERNAL_CREDIT_START`]）。
+    /// 分两次调用各取一条的话，第一次已把 `turn_start` 取走、第二次拿不到它，
+    /// 于是「两条都收齐」这个判据永远不成立——这不是断言失败，是**压根比不了**。
+    ///
+    /// 所以只在这里调 `pump()`，每次的结果都攒进同一份 `seen`。
+    ///
+    /// # `want` 到了就返回
+    ///
+    /// 调用方要的只是「至少 `want` 条」，多收的忽略即可——两条带号的帧
+    /// 之间还夹着 `batch`（读循环推的），攒完再断言才不会把「另一条还没到」
+    /// 误读成「它不存在」。
+    ///
+    /// 只认自己这条通道：通道表是进程级单例，别的用例丢进来的帧不算。
+    async fn frames_of_type(ch: &str, ty: &str, want: usize) -> Vec<Value> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen: Vec<Value> = Vec::new();
+        loop {
+            for (id, frames) in channel::pump() {
+                if id != ch {
+                    continue;
+                }
+                for fr in frames {
+                    let Ok(data) = fr.payload::<protocol::channel::ChannelData>() else {
+                        continue;
+                    };
+                    if data.payload.get("type").and_then(Value::as_str) == Some(ty) {
+                        seen.push(data.payload);
+                    }
+                }
+                if seen.len() >= want {
+                    return seen;
+                }
+            }
+            if Instant::now() >= deadline {
+                return seen;
+            }
+            // 每轮都必须 await：单线程运行时里紧凑循环会把读循环整个饿死。
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// **一轮开跑时推一帧 `turn_start`，它带一个数字 `seq`。**
+    ///
+    /// 挡的是「Hub 判不出这一轮到底在跑还是结尾丢了」：它只看有没有
+    /// `turn_end`，而一轮可以跑上一百多秒（见 `prompt` 的文档），那整段时间里
+    /// 一个健康的轮次与一次丢失的结尾长得一样。
+    ///
+    /// 反向验证（实跑过）：删掉 `prompt()` 里那句
+    /// `let _ = channel::push_external(&ch, vec![turn_start_frame(&seq)]);`，
+    /// 这条会红在「本轮必须有 turn_start」。
+    /// 它**不验取号**：`seq` 是不是从共享计数器上取的，由
+    /// `a_turn_end_is_numbered_after_its_turn_start` 钉住。
+    #[tokio::test]
+    // guard 跨 `await` 存活是本用例要的语义：互斥必须覆盖整个用例体。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    async fn a_prompt_emits_a_turn_start_frame() {
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+        let d = tempfile::tempdir().expect("tmp");
+        let (bin, _log) = recording_agent(d.path());
+        let convs = Conversations::default();
+
+        let _ = channel::open_external("ch_start");
+        convs
+            .open(spec_for("ch_start", &bin, None), None)
+            .await
+            .expect("假 agent 必须能起来");
+        // 先清掉 `ready`：它也是一帧，留着会占掉一条信用。
+        let _ = channel::pump();
+
+        convs
+            .prompt("ch_start", "hi")
+            .await
+            .expect("prompt 必须发得出去");
+
+        let starts = frames_of_type("ch_start", "turn_start", 1).await;
+        let start = starts
+            .first()
+            .expect("本轮必须有 turn_start，否则 Hub 在那一百多秒里只能说「本轮未完成」");
+        assert!(
+            start.get("seq").and_then(Value::as_i64).is_some(),
+            "turn_start 的 seq 必须是一个数字——它与 batch / turn_end 共用同一条序列: {start}"
+        );
+        assert_eq!(
+            start.get("type").and_then(Value::as_str),
+            Some("turn_start"),
+            "帧类型是对外契约（Hub 按 type 认它），不许改名: {start}"
+        );
+
+        convs.close("ch_start").await;
+    }
+
+    /// **同一轮的 `turn_start.seq` 与 `turn_end.seq` 不许撞号，且前者在前。**
+    ///
+    /// 撞号在 Hub 侧是**静默**的：`(session_id, seq)` 有 `UNIQUE`，第二条被
+    /// `INSERT OR IGNORE` 吃掉——序号仍然连续，`gaps` 不报警，页面照画。所以
+    /// 「取号来自同一个计数器、且 `turn_start` 先取」这件事只能在这里钉住。
+    ///
+    /// 反向验证（实跑过，见各处注释）：
+    /// - 删掉 `prompt()` 里那次推送 → 红在「本轮必须有 turn_start」；
+    /// - 把 `turn_start_frame` 改成不取号（`seq.last()`） → 红在「必须是 1 起的
+    ///   真号」；
+    /// - 把它改成「先取一号再减一」（`turn_start` 与 `turn_end` 拿到相邻的两个
+    ///   号、而 `turn_start` 仍在前面）→ 绿：那一改法只让序号**错位**，没造成
+    ///   撞号，不在本用例的判据内。
+    #[tokio::test]
+    // guard 跨 `await` 存活是本用例要的语义：互斥必须覆盖整个用例体。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    async fn a_turn_end_is_numbered_after_its_turn_start() {
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+        let d = tempfile::tempdir().expect("tmp");
+        let (bin, _log) = recording_agent(d.path());
+        let convs = Conversations::default();
+
+        let _ = channel::open_external("ch_span");
+        convs
+            .open(spec_for("ch_span", &bin, None), None)
+            .await
+            .expect("假 agent 必须能起来");
+        let _ = channel::pump();
+
+        convs
+            .prompt("ch_span", "hi")
+            .await
+            .expect("prompt 必须发得出去");
+
+        // 两帧都收齐再断言：`turn_end` 是 `spawn` 出去的任务推的，比 `turn_start`
+        // 晚到；分两次取的话，第一次 `pump()` 会把 `turn_start` 取走，第二次就
+        // 再也读不到它了（见 `frames_of_type` 的注释）。
+        let starts = frames_of_type("ch_span", "turn_start", 1).await;
+        let ends = frames_of_type("ch_span", "turn_end", 1).await;
+        let start = starts.first().expect("本轮必须有 turn_start");
+        let end = ends.first().expect("本轮必须有一条 turn_end");
+        let start_seq = start
+            .get("seq")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(|| panic!("turn_start 必须带数字 seq: {start}"));
+        let end_seq = end
+            .get("seq")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(|| panic!("turn_end 必须带数字 seq: {end}"));
+        // **这一句才是「真的取过号」的判据**：`next()` 从 1 开始，所以取过号的
+        // `turn_start` 不可能是 0——0 是「没有序号」的保留值。只比
+        // 「`end_seq > start_seq`」是**不够**的：实测把 `turn_start_frame` 写成
+        // 取 `last()`（不取号）时，`turn_start` 拿 0、`turn_end` 拿 1，那句
+        // 「大于」照样绿，而 0 号事件是一帧错号。
+        assert!(
+            start_seq >= 1,
+            "turn_start 必须从共享计数器上取一个真号（1 起），0 是「没有序号」的\
+             保留值：拿 0 说明它没有取号。实际 {start_seq}"
+        );
+        assert!(
+            end_seq > start_seq,
+            "turn_end.seq 必须严格大于 turn_start.seq：撞号那条会被 Hub 的 \
+             `INSERT OR IGNORE` 静默吞掉（序号仍然连续，`gaps` 不报警），\
+             实际 turn_start={start_seq}、turn_end={end_seq}"
+        );
+
+        convs.close("ch_span").await;
     }
 
     /// **有 `acp_session_id` → 走 `session/load`，且不新建。**
