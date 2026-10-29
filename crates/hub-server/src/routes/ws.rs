@@ -992,10 +992,10 @@ fn publish_channel_data(state: &AppState, node_id: &str, frame: &Frame) {
 ///
 /// # 认哪几类帧
 ///
-/// 只认 `batch` 与 `turn_end`，这两类才是**事件**。`ready` / `error` /
-/// `request` / `exited` 是控制面的话，不进轨迹——它们的语义是「这条通道
-/// 现在怎么了」，不是「agent 说了什么」。把它们写进轨迹会让页面把一次
-/// 重连的 `ready` 画成一条对话消息。
+/// 只认 `batch` / `turn_start` / `turn_end`，这几类才是**事件**。`ready` /
+/// `error` / `request` / `exited` 是控制面的话，不进轨迹——它们的语义是
+/// 「这条通道现在怎么了」，不是「agent 说了什么」。把它们写进轨迹会让页面
+/// 把一次重连的 `ready` 画成一条对话消息。
 ///
 /// 例外：`ready` 虽不写轨迹，却会被用来回填 `session.acp_session_id`
 /// （子任务 8）——它是唯一携带 ACP 会话 id 的帧。
@@ -1013,6 +1013,7 @@ fn publish_channel_data(state: &AppState, node_id: &str, frame: &Frame) {
 /// 锁住设备侧源码。
 const ACP_FRAME_TYPE_BATCH: &str = "batch";
 const ACP_FRAME_TYPE_TURN_END: &str = "turn_end";
+const ACP_FRAME_TYPE_TURN_START: &str = "turn_start";
 const ACP_FRAME_TYPE_READY: &str = "ready";
 const ACP_FIELD_TYPE: &str = "type";
 const ACP_FIELD_SESSION_ID: &str = "sessionId";
@@ -1067,10 +1068,33 @@ fn persist_trajectory(state: &AppState, node_id: &str, channel_id: &str, payload
         }
         return;
     }
-    if kind != ACP_FRAME_TYPE_BATCH && kind != ACP_FRAME_TYPE_TURN_END {
+    if kind != ACP_FRAME_TYPE_BATCH
+        && kind != ACP_FRAME_TYPE_TURN_END
+        && kind != ACP_FRAME_TYPE_TURN_START
+    {
         return;
     }
     let now = hub_core::registry::now_stamp();
+
+    if kind == ACP_FRAME_TYPE_TURN_START {
+        // `turn_start` 与 `turn_end` 同形：一条事件、一个 `seq`、来自设备侧
+        // 那条共享计数器，所以缺 `seq` 的处理完全一样——整条不写，不写 0
+        // （写 0 会让第二帧被 `UNIQUE` 吃掉且序号看上去仍然连续）。
+        //
+        // 丢这一条的后果比丢 `turn_end` 轻，也不是没有：这一轮随后会既没有
+        // 开始标记也没有结束标记，页面只能把它报成「未完成」——比真实情况
+        // 更悲观，但不会谎称它跑完了。
+        let Some(seq) = payload.get(ACP_FIELD_SEQ).and_then(Value::as_i64) else {
+            tracing::error!(channel_id = %channel_id, "a turn_start arrived without a seq; dropped");
+            return;
+        };
+        let e = hub_storage::NewEvent::turn_start(seq);
+        if let Err(err) = state.trajectory().append(&session_id, node_id, &e, &now) {
+            tracing::error!(node_id = %node_id, channel_id = %channel_id, error = %err,
+                "cannot persist a turn_start");
+        }
+        return;
+    }
 
     if kind == ACP_FRAME_TYPE_TURN_END {
         // `turn_end` 是一条事件，不是一批。它的 `seq` 由设备侧那条共享
@@ -1937,6 +1961,63 @@ mod tests {
         assert_eq!(rows[0].kind, "turn_end");
         assert_eq!(rows[0].seq, 7);
         assert!(rows[0].payload.contains("end_turn"), "{}", rows[0].payload);
+    }
+
+    /// **`turn_start` 单条落库**：它是「一轮开了」的凭据，`turn_bounds` 靠它
+    /// 把「还在跑」与「结尾丢了」分开。
+    ///
+    /// 反向验证：把 `persist_trajectory` 里 `turn_start` 那个分支删掉，这条会红
+    /// 在「一条都没写」。
+    #[test]
+    fn a_turn_start_is_persisted_as_its_own_kind() {
+        let (state, _dir) = stream_state();
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", true),
+        );
+
+        persist_trajectory(
+            &state,
+            "n_a",
+            "ch-1",
+            &serde_json::json!({"type": "turn_start", "seq": 4}),
+        );
+
+        let rows = state.trajectory().list("s_1", 0, 100).unwrap();
+        assert_eq!(rows.len(), 1, "turn_start 必须落库：{rows:?}");
+        assert_eq!(rows[0].kind, "turn_start", "{rows:?}");
+        assert_eq!(rows[0].seq, 4, "设备给的 seq 要原样进列：{rows:?}");
+        // 开始标记不带计时：这一条落下的时候还不知道这一轮要跑多久。
+        assert_eq!(rows[0].duration_source, "none", "{rows:?}");
+        assert_eq!(rows[0].duration_ms, None, "{rows:?}");
+    }
+
+    /// **缺 `seq` 的 `turn_start` 整条丢掉，不写 0**——与 `turn_end` 同一口径。
+    ///
+    /// 反向验证：把 `turn_start` 分支里的 `let Some(seq) = … else` 换成
+    /// `unwrap_or_default()`，这条会红在「一条都不该写」。
+    #[test]
+    fn a_turn_start_without_a_seq_is_dropped_not_numbered_zero() {
+        let (state, _dir) = stream_state();
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", true),
+        );
+
+        for payload in [
+            serde_json::json!({"type": "turn_start"}),
+            // 显式 null 与拿去当字符串的 false 都取不出 i64。
+            serde_json::json!({"type": "turn_start", "seq": null}),
+            serde_json::json!({"type": "turn_start", "seq": "5"}),
+        ] {
+            persist_trajectory(&state, "n_a", "ch-1", &payload);
+        }
+
+        let rows = state.trajectory().list("s_1", 0, 100).unwrap();
+        assert!(
+            rows.is_empty(),
+            "缺 seq 的 turn_start 一条都不该写：{rows:?}"
+        );
     }
 
     /// **设备掐的表要落进 `duration_ms` 那一列，且来源标 `measured`**。

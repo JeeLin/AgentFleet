@@ -39,6 +39,17 @@ use crate::Db;
 /// chunk 流自己不会说它结束了。
 pub const TURN_END_KIND: &str = "turn_end";
 
+/// 一轮对话的开始标记 `kind`。
+///
+/// 设备在一轮的工作开始之前、从与 `batch` / `turn_end` **同一条**设备侧计数器
+/// 取号写这一条。它存在的理由只有一个：`turn_end` 缺席有两种含义——「还在跑」
+/// 与「丢了」——而只看 `turn_end` 分不开。有了开始标记，「开过且没关」才是
+/// 一个可查的事实（见 [`TrajectoryRepo::turn_bounds`]）。
+///
+/// 它**不**证明 agent 还活着：开始标记写下来之后设备掉了，这一轮同样是「开过
+/// 且没关」。
+pub const TURN_START_KIND: &str = "turn_start";
+
 /// `duration_source` 的取值：**设备真的掐了表**（`duration_ms` 非 `NULL`）。
 ///
 /// 常量而不是散在的字符串字面量：`none` 与 `measured` 是一对互斥的凭据，
@@ -118,8 +129,13 @@ impl Gap {
 /// 一轮对话的范围（按 `turn_end` 切）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnBounds {
-    /// 本轮第一条的 seq。
+    /// 本轮第一条的 seq。**不一定是 `turn_start`**：它只是本轮的物理第一条。
     pub first_seq: i64,
+    /// 本轮第一条 `turn_start` 事件的 seq；`None` 表示本轮**没有开始标记**。
+    ///
+    /// `None` 有两种来路，本模块分不开、也不假装分得开：这次改动之前写下的
+    /// 历史行（设备那时还不会发 `turn_start`），或者这一轮的开始标记丢了。
+    pub start_seq: Option<i64>,
     /// 本轮 `turn_end` 的 seq；`None` 表示**这一轮没有走完**。
     pub end_seq: Option<i64>,
 }
@@ -249,6 +265,19 @@ impl NewEvent {
             seq,
             TURN_END_KIND,
             serde_json::json!({ "stopReason": stop_reason }).to_string(),
+        )
+    }
+
+    /// 一轮的开始标记。**不带计时**：这一条在轮次开始时写下，此刻还不知道
+    /// 这一轮要跑多久（耗时只有 `turn_end` 上才有，见 [`Self::measured_turn_end`]）。
+    ///
+    /// `payload` 里也写一份 `seq`：轨迹表按 `seq` 列判断裂，而页面只看得见
+    /// payload——两处都有，画图的那一方才不用回头查列。
+    pub fn turn_start(seq: i64) -> Self {
+        Self::new(
+            seq,
+            TURN_START_KIND,
+            serde_json::json!({ "seq": seq }).to_string(),
         )
     }
 
@@ -481,6 +510,23 @@ impl TrajectoryRepo {
     /// 每条 `turn_end` 收掉它之前所有还没有归属的事件。最后一个 `turn_end`
     /// 之后若还有事件，那一段是**尚未走完（或已丢失结尾）的一轮**，
     /// `end_seq` 为 `None`。
+    ///
+    /// # `start_seq` 是什么，不是什么
+    ///
+    /// 它是**本轮在这个区间里第一条 `turn_start` 的 seq**（`ORDER BY id` 下
+    /// 首次出现的那条）。两种情形会得到 `None`：
+    /// - 区间里没有开始标记——本次改动之前写下的历史行就是这样；
+    /// - 开始标记按物理顺序落在了区间外：`seq` 由设备侧计数，重连后可能从 0
+    ///   重数，所以「按 `seq` 排序」与「按写入顺序」不是同一个顺序。
+    ///
+    /// 取第一条而不是最后一条：库里若同时躺着多条开始标记，那是「开了两轮、
+    /// 只关了一次」，中间那段衔接没有凭据；报最早的那条比报最新的一条更不
+    /// 容易把一轮说短。
+    ///
+    /// 顺带把「本轮开始标记」的记账简化成了「遇到过就开始记」：每一条
+    /// `turn_start` 都写，`turn_end` 之后清空。两者在「`turn_end` 之前出现
+    /// 多条 `turn_start`」时只差取哪一条，而今天设备侧一轮只发一条——所以
+    /// 没有测试能分开它们，这里写的只是最短的那份。
     pub fn turn_bounds(&self, session_id: &str) -> Result<Vec<TurnBounds>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
@@ -491,23 +537,35 @@ impl TrajectoryRepo {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         let mut out: Vec<TurnBounds> = Vec::new();
+        // 当前这一轮的 `first_seq`；它与 `start_seq` 各自记账：一轮可能没有
+        // 开始标记（历史行），也可能开始标记不是它的物理第一条。
         let mut open: Option<i64> = None;
+        let mut start: Option<i64> = None;
         for (seq, kind) in rows {
             if open.is_none() {
                 open = Some(seq);
+            }
+            if kind == TURN_START_KIND {
+                start = Some(seq);
             }
             if kind == TURN_END_KIND {
                 if let Some(first) = open.take() {
                     out.push(TurnBounds {
                         first_seq: first,
+                        start_seq: start.take(),
                         end_seq: Some(seq),
                     });
                 }
+                // `turn_end` 一并收掉本轮的开始标记：它在下一轮之前是唯一的
+                // 收口点，下一轮若没写开始标记，`start_seq` 必须是 `None` 而
+                // 不是继承上一轮的。
+                start = None;
             }
         }
         if let Some(first) = open {
             out.push(TurnBounds {
                 first_seq: first,
+                start_seq: start,
                 end_seq: None,
             });
         }
@@ -818,6 +876,9 @@ mod tests {
     // ---- 一轮的完整性 ----
 
     /// 有 `turn_end` 的一轮 = 走完了。
+    ///
+    /// 这一轮**没有** `turn_start`（历史行形状），所以 `start_seq` 是 `None`：
+    /// 那条判据不能拿 `start_seq.is_some()` 反推「有没有走完」。
     #[test]
     fn a_turn_with_its_end_marker_is_complete() {
         let (_d, t) = setup();
@@ -829,6 +890,7 @@ mod tests {
         let turns = t.turn_bounds("s1").unwrap();
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].first_seq, 1);
+        assert_eq!(turns[0].start_seq, None, "这一轮没有开始标记");
         assert_eq!(turns[0].end_seq, Some(3), "这一轮走完了");
     }
 
@@ -847,6 +909,49 @@ mod tests {
             turns[0].end_seq, None,
             "没有 turn_end 就是没走完，页面要能画出来"
         );
+        assert_eq!(
+            turns[0].start_seq, None,
+            "也没有开始标记，这一轮无从判断状态"
+        );
+    }
+
+    /// **有开始标记、没有结束标记的一轮**：`start_seq` 有、`end_seq` 无。
+    ///
+    /// 这正是「一轮开了还没关」在库里的样子，也是路由把 `running` 与
+    /// `incomplete` 分开报的唯一依据。反向验证：把 `turn_bounds` 里
+    /// `start = Some(seq)` 那行删掉，这条会红在「start_seq 该是 Some(2)」。
+    #[test]
+    fn a_turn_with_a_start_marker_and_no_end_marker_reports_only_its_start() {
+        let (_d, t) = setup();
+        t.append("s1", "n1", &NewEvent::turn_start(1), TS).unwrap();
+        t.append("s1", "n1", &chunk(2, "hello"), TS).unwrap();
+
+        let turns = t.turn_bounds("s1").unwrap();
+        assert_eq!(turns.len(), 1, "{turns:?}");
+        assert_eq!(turns[0].first_seq, 1);
+        assert_eq!(
+            turns[0].start_seq,
+            Some(1),
+            "开始标记写下来了，就必须读得回来：{turns:?}"
+        );
+        assert_eq!(turns[0].end_seq, None, "没有 turn_end 就是没关：{turns:?}");
+    }
+
+    /// **开始与结束都有的一轮两个都报**：`start_seq` 与 `end_seq` 各自是它们
+    /// 自己的 seq，不许互相顶替。
+    #[test]
+    fn a_turn_with_both_markers_reports_both() {
+        let (_d, t) = setup();
+        t.append("s1", "n1", &NewEvent::turn_start(1), TS).unwrap();
+        t.append("s1", "n1", &chunk(2, "hello"), TS).unwrap();
+        t.append("s1", "n1", &NewEvent::turn_end(3, "end_turn"), TS)
+            .unwrap();
+
+        let turns = t.turn_bounds("s1").unwrap();
+        assert_eq!(turns.len(), 1, "{turns:?}");
+        assert_eq!(turns[0].first_seq, 1);
+        assert_eq!(turns[0].start_seq, Some(1), "{turns:?}");
+        assert_eq!(turns[0].end_seq, Some(3), "{turns:?}");
     }
 
     /// 多轮：每一轮各自收口，最后一轮未收口。
@@ -866,6 +971,32 @@ mod tests {
         assert_eq!(turns[0].end_seq, Some(2));
         assert_eq!(turns[1].end_seq, Some(4));
         assert_eq!(turns[2].end_seq, None, "第三轮还在跑或断了");
+        assert!(
+            turns.iter().all(|t| t.start_seq.is_none()),
+            "这三轮都没写开始标记：{turns:?}"
+        );
+    }
+
+    /// **开始标记只属于它开的那一轮**：上一轮的开始标记不能被算进下一轮，
+    /// 否则「上一轮已收口」会被读成「下一轮也开了」。
+    #[test]
+    fn a_start_marker_belongs_only_to_the_turn_it_opened() {
+        let (_d, t) = setup();
+        t.append("s1", "n1", &NewEvent::turn_start(1), TS).unwrap();
+        t.append("s1", "n1", &chunk(2, "t1"), TS).unwrap();
+        t.append("s1", "n1", &NewEvent::turn_end(3, "end_turn"), TS)
+            .unwrap();
+        t.append("s1", "n1", &chunk(4, "t2"), TS).unwrap();
+
+        let turns = t.turn_bounds("s1").unwrap();
+        assert_eq!(turns.len(), 2, "{turns:?}");
+        assert_eq!(turns[0].start_seq, Some(1), "{turns:?}");
+        assert_eq!(turns[0].end_seq, Some(3), "{turns:?}");
+        assert_eq!(
+            turns[1].start_seq, None,
+            "第二轮没写开始标记，不许继承上一轮的：{turns:?}"
+        );
+        assert_eq!(turns[1].first_seq, 4, "{turns:?}");
     }
 
     // ---- 耗时列的来源 ----

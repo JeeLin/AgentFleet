@@ -230,24 +230,46 @@ pub async fn cancel(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// 一个会话的轨迹响应：`{ events: [...], gaps: [...], incomplete: bool }`。
+/// 一个会话的轨迹响应：`{ events: [...], gaps: [...], incomplete: bool, running: bool }`。
 ///
-/// # 为什么 `gaps` 与 `incomplete` 要一起返回
+/// # 为什么 `gaps`、`incomplete`、`running` 要一起返回
 ///
-/// 它们是**两个方向的缺口**，任何一个单独给出都会让页面画错（见
+/// 它们是三个方向的缺口，任何一个单独给出都会让页面画错（见
 /// `session-and-trajectory.md` §3.2.1）：
 /// - `gaps`：段内丢（`seq` 断裂）。页面在断口处画「此处缺失 N 条」。
-/// - `incomplete`：末尾丢（最后一轮没有 `turn_end`）。页面在末尾画
-///   「本轮未完成」。
+/// - `incomplete`：末尾丢且**没有开始标记**（最后一轮既无 `turn_end` 也无
+///   `turn_start`）。页面在末尾画「本轮未完成」。
+/// - `running`：最后一轮**开过没关**（有 `turn_start`、无 `turn_end`）。
 ///
-/// 只给 `sum(event)` 让前端自己算的话，那条判据会在前端再实现一遍，
+/// 只给 `sum(event)` 让前端自己算的话，那几条判据会在前端再实现一遍，
 /// 两份迟早分叉——而分叉的表现是「同一份轨迹，页面说有洞、接口说没有」。
+///
+/// # 为什么 `running` 与 `incomplete` 是两个字段而不是一个三态
+///
+/// 它们回答的是**两个不同的问题**，而且都由同一个 `turns` 的最后一项算出：
+/// - `running`：这一轮**开了**、并且还没关。一轮跑 130 秒是正常事，这段时间
+///   里它必然是 `running`。
+/// - `incomplete`：这一轮连开始标记都没有，结尾也没有。开始标记是这次改动
+///   才有的，所以 `incomplete` 今天同时覆盖「改动之前写下的历史行」与
+///   「开始标记与结束标记都丢了」这两种情形——本接口分不开它们，也不假装
+///   分得开。
+///
+/// 合成一个枚举会把「历史行」和「开始标记丢了」塞进同一个值，而页面要画的
+/// 是两句话。分开之后**两者互斥**：`running` 为真时 `incomplete` 必为假，
+/// 反之亦然（见 `trajectory` 里的两行赋值）。
 #[derive(Debug, serde::Serialize)]
 pub struct TrajectoryResponse {
     pub events: Vec<EventOut>,
     pub gaps: Vec<GapOut>,
-    /// 最后一轮没有 `turn_end` = 还在跑或结尾丢了。
+    /// 最后一轮既没有 `turn_start` 也没有 `turn_end`：结尾丢了，或者那是
+    /// 开始标记上线之前写下的历史行。
     pub incomplete: bool,
+    /// 最后一轮有 `turn_start`、没有 `turn_end`：**一轮开了还没关**。
+    ///
+    /// **这不等于「agent 还活着」**：开始标记落下之后设备掉线、进程被杀，
+    /// 这一轮同样是「开了没关」，本接口看不出差别——它说的是轨迹里那个标记
+    /// 的状态，不是设备的存活状态。
+    pub running: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -350,10 +372,18 @@ pub async fn trajectory(
         .turn_bounds(&session_id)
         .map_err(|e| ApiError::internal_with("cannot read trajectory turns", e))?;
 
-    // 最后一轮没 `turn_end` 就是未完成。**空轨迹不算未完成**：一个还没说过
-    // 话的会话没有任何一轮，把它标成「未完成」会让每个新会话一打开就带一条
-    // 警告。
-    let incomplete = turns.last().is_some_and(|t| t.end_seq.is_none());
+    // 最后一轮的状态，两个标志都由这一个 `turns.last()` 算出（互相矛盾的两份
+    // 结论不可能同时出现）。**空轨迹两个都是 false**：一个还没说过话的会话
+    // 没有任何一轮，把空轨迹标成「未完成」会让每个新会话一打开就带一条警告。
+    //
+    // `running` = 开过没关。`incomplete` = 连开始标记都没有、结尾也没有。
+    // 后者必须**排除**有开始标记的情形，否则一轮正常跑了 130 秒的对话会被
+    // 报成「本轮未完成」——那正是这次要修的那个谎。`start_seq` 为 `None` 的
+    // 历史行仍然报 `incomplete`：那时设备还不会发开始标记，丢没丢分不开，
+    // 不如按「可能丢了」说。
+    let last = turns.last();
+    let running = last.is_some_and(|t| t.start_seq.is_some() && t.end_seq.is_none());
+    let incomplete = last.is_some_and(|t| t.start_seq.is_none() && t.end_seq.is_none());
 
     Ok(Json(TrajectoryResponse {
         events: events.into_iter().map(EventOut::from).collect(),
@@ -366,6 +396,7 @@ pub async fn trajectory(
             })
             .collect(),
         incomplete,
+        running,
     })
     .into_response())
 }
@@ -441,6 +472,138 @@ mod tests {
             TRAJECTORY_LIMIT_MAX,
             "上限本身是允许的"
         );
+    }
+
+    // ---- 轨迹端点的 `running` / `incomplete` ----
+    //
+    // 直接调 handler 而不是走 HTTP：`GET /api/sessions/{id}/trajectory` 的集成
+    // 用例在 `tests/api.rs`（那条锁的是 JSON 形状），这里要锁的是**两个标志
+    // 的判据**，而造出「有开始标记没结束标记」这种状态只需要往轨迹表里写行。
+
+    /// 写几条事件进轨迹，返回一个可调 handler 的 state 与那条会话的 id。
+    fn trajectory_fixture(
+        events: &[hub_storage::NewEvent],
+    ) -> (crate::AppState, tempfile::TempDir, String) {
+        let d = tempfile::tempdir().expect("tmp");
+        let pool = hub_storage::db::open_in(d.path()).expect("db").1;
+        let state = crate::AppState::bootstrap_with(
+            pool,
+            d.path(),
+            hub_core::auth::AuthParams {
+                m_cost: 8192,
+                t_cost: 1,
+                p_cost: 1,
+            },
+            std::time::Duration::from_millis(50),
+            hub_core::auth::LoginRateLimiter::new(10, 60),
+        )
+        .expect("state");
+
+        let enrolled = hub_core::registry::Registry::new(state.pool().clone())
+            .enroll(
+                &[9u8; 32],
+                hub_storage::repo::NewDevice {
+                    id: String::new(),
+                    name: "dev".into(),
+                    key_fingerprint: String::new(),
+                    os: "linux".into(),
+                    arch: "x86_64".into(),
+                    hostname: "h".into(),
+                    node_version: "0.1.0".into(),
+                },
+            )
+            .expect("enroll");
+        let node_id = enrolled.node_id();
+
+        let seat = hub_storage::SessionRepo::new(state.pool().clone())
+            .create(node_id, "~/src/app", Some("opencode"), "t0")
+            .expect("建会话");
+
+        let repo = hub_storage::TrajectoryRepo::new(state.pool().clone());
+        for e in events {
+            repo.append(&seat.id, node_id, e, &hub_core::registry::now_stamp())
+                .expect("写轨迹");
+        }
+        (state, d, seat.id)
+    }
+
+    /// 调 `GET /api/sessions/{id}/trajectory` 的那份 handler，把 JSON 解回来。
+    async fn trajectory_json(state: &crate::AppState, session_id: &str) -> serde_json::Value {
+        let r = super::trajectory(
+            axum::extract::State(state.clone()),
+            axum::Extension(Authenticated::new("admin".to_string())),
+            axum::extract::Path(session_id.to_string()),
+            axum::extract::Query(super::TrajectoryQuery {
+                after: 0,
+                limit: 100,
+            }),
+        )
+        .await
+        .expect("轨迹端点应成功");
+        let bytes = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    fn chunk(seq: i64) -> hub_storage::NewEvent {
+        hub_storage::NewEvent::new(seq, "agent_message_chunk", r#"{"k":1}"#)
+    }
+
+    /// **有开始标记、没有结束标记 ⇒ `running: true`、`incomplete: false`**。
+    ///
+    /// 这是一轮正常跑着的样子（实测一轮可以跑 130 秒以上）。从前它被报成
+    /// 「本轮未完成」——那是在说一个没发生的事实。
+    ///
+    /// 两处反向验证（都实跑过）：把 handler 里 `running` 那行改成 `false`，
+    /// 红在「running 该是 true」；把 `incomplete` 的判据改回只看
+    /// `end_seq.is_none()`，红在「incomplete 该是 false」。
+    #[tokio::test]
+    async fn a_turn_opened_but_not_closed_is_running_not_incomplete() {
+        let (state, _d, session_id) =
+            trajectory_fixture(&[hub_storage::NewEvent::turn_start(1), chunk(2)]);
+        let v = trajectory_json(&state, &session_id).await;
+        assert_eq!(v["running"], json!(true), "开了没关就是 running：{v}");
+        assert_eq!(
+            v["incomplete"],
+            json!(false),
+            "有开始标记就不许说「未完成」——那是在说一个没发生的事实：{v}"
+        );
+    }
+
+    /// **两个标记都没有 ⇒ `running: false`**。
+    ///
+    /// 历史行（开始标记上线之前写的）与「什么都没写」在库里长得一样，
+    /// 这一个标志只回答「有没有开过」，两种都不是「开过」。
+    ///
+    /// 反向验证（实跑过）：把 `running` 的判据改成 `end_seq.is_none()`，
+    /// 红在「running 该是 false」。
+    #[tokio::test]
+    async fn a_turn_with_neither_marker_is_not_running() {
+        let (state, _d, session_id) = trajectory_fixture(&[chunk(1), chunk(2)]);
+        let v = trajectory_json(&state, &session_id).await;
+        assert_eq!(v["running"], json!(false), "没开过不算 running：{v}");
+        assert_eq!(
+            v["incomplete"],
+            json!(true),
+            "结尾也没有、开始也没有，只能按「可能丢了」报：{v}"
+        );
+    }
+
+    /// **两个标记都有 ⇒ `running: false`、`incomplete: false`**：这一轮走完了。
+    ///
+    /// 反向验证（实跑过）：把 `running` 的判据里的 `end_seq.is_none()` 去掉，
+    /// 红在「running 该是 false」。
+    #[tokio::test]
+    async fn a_closed_turn_is_neither_running_nor_incomplete() {
+        let (state, _d, session_id) = trajectory_fixture(&[
+            hub_storage::NewEvent::turn_start(1),
+            chunk(2),
+            hub_storage::NewEvent::turn_end(3, "end_turn"),
+        ]);
+        let v = trajectory_json(&state, &session_id).await;
+        assert_eq!(v["running"], json!(false), "关了就不是 running：{v}");
+        assert_eq!(v["incomplete"], json!(false), "走完了就不是未完成：{v}");
     }
 
     // ---- `cancel` 的两条 404 出路 ----
