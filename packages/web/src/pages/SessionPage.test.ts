@@ -268,11 +268,23 @@ describe('工作台：结构与默认值', () => {
 })
 
 describe('通道生命周期：懒建立', () => {
-  it('打开坞不建通道——那时还没有数据要流动', async () => {
+  it('展开坞并选中终端面板即建通道——用户已经明确要一个终端', async () => {
+    // 原来这条断言「打开坞不建通道」。那把它变成了隐性前置条件：用户看到的是
+    // 一块没有任何说明的空白终端，唯一出路是「随便敲一个键」——而这个前条件
+    // 没有任何地方写着。现在「选中终端面板」本身就算建立时机，只有「展开坞
+    // 但选中 files / 还没选」才不建（见下一条）。
     const { w, posts } = await mountWorkbench()
     await w.element.querySelector<HTMLElement>('.af-wb__head button')?.click()
     await flush(w)
-    expect(posts()).toBe(0)
+    expect(posts()).toBe(1)
+  })
+
+  it('把 files 拉进坞不建第二条通道：它的首个动作（列目录）自己会开', async () => {
+    // files 面板**不**由 `openPanel` 预建通道——`af-wb__head` 先建了终端那一条
+    // （选中终端即建），把 files 拉进来本身不该再多一条。
+    const { w, posts } = await mountWorkbench()
+    await openFiles(w)
+    expect(posts()).toBe(1)
   })
 
   it('第一次与面板正文交互才 POST /api/channels，并建一条 SSE', async () => {
@@ -292,6 +304,21 @@ describe('通道生命周期：懒建立', () => {
     await interact(w)
     await interact(w)
     expect(posts()).toBe(1)
+  })
+
+  it('展开坞即连上终端：面板头显示「已连接」，不是「未建立」', async () => {
+    // 用户原话「打开终端要点一下才会连接终端」：正确的读法是「打开终端就该
+    // 连上」。判据取**面板头里那块状态徽标的文字**——它是用户能看见的唯一
+    // 连接状态，也正是原来一直停在「未建立」的那个地方。
+    const { w } = await mountWorkbench()
+    await w.element.querySelector<HTMLElement>('.af-wb__head button')?.click()
+    await flush(w)
+
+    const head = w.element.querySelector<HTMLElement>('.af-panelhead')
+    if (!head) throw new Error('dock header did not render')
+    const stateText = head.textContent ?? ''
+    expect(stateText).toContain('已连接')
+    expect(stateText).not.toContain('未建立')
   })
 
   it('切面板不建第二条通道（终端 / 文件各一条，各自懒建立）', async () => {
