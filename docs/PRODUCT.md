@@ -47,20 +47,24 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 > defined by the mapping table in `docs/DEVELOPMENT.md` §4 — the single source of
 > truth. Change scope or schedule through it.
 
-| 能力 | 用户可见行为 |
-|------|------------|
-| 设备接入 | `afcli run <hub-url>` 一条命令，节点生成密钥对、主动建立 WebSocket 外联；**首次启动自动 enroll**，用户无需单独跑 enroll；无需 Hub 入站端口 |
-| 节点身份与状态 | 注册时 Hub 签发 `node_id`；心跳即能力上报（os / arch / hostname / 版本 / 支持的 connector）；在线/离线状态 |
-| AI agent 管理与对话 | 接入各类 agent 软件（不同厂商/协议），在 Web 一个界面里统一配置、启动、对话。**agent 运行时装在节点上、由用户自己安装**（Hub 不代装，2026-10-26 裁定）；Hub 负责**扫描**出节点上装了什么、并保存它们的**启动配置**，见 `docs/architecture/workspace-and-sync.md` §4.4。接入方式见 `docs/architecture/session-and-trajectory.md` |
-| ~~Hub 一键安装 agent~~ **已撤销（2026-10-26）** | 原计划在 Hub 选设备 + 选 agent 模板 → 节点本地安装。**产品裁定：不代装**——让 Hub 往设备写可执行文件等于「一处配置错、全体设备执行未核对代码」，agent 由用户自己在设备上装，Hub 只做**扫描**（心跳上报这台机器上**存在**哪些 agent）与**启动配置**的读写，见上一行与 `architecture/workspace-and-sync.md` §4.4（原文保留作决策记录）。**afcli 自身的升级是另一条通路，不受此裁定影响**：页面显示各设备 afcli 版本号 → 可手动触发升级 → 另有「自动升级」开关；版本号由 Hub 下发，升级失败自动回滚并回报 |
-| 对话与动作流 | 会话有 Trajectory 视图，逐条展示 User/Assistant/Tool/子agent/压缩记录；**随时可看**本次改动文件与 diff |
-| 文件浏览 | 会话工作区内浏览/读写节点本地目录，写操作限制在工作区根内（**仅约束页面用户**；agent 用自己装的能力，不走这条路径） |
-| Git 操作界面 | 会话工作区的 git 状态 / diff / 提交视图 |
-| Bash / PTY | 会话工作区内的本地 shell；不装 openssh-server，Hub 不拨入 |
-| ~~工作区供料~~ **已撤销（2026-10-26）** | 原计划 Hub 把项目文件喂进设备。**产品裁定只做每台设备内自己的对话，不做任务分发**，因此没有项目文件传输需求。规格留 `architecture/workspace-and-sync.md` 作决策记录 |
-| 统一配置 agent | 在 Hub 统一管理各设备的 agent 配置（专家 agent 定义、技能）；托管文件在节点上只读，本地改动标记为「漂移」，可 push / pull |
-| ~~产物归档~~ **已撤销（2026-10-26）** | 同属「东西从设备回 Hub」的传输面，随任务分发一起撤销 |
-| 模型配置一处切换 | 在 Hub 一处配置模型与 API key，各节点上的 agent 复用同一套配置（一处改、处处生效，对标 ccswitch 的交互） |
+> **状态列**由 `mdflow-planner` 唯一维护：`[待规划]`（缺省）/ `[已规划]`（已纳入未完成的里程碑）/
+> `[x]`（承接它的里程碑已完成）/ `[已放弃]`（决定不做）。规格本身不因状态变化而删改——
+> 已建成或已放弃的功能仍留在本表里，作为产品决策的记录。
+
+| 状态 | 能力 | 用户可见行为 |
+|------|------|------------|
+| [x] | 设备接入 | `afcli run <hub-url>` 一条命令，节点生成密钥对、主动建立 WebSocket 外联；**首次启动自动 enroll**，用户无需单独跑 enroll；无需 Hub 入站端口 |
+| [x] | 节点身份与状态 | 注册时 Hub 签发 `node_id`；心跳即能力上报（os / arch / hostname / 版本 / 支持的 connector）；在线/离线状态 |
+| [x] | AI agent 管理与对话 | 接入各类 agent 软件（不同厂商/协议），在 Web 一个界面里统一配置、启动、对话。**agent 运行时装在节点上、由用户自己安装**（Hub 不代装，2026-10-26 裁定）；Hub 负责**扫描**出节点上装了什么、并保存它们的**启动配置**，见 `docs/architecture/workspace-and-sync.md` §4.4。接入方式见 `docs/architecture/session-and-trajectory.md` |
+| [已放弃] | ~~Hub 一键安装 agent~~ **已撤销（2026-10-26）** | 原计划在 Hub 选设备 + 选 agent 模板 → 节点本地安装。**产品裁定：不代装**——让 Hub 往设备写可执行文件等于「一处配置错、全体设备执行未核对代码」，agent 由用户自己在设备上装，Hub 只做**扫描**（心跳上报这台机器上**存在**哪些 agent）与**启动配置**的读写，见上一行与 `architecture/workspace-and-sync.md` §4.4（原文保留作决策记录）。**afcli 自身的升级是另一条通路，不受此裁定影响**：页面显示各设备 afcli 版本号 → 可手动触发升级 → 另有「自动升级」开关；版本号由 Hub 下发，升级失败自动回滚并回报 |
+| [x] | 对话与动作流 | 会话有 Trajectory 视图，逐条展示 User/Assistant/Tool/子agent/压缩记录；**随时可看**本次改动文件与 diff |
+| [x] | 文件浏览 | 会话工作区内浏览/读写节点本地目录，写操作限制在工作区根内（**仅约束页面用户**；agent 用自己装的能力，不走这条路径） |
+| [已规划] | Git 操作界面 | 会话工作区的 git 状态 / diff / 提交视图。**M3 只交付只读部分（状态 / diff / log）**：「提交视图」指**查看历史提交**，不是从页面发起 commit；从页面提交属写操作，未排期 |
+| [x] | Bash / PTY | 会话工作区内的本地 shell；不装 openssh-server，Hub 不拨入 |
+| [已放弃] | ~~工作区供料~~ **已撤销（2026-10-26）** | 原计划 Hub 把项目文件喂进设备。**产品裁定只做每台设备内自己的对话，不做任务分发**，因此没有项目文件传输需求。规格留 `architecture/workspace-and-sync.md` 作决策记录 |
+| [待规划] | 统一配置 agent | 在 Hub 统一管理各设备的 agent 配置（专家 agent 定义、技能）；托管文件在节点上只读，本地改动标记为「漂移」，可 push / pull |
+| [已放弃] | ~~产物归档~~ **已撤销（2026-10-26）** | 同属「东西从设备回 Hub」的传输面，随任务分发一起撤销 |
+| [待规划] | 模型配置一处切换 | 在 Hub 一处配置模型与 API key，各节点上的 agent 复用同一套配置（一处改、处处生效，对标 ccswitch 的交互） |
 
 > **终端 / 文件 / git 是会话内的面板**，绑定该会话的工作区（设备上的一个 `(node_id, path)`），
 > 进入会话才建立、退出即释放。**不做设备级的多资源管理台。**

@@ -99,7 +99,7 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
 | M0 ✅ 已完成 | 设备接入 | `afcli run` 一条命令（首次自动 enroll）；**密钥对在 node 本地生成、Hub 只存指纹**；supervisor/worker 同二进制双角色（`run --worker`，回滚由未被替换的 supervisor 执行，见 `DECISIONS.md` D1/D2）；单条 WS 主动外联；心跳即能力上报；掉线指数退避重连；防重复注册（同一指纹不得新建设备）；`afcli log` 看最近日志；**WS 协议层与 enroll 时序一并设计**（见 `architecture/protocol.md`） | 设备接入、节点身份与状态、存储与启动基座 |
 | M1 ✅ 已完成 | 会话容器与首个演示 | 工作区 `(node_id, path)` 落库；会话创建即挂载工作区；**在树莓派上开一个会话，会话内的 terminal / files / exec 面板可用，零入站端口、不装 openssh-server**；exec connector（一次性命令、无 PTY；**只经会话通道触发**，connector 跑在设备上，Hub 没有旁路入口）随此里程碑落地。**connector 只面向页面用户，不向 agent 暴露**。**「会话」指页面级容器，不是 ACP agent 会话**——ACP 归 M2 | Bash/PTY、文件浏览 |
 | M2 ✅ 已完成 | ACP 对话 | 接入 ACP（`session-and-trajectory.md`）：设备探测并心跳上报 agent 运行时；**agent 由用户自己在设备上安装，Hub 只扫描 + 存启动配置**（2026-10-26 裁定，不代装）；建会话可选用该设备上已装且可用的 agent（未装 → 409）；ACP 客户端（`initialize` / `session/new` / `session/prompt` / `session/update` / `session/cancel` / `session/load`）；`session/update` 事件流落 append-only 轨迹表（类型/输入/输出/耗时/归属节点）；对话页面。**删除语义三分离**：卸载 agent 不删会话、删设备不删会话、删工作区有会话则拒。**不用外键**——归属关系由业务层显式检查并给可读错误 | AI agent 管理与对话、对话与动作流 |
-| M3 | Git 界面 | 会话工作区的 git 状态 / diff / 提交视图；**此时会话面板补齐第三个 git 面板** | Git 操作界面 |
+| M3 🔄 当前 | Git 界面 | 会话工作区的 git 状态 / diff / 提交视图；**此时会话面板补齐第三个 git 面板**。设备侧补上 `git` connector（此前 `connector/` 里从未实现——M0 的心跳曾硬编码上报过它，`heartbeat.rs` 的注释与 `the_registered_set_is_exactly_the_three_m1_connectors` 都记着这件事）：**只读子集** `status` / `diff` / `log`，经 `git` 子进程读取工作区。**不做 `commit` 及其它写操作**：M3 的目标是「看它改了什么」，而写操作要连带解决提交者身份、钩子与失败回滚，属另一件事，有明确需求再排期 | Git 操作界面 |
 | M4 | 任务分发与托管配置 | **Hub 新建任务 → 仅节点内编排**：Hub 建任务，**node 决定开几个 sub-task**（按 `DECISIONS.md` D9 收窄为节点内编排，跨设备分发留 M8）；任务工作区来源分发时确认；托管配置覆盖层（skills / 两层权限 / 漂移检测，见 `architecture/workspace-and-sync.md` §4.1–4.3，**暂缓**）；agent 软件本体升级策略（未决，见同文 §4.4） | 统一配置 agent、模型配置一处切换 |
 | M5 | 推理网关 | 一个 OpenAI 兼容端点，背后是 N 台设备各自的全量副本（阶段 1，请求级路由） | —（新增能力） |
 | M6 | connector 插件化 | 把协议族做成插件按需加载 + 抓包插件 + 端口转发插件 | —（`PRODUCT.md` §3.2 后续项） |
@@ -116,6 +116,13 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
 >
 > **原 M2 与 Git 的先后顺序已不适用**：那条理由（「工作区必须先能被喂进去」）随传输面一起撤销。
 > M3（Git 界面）现在只需 M1 的工作区绑定即可开工。
+
+> **M3 的范围（2026-10-29 规划）**：**子任务预估 6 个**（git connector 的设备侧实现 / git 帧协议与注册表接线 /
+Hub 侧透传与能力校验 / 会话页第三个面板的注册与布局 / 状态与 diff 视图 / log 视图与真机端到端）。
+**依赖 M1**（工作区绑定、面板坞、`files` 面板的既有形态全部复用）。
+**版本类型：minor**（新增能力，向后兼容）。**缺陷池 bug**：0 个。
+> 只读是**范围决定**而非实现取舍：写操作（commit / checkout / stage）要连带决定提交者身份来源、
+> 钩子执行与失败回滚，与 M3 的目标「看它改了什么」无关，因此不在本里程碑内。
 
 > 第一版 = M0–M4（首个可用版本）。M5 起为第二阶段。
 > The first usable version is M0–M4; M5 onward is the next stage.
@@ -154,7 +161,7 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
 | 文件浏览 | M1 | 同上 |
 | AI agent 管理与对话 | M2 | `session-and-trajectory.md`（ACP 会话）。**M1 的会话容器不是 agent 会话**，见 §3 M1 行 |
 | 对话与动作流 | M2 | `session-and-trajectory.md` §3/§7（轨迹表） |
-| Git 操作界面 | M3 | `architecture/README.md` §4 |
+| Git 操作界面 | M3（**只读子集**：status / diff / log；`commit` 未排期） | `architecture/README.md:95` §4（git 是四个内置 connector 之一）；`architecture/README.md:126`（面板绑会话工作区，**工作区不是路由**）。**M3 的 `commit` 不在本里程碑**，见 `PRODUCT.md` §3.1 该行 |
 | 统一配置 agent | M4（**暂缓**） | `workspace-and-sync.md` §4.1–4.3（托管覆盖层 + 两层权限）。**规格在，实现未排期** |
 | 模型配置一处切换 | M4（**暂缓**） | `workspace-and-sync.md` §4.3；`security-and-lifecycle.md` §3 |
 | ~~Hub 一键安装 agent~~ **已撤销（2026-10-26）** | —（不做代装） | 产品裁定 agent 由用户自己安装，Hub 只扫描 + 存启动配置。原规格 `workspace-and-sync.md` §4.4 保留原文作决策记录 |
