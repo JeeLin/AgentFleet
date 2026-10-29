@@ -968,6 +968,72 @@ kbd, .kbd {
 .af-diff__row[data-kind='add'] .af-diff__sign { color: var(--af-ok-fg); }
 .af-diff__row[data-kind='del'] .af-diff__sign { color: var(--af-danger-fg); }
 
+/* git 面板（v0.4.0，只读）：分支 + 改动列表 + 逐文件 diff。
+   配色与上面的 `.af-diff` 共用同一批变量——两处 diff 长得不一样会让人以为
+   它们是两种不同的事实。 */
+.af-git { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.af-git__head {
+  display: flex; align-items: center; gap: var(--af-space-3);
+  padding: var(--af-space-2) var(--af-space-4);
+  border-bottom: 1px solid var(--af-border-subtle); flex: 0 0 auto;
+}
+.af-git__branch { color: var(--af-fg-secondary); font-size: var(--af-text-sm); }
+/* 空态 / 说明：与文件面板的 `__void` 同一口径（§3.12 的「本来该有东西但没有」）。 */
+.af-git__void { padding: var(--af-space-4); font-size: var(--af-text-sm); line-height: var(--af-leading-normal); }
+.af-git__void p { margin: 0 0 var(--af-space-2); }
+/* 列表与 diff 并排；窄列（< 720px）时上下叠——并排在 412px 里两边都读不了。 */
+.af-git__split { display: flex; flex: 1 1 auto; min-height: 0; min-width: 0; }
+.af-git__files {
+  flex: 0 0 38%; overflow: auto; min-width: 0; margin: 0; padding: 0; list-style: none;
+  border-right: 1px solid var(--af-border-subtle);
+}
+.af-git__file {
+  display: flex; align-items: baseline; gap: var(--af-space-2); width: 100%;
+  padding: var(--af-space-2) var(--af-space-3); border: 0; background: none;
+  cursor: pointer; font-family: inherit; font-size: var(--af-text-sm);
+  color: var(--af-fg-secondary); text-align: left;
+}
+.af-git__file:hover { background: var(--af-surface-2); color: var(--af-fg-primary); }
+.af-git__file[aria-selected='true'] { background: var(--af-surface-0); color: var(--af-fg-primary); }
+/* 两字母状态码是定宽的（`M ` 与 `??` 要能对齐），所以等宽字体 + 不换行。 */
+.af-git__code {
+  flex: 0 0 auto; color: var(--af-fg-tertiary); white-space: pre;
+  font-size: var(--af-text-xs);
+}
+.af-git__path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.af-git__diffpane { flex: 1 1 auto; min-width: 0; overflow: auto; }
+.af-gdiff { display: flex; flex-direction: column; min-height: 0; }
+.af-gdiff__head {
+  padding: var(--af-space-2) var(--af-space-3); font-size: var(--af-text-xs);
+  border-bottom: 1px solid var(--af-border-subtle); flex: 0 0 auto;
+}
+.af-gdiff__body {
+  margin: 0; padding: 0; overflow: auto; flex: 1 1 auto;
+  font-family: var(--af-font-mono); font-size: var(--af-text-md);
+  line-height: var(--af-leading-tight);
+}
+.af-gdiff__line { padding: 0 var(--af-space-3); white-space: pre; }
+.af-gdiff__line[data-kind='add'] { background: var(--af-add-ink); }
+.af-gdiff__line[data-kind='del'] { background: var(--af-del-ink); }
+.af-gdiff__line[data-kind='hunk'] { background: var(--af-surface-2); color: var(--af-info-fg); }
+.af-gdiff__line[data-kind='meta'] { color: var(--af-fg-tertiary); }
+.af-gdiff__note { padding: var(--af-space-4); font-size: var(--af-text-sm); margin: 0; }
+/* 截断提示用 warn 而不是 danger：内容是真的，只是不全——用户不需要「修」，
+   但必须知道「下面不是全部」。 */
+.af-gdiff__trunc {
+  margin: 0; padding: var(--af-space-2) var(--af-space-3);
+  background: var(--af-surface-2); color: var(--af-warn-fg);
+  font-size: var(--af-text-xs); border-top: 1px solid var(--af-border-subtle);
+}
+/* 窄列：列表与 diff 上下叠，各占一半高度。 */
+@media (max-width: 720px) {
+  .af-git__split { flex-direction: column; }
+  .af-git__files {
+    flex: 0 0 auto; max-height: 40%; border-right: 0;
+    border-bottom: 1px solid var(--af-border-subtle);
+  }
+}
+
 /* 轨迹抽屉的样式**只住在 `TrajDrawer.vue` 的 scoped 块里**。
    这里曾经有一份同名的全局副本（.af-traj / __head / __body / __row / __seq /
    __kind / __ms），定位与列数与组件那份都不同（`top:40px; right:0; width:460px`

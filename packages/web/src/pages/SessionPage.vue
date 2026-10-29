@@ -57,6 +57,7 @@ import FilesPanel, {
   type FilePreview,
   type FilesError,
 } from '@/components/FilesPanel.vue'
+import GitPanel from '@/components/GitPanel.vue'
 import PanelDock, { type ChannelView } from '@/components/PanelDock.vue'
 import { PANEL_ORDER, type PanelName } from '@/lib/panel'
 import SplitHandle from '@/components/SplitHandle.vue'
@@ -152,6 +153,52 @@ const activeTab = computed<TabMeta | null>(
   () => tabs.value.tabs.find((t) => t.id === tabs.value.activeId) ?? null,
 )
 
+/**
+ * git 面板的一份视图状态。
+ *
+ * **三件事各自独立**，所以是三个字段而不是一个 `error: string | null`：
+ * 「没问过」「不是仓库」「问失败了」在页面上是三句不同的话，而一个
+ * 可空字符串会让「not a git repository」和「通道断了」长得一样。
+ */
+interface GitView {
+  /** `status` 回帧里的分支名。`null` = 还不知道（没问过 / 空仓库无 HEAD）。 */
+  branch: string | null
+  /** 短 HEAD。detached 时也有值——那正是它唯一的信息来源。 */
+  head: string | null
+  /** detached HEAD。页面要写 `(detached at abc1234)` 而不是留空白。 */
+  detached: boolean
+  /** 工作区是否有未提交改动。`null` = 还没问过（与 `false` 是两件事）。 */
+  clean: boolean | null
+  /** 改动文件列表（`status` 的 `files`）。 */
+  files: GitStatusFile[]
+  /** 设备说「这里不是 git 仓库」。**正常状态**，页面上是一句中性说明。 */
+  notARepo: boolean
+  /** 当前展开的那个文件的 diff。 */
+  diff: GitDiffView | null
+  /** 正在取 diff 的路径（点开后才发，防重入）。 */
+  reading: string | null
+  /** 问 status / diff 被拒的原因。与 `notARepo` 分开：那是事实，这是故障。 */
+  error: string | null
+}
+
+/** `status` 回帧里的一个文件条目。两列状态码原样保留。 */
+interface GitStatusFile {
+  /** index 侧（暂存区）状态码，一个字符。 */
+  x: string
+  /** worktree 侧状态码，一个字符。 */
+  y: string
+  path: string
+}
+
+/** 一份 diff 回帧。 */
+interface GitDiffView {
+  path: string | null
+  /** unified diff 正文。 */
+  unified: string
+  /** 设备侧截断了（超帧预算）。**必须显式告知**，不能静默少给。 */
+  truncated: boolean
+}
+
 interface TabWorkspace {
   /** 面板坞开着吗。 */
   dock: boolean
@@ -228,6 +275,8 @@ interface TabWorkspace {
   convError: string | null
   /** 每个面板的通道视图（状态 / 错误 / 丢弃数）。 */
   views: Record<PanelName, ChannelView>
+  /** git 面板的视图状态（分支 / 改动 / diff）。 */
+  git: GitView
 }
 
 const workspaces = reactive(new Map<string, TabWorkspace>())
@@ -272,6 +321,18 @@ function blankWorkspace(): TabWorkspace {
       // 类型是 `Record<PanelName, ChannelView>`：扩 `PanelName` 时漏一项
       // 编译不过，而不是运行时读到 `undefined` 再把 `.state` 炸出来。
       git: { state: 'idle', error: null, dropped: 0 },
+    },
+    git: {
+      branch: null,
+      head: null,
+      detached: false,
+      // `null` 而不是 `true`：还没问过的时候页面不能声称「干净」。
+      clean: null,
+      files: [],
+      notARepo: false,
+      diff: null,
+      reading: null,
+      error: null,
     },
   }
 }
@@ -411,6 +472,9 @@ function ensureChannel(tab: TabMeta, panel: PanelName): ChannelHandle {
     // 丢弃语义，见 `pendingFiles` 头注释）。终端不需要这一步——它没有
     // 「打开时该问的第一件事」，输出是设备自己推的。
     if (state === 'ready' && panel === 'files') filesKick(tab)
+    // git 与 files 同一条理由：面板挂上就问一次 status。不问的话用户看到的
+    // 是一块「还没问过」的空壳，而通道明明是好的——两种空被读反（§3.12）。
+    if (state === 'ready' && panel === 'git') gitKick(tab)
   })
   channelUnsubs.set(key, unsub)
   const unframe = handle.onFrame((frame) => onPanelFrame(tab.id, panel, frame))
@@ -428,6 +492,7 @@ function ensureChannel(tab: TabMeta, panel: PanelName): ChannelHandle {
  * |---|---|---|
  * | terminal | `{ bytes }`（可能是半条控制序列） | `ws.output`（append-only） |
  * | files | `{ op: 'list' \| 'read' \| 'write' \| 'error', … }` | `ws.listings` / `ws.preview` / `ws.writeError` |
+ * | git | `{ op: 'status' \| 'diff' \| 'log' \| 'error', … }` | `ws.git`（分支 / 改动 / diff） |
  * | exec | `{ exit_code, stdout_b64, … }` | 执行结果（一次性，回完即关） |
  *
  * **真 files connector 到位后这里是唯一要改的地方**——形状已经按
@@ -443,6 +508,10 @@ function onPanelFrame(tabId: string, panel: PanelName, frame: ChannelFrame): voi
   }
   if (panel === 'files') {
     applyFileFrame(ws, frame.payload)
+    return
+  }
+  if (panel === 'git') {
+    applyGitFrame(ws, frame.payload)
   }
 }
 
@@ -1042,6 +1111,155 @@ function filesKick(tab: TabMeta): void {
     ws.loading.add(path)
     fileRequest(tab, 'list', { path })
   })
+}
+
+/**
+ * git 通道 ready 之后问一次 `status`。
+ *
+ * 同 `filesKick` 的理由：面板挂上却什么都没问，用户看到的是一块「还没问过」
+ * 的空壳，而通道明明是好的——两种空被读反（§3.12）。**问一次就够**：git 的
+ * 状态变化是用户自己触发的（切回面板时重问见 `gitRefresh`），不像终端有设备
+ * 主动推送。
+ */
+function gitKick(tab: TabMeta): void {
+  void Promise.resolve().then(() => {
+    const ws = workspaces.get(tab.id)
+    if (!ws) return
+    gitRequest(tab, 'status')
+  })
+}
+
+/** 用户点了刷新：重问一次 status（丢失 diff 是刻意的，见 `applyGitFrame`）。 */
+function gitRefresh(tab: TabMeta): void {
+  const ws = workspaces.get(tab.id)
+  if (!ws) return
+  gitRequest(tab, 'status')
+}
+
+/** 用户点了某个文件：问它的 diff。 */
+function gitShowDiff(tab: TabMeta, path: string): void {
+  const ws = workspaces.get(tab.id)
+  if (!ws) return
+  ws.git.reading = path
+  gitRequest(tab, 'diff', { path })
+}
+
+/**
+ * 往 git 通道发一次请求。
+ *
+ * 与 `fileRequest` 分开而不是共用一个函数：两者的失败落点不同（files 写进
+ * `ws.filesError`，git 写进 `ws.git.error`），合并就要在里面判 `panel`，
+ * 而那正是「一个函数知道太多」的样子。共同的形状只有五行 `fetch`。
+ */
+function gitRequest(
+  tab: TabMeta,
+  op: 'status' | 'diff',
+  payload: Record<string, unknown> = {},
+): void {
+  const handle = channels.get(channelKey(tab.id, 'git'))
+  if (!handle || handle.state() !== 'ready') return
+  const id = handle.id()
+  if (!id) return
+  void request(`/api/channels/${encodeURIComponent(id)}/send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ op, ...payload }),
+  }).catch((err: unknown) => {
+    const ws = workspaces.get(tab.id)
+    if (!ws) return
+    ws.git.reading = null
+    // 静默失败就是一块永远不动的面板：git 没有第二条反馈路径。
+    ws.git.error =
+      err instanceof ApiError
+        ? `Hub 拒绝了这次 git 请求（${err.code}）。`
+        : 'git 请求没能送到 Hub，面板内容可能已经过期。'
+  })
+}
+
+/**
+ * git 通道的帧落到 `ws.git` 上。
+ *
+ * **`status` 与 `diff` 各自只动自己的那几格**：一帧 `status` 不该把已经取到的
+ * diff 清掉（用户点开文件后再刷新一次状态，diff 还在才对）；反过来一帧 `diff`
+ * 也不该动分支名。只有 `error` 是两边共享的。
+ *
+ * **设备侧的失败走 `channel_error`（不是 `op:"error"`）**——见
+ * `crates/node-core/src/connector/git.rs` 的 `run_git`：非零退出返回
+ * `ConnectorError::Failed`，由通道层变成 `channel_error`，于是它到不了这里，
+ * 而是进 `views.git.error`（错误码）与 `ws.git.error` 无关。
+ */
+function applyGitFrame(ws: TabWorkspace, payload: unknown): void {
+  const frame = asRecord(payload)
+  if (!frame) return
+  switch (frame.op) {
+    case 'status':
+      applyGitStatus(ws.git, frame)
+      return
+    case 'diff':
+      applyGitDiff(ws.git, frame)
+      return
+    case 'error':
+      // git connector 目前不产生 `op:"error"`（失败走 `channel_error`），
+      // 但设备侧将来若统一成这一形状，这里要能接住而不是静默丢弃。
+      ws.git.reading = null
+      ws.git.error = typeof frame.reason === 'string' ? frame.reason : '设备没能完成这次 git 操作。'
+      return
+    default:
+      // 不认识的 op 一律不动状态（与 `applyFileFrame` 同一条：约束 14 的
+      // 前向兼容在页面这一侧的对应物）。
+      return
+  }
+}
+
+/**
+ * `op:"status"`：分支、HEAD、改动列表。
+ *
+ * `not_a_repo` 是设备侧的一等字段，不是「形状异常」：非仓库时它回的是
+ * **正常回帧**（见 `connector/git.rs`），`branch` / `head` / `clean` 全是
+ * `null`、`files` 为空。不认这个字段的话，非仓库会落进「还没问过」那一档，
+ * 页面上一直写「正在读取工作区状态…」——一句永远不成立的话。
+ */
+function applyGitStatus(git: GitView, frame: Record<string, unknown>): void {
+  git.error = null
+  git.notARepo = frame.not_a_repo === true
+  if (git.notARepo) {
+    // 非仓库时后面这些字段没有意义，清空而不是留上一次的值：用户可能刚在
+    // 另一个 tab 是仓库、切过来这台不是，残留的旧分支名会被当成这台的分支。
+    git.branch = null
+    git.head = null
+    git.detached = false
+    git.clean = null
+    git.files = []
+    git.diff = null
+    git.reading = null
+    return
+  }
+  git.branch = typeof frame.branch === 'string' ? frame.branch : null
+  git.head = typeof frame.head === 'string' ? frame.head : null
+  git.detached = frame.detached === true
+  git.clean = frame.clean === true
+  const raw = Array.isArray(frame.files) ? frame.files : []
+  git.files = raw.flatMap((entry) => {
+    const f = asRecord(entry)
+    if (!f || typeof f.path !== 'string') return []
+    return [
+      {
+        x: typeof f.x === 'string' ? f.x : ' ',
+        y: typeof f.y === 'string' ? f.y : ' ',
+        path: f.path,
+      },
+    ]
+  })
+}
+
+/** `op:"diff"`：一份 unified diff。 */
+function applyGitDiff(git: GitView, frame: Record<string, unknown>): void {
+  git.reading = null
+  git.diff = {
+    path: typeof frame.path === 'string' ? frame.path : null,
+    unified: typeof frame.unified === 'string' ? frame.unified : '',
+    truncated: frame.truncated === true,
+  }
 }
 
 /**
@@ -1785,6 +2003,29 @@ onBeforeUnmount(() => {
                 @dirty-change="filesDirty"
                 @dismiss-error="activeWs.filesError = null"
                 @dismiss-write-error="activeWs.writeError = null"
+              />
+            </template>
+            <!--
+              git 面板：`status` + 逐文件 `diff`（v0.4.0 只读）。
+
+              与终端 / 文件同一条纪律：**不持通道**——取数由本页翻译
+              （`gitRequest` / `applyGitFrame`），面板只吃 props、只发 intent。
+            -->
+            <template #git>
+              <GitPanel
+                v-if="activeWs.panel === 'git'"
+                :state="activeWs.views.git.state"
+                :branch="activeWs.git.branch"
+                :head="activeWs.git.head"
+                :detached="activeWs.git.detached"
+                :clean="activeWs.git.clean"
+                :files="activeWs.git.files"
+                :not-a-repo="activeWs.git.notARepo"
+                :diff="activeWs.git.diff"
+                :reading="activeWs.git.reading"
+                :error="activeWs.git.error"
+                @refresh="activeTab && gitRefresh(activeTab)"
+                @diff="(path: string) => activeTab && gitShowDiff(activeTab, path)"
               />
             </template>
           </PanelDock>

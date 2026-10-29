@@ -148,7 +148,30 @@ impl Git {
         let root = self.root_checked()?;
         // `--porcelain=v1 -z`：`-z` 用 NUL 分隔且**不转义路径**，
         // 否则一个含空格或中文的文件名会被引号包起来，页面上显示成带引号的怪东西。
-        let raw = self.run_git(root, &["status", "--porcelain=v1", "-z", "--branch"])?;
+        //
+        // **「不是 git 仓库」在这里被接住，不是错误**：它是这个工作区的一种
+        // 正常状态，页面对它画的是一句中性说明而不是红框。把它交给错误路径
+        // 的后果不只是「红框」——通道层只往页面传错误码，detail 里的那句
+        // `not a git repository` 到不了页面，于是页面既画不出中性说明，也
+        // 分不清「不是仓库」和「git 真的挂了」。所以正常回帧、字段声明事实。
+        let raw = match self.run_git(root, &["status", "--porcelain=v1", "-z", "--branch"]) {
+            Ok(raw) => raw,
+            Err(e) if is_not_a_repo(&e) => {
+                return Ok(vec![OutFrame::new(serde_json::json!({
+                    "op": "status",
+                    "not_a_repo": true,
+                    "branch": null,
+                    "head": null,
+                    "detached": false,
+                    // `clean` 用 `null` 而不是 `true`：这里根本没有「干不干净」
+                    // 这回事，说 `true` 会让页面在非仓库上来回显示
+                    // 「没有未提交的改动」。
+                    "clean": null,
+                    "files": [],
+                }))])
+            }
+            Err(e) => return Err(e),
+        };
         let StatusView {
             branch,
             head,
@@ -465,6 +488,18 @@ fn classify_failure(stderr: &str) -> String {
     }
 }
 
+/// 这个失败是不是「这里压根不是 git 仓库」。
+///
+/// 与 `classify_failure` 里那个固定前缀共用同一条判据，但用途相反：那边把
+/// 它变成一句可识别的 detail，这边把它**从错误路径上摘下来**——它是正常
+/// 状态，不该占一个错误码。
+fn is_not_a_repo(e: &ConnectorError) -> bool {
+    match e {
+        ConnectorError::Failed { detail, .. } => detail.starts_with("not a git repository"),
+        _ => false,
+    }
+}
+
 /// 这个失败是不是「仓库里还没有提交」。
 ///
 /// git 对无提交仓库的 `log` 以非零退出并说 `does not have any commits yet`
@@ -767,21 +802,46 @@ mod tests {
     /// 前缀是页面唯一可依赖的识别手段——「不是仓库」要画成中性说明而不是红框，
     /// 页面不得靠中文猜。
     #[test]
-    fn status_outside_a_repo_fails_with_the_fixed_prefix() {
+    fn status_outside_a_repo_is_a_normal_frame_saying_so() {
+        // 「不是 git 仓库」是**正常状态**，不是错误：页面对它画的是一句中性
+        // 说明。走错误路径的话通道层只把错误码传出去，detail 里的那句
+        // `not a git repository` 到不了页面——页面既画不出说明，也分不清
+        // 「不是仓库」和「git 真挂了」。
         let (_base, ws) = sandbox();
         let mut g = open(&ws);
-        let err = call(&mut g, serde_json::json!({"op": "status"})).expect_err("要报错");
+        let payload = call(&mut g, serde_json::json!({"op": "status"})).expect("非仓库不该报错");
 
-        match err {
-            ConnectorError::Failed { op, detail } => {
-                assert_eq!(op, "status");
-                assert!(
-                    detail.starts_with("not a git repository"),
-                    "detail 必须以固定前缀开头，实际 {detail:?}"
-                );
-            }
-            other => panic!("越界/失败要落到 Failed，实际 {other:?}"),
-        }
+        assert_eq!(payload["op"], "status");
+        assert_eq!(payload["not_a_repo"], true);
+        // `clean` 必须是 `null` 而不是 `true`：这里没有「干不干净」这回事，
+        // 说 `true` 会让页面在非仓库上显示「没有未提交的改动」。
+        assert!(payload["clean"].is_null(), "clean 应是 null，实际 {}", payload["clean"]);
+        assert!(payload["branch"].is_null());
+        assert!(payload["head"].is_null());
+        assert_eq!(payload["detached"], false);
+        assert_eq!(payload["files"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn a_failure_outside_a_repo_still_classifies_to_the_fixed_prefix() {
+        // `is_not_a_repo` 的判据就是这条前缀。前缀若被改（或 `classify_failure`
+        // 被删），`status` 的那条正常回帧会静默失效——变成每次打开面板都报
+        // 「git 失败」。所以这条单独钉住判据本身。
+        assert_eq!(
+            classify_failure("fatal: not a git repository (or any of the parent directories): .git"),
+            "not a git repository"
+        );
+        // 非仓库失败必须被 `is_not_a_repo` 认出来，其它失败不行。
+        let not_repo = ConnectorError::Failed {
+            op: "status".to_string(),
+            detail: classify_failure("fatal: not a git repository: .git"),
+        };
+        assert!(is_not_a_repo(&not_repo), "非仓库失败必须被认出来");
+        let other = ConnectorError::Failed {
+            op: "status".to_string(),
+            detail: classify_failure("fatal: bad revision 'nope'"),
+        };
+        assert!(!is_not_a_repo(&other), "别的失败不能被当成非仓库");
     }
 
     // ---------------------------------------------------------------- 2 diff

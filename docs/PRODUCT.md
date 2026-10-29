@@ -97,7 +97,11 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 2. **在某个设备上开 agent 对话**：选节点 → 选工作区路径（设备上已有的目录）→ 选该设备上已装且可用的 agent →
    会话建立，terminal / files 面板挂到这个工作区上（git 面板在 v0.4.0 加入）→
    在面板里对话 → Trajectory 逐条可查。
-3. **看它改了什么**：会话进行中，ACP 的 `tool_call` 事件逐条展示工具名、状态与输出摘要（改动内容从这里看）。专门的 diff 视图留到 v0.4.0 的 git 面板。
+3. **看它改了什么**：会话进行中，ACP 的 `tool_call` 事件逐条展示工具名、状态与输出摘要（"它做了什么"从这里看）；
+   工作区的**实际改动**看会话内的 git 面板——它列出 `status` 的改动文件（两列状态码原样显示，不做中文翻译），
+   点任一个文件在右侧（窄列时下方）展开该文件的 unified diff，按 `+`/`-`/`@@` 着色；diff 过大时设备侧截断并显式提示。
+   git 面板**只读**：只显示，不提供暂存 / 提交 / 切换分支。工作区不是 git 仓库时给一句中性说明（不报红），
+   并指路用文件面板浏览。
 4. **操作文件 / git / bash**：在**该会话内**用对应面板，直接作用于该会话的工作区。
 5. ~~**统一配置 agent**~~：**暂缓**（规格在 `architecture/workspace-and-sync.md` §4.1–4.3，实现未排期）。
 6. ~~**取回产物**~~：**已撤销（2026-10-26）**，随产物归档一起撤销。
@@ -115,7 +119,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 | 模块 | 对标 |
 |------|------|
 | 终端 / 文件 / git | **不对标**——会话内面板，易用即可 |
-| 对话与动作流 | **dsh**：Trajectory（逐条事件）+ 会话改动文件/diff 视图 |
+| 对话与动作流 | **dsh**：Trajectory（逐条事件）；改动文件 / diff 由会话内 git 面板承担 |
 | 专家 agent 模板 | **oh-my-opencode**：可配置、开箱即用的专家 agent 定义库（Hub 预置、节点只读生效）；agent 运行时内部的父子关系不由我们编排 |
 | 管理页（设备/agent/设置） | 自有设计系统 |
 
@@ -192,7 +196,7 @@ of one web console; run AI agent sessions on any node and route tasks to the bes
 | workspace | 工作区：设备上的一个 `(node_id, path)`，**会话的一个字段**，不是路由、不是页面；可被多个会话引用（同一条路径可被两个会话同时打开，各自持有自己的通道）。Workspace: a `(node_id, path)` on a device, carried as a field on a session — not a route and not a page |
 | ~~artifact~~ | **已撤销（2026-10-26）**：原指任务产出的最终制品归档到 Hub。随产物归档一起撤销 |
 | channel_id | 通道号：一条设备 WebSocket 上的子通道，通道键为 `(node_id, channel_id)`，每通道独立流控。Channel id: a sub-channel on one node WebSocket, keyed `(node_id, channel_id)`, with per-channel flow control |
-| ~~baseline~~ | **暂缓**：原指会话开始时记录的工作区初始状态，用于算改动文件与 diff。专门的 diff 视图留到 v0.4.0 git 面板 |
+| ~~baseline~~ | **已不需要**：原指会话开始时记录的工作区初始状态，用于算改动文件与 diff。diff 改由会话内 git 面板直接问工作区的 `status` / `diff`（v0.4.0），不依赖一份开始时拍下的快照 |
 | CAS | 内容寻址存储：Hub 侧以内容哈希存 blob。**现已完全撤销**（2026-10-26）：agent 安装取消后 `blob` 表也从 schema 去掉，项目文件 / 配置 / 产物早就不再供料。CAS: content-addressed blob storage — fully withdrawn; with agent install cancelled the `blob` table was removed from the schema |
 | supervisor | 守护进程的父进程：不碰业务与 WebSocket，只负责拉起 / 监控 / 替换 / 回滚 worker——**执行回滚的代码不参与被回滚**。Supervisor: the parent process that touches neither business logic nor the WebSocket, only starting, monitoring, swapping and rolling back the worker — the code performing a rollback is never itself replaced |
 | worker | 工作进程：持有设备身份与 WebSocket，实际执行 connector 与 agent；升级时更换，`node_id` 不变。Worker: the process holding device identity and the WebSocket that actually runs connectors and agents; swapped on upgrade, `node_id` unchanged |

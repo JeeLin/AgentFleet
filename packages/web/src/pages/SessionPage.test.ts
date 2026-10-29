@@ -1419,7 +1419,8 @@ describe('面板坞：三个面板与「＋」入口', () => {
     // 正文不是空壳：面板头写着 Git，正文里有 git 面板自己的那块。
     const head = w.element.querySelector<HTMLElement>('.af-panelhead')
     expect(head?.textContent).toContain('Git')
-    expect(w.element.querySelector('[data-git-placeholder]')).not.toBeNull()
+    // 真 git 面板已挂上（子任务 5 起，不再是我在子任务 4 留的占位）。
+    expect(w.element.querySelector('[data-git-panel]')).not.toBeNull()
 
     // 面板挂着 ≠ 通道建了：git 也走懒建立（碰正文才算）。
     expect(posts()).toBe(0)
@@ -1570,5 +1571,193 @@ describe('面板坞：窄列不溢出（412px）', () => {
     const add = cssRuleOf(css, '.af-docktabs__add')
     expect(add, '「＋」规则必须存在').not.toBe('')
     expect(add).toContain('white-space: nowrap')
+  })
+})
+
+/* ===========================================================================
+   v0.4.0 子任务 5：git 面板的 status 与 diff 视图
+   ---------------------------------------------------------------------------
+   这一组锁的是「设备回的帧 → 用户看得懂的界面」这一段。帧形状以
+   `crates/node-core/src/connector/git.rs` 的回帧为准（那边有对应的单元测试）。
+   =========================================================================== */
+describe('git 面板：status 与 diff', () => {
+  it('status 回帧渲染出分支与文件列表，两列状态码原样显示', async () => {
+    const { w, fetchMock } = await mountWorkbench()
+    await interact(w)
+    const src = FakeEventSource.instances[0]
+
+    await frame(w, src, {
+      op: 'status',
+      branch: 'main',
+      head: 'a1b2c3d',
+      detached: false,
+      clean: false,
+      files: [
+        { x: ' ', y: 'M', path: 'src/a.rs' },
+        { x: 'A', y: ' ', path: 'src/b.rs' },
+        { x: '?', y: '?', path: 'notes.md' },
+      ],
+    })
+
+    expect(w.element.querySelector('[data-git-branch]')?.textContent).toContain('main')
+    expect(w.element.querySelector('[data-git-branch]')?.textContent).toContain('a1b2c3d')
+
+    const rows = Array.from(w.element.querySelectorAll<HTMLElement>('[data-git-file]'))
+    expect(rows.map((r) => r.dataset.gitFile)).toEqual(['src/a.rs', 'src/b.rs', 'notes.md'])
+    // 状态码**不翻译**：`M` / `A` / `??` 是 git 用户的共同词汇。
+    const codes = rows.map((r) => r.querySelector('.af-git__code')?.textContent)
+    expect(codes).toEqual([' M', 'A ', '??'])
+    expect(fetchMock).toHaveBeenCalled()
+  })
+
+  it('clean:true 显示「没有未提交的改动」，不是空列表', async () => {
+    // §3.12：空列表读起来是「没读到」，而这是一条**结论**。
+    const { w } = await mountWorkbench()
+    await interact(w)
+    await frame(w, FakeEventSource.instances[0], {
+      op: 'status',
+      branch: 'main',
+      head: 'a1b2c3d',
+      detached: false,
+      clean: true,
+      files: [],
+    })
+
+    const clean = w.element.querySelector('[data-git-clean]')
+    expect(clean, '干净时必须有一句明写的结论').not.toBeNull()
+    expect(clean?.textContent).toContain('没有未提交的改动')
+    expect(w.element.querySelector('[data-git-file]')).toBeNull()
+  })
+
+  it('不是 git 仓库时给中性说明，且不出现错误样式', async () => {
+    // 「不是仓库」是**正常状态**，设备侧因此回一帧普通 `status` 带
+    // `not_a_repo:true`，而不走错误路径（见 `connector/git.rs` 的
+    // `status_outside_a_repo_is_a_normal_frame_saying_so`）。走错误路径的话
+    // 通道层只把错误码传出来，页面分不清「不是仓库」和「git 挂了」。
+    const { w } = await mountWorkbench()
+    await interact(w)
+    await frame(w, FakeEventSource.instances[0], {
+      op: 'status',
+      not_a_repo: true,
+      branch: null,
+      head: null,
+      detached: false,
+      clean: null,
+      files: [],
+    })
+
+    const voidEl = w.element.querySelector<HTMLElement>('[data-git-not-a-repo]')
+    expect(voidEl, '非仓库要说出来，不能画成空列表').not.toBeNull()
+    expect(voidEl?.textContent).toContain('不是 git 仓库')
+    // 不报红、不当错误：这里没有问题要修。
+    expect(w.element.querySelector('[role="alert"]')).toBeNull()
+    expect(w.element.querySelector('.af-danger')).toBeNull()
+    // `clean:null` 也不能被渲染成「干净」或「加载中」——那两句在非仓库上是错的。
+    expect(w.element.querySelector('[data-git-clean]')).toBeNull()
+    expect(w.element.querySelector('[data-git-loading]')).toBeNull()
+    // 分支行与刷新按钮照旧在（用户还能刷新一次，万一刚 `git init`）。
+    expect(w.element.querySelector('[data-git-refresh]')).not.toBeNull()
+  })
+
+  it('点文件发 {"op":"diff","path":…} 并渲染 diff', async () => {
+    const { w, fetchMock } = await mountWorkbench()
+    await interact(w)
+    const src = FakeEventSource.instances[0]
+    await frame(w, src, {
+      op: 'status',
+      branch: 'main',
+      head: 'a1b2c3d',
+      detached: false,
+      clean: false,
+      files: [{ x: ' ', y: 'M', path: 'src/a.rs' }],
+    })
+
+    await w.element.querySelector<HTMLElement>('[data-git-file="src/a.rs"]')?.click()
+    await flush(w)
+
+    // 发出去的 body 必须带 `path`——不带的话设备回的是「工作区全部改动」，
+    // 而用户点的是某一个文件。
+    const sent = fetchMock.mock.calls
+      .filter(([url]) => String(url).includes('/send'))
+      .map(([, init]) => JSON.parse(String((init as RequestInit).body)))
+    const diffReq = sent.find((b) => b.op === 'diff')
+    expect(diffReq, `要发出 diff 请求，实发：${JSON.stringify(sent)}`).toBeTruthy()
+    expect(diffReq.path).toBe('src/a.rs')
+
+    await frame(w, src, {
+      op: 'diff',
+      path: 'src/a.rs',
+      unified: '--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1,2 @@\n one\n+two\n',
+      truncated: false,
+    })
+
+    const body = w.element.querySelector('[data-git-diff-body]')
+    expect(body, 'diff 正文要渲染出来').not.toBeNull()
+    expect(body?.textContent).toContain('+two')
+    // 文件头不染成增删色：`+++` / `---` 是头，不是改动行。
+    const kinds = Array.from(
+      w.element.querySelectorAll<HTMLElement>('.af-gdiff__line'),
+    ).map((el) => `${el.dataset.kind}:${el.textContent}`)
+    expect(kinds[0]).toBe('meta:--- a/src/a.rs')
+    expect(kinds[1]).toBe('meta:+++ b/src/a.rs')
+    expect(kinds.some((k) => k.startsWith('add:'))).toBe(true)
+  })
+
+  it('truncated:true 时显式提示已截断，不静默', async () => {
+    const { w } = await mountWorkbench()
+    await interact(w)
+    const src = FakeEventSource.instances[0]
+    await frame(w, src, {
+      op: 'status',
+      branch: 'main',
+      head: 'a1b2c3d',
+      detached: false,
+      clean: false,
+      files: [{ x: ' ', y: 'M', path: 'big.txt' }],
+    })
+    await frame(w, src, {
+      op: 'diff',
+      path: 'big.txt',
+      unified: '+line\n… (diff truncated by the device)\n',
+      truncated: true,
+    })
+
+    const note = w.element.querySelector('[data-git-diff-truncated]')
+    expect(note, '截断必须说出来').not.toBeNull()
+    expect(note?.textContent).toContain('截断')
+  })
+
+  it('detached HEAD 写出来，不留空白', async () => {
+    // 空白会被读成「还在加载」。
+    const { w } = await mountWorkbench()
+    await interact(w)
+    await frame(w, FakeEventSource.instances[0], {
+      op: 'status',
+      branch: null,
+      head: 'deadbee',
+      detached: true,
+      clean: true,
+      files: [],
+    })
+
+    const branch = w.element.querySelector('[data-git-branch]')?.textContent ?? ''
+    expect(branch).toContain('detached')
+    expect(branch).toContain('deadbee')
+  })
+
+  it('通道 ready 后自动问一次 status（挂上就问，不是等用户点刷新）', async () => {
+    // 与 filesKick 同一条：不问的话用户看到的是一块「还没问过」的空壳，
+    // 而通道明明是好的——两种空被读反（§3.12）。
+    const { w, fetchMock } = await mountWorkbench()
+    await interact(w)
+    await flush(w)
+
+    const sent = fetchMock.mock.calls
+      .filter(([url]) => String(url).includes('/send'))
+      .map(([, init]) => JSON.parse(String((init as RequestInit).body)))
+    expect(
+      sent.filter((b) => b.op === 'status').length,
+      `面板一 ready 就该问 status，实发：${JSON.stringify(sent)}`,
+    ).toBe(1)
   })
 })
