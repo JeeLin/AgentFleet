@@ -577,12 +577,123 @@ describe('ConvFlow：输入区的行能在窄列里收缩', () => {
   }
 
   // happy-dom 不做排版、vitest 也不注入样式，`getComputedStyle` 读不到——只能读样式源。
-  it('输入行允许换行（不许换行就把「发送」「轨迹」推出视口）', () => {
-    expect(declarationsOf('.af-compose__row')).toMatch(/flex-wrap:\s*wrap/)
+  it('输入行不许换行（换行就把「发送」从输入框右边甩到下一行去）', () => {
+    const decl = declarationsOf('.af-compose__row')
+    // 正反两条都要：只删 `flex-wrap: wrap` 时下面那条反向断言是绿的，
+    // 而只写反向断言时「显式 no-wrap」与「压根没写」分不开——这一次要钉的
+    // 恰恰是「写了 no-wrap」，也就是这一行永远不会折。
+    expect(decl, '输入行必须显式声明 nowrap').toMatch(/flex-wrap:\s*nowrap/)
+    expect(decl, '输入行不许允许换行').not.toMatch(/flex-wrap:\s*wrap/)
   })
 
   it('输入框的 min-width 归零（textarea 的 cols=20 默认下限会顶住整行）', () => {
     expect(declarationsOf('.af-compose__input')).toMatch(/min-width:\s*0/)
+  })
+
+  it('目标的 min-width 也归零（不换行的一行里，它是最宽的那个固定项）', () => {
+    expect(declarationsOf('.af-compose__target')).toMatch(/min-width:\s*0/)
+  })
+})
+
+/* ===========================================================================
+   输入区的分区：主行只放「输入框 → 目标 → 发送」，次要动作在提示行右边
+   ---------------------------------------------------------------------------
+   用户反馈的原文：「快捷键位置怎么东一个西一个，发送按钮不在输入框右边」。
+   根因不是「发送按钮写错了位置」，而是**六个元素挤在同一行**：目标 + 发送 +
+   停止 + 轨迹，面板坞打开时这一列只有约 412px，于是 `flex-wrap` 把后面两个
+   甩到第二行，看起来就像散落的。
+
+   所以要钉的不是「按钮存在」，而是**分区本身**：谁在主行、谁在提示行。
+   和本文件其它样式断言一样只能读源：vitest 不开 CSS、happy-dom 不排版。
+   =========================================================================== */
+
+describe('ConvFlow：输入区主行只放输入、目标与发送', () => {
+  const VUE = 'packages/web/src/components/ConvFlow.vue'
+  /** 剥注释后的源。注释里写着这些类名与 data 属性，不剥的话删光模板照样绿。 */
+  const src = readRepoFile(VUE).replace(/<!--[\s\S]*?-->/g, '')
+
+  /** 子串在源里的位置；找不到就直接红在本行，而不是让下面的索引比较拿 -1 去蒙。 */
+  function at(needle: string): number {
+    const i = src.indexOf(needle)
+    expect(i, `源里找不到 ${needle}`).toBeGreaterThanOrEqual(0)
+    return i
+  }
+
+  /**
+   * 某个开标签在源里的起止。按**标签**切，不按「某个标记」切：后者会把
+   * 前一组末尾到下一个标记之间的内容（含上一组的结束标签）算进来，
+   * 断言就成了「A 出现在 B 之前」这种与分区无关的东西。
+   */
+  function tag(open: string): { from: number; to: number } {
+    const from = at(open)
+    const to = src.indexOf('>', from)
+    expect(to, `${open} 的标签没闭合`).toBeGreaterThan(from)
+    return { from, to: to + 1 }
+  }
+
+  /** 两段源之间的区间。 */
+  function between(after: { to: number }, before: { from: number }): string {
+    expect(before.from, '区间方向反了').toBeGreaterThan(after.to)
+    return src.slice(after.to, before.from)
+  }
+
+  it('主行的标签区间里不含「停止」「轨迹」——它们挪去提示行的次要动作组', () => {
+    const row = tag('class="af-compose__row"')
+    const hint = tag('class="af-compose__hint')
+    let content = between(row, hint)
+    const actions = src.indexOf('class="af-compose__actions"')
+    if (actions > 0 && actions < hint.from) {
+      // 有独立组时才收窄：组开标签到组闭标签之间才是「组里」
+      content = between(row, tag('class="af-compose__actions"'))
+    }
+    expect(content, '停止按钮不许留在主行').not.toContain('data-conv-stop')
+    expect(content, '轨迹按钮不许留在主行').not.toContain('data-conv-traj')
+  })
+
+  it('「停止」「轨迹」在主行**之后**，且落在那组成组的次要动作里', () => {
+    const row = tag('class="af-compose__row"')
+    const actions = tag('class="af-compose__actions"')
+    const stop = at('data-conv-stop')
+    const traj = at('data-conv-traj')
+    expect(actions.from, '次要动作组必须在主行之后').toBeGreaterThan(row.to)
+    expect(stop, '停止按钮在主行之后').toBeGreaterThan(row.to)
+    expect(traj, '轨迹按钮在主行之后').toBeGreaterThan(row.to)
+    expect(stop, '停止按钮必须包在次要动作组里').toBeGreaterThan(actions.to)
+    expect(traj, '轨迹按钮必须包在次要动作组里').toBeGreaterThan(actions.to)
+  })
+
+  it('发送按钮在主行里，且排在输入框之后（「右边」就是这个意思）', () => {
+    const row = tag('class="af-compose__row"')
+    const hint = tag('class="af-compose__hint')
+    const input = at('data-conv-input')
+    const target = at('data-conv-target')
+    const run = at('data-conv-run')
+    expect(run, '发送按钮必须在主行里').toBeGreaterThan(row.from)
+    expect(run, '发送按钮必须在主行里').toBeLessThan(hint.from)
+    expect(run, '发送按钮必须排在输入框之后').toBeGreaterThan(input)
+    expect(run, '发送按钮必须排在目标之后').toBeGreaterThan(target)
+    expect(target, '目标排在输入框之后').toBeGreaterThan(input)
+  })
+
+  it('按钮的 type 是对的：回车仍然发「发送」，不是被提示行里的按钮抢走', () => {
+    const run = at('data-conv-run')
+    expect(src.slice(src.lastIndexOf('<button', run), run)).toMatch(/type="submit"/)
+    // 次要动作在同一个 form 里：不带 type 的 <button> 缺省就是 submit，
+    // 回车会去点它们——挪位置之后这条才真正会咬人。
+    for (const hook of ['data-conv-stop', 'data-conv-traj']) {
+      const i = at(hook)
+      expect(src.slice(src.lastIndexOf('<button', i), i), `${hook} 不许是 submit`).toMatch(
+        /type="button"/,
+      )
+    }
+  })
+
+  it('理由仍然是正文（另起一行），没有退回 title / placeholder', () => {
+    const hint = tag('class="af-compose__hint')
+    const notes = tag('class="af-compose__notes')
+    const why = at('class="af-compose__why')
+    expect(notes.from, '理由行必须存在且在提示行之后').toBeGreaterThan(hint.to)
+    expect(why, '理由必须在提示行之后、自成一行').toBeGreaterThan(hint.to)
   })
 })
 

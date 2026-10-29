@@ -850,14 +850,25 @@ kbd, .kbd {
   padding: var(--af-space-4) var(--af-space-5); border-top: 1px solid var(--af-border-subtle);
   background: var(--af-surface-1);
 }
-/* 允许换行：面板坞打开时对话列只剩约 412px，一行放不下「输入 + 目标 + 两个按钮」，
-   不许换行就会把「发送」「轨迹」推到视口外，只能横向滚才够得着。 */
-.af-compose__row { display: flex; flex-wrap: wrap; gap: var(--af-space-3); align-items: flex-end; }
+/* **不**换行：这一行就是「输入框 → 目标 → 发送」三件，发送必须紧挨着输入框。
+   面板坞打开时对话列只有约 412px，扣掉行内边距 32、两处 gap 12 与发送按钮 52
+   （`.af-btn` 的 padding 8|8 + 两个汉字）+ 边框 2，留给输入框与目标约 306px；
+   两者都能缩（`.af-compose__input` / `.af-compose__target` 各自 `min-width: 0`），
+   所以放得下。放不下的是**次要动作**：它在提示行里，而不是这一行。 */
+.af-compose__row { display: flex; flex-wrap: nowrap; gap: var(--af-space-3); align-items: flex-end; }
 .af-compose__input {
   /* min-width: 0 是必需的：flex 项默认 min-width:auto，下限由内容定，
      而 textarea 自带 cols=20，光靠 .af-textarea 的 width:100% 抬不掉这个下限——
      整行会被它顶在 ~422px，缩不回来。 */
   flex: 1 1 auto; min-width: 0; min-height: 44px; max-height: 160px; resize: vertical;
+}
+/* 从 `.af-select` 的 width:100% 里退出来：宽度全交给内容（选项文字）。
+   min-width: 0 也是必需的：这一行不换行，而 `.af-select` 是 `width: 100%` +
+   内边距，自动下限按「宽度 + 内边距」算，不给它归零就会顶住整行、把发送按钮
+   挤出这一列（面板坞打开时这一列只有约 412px）。 */
+.af-compose__target {
+  flex: 0 0 auto; width: auto; max-width: 100%; min-width: 0;
+  height: 44px; font-size: var(--af-text-xs);
 }
 .af-compose__hint {
   display: flex; align-items: center; gap: var(--af-space-3);

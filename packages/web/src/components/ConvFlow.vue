@@ -762,36 +762,13 @@ watch(
         >
           {{ target === 'chat' ? '发送' : '执行' }}
         </button>
-
-        <button
-          class="af-btn af-btn--sm af-btn--ghost"
-          type="button"
-          :disabled="!!stopBlocked"
-          :data-blocked-by="stopBlocked || undefined"
-          :title="stopBlockedWhy || undefined"
-          data-conv-stop
-          @click="stop"
-        >
-          <span aria-hidden="true">⏹</span> 停止
-        </button>
-
-        <button
-          ref="trajBtnEl"
-          class="af-btn af-btn--sm af-btn--ghost"
-          type="button"
-          :aria-expanded="trajOpen ? 'true' : 'false'"
-          title="打开 / 关闭轨迹抽屉（t）"
-          data-conv-traj
-          @click="emit('open-traj', trajBtnEl)"
-        >
-          <span aria-hidden="true">≡</span> 轨迹 <kbd>t</kbd>
-        </button>
       </div>
 
       <!--
         提示行是**正文**，不是 tooltip：§3.13 要求信息不许只活在 hover 里，
         placeholder 在输入框里有内容之后就看不见了。所以「这里不是 shell」
         与「结束了为什么不能打字」两条都写在这里，而不只写在 placeholder。
+        键位与位置在左、次要动作在右；理由另起一行，才挤不掉右边的按钮。
       -->
       <p class="af-compose__hint af-field__hint">
         <span><kbd>⏎</kbd> 发送</span>
@@ -799,6 +776,38 @@ watch(
         <span><kbd>t</kbd> 轨迹抽屉</span>
         <span class="af-spacer"></span>
         <span>{{ deviceName }} · <span class="af-fp">{{ path }}</span></span>
+        <span class="af-compose__actions">
+          <button
+            class="af-btn af-btn--sm af-btn--ghost"
+            type="button"
+            :disabled="!!stopBlocked"
+            :data-blocked-by="stopBlocked || undefined"
+            :title="stopBlockedWhy || undefined"
+            data-conv-stop
+            @click="stop"
+          >
+            <span aria-hidden="true">⏹</span> 停止
+          </button>
+          <button
+            ref="trajBtnEl"
+            class="af-btn af-btn--sm af-btn--ghost"
+            type="button"
+            :aria-expanded="trajOpen ? 'true' : 'false'"
+            title="打开 / 关闭轨迹抽屉（t）"
+            data-conv-traj
+            @click="emit('open-traj', trajBtnEl)"
+          >
+            <span aria-hidden="true">≡</span> 轨迹 <kbd>t</kbd>
+          </button>
+        </span>
+      </p>
+
+      <!--
+        理由单独一行（不是提示行里的一个 flex 项）：面板坞打开时提示行只剩
+        约 412px，把这段正文塞进那一行会把右侧的停止 / 轨迹挤到下一行——
+        「哪个按钮归哪一块」正是这次要修的。
+      -->
+      <p v-if="whyBlocked || targetHint" class="af-compose__notes af-field__hint">
         <span v-if="whyBlocked" class="af-compose__why">
           {{ whyBlocked }}
         </span>
@@ -835,23 +844,29 @@ watch(
   gap: var(--af-space-3);
   padding: var(--af-space-4) var(--af-space-5);
 }
-/* 从 `.af-select` 的 width:100% 里退出来：宽度全交给内容（选项文字），
-   窄宽度时由 `.af-compose__row` 的换行把它放到单独一行，而不是把按钮挤出去。 */
-.af-compose__target {
-  flex: 0 0 auto;
-  width: auto;
-  max-width: 100%;
-  height: 44px;
-  font-size: var(--af-text-xs);
-}
 .af-compose__hint {
+  /* 窄列里键位与位置先折行：这一组仍然可以挤，右边的次要动作不许被挤走 */
   flex-wrap: wrap;
   row-gap: var(--af-space-2);
 }
-/* 「为什么」比键位提示更需要一整行：键位可以挤，理由不能 */
-.af-compose__why {
-  flex: 1 0 100%;
-  order: 1;
+/* 次要动作成组。**不设** `margin-left: auto`：提示行在 `.af-compose` 里是
+   `align-items: stretch` 的列向 flex 项，这一组已被拉满整行宽度，`justify-content`
+   也默认是 `flex-start`——flex 的自动外边距对齐在「整行宽」的纵向容器里只会把
+   内容在组内左对齐，两个按钮就会贴着左边缘而不是停在设备路径右边。 */
+.af-compose__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--af-space-2);
+}
+/* 理由另占一行：`.af-compose` 是 `flex-direction: column; align-items: stretch`，
+   所以这一行的盒子本来就占满整行宽，里面的句子靠 `center` 居中——
+   而 `.af-field__hint` 的 `text-align` 是缺省的，不写这句它只会吊在左下角。 */
+.af-compose__notes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-1);
+  margin: 0;
+  text-align: center;
 }
 
 /* 断口 / 收尾：这两者是「完整性可见」的两个方向，样式同族（虚线 + 弱色） */
