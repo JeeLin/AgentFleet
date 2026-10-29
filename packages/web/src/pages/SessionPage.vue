@@ -202,8 +202,15 @@ interface TabWorkspace {
   events: TrajectoryEvent[]
   /** 序号断口（Hub 算好的 `missing` 一并带来）。 */
   gaps: TrajectoryGap[]
-  /** 最后一轮没有 `turn_end`：还在跑，或结尾丢了。 */
+  /** 最后一轮**既没有开始标记也没有结束标记**：结尾丢了（或是旧数据）。 */
   incomplete: boolean
+  /**
+   * 最后一轮**有 `turn_start`、没有 `turn_end`**：一轮开了还没关。
+   *
+   * 与 `incomplete` 互斥。**不等于「agent 还活着」**——开始标记落库后设备掉了
+   * 也是这个状态（见 `lib/api.ts` 的同一字段）。
+   */
+  running: boolean
   /** 轨迹还有下一页吗。由「上一页取满没有」推出（Hub 不给总数）。 */
   hasMore: boolean
   /** 正在读轨迹。防重入：每来一帧都发一次请求会把 Hub 打满。 */
@@ -244,6 +251,7 @@ function blankWorkspace(): TabWorkspace {
     events: [],
     gaps: [],
     incomplete: false,
+    running: false,
     hasMore: false,
     trajLoading: false,
     trajError: null,
@@ -741,6 +749,7 @@ async function refreshTrajectory(tabId: string): Promise<void> {
     ws.events = view.events
     ws.gaps = view.gaps
     ws.incomplete = view.incomplete
+    ws.running = view.running
     ws.hasMore = view.hasMore
     ws.trajError = null
   } catch (err) {
@@ -801,6 +810,7 @@ async function onTrajMore(): Promise<void> {
     ws.events = [...ws.events, ...view.events.filter((e) => !seen.has(e.id))]
     ws.gaps = view.gaps
     ws.incomplete = view.incomplete
+    ws.running = view.running
     ws.hasMore = view.hasMore
     ws.trajError = null
   } catch (err) {
@@ -1659,6 +1669,7 @@ onBeforeUnmount(() => {
             :events="activeWs?.events ?? []"
             :gaps="activeWs?.gaps ?? []"
             :incomplete="activeWs?.incomplete ?? false"
+            :running="activeWs?.running ?? false"
             @run="runCommand"
             @send="convSend"
             @say="convSay"

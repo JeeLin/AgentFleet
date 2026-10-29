@@ -74,7 +74,19 @@ export interface ConvExecRequest {
 /** 一条待渲染的对话事件。已按 `seq` 排好、断口已插进去。 */
 export type ConvRow =
   | { kind: 'gap'; key: string; missing: number; after: number | null }
-  | { kind: 'msg'; key: string; who: 'user' | 'agent' | 'system'; text: string }
+  | {
+      kind: 'msg'
+      key: string
+      who: 'user' | 'agent' | 'system'
+      text: string
+      /**
+       * 本地回显行：已经发出去、但轨迹里还没有的那一句。
+       *
+       * 只说明「页面把它发出去了」，**不说明 Hub 或设备收到了**——所以渲染成
+       * 「待确认」而不是正常已送达的样子。
+       */
+      pending?: true
+    }
   | {
       kind: 'tool'
       key: string
@@ -135,8 +147,15 @@ const props = withDefaults(
     events?: TrajectoryEvent[]
     /** 序号断口。Hub 算好给过来，前端不重算。 */
     gaps?: TrajectoryGap[]
-    /** 最后一轮没有 `turn_end`：还在跑，或结尾丢了。 */
+    /** 最后一轮**既没有开始标记也没有结束标记**：结尾丢了。 */
     incomplete?: boolean
+    /**
+     * 最后一轮**有 `turn_start`、没有 `turn_end`**：一轮开了还没关。
+     *
+     * 与 `incomplete` 互斥。不代表 agent 还活着（开始标记落库后设备掉了也是
+     * 这个状态），所以只用它决定「别报未完成」，不用它说「正在回复」。
+     */
+    running?: boolean
   }>(),
   {
     ended: false,
@@ -147,6 +166,7 @@ const props = withDefaults(
     events: () => [],
     gaps: () => [],
     incomplete: false,
+    running: false,
     deviceGone: false,
     deviceGoneWhy: '这个会话所属的设备已被删除',
   },
@@ -256,18 +276,18 @@ const runBlockedWhy = computed(
 
 /** 停止按钮为什么被禁用。空串 = 可以按（有一轮在飞）。 */
 const stopBlocked = computed(() => {
-  // 判据是 `incomplete`：**最后一轮没有 `turn_end`**。注意它**不等于**
-  // 「agent 正在回复」——协议上「还在跑」与「结尾丢了」长得一样
-  // （`session-and-trajectory.md` 已裁定不承诺补齐），所以 `turn_end` 一旦
-  // 丢失，这个按钮会一直可点，而按下去设备只会留痕、不回话。那是协议边界，
-  // 不是这个判据写错了；不按 `incomplete` 判就没有别的信号可用。
-  if (!props.incomplete) return 'idle'
+  // 判据是「最后一轮没有 `turn_end`」，也就是 `running` 或 `incomplete`
+  // 任一为真。注意它**不等于**「agent 正在回复」——协议上「还在跑」与
+  // 「结尾丢了」长得一样（`session-and-trajectory.md` 已裁定不承诺补齐），
+  // 所以 `turn_end` 一旦丢失，这个按钮会一直可点，而按下去设备只会留痕、
+  // 不回话。那是协议边界，不是这个判据写错了。
+  if (!props.running && !props.incomplete) return 'idle'
   return ''
 })
 
 /** 停止按钮的禁用原因文案。 */
 const stopBlockedWhy = computed(() => {
-  if (!props.incomplete) {
+  if (!props.running && !props.incomplete) {
     return '没有正在回复的轮次：等 agent 回一句话后，这里才能点'
   }
   return ''
@@ -327,6 +347,24 @@ const targetHint = computed(() => {
     : '终端面板还没有通道：先按 o 打开面板并与它交互一次'
 })
 
+/**
+ * 已发出、但轨迹里还没读回来的那几句（本地回显）。
+ *
+ * # 为什么需要它
+ *
+ * user 行唯一的来源是库里那条 `user_message_chunk`（见 `rowOf`），而页面只在
+ * 轨迹重读回来后才知道它存在（`SessionPage.refreshTrajectory` 只信库里的行）。
+ * 两者之间有一段空白，长度取决于该事件何时落库；实测 agent 最慢一次 130 秒才
+ * 回完，那段时间界面上一句话都没有，用户读成「消息没发出去」，然后一遍遍重发。
+ *
+ * # 去重
+ *
+ * 轨迹里一旦出现一条 `user_message_chunk` 包含某句待定文本，就把它从这里删掉：
+ * 那说明它已经落库、已经由 `rows` 从库里画出来了，留着会画两遍。
+ */
+const pending = ref<{ id: number; text: string }[]>([])
+let pendingSeq = 0
+
 /** 把 Hub 给的事件排成行，断口插在它该在的位置。 */
 const rows = computed<ConvRow[]>(() => {
   const out: ConvRow[] = []
@@ -379,10 +417,39 @@ const rows = computed<ConvRow[]>(() => {
     }
     out.push(row)
   }
+  // 只有在**既没有开始标记也没有结束标记**时才说「结尾丢了」。一轮开了还没关
+  // （`running`）是正常的长回复状态——设备侧实测过一次 130 秒才回完，把那整段
+  // 时间标成「未完成」是在报一个没发生的事实。
   if (props.incomplete) {
     out.push({ key: 'incomplete', kind: 'incomplete' })
   }
+  // 本地回显：已经发出去、但轨迹里还没出现的那几句。接在最后，因为它们就是
+  // 最新的。**不标成「已送达」**——页面不知道 Hub 收没收到，只知道自己发出去了。
+  for (const p of pending.value) {
+    out.push({ kind: 'msg', key: `pending-${p.id}`, who: 'user', text: p.text, pending: true })
+  }
   return out
+})
+
+/** 轨迹里已经出现的 user 文本（拼成一段，便于按包含关系比对）。 */
+const dbUserText = computed(() =>
+  props.events
+    .filter((ev) => ev.kind === 'user_message_chunk')
+    .map((ev) => chunkText(parsePayload(ev.payload), ev.payload))
+    .join(''),
+)
+
+/**
+ * 轨迹已经读回来某句待定文本之后，把它从本地回显里撤掉。
+ *
+ * 不写在 `rows` 里（那会在 computed 里改 ref），改成 watch：一旦库里的 user 文本
+ * 包含某句待定内容，就说明它已经作为库里的一行画出来了，留着会画两遍。按**包含**
+ * 匹配而不是全等——ACP 会把一句话拆成多个 chunk，而这里拼起来的是全文。
+ */
+watch(dbUserText, (text) => {
+  if (!pending.value.length || !text) return
+  const left = pending.value.filter((p) => !text.includes(p.text.trim()))
+  if (left.length !== pending.value.length) pending.value = left
 })
 
 const hasRows = computed(() => rows.value.length > 0)
@@ -607,6 +674,10 @@ function submit(): void {
   }
   if (target.value === 'chat') {
     if (!canChat.value) return
+    // 先记进本地回显再上报：这一刻页面唯一确定的事实是「我把它发出去了」。
+    // 不记的话，从按下发送到库里那条 `user_message_chunk` 被读回来之间是空白，
+    // 用户会以为没发出去（见 `pending` 的注释）。
+    pending.value = [...pending.value, { id: pendingSeq++, text }]
     emit('say', text)
     draft.value = ''
     return
@@ -688,12 +759,24 @@ watch(
 
           <p v-else-if="row.kind === 'incomplete'" class="af-gap af-gap--open" data-conv-incomplete>
             <span aria-hidden="true">◌</span>
-            本轮未完成：没有收到 <span class="af-fp">turn_end</span>，可能还在跑，也可能结尾丢了
+            本轮未完成：既没有开始标记也没有收到 <span class="af-fp">turn_end</span>，结尾丢了
           </p>
 
-          <div v-else-if="row.kind === 'msg'" class="af-msg" :data-who="row.who" data-conv-msg>
+          <div
+            v-else-if="row.kind === 'msg'"
+            class="af-msg"
+            :class="{ 'af-msg--pending': row.pending }"
+            :data-who="row.who"
+            :data-pending="row.pending || undefined"
+            data-conv-msg
+          >
             <span class="af-msg__who">{{ whoLabel(row.who) }}</span>
             <div class="af-msg__body">{{ row.text }}</div>
+            <!--
+              「已发出 / 还没在轨迹里出现」要看得见：这一行的文字是页面自己补的，
+              库里还没有它。不标出来的话，用户会以为这是「已送达」的凭据。
+            -->
+            <span v-if="row.pending" class="af-msg__pending" data-conv-pending>已发送 · 等待回执</span>
           </div>
 
           <p v-else-if="row.kind === 'meta'" class="af-conv-meta" data-conv-meta>{{ row.text }}</p>

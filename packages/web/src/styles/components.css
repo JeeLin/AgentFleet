@@ -822,6 +822,14 @@ kbd, .kbd {
   background: none; border: 0; padding: var(--af-space-1) 0;
   color: var(--af-fg-tertiary); font-size: var(--af-text-sm);
 }
+/* 本地回显：这一句库里还没有。虚框 + 「已发送 · 等待回执」是为了**不要**
+   让它看起来和已落库的消息一模一样——那会变成一句页面凭空担保的「已送达」。 */
+.af-msg--pending .af-msg__body {
+  border-style: dashed; opacity: 0.85;
+}
+.af-msg__pending {
+  font-size: var(--af-text-2xs); color: var(--af-fg-tertiary);
+}
 
 /* 工具调用块：折叠成一行，展开才看详情 */
 .af-tool {

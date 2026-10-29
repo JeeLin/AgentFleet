@@ -402,6 +402,39 @@ describe('ConvFlow：断口画出来，不假装连续', () => {
     expect(el?.textContent).toContain('turn_end')
   })
 
+  it('一轮开了还没关（running）→ **不**写「本轮未完成」', async () => {
+    // 设备侧实测过一次 130 秒才回完（`conversation.rs` 的 `prompt` 文档记着）。
+    // 那整段时间「最后一轮没有 turn_end」都成立，但把它写成「未完成」是在报
+    // 一个没发生的事实。判据改成「既没有开始标记也没有结束标记」。
+    const w = mount({
+      agentId: 'opencode',
+      events: [
+        event(1, 1, 'turn_start', { seq: 1 }),
+        event(2, 2, 'agent_message_chunk', { content: [{ type: 'text', text: 'a' }] }),
+      ],
+      running: true,
+      incomplete: false,
+    })
+    await w.vm.$nextTick()
+    expect(
+      w.element.querySelectorAll('[data-conv-incomplete]'),
+      '开着的一轮不许被标成未完成',
+    ).toHaveLength(0)
+  })
+
+  it('running 时停止按钮可点：判据是「没有 turn_end」，不是「已丢」', async () => {
+    const w = mount({
+      agentId: 'opencode',
+      events: [event(1, 1, 'turn_start', { seq: 1 })],
+      running: true,
+      incomplete: false,
+    })
+    await w.vm.$nextTick()
+    const stop = w.element.querySelector<HTMLButtonElement>('[data-conv-stop]')
+    expect(stop, '停止按钮必须存在').not.toBeNull()
+    expect(stop?.disabled, '一轮开着就该能点停止').toBe(false)
+  })
+
   it('没有断口就不画断口标记——不谎报', async () => {
     const w = mount({
       agentId: 'opencode',
@@ -419,6 +452,46 @@ describe('ConvFlow：断口画出来，不假装连续', () => {
 })
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 本地回显：按下发送就显示自己那句
+// ---------------------------------------------------------------------------
+
+// 原来从「按下发送」到「库里那条 user_message_chunk 被读回来」之间是一片
+// 空白，用户读成「消息没发出去」，然后一遍遍重发。见 `pending` 的注释。
+describe('ConvFlow：本地回显', () => {
+  it('发出去就立刻显示自己那句，并标明「还没回执」', async () => {
+    const w = mount({ agentId: 'opencode' })
+    await type(w, '帮我看下构建为什么挂了')
+    await submit(w)
+
+    const pending = w.element.querySelector<HTMLElement>('[data-conv-pending]')
+    expect(pending, '必须立刻画出自己那句').not.toBeNull()
+    expect(pending?.closest('[data-conv-msg]')?.textContent).toContain('帮我看下构建为什么挂了')
+    expect(w.emitted('say')?.[0]).toEqual(['帮我看下构建为什么挂了'])
+  })
+
+  it('轨迹里出现同一句之后，本地回显自己撤掉——不许画两遍', async () => {
+    const w = mount({ agentId: 'opencode' })
+    await type(w, '你好')
+    await submit(w)
+    expect(w.element.querySelectorAll('[data-conv-pending]')).toHaveLength(1)
+
+    // Hub 把这条落库了，轨迹重读回来。
+    await w.setProps({
+      events: [event(1, 1, 'user_message_chunk', { content: [{ type: 'text', text: '你好' }] })],
+    })
+    await w.vm.$nextTick()
+
+    expect(
+      w.element.querySelectorAll('[data-conv-pending]'),
+      '库里已经有了，本地那条必须撤掉',
+    ).toHaveLength(0)
+    const userRows = w.element.querySelectorAll('[data-who="user"]')
+    expect(userRows, '只剩库里那一条').toHaveLength(1)
+    expect(userRows[0]?.textContent).toContain('你好')
+  })
+})
+
 // exec：保留下来的那半功能（一次性命令，不进轨迹）
 // ---------------------------------------------------------------------------
 

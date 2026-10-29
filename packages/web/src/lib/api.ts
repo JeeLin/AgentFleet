@@ -172,8 +172,15 @@ export interface TrajectoryGap {
 export interface TrajectoryView {
   events: TrajectoryEvent[]
   gaps: TrajectoryGap[]
-  /** 最后一轮没有 `turn_end`：还在跑，或结尾丢了。 */
+  /** 最后一轮**既没有开始标记也没有结束标记**：结尾丢了（或是旧数据）。 */
   incomplete: boolean
+  /**
+   * 最后一轮**有 `turn_start`、没有 `turn_end`**：一轮开了还没关。
+   *
+   * **这不等于「agent 还活着」**：开始标记落库之后设备掉了，同样是这个状态。
+   * 所以它只说明「这一轮没有走完」，不足以让页面说「正在回复」。
+   */
+  running: boolean
 }
 
 /** `OpenedChannel`：开通道的响应。字段与 Hub 侧同名同义。 */
