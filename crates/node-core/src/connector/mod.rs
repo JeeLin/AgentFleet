@@ -28,6 +28,20 @@ pub mod names {
     pub const TERMINAL: &str = "terminal";
     pub const FILES: &str = "files";
     pub const EXEC: &str = "exec";
+    pub const GIT: &str = "git";
+
+    /// 全部内置 connector 名，**唯一的历史枚举点**。
+    ///
+    /// 它存在的理由只有一条，而且是测试给的：写死名字数组的测试抓不到
+    /// 「加了 connector 却忘了接线」——加了 `git` 之后，一条遍历
+    /// `[TERMINAL, FILES, EXEC]` 的用例照样全绿，因为它压根没看新名字
+    /// （v0.4.0 实测撞上过）。有了这个切片，覆盖所有内置名字的用例
+    /// 就只需要遍历它，新名字自动进入断言。
+    ///
+    /// **它不参与生产逻辑**：`registered()` 与 `create` 各自显式列名字，
+    /// 因为那两处是「这台设备到底提供什么」的真相源，不该被一个数组
+    /// 顺手改掉。
+    pub const ALL: &[&str] = &[TERMINAL, FILES, EXEC, GIT];
 }
 
 /// 一条通道的请求参数：`open_channel.params` 的 connector 私有部分。
@@ -229,7 +243,7 @@ fn registered() -> &'static BTreeSet<&'static str> {
     // 与 `create` 的臂**必须同一次改**：两处不一致时下面那两条测试会红。
     // 心跳上报只认这里（子任务 11），所以**这里是「这台设备有什么能力」
     // 的唯一真相源**，不是一份可以随手加的名字清单。
-    NAMES.get_or_init(|| BTreeSet::from([names::TERMINAL, names::FILES, names::EXEC]))
+    NAMES.get_or_init(|| BTreeSet::from([names::TERMINAL, names::FILES, names::EXEC, names::GIT]))
 }
 
 /// 某个 connector 名在这台设备上**是否真的可用**（约束 9 的硬过滤口径）。
@@ -266,6 +280,7 @@ pub fn create(name: &str) -> Option<BoxedConnector> {
         names::TERMINAL => Some(Box::new(crate::connector::terminal::Terminal::new())),
         names::FILES => Some(Box::new(crate::connector::files::Files::new())),
         names::EXEC => Some(Box::new(crate::connector::exec::Exec::new())),
+        names::GIT => Some(Box::new(crate::connector::git::Git::new())),
         _ => None,
     }
 }
@@ -277,6 +292,21 @@ mod tests {
 
     fn frame_payload(f: &OutFrame) -> serde_json::Value {
         f.payload.clone()
+    }
+
+    /// `names::ALL` 与 `registered()` 必须是**同一批名字**。
+    ///
+    /// 没有这条，`ALL` 可以悄悄少一个名字，而遍历它的用例就少覆盖一个——
+    /// 那种漏洞不会让任何测试变红，只会让「以后加了 connector 自动被覆盖」
+    /// 这个承诺慢慢失效（v0.4.0 的反向验证实测：`ALL` 漏掉 `GIT` 时全绿）。
+    #[test]
+    fn the_enumeration_matches_the_registry() {
+        let from_all: BTreeSet<&str> = names::ALL.iter().copied().collect();
+        assert_eq!(
+            from_all,
+            *registered(),
+            "names::ALL 与 registered() 必须一致，否则遍历 ALL 的测试会少覆盖"
+        );
     }
 
     /// 注册表里有的名字必须能建出实例，而「注册表导出的名字」与
@@ -294,10 +324,19 @@ mod tests {
     /// 永远不会被上报（用户看不到、路由也不会派活给它）。
     #[test]
     fn a_created_connector_is_always_reported() {
-        for name in [names::TERMINAL, names::FILES, names::EXEC, "ssh", "db"] {
-            if create(name).is_some() {
-                assert!(supports(name), "{name} 能建却没上报");
-            }
+        // 遍历 `names::ALL` 而不是手写数组：写死的那一版在 `git` 落地后
+        // 仍然全绿，因为它没把 `git` 列进去（v0.4.0 的反向验证实测）。
+        for name in names::ALL {
+            assert!(
+                create(name).is_some(),
+                "{name} 在 names::ALL 里却建不出来"
+            );
+            assert!(supports(name), "{name} 能建却没上报");
+        }
+        // 负样本：根本不存在的名字，既不该建得出也不该上报。
+        for name in ["ssh", "db", "sftp", "S3"] {
+            assert!(create(name).is_none(), "{name} 不该建得出");
+            assert!(!supports(name), "{name} 不该被上报");
         }
     }
 
@@ -307,10 +346,10 @@ mod tests {
     /// （约束 9）。所以注册表与 `create` 必须互相印证，且**只有**它们
     /// 认的名字才允许出现在心跳里（`tests/capabilities.rs` 锁住导出那侧）。
     #[test]
-    fn the_registered_set_is_exactly_the_three_m1_connectors() {
+    fn the_registered_set_is_exactly_the_four_built_in_connectors() {
         assert_eq!(
             registered_names(),
-            vec![names::EXEC, names::FILES, names::TERMINAL],
+            vec![names::EXEC, names::FILES, names::GIT, names::TERMINAL],
             "注册表就是能力表：加/减一种 connector 时这里必须一起改"
         );
     }
@@ -318,7 +357,9 @@ mod tests {
     /// 未知名 = 不支持，回 `false` 而不是崩（§5 的超时拒绝走的是这条路）。
     #[test]
     fn unknown_names_are_unsupported_not_fatal() {
-        for n in ["", "git", "ssh", "TERMINAL", "termina"] {
+        // 样本里**不能再有 `git`**：它现在是真注册的，留着会让这条测试
+        // 在「git 有了」之后变成一条永远失败的假断言。
+        for n in ["", "ssh", "sftp", "TERMINAL", "termina"] {
             assert!(!supports(n), "{n} 不该被支持");
             assert!(create(n).is_none(), "{n} 不该建得出 connector");
         }

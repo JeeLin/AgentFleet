@@ -26,7 +26,8 @@ use crate::connector;
 ///
 /// **`connectors` 由 [`connector::registered_names`] 导出，不手写数组**
 /// （子任务 11）。M0 的心跳硬编码报着 `["terminal","files","git","exec"]`，
-/// 而那四个当时**一个都没实现**——`git` 至今没有实现。
+/// 而那四个当时**一个都没实现**——`git` 直到 v0.4.0 才真正落地
+/// （`connector/git.rs`，只读的 status / diff / log）。
 ///
 /// 「上报了但没实现」比「没上报」危险得多：约束 9 要求路由按上报能力做
 /// **硬过滤**，所以一份撒谎的能力表会把任务派给一台根本没装那个 connector
@@ -301,7 +302,13 @@ mod tests {
             connector::registered_names(),
             "上报的能力表必须与注册表一字不差"
         );
-        assert!(!reported.contains(&"git"), "git 从来没实现过，不许上报");
+        // 这一句在 M0/M1 一直是 `!contains("git")`，钉的是「git 从没实现过、
+        // 硬编码上报它是撒谎」。v0.4.0 让 git 真的落地了，那条事实随之作废：
+        // 现在反过来钉——实现了就必须上报，免得日后有人顺手把它摘掉。
+        assert!(
+            reported.contains(&"git"),
+            "git 已在 v0.4.0 实现，必须出现在上报的能力表里: {reported:?}"
+        );
     }
 
     /// **上报的每个名字都必须真造得出实例。**

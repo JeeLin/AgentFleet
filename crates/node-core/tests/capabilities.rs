@@ -67,7 +67,11 @@ fn every_reported_name_builds_a_real_connector() {
 /// 所以它**永远不该出现在上报里**。
 #[test]
 fn a_connector_that_was_never_implemented_is_never_reported() {
-    for phantom in ["git", "ssh", "db", "s3"] {
+    // `git` 曾经是最好的样本（M0 起硬编码上报、却一直没实现），但它在
+    // v0.4.0 真的落地了，再留在这里只会变成一条永远失败的假断言。
+    // 保住的意图不变：**只要还没实现，就不许上报**——所以样本换成那些
+    // 至今只在规划里的名字。
+    for phantom in ["ssh", "sftp", "db", "s3", "pcap"] {
         assert!(
             !reported().iter().any(|n| n == phantom),
             "{phantom} 从来没实现过，上报它等于把任务派给做不到的机器"
