@@ -57,7 +57,7 @@ import FilesPanel, {
   type FilePreview,
   type FilesError,
 } from '@/components/FilesPanel.vue'
-import GitPanel from '@/components/GitPanel.vue'
+import GitPanel, { type GitDiffView } from '@/components/GitPanel.vue'
 import type { GitCommit } from '@/components/GitLog.vue'
 import PanelDock, { type ChannelView } from '@/components/PanelDock.vue'
 import { PANEL_ORDER, type PanelName } from '@/lib/panel'
@@ -202,15 +202,6 @@ interface GitStatusFile {
   /** worktree 侧状态码，一个字符。 */
   y: string
   path: string
-}
-
-/** 一份 diff 回帧。 */
-interface GitDiffView {
-  path: string | null
-  /** unified diff 正文。 */
-  unified: string
-  /** 设备侧截断了（超帧预算）。**必须显式告知**，不能静默少给。 */
-  truncated: boolean
 }
 
 interface TabWorkspace {

@@ -42,6 +42,20 @@ export interface GitFile {
   path: string
 }
 
+/**
+ * 一份 diff 的视图形状。`path` 与 `truncated` 都来自设备回帧。
+ *
+ * 导出而**不在页面里另写一份**：两个地方各写一次同样的三个字段，改一个忘一个
+ * 时类型检查不会说话（结构类型兼容），而页面传错字段是运行期才看得见的事。
+ */
+export interface GitDiffView {
+  path: string | null
+  /** unified diff 正文。 */
+  unified: string
+  /** 设备侧截断了（超帧预算）。**必须显式告知**，不能静默少给。 */
+  truncated: boolean
+}
+
 const props = defineProps<{
   /** 通道状态。只用来决定「还没连上」那一句怎么写。 */
   state: ChannelState
@@ -58,7 +72,7 @@ const props = defineProps<{
   /** 设备说「这里不是 git 仓库」。正常状态，不报红。 */
   notARepo: boolean
   /** 当前展示的 diff。`null` = 用户还没点开任何文件。 */
-  diff: { path: string | null; unified: string; truncated: boolean } | null
+  diff: GitDiffView | null
   /** 正在取 diff 的路径。 */
   reading: string | null
   /** 问 status / diff 被拒的原因。 */
