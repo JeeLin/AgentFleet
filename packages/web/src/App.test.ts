@@ -550,3 +550,153 @@ describe('App：品牌区与导航合并成一列', () => {
     expect(closeBlock).toContain('width: 40px')
   })
 })
+
+describe('App：会话页自动收起侧栏（v0.5.0）', () => {
+  const SESSIONS_API = {
+    '/api/sessions': {
+      body: [session({ id: 's_1', workspace: { node_id: 'n_1', path: '/srv/app', path_locked: true } })],
+    },
+    '/api/devices': { body: [device()] },
+    '/api/agents': { body: [] },
+  }
+
+  /*
+    读 `data-rail` **必须读全局 `document`，不能读 `w.element`**。
+
+    `App.vue` 是**双根**模板（`<component :is="page">` 与 `.af-app` 是兄弟）。
+    `w.element` 在这种情况下是挂载容器 div（不是 `.af-app`），
+    `querySelector` 拿到的是**上一次** mount 留下的、已经不在文档里的旧节点——
+    Vue 不会更新它，于是断言一直读到旧值。实测踩过：`toggleRail` 明明执行了、
+    `rail` 也变了，断言仍读到 `collapsed`。查全局 `document` 才是挂载后的真节点。
+  */
+  function railOf(): string | null {
+    return document.querySelector<HTMLElement>('.af-app')?.getAttribute('data-rail') ?? null
+  }
+
+  /** 点顶栏的侧栏开关。**每次都重新查**，不复用上一次拿到的节点。 */
+  async function clickTopbarRail(w: ReturnType<typeof mountIn>): Promise<void> {
+    const btn = w.element.querySelector<HTMLElement>('.af-topbar button[aria-label="折叠 / 展开侧栏"]')
+    if (!btn) throw new Error('no rail toggle in topbar')
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flush(w)
+  }
+
+  /** 换页。路由是模块级 `shallowRef`，测试直接写它就是「导航」。 */
+  function go(path: string): void {
+    window.history.replaceState(null, '', path)
+    route.value = matchRoute(path)
+  }
+
+  it('进会话页收起侧栏，离开后回到进入前的值', async () => {
+    stubFetch(SESSIONS_API)
+    const w = mountApp('/sessions')
+    await flush(w)
+    expect(railOf(), '列表页不该收侧栏').toBe('open')
+
+    go('/sessions/s_1')
+    await flush(w)
+    expect(railOf(), '会话页必须收起').toBe('collapsed')
+
+    go('/devices')
+    await flush(w)
+    expect(railOf(), '离开会话页要还回去').toBe('open')
+  })
+
+  /*
+    会话里每次点开关都**立刻生效**，且这一次拨动就是用户意图的更新。
+
+    ── 这条锁的是「翻转基准」不是「rail」 ───────────────────────────
+    进会话时 `rail` 还是列表页的 `open`，可见态被自动收起成 `collapsed`。
+    若 `toggleRail` 以 `rail` 为基准翻，点一次会把 `rail` 翻成 `collapsed`，
+    可见态**仍是** `collapsed`——用户点「展开」得到的是「没动」。
+    正确的做法是以**可见态**为基准翻，于是这里第一次点击后必须是 `open`。
+
+    反向验证（实测）：把 `toggleRail` 改成
+    `autoCollapsed=false; rail=rail==='open'?'collapsed':'open'` →
+    第③步实测红（期望 open，实际 collapsed）。
+
+    ── 为什么离开会话后是 `collapsed`（最后一次拨动）而不是 `open` ────
+    侧栏开关表达的是「我要不要看侧栏」，这是**用户偏好**，不是页面态。
+    在会话里拨它，就是改了偏好；离开会话页没有任何理由把它改回去。
+    「自动收起」才是页面态，它才是**不该**越界的那个（会话外永不生效）。
+  */
+  it('会话里每次点开关都立刻生效，且拨动即用户意图', async () => {
+    stubFetch(SESSIONS_API)
+    const w = mountApp('/sessions')
+    await flush(w)
+
+    // ① 列表页、用户意图 open（初值）
+    expect(railOf(), '列表页开着').toBe('open')
+
+    // ② 进会话：自动收起
+    go('/sessions/s_1')
+    await flush(w)
+    expect(railOf(), '会话页必须收起').toBe('collapsed')
+
+    // ③ 点一次开关：必须立刻展开（不是要按两下）
+    await clickTopbarRail(w)
+    expect(railOf(), '会话里点一次开关就要展开').toBe('open')
+
+    // ④ 再点一次：收起
+    await clickTopbarRail(w)
+    expect(railOf(), '再点一次收起').toBe('collapsed')
+
+    // ⑤ 离开会话：保持用户最后一次的选择（他刚在会话里收起了侧栏）
+    go('/devices')
+    await flush(w)
+    expect(railOf(), '拨动即用户意图，离开会话不撤销它').toBe('collapsed')
+
+    // ⑥ 回列表页再点一次：翻回 open——说明它确实是普通偏好，不是会话残留
+    await clickTopbarRail(w)
+    expect(railOf(), '会话外仍可正常翻转').toBe('open')
+  })
+
+  /*
+    用户本来就收起了侧栏：进会话仍是 collapsed，会话里展开后离开仍是 open。
+
+    它与上一条**必须同时存在**，因为两条把「离开时写什么」两侧都钉住了：
+    无条件置 open 会让这里第②步（会话页收起）变成 open 而红；无条件置
+    collapsed 会让这里最后一步红。
+  */
+  it('用户本来就收起了侧栏：会话里的拨动同样立刻生效并保持', async () => {
+    stubFetch(SESSIONS_API)
+    const w = mountApp('/devices')
+    await flush(w)
+
+    await clickTopbarRail(w)
+    expect(railOf(), '用户自己收起').toBe('collapsed')
+
+    go('/sessions/s_1')
+    await flush(w)
+    expect(railOf(), '会话页收起').toBe('collapsed')
+
+    // 会话里展开：立刻生效
+    await clickTopbarRail(w)
+    expect(railOf(), '会话里展开立刻生效').toBe('open')
+
+    // 离开会话页：用户最后的选择是 open，就保持 open。
+    // （这条与上一条合起来钉住「离开时不写缺省值」：无条件置 open 会让
+    //  上一条的第⑥步之前的 collapsed 断言红；无条件置 collapsed 会让这里红。）
+    go('/devices')
+    await flush(w)
+    expect(railOf(), '保持用户最后一次的选择').toBe('open')
+  })
+
+  it('深链直接进会话页也收起（不是只有「从列表点进来」才收）', async () => {
+    stubFetch(SESSIONS_API)
+    const w = mountApp('/sessions/s_1')
+    await flush(w)
+    expect(railOf()).toBe('collapsed')
+  })
+
+  it('会话页里侧栏开关仍在顶栏的 Tab 序列里（手动展开可达）', async () => {
+    stubFetch(SESSIONS_API)
+    const w = mountApp('/sessions/s_1')
+    await flush(w)
+    const btn = w.element.querySelector<HTMLElement>('.af-topbar button[aria-label="折叠 / 展开侧栏"]')
+    if (!btn) throw new Error('no rail toggle')
+    // 自动收起是**值**的变化，不是把按钮藏掉：撤掉它用户就再也展开不了侧栏，
+    // 而「找设备 / 换会话」在会话页里就不可达了。
+    expect(isTabbable(btn), '折叠态也必须能 Tab 到展开按钮').toBe(true)
+  })
+})

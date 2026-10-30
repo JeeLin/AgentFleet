@@ -138,11 +138,71 @@ const NAV = [
   },
 ]
 
+/* ------------------------------------------------- 侧栏：会话页自动收起 */
+
+/**
+ * 侧栏的用户意图。**只由用户写**（`⌃B` / 侧栏与顶栏那两个按钮）。
+ *
+ * ── 为什么「自动收起」不能只是另一个布尔 ──────────────────────────
+ * 写成「在会话页里就强制收起」（`autoCollapsed ? 'collapsed' : rail`）时，
+ * 会话内的手动展开会被同一个 computed 立刻盖回去，症状是「开关点了没反应」。
+ *
+ * ── 为什么这次是「以当前可见态为基准翻转」而不是「清标志 + 翻 rail」 ──
+ * 后者看起来更干净，但它有一个坏交互：侧栏被自动收起成 `collapsed`，用户点
+ * 开关 → 清标志、`rail` 由 `open` 翻成 `collapsed` → 可见态**还是** `collapsed`。
+ * 用户要的是「展开」，得到的是「没动」，得点第二下才展开。实测踩过。
+ *
+ * 所以 `toggleRail` 一律以**用户眼前看到的**为基准翻转（见其注释），
+ * `rail` 因此始终等于「用户此刻要的样子」——离开会话页时直接恢复它就对了。
+ */
 const rail = ref<'open' | 'collapsed'>('open')
 
+/**
+ * 会话页里侧栏被自动收起。唯一写入者是下面那个路由 `watch`。
+ *
+ * 与 `rail` 分开是因为两者回答不同的问题：`rail` 是「用户要什么」，这里是
+ * 「这一页要不要先替他收起来」。合成一个字段就无法回答「用户手动拨过之后，
+ * 路由还该不该覆盖他」。
+ */
+const autoCollapsed = ref(false)
+
+const effectiveRail = computed<'open' | 'collapsed'>(() =>
+  autoCollapsed.value ? 'collapsed' : rail.value,
+)
+
+/**
+ * 翻转侧栏。
+ *
+ * **基准是当前可见态 `effectiveRail`，不是 `rail`。** 两者在会话页里会分叉
+ * （自动收起让可见态是 `collapsed`，而 `rail` 可能还是 `open`）：以 `rail`
+ * 为基准，用户点「展开」实际翻到 `collapsed`，视觉上毫无反应。
+ *
+ * 翻转之后写回 `rail`：那就是用户此刻的意图，离开会话页时恢复它。
+ */
 function toggleRail(): void {
-  rail.value = rail.value === 'open' ? 'collapsed' : 'open'
+  const next = effectiveRail.value === 'open' ? 'collapsed' : 'open'
+  autoCollapsed.value = false
+  rail.value = next
 }
+
+/**
+ * 进会话工作台自动收侧栏，离开会话页时这条自动收起失效。
+ *
+ * 它**不写 `rail`**：离开会话页恢复的是用户自己的偏好，而偏好从没被这里改过。
+ *
+ * 判据取 `route.value.name`，**不另写一份路径匹配**：同一判据两处实现必然
+ * 漂开（D10 的教训是 tab 的「视图切换器」语义被实现成了两个真相源）。
+ *
+ * `immediate` 是必须的：深链直接打开 `/sessions/<id>` 时也要收起，
+ * 否则「从列表点进去」与「粘贴链接进来」得到两种外壳。
+ */
+watch(
+  () => route.value.name === 'session',
+  (inSession) => {
+    autoCollapsed.value = inSession
+  },
+  { immediate: true },
+)
 
 /** 一条导航项是否当前页。会话工作台仍高亮「会话」。 */
 function isCurrent(match: readonly string[]): boolean {
@@ -376,7 +436,7 @@ watch(
        会让 `focusMain()` 的 `main[tabindex="-1"]` 选择器命中外层那个空壳。 -->
   <component :is="page" v-if="isAuthPage && page" :key="pageKey" />
 
-  <div v-else class="af-app" :data-rail="rail">
+  <div v-else class="af-app" :data-rail="effectiveRail">
     <nav class="af-sidebar" aria-label="主导航">
       <!-- 品牌区与导航同一列（用户裁定，2026-10-27）：它们同高、同背景色、
            同受 `⌃B` 折叠，分开只多一条分隔线。放在 `nav` 内部而不是外面，
@@ -419,13 +479,13 @@ watch(
       <button
         class="af-sidebar__close"
         type="button"
-        :aria-label="rail === 'collapsed' ? '展开侧栏' : '折叠侧栏'"
+        :aria-label="effectiveRail === 'collapsed' ? '展开侧栏' : '折叠侧栏'"
         @click="toggleRail"
       >
         <span class="af-sidebar__icon" aria-hidden="true">{{
-          rail === 'collapsed' ? '⇥' : '⇤'
+          effectiveRail === 'collapsed' ? '⇥' : '⇤'
         }}</span>
-        <span class="af-sidebar__item-text">{{ rail === 'collapsed' ? '展开侧栏' : '折叠侧栏' }}</span>
+        <span class="af-sidebar__item-text">{{ effectiveRail === 'collapsed' ? '展开侧栏' : '折叠侧栏' }}</span>
       </button>
     </nav>
 
