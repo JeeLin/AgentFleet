@@ -762,15 +762,31 @@ kbd, .kbd {
   padding: var(--af-space-3) var(--af-space-5);
   background: var(--af-surface-1); border-bottom: 1px solid var(--af-border-subtle);
   flex: 0 0 auto;
+  /* 与 tab 条、状态行同属一叠 chrome：三者都 `surface-1`，靠发丝线分层。
+     任何一处换成别的底色，视线都会读成「这里开始是另一个模块」。 */
+  min-width: 0;
 }
 .af-wb__title {
   font-size: var(--af-text-lg); font-weight: var(--af-weight-medium);
   margin: 0; display: flex; align-items: center; gap: var(--af-space-3);
 }
-.af-wb__meta {
+/* 状态行（v0.5.0）：设备 · 路径（锁定）· agent · 开始时间，比页头矮一档。
+   **为什么不复用 .af-wb__meta**：那是页头里的行内组，与标题同一行；这里是
+   独立的一整行，行高、内边距、底边都归自己。复用会让两处互相牵制。 */
+.af-wb__statusline {
   display: flex; align-items: center; gap: var(--af-space-3);
+  padding: var(--af-space-1) var(--af-space-5);
   font-size: var(--af-text-sm); color: var(--af-fg-tertiary);
+  background: var(--af-surface-1); border-bottom: 1px solid var(--af-border-subtle);
+  flex: 0 0 auto;
+  /* 窄屏下路径会挤掉设备名：这里允许整行横向滚，而不是把设备名挤成省略号。
+     `min-width: 0` 是 flex 子项能真正收窄的前提（否则它会撑破父宽）。 */
+  min-width: 0; overflow-x: auto; scrollbar-width: none;
 }
+.af-wb__statusline::-webkit-scrollbar { height: 0; }
+/* 设备名与路径都不许被压成半截：宁可整行滚，也不要读到一个假的路径前缀 */
+.af-wb__statusline > * { flex: 0 0 auto; }
+.af-wb__statusline .af-fp { max-width: 46ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .af-wb__target {
   display: inline-flex; align-items: center; gap: var(--af-space-2);
   padding: var(--af-space-1) var(--af-space-3);

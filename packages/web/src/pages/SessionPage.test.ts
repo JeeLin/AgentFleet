@@ -2531,3 +2531,54 @@ describe('git 面板：历史分段', () => {
     expect(empty?.textContent).toContain('还没有提交')
   })
 })
+
+describe('会话页顶部三层：tab 条 → 标题行 → 状态行（v0.5.0）', () => {
+  it('tab 条是页面最上面那一块（在标题行之前，不是夹在页头与正文之间）', async () => {
+    const { w } = await mountWorkbench()
+    // `.af-wb` **就是**页面根元素，不是它的后代——`querySelector` 查不到自己，
+    // 直接读根的 children 才是这三块 chrome 的真实顺序。
+    const wb = w.element
+    expect(wb.classList.contains('af-wb'), '页面根就是 .af-wb').toBe(true)
+    const kids = Array.from(wb.children)
+    const tabIdx = kids.findIndex((el) => el.classList.contains('af-tabbar'))
+    const headIdx = kids.findIndex((el) => el.classList.contains('af-wb__head'))
+    expect(tabIdx, 'tab 条必须在').toBeGreaterThanOrEqual(0)
+    expect(headIdx, '标题行必须在').toBeGreaterThanOrEqual(0)
+    // 反向验证：把 `<TabBar>` 移回 `.af-wb__head` 之后 → 这条红。
+    expect(tabIdx, 'tab 条必须排在标题行之前').toBeLessThan(headIdx)
+    expect(tabIdx, 'tab 条必须是第一块可见子节点').toBe(0)
+  })
+
+  it('标题行与状态行是两个块，不是挤在同一行', async () => {
+    const { w } = await mountWorkbench()
+    const head = w.element.querySelector('.af-wb__head')
+    const line = w.element.querySelector('.af-wb__statusline')
+    expect(head, '标题行在').not.toBeNull()
+    expect(line, '状态行在').not.toBeNull()
+    expect(head, '状态行不能放在标题行里面').not.toBe(line)
+    // 设备 / 路径 / agent 都在状态行里，标题行里一个都不该有
+    expect(line?.querySelector('.af-wb__target'), '设备与路径归状态行').not.toBeNull()
+    expect(head?.querySelector('.af-wb__target'), '标题行里不该再有设备块').toBeNull()
+    expect(line?.querySelector('[data-agent-badge]'), 'agent 归状态行').not.toBeNull()
+    expect(head?.querySelector('[data-agent-badge]'), '标题行里不该再有 agent').toBeNull()
+  })
+
+  it('状态行比页头矮（它就是「收窄」的那一行）', async () => {
+    const css = readRepoFile('packages/web/src/styles/components.css')
+    const line = cssRuleOf(css, '.af-wb__statusline')
+    expect(line, '状态行必须有独立规则').not.toBe('')
+    // 上下内边距只给一档（space-1），页头是两档（space-3）
+    expect(line).toContain('padding: var(--af-space-1)')
+    expect(cssRuleOf(css, '.af-wb__head')).toContain('padding: var(--af-space-3)')
+  })
+
+  it('窄屏下状态行横向滚动而不是把设备名挤没', async () => {
+    const css = readRepoFile('packages/web/src/styles/components.css')
+    const line = cssRuleOf(css, '.af-wb__statusline')
+    // flex 子项能真正收窄的前提；缺了它 `overflow-x: auto` 永远不会触发
+    expect(line, '状态行必须 min-width: 0').toContain('min-width: 0')
+    expect(line, '状态行要能横滚').toContain('overflow-x: auto')
+    // 子项不许被压缩——宁可滚，也不要读到半截路径
+    expect(cssRuleOf(css, '.af-wb__statusline > *')).toContain('flex: 0 0 auto')
+  })
+})

@@ -1995,25 +1995,33 @@ onBeforeUnmount(() => {
     </EmptyState>
 
     <template v-else>
-      <!-- 工作台头：标题 · 状态 · 设备 · 路径（锁定）· 打开面板 -->
+      <!--
+        顶部三层（v0.5.0，对齐 opencode）：tab 条 → 标题行 → 状态行。
+
+        **tab 条在最上**：它是会话页唯一的顶部导航，把「我在哪几个会话里、
+        现在在哪个」放在最靠边、最容易被扫到的位置。它原来夹在页头与正文
+        之间，读起来像「页面的第二行说明」。
+
+        标题行与状态行拆成两层而不是挤成一行：标题行只留会话名与「打开 / 收起
+        面板」，状态行只留设备 / 路径 / agent / 开始时间（更小的字、更矮的高度）。
+        挤成一行时，窄屏下路径会把设备名挤没，而两者说的不是同一件事。
+      -->
+      <TabBar
+        ref="tabBarEl"
+        :tabs="tabs.tabs"
+        :active-id="tabs.activeId"
+        :panel-counts="panelCounts"
+        :dirty="dirtyTabs"
+        :conn-of="connOf"
+        @activate="activate"
+        @close="closeOneTab"
+      />
+
       <div class="af-wb__head">
         <h1 class="af-wb__title">
           {{ title }}
           <StateBadge :state="ended ? 'ended' : 'active'" />
         </h1>
-        <span class="af-wb__meta">
-          <span class="af-wb__target">
-            <span aria-hidden="true">▣</span>
-            <b>{{ deviceLabel }}</b>
-            <span class="af-t-mute">·</span>
-            <span class="af-fp">{{ current.workspace.path }}</span>
-            <span class="af-badge" title="建会话时确定，之后不可改">路径锁定</span>
-          </span>
-          <span class="af-t-mute">·</span>
-          <span class="af-t-mute" data-agent-badge>{{ agentLabel }}</span>
-          <span class="af-t-mute">·</span>
-          <span>{{ startedLabel }}</span>
-        </span>
         <span class="af-spacer"></span>
         <button
           ref="openButtonEl"
@@ -2032,23 +2040,31 @@ onBeforeUnmount(() => {
           type="button"
           :disabled="ended"
           :aria-pressed="activeWs?.dock ? 'true' : 'false'"
-          :title="'打开 / 收起面板坞（\\）'"
+          :title="'打开 / 收起右侧那一格（\\）'"
           @click="toggleDock"
         >
           {{ activeWs?.dock ? '收起面板' : '面板坞' }}
         </button>
       </div>
 
-      <TabBar
-        ref="tabBarEl"
-        :tabs="tabs.tabs"
-        :active-id="tabs.activeId"
-        :panel-counts="panelCounts"
-        :dirty="dirtyTabs"
-        :conn-of="connOf"
-        @activate="activate"
-        @close="closeOneTab"
-      />
+      <!--
+        状态行是**独立**的语义块，不复用 `.af-wb__meta`：它的内容更少、
+        字更小、行更矮，后续还要往里放分支名。复用同一组 class 会让两个块
+        的样式互相牵制（调状态行的行高就动了页头）。
+      -->
+      <div class="af-wb__statusline">
+        <span class="af-wb__target">
+          <span aria-hidden="true">▣</span>
+          <b>{{ deviceLabel }}</b>
+          <span class="af-t-mute">·</span>
+          <span class="af-fp">{{ current.workspace.path }}</span>
+          <span class="af-badge" title="建会话时确定，之后不可改">路径锁定</span>
+        </span>
+        <span class="af-t-mute">·</span>
+        <span class="af-t-mute" data-agent-badge>{{ agentLabel }}</span>
+        <span class="af-t-mute">·</span>
+        <span>{{ startedLabel }}</span>
+      </div>
 
       <!--
         这条 tab 的归属未知（见 `unknownTabMeta`）。**与下面「设备已被删除」
