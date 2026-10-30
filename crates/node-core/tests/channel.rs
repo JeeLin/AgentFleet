@@ -171,7 +171,7 @@ fn every_registered_connector_either_opens_or_says_why_not() {
     // **遍历 `names::ALL` 而不是手写数组**：手写数组加 connector 时必然漏写一项，
     // 而漏写不会让任何测试变红——`git` 就这么漏过一次（本次步骤6 的全量
     // `cargo test --workspace` 才撞出来）。每个 connector 的 open 参数由它自己的
-    // 契约决定，所以这里只给「裸开也够用」的那几个；其余用 `params_for` 补。
+    // 契约决定，所以这里只给「裸开也够用」的那几个；其余由 `_ => json!({})` 兜底。
     let cases: Vec<(&str, serde_json::Value)> = connector::names::ALL
         .iter()
         .map(|name| {
@@ -183,14 +183,26 @@ fn every_registered_connector_either_opens_or_says_why_not() {
             (*name, params)
         })
         .collect();
-    // 「遍历了 ALL」这件事本身要能被证伪：`cases` 是从 `ALL` 一对一映射来的，
-    // 所以长度必须相等；ALL 空了的话下面的循环一次都不跑。断言紧跟在构造之后，
-    // 中间不许有任何 `take` / `filter`——否则这条断言就被用来兜住那个截断。
-    assert_eq!(
-        cases.len(),
-        connector::names::ALL.len(),
-        "每个注册的 connector 都必须在 cases 里"
+    // 「遍历了 ALL」这件事本身要能被证伪。
+    //
+    // 早先这里是 `assert_eq!(cases.len(), ALL.len())`——它**数学上必然成立**
+    // （`cases` 就是 `ALL.iter().map(..).collect()`，`map` 不改长度），注释
+    // 说「要能被证伪」而它永远为真。换成两条真能变红的：
+    //   ① `ALL` 非空——否则下面的循环一次都不跑，测试静默变成空过；
+    //   ② 每个 `ALL` 里的名字都真的出现在 `cases` 里。这一条当前同样恒真
+    //      （`cases` 由 `ALL.iter().map(..)` 直接产出），它守的是**将来**有人
+    //      把 `map` 换成 `filter` / `take` / 手工名单那一刻——那时它才会红。
+    //      不要把它读成「这里现在有截断风险」：此刻没有。
+    assert!(
+        !connector::names::ALL.is_empty(),
+        "connector::names::ALL 是空的，这个测试会静默空过"
     );
+    for name in connector::names::ALL {
+        assert!(
+            cases.iter().any(|(n, _)| n == name),
+            "connector `{name}` 没有出现在 cases 里——`map` 被换成了会丢项的迭代器？"
+        );
+    }
     for (i, (name, params)) in cases.iter().enumerate() {
         let id = format!("ch-real-{i}");
         // **根与 connector 私有参数平级**（`OpenReq` 的形状）：`workspace_root`

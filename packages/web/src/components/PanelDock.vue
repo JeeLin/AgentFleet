@@ -171,7 +171,7 @@ function onInteract(e: Event): void {
         type="button"
         data-add="toggle"
         aria-label="打开其它面板"
-        :aria-expanded="'false'"
+        aria-expanded="false"
         @click="adding = true"
       >
         ＋
@@ -270,14 +270,15 @@ function onInteract(e: Event): void {
            </div>
          </slot>
 
-         <slot name="git">
-           <div v-if="panel === 'git'" class="af-gpane">
-             <div class="af-fpane__body af-panelhost__void af-t-mute" data-git-placeholder>
-               改动与历史由 GitPanel 挂入（v0.4.0 后续子任务）。它读的是会话工作区的
-               `status` / `diff` / `log`，**只读**——面板里没有提交按钮，也不会有。
-             </div>
-           </div>
-         </slot>
+         <!--
+           `#git` **故意没有兜底内容**：`SessionPage` 里 `<template #git>` 是静态
+           存在的，而 Vue 的具名插槽兜底只在调用方**完全没提供**该插槽时才渲染，
+           所以兜底块是一条任何路径都跑不到的死代码（曾经有过，写着「由 GitPanel
+           挂入（v0.4.0 后续子任务）」，子任务 5/6 完成后连文案都过时了）。
+           `#terminal` / `#files` 的兜底则要留着：它们的调用方在部分状态下确实
+           不传插槽内容。
+         -->
+         <slot name="git"></slot>
       </template>
     </div>
   </div>

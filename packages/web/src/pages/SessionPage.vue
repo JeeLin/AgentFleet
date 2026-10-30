@@ -57,7 +57,7 @@ import FilesPanel, {
   type FilePreview,
   type FilesError,
 } from '@/components/FilesPanel.vue'
-import GitPanel, { type GitDiffView } from '@/components/GitPanel.vue'
+import GitPanel, { type GitDiffView, type GitFile } from '@/components/GitPanel.vue'
 import type { GitCommit } from '@/components/GitLog.vue'
 import PanelDock, { type ChannelView } from '@/components/PanelDock.vue'
 import { PANEL_ORDER, type PanelName } from '@/lib/panel'
@@ -195,14 +195,13 @@ interface GitView {
   error: string | null
 }
 
-/** `status` 回帧里的一个文件条目。两列状态码原样保留。 */
-interface GitStatusFile {
-  /** index 侧（暂存区）状态码，一个字符。 */
-  x: string
-  /** worktree 侧状态码，一个字符。 */
-  y: string
-  path: string
-}
+/**
+ * `status` 回帧里的一个文件条目。两列状态码原样保留。
+ *
+ * 直接复用面板导出的 `GitFile` 而不是这里再写一份 `interface`：两边各写一份
+ * 的话，加字段时必然只改一处、另一处静默丢字段（`orig` 就是这么丢的）。
+ */
+type GitStatusFile = GitFile
 
 interface TabWorkspace {
   /** 面板坞开着吗。 */
@@ -435,6 +434,18 @@ const execHandles = new Set<ChannelHandle>()
 const chatHandles = new Map<string, ChannelHandle>()
 
 /**
+ * 对话通道的两个订阅的退订函数，键与 `chatHandles` 相同。
+ *
+ * **必须有这张表**：`ensureChatChannel` 用 `handle.onState` / `handle.onFrame`
+ * 挂了两个回调，而 `releaseTab` 里只 `chatHandles.delete` + `close()` 的话，
+ * 回调仍挂在**句柄**上。`close()` 之后句柄确实不再产帧，但「靠在句柄会自我
+ * 清理」是**对另一个模块行为的假设**，而不是这里给的保证——面板通道
+ * （`channelUnsubs` / `frameUnsubs`）早就是显式持有的，对话这一侧没有理由
+ * 例外。持有退订函数后，关掉 tab 这件事在本文件里就是完整的。
+ */
+const chatUnsubs = new Map<string, () => void>()
+
+/**
  * 这张表还剩几条，**只给测试看**（`SessionPage.test.ts`）。
  *
  * 对话释放不能只靠 DELETE 断言：`close()` 发 DELETE，而「删掉表项」不发任何
@@ -446,7 +457,19 @@ function chatHandleCount(): number {
   return chatHandles.size
 }
 
-defineExpose({ chatHandleCount })
+/**
+ * 还挂着订阅的对话通道有几条，**只给测试看**。
+ *
+ * 与 `chatHandleCount` 同一理由：退订发不出任何请求，断言「关 tab 后不再有
+ * 轨迹重读」不成立——`refreshTrajectory` 首行的 `workspaces.get(tabId)` 守卫
+ * 会在 `workspaces.delete` 之后直接 return，那一道防线与退订无关。于是
+ * 「订阅退没退」在网络上与「退了」一模一样。这里只读一个数。
+ */
+function chatSubscriberCount(): number {
+  return chatUnsubs.size
+}
+
+defineExpose({ chatHandleCount, chatSubscriberCount })
 
 function ensureChannel(tab: TabMeta, panel: PanelName): ChannelHandle {
   const key = channelKey(tab.id, panel)
@@ -600,6 +623,10 @@ async function releaseTab(tabId: string): Promise<void> {
   const chat = chatHandles.get(chatKey)
   if (chat) {
     chatHandles.delete(chatKey)
+    // 先退订再关：反过来的话，`close()` 期间到达的帧仍会被回调收下，而
+    // `scheduleTrajectory` 会对着一个即将消失的 ws 起定时器。
+    chatUnsubs.get(chatKey)?.()
+    chatUnsubs.delete(chatKey)
     await chat.close()
   }
   // 关 tab 时还挂在窗口里的轨迹重读也要撤掉：它读的是一个已经不在工作区里的
@@ -614,12 +641,13 @@ async function releaseTab(tabId: string): Promise<void> {
 /* ---------------------------------------------------------------- 面板坞 */
 
 /**
- * 坞的缺省面板。**一处定义，四处使用**。
+ * 坞的缺省面板。**一处定义，所有回落点都用它**（不写「N 处使用」：那个数字
+ * 会随着新增入口变旧，2026-10-29 就已经从「四处」变成六处而注释没跟上）。
  *
- * v0.4.0 起缺省是 git（用户拍板：打开就是 git 界面）。它出现在四个回落点上：
- * `blankWorkspace` 的初值、`o` 键、`toggleDock`、`cyclePanel` 的「坞没开」分支。
- * 各写一份字面量的后果不是编译错，而是「关掉坞按 `o` 是 git、按 `\` 打开却是
- * 终端」这种半吊子一致——实测撞上过一处（`o` 的回落），所以收敛到这里。
+ * v0.4.0 起缺省是 git（用户拍板：打开就是 git 界面）。各写一份字面量的后果
+ * 不是编译错，而是「关掉坞按 `o` 是 git、按 `\` 打开却是终端」这种半吊子一致
+ * ——实测撞上过两处：`o` 键的回落，以及页面头「打开面板」按钮（第 1933 行
+ * 曾是裸的 `'git'`，改缺省值时它不跟着变）。所以收敛到这里。
  */
 const DEFAULT_PANEL: PanelName = 'git'
 
@@ -793,15 +821,19 @@ function ensureChatChannel(tab: TabMeta): ChannelHandle {
   const ws = workspaceOf(tab.id)
   // 失败的原因要看得见：输入框已经清空而没有回音时，用户唯一能读到的是这句。
   // 通道是在**发第一句话时**才开的，所以这里只显示结果，不参与能不能发的判据。
-  handle.onState(() => {
+  const offState = handle.onState(() => {
     ws.convError = handle.errorCode()
   })
   // 对话的帧只用来判「还在动」：内容一律读轨迹表（`GET .../trajectory`），
   // 因为帧在断线期间会丢，而轨迹是库里的。页面不靠帧补历史。
   // 读的动作走 `scheduleTrajectory`：一次回复的帧是成批到的，每帧一读会把
   // 请求数抬到帧数那么多，而新内容往往只有几个字。
-  handle.onFrame(() => {
+  const offFrame = handle.onFrame(() => {
     scheduleTrajectory(tab.id)
+  })
+  chatUnsubs.set(key, () => {
+    offState()
+    offFrame()
   })
   return handle
 }
@@ -975,36 +1007,45 @@ function closeTraj(): void {
 /* ---------------------------------------------------------------- 文件取数 */
 
 /**
- * 文件面板要东西的入口。**面板不持通道**（组件头注释），所以「谁去取」这一步
- * 在页面：把意图包成通道数据帧送下去。
+ * 往某个面板的通道上发一个请求帧。
  *
- * 意图 → op 的对应关系与 node 侧 `files.rs` 的入帧（`op = "list" | "read" |
- * "write"`）逐字一致（`crates/node-core/src/connector/files.rs` 的
- * `on_data` 只认**顶层** `op`）。将来换成别的搬运方式只改这里，面板不知道。
+ * `files` 与 `git` 两条取数路径的骨架**逐行同构**（取 handle → 取 id → POST
+ * /send → catch 里把错误写进面板状态），早先是两份各写一遍的；只把「失败时
+ * 说什么」留在外面，是因为那是这两个面板唯一真正不同的部分。
+ *
+ * 失败必须**说话**：面板没有第二条反馈路径，静默失败就是一块永远不动的面板
+ * ——用户看不出是网络断了、通道没了，还是这次操作本来就没结果。
  *
  * **必须发 `application/json`**：Hub 的 `/send` 按 Content-Type 分派
  * （`crates/hub-server/src/routes/stream.rs`），只有 JSON 会原样成为
  * `channel_data.payload`；终端的 `application/octet-stream` 会被包成
- * `{"bytes":…}`，files connector 收不到 `op`。
+ * `{"bytes":…}`，两个 connector 都收不到 `op`。
  *
- * 不走 `ChannelHandle.send()`：那条路的语义是「终端敲击」——断线时丢弃并
- * 计数。一次 `list` 被丢就再也没人回应它，而「有 N 条已丢」那个徽标在说
- * 取数这件事时用户根本读不懂（见 `pendingFiles`）；所以取数自己发请求，
- * 失败时把原因写进 `ws.filesError`（§7.4 第 ③ 路）。
- *
- * **只应对已 `ready` 的通道**：未 ready 的那一次由 `pendingFiles` 记下，
- * 等通道 ready 时补发。
+ * **未 `ready` 的通道直接返回，不排队也不补发**。补发是 `files` 自己的事
+ * （`pendingFiles`，见 `fileRequest` 的注释），git 侧没有对应机制——把那条
+ * 保证写在这个共用函数的头上会让人以为 git 也有。
  */
-function fileRequest(tab: TabMeta, op: 'list' | 'read' | 'write', payload: Record<string, unknown>): void {
-  const handle = channels.get(channelKey(tab.id, 'files'))
-  if (!handle || handle.state() !== 'ready') return
+function sendPanelRequest(
+  tab: TabMeta,
+  panel: PanelName,
+  op: string,
+  payload: Record<string, unknown>,
+  onError: (err: unknown) => void,
+): boolean {
+  const handle = channels.get(channelKey(tab.id, panel))
+  if (!handle || handle.state() !== 'ready') return false
   const id = handle.id()
-  if (!id) return
+  if (!id) return false
   void request(`/api/channels/${encodeURIComponent(id)}/send`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ op, ...payload }),
-  }).catch((err: unknown) => {
+  }).catch(onError)
+  return true
+}
+
+function fileRequest(tab: TabMeta, op: 'list' | 'read' | 'write', payload: Record<string, unknown>): void {
+  sendPanelRequest(tab, 'files', op, payload, (err: unknown) => {
     // 取数被 Hub 拒（404 通道没了 / 400 载荷不合法 / 403 CSRF）时页面必须
     // 说话：文件面板没有第二条反馈路径，静默失败就是一棵永远不动的空树。
     const ws = workspaces.get(tab.id)
@@ -1145,16 +1186,44 @@ function gitRefresh(tab: TabMeta): void {
   gitRequest(tab, 'status')
 }
 
-/** 用户点了某个文件：问它的 diff。 */
-function gitShowDiff(tab: TabMeta, path: string): void {
+/**
+ * `orig` 是重命名 / 复制的旧路径。
+ *
+ * 它必须一起发给设备侧：git 的 rename 检测要 pathspec 里**同时**有新旧两条
+ * 路径，只给新路径时 git 判成「新建文件」，页面于是把一次改名显示成
+ * 「新建了这个文件」——用户看不到「这是同一个文件改名了」。
+ */
+function gitShowDiff(tab: TabMeta, path: string, orig?: string): void {
   const ws = workspaces.get(tab.id)
   if (!ws) return
   // 从改动分段取 diff 时清掉「这份 diff 属于哪条提交」——不清的话 diff 面板
   // 会把它当历史 diff 渲染，`stale` 判据也就跟着错（见 `GitPanel` 的 `logReading`）。
   ws.git.logSelected = null
   ws.git.logReading = null
-  ws.git.reading = path
-  gitRequest(tab, 'diff', { path })
+  // `reading` 只有在请求**确实发出去之后**才置位：`sendPanelRequest` 在通道未
+  // ready / 取不到 id 时直接 return 且不调 `onError`（git 侧没有 `files` 那样的
+  // 补发机制），先置位就会让面板永久停在「正在读取 diff…」。
+  if (gitRequest(tab, 'diff', orig ? { path, orig } : { path })) ws.git.reading = path
+}
+
+/**
+ * 用户切回改动分段。
+ *
+ * 与 `gitShowLog` **对称的一半**：历史侧把 `ws.git.diff` 写成「某条提交的
+ * diff」，这里必须把它撤掉。不撤的话，切回改动后左栏是工作区文件列表、一行
+ * 都没高亮，右栏却仍是那条提交的改动——两个提示指向两个事实。
+ *
+ * 只清不请求：`status` 在进入面板时已经问过，用户切回来时那块数据还在
+ * （`gitRefresh` 负责重问）。这里再发一次 `status` 就是替用户做他没要的请求
+ * ——和「切到历史才问 log」是同一把尺子。
+ */
+function gitShowChanges(tab: TabMeta): void {
+  const ws = workspaces.get(tab.id)
+  if (!ws) return
+  ws.git.diff = null
+  ws.git.reading = null
+  ws.git.logSelected = null
+  ws.git.logReading = null
 }
 
 /**
@@ -1163,9 +1232,35 @@ function gitShowDiff(tab: TabMeta, path: string): void {
  * `limit` 写死 30 而不是做成可调的「加载更多」：v0.4.0 只要「历史提交可查」，
  * 而一个没有总数（git 不给）的分页控件比一次给 30 条更难用也对不了账。
  * 超过时设备回 `truncated:true`，页面明说「更早的没有列出」。
+ *
+ * **必须清 `diff`**：「改动」与「历史」两个分段共用同一个 `ws.git.diff`
+ * （右栏的判据是 `GitPanel.vue:289` 那个 `v-if="!diff"`）。不清的话，在改动
+ * 分段点过文件后切过来，右栏会把**工作区**的 diff 当成「这条提交改了什么」
+ * 渲染出来——而 `GitLog.vue` 的文件头正明说那是另一件事。
+ *
+ * **`logSelected` 也要清**：不清的话上一轮选中的提交仍在 `GitLog` 里高亮
+ * （`aria-selected`），而 `diff` 已被清成 `null`、右栏写着「点左边任一提交」。
+ * 同一屏里高亮说「你选了这条」、正文说「你还没选」，是两件事。与
+ * `gitShowDiff` 对称：那边切到时也清 `logSelected`。
+ *
+ * **反方向由 `gitShowChanges` 负责**：本函数是「进入历史」的一半，离开历史
+ * 走 `gitShowChanges`。只写这一半的后果是 diff 从历史串到改动分段——方向
+ * 相反，但同样是「两个提示指向两个事实」。
  */
 function gitShowLog(tab: TabMeta): void {
-  gitRequest(tab, 'log', { limit: 30 })
+  const ws = workspaces.get(tab.id)
+  if (!ws) return
+  ws.git.diff = null
+  ws.git.reading = null
+  ws.git.logSelected = null
+  // **已经有列表就不重发**：用户在同一对分段之间来回切（看一处改动、回到历史
+  // 核对一下、再看下一处）时，每切一次都跑一遍 `git log` 是替用户做他没要的
+  // 请求——而 `GitPanel` 那条懒建立的注释写的动机正是「不要替用户做他没要的
+  // 请求」。要拿最新历史用刷新按钮（它重问 `status`；历史仍然点「历史」进来
+  // 时若想强制重取，先把分段切走再切回来不是可靠手段，所以这里不提供隐式
+  // 刷新——`git log` 的结果不会因为面板多开一会儿而变化，除非用户在别处提交，
+  // 而那种情况他本来就该点刷新）。
+  if (ws.git.commits === null) gitRequest(tab, 'log', { limit: 30 })
 }
 
 /**
@@ -1178,6 +1273,9 @@ function gitShowLog(tab: TabMeta): void {
 function gitOpenCommit(tab: TabMeta, hash: string): void {
   const ws = workspaces.get(tab.id)
   if (!ws) return
+  // 与 `gitShowLog` 对称：切到「看某条提交」时把上一份 diff 撤掉，否则
+  // 从改动分段带过来的工作区 diff 会先闪一下再被替换。
+  ws.git.diff = null
   ws.git.logReading = hash
   ws.git.logSelected = hash
   gitRequest(tab, 'diff', { commit: hash })
@@ -1189,21 +1287,17 @@ function gitOpenCommit(tab: TabMeta, hash: string): void {
  * 与 `fileRequest` 分开而不是共用一个函数：两者的失败落点不同（files 写进
  * `ws.filesError`，git 写进 `ws.git.error`），合并就要在里面判 `panel`，
  * 而那正是「一个函数知道太多」的样子。共同的形状只有五行 `fetch`。
+ *
+ * 返回**请求是否真的发出去了**：未 ready / 取不到 id 时 `sendPanelRequest`
+ * 直接返回且不调 `onError`，调用方据此决定要不要置「正在读取」标记——
+ * 先置位再发就会在早返路径上留下一个永远不复位的 reading。
  */
 function gitRequest(
   tab: TabMeta,
   op: 'status' | 'diff' | 'log',
   payload: Record<string, unknown> = {},
-): void {
-  const handle = channels.get(channelKey(tab.id, 'git'))
-  if (!handle || handle.state() !== 'ready') return
-  const id = handle.id()
-  if (!id) return
-  void request(`/api/channels/${encodeURIComponent(id)}/send`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ op, ...payload }),
-  }).catch((err: unknown) => {
+): boolean {
+  return sendPanelRequest(tab, 'git', op, payload, (err: unknown) => {
     const ws = workspaces.get(tab.id)
     if (!ws) return
     ws.git.reading = null
@@ -1227,6 +1321,14 @@ function gitRequest(
  * `crates/node-core/src/connector/git.rs` 的 `run_git`：非零退出返回
  * `ConnectorError::Failed`，由通道层变成 `channel_error`，于是它到不了这里，
  * 而是进 `views.git.error`（错误码）与 `ws.git.error` 无关。
+ *
+ * **一个已知的可读性缺口**：设备侧 `ConnectorError` 的 `to_string()` 是带
+ * detail 的（`#[error("invalid request: {detail}")]`），而通道层把码与这句话
+ * 一起放进了 `channel_error` 的 `reason`；但 `ChannelHandle` 只暴露
+ * `errorCode()`、不暴露 `reason`，所以页面只能显示「Hub 拒绝了这次 git 请求
+ * （internal）。」——用户看不到「有一条在飞」这类可读原因。要补它得让
+ * `lib/channel.ts` 把 `reason` 也存下来，那是通道层的事，不在本里程碑的
+ * 只读面板范围内。这里写下来是为了让下一个人知道「不是设备没说，是页面没读」。
  */
 function applyGitFrame(ws: TabWorkspace, payload: unknown): void {
   const frame = asRecord(payload)
@@ -1285,13 +1387,16 @@ function applyGitStatus(git: GitView, frame: Record<string, unknown>): void {
   git.files = raw.flatMap((entry) => {
     const f = asRecord(entry)
     if (!f || typeof f.path !== 'string') return []
-    return [
-      {
-        x: typeof f.x === 'string' ? f.x : ' ',
-        y: typeof f.y === 'string' ? f.y : ' ',
-        path: f.path,
-      },
-    ]
+    // `orig` 只在重命名 / 复制时出现，且**必须留着**：问 diff 时它要一起
+    // 发给设备侧（否则 git 把改名判成新建）。早先这里逐字段重建对象，
+    // 只写了 x/y/path，`orig` 就在这行里被静默丢掉了。
+    const out: GitStatusFile = {
+      x: typeof f.x === 'string' ? f.x : ' ',
+      y: typeof f.y === 'string' ? f.y : ' ',
+      path: f.path,
+    }
+    if (typeof f.orig === 'string') out.orig = f.orig
+    return [out]
   })
 }
 
@@ -1299,6 +1404,10 @@ function applyGitStatus(git: GitView, frame: Record<string, unknown>): void {
 function applyGitDiff(git: GitView, frame: Record<string, unknown>): void {
   git.reading = null
   git.logReading = null
+  // 这份 diff 是**成功**取到的，所以失败横幅必须撤掉：`GitPanel` 的错误横幅
+  // 排在文件列表与 diff 之前（`v-if="error"` 在 `v-else-if="clean === null"` 上面），
+  // 不清的话一次失败的刷新会让之后所有成功的 diff 都被那行红字盖住。
+  git.error = null
   git.diff = {
     path: typeof frame.path === 'string' ? frame.path : null,
     unified: typeof frame.unified === 'string' ? frame.unified : '',
@@ -1912,7 +2021,8 @@ onBeforeUnmount(() => {
           type="button"
           :disabled="ended"
           :title="ended ? '会话已结束：面板不会再建立通道' : '打开 Git 面板（o）'"
-          @click="openPanel('git')"
+          data-open-panel
+          @click="openPanel(DEFAULT_PANEL)"
         >
           <span aria-hidden="true">▤</span> 打开面板
           <kbd>o</kbd>
@@ -2098,8 +2208,9 @@ onBeforeUnmount(() => {
                 :log-reading="activeWs.git.logReading"
                 :log-selected="activeWs.git.logSelected"
                 @refresh="activeTab && gitRefresh(activeTab)"
-                @diff="(path: string) => activeTab && gitShowDiff(activeTab, path)"
+                @diff="(path: string, orig?: string) => activeTab && gitShowDiff(activeTab, path, orig)"
                 @log="activeTab && gitShowLog(activeTab)"
+                @changes="activeTab && gitShowChanges(activeTab)"
                 @open-commit="(hash: string) => activeTab && gitOpenCommit(activeTab, hash)"
               />
             </template>

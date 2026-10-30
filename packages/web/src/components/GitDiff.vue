@@ -40,12 +40,22 @@ const lines = computed(() => {
 })
 
 /**
+ * 一行对应的样式类名。**类型是封闭联合，不是 `string`**：`components.css` 里
+ * 每个 kind 各有一条 `[data-kind='…']` 规则，写成 `string` 时新加一个返回值
+ * TypeScript 不会提醒「CSS 里没有这一档」，那一行就静默按默认样式渲染。
+ *
+ * `ctx` 没有自己的 CSS 规则是**故意的**：上下文行就该是默认样式，写一条
+ * 与默认值相同的规则只会让人以为它跟别的档一样有特殊处理。
+ */
+type DiffLineKind = 'meta' | 'hunk' | 'add' | 'del' | 'ctx'
+
+/**
  * 一行的色别，只看首字符。
  *
  * **`+++` / `---` 是文件头而不是增删行**，所以先判它们：只按首字符判的话
  * 两个文件头会被染成绿 / 红，读起来像「这一整行被加了」。
  */
-function kindOf(line: string): string {
+function kindOf(line: string): DiffLineKind {
   if (line.startsWith('+++') || line.startsWith('---')) return 'meta'
   if (line.startsWith('@@')) return 'hunk'
   if (line.startsWith('+')) return 'add'
@@ -63,7 +73,10 @@ function kindOf(line: string): string {
 
     <p v-if="stale" class="af-gdiff__note af-t-mute">正在读取这一份 diff…</p>
     <p v-else-if="!lines.length" class="af-gdiff__note af-t-mute" data-git-diff-empty>
-      这个文件没有可显示的改动——它可能是未跟踪的空文件，或改动只涉及模式 / 权限。
+      <!-- 空正文 + 已截断 ≠ 「没有改动」：`truncate_utf8` 在首字节非法 UTF-8 时
+           能截到什么都不剩，这时说「没有可显示的改动」是在撒谎。 -->
+      <template v-if="truncated">改动太长了，设备侧一截就什么都不剩。</template>
+      <template v-else>这个文件没有可显示的改动——它可能是未跟踪的空文件，或改动只涉及模式 / 权限。</template>
     </p>
     <template v-else>
       <pre class="af-gdiff__body" data-git-diff-body><div
@@ -72,10 +85,12 @@ function kindOf(line: string): string {
         class="af-gdiff__line"
         :data-kind="line.kind"
       >{{ line.text }}</div></pre>
-      <!-- 截断要显式说出来：静默少给一半会让用户以为「就改了这些」。 -->
-      <p v-if="truncated" class="af-gdiff__trunc" role="status" data-git-diff-truncated>
-        diff 太长，设备侧已截断：下面这些不是全部改动。把改动拆小、或直接用文件面板看具体位置。
-      </p>
     </template>
+    <!-- 截断要显式说出来：静默少给一半会让用户以为「就改了这些」。
+         **放在 `lines.length` 判定之外**：早先它在 `<template v-else>` 里，
+         于是空正文 + 截断时提示语不出现，面板只显示「没有可显示的改动」。 -->
+    <p v-if="truncated" class="af-gdiff__trunc" role="status" data-git-diff-truncated>
+      diff 太长，设备侧已截断：下面这些不是全部改动。把改动拆小、或直接用文件面板看具体位置。
+    </p>
   </div>
 </template>

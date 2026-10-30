@@ -24,7 +24,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::files::resolve_within;
@@ -42,7 +44,48 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 /// 取协议帧上限的保守分数：整帧还要装 JSON 信封（`op`、`path`、字段名和转义），
 /// 直接贴着 1 MiB 去截会在序列化后被推过去。超限**在设备侧截断并声明**
 /// 比发出去让 Hub 拒帧好——拒帧会断开整条设备连接，那是故障；截断是可读的。
-const PAYLOAD_BUDGET: usize = protocol::MAX_FRAME_BYTES * 3 / 4;
+///
+/// **它刻意不等于 `files.rs` 的 `PAYLOAD_BUDGET`**（那边是 `MAX_FRAME_BYTES
+/// - 1024`）：diff 是纯文本，序列化后不膨胀，只需给信封留余量；而 files 的
+/// 载荷是 base64（4/3 膨胀）加一份等长 `text`，**不能靠固定余量**——真正的
+/// 判据是编码后的大小，装不下退回头尾预览。实测把这里换成 `-1024` 会让
+/// `a_huge_diff_is_truncated_on_the_device_and_says_so` 红（截断后 1135928
+/// > 1048576，仍超帧），因为那 25% 是 cover 信封与转义的，不是可选的。
+const PAYLOAD_BUDGET: usize = protocol::frame::MAX_FRAME_BYTES * 3 / 4;
+
+/// 「通道没开」的文案。
+///
+/// `on_data` 里两处构造它（开头一次、起线程前一次），各写一份字面量时改文案
+/// 要改两处，而改一处不会有测试变红——那条用例只 `contains("not open")`，
+/// 两份都成立。
+const NOT_OPEN: &str = "git channel is not open";
+
+/// `git` 通道认的三个 op。
+///
+/// **白名单与分派表从这里同一张表派生**（`on_data` 校验用 `parse`，线程里
+/// 分派也用 `parse`）：早先它们是两处手写字符串——`match op { "status" | "log"
+/// | "diff" => {} }` 与 `match op { "status" => …, "diff" => … }`——加第四个 op
+/// 时只改一处，另一处会静默落进 `other` 臂，编译不报错、测试也不会红。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitOp {
+    Status,
+    Diff,
+    Log,
+}
+
+impl GitOp {
+    /// 认不出来就回 `Invalid`（通道层能翻成 `channel_error` 的那一档）。
+    fn parse(op: &str) -> Result<Self, ConnectorError> {
+        match op {
+            "status" => Ok(Self::Status),
+            "diff" => Ok(Self::Diff),
+            "log" => Ok(Self::Log),
+            other => Err(ConnectorError::Invalid {
+                detail: format!("unknown git operation: {other}"),
+            }),
+        }
+    }
+}
 
 /// `log` 缺省取多少条（调用方没给 `limit` 时）。
 const DEFAULT_LOG_LIMIT: u32 = 30;
@@ -62,8 +105,20 @@ pub struct Git {
     /// 不需要任何全局状态。
     git_bin: PathBuf,
     timeout: Duration,
-    /// 进行中的请求。同一时刻只有一条——通道是串行的，页面也不会并发问两次。
+    /// 进行中的请求。**约束**是「同一时刻只保留一条」：新请求在旧的还没取走时
+    /// 会被 `on_data` 拒（返回 `Invalid`），不会排队也不会顶掉旧的。
+    ///
+    /// 不要把它写成「页面不会并发问两次」——那是一句**代码没提供的保证**：
+    /// 页面连点两个文件就是两次请求，而 `on_data` 返回后 `poll` 才取结果，
+    /// 中间完全可能来第二帧。把希望写成事实，正是当初没加守卫的原因。
     pending: Option<Receiver<Result<Vec<OutFrame>, ConnectorError>>>,
+    /// 在飞请求的取消旗。`close()` 置位，之后工作线程会在下一个 10ms 轮询点
+    /// 杀掉 git 子进程并退出。
+    ///
+    /// **为什么需要它**：`close()` 只是丢弃 `Receiver`，线程与 git 子进程都还在
+    /// 跑——通道被回收（用户关掉面板）后仍会有一个最长 15 秒的 `git` 进程。
+    /// 「新请求顶掉旧请求」那条路径已被 `pending` 守卫挡掉，但**回收**这条没有。
+    cancel: Arc<AtomicBool>,
 }
 
 impl Git {
@@ -78,6 +133,7 @@ impl Git {
             git_bin: git_bin.into(),
             timeout: DEFAULT_TIMEOUT,
             pending: None,
+            cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -90,21 +146,36 @@ impl Git {
 
     fn root_checked(&self) -> Result<&Path, ConnectorError> {
         self.root.as_deref().ok_or_else(|| ConnectorError::Invalid {
-            detail: "git channel is not open".to_string(),
+            detail: NOT_OPEN.to_string(),
         })
     }
 
     /// 跑一次 git，拿 stdout。**同步**——调用方负责放到线程里去。
     fn run_git(&self, root: &Path, args: &[&str]) -> Result<Vec<u8>, ConnectorError> {
         let op = args.first().copied().unwrap_or("git").to_string();
-        let mut child = Command::new(&self.git_bin)
-            .args(args)
+        let mut cmd = Command::new(&self.git_bin);
+        cmd.args(args)
             // `cwd` 是工作区根：git 靠它定位仓库，不另传 `-C`
             // （`-C` 的路径要拼进参数，而那正是能拼错的地方）。
             .current_dir(root)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        // **必须清掉继承来的 `GIT_*`**：`afcli` 常被从「某个 git 钩子 / IDE 的
+        // git 集成 / `git rebase --exec`」里拉起，那些环境里 `GIT_DIR` /
+        // `GIT_WORK_TREE` / `GIT_INDEX_FILE` 都指着**另一个**仓库。不清的话
+        // `current_dir(root)` 会被 `GIT_DIR` 压过去，connector 于是报出那个
+        // 仓库的分支与改动——用户在这台机器上看到的「工作区」根本不是这个会话
+        // 的工作区。（实测：`GIT_DIR` 指向别处时不清会读出那个仓库的状态。）
+        //
+        // 只删 `GIT_*` 而不是 `env_clear()`：清空全部会把 `PATH` / `HOME` 一起
+        // 带走，而 git 需要它们（`HOME` 决定 `~/.gitconfig` 与 `core.excludesfile`）。
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("GIT_") {
+                cmd.env_remove(&key);
+            }
+        }
+        let mut child = cmd
             .spawn()
             // coverage: excluded — 只在 `git` 可执行文件缺失 / 无执行权限 /
             // 进程表满时才会走到。`with_git_bin` 能指向一个不存在的路径来构造
@@ -116,12 +187,18 @@ impl Git {
                 detail: format!("cannot run git: {e}"),
             })?;
 
-        let out = match wait_with_deadline(&mut child, self.timeout) {
+        let out = match wait_with_deadline(&mut child, self.timeout, &self.cancel) {
             Ok(Some(out)) => out,
             Ok(None) => {
-                // 超时：先杀再报。杀完还得收尸，否则留下僵尸进程。
+                // 超时或已取消：先杀再报。杀完还得收尸，否则留下僵尸进程。
                 let _ = child.kill();
                 let _ = child.wait();
+                if self.cancel.load(Ordering::SeqCst) {
+                    return Err(ConnectorError::Failed {
+                        op,
+                        detail: "git request cancelled: the channel was closed".to_string(),
+                    });
+                }
                 return Err(ConnectorError::Failed {
                     op,
                     detail: format!("git timed out after {}s", self.timeout.as_secs()),
@@ -184,7 +261,6 @@ impl Git {
         };
         let StatusView {
             branch,
-            head,
             detached,
             files,
         } = parse_status(&raw);
@@ -192,18 +268,12 @@ impl Git {
         // HEAD 用 `rev-parse` 单独取：`status --branch` 只在跟踪分支时给
         // `## main...origin/main`，detached 时给 `## HEAD (no branch)`，
         // 拿不到短 hash。多一次子进程换一个确定的字段，值得。
-        let head = match head {
-            // coverage: excluded — `parse_status` 从不给 `head`：`status
-            // --branch` 的输出里没有短 hash（只有分支名或 `HEAD (no branch)`），
-            // 所以解析结果这一格恒为 `None`。留着这一臂是因为「将来若改成解析
-            // 别的 git 输出」时它就在该在的位置；它不是业务分支。
-            Some(h) => Some(h),
-            // **不要 `unwrap_or(None)`**：`head_short` 内部已经把「空仓库没有
-            // HEAD」折成 `Ok(None)` 了，剩下的 `Err` 是**真错**（git 挂了、
-            // 权限不对）。吞掉它会让页面上「我不知道 HEAD」与「读 HEAD 失败了」
-            // 显示成同一句话。
-            None => self.head_short(root)?,
-        };
+        //
+        // **不要 `unwrap_or(None)`**：`head_short` 内部已经把「空仓库没有
+        // HEAD」折成 `Ok(None)` 了，剩下的 `Err` 是**真错**（git 挂了、
+        // 权限不对）。吞掉它会让页面上「我不知道 HEAD」与「读 HEAD 失败了」
+        // 显示成同一句话。
+        let head = self.head_short(root)?;
 
         Ok(vec![OutFrame::new(serde_json::json!({
             "op": "status",
@@ -223,34 +293,47 @@ impl Git {
     fn head_short(&self, root: &Path) -> Result<Option<String>, ConnectorError> {
         match self.run_git(root, &["rev-parse", "--short", "HEAD"]) {
             Ok(raw) => Ok(Some(String::from_utf8_lossy(&raw).trim().to_string())),
-            // 空仓库没有 HEAD：那不是错误，是「还没有提交」。
-            Err(_) => Ok(None),
+            // **只有「空仓库」折成 `None`，其余 `Err` 原样传播**。
+            //
+            // 早先这里是 `Err(_) => Ok(None)`：它把 `rev-parse` 的所有失败
+            // （git 挂了、权限不对、索引损坏）都显示成「这个仓库还没有 HEAD」，
+            // 而这正是调用点 214-217 的注释明说要避免的事——守卫被删在了上游，
+            // 却停在一个仍在吞错的地方。`is_empty_repo` 的判据就是
+            // 「`does not have any commits yet` / `bad default revision`」，
+            // 与 `log` 用的是同一套，不另写。
+            Err(e) if is_empty_repo(&e) => Ok(None),
+            Err(e) => Err(e),
         }
     }
 
     fn diff(&self, data: &serde_json::Value) -> Result<Vec<OutFrame>, ConnectorError> {
         let root = self.root_checked()?;
-        let args = diff_args(data)?;
+        let req = diff_args(data)?;
 
         // 越界判据与 files 同一套（`resolve_within`），不重写：
         // 三种逃逸（`..` / 绝对路径 / 链接出界）在那里已经各自被拒。
-        let shown = data
-            .get("path")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
-        if let Some(shown) = &shown {
-            resolve_within(root, shown)?;
+        //
+        // 查的是 `req` 里那两个**已经拼进 argv 的同名值**，而不是回头再从
+        // `data` 里 `.get()` 一遍：只查一份、用的也是那一份，才不会有
+        // 「查的路径」与「交给 git 的路径」在结构上可以是两个值的缝。
+        if let Some(path) = &req.path {
+            resolve_within(root, path)?;
+        }
+        // `orig` 同样要过越界检查：它也会被拼进 pathspec 交给 git，
+        // 只查 `path` 的话它就成了一条绕过 `resolve_within` 的路径。
+        if let Some(orig) = &req.orig {
+            resolve_within(root, orig)?;
         }
 
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let arg_refs: Vec<&str> = req.args.iter().map(String::as_str).collect();
         let raw = self.run_git(root, &arg_refs)?;
         let (unified, truncated) = truncate_utf8(&raw, PAYLOAD_BUDGET);
 
         Ok(vec![OutFrame::new(serde_json::json!({
             "op": "diff",
-            "path": shown,
-            "staged": data.get("staged").and_then(serde_json::Value::as_bool).unwrap_or(false),
-            "commit": data.get("commit").and_then(serde_json::Value::as_str),
+            "path": req.path,
+            "staged": req.staged,
+            "commit": req.commit,
             "unified": unified,
             "truncated": truncated,
         }))])
@@ -271,7 +354,10 @@ impl Git {
         // **空仓库不是错误**：`git log` 在还没有提交的仓库上以非零退出，
         // 而「还没有提交」是一种正常状态（和「不是 git 仓库」不同）。
         // 把它当失败会让页面在新建仓库上弹一个红框。
-        let raw = match self.run_git(root, &["log", fmt, "-n", &limit.to_string()]) {
+        // 多取一条：`truncated` 靠它判断「还有没有更早的」（见下方注释）。
+        // 页面收到的是前 `limit` 条（由调用侧截断）。
+        let probe = limit.saturating_add(1);
+        let raw = match self.run_git(root, &["log", fmt, "-n", &probe.to_string()]) {
             Ok(raw) => raw,
             Err(e) if is_empty_repo(&e) => Vec::new(),
             // coverage: excluded — 让 `git log` 在**非**空仓库上以非零退出且
@@ -284,20 +370,17 @@ impl Git {
         let text = String::from_utf8_lossy(&raw);
         let commits = parse_log(&text);
 
-        // 检查是否还有更多提交：`git log` 拿不到总数，再看一条即可。
-        let truncated = commits.len() as u32 >= limit && {
-            let more = limit.saturating_add(1).to_string();
-            self.run_git(root, &["rev-list", "--count", "HEAD"])
-                .map(|c| {
-                    String::from_utf8_lossy(&c)
-                        .trim()
-                        .parse::<u32>()
-                        .map(|total| total > limit)
-                        .unwrap_or(false)
-                })
-                .unwrap_or(false)
-                && !more.is_empty()
-        };
+        // 是否还有更早的提交：**多取一条**就知道了（`limit + 1`）。
+        //
+        // 曾经这里算出 `limit + 1` 却从不使用它，真正的判据是另一次
+        // `git rev-list --count HEAD`——那是**全历史计数**，在几十万提交的仓库上
+        // 是一次与总提交数成正比的全量遍历，而这里要回答的只是「还有没有第
+        // `limit + 1` 条」。多取一条的成本只与 `limit` 有关，且省掉一次子进程。
+        let truncated = commits.len() as u32 > limit;
+        // 那第 `limit + 1` 条只是为了探测「还有没有」，不留进回帧——
+        // 页面按 `limit` 渲染，多一条会让「最近 N 条」这句话不成立。
+        let mut commits = commits;
+        commits.truncate(limit as usize);
 
         Ok(vec![OutFrame::new(serde_json::json!({
             "op": "log",
@@ -334,6 +417,10 @@ impl Connector for Git {
             });
         }
         self.close();
+        // `close()` 会把取消旗置位（那是它的职责），而 `open()` 是**重新**开始：
+        // 不复位的话这条通道从此每次请求都立刻被取消——`open` 内部就调了
+        // `close()`，所以这不是理论问题，是第一请求就会撞上的。
+        self.cancel.store(false, Ordering::SeqCst);
         self.root = Some(real);
         Ok(Vec::new())
     }
@@ -353,15 +440,8 @@ impl Connector for Git {
         // 参数校验放在**起线程之前**：非法请求要当场变成 `channel_error`，
         // 进了线程就只剩 `poll` 的 `Err`，而通道层对那一路的处理与「这次请求
         // 被拒」在页面上长得不一样。
-        match op.as_str() {
-            "status" | "log" | "diff" => {}
-            other => {
-                return Err(ConnectorError::Invalid {
-                    detail: format!("unknown git operation: {other}"),
-                })
-            }
-        }
-        if op == "diff" {
+        let op = GitOp::parse(&op)?;
+        if op == GitOp::Diff {
             diff_args(data)?;
         }
 
@@ -371,39 +451,38 @@ impl Connector for Git {
         // 所以这一格在这里恒为 `Some`。它是给「将来有人把开头的检查挪走」留的
         // 第二道闸：少了它，那种改动会让这里变成对 `None` 的 `unwrap`。
         let root = self.root.clone().ok_or_else(|| ConnectorError::Invalid {
-            detail: "git channel is not open".to_string(),
+            detail: NOT_OPEN.to_string(),
         })?;
         let git_bin = self.git_bin.clone();
         let timeout = self.timeout;
         let payload = data.clone();
 
+        // **上一次请求还没取走结果时，拒绝新请求**，而不是顶掉它。
+        //
+        // 曾经这里无条件 `self.pending = Some(rx)`，后果是两个：
+        // (a) 旧 `Receiver` 被丢 → 旧线程的 `tx.send` 失败 → 第一次请求的结果
+        //     **永久丢失**，页面上对应那个文件的 `reading` 永不复位（它只在
+        //     收到 diff 帧时才清），表现为「正在读取 diff…」一直转；
+        // (b) 旧线程仍在跑那个 git 子进程，要等它自己超时（15s）才退出，
+        //     所以**每顶掉一次就多一个 15 秒的 git 进程**。
+        // 触发路径不是理论：连点两个文件就是两次 `on_data`，而第一次的
+        // poll 明显晚于第二次请求到达。
+        //
+        // 选「拒绝」而不是「排队」：git 面板里连点两次的意图是「改看第二个」，
+        // 排队会让用户等第一份（他已经不要的）diff 先回来；而拒绝是一句
+        // 可读的 `Invalid`，页面可以立刻复位 `reading`。
+        if self.pending.is_some() {
+            return Err(ConnectorError::Invalid {
+                detail: "a git request is already in flight".to_string(),
+            });
+        }
+
         let (tx, rx) = mpsc::sync_channel(1);
+        let cancel = Arc::clone(&self.cancel);
         std::thread::Builder::new()
             .name("afcli-git".to_string())
             .spawn(move || {
-                // 线程里重建一个临时 `Git`：它的方法都是 `&self`，不碰通道状态。
-                let worker = Git {
-                    root: Some(root),
-                    git_bin,
-                    timeout,
-                    pending: None,
-                };
-                let result = match payload
-                    .get("op")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                {
-                    "status" => worker.status(),
-                    "diff" => worker.diff(&payload),
-                    "log" => worker.log(&payload),
-                    // coverage: excluded — `on_data` 在起线程之前已经把 op
-                    // 白名单校验过了，所以线程里这一臂不可达。留着是因为
-                    // `match` 必须穷尽，而「默认放行」在这里会是安全洞
-                    // （未知 op 静默成功）。
-                    other => Err(ConnectorError::Invalid {
-                        detail: format!("unknown git operation: {other}"),
-                    }),
-                };
+                let result = run_op(&payload, root, git_bin, timeout, cancel);
                 // 没人接就说明通道已释放（页面走了）：那不是错误。
                 let _ = tx.send(result);
             })
@@ -436,6 +515,9 @@ impl Connector for Git {
     }
 
     fn close(&mut self) {
+        // 先让在飞的工作线程停手，再清状态：只丢弃 `Receiver` 的话，线程里那个
+        // git 子进程会一直跑到超时（最长 15s），通道已经没了还在烧 CPU / 占 fd。
+        self.cancel.store(true, Ordering::SeqCst);
         self.root = None;
         self.pending = None;
     }
@@ -448,7 +530,11 @@ impl Connector for Git {
 /// `Ok(None)` = 超时。轮询而不是阻塞 `wait()`：标准库没有带超时的 wait，
 /// 而 `wait-timeout` 不在 workspace 依赖里——为一件已有现成写法的事加依赖
 /// 不划算。这套写法 `agent/detect.rs` 已经跑在生产路径上。
-fn wait_with_deadline(child: &mut Child, timeout: Duration) -> std::io::Result<Option<Captured>> {
+fn wait_with_deadline(
+    child: &mut Child,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> std::io::Result<Option<Captured>> {
     let deadline = Instant::now() + timeout;
     // **两个管道各交给一个读取线程**，主线程只负责超时与 wait。
     //
@@ -477,7 +563,10 @@ fn wait_with_deadline(child: &mut Child, timeout: Duration) -> std::io::Result<O
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if Instant::now() >= deadline {
+        // 取消与超时共用 `Ok(None)` 这一出口：两者的处置一样（杀掉子进程、
+        // 由调用方决定报什么），分成两个返回值只会让调用点多一个必处理的分支。
+        // 调用方靠 `cancel` 旗分辨是哪一种。
+        if Instant::now() >= deadline || cancel.load(Ordering::SeqCst) {
             return Ok(None);
         }
         // 10ms 粒度：git 命令多在几十毫秒内结束，再细是忙等，
@@ -485,13 +574,37 @@ fn wait_with_deadline(child: &mut Child, timeout: Duration) -> std::io::Result<O
         std::thread::sleep(Duration::from_millis(10));
     };
 
-    let stdout = out_reader.and_then(|h| h.join().ok()).unwrap_or_default();
-    let stderr = err_reader.and_then(|h| h.join().ok()).unwrap_or_default();
+    // `join()` 失败（读线程 panic）**不能**被吞成空输出：那会把「管道读失败」
+    // 伪装成「git 正常退出且什么都没输出」，而后者在页面上是「这个文件没有改动」——
+    // 一条骗人的空结果。这一格在本环境下不可达（`read_to_end` 到 `Vec` 只在
+    // OOM 时失败），但**吞错的代价是给出假答案**，所以按错误处理。
+    let stdout = join_reader(out_reader, "stdout")?;
+    let stderr = join_reader(err_reader, "stderr")?;
     Ok(Some(Captured {
         status,
         stdout,
         stderr,
     }))
+}
+
+/// 取回一个读线程的结果。
+///
+/// `join()` 返回 `Err` 表示那个线程 panic 了——此时它读到的东西不可信，
+/// 必须当作 IO 错误往上抛，而不是回一个空 `Vec`
+/// （空 `Vec` 会被上层当成「git 成功但没有输出」）。
+fn join_reader(
+    handle: Option<std::thread::JoinHandle<Vec<u8>>>,
+    which: &str,
+) -> std::io::Result<Vec<u8>> {
+    let Some(handle) = handle else {
+        return Ok(Vec::new());
+    };
+    match handle.join() {
+        Ok(buf) => Ok(buf),
+        Err(_) => Err(std::io::Error::other(format!(
+            "git {which} reader thread panicked"
+        ))),
+    }
 }
 
 /// 一次子进程的产出。
@@ -537,6 +650,10 @@ fn is_not_a_repo(e: &ConnectorError) -> bool {
 /// git 对无提交仓库的 `log` 以非零退出并说 `does not have any commits yet`
 /// ——那是**一种正常状态**，不是故障。与「不是 git 仓库」一样，
 /// 页面要把它画成中性说明而不是红框。
+///
+/// **`needed a single revision` 也在表里**：`rev-parse --short HEAD` 在还没有
+/// 任何提交的仓库上说的是这句，而不是 `log` 那两句。`status` 要靠这里的判定
+/// 才能把「空仓库」与「真读失败了」分开（见 `head_short`）。
 fn is_empty_repo(e: &ConnectorError) -> bool {
     match e {
         ConnectorError::Failed { detail, .. } => {
@@ -544,18 +661,35 @@ fn is_empty_repo(e: &ConnectorError) -> bool {
             d.contains("does not have any commits yet")
                 || d.contains("does not have any commits")
                 || d.contains("bad default revision")
+                || d.contains("needed a single revision")
         }
         _ => false,
     }
 }
 
+/// `diff` 一次解析的产物：交给 git 的 argv，以及要回显进回帧的字段。
+///
+/// **两者必须同源**：早先 argv 由 `diff_args` 算、回显字段由 `diff()` 自己
+/// 再从 `data` 里 `.get()` 一遍，同一个字段读两次。当下两处读的是同一份
+/// `Value` 所以值一致，但这是「一份事实两个来源」——越界检查用的 `path`
+/// 与拼进 argv 的 `path` 在结构上可以不是同一个值。一次解析同时产出两者，
+/// 这层不一致就没有了。
+struct DiffReq {
+    args: Vec<String>,
+    path: Option<String>,
+    orig: Option<String>,
+    staged: bool,
+    commit: Option<String>,
+}
+
 /// `diff` 的参数。**三种取法互斥**，且都校验形状后才进参数数组。
-fn diff_args(data: &serde_json::Value) -> Result<Vec<String>, ConnectorError> {
+fn diff_args(data: &serde_json::Value) -> Result<DiffReq, ConnectorError> {
     let staged = data
         .get("staged")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let path = data.get("path").and_then(serde_json::Value::as_str);
+    let orig = data.get("orig").and_then(serde_json::Value::as_str);
     let commit = data.get("commit").and_then(serde_json::Value::as_str);
 
     if commit.is_some() && (path.is_some() || staged) {
@@ -563,6 +697,14 @@ fn diff_args(data: &serde_json::Value) -> Result<Vec<String>, ConnectorError> {
             detail: "\"commit\" cannot be combined with \"path\" or \"staged\"".to_string(),
         });
     }
+
+    let echo = |args: Vec<String>| DiffReq {
+        args,
+        path: path.map(str::to_string),
+        orig: orig.map(str::to_string),
+        staged,
+        commit: commit.map(str::to_string),
+    };
 
     if let Some(commit) = commit {
         // 形状校验：只允许 4-40 位十六进制（含 `HEAD~1` 这类写法太宽，
@@ -578,12 +720,12 @@ fn diff_args(data: &serde_json::Value) -> Result<Vec<String>, ConnectorError> {
         // `git show --format=` 抑制 commit 头只留 diff。
         // **不能用 `git diff <hash>`**：那比较的是 hash 与**工作区**，
         // 回答的是另一个问题。
-        return Ok(vec![
+        return Ok(echo(vec![
             "show".to_string(),
             "--format=".to_string(),
             "--patch".to_string(),
             commit.to_string(),
-        ]);
+        ]));
     }
 
     let mut args: Vec<String> = vec!["diff".to_string(), "--no-color".to_string()];
@@ -593,8 +735,16 @@ fn diff_args(data: &serde_json::Value) -> Result<Vec<String>, ConnectorError> {
     if let Some(path) = path {
         args.push("--".to_string());
         args.push(path.to_string());
+        // 重命名 / 复制必须**两条路径都给**，git 才做相似度检测。
+        // 只给新路径时，git 把它当「新建文件」——diff 里是 `new file mode`
+        // 而不是 `rename from`，页面于是把一次改名显示成「新建了这个文件」。
+        // 这是 rename 检测的固有要求，不是可以给 git 加个开关绕开的：
+        // pathspec 过滤掉旧路径后，git 无从知道那个被删的文件去哪了。
+        if let Some(orig) = orig {
+            args.push(orig.to_string());
+        }
     }
-    Ok(args)
+    Ok(echo(args))
 }
 
 /// `status` 的解析结果。
@@ -604,12 +754,13 @@ fn diff_args(data: &serde_json::Value) -> Result<Vec<String>, ConnectorError> {
 /// 写反了编译器不一定拦得住。
 struct StatusView {
     branch: Option<String>,
-    /// `status --branch` 在部分情况下给不出短 hash，此时为 `None`，
-    /// 由调用方补一次 `rev-parse`。
-    head: Option<String>,
     detached: bool,
     files: Vec<serde_json::Value>,
 }
+// 这里没有 `head` 字段：`status --branch` 的输出里**从来没有**短 hash（只有
+// 分支名或 `HEAD (no branch)`），HEAD 一律由调用方 `head_short()` 单独取。
+// 曾经留过一个恒为 `None` 的 `head` 字段加一条「解析给不出时补一次」的注释，
+// 那句注释会让读者以为它有时给得出——实际那一臂从未被执行过。
 
 /// 解析 `status --porcelain=v1 -z --branch`。
 fn parse_status(raw: &[u8]) -> StatusView {
@@ -644,28 +795,44 @@ fn parse_status(raw: &[u8]) -> StatusView {
         let path = rest.strip_prefix(' ').unwrap_or(rest);
         let x = xy.chars().next().unwrap_or(' ');
         let y = xy.chars().nth(1).unwrap_or(' ');
-        let mut path = path.to_string();
+        let path = path.to_string();
 
         // 重命名 / 复制：`-z` 下**旧路径是下一条记录**（不是同一行里用 `->` 分隔，
         // 那种形状只在非 `-z` 输出里出现）。
+        //
+        // **旧路径另放一个字段，不拼进 `path`**。`path` 会被页面原样填回
+        // `{"op":"diff","path":…}`（它是「请求用标识」而非「显示串」）；
+        // 拼成 `新 <- 旧` 之后，这个串既不是新路径也不是旧路径——
+        // `git diff -- "新 <- 旧"` 因路径不存在返回空串，而页面把「空 diff」
+        // 显示成「这个文件没有可显示的改动」，于是**重命名过的文件一律点不开，
+        // 且理由被错报成「没有改动」**。两个字段各自只担一件事。
+        let mut orig = None;
         if x == 'R' || x == 'C' || y == 'R' || y == 'C' {
-            if let Some(orig) = parts.next() {
-                path = format!("{path} <- {orig}");
+            if let Some(o) = parts.next() {
+                orig = Some(o.to_string());
             }
         }
         if path.is_empty() {
             continue;
         }
-        files.push(serde_json::json!({
+        let mut entry = serde_json::json!({
             "x": x.to_string(),
             "y": y.to_string(),
             "path": path,
-        }));
+        });
+        if let Some(orig) = orig {
+            // 用 `as_object_mut` 而不是 `entry["orig"] = …`：后者是对 `Value`
+            // 做索引赋值，形状不对时 panic，而本 crate 禁裸索引
+            // （`AGENTS.md` 生产代码禁 panic 铁律）。
+            if let Some(map) = entry.as_object_mut() {
+                map.insert("orig".to_string(), serde_json::Value::String(orig));
+            }
+        }
+        files.push(entry);
     }
 
     StatusView {
         branch,
-        head: None,
         detached,
         files,
     }
@@ -715,6 +882,47 @@ fn truncate_utf8(raw: &[u8], budget: usize) -> (String, bool) {
     (text, true)
 }
 
+/// 跑一次 git op 并给出结果帧。**在 `on_data` 起的那个线程里执行。**
+///
+/// 分开的两个理由：① 它碰子进程、且要求 `payload`/`root` 等全部是所有权
+/// 副本（`Git` 本身不能跨线程搬——它持着通道）；② `on_data` 只做校验与登记，
+/// 长度才压得住：这道分工线画在这里，加 op 时改的是分派表而不是校验段。
+fn run_op(
+    payload: &serde_json::Value,
+    root: PathBuf,
+    git_bin: PathBuf,
+    timeout: Duration,
+    cancel: Arc<AtomicBool>,
+) -> Result<Vec<OutFrame>, ConnectorError> {
+    // 线程里重建一个临时 `Git`：它的方法都是 `&self`，不碰通道状态。
+    // `cancel` 是从通道那边共享过来的同一份旗：`close()` 一置位，这里的
+    // `run_git` 就会在下一个 10ms 轮询点杀掉子进程。
+    let worker = Git {
+        root: Some(root),
+        git_bin,
+        timeout,
+        pending: None,
+        cancel,
+    };
+    // 分派从 `GitOp` 来，与 `on_data` 的白名单**同一张表**：早先这里是手写的
+    // `"status" => … "diff" => … "log" => …`，那是第二张表——加一个 op 时
+    // 只改一处、另一处悄悄落进 `other` 臂，编译不会报错。
+    match GitOp::parse(
+        payload
+            .get("op")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default(),
+    ) {
+        Ok(GitOp::Status) => worker.status(),
+        Ok(GitOp::Diff) => worker.diff(payload),
+        Ok(GitOp::Log) => worker.log(payload),
+        // coverage: excluded — `on_data` 在起线程之前已经 `GitOp::parse` 过了，
+        // 所以线程里这一臂不可达。留着是因为这里拿到的是 `&str`（要重新解析），
+        // 而「默认放行」在安全上是洞（未知 op 静默成功）。
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,6 +952,14 @@ mod tests {
     /// 直接断言第一次 `poll` 会拿到空数组，那是设计而不是失败。
     fn call(g: &mut Git, data: serde_json::Value) -> Result<serde_json::Value, ConnectorError> {
         Connector::on_data(g, &data)?;
+        call_pending(g)
+    }
+
+    /// 只取走已在飞的那条请求的结果（不发新请求）。
+    ///
+    /// `call` 把「发」与「等」绑在一起，测「在飞时新请求被拒」时必须分开：
+    /// 发完不 poll 才是「在飞」这件事本身。
+    fn call_pending(g: &mut Git) -> Result<serde_json::Value, ConnectorError> {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let frames = Connector::poll(g)?;
@@ -753,6 +969,39 @@ mod tests {
             assert!(Instant::now() < deadline, "git op did not finish in time");
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    // ------------------------------------------------------- join_reader 的处置
+
+    /// 读线程 panic 时**不能**被当成空输出。
+    ///
+    /// 空 `Vec` 会被上层读成「git 成功但没有输出」，于是 `diff` 报「没有改动」——
+    /// 一次 panic 就这样变成了假答案。所以这一格要的是 `Err`。
+    #[test]
+    fn join_reader_turns_a_panicked_reader_into_an_error() {
+        // 不需要让真实的 git 子进程崩：`join_reader` 收的是 `JoinHandle<Vec<u8>>`，
+        // 测试里自己 spawn 一个 panic 的线程就是同一个类型。
+        let handle = std::thread::spawn(|| -> Vec<u8> { panic!("reader blew up") });
+        let err = join_reader(Some(handle), "stdout").expect_err("panic 要变成错误");
+        assert!(
+            err.to_string()
+                .contains("git stdout reader thread panicked"),
+            "错误信息要说出是哪个读线程，实际 {err}"
+        );
+    }
+
+    /// 没有读线程（管道没接管）时是空输出，而不是错误。
+    #[test]
+    fn join_reader_with_no_thread_is_an_empty_output() {
+        let out = join_reader(None, "stderr").expect("没有读线程不算错误");
+        assert!(out.is_empty(), "管道没接管时输出为空，实际 {out:?}");
+    }
+
+    /// 正常的读线程把字节原样交回来。
+    #[test]
+    fn join_reader_returns_what_the_thread_read() {
+        let handle = std::thread::spawn(|| b"hello".to_vec());
+        assert_eq!(join_reader(Some(handle), "stdout").expect("ok"), b"hello");
     }
 
     fn git_in(dir: &Path, args: &[&str]) {
@@ -777,6 +1026,46 @@ mod tests {
         std::fs::write(ws.join("a.txt"), "one\n").expect("write");
         git_in(ws, &["add", "a.txt"]);
         git_in(ws, &["commit", "-q", "-m", "first commit"]);
+    }
+
+    /// 改本进程环境的用例必须互斥。
+    ///
+    /// `std::env::set_var` 动的是**整个进程**的环境：两个用例并行跑时，
+    /// A 刚种下 `GIT_DIR`，B 的 `remove_var` 就把它删了，或者 A 的子进程
+    /// 读到的是 B 种的值。症状是「单跑全绿、全量随机红」。
+    ///
+    /// 锁本体在 [`crate::pty::testutil::env_lock`]：`pty.rs` 也改进程环境，
+    /// 各持一份 `static` 时两把锁互不互斥（实测改其中一份的类型，两份都编译通过）。
+    use crate::pty::testutil::env_lock;
+
+    /// 继承来的 `GIT_DIR` 不能改变 connector 认定的工作区。
+    ///
+    /// 真实症状：`afcli` 被从 git 钩子 / IDE 的 git 集成里拉起时，环境里带着
+    /// 指向**另一个**仓库的 `GIT_DIR`。不清的话 `current_dir(root)` 会被
+    /// `GIT_DIR` 压过去，页面报出那个仓库的分支——用户看到的根本不是这个会话的
+    /// 工作区，而且没有任何迹象说明读错了对象。
+    #[test]
+    fn an_inherited_git_dir_does_not_hijack_the_workspace() {
+        let _guard = env_lock();
+        let (_base_a, ws) = sandbox();
+        repo_with_commit(&ws);
+
+        // 另造一个**别的**仓库，用 `GIT_DIR` 指着它。它的分支名与本仓库不同，
+        // 这样「读到了哪一个」在断言里是可区分的。
+        let (_base_b, other) = sandbox();
+        repo_with_commit(&other);
+        git_in(&other, &["checkout", "-q", "-b", "hijacked"]);
+
+        let other_git = other.join(".git");
+        std::env::set_var("GIT_DIR", &other_git);
+        let got = call(&mut open(&ws), serde_json::json!({"op": "status"}));
+        std::env::remove_var("GIT_DIR");
+        let got = got.expect("status");
+
+        assert_eq!(
+            got["branch"], "main",
+            "继承的 GIT_DIR 不能把工作区换掉（读到 hijacked 说明没清 GIT_*）: {got}"
+        );
     }
 
     // ---------------------------------------------------------------- 1 status
@@ -1027,6 +1316,45 @@ mod tests {
         }
     }
 
+    /// 上一次请求还没取走结果时，**新请求被拒**，而不是静默顶掉旧的。
+    ///
+    /// 这条是「结果永久丢失 + git 子进程泄漏 15s」那个 bug 的可证伪断言：
+    /// 曾经 `on_data` 无条件 `self.pending = Some(rx)`，旧 `Receiver` 被丢后
+    /// 第一帧结果再也取不到（页面上的 `reading` 永不复位），而旧线程要等
+    /// 自己超时才退出。
+    #[test]
+    fn a_second_request_while_one_is_in_flight_is_rejected() {
+        let (_base, ws) = sandbox();
+        repo_with_commit(&ws);
+        let mut g = open(&ws);
+
+        // 第一次：只发，不 poll——模拟「请求已上路、结果还没取」。
+        Connector::on_data(&mut g, &serde_json::json!({"op": "status"})).expect("第一次要收下");
+        assert!(g.pending.is_some(), "前提：这时确实有一条在飞");
+
+        // 第二次：必须被拒，且说的是「有一条在飞」而不是别的原因。
+        match Connector::on_data(&mut g, &serde_json::json!({"op": "diff", "path": "a.txt"})) {
+            Err(ConnectorError::Invalid { detail }) => {
+                assert!(
+                    detail.contains("already in flight"),
+                    "要说清是有一条在飞，实际 {detail:?}"
+                );
+            }
+            other => panic!("有一条在飞时新请求要被拒，实际 {other:?}"),
+        }
+        // 被拒**不能**把在飞的那条顶掉——顶掉就是丢结果。
+        assert!(
+            g.pending.is_some(),
+            "被拒后原来那条必须还在，否则结果就丢了"
+        );
+
+        // 取走结果后，同样的请求就能发了（守卫是「在飞」判据，不是永久锁）。
+        let first = call_pending(&mut g).expect("第一次的结果要拿得到");
+        assert_eq!(first["op"], "status", "拿到的是第一次的结果: {first}");
+        Connector::on_data(&mut g, &serde_json::json!({"op": "diff", "path": "a.txt"}))
+            .expect("取走之后要能发新的");
+    }
+
     /// 通道没开时发任何 op 都是 `Invalid`，且说的是「通道没开」而不是别的原因。
     ///
     /// 顺序有讲究：先判「开着吗」再判「op 对不对」。反过来的话，用户在已关闭的
@@ -1262,6 +1590,35 @@ mod tests {
         }
     }
 
+    /// 越界的 `orig` 同样要被拒——不能只查 `path`。
+    ///
+    /// `orig` 与 `path` 都会拼进 pathspec 交给 git，只查一个的话另一个就是
+    /// 绕过 `resolve_within` 的路径。这条与上一条**各查一边**：上一条只喂
+    /// `path`、这条只喂 `orig`，所以删掉任一侧的守卫都会有一条变红。
+    #[test]
+    fn diff_rejects_an_outside_workspace_orig() {
+        let (_base, ws) = sandbox();
+        repo_with_commit(&ws);
+        let mut g = open(&ws);
+
+        let err = call(
+            &mut g,
+            serde_json::json!({"op": "diff", "path": "a.txt", "orig": "../../etc/passwd"}),
+        )
+        .expect_err("越界 orig 必须被拒");
+
+        match err {
+            ConnectorError::OutsideWorkspace { shown } => {
+                assert_eq!(shown, "../../etc/passwd", "shown 是用户自己写的那个写法");
+                assert!(
+                    !shown.contains(ws.to_string_lossy().as_ref()),
+                    "不得泄漏工作区根的绝对路径"
+                );
+            }
+            other => panic!("越界 orig 要落到 OutsideWorkspace，实际 {other:?}"),
+        }
+    }
+
     /// 未提交改动的 diff：`path` 取法。
     #[test]
     fn diff_of_a_modified_file_shows_the_change() {
@@ -1406,6 +1763,38 @@ mod tests {
         assert_eq!(all["truncated"], false, "全给了就不该说截断: {all}");
     }
 
+    /// `truncated` 的判据是「多取的那一条是否存在」，且**那条不能进回帧**。
+    ///
+    /// 实现为了判断「还有没有更早的」会向 git 多要一条（`limit + 1`）。
+    /// 若忘了截掉，页面收到的就是 `limit + 1` 条——而它对外说的是「最近 N 条」。
+    #[test]
+    fn log_truncates_the_probe_entry_out_of_the_frame() {
+        let (_base, ws) = sandbox();
+        repo_with_commit(&ws);
+        for i in 2..=5 {
+            std::fs::write(ws.join("a.txt"), format!("line {i}\n")).expect("write");
+            git_in(&ws, &["add", "a.txt"]);
+            git_in(&ws, &["commit", "-q", "-m", &format!("commit {i}")]);
+        }
+        let mut g = open(&ws);
+        // 共 5 条提交，limit=3 → 回 3 条 + truncated=true（第 4 条只是探测用）。
+        let got = call(&mut g, serde_json::json!({"op": "log", "limit": 3})).expect("log");
+        let commits = got["commits"].as_array().expect("commits");
+        assert_eq!(
+            commits.len(),
+            3,
+            "回帧里不能出现那第 `limit + 1` 条探测记录: {got}"
+        );
+        assert_eq!(
+            got["truncated"], true,
+            "共 5 条却只给 3 条，要声明截断: {got}"
+        );
+        // 正好给完时不截断：这条锁住「多取一条」不会在边界上误报。
+        let all = call(&mut g, serde_json::json!({"op": "log", "limit": 5})).expect("log");
+        assert_eq!(all["commits"].as_array().map(Vec::len), Some(5), "{all}");
+        assert_eq!(all["truncated"], false, "正好给完不该说截断: {all}");
+    }
+
     /// 空仓库没有提交：`log` 给空列表而不是报错（和「不是仓库」区分开）。
     #[test]
     fn log_of_a_repo_without_commits_is_empty_not_failed() {
@@ -1419,6 +1808,72 @@ mod tests {
     }
 
     // ---------------------------------------------------------------- 超时
+
+    /// `close()` 必须让在飞的 git 请求**立刻停手**，而不是等它自己超时。
+    ///
+    /// 通道被回收（用户关掉面板）时若只丢弃 `Receiver`，那个 git 子进程会一直
+    /// 跑到 15s 超时——通道已经没了还在烧 CPU / 占 fd。
+    ///
+    /// 判据是**子进程真的没了**，不是「报了什么错」：`close()` 之后 `pending`
+    /// 已被清空，结果本来就取不到（那次请求的结果已无人接收，这是设计）。
+    /// 所以这条用挂住的假 git + 长超时（30s）来区分：不等取消的话，那个
+    /// `sleep 3600` 会活到 30s 超时，而这里 1 秒内就该消失。
+    #[test]
+    fn closing_the_channel_cancels_an_in_flight_git() {
+        let (_base, ws) = sandbox();
+        let bin = _base.path().join("fake-git");
+        // 把 pid 写进一个文件，好在事后从外部核它是否还活着。
+        let pidfile = _base.path().join("pid");
+        std::fs::write(
+            &bin,
+            format!("#!/bin/sh\necho $$ > '{}'\nsleep 3600\n", pidfile.display()),
+        )
+        .expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+
+        let mut g = Git::with_git_bin(&bin).with_timeout(Duration::from_secs(30));
+        Connector::open(
+            &mut g,
+            OpenReq::new(ws.to_string_lossy(), serde_json::json!({})),
+        )
+        .expect("open");
+
+        Connector::on_data(&mut g, &serde_json::json!({"op": "status"})).expect("收下请求");
+        // 等假 git 真的跑起来并写下 pid。
+        let start = Instant::now();
+        while !pidfile.exists() {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "假 git 没起来，这条测不到想测的东西"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .expect("read pid")
+            .trim()
+            .parse()
+            .expect("pid is a number");
+
+        Connector::close(&mut g);
+
+        // 进程消失有延迟（10ms 轮询点 + 收尸），但必须**远早于** 30s 超时。
+        let start = Instant::now();
+        loop {
+            // `/proc/<pid>` 存在即进程还在（真进程、不是自己造的句柄）。
+            if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "close() 之后 git 子进程（pid {pid}）还活着——取消没生效"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 
     /// 测试标准 5：挂住的假 git 必须**在超时附近**返回，而不是挂死。
     ///
@@ -1459,6 +1914,52 @@ mod tests {
             elapsed < timeout + Duration::from_secs(2),
             "必须在超时附近返回，实际 {elapsed:?}"
         );
+    }
+
+    /// `rev-parse` 的真实失败**必须传播**，不能被当成「空仓库没有 HEAD」。
+    ///
+    /// 这条守的是 `head_short` 的 `Err(e) => Err(e)` 臂：早先那里是
+    /// `Err(_) => Ok(None)`，于是 git 挂了 / 权限不对 / 索引损坏都被显示成
+    /// 「这个仓库还没有 HEAD」——一次真故障与一个正常状态长得一模一样。
+    ///
+    /// 构造：假 git 把 `status` 原样转给真 git（让 `parse_status` 拿到正常数据），
+    /// 而 `rev-parse` 一律 `exit 128` 并说一句**不是**空仓库措辞的话。
+    #[test]
+    fn a_real_rev_parse_failure_is_not_reported_as_a_repo_without_head() {
+        let (_base, ws) = sandbox();
+        repo_with_commit(&ws);
+        let bin = _base.path().join("fake-git");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+             rev-parse) echo 'fatal: something is genuinely wrong' >&2; exit 128 ;;\n\
+             *) exec git \"$@\" ;;\n\
+             esac\n",
+        )
+        .expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+
+        let mut g = Git::with_git_bin(&bin);
+        Connector::open(
+            &mut g,
+            OpenReq::new(ws.to_string_lossy(), serde_json::json!({})),
+        )
+        .expect("open");
+
+        let err = call(&mut g, serde_json::json!({"op": "status"}))
+            .expect_err("rev-parse 真失败时必须报错，不能回 head:null");
+        match err {
+            ConnectorError::Failed { detail, .. } => assert!(
+                detail.contains("genuinely wrong"),
+                "detail 要带上 rev-parse 的真实原因，实际 {detail:?}"
+            ),
+            other => panic!("要落到 Failed，实际 {other:?}"),
+        }
     }
 
     // ------------------------------------------------------------ 其它边界
@@ -1537,10 +2038,10 @@ mod tests {
         // 截断后的整帧仍要在协议上限内，否则 Hub 会拒帧并断开设备连接。
         let frame = serde_json::to_vec(&got).expect("serialize");
         assert!(
-            frame.len() <= protocol::MAX_FRAME_BYTES,
+            frame.len() <= protocol::frame::MAX_FRAME_BYTES,
             "截断后仍超帧上限: {} > {}",
             frame.len(),
-            protocol::MAX_FRAME_BYTES
+            protocol::frame::MAX_FRAME_BYTES
         );
     }
 
@@ -1565,7 +2066,7 @@ mod tests {
         );
     }
 
-    /// 重命名：`-z` 下旧路径是**下一条**记录，要拼成 `新 <- 旧`。
+    /// 重命名：`-z` 下旧路径是**下一条**记录，另放进 `orig` 字段。
     ///
     /// 不认这条会让重命名显示成「新文件」+ 一条孤立的旧路径（后者被当成
     /// 一个路径为空或怪异的条目，取决于解析怎么写），用户在页面上看不出
@@ -1584,7 +2085,78 @@ mod tests {
         assert_eq!(files.len(), 1, "一次重命名是一条记录，不是两条: {got}");
         let f = &files[0];
         assert_eq!(f["x"], "R", "index 侧是 R（已 add）: {got}");
-        assert_eq!(f["path"], "b.txt <- a.txt", "要保住新旧两个路径: {got}");
+        assert_eq!(f["path"], "b.txt", "`path` 要是那条真实路径: {got}");
+        assert_eq!(f["orig"], "a.txt", "旧路径另放 `orig`: {got}");
+    }
+
+    /// 拿 `status` 给的 `path` **原样**去问 `diff`，必须问得出内容。
+    ///
+    /// 这条是「 renaming 过的文件点不开」那个 bug 的可证伪断言：曾经 `path`
+    /// 被拼成 `b.txt <- a.txt`，页面把它原样回传，`git diff -- "b.txt <- a.txt"`
+    /// 因路径不存在返回空串，而页面把空串显示成「这个文件没有可显示的改动」——
+    /// 结果是**重命名过的文件一律点不开，且理由被错报成「没有改动」**。
+    /// 只断言拼接形状测不出这个 bug（那版测试是全绿的）。
+    #[test]
+    fn the_path_from_status_is_usable_as_a_diff_argument() {
+        let (_base, ws) = sandbox();
+        repo_with_commit(&ws);
+        // 先把内容**提交**进 HEAD：git 的 rename 检测比的是 HEAD 与索引的
+        // 内容相似度。若不提交就改名，比的是「HEAD 里的 one」与「索引里的
+        // 新内容」，相似度不足 → git 报 `D a.txt` + `A b.txt` 两条记录，
+        // 那时没有 `orig`，这条测试也就测不到想测的东西。
+        let body: String = (0..40).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(ws.join("a.txt"), &body).expect("write");
+        git_in(&ws, &["add", "-A"]);
+        git_in(&ws, &["commit", "-q", "-m", "grow"]);
+        // 改名**并**改一行：真实场景里的重命名通常带着改动，纯改名反而
+        // 会让 diff 里除了 rename 头没有内容行，断言强度不够。
+        std::fs::rename(ws.join("a.txt"), ws.join("b.txt")).expect("rename");
+        std::fs::write(ws.join("b.txt"), body.replace("line 7\n", "line seven\n")).expect("write");
+        git_in(&ws, &["add", "-A"]);
+
+        let mut g = open(&ws);
+        let got = call(&mut g, serde_json::json!({"op": "status"})).expect("status");
+        let files = got["files"].as_array().expect("files");
+        assert_eq!(files.len(), 1, "前提：只有一条重命名记录: {got}");
+        assert_eq!(
+            files[0]["orig"].as_str(),
+            Some("a.txt"),
+            "前提：这条确实是 rename，否则测的是另一件事: {got}"
+        );
+        // 关键：`path` 与 `orig` 都从 status 的回帧**原样**取用，不做拆分或还原。
+        let path = files[0]["path"].as_str().expect("path is str").to_string();
+        let orig = files[0]["orig"].as_str().expect("orig is str").to_string();
+
+        // 只给 `path` 的对照组：这条正是曾经的实现，它把一次改名显示成
+        // 「新建文件」。留着它，是因为「为什么必须带 orig」这件事
+        // 光看文档记不住，看一条红得起来的对照断言才记得住。
+        let only_new = call(
+            &mut g,
+            serde_json::json!({"op": "diff", "path": path, "staged": true}),
+        )
+        .expect("diff");
+        assert!(
+            only_new["unified"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("new file"),
+            "对照前提：只给新路径时 git 判成新建文件（rename 检测需要两条路径）: {only_new}"
+        );
+
+        let d = call(
+            &mut g,
+            serde_json::json!({"op": "diff", "path": path, "orig": orig, "staged": true}),
+        )
+        .expect("diff");
+        let unified = d["unified"].as_str().unwrap_or_default();
+        assert!(
+            unified.contains("rename from") && unified.contains("rename to"),
+            "带上 orig 的 diff 要问得出重命名内容，实际: {d}"
+        );
+        assert!(
+            unified.contains("line seven"),
+            "重命名带着的内容改动也要在 diff 里，实际: {d}"
+        );
     }
 
     /// `git status` 里含空格的文件名不该被引号包起来（`-z` 的作用）。

@@ -68,8 +68,14 @@ crates/hub-server/src/routes/stream.rs:1070: 与 `stream()`（同文件 :490）�
 crates/hub-server/src/routes/stream.rs:1091: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 同 `routes/api.rs:348`。该臂本身已由 `expiring_an_unacked_channel_survives_a_device_that_will_not_take_the_close` 覆盖（队列满 → 走这里，只留痕不扩散）。
 crates/hub-server/src/routes/stream.rs:1094: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 同 `routes/api.rs:348`。该臂本身已由 `expiring_an_unacked_channel_survives_a_device_that_will_not_take_the_close` 覆盖（队列满 → 走这里，只留痕不扩散）。
 crates/hub-server/src/routes/stream.rs:1310: 夹具的收尾：`Streams` 自己握着发送端， 流在测试期间从不结束，所以这条 `break` 打不到；它不是被测逻辑的分支。
+crates/hub-server/src/routes/stream.rs:2133: 夹具的收尾：`Streams` 自己握着发送端， 流在测试期间从不结束，所以这条 `break` 打不到；它不是被测逻辑的分支。
+crates/hub-server/src/routes/stream.rs:2135: 夹具的收尾：`Streams` 自己握着发送端， 流在测试期间从不结束，所以这条 `break` 打不到；它不是被测逻辑的分支。
 crates/hub-server/src/routes/stream.rs:2136: 同上面的 `Closed` 臂： `panic!` 的参数行被 llvm-cov 记为 miss（多行宏已知现象）。
-crates/hub-server/src/routes/stream.rs:2192: 同上面的 `Closed` 臂： `panic!` 的参数行被 llvm-cov 记为 miss（多行宏已知现象）。
+crates/hub-server/src/routes/stream.rs:2137: 夹具的收尾：`Streams` 自己握着发送端， 流在测试期间从不结束，所以这条 `break` 打不到；它不是被测逻辑的分支。
+crates/hub-server/src/routes/stream.rs:2138: 夹具的收尾：`Streams` 自己握着发送端， 流在测试期间从不结束，所以这条 `break` 打不到；它不是被测逻辑的分支。
+crates/hub-server/src/routes/stream.rs:2147: 同上面的 `Closed` 臂： `panic!` 的参数行被 llvm-cov 记为 miss（多行宏已知现象）。
+crates/hub-server/src/routes/stream.rs:2236: 同上面的 `Closed` 臂： `panic!` 的参数行被 llvm-cov 记为 miss（多行宏已知现象）。
+crates/hub-server/src/routes/stream.rs:2237: 同上面的 `Closed` 臂： `panic!` 的参数行被 llvm-cov 记为 miss（多行宏已知现象）。
 crates/hub-server/src/routes/ws.rs:141: 同上面的收尾行：单测里 task 被 runtime 取消， `Err` 臂走不到，故这行日志不可达。
 crates/hub-server/src/routes/ws.rs:275: 表里没它：旧连接已在自己的断开处理器里被摘掉。 要触达需让它在 insert 之后、send 之前被另一个 task 摘表（极窄窗口）。
 crates/hub-server/src/routes/ws.rs:281: 控制帧队列 8 格而顶替只推一帧，要满得让同一连接被 连续顶替 9 次且一次都不消费。
@@ -204,161 +210,158 @@ crates/node-core/src/agent/acp.rs:479: 读 stdout 本身出错（非 EOF）。�
 crates/node-core/src/agent/acp.rs:504: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
 crates/node-core/src/agent/acp.rs:551: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
 crates/node-core/src/agent/acp.rs:598: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:870: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:882: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:913: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:951: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1093: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1094: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1095: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1096: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1097: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1098: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1179: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1180: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1181: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1183: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1184: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1187: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1188: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1189: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1190: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1191: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1193: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1194: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1196: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1197: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1199: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1200: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1201: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1202: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1203: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1204: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1205: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1206: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1208: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1209: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1210: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1213: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1214: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1217: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1218: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1224: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1225: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1226: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1227: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1228: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1229: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1230: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1232: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1233: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:1335: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
+crates/node-core/src/agent/acp.rs:870: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:882: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:913: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:951: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1093: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1094: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1095: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1096: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1097: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1098: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1179: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1180: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1181: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1183: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1184: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1187: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1188: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1189: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1190: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1191: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1193: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1194: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1196: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1197: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1199: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1200: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1201: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1202: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1203: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1204: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1205: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1206: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1208: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1209: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1210: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1213: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1214: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1217: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1218: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1224: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1225: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1226: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1227: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1228: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1229: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1230: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1232: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1233: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/agent/acp.rs:1335: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
 crates/node-core/src/agent/cache.rs:268: 锁中毒只在别的持锁者 panic 时出现， 而 workspace lint 把 panic 禁成 deny（生产代码无 panic 路径）。 那种情况下进程状态已不可信，返回上一份空快照不会更糟。
-crates/node-core/src/agent/cache.rs:327: 锁中毒只在别的持锁者 panic 时出现， 而 workspace lint 把 panic 禁成 deny（生产代码无 panic 路径）。 那种情况下进程状态已不可信，返回上一份空快照不会更糟。
+crates/node-core/src/agent/cache.rs:327: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
 crates/node-core/src/agent/conversation.rs:670: 拿不到家目录：原样传下去，让 `current_dir` 自己报错。编一个路径只会 让 agent 在一个不存在的目录里失败，而错误指向的是我们编的那个。 要在用例里走到这一臂，只能把进程的 `HOME` 拿掉， 而设/删环境变量是**进程全局**的：测试并行跑时会把别的用例一起带偏。 仓库明令禁止在测试里 `set_var`，故无合法构造手段。
 crates/node-core/src/agent/conversation.rs:783: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:930: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:931: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1123: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1124: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1125: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1126: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1127: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1129: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1130: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1132: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1133: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1134: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1136: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1137: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1138: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1139: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1140: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1141: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1142: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1143: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1144: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1145: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1146: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1147: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1148: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1149: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1150: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1151: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1152: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1153: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1154: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1155: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1156: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1157: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1161: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1163: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1166: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1167: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1168: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1169: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1170: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1171: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1172: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1173: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1174: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1176: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1177: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1178: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1179: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1180: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1181: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1182: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1183: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1185: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1186: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1188: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1189: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1190: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1191: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1192: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1193: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1194: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1195: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1198: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1199: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1200: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1203: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1205: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1211: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1212: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1213: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1216: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1217: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1218: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1219: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1220: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1497: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1501: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1564: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1568: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1626: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1630: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1638: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:1641: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:2072: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:2073: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:2089: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:2109: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:2118: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:2122: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:2131: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:2132: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:2175: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:2176: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:2178: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:2192: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:2415: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:2469: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:2551: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:2691: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:2813: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
-crates/node-core/src/agent/conversation.rs:2953: `AcpClient` 内部（`acp.rs` 的 `spawn`） 自己持着事件发送端的一个克隆，它活到客户端被丢弃为止，所以 `recv()` 永远等不到 `None`；循环是靠 `Event::Exited` 结束的， 而那一臂先 flush 再退出。**因此循环的每条出口都已先发完** ——曾经在循环后还留一句兜底 flush，并把成因写成「`recv` 返回 `None`」，那是把责任推给一条不可达的臂：删掉它 398 项用例全绿。 这一臂留着是因为 `recv()` 的签名是 `Option<Event>`，必须穷尽。
+crates/node-core/src/agent/conversation.rs:930: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:931: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1123: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1124: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1125: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1126: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1127: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1129: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1130: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1132: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1133: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1134: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1136: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1137: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1138: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1139: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1140: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1141: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1142: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1143: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1144: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1145: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1146: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1147: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1148: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1149: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1150: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1151: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1152: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1153: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1154: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1155: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1156: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1157: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1161: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1163: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1166: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1167: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1168: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1169: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1170: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1171: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1172: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1173: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1174: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1176: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1177: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1178: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1179: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1180: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1181: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1182: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1183: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1185: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1186: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1188: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1189: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1190: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1191: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1192: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1193: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1194: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1195: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1198: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1199: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1200: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1203: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1205: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1211: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1212: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1213: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1216: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1217: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1218: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1219: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1220: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1497: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1501: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1564: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1568: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1626: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1630: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1638: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:1641: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:2072: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:2089: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:2109: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:2118: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:2122: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:2175: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:2176: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:2178: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:2192: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:2415: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:2469: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:2551: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:2691: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:2813: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
+crates/node-core/src/agent/conversation.rs:2953: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
 crates/node-core/src/agent/detect.rs:361: (racy) — `try_wait()` 本身失败（子进程句柄 已被内核回收 / 权限被撤）。要构造它得让内核在探测窗口里拒绝 对自己刚起的子进程做 wait，单测里没有可控手段，这一臂永不执行。 标 `(racy)` 而不是普通例外：同一份源码连跑两次，llvm-cov 把 这一臂归到 `Err(e) => {` 与 `return Err(...)` 两个不同的行号上 （实测 361 / 365 各出现一次），于是「集合相等」的严格比对会 随机红。臂本身不可达这件事没变，变的是它被记在哪一行。
 crates/node-core/src/agent/detect.rs:370: (racy) — `try_wait()` 本身失败（子进程句柄 已被内核回收 / 权限被撤）。要构造它得让内核在探测窗口里拒绝 对自己刚起的子进程做 wait，单测里没有可控手段，这一臂永不执行。 标 `(racy)` 而不是普通例外：同一份源码连跑两次，llvm-cov 把 这一臂归到 `Err(e) => {` 与 `return Err(...)` 两个不同的行号上 （实测 361 / 365 各出现一次），于是「集合相等」的严格比对会 随机红。臂本身不可达这件事没变，变的是它被记在哪一行。
 crates/node-core/src/agent/detect.rs:573: 本机若**真装了** opencode 就走 `Ready` 臂，CI 上 通常没装就走 `NotInstalled` 臂。两条臂互斥，同一次运行只能覆盖其中一条， 于是剩下那条恒被报成未覆盖——换了台机器跑就会翻转，不是漏测。
@@ -435,14 +438,13 @@ crates/node-core/src/connector/exec.rs:572: `fork` 失败需进程表耗尽，�
 crates/node-core/src/connector/exec.rs:573: `fork` 失败需进程表耗尽，测试环境无可控构造 手段（防御性兜底）。
 crates/node-core/src/connector/exec.rs:574: `fork` 失败需进程表耗尽，测试环境无可控构造 手段（防御性兜底）。
 crates/node-core/src/connector/exec.rs:575: `fork` 失败需进程表耗尽，测试环境无可控构造 手段（防御性兜底）。
-crates/node-core/src/connector/exec.rs:580: `fork` 失败需进程表耗尽，测试环境无可控构造 手段（防御性兜底）。
-crates/node-core/src/connector/exec.rs:659: 多行 `tracing!` 的参数行被 llvm-cov 记为 miss（已知现象）；这条日志本身由 `a_pipe_that_fails_permanently_is_dropped_not_retried` 走到。
-crates/node-core/src/connector/exec.rs:701: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
-crates/node-core/src/connector/exec.rs:702: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
-crates/node-core/src/connector/exec.rs:703: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
-crates/node-core/src/connector/exec.rs:704: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
-crates/node-core/src/connector/exec.rs:705: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
-crates/node-core/src/connector/exec.rs:810: `fds()` 里已关的那根传的就是 -1，内核会忽略它而 `revents` 恒 0—— 语义与「不在表里」相同，所以不需要在这里再筛一遍。 `poll` 失败需 nfds 超范围或非法 fd，这里传的都是 内核刚给的 fd（防御性兜底）。
+crates/node-core/src/connector/exec.rs:669: 多行 `tracing!` 的参数行被 llvm-cov 记为 miss（已知现象）；这条日志本身由 `a_pipe_that_fails_permanently_is_dropped_not_retried` 走到。
+crates/node-core/src/connector/exec.rs:711: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
+crates/node-core/src/connector/exec.rs:712: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
+crates/node-core/src/connector/exec.rs:713: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
+crates/node-core/src/connector/exec.rs:714: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
+crates/node-core/src/connector/exec.rs:715: 非 EINTR 的 `waitpid` 失败要求这个 pid 不是我们的子进程（已被别人回收）；本函数是唯一持有它的地方。 `EINTR` 则重试，那条路真的会被信号打断。
+crates/node-core/src/connector/exec.rs:820: `fds()` 里已关的那根传的就是 -1，内核会忽略它而 `revents` 恒 0—— 语义与「不在表里」相同，所以不需要在这里再筛一遍。 `poll` 失败需 nfds 超范围或非法 fd，这里传的都是 内核刚给的 fd（防御性兜底）。
 crates/node-core/src/connector/files.rs:109: Unix 上 `RootDir` 必然让 `asked.is_absolute()` 为真、在 :97 就已经返回；`Prefix` 只在 Windows 出现（盘符 / UNC），本 crate 只在 Unix 目标上构建。 留着这一臂是为了「将来若支持 Windows，越界判定不会漏掉盘符」。
 crates/node-core/src/connector/files.rs:137: `lexical` 由根的分段拼成，而根在 `open` 时 已被 canonicalize 过（必然存在），所以向上走必然在根处停住。
 crates/node-core/src/connector/files.rs:138: `lexical` 由根的分段拼成，而根在 `open` 时 已被 canonicalize 过（必然存在），所以向上走必然在根处停住。
@@ -451,42 +453,42 @@ crates/node-core/src/connector/files.rs:324: 元数据读不到要求该项在 `
 crates/node-core/src/connector/files.rs:678: 元数据读不到要求该项在 `read_dir` 之后被另一个进程删掉，同样是竞态而非分支。
 crates/node-core/src/connector/files.rs:1247: mkfifo 只可能因 umask/路径/已存在而失败， 这里传的是刚由 tempfile 建出的目录下的新名字。
 crates/node-core/src/connector/files.rs:1317: mkfifo 只可能因 umask/路径/已存在而失败， 这里传的是刚由 tempfile 建出的目录下的新名字。
-crates/node-core/src/connector/git.rs:115: 只在 `git` 可执行文件缺失 / 无执行权限 / 进程表满时才会走到。`with_git_bin` 能指向一个不存在的路径来构造 这一支，但那验的是「我们自己写的 map_err 有没有语法错」，不是 「git 起不来时产品怎么办」——真实世界里这一支的替代路径是 `Err` 被通道层翻成 `channel_error{internal}`，那条已有测试。
-crates/node-core/src/connector/git.rs:116: 只在 `git` 可执行文件缺失 / 无执行权限 / 进程表满时才会走到。`with_git_bin` 能指向一个不存在的路径来构造 这一支，但那验的是「我们自己写的 map_err 有没有语法错」，不是 「git 起不来时产品怎么办」——真实世界里这一支的替代路径是 `Err` 被通道层翻成 `channel_error{internal}`，那条已有测试。
-crates/node-core/src/connector/git.rs:117: 只在 `git` 可执行文件缺失 / 无执行权限 / 进程表满时才会走到。`with_git_bin` 能指向一个不存在的路径来构造 这一支，但那验的是「我们自己写的 map_err 有没有语法错」，不是 「git 起不来时产品怎么办」——真实世界里这一支的替代路径是 `Err` 被通道层翻成 `channel_error{internal}`，那条已有测试。
-crates/node-core/src/connector/git.rs:135: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
-crates/node-core/src/connector/git.rs:136: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
-crates/node-core/src/connector/git.rs:137: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
-crates/node-core/src/connector/git.rs:138: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
-crates/node-core/src/connector/git.rs:139: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
-crates/node-core/src/connector/git.rs:140: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
-crates/node-core/src/connector/git.rs:141: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
-crates/node-core/src/connector/git.rs:200: `parse_status` 从不给 `head`：`status --branch` 的输出里没有短 hash（只有分支名或 `HEAD (no branch)`）， 所以解析结果这一格恒为 `None`。留着这一臂是因为「将来若改成解析 别的 git 输出」时它就在该在的位置；它不是业务分支。
-crates/node-core/src/connector/git.rs:282: 让 `git log` 在**非**空仓库上以非零退出且 不被 `is_empty_repo` 认出来，需要把仓库搞坏（HEAD 指向不存在的 对象 / 索引损坏）。那种状态下 `status` 也一起崩，页面上先坏的是 另一块；为它造一个损坏仓库来测这一行的传播，测的其实是 `run_git` 已有的错误路径。
-crates/node-core/src/connector/git.rs:314: `Default` 是给 `#[derive(Default)]` 的容器与 `unwrap_or_default()` 准备的构造入口，生产代码从不经它拿 `Git`（通道 一律走 `create(name)`）。这一行的存在理由是 trait 完整性，不是业务分支。
-crates/node-core/src/connector/git.rs:315: `Default` 是给 `#[derive(Default)]` 的容器与 `unwrap_or_default()` 准备的构造入口，生产代码从不经它拿 `Git`（通道 一律走 `create(name)`）。这一行的存在理由是 trait 完整性，不是业务分支。
-crates/node-core/src/connector/git.rs:316: `Default` 是给 `#[derive(Default)]` 的容器与 `unwrap_or_default()` 准备的构造入口，生产代码从不经它拿 `Git`（通道 一律走 `create(name)`）。这一行的存在理由是 trait 完整性，不是业务分支。
-crates/node-core/src/connector/git.rs:374: 副本进线程：`Git` 本身不能跨线程搬（它持着通道），而这次 git 调用 只需要根、可执行文件路径与超时这三样。 `on_data` 开头已经 `root_checked()?` 过一次， 所以这一格在这里恒为 `Some`。它是给「将来有人把开头的检查挪走」留的 第二道闸：少了它，那种改动会让这里变成对 `None` 的 `unwrap`。
-crates/node-core/src/connector/git.rs:375: 副本进线程：`Git` 本身不能跨线程搬（它持着通道），而这次 git 调用 只需要根、可执行文件路径与超时这三样。 `on_data` 开头已经 `root_checked()?` 过一次， 所以这一格在这里恒为 `Some`。它是给「将来有人把开头的检查挪走」留的 第二道闸：少了它，那种改动会让这里变成对 `None` 的 `unwrap`。
-crates/node-core/src/connector/git.rs:403: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
-crates/node-core/src/connector/git.rs:404: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
-crates/node-core/src/connector/git.rs:405: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
-crates/node-core/src/connector/git.rs:768: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
-crates/node-core/src/connector/git.rs:856: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
-crates/node-core/src/connector/git.rs:1009: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
-crates/node-core/src/connector/git.rs:1015: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
-crates/node-core/src/connector/git.rs:1026: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
-crates/node-core/src/connector/git.rs:1044: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
-crates/node-core/src/connector/git.rs:1051: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
-crates/node-core/src/connector/git.rs:1109: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
-crates/node-core/src/connector/git.rs:1133: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
-crates/node-core/src/connector/git.rs:1202: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
-crates/node-core/src/connector/git.rs:1206: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
-crates/node-core/src/connector/git.rs:1210: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
-crates/node-core/src/connector/git.rs:1261: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
-crates/node-core/src/connector/git.rs:1456: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
-crates/node-core/src/connector/git.rs:1542: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
-crates/node-core/src/connector/git.rs:1535: `on_data` 在起线程之前已经把 op 白名单校验过了，所以线程里这一臂不可达。留着是因为 `match` 必须穷尽，而「默认放行」在这里会是安全洞 （未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:186: 只在 `git` 可执行文件缺失 / 无执行权限 / 进程表满时才会走到。`with_git_bin` 能指向一个不存在的路径来构造 这一支，但那验的是「我们自己写的 map_err 有没有语法错」，不是 「git 起不来时产品怎么办」——真实世界里这一支的替代路径是 `Err` 被通道层翻成 `channel_error{internal}`，那条已有测试。
+crates/node-core/src/connector/git.rs:187: 只在 `git` 可执行文件缺失 / 无执行权限 / 进程表满时才会走到。`with_git_bin` 能指向一个不存在的路径来构造 这一支，但那验的是「我们自己写的 map_err 有没有语法错」，不是 「git 起不来时产品怎么办」——真实世界里这一支的替代路径是 `Err` 被通道层翻成 `channel_error{internal}`，那条已有测试。
+crates/node-core/src/connector/git.rs:188: 只在 `git` 可执行文件缺失 / 无执行权限 / 进程表满时才会走到。`with_git_bin` 能指向一个不存在的路径来构造 这一支，但那验的是「我们自己写的 map_err 有没有语法错」，不是 「git 起不来时产品怎么办」——真实世界里这一支的替代路径是 `Err` 被通道层翻成 `channel_error{internal}`，那条已有测试。
+crates/node-core/src/connector/git.rs:212: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
+crates/node-core/src/connector/git.rs:213: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
+crates/node-core/src/connector/git.rs:214: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
+crates/node-core/src/connector/git.rs:215: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
+crates/node-core/src/connector/git.rs:216: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
+crates/node-core/src/connector/git.rs:217: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
+crates/node-core/src/connector/git.rs:218: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
+crates/node-core/src/connector/git.rs:368: 让 `git log` 在**非**空仓库上以非零退出且 不被 `is_empty_repo` 认出来，需要把仓库搞坏（HEAD 指向不存在的 对象 / 索引损坏）。那种状态下 `status` 也一起崩，页面上先坏的是 另一块；为它造一个损坏仓库来测这一行的传播，测的其实是 `run_git` 已有的错误路径。
+crates/node-core/src/connector/git.rs:397: `Default` 是给 `#[derive(Default)]` 的容器与 `unwrap_or_default()` 准备的构造入口，生产代码从不经它拿 `Git`（通道 一律走 `create(name)`）。这一行的存在理由是 trait 完整性，不是业务分支。
+crates/node-core/src/connector/git.rs:398: `Default` 是给 `#[derive(Default)]` 的容器与 `unwrap_or_default()` 准备的构造入口，生产代码从不经它拿 `Git`（通道 一律走 `create(name)`）。这一行的存在理由是 trait 完整性，不是业务分支。
+crates/node-core/src/connector/git.rs:399: `Default` 是给 `#[derive(Default)]` 的容器与 `unwrap_or_default()` 准备的构造入口，生产代码从不经它拿 `Git`（通道 一律走 `create(name)`）。这一行的存在理由是 trait 完整性，不是业务分支。
+crates/node-core/src/connector/git.rs:454: 副本进线程：`Git` 本身不能跨线程搬（它持着通道），而这次 git 调用 只需要根、可执行文件路径与超时这三样。 `on_data` 开头已经 `root_checked()?` 过一次， 所以这一格在这里恒为 `Some`。它是给「将来有人把开头的检查挪走」留的 第二道闸：少了它，那种改动会让这里变成对 `None` 的 `unwrap`。
+crates/node-core/src/connector/git.rs:455: 副本进线程：`Git` 本身不能跨线程搬（它持着通道），而这次 git 调用 只需要根、可执行文件路径与超时这三样。 `on_data` 开头已经 `root_checked()?` 过一次， 所以这一格在这里恒为 `Some`。它是给「将来有人把开头的检查挪走」留的 第二道闸：少了它，那种改动会让这里变成对 `None` 的 `unwrap`。
+crates/node-core/src/connector/git.rs:922: `on_data` 在起线程之前已经 `GitOp::parse` 过了， 所以线程里这一臂不可达。留着是因为这里拿到的是 `&str`（要重新解析）， 而「默认放行」在安全上是洞（未知 op 静默成功）。
+crates/node-core/src/connector/git.rs:1017: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/connector/git.rs:1145: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/connector/git.rs:1298: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/connector/git.rs:1304: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/connector/git.rs:1315: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/connector/git.rs:1343: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/connector/git.rs:1372: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/connector/git.rs:1379: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/connector/git.rs:1437: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/connector/git.rs:1461: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/connector/git.rs:1530: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/connector/git.rs:1534: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/connector/git.rs:1538: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/connector/git.rs:1589: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/connector/git.rs:1618: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/connector/git.rs:1911: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/connector/git.rs:1961: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/connector/git.rs:2036: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/connector/git.rs:2043: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
 crates/node-core/src/connector/terminal.rs:222: 0 视作「没给」：页面刚挂载、还没量到尺寸时会发 0， 而 0 对内核是「未设置」，`stty size` 会报 `0 0`。回落到默认比 报错更接近用户要的——他要的是一个能看见提示符的终端。 `?` 的那条 Err 因此**结构上不可达**：`non_zero` 只放行 ≥1，而 `MIN_DIM` 也是 1，两个入口都不会让 `checked` 失败。下面的 `?` 留着是因为「以后若把 MIN_DIM 调大，这里要立刻跟着拒绝」。 理由见上：`checked` 在 `open` 里恒成功。
 crates/node-core/src/connector/terminal.rs:277: 上面 `self.pty()?` 已经确认开着，同一 函数里 `self.pty` 不可能从 Some 变成 None（改它的 `close` / `detach` 都是别的入口），所以这个 None 臂结构上不可达。
 crates/node-core/src/connector/terminal.rs:278: 上面 `self.pty()?` 已经确认开着，同一 函数里 `self.pty` 不可能从 Some 变成 None（改它的 `close` / `detach` 都是别的入口），所以这个 None 臂结构上不可达。
@@ -514,8 +516,8 @@ crates/node-core/src/heartbeat.rs:168: 只在**读不到 `/proc`** 的机器上�
 crates/node-core/src/heartbeat.rs:185: 只在**读不到 `/proc`** 的机器上才会走到（非 Linux、 或被裁掉的容器）。本项目的目标平台是 Linux，`/proc/loadavg` 恒在， 出参不可能为空；这是给「什么也没测到」留的诚实出口，不是业务分支。
 crates/node-core/src/heartbeat.rs:186: 只在**读不到 `/proc`** 的机器上才会走到（非 Linux、 或被裁掉的容器）。本项目的目标平台是 Linux，`/proc/loadavg` 恒在， 出参不可能为空；这是给「什么也没测到」留的诚实出口，不是业务分支。
 crates/node-core/src/heartbeat.rs:192: 只在**读不到 `/proc`** 的机器上才会走到（非 Linux、 或被裁掉的容器）。本项目的目标平台是 Linux，`/proc/loadavg` 恒在， 出参不可能为空；这是给「什么也没测到」留的诚实出口，不是业务分支。
-crates/node-core/src/heartbeat.rs:486: 只在**读不到 `/proc`** 的机器上才会走到（非 Linux、 或被裁掉的容器）。本项目的目标平台是 Linux，`/proc/loadavg` 恒在， 出参不可能为空；这是给「什么也没测到」留的诚实出口，不是业务分支。
-crates/node-core/src/heartbeat.rs:553: 只在**读不到 `/proc`** 的机器上才会走到（非 Linux、 或被裁掉的容器）。本项目的目标平台是 Linux，`/proc/loadavg` 恒在， 出参不可能为空；这是给「什么也没测到」留的诚实出口，不是业务分支。
+crates/node-core/src/heartbeat.rs:486: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/node-core/src/heartbeat.rs:553: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
 crates/node-core/src/identity.rs:316: 见 :298：内层 `if let Ok(d)` 的 else 不可达， 这里是它的收尾行。
 crates/node-core/src/identity.rs:394: 见 :298：内层 `if let Ok(d)` 的 else 不可达， 这里是它的收尾行。
 crates/node-core/src/log.rs:83: 收紧日志目录权限：目录已存在（create_dir_all 成功）即 set_permissions 必成功，正常文件系统构造不出失败（防御性兜底）。
@@ -539,60 +541,59 @@ crates/node-core/src/pty.rs:269: `n == 0` 臂（`BrokenPipe` + "terminal is gone
 crates/node-core/src/pty.rs:270: `n == 0` 臂（`BrokenPipe` + "terminal is gone"）：`write(2)` 对一根活着的 PTY 只会返回正数或负 errno， 返回 0 需要「是终端却一个字节都不收」的稳定时序，测试环境造不出来。
 crates/node-core/src/pty.rs:271: `n == 0` 臂（`BrokenPipe` + "terminal is gone"）：`write(2)` 对一根活着的 PTY 只会返回正数或负 errno， 返回 0 需要「是终端却一个字节都不收」的稳定时序，测试环境造不出来。
 crates/node-core/src/pty.rs:354: `ioctl` 失败需要一个「是终端却拒绝改尺寸」的 fd （普通管道 / 普通文件会返回 ENOTTY，但那不是 PTY 路径构造得出来的）， 属防御性兜底。
-crates/node-core/src/pty.rs:809: `poll` 失败需 fd 无效或 `nfds` 超范围， 这里传的都是内核刚给的 fd（防御性兜底）。
-crates/node-core/src/pty.rs:810: `poll` 失败需 fd 无效或 `nfds` 超范围， 这里传的都是内核刚给的 fd（防御性兜底）。
-crates/node-core/src/pty.rs:811: `poll` 失败需 fd 无效或 `nfds` 超范围， 这里传的都是内核刚给的 fd（防御性兜底）。
+crates/node-core/src/pty.rs:820: `poll` 失败需 fd 无效或 `nfds` 超范围， 这里传的都是内核刚给的 fd（防御性兜底）。
+crates/node-core/src/pty.rs:821: `poll` 失败需 fd 无效或 `nfds` 超范围， 这里传的都是内核刚给的 fd（防御性兜底）。
+crates/node-core/src/pty.rs:822: `poll` 失败需 fd 无效或 `nfds` 超范围， 这里传的都是内核刚给的 fd（防御性兜底）。
 crates/node-core/src/worker.rs:125: `work` 是进程入口，只能靠 spawn 真二进制走到： `load_or_create` 的成功臂、失败臂与整条 `run_with` 链在单测里都触达不到 （`run_with` 自建多线程 runtime，嵌在 `#[tokio::test]` 里会 panic）。
 crates/node-core/src/worker.rs:133: `work` 是进程入口，只能靠 spawn 真二进制走到： `load_or_create` 的成功臂、失败臂与整条 `run_with` 链在单测里都触达不到 （`run_with` 自建多线程 runtime，嵌在 `#[tokio::test]` 里会 panic）。
-crates/node-core/src/worker.rs:143: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:144: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:145: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:146: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:147: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:148: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:149: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:150: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:151: 见 `run_with` 上的标注：进程入口，只能由 真进程触达。
-crates/node-core/src/worker.rs:152: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:153: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:154: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:155: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:156: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:157: 身份已备好之后的全部流程。 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到）， 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测—— 见 `mod tests` 里的 `run_with` 用例。 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
-crates/node-core/src/worker.rs:161: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
+crates/node-core/src/worker.rs:144: `run_with` 是进程入口（自建多线程 runtime 并 block_on，嵌在 `#[tokio::test]` 里会 panic），只能靠 spawn 二进制走到；单测走 `connect_loop` 与 `session`，故 `run_with` 体内这几行无对应用例。
+crates/node-core/src/worker.rs:145: `run_with` 是进程入口（自建多线程 runtime 并 block_on，嵌在 `#[tokio::test]` 里会 panic），只能靠 spawn 二进制走到；单测走 `connect_loop` 与 `session`，故 `run_with` 体内这几行无对应用例。
+crates/node-core/src/worker.rs:146: `run_with` 是进程入口（自建多线程 runtime 并 block_on，嵌在 `#[tokio::test]` 里会 panic），只能靠 spawn 二进制走到；单测走 `connect_loop` 与 `session`，故 `run_with` 体内这几行无对应用例。
+crates/node-core/src/worker.rs:147: `run_with` 是进程入口（自建多线程 runtime 并 block_on，嵌在 `#[tokio::test]` 里会 panic），只能靠 spawn 二进制走到；单测走 `connect_loop` 与 `session`，故 `run_with` 体内这几行无对应用例。
+crates/node-core/src/worker.rs:148: `run_with` 是进程入口（自建多线程 runtime 并 block_on，嵌在 `#[tokio::test]` 里会 panic），只能靠 spawn 二进制走到；单测走 `connect_loop` 与 `session`，故 `run_with` 体内这几行无对应用例。
+crates/node-core/src/worker.rs:149: `run_with` 是进程入口（自建多线程 runtime 并 block_on，嵌在 `#[tokio::test]` 里会 panic），只能靠 spawn 二进制走到；单测走 `connect_loop` 与 `session`，故 `run_with` 体内这几行无对应用例。
+crates/node-core/src/worker.rs:150: `run_with` 是进程入口（自建多线程 runtime 并 block_on，嵌在 `#[tokio::test]` 里会 panic），只能靠 spawn 二进制走到；单测走 `connect_loop` 与 `session`，故 `run_with` 体内这几行无对应用例。
+crates/node-core/src/worker.rs:151: `run_with` 是进程入口（自建多线程 runtime 并 block_on，嵌在 `#[tokio::test]` 里会 panic），只能靠 spawn 二进制走到；单测走 `connect_loop` 与 `session`，故 `run_with` 体内这几行无对应用例。
+crates/node-core/src/worker.rs:152: `run_with` 是进程入口（自建多线程 runtime 并 block_on，嵌在 `#[tokio::test]` 里会 panic），只能靠 spawn 二进制走到；单测走 `connect_loop` 与 `session`，故 `run_with` 体内这几行无对应用例。
+crates/node-core/src/worker.rs:153: `run_with` 是进程入口（自建多线程 runtime 并 block_on，嵌在 `#[tokio::test]` 里会 panic），只能靠 spawn 二进制走到；单测走 `connect_loop` 与 `session`，故 `run_with` 体内这几行无对应用例。
+crates/node-core/src/worker.rs:154: `run_with` 是进程入口（自建多线程 runtime 并 block_on，嵌在 `#[tokio::test]` 里会 panic），只能靠 spawn 二进制走到；单测走 `connect_loop` 与 `session`，故 `run_with` 体内这几行无对应用例。
+crates/node-core/src/worker.rs:155: `run_with` 是进程入口（自建多线程 runtime 并 block_on，嵌在 `#[tokio::test]` 里会 panic），只能靠 spawn 二进制走到；单测走 `connect_loop` 与 `session`，故 `run_with` 体内这几行无对应用例。
+crates/node-core/src/worker.rs:156: `run_with` 是进程入口（自建多线程 runtime 并 block_on，嵌在 `#[tokio::test]` 里会 panic），只能靠 spawn 二进制走到；单测走 `connect_loop` 与 `session`，故 `run_with` 体内这几行无对应用例。
+crates/node-core/src/worker.rs:157: `run_with` 是进程入口（自建多线程 runtime 并 block_on，嵌在 `#[tokio::test]` 里会 panic），只能靠 spawn 二进制走到；单测走 `connect_loop` 与 `session`，故 `run_with` 体内这几行无对应用例。
+crates/node-core/src/worker.rs:158: 进程入口：自建多线程 runtime 并 block_on， 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
 crates/node-core/src/worker.rs:162: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
 crates/node-core/src/worker.rs:163: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
-crates/node-core/src/worker.rs:165: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
+crates/node-core/src/worker.rs:164: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
 crates/node-core/src/worker.rs:166: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
-crates/node-core/src/worker.rs:169: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限） 时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
+crates/node-core/src/worker.rs:167: 同上：runtime 构造失败需 fd / 内存耗尽， 测试环境无可控构造手段（防御性兜底）。
 crates/node-core/src/worker.rs:170: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限） 时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
-crates/node-core/src/worker.rs:176: 退出码协议里的三个非零码都带「这一版坏了」的语义， 而 worker 自己不打算判自己坏——它只会「正常停下」。 同上：`block_on` 是进程入口路径。
+crates/node-core/src/worker.rs:171: 建不出 OS 线程（fd / 内存耗尽 / 线程数受限） 时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
 crates/node-core/src/worker.rs:177: 退出码协议里的三个非零码都带「这一版坏了」的语义， 而 worker 自己不打算判自己坏——它只会「正常停下」。 同上：`block_on` 是进程入口路径。
 crates/node-core/src/worker.rs:178: 退出码协议里的三个非零码都带「这一版坏了」的语义， 而 worker 自己不打算判自己坏——它只会「正常停下」。 同上：`block_on` 是进程入口路径。
-crates/node-core/src/worker.rs:323: 退出码协议里的三个非零码都带「这一版坏了」的语义， 而 worker 自己不打算判自己坏——它只会「正常停下」。 同上：`block_on` 是进程入口路径。
-crates/node-core/src/worker.rs:384: 心跳 tick 臂：需让 ticker 在 session 内触发而 read 不返回。
-crates/node-core/src/worker.rs:424: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
-crates/node-core/src/worker.rs:473: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
+crates/node-core/src/worker.rs:179: 退出码协议里的三个非零码都带「这一版坏了」的语义， 而 worker 自己不打算判自己坏——它只会「正常停下」。 同上：`block_on` 是进程入口路径。
+crates/node-core/src/worker.rs:324: 退出码协议里的三个非零码都带「这一版坏了」的语义， 而 worker 自己不打算判自己坏——它只会「正常停下」。 同上：`block_on` 是进程入口路径。
+crates/node-core/src/worker.rs:385: 心跳 tick 臂：需让 ticker 在 session 内触发而 read 不返回。
+crates/node-core/src/worker.rs:425: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
 crates/node-core/src/worker.rs:474: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
-crates/node-core/src/worker.rs:490: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
+crates/node-core/src/worker.rs:475: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
 crates/node-core/src/worker.rs:491: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
-crates/node-core/src/worker.rs:512: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
-crates/node-core/src/worker.rs:521: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
+crates/node-core/src/worker.rs:492: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
+crates/node-core/src/worker.rs:513: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
 crates/node-core/src/worker.rs:522: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
 crates/node-core/src/worker.rs:523: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
 crates/node-core/src/worker.rs:524: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
 crates/node-core/src/worker.rs:525: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
 crates/node-core/src/worker.rs:526: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
-crates/node-core/src/worker.rs:534: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
+crates/node-core/src/worker.rs:527: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
 crates/node-core/src/worker.rs:535: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
 crates/node-core/src/worker.rs:536: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
 crates/node-core/src/worker.rs:537: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
 crates/node-core/src/worker.rs:538: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
-crates/node-core/src/worker.rs:621: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
-crates/node-core/src/worker.rs:637: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
+crates/node-core/src/worker.rs:539: `next_text` 只产出 Transport；这条归类是诚实的降级， `next_text` 只产出 Transport，这条归类结构上 不可达（诚实的降级，见 :214 注释）。 不是为了兜住某个具体错误。
+crates/node-core/src/worker.rs:622: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:638: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:639: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
-crates/node-core/src/worker.rs:644: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
+crates/node-core/src/worker.rs:640: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:645: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:646: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:647: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
@@ -600,13 +601,13 @@ crates/node-core/src/worker.rs:648: 见 :347 的 `select!` 竞争臂：本函数
 crates/node-core/src/worker.rs:649: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:650: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:651: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
-crates/node-core/src/worker.rs:655: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
+crates/node-core/src/worker.rs:652: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:656: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:657: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:658: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:659: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
-crates/node-core/src/worker.rs:661: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
-crates/node-core/src/worker.rs:664: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
+crates/node-core/src/worker.rs:660: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
+crates/node-core/src/worker.rs:662: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:665: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:666: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:667: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
@@ -614,34 +615,35 @@ crates/node-core/src/worker.rs:668: 见 :347 的 `select!` 竞争臂：本函数
 crates/node-core/src/worker.rs:669: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:670: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:671: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
-crates/node-core/src/worker.rs:673: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
+crates/node-core/src/worker.rs:672: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:674: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
-crates/node-core/src/worker.rs:711: heartbeat 编码失败需构造 serde 失败的 Heartbeat。
+crates/node-core/src/worker.rs:675: 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而 `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒 可达，但**是否执行**取决于同一场竞争。 `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号 与真正被豁免的那行差几条（实测差 4 行）。 (racy) — 见上：select! 竞争臂的传递依赖。
 crates/node-core/src/worker.rs:712: heartbeat 编码失败需构造 serde 失败的 Heartbeat。
-crates/node-core/src/worker.rs:866: 只在断言失败时执行；`panic!` 的格式串行被 llvm-cov 记为 miss（多行宏已知现象）。
-crates/node-core/src/worker.rs:898: 同上：只在断言失败时执行的 `panic!` 参数行。
-crates/node-core/src/worker.rs:931: `assert!` 的格式串参数行（多行宏已知现象）。
-crates/node-core/src/worker.rs:940: 同上：`assert!` 的格式串参数行。
-crates/node-core/src/worker.rs:1085: 测试夹具 `fake_hub`：fixture 只在测试自己起的 监听器上跑，accept / upgrade 失败臂构造不出。
-crates/node-core/src/worker.rs:1089: 同上：fixture 的 upgrade 失败臂。
-crates/node-core/src/worker.rs:1107: `unreachable!`：上面已经 return，结构上不可达。
+crates/node-core/src/worker.rs:713: heartbeat 编码失败需构造 serde 失败的 Heartbeat。
+crates/node-core/src/worker.rs:867: 只在断言失败时执行；`panic!` 的格式串行被 llvm-cov 记为 miss（多行宏已知现象）。
+crates/node-core/src/worker.rs:899: 同上：只在断言失败时执行的 `panic!` 参数行。
+crates/node-core/src/worker.rs:932: `assert!` 的格式串参数行（多行宏已知现象）。
+crates/node-core/src/worker.rs:941: 同上：`assert!` 的格式串参数行。
+crates/node-core/src/worker.rs:1086: 测试夹具 `fake_hub`：fixture 只在测试自己起的 监听器上跑，accept / upgrade 失败臂构造不出。
+crates/node-core/src/worker.rs:1090: 同上：fixture 的 upgrade 失败臂。
 crates/node-core/src/worker.rs:1108: `unreachable!`：上面已经 return，结构上不可达。
-crates/node-core/src/worker.rs:1586: 测试夹具：accept 失败臂在测试自己起的 监听器上构造不出。
-crates/node-core/src/worker.rs:1590: 同上：upgrade 失败臂。
-crates/node-core/src/worker.rs:1614: 真 PTY 通道上的断言：worker 只会发 自己造的 JSON 帧，这条「解析不动」的 continue 在 `fake_hub_recording_heartbeats` 上构造不出（对端发的 每帧都由 `Frame::push` 保证可解析）。
-crates/node-core/src/worker.rs:1674: 测试夹具：accept / upgrade 失败臂在测试 自己起的监听器上构造不出（同 `fake_hub`）。
-crates/node-core/src/worker.rs:1677: 测试夹具：accept / upgrade 失败臂在测试 自己起的监听器上构造不出（同 `fake_hub`）。
-crates/node-core/src/worker.rs:1692: 同上：worker 只会发 `Frame::push` 造得 出的 JSON，这条 continue 在夹具上构造不出。
-crates/node-core/src/worker.rs:1696: 同上：worker 只会发 `Frame::push` 造得 出的 JSON，这条 continue 在夹具上构造不出。
-crates/node-core/src/worker.rs:1737: 同上：worker 只会发 `Frame::push` 造得 出的 JSON，这条 continue 在夹具上构造不出。
-crates/node-core/src/worker.rs:1743: 同上：worker 只会发 `Frame::push` 造得 出的 JSON，这条 continue 在夹具上构造不出。
-crates/node-core/src/worker.rs:1955: 只在上面这条断言失败时执行；`panic!` 的 参数行被 llvm-cov 记为 miss（多行宏已知现象）。
-crates/node-core/src/worker.rs:2172: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
-crates/node-core/src/worker.rs:2217: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
-crates/node-core/src/worker.rs:2302: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
+crates/node-core/src/worker.rs:1109: `unreachable!`：上面已经 return，结构上不可达。
+crates/node-core/src/worker.rs:1587: 测试夹具：accept 失败臂在测试自己起的 监听器上构造不出。
+crates/node-core/src/worker.rs:1591: 同上：upgrade 失败臂。
+crates/node-core/src/worker.rs:1615: 真 PTY 通道上的断言：worker 只会发 自己造的 JSON 帧，这条「解析不动」的 continue 在 `fake_hub_recording_heartbeats` 上构造不出（对端发的 每帧都由 `Frame::push` 保证可解析）。
+crates/node-core/src/worker.rs:1675: 测试夹具：accept / upgrade 失败臂在测试 自己起的监听器上构造不出（同 `fake_hub`）。
+crates/node-core/src/worker.rs:1678: 测试夹具：accept / upgrade 失败臂在测试 自己起的监听器上构造不出（同 `fake_hub`）。
+crates/node-core/src/worker.rs:1693: 同上：worker 只会发 `Frame::push` 造得 出的 JSON，这条 continue 在夹具上构造不出。
+crates/node-core/src/worker.rs:1697: 同上：worker 只会发 `Frame::push` 造得 出的 JSON，这条 continue 在夹具上构造不出。
+crates/node-core/src/worker.rs:1738: 同上：worker 只会发 `Frame::push` 造得 出的 JSON，这条 continue 在夹具上构造不出。
+crates/node-core/src/worker.rs:1744: 同上：worker 只会发 `Frame::push` 造得 出的 JSON，这条 continue 在夹具上构造不出。
+crates/node-core/src/worker.rs:1956: 只在上面这条断言失败时执行；`panic!` 的 参数行被 llvm-cov 记为 miss（多行宏已知现象）。
+crates/node-core/src/worker.rs:2173: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
+crates/node-core/src/worker.rs:2218: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
 crates/node-core/src/worker.rs:2303: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
-crates/node-core/src/worker.rs:2428: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
-crates/node-core/src/worker.rs:2491: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
+crates/node-core/src/worker.rs:2304: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
+crates/node-core/src/worker.rs:2429: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
+crates/node-core/src/worker.rs:2492: `assert!` 的格式参数行（多行宏已知现象）：只在 上面这条断言失败时才执行。
 crates/protocol/src/handshake.rs:834: 测试失败路径：这条分支只在「载荷本该是 enroll」时才执行。
 crates/protocol/src/handshake.rs:1142: 走不到：上面那条 `assert!` 已经钉住形态。 测试失败路径：这条分支只在「上面那条断言本该红」时才执行。
 crates/protocol/src/handshake.rs:1159: 测试失败路径：这条分支只在「上面那条断言本该红」时才执行。

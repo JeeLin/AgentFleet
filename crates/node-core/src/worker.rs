@@ -137,7 +137,8 @@ impl Worker {
     ///
     /// 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到），
     /// 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测——
-    /// 见 `mod tests` 里的 `run_with` 用例。
+    /// 单测覆盖 `connect_loop` 与 `session`（`run_with` 自身是 `-> ExitCode`
+    /// 的进程入口，没有对应用例，见下一行的 `coverage: excluded`）。
     // coverage: excluded — 进程入口：自建多线程 runtime 并 block_on，
     // 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
     fn run_with<W: std::io::Write>(

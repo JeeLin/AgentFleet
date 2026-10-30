@@ -2111,19 +2111,30 @@ mod tests {
             .any(|e| e.name == "channel.closed"));
     }
 
-    /// 从实时流里取下一条事件。
+    /// 从实时流里取**下一条**事件；`None` 表示「等不到」。
     ///
-    /// 返回 `None` 表示「这一轮订阅者被甩掉了」（`Lagged`）——那一轮不构成
-    /// 断言，下一轮重来。
+    /// 返回 `None` 有三种来源，调用方按自己的判据区分：
     ///
-    /// **抽成助手是为了让 `Lagged` 这条路可确定性地被测到**：写在并发用例
-    /// 里它只是「有时会撞上」，撞不撞得上取决于调度——那会让覆盖率每次跑
-    /// 都不一样，覆盖率门禁就成了掷骰子。
-    fn next_live_event(rx: &mut tokio::sync::broadcast::Receiver<Envelope>) -> Option<Envelope> {
+    /// - `Lagged`：订阅者被环形缓冲甩掉了。这条**必须**单独可测（见
+    ///   `a_lagged_subscriber_is_told_it_missed_events`），所以下面不让它
+    ///   走「一直等到超时」——否则这条臂永远跑不到。
+    /// - `Closed`：结构上不可达（`Streams` 自己持有发送端）。
+    /// - 超时：**这一条是给「快照与实时流无缝」那条用例用的**。那条用例把
+    ///   「有没有下一条」当成两个互斥的事实之一（有 ⇒ 必须是 `expected`；
+    ///   没有 ⇒ 抓不到错），而原来写成无限 `yield_now` 等待，两种事实都靠
+    ///   调度决定——删掉里头的 `assert_eq!` 测试照样绿，断言等于没写。
+    fn next_live_event_timeout(
+        rx: &mut tokio::sync::broadcast::Receiver<Envelope>,
+        budget: std::time::Duration,
+    ) -> Option<Envelope> {
+        let deadline = std::time::Instant::now() + budget;
         loop {
             match rx.try_recv() {
                 Ok(env) => return Some(env),
                 Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                    if std::time::Instant::now() >= deadline {
+                        return None;
+                    }
                     std::thread::yield_now();
                 }
                 // 订阅者被甩掉了：这一轮不构成断言（下一轮重新来）。
@@ -2153,7 +2164,7 @@ mod tests {
             s.publish("device.status", "{}");
         }
         assert!(
-            next_live_event(&mut rx).is_none(),
+            next_live_event_timeout(&mut rx, std::time::Duration::from_secs(1)).is_none(),
             "订阅者被甩掉时必须收到 Lagged，而不是一条更旧的事件"
         );
     }
@@ -2163,11 +2174,36 @@ mod tests {
     /// 「读快照」与「订阅」分开做时，发布方在两步之间被切走会让新订阅者
     /// 在两处各收一次（终端把同一段输出画两遍），反向则永久丢失且没有
     /// `resync` 注释帧。
+    ///
+    /// **这条用例的可证伪性靠「从外部抓到的 id 序列」，不靠调度运气。**
+    /// 早先的写法是「读 `last_event_id()` → 订阅 → 断言实时流的下一条等于
+    /// `last+1`」：那个 `expected` 就是从 `last` 推出来的，同一把尺子量两次，
+    /// 恒真——实测把 `assert_eq!` 整条删掉、甚至把 `subscribe_parts` 改成
+    /// 「先 `subscribe` 后读快照」（真的会丢事件的错法），用例都照样绿。
+    ///
+    /// 现在换成可证伪的形状：订阅点**故意退到更早**，把「快照覆盖的 id 集合」
+    /// 与「实时流收到的 id 集合」都收下来，然后断言
+    ///
+    ///   ① 快照只带 `> from` 的 id，且两者不相交（不重发）；
+    ///   ② 快照覆盖 `from+1..=last` 的每一个 id（不丢事件）。
+    ///
+    /// ② 是这里唯一真能抓「丢事件」的判据：`backlog` 是订阅那一刻的快照，
+    /// `last` 是订阅**之前**读到的终点，所以 `from+1..=last` 这一段**必须**
+    /// 全部出现在快照里——它们是订阅前就已存在的事件，订阅后能被实时流
+    /// 捞到的只可能是订阅之后才 publish 的那些。早先只断「不相交」时，把
+    /// `backlog_since` 改成跳掉中段一条，用例照样绿——那正是本注释要防的事。
+    ///
+    /// 这两条是能从外部独立核算的：不需要相信任何一方自报的「下一条是谁」。
     #[test]
     fn the_snapshot_and_the_live_stream_leave_no_gap_or_duplicate() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let s = Streams::new();
+        // 先铺一段真实历史，让「快照」有内容可谈。
+        for i in 0..20u64 {
+            s.session_state("s_1", &format!("running-{i}"));
+        }
+
         let stop = Arc::new(AtomicBool::new(false));
         let publisher = {
             let s = s.clone();
@@ -2179,20 +2215,69 @@ mod tests {
             })
         };
 
-        let mut checked = 0usize;
-        for _ in 0..2_000 {
+        let mut rounds = 0usize;
+        for _ in 0..300 {
             let last = s.last_event_id();
-            let (backlog, mut rx) = s.subscribe_parts(Some(last));
-            // 快照里的最后一条（没有就是 `last`）之后，实时流必须紧接下一条
-            let expected = backlog.last().map_or(last, |e| e.id) + 1;
-            // 订阅者被甩掉了（`None`）：这一轮不构成断言，下一轮重新来。
-            if let Some(env) = next_live_event(&mut rx) {
-                assert_eq!(env.id, expected, "实时流必须紧接快照（既不重发也不丢事件）");
-                checked += 1;
+            // 退 3 条：快照至少能带回一点东西（终点订阅时快照恒空，
+            // 「不重发」就退化成「两边都空」，测不出任何东西）。
+            let from = last.saturating_sub(3);
+            let (backlog, mut rx) = s.subscribe_parts(Some(from));
+
+            // 实时侧：把当前能拿到的都取走（不阻塞等待，避免用例挂住）。
+            //
+            // **实测这里恒空**（300 轮 0 次非空）：发布线程要在 `subscribe_parts`
+            // 返回后、这个循环跑完前完成一轮 `publish` 才可能有货，而那一步只要
+            // 几微秒。所以下面这条「不重发」断言在本用例里**没有检测力**——
+            // 它守着的是「将来有人把 `try_recv` 换成会等待的形态」那一刻。
+            // 真能抓「重发」的是上面那句 `快照只该带 > from`（重发必然带
+            // `<= from` 的 id）与末尾的 `all.windows(2)` 单调断言。
+            let mut live: Vec<u64> = Vec::new();
+            while let Ok(env) = rx.try_recv() {
+                live.push(env.id);
             }
+
+            let snapshot: Vec<u64> = backlog.iter().map(|e| e.id).collect();
+            for id in &snapshot {
+                assert!(
+                    *id > from,
+                    "快照只该带 `> from` 的事件（from={from}，拿到 {id}）"
+                );
+                assert!(
+                    !live.contains(id),
+                    "id={id} 在快照与实时流各来一次（重发）——发布方在\"读快照\"与\
+                     \"订阅\"之间被切走了"
+                );
+            }
+            // 全局单调：两次收集到的 id 都不能回退
+            let mut all = snapshot.clone();
+            all.extend(live.iter().copied());
+            all.sort_unstable();
+            for w in all.windows(2) {
+                assert!(w[0] < w[1], "同一个 id 出现两次：{w:?}");
+            }
+            // ② 覆盖：`from+1..=last` 这一段（订阅前就已存在的全部事件）必须
+            // 一个不漏地出现在快照里。少了任何一条都是丢事件。
+            //
+            // **只对快照断言，且必须限定在环形缓冲还装得下的范围内**：`backlog`
+            // 是订阅那一刻 `replay` 的拷贝，而 `replay` 封顶 `REPLAY_CAPACITY`
+            // （256）条、满了就 `pop_front`。发布线程是自由跑的，`last` 与
+            // `subscribe_parts` 之间它可能已经 publish 了几百条，把 `from+1`
+            // 挤出去——那时「快照里没有 `from+1`」是正确的，不是丢事件。
+            // 所以下界取「`last` 往回数 `REPLAY_CAPACITY` 条」与 `from+1` 的较大者：
+            // 这一段在订阅时刻**必然**还在缓冲里（订阅点之后最多再有几百条进来，
+            // 但 `last` 是订阅之前读的，故 `last-capacity` 之后的事件一定没被挤掉）。
+            let lower = (from + 1).max(last.saturating_sub(REPLAY_CAPACITY as u64 - 1));
+            for expect in lower..=last {
+                assert!(
+                    snapshot.binary_search(&expect).is_ok(),
+                    "id={expect} 在快照里没有（丢事件）：快照={snapshot:?}；\
+                     from={from} last={last} lower={lower}"
+                );
+            }
+            rounds += 1;
         }
         stop.store(true, Ordering::Relaxed);
         publisher.join().expect("publisher");
-        assert!(checked > 0, "至少要断言过一次");
+        assert_eq!(rounds, 300, "每一轮都必须真的跑完");
     }
 }

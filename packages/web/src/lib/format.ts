@@ -38,6 +38,45 @@ export function relativeTime(stamp: string | null | undefined, now = Date.now())
 }
 
 /**
+ * 相对时间（长跨度）：档位比 `relativeTime` 更粗——**第一档就是 60 秒**，
+ * 没有「N 秒前」，并补上「个月 / 年」。
+ *
+ * **不要把它当成「`relativeTime` 加参数」**：两处的档位宽度不同是刻意的。
+ * 设备的心跳按秒上报，「12 秒前」是有信息量的；而 commit 的时间戳按分钟看
+ * 才有意义，一条 30 秒前的提交说「刚刚」比说「30 秒前」更贴近用户感受。
+ * 所以同一个时刻在两个面板上可能显示成不同说法（「29 秒前」vs「刚刚」），
+ * 那不是 bug。
+ *
+ * **解析失败原样回显**，不写「刚刚」（与 `relativeTime` 回「—」不同）：这里的
+ * 输入是 git 的 `%aI`，解析不动说明设备给了个怪值——把怪值原样显示出来，
+ * 用户与日志对得上；编成「刚刚」会让人以为提交真的刚发生。
+ *
+ * 与 `relativeTime` 分成两个函数而不是加参数：调用方的**失败口径**不同
+ * （「—」是「未上报」，「原样」是「读不懂」），塞进同一个签名就要在里面判。
+ */
+export function relativeTimeLong(stamp: string, now = Date.now()): string {
+  // 主路径是 ISO-8601（git 的 `%aI`）。`unix:` 回落**不是**给生产调用方的：
+  // 本函数唯一的调用方是 `GitLog.vue` 的 `relative(c.when)`，入参一定是 `%aI`。
+  // 留这条回落是为了单测能直接喂 `unix:` 样本、以及万一将来换了时间来源。
+  // 换句话说：这里「能读 `unix:`」是兜底能力，不代表两种格式会混着来。
+  const iso = Date.parse(stamp)
+  const epoch = Number.isNaN(iso) ? parseStamp(stamp) : Math.floor(iso / 1000)
+  if (epoch === null) return stamp
+  // **不要 `Math.max(0, …)`**：未来时间要能被下面那行 `diff < 0` 认出来并原样
+  // 回显——先夹到 0 的话就变成了「刚刚」，把时钟不同步说成「刚提交」。
+  const diff = Math.floor(now / 1000) - epoch
+  // 未来时间（时钟不同步）也原样回显：算出「-3 分钟前」比不显示更坏。
+  if (diff < 0) return stamp
+  // 60 秒：见函数头「第一档就是 60 秒」，与 `relativeTime` 的 5 秒不同。
+  if (diff < 60) return '刚刚'
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`
+  if (diff < 86400 * 30) return `${Math.floor(diff / 86400)} 天前`
+  if (diff < 86400 * 365) return `${Math.floor(diff / (86400 * 30))} 个月前`
+  return `${Math.floor(diff / (86400 * 365))} 年前`
+}
+
+/**
  * 会话在 tab 条 / 列表里的标题。
  *
  * 后端 `SessionSummary` **没有 title 字段**（`session` 表里也没有）：

@@ -30,13 +30,18 @@ pub mod names {
     pub const EXEC: &str = "exec";
     pub const GIT: &str = "git";
 
-    /// 全部内置 connector 名，**唯一的历史枚举点**。
+    /// 全部内置 connector 名。
     ///
     /// 它存在的理由只有一条，而且是测试给的：写死名字数组的测试抓不到
-    /// 「加了 connector 却忘了接线」——加了 `git` 之后，一条遍历
+    /// 「加了 connector 却忘了接线」——加了 `git` 之后，一条只列
     /// `[TERMINAL, FILES, EXEC]` 的用例照样全绿，因为它压根没看新名字
     /// （v0.4.0 实测撞上过）。有了这个切片，覆盖所有内置名字的用例
-    /// 就只需要遍历它，新名字自动进入断言。
+    /// 就能遍历它，新名字自动进入断言。
+    ///
+    /// **但它不是「唯一枚举点」**：`the_registered_set_is_exactly_the_four_…`
+    /// 仍手写 `vec![EXEC, FILES, GIT, TERMINAL]`，因为它要断的正是「注册表
+    /// 恰好是这四个」——拿 `ALL` 去比就变成 `ALL == ALL`，恒真。那一条用
+    /// 手写名单是刻意的，不是漏改。
     ///
     /// **它不参与生产逻辑**：`registered()` 与 `create` 各自显式列名字，
     /// 因为那两处是「这台设备到底提供什么」的真相源，不该被一个数组
@@ -162,17 +167,20 @@ impl ConnectorError {
 
     /// 该回哪个 `channel_error.code`（§4 的 code 清单只有一份）。
     ///
-    /// 「越界」映射到 `internal` 而不是 `unsupported`：`unsupported` 是
-    /// 「这台设备根本没有这个 connector / 通道用不了」，而越界是**通道能用、
-    /// 这次请求被策略拒绝**——混成同一档会让人以为终端不支持。
+    /// **当前全部落到 `internal`，这是已知的表达力缺口，不是疏忽**。协议侧的
+    /// `ChannelErrorCode` 是**封闭集合**（6 个值），其中没有任何一个能表达
+    /// 「通道能用、但这次请求被策略拒绝」或「参数不认识」：最接近的
+    /// `unsupported` 语义是「这台设备根本没有这个 connector / 这条通道用不了」，
+    /// 拿它回越界会让人以为终端不支持。v0.4.0 不动协议，所以这里**有意**把
+    /// `OutsideWorkspace` / `WorkspaceRoot` / `Invalid` 一并折进 `internal`——
+    /// 具体理由走 `detail`（错误文本），页面拿不到 reason 这一点是既定的。
+    ///
+    /// 直接回 `Internal`，不写 `match`：`ChannelErrorCode` 是封闭集合（6 个值），
+    /// 没有任何一档能表达下面这三类，逐分支列出只会让人以为「每档单独判断过」，
+    /// 而实际是「协议没有可用的档位」。将来协议加码时这里**不会**报错（本来就没有
+    /// 需要穷举的东西），所以注释点名了三个被折叠的类型，改协议时按名字回头找。
     pub fn code(&self) -> protocol::channel::ChannelErrorCode {
-        use protocol::channel::ChannelErrorCode;
-        match self {
-            Self::OutsideWorkspace { .. } | Self::WorkspaceRoot { .. } | Self::Invalid { .. } => {
-                ChannelErrorCode::Internal
-            }
-            Self::Failed { .. } | Self::Internal { .. } => ChannelErrorCode::Internal,
-        }
+        protocol::channel::ChannelErrorCode::Internal
     }
 }
 

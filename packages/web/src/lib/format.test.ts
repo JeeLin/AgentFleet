@@ -7,6 +7,7 @@ import {
   parseStamp,
   percent,
   relativeTime,
+  relativeTimeLong,
   sessionTitle,
   workspaceName,
 } from './format'
@@ -55,6 +56,33 @@ describe('relativeTime', () => {
   it('服务端时钟略快时不出现负时间', () => {
     // 同一台机器上 Hub 与浏览器可能差几秒，负数会读成「-3 秒前」
     expect(relativeTime('unix:1700000060', NOW)).toBe('刚刚')
+  })
+})
+
+describe('relativeTimeLong', () => {
+  // 输入是 git 的 `%aI`（ISO-8601），不是 `unix:` 前缀。
+  const at = (secsAgo: number): string =>
+    new Date(NOW - secsAgo * 1000).toISOString()
+
+  it('六个档位各自给出对应措辞', () => {
+    // 每个档位取一个中段值，避免压边界：边界另有一条。
+    expect(relativeTimeLong(at(10), NOW)).toBe('刚刚')
+    expect(relativeTimeLong(at(5 * 60), NOW)).toBe('5 分钟前')
+    expect(relativeTimeLong(at(2 * 3600), NOW)).toBe('2 小时前')
+    expect(relativeTimeLong(at(3 * 86400), NOW)).toBe('3 天前')
+    expect(relativeTimeLong(at(3 * 86400 * 30), NOW)).toBe('3 个月前')
+    expect(relativeTimeLong(at(2 * 86400 * 365), NOW)).toBe('2 年前')
+  })
+
+  it('解析不动就原样回显，不写「刚刚」', () => {
+    // 与 `relativeTime` 的「—」不同：这里的调用方（git 提交列表）宁可显示
+    // 原始串，也不要编一个「刚刚」让人以为提交刚发生。
+    expect(relativeTimeLong('not-a-date', NOW)).toBe('not-a-date')
+    expect(relativeTimeLong('', NOW)).toBe('')
+  })
+
+  it('未来时间原样回显，不算出负的「分钟前」', () => {
+    expect(relativeTimeLong(at(-120), NOW)).toBe(at(-120))
   })
 })
 

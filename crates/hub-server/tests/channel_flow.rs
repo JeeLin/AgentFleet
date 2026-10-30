@@ -162,13 +162,28 @@ impl Page {
 ///
 /// 判据用「心跳已落库」而不是固定 sleep：`on_heartbeat` 先写内存再落库，
 /// 所以查得到非空 `last_seen_at` 时内存那份也写完了。
+///
+/// **`last_seen_at` 只由心跳写**（`DeviceRepo::touch_online`），enroll 不写它，
+/// 所以「非空」确实证明这一帧已被处理，不会因为上一次心跳而提前成立。
 async fn report_connectors(hub: &Hub, est: &mut node_core::conn::Established) {
+    report_capabilities(hub, est, &["terminal", "files", "git"]).await
+}
+
+/// 上报**指定的** connector 集合，并等 Hub 记下。
+///
+/// 与 [`report_connectors`] 共用一个实现：两处各抄一份载荷时，改字段
+/// （比如加一个新的必填项）只改一处，另一处会静默地少上报。
+async fn report_capabilities(
+    hub: &Hub,
+    est: &mut node_core::conn::Established,
+    connectors: &[&str],
+) {
     est.send(&Frame::push(
         types::HEARTBEAT,
         0,
         json!({
             "node_version": "0.1.0",
-            "capabilities": {"connectors": ["terminal", "files", "git"], "agents": [test_agent_report()]},
+            "capabilities": {"connectors": connectors, "agents": [test_agent_report()]},
             "resources": null,
             "workspace_roots": [],
         }),
@@ -1113,22 +1128,7 @@ async fn opening_git_without_the_capability_is_refused() {
     let hub = Hub::boot().await;
     let (mut est, node_id, _kp) = connect_enrolled(&hub).await;
     // 只上报 terminal：**明确不含 git**。
-    est.send(&Frame::push(
-        types::HEARTBEAT,
-        0,
-        json!({
-            "node_version": "0.1.0",
-            "capabilities": {"connectors": ["terminal"], "agents": [test_agent_report()]},
-            "resources": null,
-            "workspace_roots": [],
-        }),
-    ))
-    .await
-    .expect("heartbeat must send");
-    common::wait_until(Duration::from_secs(2), || {
-        common::device_row(&hub, &node_id, "last_seen_at").is_some_and(|v| !v.is_empty())
-    })
-    .await;
+    report_capabilities(&hub, &mut est, &["terminal"]).await;
 
     let page = Page::new(hub).await;
     let session_id = page.make_session(&node_id).await;

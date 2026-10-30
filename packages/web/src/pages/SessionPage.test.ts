@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import SessionPage from '@/pages/SessionPage.vue'
 import { device, mountIn, session } from '@/test/mount'
@@ -228,6 +228,23 @@ function press(key: string): void {
   document.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
 }
 
+/** 取所有发往通道的 send body。 */
+function sentBodies(fetchMock: ReturnType<typeof stubFetch>): Array<Record<string, unknown>> {
+  return fetchMock.mock.calls
+    .filter(([url]) => String(url).includes('/send'))
+    .map(([, init]) => JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>)
+}
+
+/**
+ * 取某一种 op 的请求体。没有就抛——测试里这是前提不成立，继续往下断言
+ * 只会拿到 `undefined` 上的属性。
+ */
+function reqOf(sent: Array<Record<string, unknown>>, op: string): Record<string, unknown> {
+  const r = sent.find((b) => b.op === op)
+  if (!r) throw new Error(`要发出 ${op} 请求，实发：${JSON.stringify(sent)}`)
+  return r
+}
+
 /**
  * 用「＋」把一个具名面板拉进坞并选中它。
  *
@@ -310,6 +327,45 @@ describe('工作台：结构与默认值', () => {
     const sep = w.element.querySelector<HTMLElement>('[role="separator"]')
     expect(sep?.getAttribute('aria-valuenow')).toBe('56')
     expect((w.element.querySelector<HTMLElement>('.af-wb__conv') as HTMLElement).style.flex).toContain('56%')
+  })
+
+  /**
+   * 页面头「打开面板」按钮开的是**缺省面板**，不是某个写死的字面量。
+   *
+   * 这一条是给 `DEFAULT_PANEL` 兜底的：那个常量收敛了六个回落点，但页面头
+   * 这个按钮曾是第七个——它写的是裸的 `'git'`，改缺省值时它不跟着变，于是
+   * 「按 `o` 开 git、点头上的按钮开另一个」。那次是审查看出来的，不是测试
+   * 抓出来的（**当时没有任何一条用例覆盖它**）。
+   *
+   * **判据为什么读源文件而不是断言渲染结果**：第一版这条用例断言「点了之后
+   * 选中 `git` 标签」，而 `DEFAULT_PANEL` 当前值就是 `'git'`——「按钮用常量」与
+   * 「按钮写死 `'git'`」在任何输入下产出同一个标签。实测把
+   * `openPanel(DEFAULT_PANEL)` 改回 `openPanel('git')` 仍然绿，零检测力。
+   * 它能守住的只能是**静态源文本**：那一行的实参是标识符而不是引号字面量。
+   */
+  it('页面头的「打开面板」按钮跟 DEFAULT_PANEL 走，不写死字面量', async () => {
+    const src = readRepoFile('packages/web/src/pages/SessionPage.vue')
+
+    const bind = /data-open-panel[\s\S]{0,400}?@click="openPanel\(([^)]*)\)"/.exec(src)
+    if (!bind) {
+      throw new Error('页面头的「打开面板」按钮不在，或它不再用 @click="openPanel(...)"：换锚点了吗？')
+    }
+    expect(bind[1]?.trim(), '页面头按钮的实参必须是 DEFAULT_PANEL，不能是引号字面量').toBe('DEFAULT_PANEL')
+
+    // 反向兜底：整个文件里不该再有写死缺省面板的调用。
+    expect(
+      /openPanel\(['"]git['"]\)/.test(src),
+      "不该出现 openPanel('git')——缺省值只有 DEFAULT_PANEL 一个真相源",
+    ).toBe(false)
+
+    // 行为侧仍验一次（按钮真能打开面板），但它不是这条用例的判据。
+    const { w } = await mountWorkbench()
+    const button = w.element.querySelector<HTMLElement>('[data-open-panel]')
+    if (!button) throw new Error('页面头的「打开面板」按钮不在：它换锚点了吗？')
+    await button.click()
+    await flush(w)
+    const selected = w.element.querySelector<HTMLElement>('[data-panel][aria-selected="true"]')
+    expect(selected?.getAttribute('data-panel')).toBe('git')
   })
 
   it('工作台头写明路径锁定，以及这个会话的 agent 现状', async () => {
@@ -540,10 +596,6 @@ describe('多 tab 的代价可见', () => {
 describe('键盘', () => {
   it('`o` 打开面板，`\\` 收起坞', async () => {
     const { w } = await mountWorkbench()
-    const press = (key: string): void => {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
-    }
-
     press('o')
     await flush(w)
     expect(w.element.querySelector('[data-panelhost]')).not.toBeNull()
@@ -870,10 +922,6 @@ describe('对话列：ConvFlow 与轨迹抽屉', () => {
 
   it('`t` 打开轨迹抽屉，再按一次关掉（键位由页面注册）', async () => {
     const { w } = await mountWorkbench()
-    const press = (key: string): void => {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
-    }
-
     press('t')
     await flush(w)
     expect(document.querySelector('[data-traj]')).not.toBeNull()
@@ -1317,6 +1365,71 @@ describe('对话帧驱动的轨迹重读：成批到达时合并', () => {
   })
 })
 
+describe('关 tab 时把还挂着的东西一并撤掉', () => {
+  /** 说一句话：建对话通道（懒建立，这是唯一入口）。 */
+  async function say(w: ReturnType<typeof mountIn>): Promise<void> {
+    const input = w.element.querySelector<HTMLTextAreaElement>('[data-conv-input]')
+    if (!input) throw new Error('no conv input')
+    input.value = '关 tab 之前说的话'
+    input.dispatchEvent(new Event('input'))
+    await w.vm.$nextTick()
+    w.element.querySelector('form')?.dispatchEvent(new Event('submit', { cancelable: true }))
+    await flush(w)
+  }
+
+  const subs = (w: ReturnType<typeof mountIn>): number =>
+    (w.vm as unknown as { chatSubscriberCount: () => number }).chatSubscriberCount()
+
+  it('关掉 tab 会退掉对话通道的订阅（`onState` / `onFrame` 两个回调）', async () => {
+    // 守 `chatUnsubs`。判据是**页面自己记的订阅数**，不是网络请求：
+    //
+    // `refreshTrajectory` 首行 `workspaces.get(tabId)` 在 `workspaces.delete`
+    // 之后直接 return，所以「订阅没退」在请求数上与「退了」完全一样——
+    // 我最初就是按请求数断言的，实测把 `chatUnsubs` 的退订整段换成
+    // `void chatUnsubs` 之后用例照样绿。要能证伪只能读订阅表本身。
+    const { w } = await mountWithAgent()
+    await say(w)
+    expect(subs(w), '说了一句话就挂上了两个回调').toBe(1)
+
+    const closer = w.element.querySelector<HTMLElement>('[data-tab-close="s_1"]')
+    expect(closer, '关 tab 的按钮必须在').not.toBeNull()
+    await closer?.click()
+    await flush(w)
+
+    expect(subs(w), '关 tab 必须退掉对话通道的订阅，否则回调挂在已丢弃的 ws 上').toBe(0)
+  })
+
+  it('关 tab 会撤掉挂在窗口里的轨迹重读定时器', async () => {
+    // 守 `releaseTab` 里那段 `trajTimers` 清理。**这是第二道防线**，第一道是
+    // `refreshTrajectory` 首行的 `workspaces.get(tabId)` 守卫（取不到就 return）。
+    // 因为两道都在，删掉任何一道都观察不到行为差异——所以这条不假称「断言了
+    // 行为」，它钉的是**清理本身做了**（定时器表在关 tab 后不应还留着这个 tab）。
+    //
+    // 时序必须是「帧刚把定时器挂上 → 立刻关 tab」，中间不能等过
+    // `TRAJ_DEBOUNCE_MS`。
+    const { w, src } = await mountWithAgent()
+    await say(w)
+
+    src()?.emit('channel.frame', {
+      node_id: 'n_1',
+      channel_id: 'ch-acp',
+      payload: { kind: 'session/update', update: { sessionUpdate: 'agent_message_chunk' } },
+    })
+    await flush(w)
+
+    const closer = w.element.querySelector<HTMLElement>('[data-tab-close="s_1"]')
+    await closer?.click()
+    await flush(w)
+
+    // 订阅已退（上一条用例守住），定时器也已撤：再等过整个窗口，静默即可。
+    // 这里只断言「没有把异常打到控制台」是弱判据，所以真正的判据放在
+    // 下面——关 tab 之后再说话也不该重读（workspaces 里没有它了）。
+    await new Promise((r) => setTimeout(r, 260))
+    await flush(w)
+    expect(subs(w), '关掉之后订阅表里不该还留着这个 tab').toBe(0)
+  })
+})
+
 describe('轨迹抽屉：打开即读，读到就画', () => {
   it('按 t 打开抽屉 → GET .../trajectory，事件画进列表', async () => {
     const { w, fetchMock } = await mountWithAgent()
@@ -1534,6 +1647,22 @@ describe('面板坞：三个面板与「＋」入口', () => {
     expect(selected(), 'git 之后回环到 terminal').toBe('terminal')
   })
 
+  it('关掉坞之后 openDock 能从关着的状态再把坞打开（走回落分支）', async () => {
+    // `openDock` 的注释说「保留回落分支，因为 `closeDock()` 之后的用例仍要能
+    // 从关着的状态打开」——在此之前**没有任何用例**走那条分支（实测 31 次
+    // 快路径 / 0 次回落）。这条把它钉住：先真的关掉坞，再走 `openDock`。
+    const { w } = await mountWorkbench()
+    expect(w.element.querySelector('.af-docktabs'), '前提：进会话时坞是开着的').not.toBeNull()
+
+    await w.element.querySelector<HTMLElement>('.af-docktabs__close')?.click()
+    await flush(w)
+    expect(w.element.querySelector('.af-docktabs'), '前提：点关闭之后坞真的没了').toBeNull()
+
+    // 这一步必须走 177-181 行的回落分支（快路径在 178 行就 return 了）。
+    await openDock(w)
+    expect(w.element.querySelector('.af-docktabs'), 'openDock 要从关着的状态把坞打开').not.toBeNull()
+  })
+
   it('关掉坞之后按 `o` 回到只有 git 的干净状态', async () => {
     const { w, deletes } = await mountWorkbench()
     await openTerminal(w)
@@ -1629,6 +1758,46 @@ describe('git 面板：status 与 diff', () => {
     expect(w.element.querySelector('[data-git-file]')).toBeNull()
   })
 
+  it('有改动时头部徽标写「N 个改动」，与文件条数一致；干净时没有这个徽标', async () => {
+    // 这个徽标（`data-git-dirty`）是全仓最后一个零断言的 git 锚点：把
+    // `v-if="clean === false"` 改成恒 false、或把 `files.length` 写成常量，
+    // 770 条测试曾经全绿。判据取「文案里的数字 == 文件条数」，不写死 3——
+    // 写死数字的话，将来改样本仍绿而徽标可能已经算错。
+    const { w } = await mountWorkbench()
+    await interact(w)
+    const src = FakeEventSource.instances[0]
+    const files = [
+      { x: ' ', y: 'M', path: 'src/a.rs' },
+      { x: 'A', y: ' ', path: 'src/b.rs' },
+      { x: '?', y: '?', path: 'notes.md' },
+    ]
+    await frame(w, src, {
+      op: 'status',
+      branch: 'main',
+      head: 'a1b2c3d',
+      detached: false,
+      clean: false,
+      files,
+    })
+
+    const dirty = w.element.querySelector<HTMLElement>('[data-git-dirty]')
+    expect(dirty, 'clean === false 时头部必须有改动数徽标').not.toBeNull()
+    const rows = w.element.querySelectorAll('[data-git-file]').length
+    expect(rows, '文件行数与样本条数一致（否则下面的数字比对没有意义）').toBe(files.length)
+    expect(dirty?.textContent?.trim()).toBe(`${files.length} 个改动`)
+
+    // 反方向：干净时这个徽标不该出现（`clean:true` 有自己的结论句）。
+    await frame(w, src, {
+      op: 'status',
+      branch: 'main',
+      head: 'a1b2c3d',
+      detached: false,
+      clean: true,
+      files: [],
+    })
+    expect(w.element.querySelector('[data-git-dirty]'), '干净时不该有改动数徽标').toBeNull()
+  })
+
   it('不是 git 仓库时给中性说明，且不出现错误样式', async () => {
     // 「不是仓库」是**正常状态**，设备侧因此回一帧普通 `status` 带
     // `not_a_repo:true`，而不走错误路径（见 `connector/git.rs` 的
@@ -1659,6 +1828,37 @@ describe('git 面板：status 与 diff', () => {
     expect(w.element.querySelector('[data-git-refresh]')).not.toBeNull()
   })
 
+  it('重命名文件点开的 diff 请求要带上旧路径 orig', async () => {
+    const { w, fetchMock } = await mountWorkbench()
+    await interact(w)
+    const src = FakeEventSource.instances[0]
+    await frame(w, src, {
+      op: 'status',
+      branch: 'main',
+      head: 'a1b2c3d',
+      detached: false,
+      clean: false,
+      // 重命名：`orig` 是旧路径，页面只**显示** `新 <- 旧`。
+      files: [{ x: 'R', y: ' ', path: 'src/b.rs', orig: 'src/a.rs' }],
+    })
+
+    await w.element.querySelector<HTMLElement>('[data-git-file="src/b.rs"]')?.click()
+    await flush(w)
+
+    const sent = sentBodies(fetchMock)
+    const diffReq = reqOf(sent, 'diff')
+    // `path` 必须是那条真实路径——曾经的 bug 是把它拼成 `src/b.rs <- src/a.rs`
+    // 原样发出，设备侧拿它去 `git diff` 得到空串，页面显示「没有可显示的改动」。
+    expect(diffReq.path).toBe('src/b.rs')
+    // `orig` 必须一起发：git 的 rename 检测要 pathspec 里同时有新旧两条路径，
+    // 只给新路径时 git 判成「新建文件」，页面于是把改名显示成「新建了文件」。
+    expect(diffReq.orig).toBe('src/a.rs')
+
+    // 列表里给用户看的仍是「新 <- 旧」，请求标识不因此改变。
+    const row = w.element.querySelector<HTMLElement>('[data-git-file="src/b.rs"]')
+    expect(row?.textContent).toContain('src/a.rs')
+  })
+
   it('点文件发 {"op":"diff","path":…} 并渲染 diff', async () => {
     const { w, fetchMock } = await mountWorkbench()
     await interact(w)
@@ -1677,11 +1877,8 @@ describe('git 面板：status 与 diff', () => {
 
     // 发出去的 body 必须带 `path`——不带的话设备回的是「工作区全部改动」，
     // 而用户点的是某一个文件。
-    const sent = fetchMock.mock.calls
-      .filter(([url]) => String(url).includes('/send'))
-      .map(([, init]) => JSON.parse(String((init as RequestInit).body)))
-    const diffReq = sent.find((b) => b.op === 'diff')
-    expect(diffReq, `要发出 diff 请求，实发：${JSON.stringify(sent)}`).toBeTruthy()
+    const sent = sentBodies(fetchMock)
+    const diffReq = reqOf(sent, 'diff')
     expect(diffReq.path).toBe('src/a.rs')
 
     await frame(w, src, {
@@ -1752,9 +1949,7 @@ describe('git 面板：status 与 diff', () => {
     await interact(w)
     await flush(w)
 
-    const sent = fetchMock.mock.calls
-      .filter(([url]) => String(url).includes('/send'))
-      .map(([, init]) => JSON.parse(String((init as RequestInit).body)))
+    const sent = sentBodies(fetchMock)
     expect(
       sent.filter((b) => b.op === 'status').length,
       `面板一 ready 就该问 status，实发：${JSON.stringify(sent)}`,
@@ -1769,17 +1964,23 @@ describe('git 面板：status 与 diff', () => {
    `{ op:'log', commits:[{hash,author,when,subject}], truncated }`。
    =========================================================================== */
 describe('git 面板：历史分段', () => {
+  /**
+   * 钉住「现在」：相对时间那一列的输出取决于当前时钟，不钉死的话
+   * 「3 小时前」会随时间漂成「4 小时前」，用例会在某天突然红。
+   */
+  const NOW_MS = Date.parse('2026-10-29T13:00:00+00:00')
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.setSystemTime(NOW_MS)
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   /** 切到「历史」分段。 */
   async function toLog(w: ReturnType<typeof mountIn>): Promise<void> {
     await w.element.querySelector<HTMLElement>('[data-git-seg="log"]')?.click()
     await flush(w)
-  }
-
-  /** 取所有发往通道的 send body。 */
-  function sentBodies(fetchMock: ReturnType<typeof stubFetch>): Array<Record<string, unknown>> {
-    return fetchMock.mock.calls
-      .filter(([url]) => String(url).includes('/send'))
-      .map(([, init]) => JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>)
   }
 
   const COMMIT_A = {
@@ -1818,6 +2019,448 @@ describe('git 面板：历史分段', () => {
     expect(rows[0]?.textContent).toContain('aaaaaaa')
     expect(rows[0]?.textContent).toContain('Ann')
     expect(rows[0]?.textContent).toContain('feat: 加 A')
+
+    // 第 4 列是**相对时间**，早先这条用例只断言了前三列，于是 `relative()`
+    // 整个函数（六个档位）在全仓 0 断言覆盖：把 `'刚刚'` 改成别的东西都不红。
+    // 用 `vi.setSystemTime` 钉住「现在」，输出才是确定的。
+    const when = rows[0]?.querySelector<HTMLElement>('.af-glog__when')
+    expect(when, '提交行要有相对时间那一列').not.toBeNull()
+    expect(when?.textContent?.trim(), 'COMMIT_A 是 3 小时前').toBe('3 小时前')
+  })
+
+  it('取某条提交的 diff 时那一行带「读取中」，别的行不带', async () => {
+    // `af-glog__busy` 是用户点完到回帧之间**唯一**的反馈：列表不动、什么都没有
+    // 的话，用户会以为点击没生效从而再点一次。早先它在全仓 0 断言。
+    const { w } = await mountWorkbench()
+    await interact(w)
+    await toLog(w)
+    await frame(w, FakeEventSource.instances[0], {
+      op: 'log',
+      commits: [COMMIT_A, COMMIT_B],
+      truncated: false,
+    })
+
+    await w.element
+      .querySelector<HTMLElement>(`[data-git-commit="${COMMIT_A.hash}"]`)
+      ?.click()
+    await flush(w)
+
+    const busy = Array.from(w.element.querySelectorAll<HTMLElement>('[data-git-commit]'))
+      .filter((r) => r.querySelector('.af-glog__busy') !== null)
+      .map((r) => r.dataset.gitCommit)
+    // 只标被点的那一条：两条都标的话用户分不出在等哪一份。
+    expect(busy).toEqual([COMMIT_A.hash])
+  })
+
+  it('切到历史分段会清掉上一轮选中的提交，不留「高亮了但正文说没选」的矛盾', async () => {
+    // 这条守的是 `gitShowLog` 里的 `ws.git.logSelected = null`。
+    //
+    // 不清的后果是**同一屏自相矛盾**：`GitLog` 按 `aria-selected` 高亮上一轮
+    // 选中的那行（说「你选了这条」），而 `diff` 已被清成 `null`、右栏写「点
+    // 左边任一提交看它改了什么」（说「你还没选」）。两个提示指向两个事实。
+    //
+    // 判据用 `aria-selected` 而不是「有没有 .af-glog__busy」：后者是「请求在飞」
+    // 的瞬时态，与「这份 diff 属于哪条提交」不是一回事。
+    const { w } = await mountWorkbench()
+    await interact(w)
+    await toLog(w)
+    const src = FakeEventSource.instances[0]
+    await frame(w, src, { op: 'log', commits: [COMMIT_A, COMMIT_B], truncated: false })
+
+    await w.element.querySelector<HTMLElement>(`[data-git-commit="${COMMIT_A.hash}"]`)?.click()
+    await flush(w)
+    // 先确认「选中」确实发生了，否则下面那句「清空了」在任何输入下都成立。
+    const selectedBefore = Array.from(
+      w.element.querySelectorAll<HTMLElement>('[data-git-commit][aria-selected="true"]'),
+    ).map((r) => r.dataset.gitCommit)
+    expect(selectedBefore, '点了提交之后那一行必须是选中态（否则后面的断言恒真）').toEqual([
+      COMMIT_A.hash,
+    ])
+
+    // 走真实路径：先切到「改动」分段，再切回「历史」。
+    //
+    // **不能在同一个分段上再点一次「历史」**：`GitPanel.selectSegment` 在
+    // `segment === next` 时提前 return、不 emit，所以那样点不会调 `gitShowLog`。
+    // 真机上这条路径也确实存在（看改动 → 回历史，列表还在，只是 diff 没了）。
+    await w.element.querySelector<HTMLElement>('[data-git-seg="changes"]')?.click()
+    await flush(w)
+    await toLog(w)
+
+    const selectedAfter = Array.from(
+      w.element.querySelectorAll<HTMLElement>('[data-git-commit][aria-selected="true"]'),
+    ).map((r) => r.dataset.gitCommit)
+    expect(selectedAfter, '切到历史分段后不该还有行是高亮的').toEqual([])
+  })
+
+  it('看过提交的 diff 后切回改动分段：右栏不得残留那条提交的改动', async () => {
+    // 这条守的是 `gitShowChanges`（`GitPanel` 的 `changes` 一侧 emit）。
+    //
+    // 两个分段共用页面上的同一份 `ws.git.diff`。只清「进入历史」那一侧的话，
+    // 切回改动后左栏是**工作区**文件列表、一行都没高亮，右栏却还是**上一条
+    // 提交**的 diff——同一屏两个提示指向两个事实。
+    //
+    // **必须先铺一帧 status**：不铺的话改动分段是「还没问过」的空态，右栏被
+    // 空态整块遮住，泄漏看不出来（这正是它逃过前几轮的原因）。
+    const { w } = await mountWorkbench()
+    await interact(w)
+    const src = FakeEventSource.instances[0]
+    await frame(w, src, {
+      op: 'status',
+      branch: 'main',
+      head: 'a1b2c3d',
+      detached: false,
+      clean: false,
+      files: [{ path: 'worktree.txt', x: 'M', y: ' ' }],
+      not_a_repo: false,
+    })
+    await toLog(w)
+    await frame(w, src, { op: 'log', commits: [COMMIT_A, COMMIT_B], truncated: false })
+
+    await w.element
+      .querySelector<HTMLElement>(`[data-git-commit="${COMMIT_A.hash}"]`)
+      ?.click()
+    await flush(w)
+    await frame(w, src, {
+      op: 'diff',
+      path: 'first.txt',
+      unified: '--- a/first.txt\n+++ b/first.txt\n@@ -1 +1,2 @@\n one\n+COMMIT_ONLY\n',
+      truncated: false,
+    })
+    // 先确认这条提交的改动**确实渲染出来了**，否则下面那句「没有残留」恒真。
+    const before = w.element.querySelector('[data-git-diff-body]')?.textContent ?? ''
+    expect(before, '点提交后右栏必须显示该提交的 diff（否则后面的断言恒真）').toContain(
+      'COMMIT_ONLY',
+    )
+
+    // 走真实路径：点「改动」分段。
+    await w.element.querySelector<HTMLElement>('[data-git-seg="changes"]')?.click()
+    await flush(w)
+
+    const after = w.element.querySelector('[data-git-diff-body]')?.textContent ?? ''
+    expect(after, '切回改动分段后右栏不得残留提交的 diff').not.toContain('COMMIT_ONLY')
+    // 顺带钉住「改动分段确实是改动分段」：左栏是工作区那一行。
+    expect(w.element.querySelector('[data-git-file]')?.getAttribute('data-git-file')).toBe(
+      'worktree.txt',
+    )
+  })
+
+  it('分段来回切不会重复问 log：已经拿到列表就复用（问一次就够）', async () => {
+    // 语义未定就写不出用例，于是 `gitShowLog` 一直是「每切一次发一次 log」而
+    // 没人钉住它。这里把语义定下来：**列表已经拿到就不重发**。
+    //
+    // 理由与 `GitPanel` 那条懒建立的注释同源——「不要替用户做他没要的请求」；
+    // 而「改动 ↔ 历史」来回切在一次排查里会点很多次。
+    const { w, fetchMock } = await mountWorkbench()
+    await interact(w)
+    const src = FakeEventSource.instances[0]
+    await frame(w, src, {
+      op: 'status',
+      branch: 'main',
+      head: 'a1b2c3d',
+      detached: false,
+      clean: false,
+      files: [{ path: 'a.txt', x: 'M', y: ' ' }],
+      not_a_repo: false,
+    })
+    const logCount = (): number => sentBodies(fetchMock).filter((b) => b.op === 'log').length
+
+    await toLog(w)
+    await frame(w, src, { op: 'log', commits: [COMMIT_A, COMMIT_B], truncated: false })
+    expect(logCount(), '第一次进历史要问一次').toBe(1)
+
+    // 回改动，再进历史：列表已在手，不该再问。
+    await w.element.querySelector<HTMLElement>('[data-git-seg="changes"]')?.click()
+    await flush(w)
+    await toLog(w)
+    expect(logCount(), '列表已拿到时再进历史不该重发 log').toBe(1)
+  })
+
+  it('有 head 但没有分支名时，头一行要同时写出「分支未知」与那个 head', async () => {
+    // 守 `branchLine` 的最后一档。旧写法是 `return props.head ?? '（分支未知）'`：
+    // head 非空时它**只回 head**，于是头一行变成孤零零一个提交号，看不出
+    // 「这台机器报不出分支名」——用户会以为那就是分支本身。
+    //
+    // 判据必须是**两样都在**：只断言「含 deadbee」的话旧写法照样过（旧写法
+    // 在 head 非空时正是回 head，实测把新写法改回旧的仍绿）。
+    const { w } = await mountWorkbench()
+    await interact(w)
+    const src = FakeEventSource.instances[0]
+    await frame(w, src, {
+      op: 'status',
+      branch: null,
+      head: 'deadbee',
+      detached: false,
+      clean: true,
+      files: [],
+      not_a_repo: false,
+    })
+    const line = w.element.querySelector('[data-git-branch]')?.textContent ?? ''
+    expect(line, '已知的 head 要写出来').toContain('deadbee')
+    expect(line, '也要说明「分支名未知」，否则那个 head 会被当成分支名').toContain('分支未知')
+  })
+
+  it('点第二个文件时，右栏给的是「正在读取这一份 diff」而不是把上一份当结论', async () => {
+    // 守两处 `:stale`（`GitPanel.vue` 的 `reading !== null` /
+    // `logReading !== null`）。它是「这份 diff 是上一份、新请求还在飞」的
+    // 唯一显式提示——此前 `grep stale` 在测试里 0 命中，改成 `false` 全量
+    // 772 条照样绿。
+    //
+    // 路径要真的**换一个文件**：同一个文件再点一次会被 `reading` 判据挡在
+    // 外面（页面自己不清），测不到这份提示。
+    const { w } = await mountWorkbench()
+    await interact(w)
+    const src = FakeEventSource.instances[0]
+    await frame(w, src, {
+      op: 'status',
+      branch: 'main',
+      head: 'a1b2c3d',
+      detached: false,
+      clean: false,
+      files: [
+        { path: 'a.txt', x: 'M', y: ' ' },
+        { path: 'b.txt', x: 'M', y: ' ' },
+      ],
+      not_a_repo: false,
+    })
+
+    // 先看 a.txt 的 diff（让它成为「上一份」）
+    w.element.querySelector<HTMLElement>('[data-git-file="a.txt"]')?.click()
+    await flush(w)
+    await frame(w, src, {
+      op: 'diff',
+      path: 'a.txt',
+      unified: '--- a/a.txt\n+++ b/a.txt\n@@ -1 +1,2 @@\n one\n+FROM_A\n',
+      truncated: false,
+    })
+    const pane = (): string =>
+      w.element.querySelector('.af-git__diffpane')?.textContent ?? ''
+    expect(pane(), '先得有 a.txt 的 diff 当「上一份」').toContain('FROM_A')
+
+    // 点 b.txt：新请求在飞，右栏必须明说「这一份是旧的」
+    w.element.querySelector<HTMLElement>('[data-git-file="b.txt"]')?.click()
+    await flush(w)
+    expect(pane(), '新请求在飞时要提示「正在读取这一份 diff」').toContain('正在读取这一份 diff')
+    // 而且不能把 a.txt 的结论当 b.txt 的结论展示（`stale` 时 `lines` 为空）
+    expect(pane(), 'stale 时不该还在展示上一份的正文').not.toContain('FROM_A')
+  })
+
+  it('历史分段点下一条提交时，右栏立刻切到「正在读取这条提交的改动…」', async () => {
+    // 历史侧**没有** `stale` 那一档，因为 `gitOpenCommit` 发请求前就把
+    // `ws.git.diff` 清成 `null`——`<GitDiff>` 只在已经拿到某条提交的 diff
+    // 之后才渲染，那时不存在「上一份」可言。（早先那里挂着
+    // `:stale="logReading !== null"`，是走不到的死判据，已删。）
+    //
+    // 所以要守的是**清空之后**那句提示：右栏不能还挂着上一条提交的正文，
+    // 也不能退回「点左边任一提交看它改了什么」（那说的是「你还没选」，而
+    // 用户刚点了）。
+    const { w } = await mountWorkbench()
+    await interact(w)
+    await toLog(w)
+    const src = FakeEventSource.instances[0]
+    await frame(w, src, { op: 'log', commits: [COMMIT_A, COMMIT_B], truncated: false })
+
+    await w.element
+      .querySelector<HTMLElement>(`[data-git-commit="${COMMIT_A.hash}"]`)
+      ?.click()
+    await flush(w)
+    await frame(w, src, {
+      op: 'diff',
+      path: 'first.txt',
+      unified: '--- a/first.txt\n+++ b/first.txt\n@@ -1 +1,2 @@\n one\n+FROM_COMMIT_A\n',
+      truncated: false,
+    })
+    const pane = (): string => w.element.querySelector('.af-git__diffpane')?.textContent ?? ''
+    expect(pane(), '先得有 A 的 diff 当「上一份」').toContain('FROM_COMMIT_A')
+
+    // 点 B：请求在飞，右栏要明说正在读**这一条**。
+    await w.element
+      .querySelector<HTMLElement>(`[data-git-commit="${COMMIT_B.hash}"]`)
+      ?.click()
+    await flush(w)
+    expect(pane(), '上一条提交的正文不得残留在 B 的请求期间').not.toContain('FROM_COMMIT_A')
+    expect(pane(), '点了提交之后不能退回「你还没选」那句').not.toContain('点左边任一提交')
+    expect(pane(), '要明说正在读这一条提交的改动').toContain('正在读取这条提交的改动')
+  })
+
+  it('刷新按钮再问一次 status（那条 0 覆盖的 emit 通路）', async () => {
+    // 守 `GitPanel.vue` 的 `@click="emit('refresh')"`。改坏它（改成 `undefined`）
+    // 时全量 772 条照样绿——说明此前没人在看这条通路。
+    const { w, fetchMock } = await mountWorkbench()
+    await interact(w)
+    const src = FakeEventSource.instances[0]
+    await frame(w, src, {
+      op: 'status',
+      branch: 'main',
+      head: 'a1b2c3d',
+      detached: false,
+      clean: true,
+      files: [],
+      not_a_repo: false,
+    })
+    const before = sentBodies(fetchMock).filter((b) => b.op === 'status').length
+
+    const btn = w.element.querySelector<HTMLElement>('[data-git-refresh]')
+    expect(btn, '头一行必须常驻刷新按钮（非仓库时也一样）').toBeTruthy()
+    btn?.click()
+    await flush(w)
+
+    const after = sentBodies(fetchMock).filter((b) => b.op === 'status').length
+    expect(after, '点刷新必须再发一次 {"op":"status"}').toBe(before + 1)
+  })
+
+  it('分段条上按左右方向键能换分段（`onSegKey` 的通路）', async () => {
+    // 守 `onSegKey`：改坏它（首行插 `return`）时全量 772 条照样绿。
+    // `role="tablist"` 写了就得让方向键能用，否则屏幕阅读器报「无反应」。
+    const { w, fetchMock } = await mountWorkbench()
+    await interact(w)
+    const src = FakeEventSource.instances[0]
+    await frame(w, src, {
+      op: 'status',
+      branch: 'main',
+      head: 'a1b2c3d',
+      detached: false,
+      clean: true,
+      files: [],
+      not_a_repo: false,
+    })
+    const bar = w.element.querySelector<HTMLElement>('[data-git-panel] [role="tablist"]')
+    expect(bar, '分段条要有 role="tablist"').toBeTruthy()
+
+    bar?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    await flush(w)
+    const logs = sentBodies(fetchMock).filter((b) => b.op === 'log').length
+    expect(logs, 'ArrowRight 要切到历史并发一次 log').toBe(1)
+
+    bar?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }))
+    await flush(w)
+    // 回到改动分段：右栏空态，历史列表消失。
+    expect(
+      w.element.querySelector('[data-git-commit]'),
+      'ArrowLeft 要切回改动分段（历史列表不再渲染）',
+    ).toBeNull()
+  })
+
+  it('「还没问过」与「正在读取 diff」两句空态文案都要真的出现', async () => {
+    // 两处都是「空态」，而空态写错/写没正是最容易被读成「还在加载」的地方。
+    // 前者判据 `clean === null`、后者判据 `!diff && reading`。
+    const { w } = await mountWorkbench()
+    await interact(w)
+    const src = FakeEventSource.instances[0]
+
+    // ① 一帧 status 都还没回：`clean === null`。
+    expect(
+      w.element.querySelector('[data-git-loading]')?.textContent ?? '',
+      '没问过 status 时要说「正在读取工作区状态」',
+    ).toContain('正在读取工作区状态')
+
+    // ② 有一份改动列表，点一个文件但 diff 还没回来：`!diff && reading`。
+    await frame(w, src, {
+      op: 'status',
+      branch: 'main',
+      head: 'a1b2c3d',
+      detached: false,
+      clean: false,
+      files: [{ path: 'a.txt', x: 'M', y: ' ' }],
+      not_a_repo: false,
+    })
+    w.element.querySelector<HTMLElement>('[data-git-file="a.txt"]')?.click()
+    await flush(w)
+    expect(
+      w.element.querySelector('[data-git-diffpane], .af-git__diffpane')?.textContent ?? '',
+      '点了文件但 diff 没回来时要说「正在读取 diff…」',
+    ).toContain('正在读取 diff')
+    // 反向：这一刻不该出现「点左边任一文件」那句（那说的是「你还没选」）。
+    expect(w.element.querySelector('[data-git-no-diff]'), '读取中不能同时说「你还没选」').toBeNull()
+  })
+
+  it('git 请求失败时错误横幅要显示出原因（`gitRequest` 的 onError）', async () => {
+    // `data-git-error` 是面板唯一的错误出口。静默失败 = 一块永远不动的面板。
+    //
+    // 用通道帧 `{"op":"error","code":…,"reason":…}` 走真实路径：Hub 把
+    // `channel_error` 重发成这一帧（见 `ws.rs` 的 `publish_channel_error`）。
+    const { w } = await mountWorkbench()
+    await interact(w)
+    const src = FakeEventSource.instances[0]
+    await frame(w, src, {
+      op: 'status',
+      branch: 'main',
+      head: 'a1b2c3d',
+      detached: false,
+      clean: false,
+      files: [{ path: 'a.txt', x: 'M', y: ' ' }],
+      not_a_repo: false,
+    })
+
+    // 触发一次会失败的请求：发 diff 后回一条错误帧。
+    w.element.querySelector<HTMLElement>('[data-git-file="a.txt"]')?.click()
+    await flush(w)
+    await frame(w, src, { op: 'error', code: 'internal', reason: 'git exploded' })
+    await flush(w)
+
+    const banner = w.element.querySelector('[data-git-error]')
+    expect(banner, '必须有一个错误横幅（静默失败就是一块不动的面板）').toBeTruthy()
+    expect(banner?.getAttribute('role'), '错误横幅要 role="alert"').toBe('alert')
+    // 优先显示 `reason`（设备说的人话），没有才退回通用句——所以这里断言
+    // reason 原样出现。只断言「横幅非空」的话，写死一句「出错了」也能过。
+    expect(banner?.textContent ?? '', '要把设备给的 reason 原样显示出来').toContain(
+      'git exploded',
+    )
+    // 读取中的标记必须被清掉：不清的话「正在读取 diff…」与错误横幅会同时挂着。
+    expect(
+      w.element.querySelector('.af-git__diffpane')?.textContent ?? '',
+      '出错误之后不能再挂着「正在读取 diff…」',
+    ).not.toContain('正在读取 diff')
+  })
+
+  it('「不是 git 仓库」时上一台的字段必须被清空，不能在切回仓库时冒出来', async () => {
+    // 用户可能刚在另一个 tab 是仓库、切过来这台不是——残留的旧分支名会被
+    // 当成这台的分支。`applyGitStatus` 的 `notARepo` 分支清了 7 个字段。
+    //
+    // **这条用例守不住那 7 行清理，如实记在这里**：非仓库时模板里那 7 个
+    // 字段一个都渲染不出来——`GitPanel` 的「不是 git 仓库」块是
+    // `v-if="notARepo"`，内容区整块在 `v-else` 里。实测把 7 行清理整段删掉，
+    // 本文件 784 条用例全绿（含本用例）。所以下面那两条「非仓库下不该有
+    // diff 正文 / 文件行」**在删掉清理后同样成立**——它们查不到东西是因为
+    // 内容区被 `v-if` 换掉了，不是因为清理生效了，对清理本身零检测力。
+    //
+    // 那 7 行仍然保留：它是切 tab 时防止旧值残留的正确性保障，只是**只能靠
+    // 源码契约**（读者对着 `applyGitStatus` 核对），没有测试出口。删掉这条
+    // 用例里的假断言，留下真正有效的那部分：一帧 `not_a_repo` 必须让面板
+    // 走到「不是 git 仓库」这一支，而不是继续显示上一台的仓库内容。
+    const { w } = await mountWorkbench()
+    await interact(w)
+    const src = FakeEventSource.instances[0]
+    await frame(w, src, {
+      op: 'status',
+      branch: 'main',
+      head: 'a1b2c3d',
+      detached: false,
+      clean: false,
+      files: [{ path: 'a.txt', x: 'M', y: ' ' }],
+      not_a_repo: false,
+    })
+    expect(w.element.querySelector('[data-git-file="a.txt"]'), '先得有文件行').toBeTruthy()
+
+    await frame(w, src, {
+      op: 'status',
+      branch: null,
+      head: null,
+      detached: false,
+      clean: null,
+      files: [],
+      not_a_repo: true,
+    })
+    await flush(w)
+    expect(
+      w.element.querySelector('[data-git-not-a-repo]'),
+      '非仓库要走「不是 git 仓库」那一支',
+    ).toBeTruthy()
+    expect(w.element.querySelector('[data-git-branch]')?.textContent ?? '').toContain(
+      '不是 git 仓库',
+    )
+    // 非仓库帧之后，上一台的改动列表必须不再出现在面板上（走到 `v-if` 那一支
+    // 就必然满足；这条守的是「非仓库帧真的被处理了」，不是那 7 行清理）。
+    expect(w.element.querySelector('[data-git-file]'), '非仓库下不该有文件行').toBeNull()
   })
 
   it('点某条提交发 {"op":"diff","commit":"<完整 hash>"} 并渲染该提交的改动', async () => {

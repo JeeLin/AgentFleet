@@ -54,10 +54,8 @@ done
 
 pass=0
 fail=0
-skip=0
 ok() { echo "  ✅ $1"; pass=$((pass + 1)); }
 bad() { echo "  ❌ $1"; fail=$((fail + 1)); }
-skipped() { echo "  ⏭️  $1"; skip=$((skip + 1)); }
 info() { echo "     $1"; }
 
 # ---------------------------------------------------------------------------
@@ -264,6 +262,30 @@ wait_until() {
   done
 }
 
+# 往某条 git 通道下发一个 op，成功回 0、失败回 1 并把原因写进测试输出。
+#
+# 五个断言都要做同一件事（POST /send + 校验 HTTP 码），各抄一遍时「改 URL
+# 形状只改一处」不会有任何一条断言变红——所以收在这里。通道号是参数：断言 7
+# 用的是第二条通道 `$CH2`。
+#
+# 同时把结果写进 `SEND_OK`（1 = 发出去了，0 = 没发出去）：调用点据此决定要不要
+# 进 `wait_until`。请求压根没出本机时再等 20 秒，只会多报一条「没收到回帧」，
+# 把「没送出去」误诊成「设备没回」。
+send_op() {
+  local ch=$1 body=$2 code
+  SEND_OK=0
+  code=$(curl_auth -o "$BODY" -w '%{http_code}' -X POST \
+    "$BASE/api/channels/$ch/send" --data-binary "$body")
+  if [ "$code" = "200" ] || [ "$code" = "202" ] || [ "$code" = "204" ]; then
+    info "git op 已下发到 $ch：$body（$code）"
+    SEND_OK=1
+    return 0
+  fi
+  bad "下发 git op 到 $ch 回 $code（body=$body）：$(cat "$BODY")"
+  dump "下发 git op：$body"
+  return 1
+}
+
 dump() {
   local what=$1
   echo "     —— 现场（$what）——"
@@ -382,16 +404,10 @@ status_ready() {
 }
 
 if [ -n "$CH" ]; then
-  SEND_CODE=$(curl_auth -o "$BODY" -w '%{http_code}' -X POST \
-    "$BASE/api/channels/$CH/send" --data-binary '{"op":"status"}')
-  if [ "$SEND_CODE" = "200" ] || [ "$SEND_CODE" = "202" ] || [ "$SEND_CODE" = "204" ]; then
-    info "status 请求已下发（$SEND_CODE）"
-  else
-    bad "下发 status 回 $SEND_CODE：$(cat "$BODY")"
-    dump "断言 3 下发"
-  fi
-
-  if wait_until 20 status_ready; then
+  # `send_op` 失败时**不进 `wait_until`**：请求根本没发出去，再等 20 秒只会
+  # 多报一条「20s 内没有回帧」，把「没送出去」伪装成「设备没回」。
+  send_op $CH '{"op":"status"}'
+  if [ "$SEND_OK" -eq 1 ] && wait_until 20 status_ready; then
     ST=$(frames_of "$CH" | jq -c 'select(.op == "status")' | head -1)
     GOT_BRANCH=$(printf '%s' "$ST" | jq -r '.branch // ""')
     GOT_CLEAN=$(printf '%s' "$ST" | jq -r '.clean')
@@ -430,7 +446,7 @@ if [ -n "$CH" ]; then
       bad "untracked.txt 的状态码是 '$UNTRACKED_CODE'（期望 '??'）；实收 files=$GOT_FILES"
     fi
   else
-    bad "20s 内没有收到 status 回帧"
+    bad "没有收到 status 回帧（send_op 成功时是 20s 超时；SEND_OK=0 时是请求没发出去，见上一条 ❌）"
     dump "断言 3"
   fi
 fi
@@ -441,18 +457,11 @@ fi
 echo
 echo "== 4 点文件取 diff（工作区改动）=="
 if [ -n "$CH" ]; then
-  SEND_CODE=$(curl_auth -o "$BODY" -w '%{http_code}' -X POST \
-    "$BASE/api/channels/$CH/send" --data-binary '{"op":"diff","path":"edited.txt"}')
-  if [ "$SEND_CODE" = "200" ] || [ "$SEND_CODE" = "202" ] || [ "$SEND_CODE" = "204" ]; then
-    info "diff 请求已下发（$SEND_CODE）"
-  else
-    bad "下发 diff 回 $SEND_CODE：$(cat "$BODY")"
-  fi
-
+  send_op $CH '{"op":"diff","path":"edited.txt"}'
   file_diff_ready() {
     [ "$(frames_of "$CH" | jq -r 'select(.op == "diff" and .path == "edited.txt") | 1' 2>/dev/null | grep -c .)" -gt 0 ]
   }
-  if wait_until 20 file_diff_ready; then
+  if [ "$SEND_OK" -eq 1 ] && wait_until 20 file_diff_ready; then
     DF=$(frames_of "$CH" | jq -c 'select(.op == "diff" and .path == "edited.txt")' | head -1)
     UNI=$(printf '%s' "$DF" | jq -r '.unified // ""')
     TRUNC=$(printf '%s' "$DF" | jq -r '.truncated')
@@ -476,7 +485,7 @@ if [ -n "$CH" ]; then
       bad "这份小 diff 报 truncated=$TRUNC，但它的体积远小于帧预算"
     fi
   else
-    bad "20s 内没收到 edited.txt 的 diff 回帧"
+    bad "没收到 edited.txt 的 diff 回帧（SEND_OK=0 说明请求没发出去，见上一条 ❌）"
     dump "断言 4"
   fi
 fi
@@ -487,18 +496,11 @@ fi
 echo
 echo "== 5 切历史取 log（limit 生效）=="
 if [ -n "$CH" ]; then
-  SEND_CODE=$(curl_auth -o "$BODY" -w '%{http_code}' -X POST \
-    "$BASE/api/channels/$CH/send" --data-binary '{"op":"log","limit":30}')
-  if [ "$SEND_CODE" = "200" ] || [ "$SEND_CODE" = "202" ] || [ "$SEND_CODE" = "204" ]; then
-    info "log 请求已下发（$SEND_CODE）"
-  else
-    bad "下发 log 回 $SEND_CODE：$(cat "$BODY")"
-  fi
-
+  send_op $CH '{"op":"log","limit":30}'
   log_ready() {
     [ "$(frames_of "$CH" | jq -r 'select(.op == "log") | 1' 2>/dev/null | grep -c .)" -gt 0 ]
   }
-  if wait_until 20 log_ready; then
+  if [ "$SEND_OK" -eq 1 ] && wait_until 20 log_ready; then
     LG=$(frames_of "$CH" | jq -c 'select(.op == "log")' | head -1)
     NCOMMIT=$(printf '%s' "$LG" | jq -r '.commits | length')
     if [ "$NCOMMIT" -ge 2 ] 2>/dev/null; then
@@ -520,7 +522,7 @@ if [ -n "$CH" ]; then
       bad "truncated=$(printf '%s' "$LG" | jq -r '.truncated')，但只有 2 条提交"
     fi
   else
-    bad "20s 内没收到 log 回帧"
+    bad "没收到 log 回帧（SEND_OK=0 说明请求没发出去，见上一条 ❌）"
     dump "断言 5"
   fi
 fi
@@ -537,21 +539,14 @@ fi
 echo
 echo "== 6 点提交取该提交的 diff（commit 档）=="
 if [ -n "$CH" ]; then
-  SEND_CODE=$(curl_auth -o "$BODY" -w '%{http_code}' -X POST \
-    "$BASE/api/channels/$CH/send" --data-binary "{\"op\":\"diff\",\"commit\":\"$HEAD_HASH\"}")
-  if [ "$SEND_CODE" = "200" ] || [ "$SEND_CODE" = "202" ] || [ "$SEND_CODE" = "204" ]; then
-    info "commit diff 请求已下发（$SEND_CODE），目标提交 ${HEAD_HASH:0:7}"
-  else
-    bad "下发 commit diff 回 $SEND_CODE：$(cat "$BODY")"
-  fi
-
+  send_op $CH "{\"op\":\"diff\",\"commit\":\"$HEAD_HASH\"}"
   # 用「第 2 帧之后的 commit diff」区分：判断条件是**新增行**存在，
   # 而不是数帧数（工作区那份 diff 也在同一通道上）。
   commit_diff_ready() {
     frames_of "$CH" | jq -r 'select(.op == "diff") | .unified // ""' 2>/dev/null |
       grep -q '^+second commit content$'
   }
-  if wait_until 20 commit_diff_ready; then
+  if [ "$SEND_OK" -eq 1 ] && wait_until 20 commit_diff_ready; then
     CD=$(frames_of "$CH" | jq -c 'select(.op == "diff")' | grep -F 'second commit content' | head -1)
     CDU=$(printf '%s' "$CD" | jq -r '.unified // ""')
     if printf '%s' "$CDU" | grep -q -- '--- a/first.txt'; then
@@ -575,7 +570,7 @@ if [ -n "$CH" ]; then
       ok "该提交的 diff 只含它自己改过的文件"
     fi
   else
-    bad "20s 内没收到该提交的 diff（'second commit content' 从未出现在任何 diff 回帧里）"
+    bad "没收到该提交的 diff（`second commit content` 从未出现在任何 diff 回帧里；SEND_OK=0 说明请求没发出去）"
     dump "断言 6"
   fi
 fi
@@ -612,18 +607,11 @@ if [ -n "$SID2" ]; then
 fi
 
 if [ -n "$CH2" ]; then
-  SEND_CODE=$(curl_auth -o "$BODY" -w '%{http_code}' -X POST \
-    "$BASE/api/channels/$CH2/send" --data-binary '{"op":"status"}')
-  if [ "$SEND_CODE" = "200" ] || [ "$SEND_CODE" = "202" ] || [ "$SEND_CODE" = "204" ]; then
-    info "status 请求已下发（$SEND_CODE）"
-  else
-    bad "下发 status 回 $SEND_CODE：$(cat "$BODY")"
-  fi
-
+  send_op $CH2 '{"op":"status"}'
   notrepo_ready() {
     [ "$(frames_of "$CH2" | jq -r 'select(.op == "status") | 1' 2>/dev/null | grep -c .)" -gt 0 ]
   }
-  if wait_until 20 notrepo_ready; then
+  if [ "$SEND_OK" -eq 1 ] && wait_until 20 notrepo_ready; then
     NR=$(frames_of "$CH2" | jq -c 'select(.op == "status")' | head -1)
     if [ "$(printf '%s' "$NR" | jq -r '.not_a_repo // false')" = "true" ]; then
       ok "非仓库回正常 status 帧且 not_a_repo=true（不是 channel_error）"
@@ -642,16 +630,27 @@ if [ -n "$CH2" ]; then
     else
       bad "非仓库的 files 不是空数组：$(printf '%s' "$NR" | jq -c '.files')"
     fi
-    # 反证：这条通道上**不该**出现 channel_error。出现就说明还是走了错误路径。
-    if grep -q "channel_error" "$SSE_LOG" 2>/dev/null &&
-      [ "$(frames_of "$CH2" | wc -l)" = "0" ]; then
-      bad "非仓库上只收到了 channel_error、没有 status 帧——still 走错误路径"
+    # 反证：这条通道上**不该**出现错误帧。
+    #
+    # 判据必须**与该通道绑定**：早先写的是 `grep -q channel_error "$SSE_LOG"` +
+    # `[ "$(frames_of "$CH2" | wc -l)" = "0" ]`，而这一段位于
+    # `wait_until 20 notrepo_ready` 的**成功分支**内——`notrepo_ready` 的判据
+    # 正是 `frames_of "$CH2"` 里有 status 帧，所以进到这里时 `frames_of` 的行数
+    # 必然 ≥ 1，第二个条件恒假、整条 `&&` 恒假，永远走 else 打 ok：
+    # 恒真断言。且 `$SSE_LOG` 是全脚本共用的一份，不分通道，连「哪条通道出的
+    # 错」都分不出来。
+    #
+    # 现在按 `channel_id` 过滤，判「这条通道的载荷里有没有 `code` 字段」
+    # （`channel_error` 载荷的形状就是带 `code`）。
+    CH2_ERRORS=$(frames_of "$CH2" | jq -r 'select(.code != null) | .code' 2>/dev/null | grep -c . )
+    if [ "$CH2_ERRORS" -gt 0 ]; then
+      bad "非仓库这条通道上收到了 $CH2_ERRORS 条错误帧（code=$(frames_of "$CH2" | jq -rc 'select(.code != null) | .code' 2>/dev/null | tr '\n' ' ')）——still 走错误路径"
       dump "断言 7"
     else
-      ok "非仓库这条通道没有落到 channel_error 上"
+      ok "非仓库这条通道没有落到 channel_error 上（0 条错误帧）"
     fi
   else
-    bad "20s 内没有 status 回帧（很可能设备把它当错误回成了 channel_error）"
+    bad "没有 status 回帧（SEND_OK=0 说明请求没发出去；否则设备多半把它当错误回成了 channel_error）"
     info "SSE 里该通道的全部载荷："
     frames_of "$CH2" | head -5 | sed 's/^/       /'
     dump "断言 7"
@@ -661,10 +660,7 @@ fi
 # ---------------------------------------------------------------------------
 echo
 echo "== 结果 =="
-echo "  通过 $pass，失败 $fail，跳过 $skip"
-if [ "$skip" -ne 0 ]; then
-  echo "  ⚠️  有 $skip 项**没跑**：见上面 ⏭️ 行。跳过不计入通过。"
-fi
+echo "  通过 $pass，失败 $fail"
 if [ "$fail" -ne 0 ]; then
   echo "  ❌ 验收未通过" >&2
   [ "$KEEP" -eq 0 ] && echo "     （加 --keep 重跑可保留现场）" >&2

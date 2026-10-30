@@ -213,6 +213,26 @@ def owner_marker(markers, line):
     return None
 
 
+def owner_outside_tests(markers, regions, line):
+    """与 `owner` 同义，但**测试块内的行不认生产代码里的标注**。
+
+    为什么需要这一层：`owner` 的规则是「先向上取最近的标注，取不到再向下」。
+    对一条落在 `#[cfg(test)]` 模块里的未覆盖行，向上取会跨过 `mod tests {`
+    的边界，捞到上面某个生产函数的标注——于是这条登记的理由写成
+    「线程里这一臂不可达」，而被豁免的其实是一句 `other => panic!(…)`
+    的测试兜底臂。`--check` 只看「有没有锚点」，错锚同样能通过，缺陷因此
+    长期隐形（实测全仓 620 条曾 100% 被判为「锚在就地标注」、测试块一栏为 0，
+    而其中两百多条实际位于测试模块内）。
+
+    判据：行在测试区间内时，只接受**同样落在测试区间内**的标注；生产区的
+    标注对它无效。测试区间内没有标注就返回 None，由调用方退回
+    `TEST_BRANCH`——那句理由（「绿的时候永远不执行」）才是这些行的实情。
+    """
+    if line in regions:
+        return owner([m for m in markers if m[0] in regions], line)
+    return owner(markers, line)
+
+
 def owner(markers, line):
     mk = owner_marker(markers, line)
     for m in markers:
@@ -287,23 +307,50 @@ if mode == '--racy':
     sys.exit(0)
 
 if mode == '--rebuild':
-    # 人工精修过的理由按「同一行」记住：行号没动就原样带回，行号动了就退回标注原文。
+    # 人工精修过的理由按「同一行 + 同一归属类别」记住。
+    #
+    # 只按行号记是不够的：行号没动但**这一行的身份变了**（比如上一次重建把一条
+    # 测试兜底臂错锚到生产标注上、写成「线程里这一臂不可达」，这次规则修好、
+    # 它应当落回 `TEST_BRANCH`），只比对行号就会把那条错理由原样搬回来，
+    # 于是规则修好了而表还是错的——实测 `git.rs:1382` 正是这样活下来的。
+    # 判据：旧理由要么等于旧规则的推导（说明它是生成的、不是精修的），要么
+    # 与新规则推导**同类**（同为 TEST_BRANCH，或同为标注原文的语义域）。
+    # 简单可靠的做法：只有「旧理由的类别」== 「新推导的类别」时才带回。
+    def category(reason, test_branch):
+        if reason.strip() == test_branch:
+            return 'test'
+        return 'marker'
+
     curated_by_line = {}
     for path, line, reason in rows:
         markers, regions = info_for(path)
-        derived = owner(markers, line)
+        derived = owner_outside_tests(markers, regions, line)
         if derived is None and line in regions:
             derived = TEST_BRANCH
         if derived is None:
             continue
         if derived.strip() != reason.strip():
+            # 类别不一致 → 不回带：那一行的性质变了，旧理由说的是另一件事。
+            if category(reason, TEST_BRANCH) != category(derived, TEST_BRANCH):
+                continue
             curated_by_line[(path, line)] = reason.strip()
     out = []
+    # racy 行必须从重建结果里剔除：`check-coverage.sh` 把它们从**两个方向**的
+    # 集合比对里都减掉，于是「登记表里有它」这件事永远对不上——actual 侧没有、
+    # declared 侧有，门禁每次都报同一堆 stale exception。那不是「这次运气不好」，
+    # 是先天地无法满足的命题；让它进表 = 让门禁永久红。
+    racy_lines = set()
+    for p in marker_files():
+        for marker_line, text in marker_blocks(read_lines(p)):
+            if '(racy)' in text:
+                racy_lines.add('%s:%d' % (p, marker_line))
     for item in sorted(uncovered, key=lambda s: (s.rpartition(':')[0], int(s.rpartition(':')[2]))):
+        if item in racy_lines:
+            continue
         path, _, num = item.rpartition(':')
         line = int(num)
         markers, regions = info_for(path)
-        derived = owner(markers, line)
+        derived = owner_outside_tests(markers, regions, line)
         if derived is None and line in regions:
             derived = TEST_BRANCH
         if derived is None:
@@ -324,7 +371,7 @@ for path, line, reason in rows:
         unanchored.append((path, line, reason, '登记的文件不在 crates/ 下'))
         continue
     markers, regions = info_for(path)
-    derived = owner(markers, line)
+    derived = owner_outside_tests(markers, regions, line)
     if derived is not None:
         by_marker += 1
         if derived.strip() != reason.strip():
@@ -410,8 +457,11 @@ case "$MODE" in
         tmp="$(mktemp)"
         trap 'rm -f "$tmp" "$tmp.header"' EXIT
         collect_uncovered > "$tmp"
-        # 表头照抄现文件（表头是文件的一部分，不是生成物）
-        sed -n '1,/^[^#]/p' "$EXCEPTIONS" | sed '$d' > "$tmp.header"
+        # 表头照抄现文件（表头是文件的一部分，不是生成物）。不能用
+        # `sed -n '1,/^[^#]/p' | sed '$d'`：那个写法把「第一个非 # 行」连同
+        # 它的替换一起吃掉，表头末尾若是半句话就被静默截断——本仓实测出现过
+        # 表头最后一行停在「本文件写下时写的是」，读者看不出缺了什么。
+        awk '/^#/ { print; next } { exit }' "$EXCEPTIONS" > "$tmp.header"
         cat "$tmp.header"
         analyse "$MODE" "$EXCEPTIONS" "$tmp"
         ;;

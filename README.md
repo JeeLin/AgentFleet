@@ -29,8 +29,8 @@ node, run AI agent sessions, and route tasks to the node best suited to run them
 
 ## 第一版范围 / First Release Scope
 
-> 「第一版」指**首个可用版本（里程碑 v0.1.0–v0.5.0）**。v0.6.0 起为第二阶段。
-> "First release" = the first usable version (v0.1.0–v0.5.0). v0.6.0 onward is the next stage.
+> 「第一版」指**首个可用版本（里程碑 v0.1.0–v0.6.0）**。v0.7.0 起为第二阶段。
+> "First release" = the first usable version (v0.1.0–v0.6.0). v0.7.0 onward is the next stage.
 
 > **当前进度 / Current status：v0.1.0–v0.3.0 已完成，v0.4.0（会话内 git 面板，只读）进行中。**
 > v0.2.0 交付的是**会话容器**（页面级：工作区 + 终端 / 文件 / exec 面板）与 Web 控制台。

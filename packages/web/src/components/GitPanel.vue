@@ -35,11 +35,19 @@ import GitDiff from '@/components/GitDiff.vue'
 import GitLog, { type GitCommit } from '@/components/GitLog.vue'
 import type { ChannelState } from '@/lib/channel'
 
-/** `status` 回帧里的一个文件条目。两列状态码原样保留。 */
+/**
+ * `status` 回帧里的一个文件条目。两列状态码原样保留。
+ *
+ * `path` 是**请求用标识**（原样填回 `{"op":"diff","path":…}`），
+ * `orig` 只是重命名 / 复制的**旧路径**，仅供显示。两者不合并：
+ * 合并出来的 `新 <- 旧` 不是任何一条真实路径，拿它去问 diff 只会得到空串。
+ */
 export interface GitFile {
   x: string
   y: string
   path: string
+  /** 重命名 / 复制的旧路径；无则 `undefined`。 */
+  orig?: string
 }
 
 /**
@@ -90,10 +98,25 @@ const props = defineProps<{
 const emit = defineEmits<{
   /** 用户点刷新：重问一次 status。 */
   (e: 'refresh'): void
-  /** 用户点某个文件：取它的 diff。 */
-  (e: 'diff', path: string): void
+  /**
+   * 用户点了改动列表里的一行：取它的 diff。
+   *
+   * 第二个参数是重命名 / 复制的**旧路径**：问 diff 时必须把它一起给
+   * `git`，否则 pathspec 只含新路径，git 会把它当「新建文件」，
+   * 页面于是把一次改名显示成「新建了这个文件」。
+   */
+  (e: 'diff', path: string, orig?: string): void
   /** 用户切到历史分段：问一次 log。 */
   (e: 'log'): void
+  /**
+   * 用户切回改动分段。
+   *
+   * **必须有这一侧**：两个分段共用页面上的同一份 `ws.git.diff`，历史侧往里
+   * 写过「某条提交的 diff」。只有 `log` 一侧 emit 的话，页面没有任何入口在
+   * 「离开历史」时把那份 diff 撤掉——切回改动后左栏是工作区文件列表、无一行
+   * 高亮，右栏却还显示着上一条提交的改动，两个提示指向两个事实。
+   */
+  (e: 'changes'): void
   /** 用户点某条提交：取它的 diff（**完整** hash）。 */
   (e: 'open-commit', hash: string): void
 }>()
@@ -111,7 +134,11 @@ const segment = ref<Segment>('changes')
 function selectSegment(next: Segment): void {
   if (segment.value === next) return
   segment.value = next
+  // 写成两支而不是 `emit(next)`：`defineEmits` 里两个事件签名不同
+  // （一个无参、一个无参但名字不同），把 `Segment` 直接传进去时 TS 无法在
+  // 重载之间消歧，只能靠字面量。
   if (next === 'log') emit('log')
+  else emit('changes')
 }
 
 /**
@@ -137,6 +164,11 @@ function onSegKey(e: KeyboardEvent): void {
  *
  * detached 时**不能留空白**：空白会被读成「还在加载」。空仓库（有分支名但
  * 没有 head）也不留空白——写「还没有提交」，因为那正是空的**原因**。
+ *
+ * 没有分支名却有 head 时**要把 head 写出来**：那意味着 `rev-parse
+ * --abbrev-ref HEAD` 没能给出名字（比如设备侧读到了 `HEAD` 但 `symbolic-ref`
+ * 失败），而提交号是已知的事实。把它丢掉换一句「（分支未知）」等于用一句
+ * 「不知道」覆盖一条已知信息，与本面板「空白会被读成还在加载」的口径也相反。
  */
 const branchLine = computed(() => {
   if (props.detached) {
@@ -145,7 +177,9 @@ const branchLine = computed(() => {
   if (props.branch) {
     return props.head ? `${props.branch} · ${props.head}` : `${props.branch} · 还没有提交`
   }
-  return props.head ?? '（分支未知）'
+  // 走到这里一定是「没有分支名」（非 git 仓库由模板的 `v-if="notARepo"`
+  // 在更外层整块换掉，不进这个函数）。
+  return props.head ? `（分支未知）· ${props.head}` : '（分支未知）'
 })
 
 /** 两列状态码拼成一个两字符的徽标。`??` 就是两列都是 `?`，原样显示。 */
@@ -173,6 +207,17 @@ function codeTitle(f: GitFile): string {
   const x = names[f.x] ?? f.x
   const y = names[f.y] ?? f.y
   return `index: ${x} / 工作区: ${y}`
+}
+
+/**
+ * 列表里显示的路径：重命名 / 复制时把旧路径补在后面。
+ *
+ * **只用于显示**——点这一行发出去的是 `f.path`（不含 `orig`）。
+ * 显示串与请求标识分开，是因为前者可以是「给人读的合成串」，
+ * 而后者必须是 git 认得的一条真实路径。
+ */
+function displayPath(f: GitFile): string {
+  return f.orig ? `${f.path} <- ${f.orig}` : f.path
 }
 
 /** 改动分段里，diff 属于哪个文件（用来高亮被点中的行）。 */
@@ -247,6 +292,9 @@ const selected = computed(() => props.diff?.path ?? props.reading)
 
       <!-- ================== 历史分段 ================== -->
       <template v-if="segment === 'log'">
+        <!-- `log` 失败时原因写在同一个 `error` 上（`gitRequest` 的 `onError`）：
+              这段不读它的话，用户只看到「正在读取提交历史…」永远转下去。 -->
+        <p v-if="error" class="af-panel__state" role="alert" data-git-error>{{ error }}</p>
         <div class="af-git__split">
           <div class="af-git__files af-git__files--log">
             <GitLog
@@ -258,15 +306,24 @@ const selected = computed(() => props.diff?.path ?? props.reading)
             />
           </div>
           <div class="af-git__diffpane">
+            <!-- **这里没有 `stale` 档，是结构决定的**：`SessionPage` 的
+                 `gitOpenCommit` 在发请求前就把 `ws.git.diff` 清成 `null`
+                 （理由见那里的注释：不清的话从改动分段带过来的工作区 diff
+                 会先闪一下），所以点下一条提交时走到的是上面那句
+                 「点左边任一提交看它改了什么」，`<GitDiff>` 只有在**已经拿到**
+                 这一条提交的 diff 之后才会渲染——那时不存在「上一份」可言。
+                 早先这里挂着 `:stale="logReading !== null"`，而那个值永远
+                 不可能在渲染 `<GitDiff>` 时为真，是死判据（实测改成
+                 `:stale="false"` 全量用例全绿，因为分支根本走不到）。 -->
             <p v-if="!diff" class="af-git__void af-t-mute" data-git-log-no-diff>
-              点左边任一提交看它改了什么。
+              {{ logReading !== null ? '正在读取这条提交的改动…' : '点左边任一提交看它改了什么。' }}
             </p>
             <GitDiff
               v-else
               :unified="diff.unified"
               :truncated="diff.truncated"
               :path="diff.path"
-              :stale="logReading !== null"
+              :stale="false"
             />
           </div>
         </div>
@@ -274,10 +331,13 @@ const selected = computed(() => props.diff?.path ?? props.reading)
 
       <!-- ================== 改动分段 ================== -->
       <template v-else>
+        <!-- 错误横幅**与内容并排**，不替换内容：早先它是 `v-if="error"`、
+              排在 `clean === null` 之前，于是出过一次错之后文件列表与 diff
+              全被换掉——包括已经成功取到的 diff。 -->
         <p v-if="error" class="af-panel__state" role="alert" data-git-error>{{ error }}</p>
 
         <!-- ① 还没问过：状态未知。不能声称「干净」，也不能画空列表。 -->
-        <p v-else-if="clean === null" class="af-git__void af-t-mute" data-git-loading>
+        <p v-if="clean === null" class="af-git__void af-t-mute" data-git-loading>
           正在读取工作区状态…
         </p>
 
@@ -297,10 +357,10 @@ const selected = computed(() => props.diff?.path ?? props.reading)
                 :aria-selected="selected === f.path ? 'true' : 'false'"
                 :data-git-file="f.path"
                 :title="codeTitle(f)"
-                @click="emit('diff', f.path)"
+                @click="emit('diff', f.path, f.orig)"
               >
                 <span class="af-git__code af-fp" aria-hidden="true">{{ codeOf(f) }}</span>
-                <span class="af-git__path af-fp">{{ f.path }}</span>
+                <span class="af-git__path af-fp">{{ displayPath(f) }}</span>
               </button>
             </li>
           </ul>

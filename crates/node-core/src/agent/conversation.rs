@@ -2070,7 +2070,7 @@ for line in sys.stdin:
                 busy = true;
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await; // coverage: excluded (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
         }
         assert!(busy, "prompt 之后必须有一轮在飞，否则停止按钮永远亮不起来");
 
@@ -2081,7 +2081,7 @@ for line in sys.stdin:
             if methods_in(&log).iter().any(|m| m == "session/prompt") {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await; // coverage: excluded (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
         }
         assert!(
             methods_in(&log).iter().any(|m| m == "session/prompt"),
@@ -2101,7 +2101,7 @@ for line in sys.stdin:
                 saw_cancel = true;
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await; // coverage: excluded (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
         }
         assert!(
             saw_cancel,
@@ -2128,8 +2128,8 @@ for line in sys.stdin:
             }
             if turn_end.is_some() {
                 break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            } // coverage: excluded (racy) — 同上：这一臂是否走到取决于轮询是否在 `turn_end` 就绪前先转一圈，属于时序非确定。
+            tokio::time::sleep(Duration::from_millis(25)).await; // coverage: excluded (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
         }
         let payload =
             turn_end.expect("被中断的那一轮也要有 turn_end，否则页面一直显示「正在回复」");
@@ -2685,7 +2685,7 @@ for line in sys.stdin:
         // 60ms 的批窗口 + 假 agent 的退出，给足预算；但**每轮都要 await**
         // 一次 sleep，否则单线程运行时下 `read_events` 任务会被饿死。
         for _ in 0..40 {
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            tokio::time::sleep(Duration::from_millis(25)).await; // coverage: excluded (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
             if reader.is_finished() {
                 break;
             }

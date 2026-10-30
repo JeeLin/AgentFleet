@@ -20,6 +20,8 @@
 
 import { computed } from 'vue'
 
+import { relativeTimeLong } from '../lib/format'
+
 /** `log` 回帧里的一条提交。字段名与设备侧 `parse_log` 一一对应。 */
 export interface GitCommit {
   /** 完整 hash（40 位）。请求该提交的 diff 时必须发这个，不能发短 hash。 */
@@ -53,22 +55,11 @@ function shortOf(hash: string): string {
 }
 
 /**
- * 相对时间。设备给的是 ISO-8601，这里只做粗粒度换算。
- *
- * **解析失败就原样显示**，不写「刚刚」：写错的时间比一个说不清的原始时间
- * 更难查（用户会以为提交真的刚发生）。
+ * 相对时间。设备给的是 ISO-8601，换算交给 `lib/format.ts` 的同族实现——
+ * 展示口径只留一份，档位边界不再各写各的。
  */
 function relative(when: string): string {
-  const t = Date.parse(when)
-  if (Number.isNaN(t)) return when
-  const secs = Math.floor((Date.now() - t) / 1000)
-  if (secs < 0) return when
-  if (secs < 60) return '刚刚'
-  if (secs < 3600) return `${Math.floor(secs / 60)} 分钟前`
-  if (secs < 86400) return `${Math.floor(secs / 3600)} 小时前`
-  if (secs < 86400 * 30) return `${Math.floor(secs / 86400)} 天前`
-  if (secs < 86400 * 365) return `${Math.floor(secs / (86400 * 30))} 个月前`
-  return `${Math.floor(secs / (86400 * 365))} 年前`
+  return relativeTimeLong(when)
 }
 
 /** 列表是否空到需要一句说明。`null`（没问过）不算空——那是另一句话。 */

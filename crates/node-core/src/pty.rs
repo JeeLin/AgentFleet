@@ -366,12 +366,10 @@ mod tests {
     /// A 刚种下自己的探测键，B 的 `remove_var` 就把它删了，或者 A 的子进程
     /// 读到的是 B 种的值。症状是「单跑全绿、全量随机红」，而且红的是断言
     /// 里那句「新键要被追加进去」，看起来像 PTY 的 env 逻辑有问题。
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
+    ///
+    /// 锁本体在 [`crate::pty::testutil::env_lock`]：`connector/git.rs` 也改进程
+    /// 环境（`GIT_DIR`），各持一份 `static` 时两把锁互不互斥。
+    use crate::pty::testutil::env_lock;
 
     /// 真实 PTY：`stty size` 是内核对尺寸协商的回答，别的都是自说自话。
     ///
@@ -745,6 +743,19 @@ pub fn default_shell() -> String {
 pub(crate) mod testutil {
     use super::Pty;
     use std::os::fd::RawFd;
+
+    /// 改本进程环境的用例必须互斥——**全 crate 只有这一把锁**。
+    ///
+    /// `std::env::set_var` 动的是**整个进程**的环境表，不是某个模块的：`pty.rs`
+    /// 种探测键与 `connector/git.rs` 种 `GIT_DIR` 的用例并行跑时会互相踩。
+    /// 各模块各写一份 `static LOCK` 时，两把锁互不互斥——改其中一份的类型，
+    /// 两份都照样编译，而互斥早已失效。所以锁放在这里一处。
+    pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     /// 一直读到 `needle` 出现，或超时。**到点一定会返回。**
     ///
