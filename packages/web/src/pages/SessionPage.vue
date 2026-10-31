@@ -85,7 +85,7 @@ import { cwdPathOf, isOutsideSeg, splitPath } from '@/lib/files-path'
 import { deviceLabel as deviceLabelOf, relativeTime, sessionTitle } from '@/lib/format'
 import { ApiError, NetworkError, describeReadFailure, request } from '@/lib/http'
 import { actForKey, bindingOf, dispatch, isTyping, register, unregister } from '@/lib/keynav'
-import { SPLIT_DEFAULT } from '@/lib/split'
+import { clampSplit, SPLIT_DEFAULT } from '@/lib/split'
 import {
   activateTab as activateTabState,
   closeTab,
@@ -206,6 +206,21 @@ type GitStatusFile = GitFile
 interface TabWorkspace {
   /** 面板坞开着吗。 */
   dock: boolean
+  /**
+   * 对话列宽度（百分比，30–70）。**这是左右分栏唯一的数字。**
+   *
+   * ── 为什么钉在 workspace 上而不是页面级 ref ────────────────────
+   * 它是**每个会话自己的布局**：一个会话在跑长命令要把终端拉宽，另一个在
+   * 读 diff 要把对话拉宽，两者不该互相污染。挂在 workspace 上就自动跟着
+   * tab 走（切走再切回原值还在），也不需要另写一份 localStorage——
+   * 写全局存储会让新 tab 继承上一个会话的比例，而两个会话的工作内容未必同类。
+   *
+   * ── 为什么只有一个数，没有 splitV ──────────────────────────────
+   * v0.5.0 起右侧只有一格（裁决 C），**没有纵向分栏**。拆成 `splitH` /
+   * `splitV` 两个字段却没有第二处可拖，只会让「哪个是哪个」变成新的认知
+   * 负担。将来真要做纵向时再加，那时才有真实的第二处可调。
+   */
+  split: number
   /** 当前面板。`null` = 坞开着但还没选（只在坞开着时出现）。 */
   panel: PanelName | null
   /**
@@ -306,6 +321,7 @@ function blankWorkspace(): TabWorkspace {
     // 都画不出来，于是点不到标签、也就永远填不满 `mounted`。加面板之前必须
     // 先有一条非空的初值，否则新面板和 files 一样不可达。
     dock: true,
+    split: SPLIT_DEFAULT,
     panel: DEFAULT_PANEL,
     mounted: [DEFAULT_PANEL],
     output: '',
@@ -677,8 +693,6 @@ async function releaseTab(tabId: string): Promise<void> {
  */
 const DEFAULT_PANEL: PanelName = 'git'
 
-const split = ref(SPLIT_DEFAULT)
-
 /**
  * 打开 / 换到某个面板。v0.5.0 起右侧只有**一格**，所以这里的语义是
  * 「**换掉**当前显示的那一个」，不是「再挂一个」（裁决 C）。
@@ -791,6 +805,24 @@ function cyclePanel(delta: number): void {
   const idx = ws.panel ? order.indexOf(ws.panel) : 0
   const next = order[(idx + delta + order.length) % order.length] as PanelName
   openPanel(next)
+}
+
+/**
+ * 改当前 tab 的对话列宽度。
+ *
+ * 收口放在这里而不是信任子组件：`clampSplit` 在 `lib/split.ts` 里是唯一的
+ * 口径（30–70），而 `SplitHandle` 的 v-model 只是一个数字通道——将来再接
+ * 第二个拖动来源（触摸板手势之类）时，收口点不应该也跟着多一个。
+ */
+function setSplit(value: number): void {
+  const ws = activeWs.value
+  if (!ws) return
+  ws.split = clampSplit(value)
+}
+
+/** 双击把手 = 恢复缺省比例。拖歪了的回头路（见 SplitHandle 的事件说明）。 */
+function resetSplit(): void {
+  setSplit(SPLIT_DEFAULT)
 }
 
 function toggleDock(): void {
@@ -2156,7 +2188,7 @@ onBeforeUnmount(() => {
           class="af-wb__conv"
           tabindex="-1"
           data-wb-body
-          :style="activeWs?.dock ? { flex: `0 0 ${split}%` } : undefined"
+          :style="activeWs?.dock ? { flex: `0 0 ${activeWs.split}%` } : undefined"
         >
           <ConvFlow
             :device-name="deviceLabel"
@@ -2187,7 +2219,17 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <SplitHandle v-if="activeWs?.dock" v-model="split" />
+        <!--
+          v-model 直连 workspace：`split` 是**每个会话自己的**布局（见 TabWorkspace）。
+          绑页面的一个 ref 会让两个 tab 共用一个数——切 tab 时比例跳一下，
+          用户会以为分栏坏了。
+        -->
+        <SplitHandle
+          v-if="activeWs?.dock"
+          :model-value="activeWs.split"
+          @update:model-value="setSplit"
+          @reset="resetSplit"
+        />
 
         <div v-if="activeWs?.dock" ref="dockEl" class="af-wb__dockwrap">
           <PanelDock

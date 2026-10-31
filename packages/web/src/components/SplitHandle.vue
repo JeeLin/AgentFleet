@@ -2,8 +2,15 @@
 /* ===========================================================================
    SplitHandle —— 对话区与面板坞之间的把手（规范 §3.15 / §7.1）
    ---------------------------------------------------------------------------
-   它是 `role="separator"`，可聚焦，`←→` 调 4%、`Home` / `End` 到 30% / 70%。
+   它是 `role="separator"`，可聚焦，`←→` 调 4%、`Home` / `End` 到 30% / 70%，
+   **双击恢复缺省比例**。
    能拖、能按、能用键盘——**没有键盘的把手等于鼠标专属**，上一版就是这样。
+
+   ── 为什么双击恢复缺省是必要的（v0.5.0） ──────────────────────────
+   右侧变成一格之后，用户会比以前更频繁地拖它：文件树要宽、终端也要宽、
+   git diff 还要宽，三种需求差得远。于是「拖到极端之后怎么回去」从罕见
+   变成常见——没有回头路的话，用户只能靠方向键一格一格挪回去，而他还得
+   先记得缺省是 56。
 
    ── 为什么不是 <input type="range"> ────────────────────────────────
    原生 range 在垂直方向上是「一条带刻度的滑轨」，视觉上会打断两块面板的
@@ -28,6 +35,13 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: number): void
+  /**
+   * 双击 = 恢复缺省比例。**由宿主决定缺省值是多少**，组件只知道「要恢复」。
+   *
+   * 组件内不知道 `SPLIT_DEFAULT` 的语义（它是「对话列占多少」，是页面的事），
+   * 让把手自己写死一个数就把那个数变成了两处真相源。
+   */
+  (e: 'reset'): void
 }>()
 
 const dragging = ref(false)
@@ -111,6 +125,7 @@ function onKeydown(e: KeyboardEvent): void {
     @pointercancel="endDrag"
     @lostpointercapture="endDrag"
     @keydown="onKeydown"
+    @dblclick="emit('reset')"
   >
     <span class="af-track" aria-hidden="true"></span>
     <span class="af-gutter__label" aria-hidden="true">← → 调整</span>

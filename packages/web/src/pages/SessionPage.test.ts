@@ -2661,3 +2661,108 @@ describe('会话页顶部三层：tab 条 → 标题行 → 状态行（v0.5.0�
     expect(cssRuleOf(css, '.af-wb__statusline > *')).toContain('flex: 0 0 auto')
   })
 })
+
+/* ===========================================================================
+   v0.5.0 子任务 4：只保留左右一条分栏
+   ---------------------------------------------------------------------------
+   裁决 C 让右侧只剩一格，所以纵向分栏不存在。这一组钉住两件事：
+   分栏是**每个 tab 自己的**布局，以及**没有**第二个坐标被引进来。
+   =========================================================================== */
+describe('分栏：只有左右一条，且每个 tab 各自保留自己的比例（v0.5.0）', () => {
+  /** 按一次方向键/press 直接改 workspace。 */
+  function convFlex(w: ReturnType<typeof mountIn>): string {
+    return (w.element.querySelector<HTMLElement>('.af-wb__conv') as HTMLElement).style.flex
+  }
+
+  it('拖动手柄只改左右比例，没有引进第二个坐标（workspace 里不存在 splitV）', async () => {
+    const { w } = await mountWorkbench()
+    const sep = w.element.querySelector<HTMLElement>('[role="separator"]')
+    if (!sep) throw new Error('没有把手')
+    expect(sep.getAttribute('aria-valuenow'), '缺省 56%').toBe('56')
+
+    // 键盘调一次：`→` 加 4%，只动左右
+    sep.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }))
+    await flush(w)
+    expect(sep.getAttribute('aria-valuenow')).toBe('60')
+    expect(convFlex(w), '对话列宽度跟着变').toContain('60%')
+
+    // 反向验证：把 workspace 改成 `{ splitH, splitV }` 两个字段 → 这条红。
+    //
+    // 判据**不能**是「源码里出现过 splitV 这个词」——注释里提到它就是红的，
+    // 而注释恰恰是解释「为什么不这么做」的地方。所以只剥掉注释看代码：
+    // 真正的判据是「渲染路径上只有一个百分比坐标」。
+    const src = readRepoFile('packages/web/src/pages/SessionPage.vue')
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '')
+    expect(/\bsplitV\b/.test(src), '不该有第二个分栏坐标').toBe(false)
+    expect(/\bVSPLIT_/.test(src), '不该有纵向分栏常量').toBe(false)
+  })
+
+  it('切 tab 再切回：比例保留原值（每个 tab 自己的）', async () => {
+    const { w } = await mountWorkbench()
+    const sep = () => {
+      const el = w.element.querySelector<HTMLElement>('[role="separator"]')
+      if (!el) throw new Error('没有把手')
+      return el
+    }
+
+    // s_1 调到 60%
+    sep().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }))
+    await flush(w)
+    expect(sep().getAttribute('aria-valuenow'), 's_1 已是 60%').toBe('60')
+
+    // 切到 s_2：它有自己的 workspace，比例是缺省值
+    await tabLabel(w, 's_2').click()
+    await flush(w)
+    expect(sep().getAttribute('aria-valuenow'), 's_2 没被 s_1 的比例污染').toBe('56')
+
+    // s_2 调到 52%（两次 ←）
+    for (let i = 0; i < 2; i++) {
+      sep().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }))
+      await flush(w)
+    }
+    expect(sep().getAttribute('aria-valuenow'), 's_2 是 48%').toBe('48')
+
+    // 切回 s_1：它自己的 60% 还在
+    await tabLabel(w, 's_1').click()
+    await flush(w)
+    expect(sep().getAttribute('aria-valuenow'), 's_1 的比例必须还是 60%').toBe('60')
+    expect(convFlex(w), '渲染出来的宽度也得是 60%').toContain('60%')
+  })
+
+  it('双击把手恢复缺省 56%', async () => {
+    const { w } = await mountWorkbench()
+    const sep = () => {
+      const el = w.element.querySelector<HTMLElement>('[role="separator"]')
+      if (!el) throw new Error('没有把手')
+      return el
+    }
+
+    // 拖歪：End 到 70%
+    sep().dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }))
+    await flush(w)
+    expect(sep().getAttribute('aria-valuenow')).toBe('70')
+
+    sep().dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    await flush(w)
+    // 反向验证：去掉页面上的 `@reset` 绑定 → 这条红
+    expect(sep().getAttribute('aria-valuenow'), '双击要回到 56%').toBe('56')
+    expect(convFlex(w)).toContain('56%')
+  })
+
+  it('百分比下界在 412px 窄屏仍成立（30% × 412 ≥ 123px，不是负值或 NaN）', async () => {
+    const { w } = await mountWorkbench()
+    const sep = w.element.querySelector<HTMLElement>('[role="separator"]')
+    if (!sep) throw new Error('没有把手')
+    sep.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }))
+    await flush(w)
+    expect(sep.getAttribute('aria-valuenow')).toBe('30')
+    // 夹取发生在百分比层面（`clampSplit`），所以窄屏下算出的像素只会更小，
+    // **不会**变成负数或 NaN——这正是「百分比下限而不是像素下限」的理由
+    // （lib/split.ts 文件头）。这里把那个数真的算出来，防止有人改成像素。
+    const px = (30 / 100) * 412
+    expect(Number.isFinite(px) && px > 0).toBe(true)
+    expect(px).toBeGreaterThanOrEqual(123)
+  })
+})

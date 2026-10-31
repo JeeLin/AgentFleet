@@ -110,3 +110,35 @@ describe('SplitHandle：拖动', () => {
     expect(handle(w).hasAttribute('data-dragging')).toBe(false)
   })
 })
+
+describe('SplitHandle：双击恢复缺省（v0.5.0）', () => {
+  it('双击发 reset 事件（缺省值由宿主决定，组件不写死）', async () => {
+    const w = mountIn(SplitHandle, { props: { modelValue: 70 } })
+    handle(w).dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    await w.vm.$nextTick()
+    // 反向验证：去掉模板上的 @dblclick="emit('reset')" → 这条红
+    expect(w.emitted('reset')).toHaveLength(1)
+  })
+
+  it('双击**不**顺带 emit 一个宽度值——组件不知道缺省是多少', async () => {
+    const w = mountIn(SplitHandle, { props: { modelValue: 70 } })
+    handle(w).dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    await w.vm.$nextTick()
+    expect(w.emitted('update:modelValue'), '缺省值不该由把手决定').toBeUndefined()
+  })
+
+  it('双击一次只发一次 reset（不是连发）', async () => {
+    const w = mountIn(SplitHandle, { props: { modelValue: 30 } })
+    handle(w).dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    await w.vm.$nextTick()
+    expect(w.emitted('reset')).toHaveLength(1)
+  })
+
+  it('仍然没有 direction prop，aria-orientation 仍是 vertical（左右语义不回退）', () => {
+    const w = mountIn(SplitHandle, { props: { modelValue: 56 } })
+    // v0.5.0 没有纵向分栏，所以不给 direction：没有第二个使用场景时加参数
+    // 等于为一个不存在的需求预留 API（子任务 4 的裁定）。
+    expect(w.props()).not.toHaveProperty('direction')
+    expect(handle(w).getAttribute('aria-orientation')).toBe('vertical')
+  })
+})
