@@ -86,6 +86,8 @@ import { deviceLabel as deviceLabelOf, relativeTime, sessionTitle } from '@/lib/
 import { ApiError, NetworkError, describeReadFailure, request } from '@/lib/http'
 import { actForKey, bindingOf, dispatch, isTyping, register, unregister } from '@/lib/keynav'
 import { clampSplit, SPLIT_DEFAULT } from '@/lib/split'
+import { handleLayerKeydown, pop, push } from '@/lib/focus'
+import { NARROW_QUERY, watchMediaQuery } from '@/lib/media'
 import {
   activateTab as activateTabState,
   closeTab,
@@ -1057,6 +1059,82 @@ watch(
 const dockEl = ref<HTMLElement | null>(null)
 const openButtonEl = ref<HTMLButtonElement | null>(null)
 
+/* ---------------------------------------------------------------- 窄屏抽屉 */
+
+/**
+ * 窄屏（< 900px，断点见 `lib/media.ts`）。
+ *
+ * ── 为什么这个判断在 JS 里，尽管样式已经被 CSS 处理了 ──────────────
+ * 窄屏的右侧不是一个「更窄的列」，而是**一层浮层**：它盖在对话上、有遮罩、
+ * Esc 能关、焦点被圈在里面、关掉之后回到打开它的按钮。这四件事样式做不到。
+ *
+ * 宽屏下 `dock` 只是「这一列显不显示」，焦点自由进出；窄屏下它是模态层。
+ * 两套语义共用一个 `ws.dock` 状态（它确实是同一件事：用户要看到面板），
+ * 但**只有窄屏才入焦点栈**——宽屏下把右侧设成 inert 会让对话区点不动，
+ * 那是荒谬的：两边并列，凭什么右边是模态。
+ */
+/*
+  订阅放在 setup 期而不是 `onMounted`：`matchMedia` 在 setup 期已经可用，
+  而「第一帧就该知道自己是窄屏」——放到 mounted 之后，窄屏下第一帧会先渲染
+  成宽屏（并列、有把手），再跳成抽屉。测试还依赖 setup 期就有正确值。
+*/
+const narrow = watchMediaQuery(NARROW_QUERY)
+const isNarrow = narrow.matches
+
+/**
+ * 当前窄屏抽屉是否已经在焦点栈里。
+ *
+ * 它必须是一个显式的账本，不能靠 `depth()` 判断：轨迹抽屉可能开着、
+ * 帮助面板可能开着，`depth() > 0` 说明不了这一层在不在。
+ * 也不能靠 `ws.dock` 反推——宽屏下 `dock` 为真时它**不该**在栈里。
+ */
+let narrowPushed = false
+
+/** 抽屉真正作为一层浮层挂着的条件。 */
+const drawerIsLayer = computed(() => isNarrow.value && (activeWs.value?.dock ?? false))
+
+function onNarrowKeydown(e: KeyboardEvent): void {
+  const el = dockEl.value
+  if (!el) return
+  // 判据（是不是栈顶、输入法选字中吗）全在 `handleLayerKeydown` 里——
+  // `TrajDrawer` / `LoginPrompt` 走的是同一个函数，三份实现迟早会漂成
+  // 三种键位。
+  handleLayerKeydown(e, el, closeDock)
+}
+
+function pushNarrowDrawer(): void {
+  const el = dockEl.value
+  if (!el || narrowPushed) return
+  // `opener` 显式给「打开面板」按钮：它是用户刚才按的那个，
+  // 关掉抽屉要把焦点还回去，而不是丢给 `main`。
+  push(el, { opener: openButtonEl.value })
+  narrowPushed = true
+  document.addEventListener('keydown', onNarrowKeydown)
+}
+
+function popNarrowDrawer(): void {
+  if (!narrowPushed) return
+  narrowPushed = false
+  document.removeEventListener('keydown', onNarrowKeydown)
+  pop(dockEl.value ?? undefined)
+}
+
+/**
+ * 让「这一层在不在栈里」跟上「该不该在」。
+ *
+ * 三种触发都会走到这里：`dock` 变了、视口跨过断点、切了 tab。
+ * **必须集中在一个函数**——分散写的话，最容易漏的是「宽屏拖窄时抽屉正开着」
+ * 这一条（那时没有任何用户动作，只有一个 `matchMedia` 事件）。
+ */
+watch(
+  drawerIsLayer,
+  (want) => {
+    if (want) void nextTick(() => pushNarrowDrawer())
+    else popNarrowDrawer()
+  },
+  { immediate: true, flush: 'post' },
+)
+
 /* ---------------------------------------------------------------- 轨迹抽屉 */
 
 /**
@@ -2023,6 +2101,10 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  // 抽屉若还作为浮层挂着，先出栈：留下一个 inert 的 body 会让整页点不动，
+  // 而这个页面已经卸载了，没人会再帮它 pop。
+  popNarrowDrawer()
+  narrow.stop()
   document.removeEventListener('keydown', onKeydown)
   // 页面级键位随页面失效：离开工作台后按 `o` / `t` 不该再有作用
   // （`register` 拒绝重复注册，所以没有这一步时第二次进工作台会直接抛）。
@@ -2212,7 +2294,12 @@ onBeforeUnmount(() => {
           />
           <div class="af-wb__convhint af-field__hint">
             <span><kbd>o</kbd> 打开面板</span>
-            <span><kbd>[</kbd><kbd>]</kbd> 切换面板</span>
+            <!--
+              窄屏下 `[` / `]` 仍然可用（换工具不因屏宽分叉），只是抽屉
+              盖住了对话，这条提示看不见——所以窄屏改用 Esc 这一句。
+            -->
+            <span v-if="!isNarrow"><kbd>[</kbd><kbd>]</kbd> 切换面板</span>
+            <span v-else><kbd>Esc</kbd> 收起抽屉</span>
             <span><kbd>\</kbd> 收起面板坞</span>
             <span class="af-spacer"></span>
             <span><kbd>⇧Tab</kbd> 回 tab 条</span>
@@ -2224,14 +2311,54 @@ onBeforeUnmount(() => {
           绑页面的一个 ref 会让两个 tab 共用一个数——切 tab 时比例跳一下，
           用户会以为分栏坏了。
         -->
+        <!--
+          窄屏才有把手：< 900px 时右侧是覆盖式抽屉（对话全宽），比例不参与
+          布局——留一个拖不动的把手在这里只会让人以为它坏了。
+        -->
         <SplitHandle
-          v-if="activeWs?.dock"
+          v-if="activeWs?.dock && !isNarrow"
           :model-value="activeWs.split"
           @update:model-value="setSplit"
           @reset="resetSplit"
         />
 
-        <div v-if="activeWs?.dock" ref="dockEl" class="af-wb__dockwrap">
+        <!--
+          ── 为什么包一层 Teleport，且 `:disabled` 跟着 `isNarrow` ─────────
+          宽屏：右侧是并列的一列，**必须留在原位**参与 flex 布局，所以禁用
+          Teleport（`disabled` 时它原地渲染，与没有这层完全一样）。
+
+          窄屏：它变成一层**模态浮层**，而 `focus.push` 的 `inertOthers` 只把
+          「body 直接子节点里、不含浮层容器的那几个」置 inert。抽屉留在
+          `.af-wb__body` 里时，它所在的那棵子树就是整个 `#app`——而 `#app`
+          是 body 唯一的子节点，于是「背后全部 inert」退化成「一个都没
+          inert」：遮罩盖住了视觉，背后的对话区仍然可 Tab、可点。
+          （`TrajDrawer.vue` / `App.vue` 的帮助面板踩的是同一个坑，注释里
+          写着同一件事。）
+
+          遮罩跟着一起 Teleport：留在原位的话它会被 `#app` 的 inert 影响，
+          且定位基准变成 `.af-wb__body` 而不是视口。
+        -->
+        <Teleport to="body" :disabled="!isNarrow">
+          <!--
+            窄屏的遮罩：抽屉是最上层的一层浮层，点外面 = 关。
+            **只在窄屏存在**——宽屏下右侧是并列的一列，它旁边没有「外面」。
+            用 `@click.self` 而不是给遮罩单独一个按钮：遮罩本身就是那块区域，
+            点在抽屉里的事件会冒泡到遮罩，`self` 把它们挡掉。
+          -->
+          <div
+            v-if="drawerIsLayer"
+            class="af-wb__scrim"
+            data-dock-scrim
+            @click.self="closeDock"
+          ></div>
+
+          <div
+            v-if="activeWs?.dock"
+            ref="dockEl"
+            class="af-wb__dockwrap"
+            :data-drawer="isNarrow ? 'true' : undefined"
+            :aria-label="isNarrow ? '面板' : undefined"
+          >
           <PanelDock
             :panel="activeWs.panel"
             :mounted="activeWs.mounted"
@@ -2325,7 +2452,8 @@ onBeforeUnmount(() => {
               />
             </template>
           </PanelDock>
-        </div>
+          </div>
+        </Teleport>
       </div>
 
       <TrajDrawer
@@ -2393,11 +2521,27 @@ onBeforeUnmount(() => {
   flex: 1 1 auto;
   min-width: 0;
 }
+/* 遮罩（v0.5.0）：只在窄屏渲染（`v-if="drawerIsLayer"`），所以这里不需要
+   媒体查询——它出现的时候必然已经是覆盖态。 */
+.af-wb__scrim {
+  position: absolute; inset: 0;
+  background: var(--af-scrim);
+  z-index: 1;
+}
+
+/*
+  < 900px：右侧一格转**覆盖式抽屉**（§7.1 / D15）。
+
+  断点这个数必须与 `lib/media.ts` 的 `NARROW_MAX_PX` 一致——CSS 的媒体查询
+  JS 读不到，所以它天然有两份。`media.test.ts` 会把这两边钉在一起。
+*/
 @media (max-width: 900px) {
-  /* < 900px 面板坞覆盖式展开（§7.1）：对话全宽，坞叠在上面 */
+  /* 抽屉是 `position: absolute`，需要 `relative` 的锚点 */
   .af-wb__body {
     position: relative;
   }
+  /* 对话全宽：抽屉盖在上面，不占布局宽度。`!important` 是因为宽屏的
+     flex-basis 走内联样式（`activeWs.split`），内联的优先级高于类选择器。 */
   .af-wb__conv {
     flex: 1 1 auto !important;
   }
@@ -2408,6 +2552,12 @@ onBeforeUnmount(() => {
     background: var(--af-surface-0);
     border-left: 1px solid var(--af-border-strong);
     box-shadow: -16px 0 32px rgb(0 0 0 / 45%);
+    /* 抽屉比遮罩高一层：遮罩盖住对话，抽屉盖住遮罩 */
+    z-index: 2;
+    /* 缩到窗口宽度以内：`min()` 之上再兜一道，防止某个浏览器的 `min`
+       在某些缩放下算大了导致横向溢出（412px 那条用例的判据）。 */
+    max-width: 100vw;
+    min-width: 0;
   }
 }
 </style>

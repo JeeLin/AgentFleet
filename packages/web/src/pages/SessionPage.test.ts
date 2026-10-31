@@ -253,7 +253,11 @@ function reqOf(sent: Array<Record<string, unknown>>, op: string): Record<string,
  * 与面板头里的工具名。这里读前者并映射回 `PanelName`。
  */
 function currentPanel(w: ReturnType<typeof mountIn>): string | null {
-  const text = w.element.querySelector('[data-dock-current]')?.textContent ?? ''
+  // 先在 `w.element` 里找，找不到再查 `document`：窄屏时坞被 Teleport 到
+  // body（见页面里那段 Teleport 注释），`w.element` 里查不到它；宽屏下它
+  // 仍在原位。两种屏宽共用这一个判据，免得每条用例自己记住现在是哪种屏。
+  const el = w.element.querySelector('[data-dock-current]') ?? document.querySelector('[data-dock-current]')
+  const text = el?.textContent ?? ''
   const hit = PANEL_LABELS.find(([, label]) => text.includes(label))
   return hit ? hit[0] : null
 }
@@ -2764,5 +2768,194 @@ describe('分栏：只有左右一条，且每个 tab 各自保留自己的比�
     const px = (30 / 100) * 412
     expect(Number.isFinite(px) && px > 0).toBe(true)
     expect(px).toBeGreaterThanOrEqual(123)
+  })
+})
+
+/* ===========================================================================
+   v0.5.0 子任务 5：窄屏把右侧一格降级为覆盖式抽屉
+   ---------------------------------------------------------------------------
+   断点是 900px（`lib/media.ts` 的 `NARROW_MAX_PX`）。这一组钉住：
+   宽屏两块并列、窄屏只有一块可见、窄屏是**一层浮层**（遮罩 + Esc + 焦点回位）、
+   以及窄屏的缺省工具与宽屏一致。
+   =========================================================================== */
+describe('窄屏：右侧一格转覆盖式抽屉（v0.5.0）', () => {
+  const realMatchMedia = window.matchMedia
+  const realDock = { ...{} } as Record<string, never>
+  void realDock
+
+
+  /**
+   * 抽屉开着时，页面**背后**是否被设成 inert。
+   *
+   * `inert` 标在「body 的直接子元素里不含抽屉的那些」上（见 `focus.push`），
+   * 而测试把组件挂在一个 `div` 宿主里——所以判据读那个宿主，不是页面根。
+   * 读页面根或读对话区都会恒假：`inert` 这个 DOM 属性**不继承**，
+   * 子元素的 `.inert` 永远是 `false`。
+   */
+  function backdropInert(drawer: HTMLElement | null): boolean {
+    const hosts = Array.from(document.body.children).filter(
+      (el) => !(drawer && (el === drawer || el.contains(drawer))),
+    )
+    return hosts.some((el) => (el as HTMLElement).inert)
+  }
+
+  /**
+   * 查抽屉侧的元素。
+   *
+   * 窄屏时抽屉与遮罩被 Teleport 到 `body`（理由见页面里的 Teleport 注释：
+   * 不 Teleport 的话 `focus.push` 的 inert 会退化成「一个都没 inert」）。
+   * 所以窄屏要查 `document`；宽屏它们仍在原位，`w.element` 也能查到。
+   */
+  const q = (sel: string): HTMLElement | null => document.querySelector<HTMLElement>(sel)
+
+  /** 把视口固定在窄屏 / 宽屏，并返回一个能切换的句柄。 */
+  function viewport(narrow: boolean): { set: (v: boolean) => void; stop: () => void } {
+    const listeners = new Set<(e: MediaQueryListEvent) => void>()
+    const state = { matches: narrow }
+    const mql = {
+      get matches() {
+        return state.matches
+      },
+      media: '(max-width: 900px)',
+      addEventListener: (_: string, fn: (e: MediaQueryListEvent) => void) => listeners.add(fn),
+      removeEventListener: (_: string, fn: (e: MediaQueryListEvent) => void) => listeners.delete(fn),
+    }
+    window.matchMedia = (() => mql) as unknown as typeof window.matchMedia
+    return {
+      set: (v: boolean) => {
+        state.matches = v
+        for (const fn of listeners) fn({ matches: v } as MediaQueryListEvent)
+      },
+      stop: () => {
+        window.matchMedia = realMatchMedia
+      },
+    }
+  }
+
+  afterEach(() => {
+    window.matchMedia = realMatchMedia
+  })
+
+  it('宽屏（> 900px）：对话与右侧一格并列，右侧内部没有上下两块', async () => {
+    viewport(false)
+    const { w } = await mountWorkbench()
+
+    // 两块并列：把手在，且没有遮罩（宽屏下右侧不是模态）
+    expect(w.element.querySelector('[role="separator"]'), '宽屏有把手').not.toBeNull()
+    expect(w.element.querySelector('[data-dock-scrim]'), '宽屏没有遮罩').toBeNull()
+    expect(
+      w.element.querySelector('[data-drawer]'),
+      '宽屏的右侧不是抽屉',
+    ).toBeNull()
+
+    // 右侧内部只有一块面板正文（裁决 C 的单选语义，与屏宽无关）
+    const dock = w.element.querySelector('.af-wb__dockwrap')
+    const panes = dock?.querySelectorAll('.af-panelhost')
+    expect(panes?.length, '右侧只渲染一个面板正文').toBe(1)
+  })
+
+  it('窄屏（<= 900px）：出现遮罩与抽屉，且只显示一个工具', async () => {
+    viewport(true)
+    const { w } = await mountWorkbench()
+
+    expect(q('[data-dock-scrim]'), '窄屏必须有遮罩').not.toBeNull()
+    const drawer = q('[data-drawer="true"]')
+    expect(drawer, '窄屏的右侧标记为抽屉').not.toBeNull()
+
+    // 只渲染一个面板正文——不是「两个抽屉页签」
+    expect(drawer?.querySelectorAll('.af-panelhost').length).toBe(1)
+    // 窄屏没有把手：比例不参与布局，留一个拖不动的把手只会让人以为它坏了
+    expect(w.element.querySelector('[role="separator"]'), '窄屏不该有把手').toBeNull()
+  })
+
+  it('窄屏缺省工具与宽屏一致（都是 git，不随屏宽变）', async () => {
+    // 原方案把窄屏缺省定为终端（「窄屏只能看一块，先给能力最全的那块」）。
+    // 裁决 C 推翻了那个理由：宽屏同样只能看一块。两个屏宽给不同缺省，
+    // 会让「我打开会话看到什么」取决于窗口宽度——不可预测。
+    //
+    // 只挂载一次，用 viewport 切换：同一个用例里挂两次会留下未卸载的
+    // 组件，第二次挂载时 `keynav.register` 直接抛「一个动作只能有一个主人」。
+    const vp = viewport(true)
+    const { w } = await mountWorkbench()
+    expect(currentPanel(w), '窄屏缺省也必须是 git').toBe('git')
+
+    vp.set(false)
+    await flush(w)
+    expect(currentPanel(w), '宽屏缺省也是 git').toBe('git')
+    vp.stop()
+  })
+
+  it('窄屏不产生横向溢出（遮罩与抽屉都有宽度收口）', () => {
+    const src = readRepoFile('packages/web/src/pages/SessionPage.vue')
+    // 抽屉样式有**两条**同选择器的规则：宽屏的布局基线与窄屏的覆盖态。
+    // `cssRuleOf` 取第一条（宽屏），这里要的是窄屏那条，所以先切出 @media 段。
+    const mediaAt = src.indexOf('@media (max-width: 900px)')
+    expect(mediaAt, '窄屏媒体查询必须存在').toBeGreaterThan(0)
+    const drawer = cssRuleOf(src.slice(mediaAt), '.af-wb__dockwrap')
+    expect(drawer, '窄屏抽屉规则必须存在').not.toBe('')
+    expect(drawer, '抽屉必须有 min-width: 0（flex 子项能真正收窄的前提）').toContain('min-width: 0')
+    expect(drawer, '抽屉必须不超过视口宽').toMatch(/max-width:\s*100vw/)
+    // 遮罩必须铺满所在容器，否则点不到边角
+    expect(cssRuleOf(src, '.af-wb__scrim')).toContain('inset: 0')
+  })
+
+  it('窄屏抽屉是一层浮层：Esc 走 layer:escape，焦点回到触发元素', async () => {
+    viewport(true)
+    const { w } = await mountWorkbench()
+
+    // 打开抽屉的那一下：焦点应当进到抽屉里（push 的首焦点）
+    //
+    // 判据读 `inert` **只能读 push 直接标的那个节点**：`inert` 在规范里
+    // 是「作用在子树上的行为」，但 DOM 属性本身**不继承**——读子元素的
+    // `.inert` 永远是 `false`，那会让这条断言恒假。`focus.push` 标的是
+    // **body 的直接子元素**里「不含抽屉」的那些，也就是页面根 `.af-wb`
+    // 外面那一层（`App.vue` 的 `.af-app`）。所以这里读页面根自己。
+    const drawerEl = q('[data-drawer="true"]')
+    expect(backdropInert(drawerEl), '抽屉开着时页面其余部分必须 inert').toBe(true)
+
+    // Esc：走 handleLayerKeydown（同一个函数给 TrajDrawer / LoginPrompt 用）
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flush(w)
+
+    expect(q('[data-dock-scrim]'), 'Esc 必须关掉抽屉').toBeNull()
+    expect(backdropInert(null), '关掉之后背后必须解掉 inert').toBe(false)
+    // 焦点回到「打开面板」按钮（push 的 opener）
+    expect(
+      document.activeElement?.hasAttribute('data-open-panel'),
+      '焦点必须回到打开它的那个按钮',
+    ).toBe(true)
+  })
+
+  it('宽屏下抽屉语义不生效：点遮罩那套不该抢焦点', async () => {
+    viewport(false)
+    const { w } = await mountWorkbench()
+    // 前提：宽屏下坞**留在原位**（没 Teleport），所以它在 `w.element` 里查得到
+    expect(w.element.querySelector('[data-dock-current]'), '宽屏的坞还在原位').not.toBeNull()
+    // 反向验证：去掉 `drawerIsLayer` 里的 `isNarrow &&` → 这条红（并列布局
+    // 下把页面其余部分设 inert 会让半屏界面点不动）
+    expect(backdropInert(q('[data-drawer]')), '宽屏下不该有任何 inert').toBe(false)
+    // 上面那条在变异下会假绿：`q('[data-drawer]')` 在宽屏查不到（宽屏的坞
+    // 没有 `data-drawer`），于是 inert 判定里「除它以外的宿主」全是整棵
+    // 组件树，浮层自己也在里面——`hosts.some(inert)` 碰巧还是 false。
+    // 所以再钉一条不看 inert 的判据：宽屏**不该有遮罩**，这才是「不是模态」
+    // 的直接表现，而遮罩一出现就说明 `isNarrow &&` 被拿掉了。
+    expect(q('[data-dock-scrim]'), '宽屏不该有遮罩（它不是模态）').toBeNull()
+  })
+
+  it('宽屏拖到窄屏：抽屉该入栈；拖回宽屏：该出栈', async () => {
+    const vp = viewport(false)
+    const { w } = await mountWorkbench()
+    expect(backdropInert(q('[data-drawer]')), '前提：宽屏不 inert').toBe(false)
+
+    vp.set(true)
+    await flush(w)
+    expect(q('[data-dock-scrim]'), '变窄之后抽屉出现').not.toBeNull()
+    expect(backdropInert(q('[data-drawer="true"]')), '变窄之后背后必须 inert').toBe(true)
+
+    vp.set(false)
+    await flush(w)
+    expect(q('[data-dock-scrim]'), '变宽之后遮罩消失').toBeNull()
+    expect(backdropInert(q('[data-drawer]')), '变宽之后必须解掉 inert（否则整页点不动）').toBe(false)
+    vp.stop()
   })
 })
