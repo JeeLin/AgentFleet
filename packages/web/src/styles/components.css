@@ -1136,6 +1136,16 @@ kbd, .kbd {
    半透明，渐隐区里的 tab 名会发虚。裸滚动条不好看但内容始终是硬的。 */
 .af-tabbar::-webkit-scrollbar { height: 0; }
 
+/* tab 上的当前工具图标（v0.5.0）。v0.4.0 这里是个数字徽标（面板数）；
+   右侧只剩一格之后那个数恒为 1，于是换成图标——见 TabBar 的 props 注释。
+   它不抢宽度：名字被省略号截断时图标必须还在，否则「这个 tab 开着什么」
+   就只剩读屏能知道了。 */
+.af-tab__tool {
+  flex: 0 0 auto; display: inline-flex; align-items: center;
+  padding: 0 var(--af-space-1);
+  font-size: var(--af-text-xs); color: var(--af-fg-tertiary);
+}
+
 /* tab 本体只画内容区边框，条自己画底边——「哪条线属于谁」不能含糊。
    四条边框里只留左边一条（给未连接态上色），另外三条要么透明、要么零 */
 .af-tab {

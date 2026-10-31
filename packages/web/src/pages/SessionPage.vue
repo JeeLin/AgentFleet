@@ -208,7 +208,16 @@ interface TabWorkspace {
   dock: boolean
   /** 当前面板。`null` = 坞开着但还没选（只在坞开着时出现）。 */
   panel: PanelName | null
-  /** 这个 tab 已打开过的面板（决定坞标签与徽标数）。 */
+  /**
+   * 这个 tab 上挂着的面板。**v0.5.0 起恒为 0 或 1 个元素**（裁决 C：右侧一格）。
+   *
+   * 留着数组而不是收成单个值，是因为 `closeDock` 那段「逐个释放」的循环、
+   * 以及若干测试的前提都是「一组面板」，改成标量会牵动它们却不换来任何
+   * 表达力。不变量的执行点在 `openPanel`：它写 `ws.mounted = [panel]`
+   * （整体替换，不是 push），`closeDock` 写 `[]`。**别在别处 push**——
+   * 一 push 就破坏了这条不变量，而症状（两个通道同时活着）很容易被当成
+   * 「本来就是多面板」而漏过去。
+   */
   mounted: PanelName[]
   /**
    * 终端缓冲：纯文本（PTY 的原始字节），切走再回来仍在。
@@ -365,9 +374,26 @@ const activeWs = computed<TabWorkspace | null>(() =>
   tabs.value.activeId ? (workspaces.get(tabs.value.activeId) ?? null) : null,
 )
 
-const panelCounts = computed<Record<string, number>>(() => {
-  const out: Record<string, number> = {}
-  for (const tab of tabs.value.tabs) out[tab.id] = workspaces.get(tab.id)?.mounted.length ?? 0
+/**
+ * 每个 tab 当前开着的**工具**（`null` = 坞收着）。
+ *
+ * ── 为什么是工具而不是「面板数」 ──────────────────────────────────
+ * v0.4.0 这里给的是 `mounted.length`，那个数让「N 个 tab = N × 面板数条
+ * 活跃通道」这个代价可见。v0.5.0 右侧只有一格（裁决 C），`mounted` 恒为
+ * 一个元素，长度恒为 1——一个永远是 1 的徽标不是信息，是噪音。
+ *
+ * 但「这个 tab 现在开着什么」仍是有用信息（切回去之前想知道会看到终端还是
+ * Git），所以要留着，只换载体：图标比数字省地方，也不撒谎。
+ *
+ * 键用 `Record<string, PanelName | null>` 而不是 `Partial<...>`：
+ * 缺键与「没有工具」是两件事，前者会让 `v-if` 静默成立不了。
+ */
+const panelIcons = computed<Record<string, PanelName | null>>(() => {
+  const out: Record<string, PanelName | null> = {}
+  for (const tab of tabs.value.tabs) {
+    const ws = workspaces.get(tab.id)
+    out[tab.id] = ws && ws.dock ? ws.panel : null
+  }
   return out
 })
 
@@ -653,14 +679,40 @@ const DEFAULT_PANEL: PanelName = 'git'
 
 const split = ref(SPLIT_DEFAULT)
 
+/**
+ * 打开 / 换到某个面板。v0.5.0 起右侧只有**一格**，所以这里的语义是
+ * 「**换掉**当前显示的那一个」，不是「再挂一个」（裁决 C）。
+ *
+ * ── 点当前这一个 = 无副作用 ──────────────────────────────────────────
+ * 这是本函数最先做的一件事，也是最要紧的一条：`＋` 里列出了**全部三个**
+ * 工具（含当前这个），用户点到它时不能走「先释放再重建」那条路——
+ * 对终端来说那就是**把正在跑的 shell 杀掉**，而用户只是点了一下。
+ * 所以先判等、直接返回，一个通道调用都不发。
+ */
 function openPanel(panel: PanelName): void {
   const ws = activeWs.value
   const tab = activeTab.value
   if (!ws || !tab) return
   if (ended.value) return
+
+  const previous = ws.panel
   ws.dock = true
+
+  if (previous === panel && ws.mounted.includes(panel)) {
+    // 已经是这一个了：只保证坞是开的、把焦点送进正文，**不碰通道**。
+    void nextTick(() => focusPanelBody())
+    return
+  }
+
+  // 换掉旧的那一个 = 释放它的通道（§7.2「退出即释放」按工具算，不按坞算）。
+  // **终端这一路要格外小心**：`crates/node-core/src/connector/terminal.rs:305`
+  // 的 `close()` 走 `pty.close()`，释放通道 = **杀掉真 shell**。这是本里程碑
+  // 相对 v0.4.0 的行为降级（那时可以在多个已挂载面板间来回切而不丢 shell），
+  // 已知并接受，不在这里缓解——缓解属于新能力。键位文案与 e2e 如实反映它。
+  if (previous && previous !== panel) void releaseChannel(tab.id, previous)
+
   ws.panel = panel
-  if (!ws.mounted.includes(panel)) ws.mounted.push(panel)
+  ws.mounted = [panel]
   // 焦点进面板正文（用户按 `o` 的意图是去用那个面板，不是打开一个壳）
   void nextTick(() => focusPanelBody())
   // 显式选中终端面板 = 「给我一个终端」，这时就该建通道。
@@ -2010,7 +2062,7 @@ onBeforeUnmount(() => {
         ref="tabBarEl"
         :tabs="tabs.tabs"
         :active-id="tabs.activeId"
-        :panel-counts="panelCounts"
+        :panel-icons="panelIcons"
         :dirty="dirtyTabs"
         :conn-of="connOf"
         @activate="activate"

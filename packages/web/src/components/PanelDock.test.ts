@@ -22,12 +22,14 @@ function mount(props: Partial<Record<string, unknown>> = {}) {
 }
 
 describe('PanelDock：容器只做容器的事', () => {
-  it('有面板时列出坞标签，没有时明写「没有打开的面板」', () => {
-    const withPanels = mount()
-    expect(withPanels.element.querySelector('.af-docktabs__b')?.textContent).toContain('终端')
+  it('坞头写出当前是哪个工具；没选时明写「未选择」', () => {
+    // v0.5.0 拆掉了坞标签条（裁决 C：右侧一格，「＋」是唯一入口）。
+    // 但「我现在在看哪个」仍要有一处视觉落点——候选里的 aria-current 只给读屏。
+    const withPanel = mount()
+    expect(withPanel.element.querySelector('[data-dock-current]')?.textContent).toContain('终端')
 
     const none = mount({ panel: null, mounted: [] })
-    expect(none.element.querySelector('.af-docktabs__empty')?.textContent).toContain('没有打开的面板')
+    expect(none.element.querySelector('[data-dock-current]')?.textContent).toContain('未选择')
     expect(none.element.querySelector('.af-panelhost__void')?.textContent).toContain('面板')
   })
 
@@ -104,20 +106,21 @@ describe('PanelDock：交互才发 interact', () => {
     expect(w.emitted('interact')?.[0]).toEqual(['terminal'])
   })
 
-  it('点坞标签不是「与面板正文交互」——那是切换面板', () => {
-    const w = mount()
-    const tab = w.element.querySelector<HTMLElement>('.af-docktabs__b')
-    expect(tab).not.toBeNull()
+  it('点「＋」里的候选不是「与面板正文交互」——那是换工具', async () => {
+    const w = mount({ panel: 'terminal', mounted: ['terminal'] })
+    await w.element.querySelector<HTMLElement>('[data-add="toggle"]')?.click()
+    const files = w.element.querySelector<HTMLElement>('[data-add="files"]')
+    expect(files).not.toBeNull()
 
     // 分两个事件断言，因为组件本来就是这么分的：
-    // `pointerdown` 只走 `onInteract`（这里该被 `closest('.af-docktabs')` 挡掉），
+    // `pointerdown` 只走 `onInteract`（该被 `closest('.af-docktabs')` 挡掉），
     // 而 `open` 挂在 `@click` 上——只发 pointerdown 是拿不到 `open` 的。
-    tab?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+    files?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
     expect(w.emitted('interact')).toBeUndefined()
 
-    tab?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    expect(w.emitted('open')?.[0]).toEqual(['terminal'])
-    // 切换面板本身也不该顺带建通道
+    files?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    expect(w.emitted('open')?.[0]).toEqual(['files'])
+    // 换工具本身也不该顺带建通道
     expect(w.emitted('interact')).toBeUndefined()
   })
 
@@ -140,7 +143,7 @@ describe('PanelDock：交互才发 interact', () => {
     const w = mount()
     const close = w.element.querySelector('.af-docktabs__close')
     expect(close?.tagName).toBe('BUTTON')
-    expect(close?.getAttribute('aria-label')).toContain('关闭面板坞')
+    expect(close?.getAttribute('aria-label')).toContain('收起右侧面板')
     expect(close?.getAttribute('aria-label')).toContain('释放')
   })
 })
@@ -161,11 +164,33 @@ describe('PanelDock：文件面板', () => {
 })
 
 describe('PanelDock：无障碍', () => {
-  it('坞标签是 tablist，选中的那条 aria-selected=true', () => {
-    const w = mount({ mounted: ['terminal', 'files'] })
-    const tabs = Array.from(w.element.querySelectorAll('[role="tab"]'))
-    expect(tabs).toHaveLength(2)
-    expect(tabs.map((t) => t.getAttribute('aria-selected'))).toEqual(['true', 'false'])
+  /*
+    v0.4.0 这里断言的是「坞标签是 tablist、选中的那条 aria-selected=true」。
+    v0.5.0 拆掉了坞标签条（裁决 C），那条断言**随之改写**为下面这条——
+    不许悄悄删掉：坞从「多个已挂载面板的标签条」变成「一格 + 一个 ＋」，
+    这正是要钉住的语义变化。
+  */
+  it('「＋」列出全部三个工具，当前那个标 aria-current', async () => {
+    const w = mount({ panel: 'files', mounted: ['files'] })
+    await w.element.querySelector<HTMLElement>('[data-add="toggle"]')?.click()
+    const adds = Array.from(w.element.querySelectorAll('[data-add]'))
+      .map((el) => el.getAttribute('data-add'))
+      .filter((n): n is string => n !== 'cancel' && n !== 'toggle')
+    // 全部三个，且顺序与 PANEL_ORDER 一致；**含当前这一个**
+    expect(adds).toEqual(['terminal', 'files', 'git'])
+    const current = w.element.querySelector('[data-add="files"]')
+    expect(current?.getAttribute('aria-current')).toBe('true')
+    expect(w.element.querySelector('[data-add="git"]')?.getAttribute('aria-current')).toBe('false')
+  })
+
+  it('点「＋」里当前那一个 = 零副作用（不 emit open，终端不会被重建）', async () => {
+    const w = mount({ panel: 'terminal', mounted: ['terminal'] })
+    await w.element.querySelector<HTMLElement>('[data-add="toggle"]')?.click()
+    await w.element.querySelector<HTMLElement>('[data-add="terminal"]')?.click()
+    // 反向验证：去掉 `addPanel` 里的 `if (name === props.panel) return` → 这条红
+    expect(w.emitted('open')).toBeUndefined()
+    // 候选列表收起（点了就该收）
+    expect(w.element.querySelector('[data-add="terminal"]')).toBeNull()
   })
 
   it('终端输出是 role="log"（读屏会播报新增行）', () => {

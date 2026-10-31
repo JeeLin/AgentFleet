@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import TabBar from '@/components/TabBar.vue'
 import { mountIn } from '@/test/mount'
 import type { TabMeta } from '@/lib/tabs'
+import type { PanelName } from '@/lib/panel'
 
 const TABS: TabMeta[] = [
   { id: 's_1', title: 'alpha', path: '/srv/alpha', nodeId: 'n_1' },
@@ -10,12 +11,12 @@ const TABS: TabMeta[] = [
   { id: 's_3', title: 'gamma', path: '/srv/gamma', nodeId: 'n_2' },
 ]
 
-function mountBar(activeId: string | null = 's_1', panelCounts: Record<string, number> = {}) {
+function mountBar(activeId: string | null = 's_1', panelIcons: Record<string, PanelName | null> = {}) {
   const w = mountIn(TabBar, {
     props: {
       tabs: TABS,
       activeId,
-      panelCounts,
+      panelIcons,
       connOf: (nodeId: string | null) => (nodeId === 'n_2' ? 'offline' : 'online'),
     },
   })
@@ -130,16 +131,42 @@ describe('TabBar：关闭', () => {
   })
 })
 
-describe('TabBar：代价可见', () => {
-  it('开过面板的 tab 显示面板数徽标', () => {
-    const w = mountBar('s_1', { s_1: 2 })
-    const badge = Array.from(w.element.querySelectorAll('.af-badge')).find((el) => el.textContent?.trim() === '2')
-    expect(badge?.getAttribute('title')).toContain('2 个面板')
+describe('TabBar：当前工具可见', () => {
+  /*
+    v0.4.0 这一组断言的是「开过面板的 tab 显示面板数徽标（数字 + 「N 个面板」）」。
+    那个数字的含义是「这个 tab 上几块面板 = 几条活跃通道」。
+
+    v0.5.0 右侧只剩一格（裁决 C），面板数恒为 1，一个永远是 1 的数字不是信息。
+    文档的裁定是**改为在 tab 上显示当前工具的图标**，不是删掉这个位置——
+    「这个 tab 现在开着什么」仍然有用，图标是最省的载体。所以这几条**改写**
+    （不是删除）：断言载体从数字换成图标，且图标随工具变。
+  */
+  it('开着工具的 tab 显示那个工具的图标与名字', () => {
+    const w = mountBar('s_1', { s_1: 'git' })
+    const tool = w.element.querySelector('[data-sid="s_1"] [data-tab-tool]')
+    expect(tool, 'tab 上必须有当前工具标记').not.toBeNull()
+    expect(tool?.textContent?.trim(), 'git 用 ⑂').toBe('⑂')
+    expect(tool?.getAttribute('title')).toContain('Git')
   })
 
-  it('没开面板的 tab 不显示徽标（0 不是要展示的代价）', () => {
-    const w = mountBar('s_1', { s_1: 0 })
-    expect(w.element.querySelector('.af-badge')).toBeNull()
+  it('换工具就换图标（不是写死一个）', () => {
+    const w = mountBar('s_1', { s_1: 'terminal' })
+    const tool = w.element.querySelector('[data-sid="s_1"] [data-tab-tool]')
+    expect(tool?.textContent?.trim(), 'terminal 用 ▶').toBe('▶')
+    expect(tool?.getAttribute('title')).toContain('终端')
+  })
+
+  it('没有工具的 tab 不显示标记（收起坞 ≠ 开着什么）', () => {
+    const w = mountBar('s_1', { s_1: null })
+    expect(w.element.querySelector('[data-tab-tool]')).toBeNull()
+  })
+
+  it('面板数徽标已经没有了（恒为 1 的数字不该占这个位置）', () => {
+    const w = mountBar('s_1', { s_1: 'git' })
+    // 反向验证：把 TabBar 改回渲染 `{{ panelCounts[tab.id] }}` → 这条红
+    expect(Array.from(w.element.querySelectorAll('.af-badge')).map((el) => el.textContent?.trim())).not.toContain(
+      '1',
+    )
   })
 
   it('断开的设备在 tab 上有连接态标记', () => {

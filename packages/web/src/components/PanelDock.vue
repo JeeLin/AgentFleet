@@ -1,10 +1,18 @@
 <script setup lang="ts">
 /* ===========================================================================
-   PanelDock —— 面板坞容器（规范 §5.4 / §7.1 / §7.2）
+   PanelDock —— 右侧那一格面板容器（规范 §5.4 / §7.1 / §7.2）
    ---------------------------------------------------------------------------
-   坞里**同时**能放终端与文件，因为它们是同时看的两件事（改代码 → 跑命令 →
-   看报错）。这一层只管容器：标签、状态、释放入口。面板内容由 13b / 13c
-   挂进来——13a 的正文里只有一块占位，不画假的终端。
+   右侧**同一时刻只显示一个**工具（v0.5.0 裁决 C）。这一层只管容器：工具
+   入口（「＋」）、状态、释放入口。面板内容由 13b / 13c 挂进来。
+
+   ── 为什么没有标签条 ──────────────────────────────────────────────
+   v0.4.0 的坞是一排标签 + 一个「＋」，标签条负责在**已挂载**的几个面板间
+   切换。C 让右侧只剩一格之后，标签条与「＋」就成了**两个**切换入口，
+   而「当前是哪个工具」就出现两处真相。所以只剩「＋」：它列出**全部三个**
+   工具，选中即替换（替换掉的释放其通道）。
+
+   点「＋」里**当前这一个**必须是零副作用——不能走「先释放再重建」，
+   那对终端等于把正在跑的 shell 杀掉。
 
    ── 通道什么时候建：第一次交互 ────────────────────────────────────
    打开坞、切面板都**不**建通道：这时候还没有任何数据要流动，建一条空通道
@@ -21,7 +29,7 @@ import { computed, ref } from 'vue'
 
 import type { ChannelState } from '@/lib/channel'
 import { CHANNEL_STATE_LABEL, channelErrorLabel } from '@/lib/channel'
-import { PANEL_ORDER, type PanelName } from '@/lib/panel'
+import { PANEL_ICON, PANEL_LABEL, PANEL_ORDER, type PanelName } from '@/lib/panel'
 
 export interface ChannelView {
   state: ChannelState
@@ -52,13 +60,6 @@ const emit = defineEmits<{
   /** 第一次与面板正文交互：该建通道了。 */
   (e: 'interact', panel: PanelName): void
 }>()
-
-/**
- * 标签与图标。类型是 `Record<PanelName, string>`：扩 `PanelName` 时漏一项
- * 就编译不过，而不是运行时渲染出 `undefined`——这正是扩枚举时想要的失败方式。
- */
-const PANEL_LABEL: Record<PanelName, string> = { terminal: '终端', files: '文件', git: 'Git' }
-const PANEL_ICON: Record<PanelName, string> = { terminal: '▶', files: '▤', git: '⑂' }
 
 /** 状态 → 徽标色。`failed` 用 danger：它是唯一需要用户处理的态。 */
 const STATE_BADGE: Record<ChannelState, string> = {
@@ -97,15 +98,20 @@ const lines = computed(() => {
 const adding = ref(false)
 
 /**
- * 「＋」的候选：**还没挂进坞的面板**。
+ * 「＋」的候选：**全部三个**工具，顺序与 `PANEL_ORDER` 一致。
  *
- * 已挂载的不列出来：它已经在标签条上了，再列一遍会让「点它切换」与
- * 「点它再挂一个」两种语义撞在一起。
+ * 含当前显示的那一个：它是「换掉现在这一个」的唯一入口，所以必须能
+ * 在里面看见自己现在是什么。点它会**什么都不做**（见 `addPanel`）——
+ * 这比「隐藏当前项」好：隐藏了之后用户会怀疑列表不全，而列表本来就只有三个。
  */
-const candidates = computed(() => PANEL_ORDER.filter((n) => !props.mounted.includes(n)))
+const candidates = computed(() => PANEL_ORDER)
 
 function addPanel(name: PanelName): void {
   adding.value = false
+  // 点当前这一个 = 「关掉候选列表」，不是「重建它」。emit 出去也由页面的
+  // `openPanel` 判等返回，但**不 emit 更好**：不 emit 就没有任何一条路径
+  // 能把信号送到释放通道那一侧，这是结构上的保证，不靠下游自律。
+  if (name === props.panel) return
   emit('open', name)
 }
 
@@ -120,29 +126,25 @@ function onInteract(e: Event): void {
 
 <template>
   <div class="af-wb__dock" aria-label="面板坞">
-    <div class="af-docktabs" role="tablist" aria-label="面板">
-      <button
-        v-for="name in mounted"
-        :key="name"
-        class="af-docktabs__b"
-        type="button"
-        role="tab"
-        :aria-selected="panel === name ? 'true' : 'false'"
-        :data-panel="name"
-        @click="emit('open', name)"
-      >
-        <span aria-hidden="true">{{ PANEL_ICON[name] }}</span> {{ labelOf(name) }}
-        <span v-if="panel === name && channel.state === 'ready'" class="af-badge af-badge--ok">
-          已连接
-        </span>
-      </button>
-      <span v-if="!mounted.length" class="af-docktabs__empty af-t-mute">没有打开的面板</span>
+    <!--
+      工具入口只有「＋」这一个（裁决 C：右侧一格，没有坞标签条）。
+      它必须是真 <button> 且能 Tab 到——它是工具的**唯一**入口，
+      拦住键盘用户等于让他们看不见终端与文件（D10 立过同一条判据）。
+    -->
+    <div class="af-docktabs">
+      <span class="af-docktabs__current" data-dock-current>
+        <span aria-hidden="true">{{ panel ? PANEL_ICON[panel] : '▤' }}</span>
+        {{ panel ? labelOf(panel) : '未选择' }}
+      </span>
+      <span v-if="panel && channel.state === 'ready'" class="af-badge af-badge--ok">
+        已连接
+      </span>
       <span class="af-docktabs__spacer"></span>
-      <!-- 「＋」展开尚未挂载的面板候选。
-           **不弹浮层**：全仓没有 popover 组件，为两三个按钮新建一套浮层的
-           代价高于收益；而行内展开在 412px 窄列（§7.1 覆盖式展开）下不需要
-           处理贴边与超出视口，浮层则要。
-           候选里**必须有终端**——坞的缺省面板是 git，这是终端唯一的入口。 -->
+      <!--
+        候选**不弹浮层**：全仓没有 popover 组件，为三个按钮新建一套浮层的
+        代价高于收益；行内展开在 412px 窄列（§7.1 覆盖式展开）下也不需要
+        处理贴边与超出视口。
+      -->
       <template v-if="adding">
         <button
           v-for="name in candidates"
@@ -150,7 +152,9 @@ function onInteract(e: Event): void {
           class="af-docktabs__add"
           type="button"
           :data-add="name"
-          :aria-label="`打开${PANEL_LABEL[name]}面板`"
+          :aria-current="name === panel ? 'true' : 'false'"
+          :aria-label="name === panel ? `当前已是${PANEL_LABEL[name]}面板` : `换成${PANEL_LABEL[name]}面板`"
+          :title="name === panel ? '已经是这一个，点了不会重建通道' : `换成${PANEL_LABEL[name]}（会释放当前面板的通道）`"
           @click="addPanel(name)"
         >
           <span aria-hidden="true">{{ PANEL_ICON[name] }}</span> {{ PANEL_LABEL[name] }}
@@ -170,8 +174,8 @@ function onInteract(e: Event): void {
         class="af-docktabs__add"
         type="button"
         data-add="toggle"
-        aria-label="打开其它面板"
-        aria-expanded="false"
+        aria-label="换一个工具"
+        :aria-expanded="false"
         @click="adding = true"
       >
         ＋
@@ -179,7 +183,7 @@ function onInteract(e: Event): void {
       <button
         class="af-docktabs__close"
         type="button"
-        aria-label="关闭面板坞（释放面板通道）"
+        aria-label="收起右侧面板（释放它的通道）"
         @click="emit('close')"
       >
         ✕
@@ -289,11 +293,19 @@ function onInteract(e: Event): void {
   /* 宽度由页面按分栏比例给（flex-basis），这里只保证能收窄 */
   min-width: 240px;
 }
-.af-docktabs__empty {
-  display: flex;
+/* 当前工具名：坞标签条拆掉之后，「我现在在看哪个」必须仍然写在一处
+   （候选里的 aria-current 是给读屏的，视觉上需要这一行）。 */
+.af-docktabs__current {
+  display: inline-flex;
   align-items: center;
+  gap: var(--af-space-2);
   padding: 0 var(--af-space-4);
   font-size: var(--af-text-xs);
+  color: var(--af-fg-secondary);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .af-panelhead {
   border-left: 0;

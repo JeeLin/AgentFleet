@@ -27,6 +27,7 @@
 import { nextTick, ref } from 'vue'
 
 import { neighborId, type TabMeta, type TabsState } from '@/lib/tabs'
+import { PANEL_ICON, PANEL_LABEL, type PanelName } from '@/lib/panel'
 
 /** 一台 tab 的设备连接态。未选中且断开时 tab 左侧有一道 1px 色标（§5.5.7）。 */
 export type TabConn = 'online' | 'reconnecting' | 'offline'
@@ -35,8 +36,14 @@ const props = withDefaults(
   defineProps<{
     tabs: TabMeta[]
     activeId: string | null
-    /** 每个 tab 已打开的面板数——**让「N 个 tab = N × 面板数条通道」这个代价可见**。 */
-    panelCounts: Record<string, number>
+    /**
+     * 每个 tab 当前开着的工具（`null` = 坞收着）。
+     *
+     * v0.4.0 这里传的是「面板数」——它的用途是让「N 个 tab = N × 面板数条
+     * 活跃通道」这个代价可见。v0.5.0 右侧只有一格，那个数恒为 1，于是换成
+     * 工具图标：「这个 tab 现在开着什么」仍然有用，而图标是最省的载体。
+     */
+    panelIcons: Record<string, PanelName | null>
     /** tab 所属设备的连接态。 */
     connOf: (nodeId: string | null) => TabConn
     /**
@@ -149,11 +156,15 @@ defineExpose({ focusTab })
       >
         <span class="af-tab__name">{{ tab.title }}</span>
       </button>
+      <!-- 当前工具图标：切回去之前先知道会看到什么。
+           v0.4.0 这里是个数字徽标（面板数）；一格之后数字恒为 1，见 props 注释。 -->
       <span
-        v-if="panelCounts[tab.id]"
-        class="af-badge af-badge--info"
-        :title="`这个会话开了 ${panelCounts[tab.id]} 个面板：每个都是一条活跃通道`"
-      >{{ panelCounts[tab.id] }}</span>
+        v-if="panelIcons[tab.id]"
+        class="af-tab__tool"
+        data-tab-tool
+        :title="`这个会话当前开着${PANEL_LABEL[panelIcons[tab.id]!]}面板`"
+        aria-hidden="true"
+      >{{ PANEL_ICON[panelIcons[tab.id]!] }}</span>
       <!-- 脏标记：关掉这个 tab 会丢掉未保存的改动（§5.5.2）。写在 tab 上是因为
            那份改动随 tab 一起消失，而面板在切走时已经被卸掉、说不出口。 -->
       <span
