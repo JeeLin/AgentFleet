@@ -106,10 +106,27 @@ export const KEYS: readonly KeyGroup[] = [
     group: '会话工作台',
     scope: 'session',
     keys: [
-      { keys: ['o'], act: 'panel:open', label: '打开一个面板（终端 / 文件）', scope: 'session' },
-      { keys: ['['], act: 'panel:prev', label: '切换到上一个已打开的面板', scope: 'session' },
-      { keys: [']'], act: 'panel:next', label: '切换到下一个已打开的面板', scope: 'session' },
-      { keys: ['\\'], act: 'dock:toggle', label: '打开 / 收起面板坞', scope: 'session' },
+      /*
+        键位**没有改**，改的是语义（v0.5.0 裁决 C：右侧只有一格）。
+        label 必须跟着改：`?` 面板是用户查得到的承诺，而按 `]` 现在会
+        **替换**当前工具并**释放**它的通道——对终端就是杀掉正在跑的 shell。
+        改实现不改文案，`?` 会继续承诺「切换到下一个面板」，而实际发生的是
+        替换与释放，用户完全无从预料（这是本里程碑唯一的已知降级）。
+      */
+      { keys: ['o'], act: 'panel:open', label: '聚焦右侧那一格（没有则打开 Git）', scope: 'session' },
+      {
+        keys: ['['],
+        act: 'panel:prev',
+        label: '换成上一个工具（当前工具会被替换，通道释放：终端会被杀掉）',
+        scope: 'session',
+      },
+      {
+        keys: [']'],
+        act: 'panel:next',
+        label: '换成下一个工具（当前工具会被替换，通道释放：终端会被杀掉）',
+        scope: 'session',
+      },
+      { keys: ['\\'], act: 'dock:toggle', label: '打开 / 收起右侧那一格', scope: 'session' },
       { keys: ['t'], act: 'traj:toggle', label: '打开 / 关闭轨迹抽屉', scope: 'session' },
       {
         keys: ['g', 'g'],

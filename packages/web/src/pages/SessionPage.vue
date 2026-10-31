@@ -2292,15 +2292,24 @@ onBeforeUnmount(() => {
             @cancel="convCancel"
             @open-traj="toggleTraj"
           />
+          <!--
+            键位提示条（v0.5.0）：文案与 `lib/keynav.ts` 的 label **必须说同一件事**。
+            `?` 面板是用户查得到的承诺，这条提示是他没按 `?` 之前唯一看得见的
+            那句——两处不一致时，用户信的是眼前这句，然后被 `]` 杀掉一个 shell。
+
+            所以这里不写「切换面板」：v0.5.0 起 `[` / `]` 是**替换**当前工具，
+            并释放被换掉那个的通道（对终端就是杀掉 shell）。这句话不好塞进
+            一行提示，于是给出最短的诚实版本「换工具（终端会被杀掉）」。
+          -->
           <div class="af-wb__convhint af-field__hint">
-            <span><kbd>o</kbd> 打开面板</span>
+            <span><kbd>o</kbd> 聚焦右侧那一格</span>
             <!--
               窄屏下 `[` / `]` 仍然可用（换工具不因屏宽分叉），只是抽屉
               盖住了对话，这条提示看不见——所以窄屏改用 Esc 这一句。
             -->
-            <span v-if="!isNarrow"><kbd>[</kbd><kbd>]</kbd> 切换面板</span>
+            <span v-if="!isNarrow"><kbd>[</kbd><kbd>]</kbd> 换工具（终端会被杀掉）</span>
             <span v-else><kbd>Esc</kbd> 收起抽屉</span>
-            <span><kbd>\</kbd> 收起面板坞</span>
+            <span><kbd>\</kbd> 收起右侧那一格</span>
             <span class="af-spacer"></span>
             <span><kbd>⇧Tab</kbd> 回 tab 条</span>
           </div>
