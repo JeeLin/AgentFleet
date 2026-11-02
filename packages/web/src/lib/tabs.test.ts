@@ -14,7 +14,16 @@ import {
 } from './tabs'
 
 function meta(id: string, title = id): TabMeta {
-  return { id, title, path: `/srv/${title}`, nodeId: `n_${id}` }
+  return {
+    id,
+    title,
+    path: `/srv/${title}`,
+    nodeId: `n_${id}`,
+    // 缺省给 `unknown`：绝大多数用例不关心起点，而这一档不会让它们
+    // 意外地看起来测到了「有起点」。要别的态就自己构造。
+    baseRev: null,
+    baseRevStatus: 'unknown',
+  }
 }
 
 function stateOf(...ids: string[]): TabsState {
@@ -143,6 +152,51 @@ describe('sessionStorage 持久化', () => {
     expect(loadTabs(fakeStorage({ [STORAGE_KEY]: 'not json' })).tabs).toEqual([])
     expect(loadTabs(fakeStorage({ [STORAGE_KEY]: '{"tabs":1}' })).tabs).toEqual([])
     expect(loadTabs(fakeStorage({ [STORAGE_KEY]: '[{"id":1}]' })).tabs).toEqual([])
+  })
+
+  it('起点两字段随 tab 存取往返', () => {
+    const store = fakeStorage()
+    const withBase: TabMeta = {
+      ...meta('a'),
+      baseRev: '3f2a1b0c4d5e6f708192a3b4c5d6e7f809a1b2c3',
+      baseRevStatus: 'ok',
+    }
+    const noBase: TabMeta = { ...meta('b'), baseRev: null, baseRevStatus: 'not_a_repo' }
+    saveTabs(store, { tabs: [withBase, noBase], activeId: 'a' })
+
+    const back = loadTabs(store)
+    // **整对象相等**，不是只比 `id`：只比 id 的话，字段在写入时被丢掉也照样绿。
+    expect(back.tabs).toEqual([withBase, noBase])
+    expect(back.tabs[0]?.baseRev).toBe(withBase.baseRev)
+    expect(back.tabs[0]?.baseRevStatus).toBe('ok')
+    expect(back.tabs[1]?.baseRevStatus).toBe('not_a_repo')
+  })
+
+  it('v0.6.0 之前写下的 tab 缺起点字段：读成 unknown，不崩、不丢 tab', () => {
+    // 升级前 localStorage 里的真实形态：**没有** `baseRev` / `baseRevStatus`。
+    // 若让 `isTabMeta` 把它们当必填，这里会读到空列表——「升级一次，所有
+    // 打开的 tab 静默消失」。那时也确实没有记录起点，所以 `unknown` 是对的，
+    // 不是「解析失败随便填一个」。
+    const legacy = [
+      { id: 'a', title: 'alpha', path: '/srv/alpha', nodeId: 'n_1' },
+      { id: 'b', title: 'beta', path: '/srv/beta', nodeId: 'n_2' },
+    ]
+    const back = loadTabs(fakeStorage({ [STORAGE_KEY]: JSON.stringify(legacy) }))
+    expect(back.tabs.map((t) => t.id), '老 tab 不能被丢掉').toEqual(['a', 'b'])
+    for (const t of back.tabs) {
+      expect(t.baseRev).toBeNull()
+      expect(t.baseRevStatus).toBe('unknown')
+    }
+  })
+
+  it('起点字段是垃圾值（不是五态之一）时归 unknown，不把垃圾带上页面', () => {
+    // 反向验证：把 `normalizeTabMeta` 的兜底删掉（直接透传原始值），
+    // 这里会读到 'okay' 并一路进 `data-base-status` 与文案分档。
+    const weird = [{ id: 'a', title: 'alpha', path: '/srv/alpha', nodeId: 'n_1', baseRev: 7, baseRevStatus: 'okay' }]
+    const back = loadTabs(fakeStorage({ [STORAGE_KEY]: JSON.stringify(weird) }))
+    expect(back.tabs).toHaveLength(1)
+    expect(back.tabs[0]?.baseRevStatus).toBe('unknown')
+    expect(back.tabs[0]?.baseRev, '`baseRev` 不是字符串就当没有').toBeNull()
   })
 
   it('没有 storage（隐私模式 / SSR）时回落到 fallback', () => {

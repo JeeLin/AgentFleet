@@ -33,6 +33,22 @@ export interface TabMeta {
    * 「万一没有值」的分支都不会被发现。
    */
   nodeId: string | null
+  /**
+   * 会话起点（完整 40 位 hash）。`null` = 没有，原因看 `baseRevStatus`。
+   *
+   * **随 tab 持久化**：刷新页面时 `GET /api/sessions` 还会再给一遍，但那条
+   * 请求可能失败或慢；先把已知的值留在 tab 上，「起点」这一行就不会在刷新的
+   * 一瞬间闪成「未记录」——那会让人以为数据丢了。
+   */
+  baseRev: string | null
+  /**
+   * 起点为什么有／没有（Hub 的五态）。
+   *
+   * **缺字段的老数据读成 `'unknown'`**（见 `isTabMeta`）：v0.6.0 之前写进
+   * localStorage 的 tab 没有这两个键，而那时也确实没有记录起点——`unknown`
+   * 描述的就是这个事实，不是「解析失败随便填一个」。
+   */
+  baseRevStatus: 'ok' | 'not_a_repo' | 'no_head' | 'unavailable' | 'unknown'
 }
 
 export interface TabsState {
@@ -114,7 +130,9 @@ export function loadTabs(storage: Pick<Storage, 'getItem'> | null | undefined, f
   try {
     const parsed: unknown = JSON.parse(raw)
     if (!Array.isArray(parsed)) return { tabs: fallback, activeId: fallback[0]?.id ?? null }
-    const tabs = parsed.filter(isTabMeta)
+    const tabs = parsed
+      .map(normalizeTabMeta)
+      .filter((t): t is TabMeta => t !== null)
     if (!tabs.length) return { tabs: fallback, activeId: fallback[0]?.id ?? null }
     return { tabs, activeId: tabs[0]?.id ?? null }
   } catch {
@@ -142,4 +160,40 @@ function isTabMeta(v: unknown): v is TabMeta {
     typeof t.path === 'string' &&
     typeof t.nodeId === 'string'
   )
+}
+
+/**
+ * 把 localStorage 里读到的原始对象补齐成 [`TabMeta`]。
+ *
+ * **为什么不放进 `isTabMeta` 的类型谓词里**：类型谓词只能回答「是不是」，
+ * 不能「改一改再说是」。v0.6.0 新增的 `baseRev` / `baseRevStatus` 在**老数据
+ * 里根本不存在**，而老数据的其余字段全部合法——让它进不了类型谓词就等于
+ * 「升级一次，所有 tab 静默消失」。
+ *
+ * 缺 `baseRevStatus` 时填 `'unknown'`（不是 `'ok'`）：那时的会话确实没有
+ * 记录起点。其余形状不对的值一律归 `'unknown'`，同一条理由。
+ */
+export function normalizeTabMeta(v: unknown): TabMeta | null {
+  if (!isTabMeta(v)) return null
+  // `isTabMeta` 是类型谓词，编译后不改变变量的静态类型；这里要先按
+  // `unknown` 再按 `Record` 取可选的原始字段，否则 TS 认为 `TabMeta`
+  // 与索引签名不重叠。
+  const t = v as unknown as Record<string, unknown>
+  const rawStatus = t.baseRevStatus
+  const baseRevStatus: TabMeta['baseRevStatus'] =
+    rawStatus === 'ok' ||
+    rawStatus === 'not_a_repo' ||
+    rawStatus === 'no_head' ||
+    rawStatus === 'unavailable' ||
+    rawStatus === 'unknown'
+      ? rawStatus
+      : 'unknown'
+  return {
+    id: t.id as string,
+    title: t.title as string,
+    path: t.path as string,
+    nodeId: t.nodeId as string,
+    baseRev: typeof t.baseRev === 'string' ? t.baseRev : null,
+    baseRevStatus,
+  }
 }

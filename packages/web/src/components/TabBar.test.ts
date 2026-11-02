@@ -5,10 +5,13 @@ import { mountIn } from '@/test/mount'
 import type { TabMeta } from '@/lib/tabs'
 import type { PanelName } from '@/lib/panel'
 
+// 起点两字段对 tab 条的渲染没有影响（它不显示起点），但 `TabMeta` 要求它们。
+// 给 `unknown` + `null`：与「v0.6.0 之前建立的会话」一致，不会让任何用例
+// 意外地看起来测到了 `ok`。
 const TABS: TabMeta[] = [
-  { id: 's_1', title: 'alpha', path: '/srv/alpha', nodeId: 'n_1' },
-  { id: 's_2', title: 'beta', path: '/srv/beta', nodeId: 'n_1' },
-  { id: 's_3', title: 'gamma', path: '/srv/gamma', nodeId: 'n_2' },
+  { id: 's_1', title: 'alpha', path: '/srv/alpha', nodeId: 'n_1', baseRev: null, baseRevStatus: 'unknown' },
+  { id: 's_2', title: 'beta', path: '/srv/beta', nodeId: 'n_1', baseRev: null, baseRevStatus: 'unknown' },
+  { id: 's_3', title: 'gamma', path: '/srv/gamma', nodeId: 'n_2', baseRev: null, baseRevStatus: 'unknown' },
 ]
 
 function mountBar(activeId: string | null = 's_1', panelIcons: Record<string, PanelName | null> = {}) {

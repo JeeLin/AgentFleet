@@ -40,8 +40,8 @@ class FakeEventSource {
 }
 
 const TWO_TABS: TabMeta[] = [
-  { id: 's_1', title: 'alpha', path: '/srv/alpha', nodeId: 'n_1' },
-  { id: 's_2', title: 'beta', path: '/srv/beta', nodeId: 'n_1' },
+  { id: 's_1', title: 'alpha', path: '/srv/alpha', nodeId: 'n_1', baseRev: null, baseRevStatus: 'unknown' },
+  { id: 's_2', title: 'beta', path: '/srv/beta', nodeId: 'n_1', baseRev: null, baseRevStatus: 'unknown' },
 ]
 
 const SESSIONS = [
@@ -3020,5 +3020,187 @@ describe('窄屏：右侧一格转覆盖式抽屉（v0.5.0）', () => {
     expect(q('[data-dock-scrim]'), '变宽之后遮罩消失').toBeNull()
     expect(backdropInert(q('[data-drawer]')), '变宽之后必须解掉 inert（否则整页点不动）').toBe(false)
     vp.stop()
+  })
+})
+
+/* ===========================================================================
+   v0.6.0 子任务 5：会话起点 + 相对起点的产出概览
+   ---------------------------------------------------------------------------
+   这一组锁的是「会话起点在页面上怎么显示」。设计上起点属于**会话身份**
+   （与设备、路径同级），所以它必须活过「切换工具」——这是本组里最要紧的一条。
+
+   起点来自 `SessionSummary`（列表 API），产出概览来自同一条 git 通道上的
+   一次 `log`（`limit` 500）与 `status`（`files.length`）。
+   =========================================================================== */
+
+/** 一个带起点的 `SessionSummary`（`base_rev_status === 'ok'`）。 */
+const BASE_HEAD = '3f2a1b0c4d5e6f708192a3b4c5d6e7f809a1b2c3'
+
+/** 本次会话起点那一段文字。**取整个 `[data-base-rev]` 块**，不是只取 code。 */
+function baseRevText(w: ReturnType<typeof mountIn>): string {
+  return w.element.querySelector('[data-base-rev]')?.textContent ?? ''
+}
+
+describe('会话起点（v0.6.0）', () => {
+  it('状态行显示短起点（前 7 位），title 含完整 40 位', async () => {
+    const { w } = await mountWorkbench(
+      [{ id: 's_1', title: 'alpha', path: '/srv/alpha', nodeId: 'n_1', baseRev: BASE_HEAD, baseRevStatus: 'ok' }],
+    )
+    await interact(w)
+
+    expect(baseRevText(w)).toContain('3f2a1b0')
+    // **不只断言那 7 位**：`3f2a1b0` 也可能是别处漏出来的。断言完整 hash
+    // 只出现在 `title` 里（可见文本里不该有 40 位）。
+    const code = w.element.querySelector<HTMLElement>('[data-base-rev] code')
+    expect(code?.getAttribute('title')).toContain(BASE_HEAD)
+    expect(code?.textContent?.trim()).toBe('3f2a1b0')
+    expect(baseRevText(w)).not.toContain(BASE_HEAD)
+  })
+
+  it('四档「没有起点」各自一句互不相同的文案，且都不显示 hash', async () => {
+    // 四档并排：任意两档文案相同都会被下面的集合大小断言抓到。
+    const cases: Array<{ status: TabMeta['baseRevStatus']; want: string }> = [
+      { status: 'not_a_repo', want: '不是 git 仓库' },
+      { status: 'no_head', want: '仓库还没有提交' },
+      { status: 'unavailable', want: '未能读取' },
+      { status: 'unknown', want: '未记录' },
+    ]
+    const seen = new Set<string>()
+    for (const c of cases) {
+      const { w } = await mountWorkbench([
+        { id: 's_1', title: 'alpha', path: '/srv/alpha', nodeId: 'n_1', baseRev: null, baseRevStatus: c.status },
+      ])
+      await interact(w)
+      const text = baseRevText(w)
+      expect(text, `${c.status} 必须说「${c.want}」`).toContain(c.want)
+      expect(text, `${c.status} 不该显示一个 hash`).not.toMatch(/[0-9a-f]{7}/)
+      const e = w.element.querySelector<HTMLElement>('[data-base-rev] code')
+      expect(e?.dataset.baseStatus).toBe(c.status)
+      seen.add(text.trim())
+      w.unmount()
+    }
+    expect(seen.size, '四档文案必须互不相同').toBe(cases.length)
+  })
+
+  it('提交数与未提交文件数分开报，不相加', async () => {
+    const { w } = await mountWorkbench([
+      { id: 's_1', title: 'alpha', path: '/srv/alpha', nodeId: 'n_1', baseRev: BASE_HEAD, baseRevStatus: 'ok' },
+    ])
+    await interact(w)
+    const src = FakeEventSource.instances[0]
+
+    // status 先到（3 个改动文件），再回概览那次 log。
+    //
+    // **起点自身不算产出**：`BASE_HEAD` 在下标 1，它之前只有 1 条提交（下标 0），
+    // 所以正确的是「提交 1 次」——取下标，不是下标 + 1。这一条顺带锁住了那个
+    // off-by-one：写成 index + 1 会得到 2 次，本用例红。
+    await frame(w, src, {
+      op: 'status',
+      branch: 'main',
+      head: 'fff0000',
+      detached: false,
+      clean: false,
+      files: [
+        { x: ' ', y: 'M', path: 'src/a.rs' },
+        { x: 'A', y: ' ', path: 'src/b.rs' },
+        { x: '?', y: '?', path: 'notes.md' },
+      ],
+    })
+    await frame(w, src, {
+      op: 'log',
+      commits: [
+        { hash: 'fff0000aaaa', author: 'u', when: 'now', subject: 'c2' },
+        { hash: BASE_HEAD, author: 'u', when: 'then', subject: 'c1' },
+        { hash: '000aaaa1111', author: 'u', when: 'old', subject: 'c0' },
+      ],
+      truncated: false,
+    })
+
+    const line = w.element.querySelector('[data-base-overview]')?.textContent ?? ''
+    // **两句分别断言**：把它们相加报一个总数（5）的实现会同时让这两条红。
+    expect(line).toContain('提交 1 次')
+    expect(line).toContain('另有 3 个文件未提交')
+    expect(line, '起点自身的短 hash 要在场').toContain('3f2a1b0')
+    // 断言没有把两个数合成一个总数（1 + 3 = 4）。
+    expect(line).not.toContain('共 4')
+    expect(line).not.toContain('提交 4 次')
+  })
+
+  it('超过上限时只说「超过」并给下界，不报一个确切数字', async () => {
+    const { w } = await mountWorkbench([
+      { id: 's_1', title: 'alpha', path: '/srv/alpha', nodeId: 'n_1', baseRev: BASE_HEAD, baseRevStatus: 'ok' },
+    ])
+    await interact(w)
+    const src = FakeEventSource.instances[0]
+    await frame(w, src, {
+      op: 'status',
+      branch: 'main',
+      head: 'fff0000',
+      detached: false,
+      clean: true,
+      files: [],
+    })
+    // 500 条里找不到起点，且 truncated → 「超过 500」。
+    const commits = Array.from({ length: 500 }, (_, i) => ({
+      hash: `h${String(i).padStart(7, '0')}`,
+      author: 'u',
+      when: 'now',
+      subject: `c${i}`,
+    }))
+    await frame(w, src, { op: 'log', commits, truncated: true })
+
+    const line = w.element.querySelector('[data-base-overview]')?.textContent ?? ''
+    expect(line).toContain('超过 500')
+    // 反向验证点：把实现改成「找不到就报 0」会让这条红（0 是一个确切数字）。
+    expect(line, '不能报确切提交数').not.toContain('提交 0 次')
+    expect(line).not.toMatch(/提交 \d+ 次/)
+    // 也不能把它写成「提交 500 次」——500 只是下界。
+    expect(line).not.toContain('提交 500 次')
+  })
+
+  it('切到别的工具后起点仍在（起点不在 git 面板里）', async () => {
+    const { w } = await mountWorkbench([
+      { id: 's_1', title: 'alpha', path: '/srv/alpha', nodeId: 'n_1', baseRev: BASE_HEAD, baseRevStatus: 'ok' },
+    ])
+    await interact(w)
+    expect(baseRevText(w)).toContain('3f2a1b0')
+
+    // 切到终端（`GitPanel` 会卸载）。
+    await openPanelNamed(w, 'terminal')
+    expect(currentPanel(w), '前提：已经切到终端').toBe('terminal')
+    expect(baseRevText(w), '切到终端后起点必须还在').toContain('3f2a1b0')
+    // 概览那一行随 git 面板一起消失是对的（它只在看 git 时才有意义）。
+    expect(w.element.querySelector('[data-base-overview]')).toBeNull()
+  })
+
+  it('起点恰好是上限那一条时不说「超过」', async () => {
+    // off-by-one：`truncated` 的判据是「取到 limit + 1 条」。所以
+    // 「500 条、找不到起点、truncated === false」= 起点不在历史里（stale），
+    // 「500 条、找不到起点、truncated === true」= 起点比第 500 条还早（over_limit）。
+    const { w } = await mountWorkbench([
+      { id: 's_1', title: 'alpha', path: '/srv/alpha', nodeId: 'n_1', baseRev: BASE_HEAD, baseRevStatus: 'ok' },
+    ])
+    await interact(w)
+    const src = FakeEventSource.instances[0]
+    await frame(w, src, {
+      op: 'status',
+      branch: 'main',
+      head: 'fff0000',
+      detached: false,
+      clean: true,
+      files: [],
+    })
+    const commits = Array.from({ length: 500 }, (_, i) => ({
+      hash: `h${String(i).padStart(7, '0')}`,
+      author: 'u',
+      when: 'now',
+      subject: `c${i}`,
+    }))
+    await frame(w, src, { op: 'log', commits, truncated: false })
+
+    const line = w.element.querySelector('[data-base-overview]')?.textContent ?? ''
+    expect(line, 'stale 档要说起点已不在历史里').toContain('已不在当前历史里')
+    expect(line, 'stale 档不能说「超过」').not.toContain('超过')
+    expect(line, 'stale 档不报数').not.toMatch(/提交 \d+ 次/)
   })
 })

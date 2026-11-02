@@ -205,6 +205,40 @@ interface GitView {
  */
 type GitStatusFile = GitFile
 
+/**
+ * 会话起点 + 相对起点的产出概览。
+ *
+ * **为什么不塞进 `GitView`**：起点不属于 git 面板，它属于**会话身份**——
+ * 与设备、路径同级，切到终端 / 文件树时也应该看得见。放进 `GitView` 的后果
+ * 具体到模板：`GitPanel` 是 `#git` 插槽里的组件，换到别的面板它就卸载了，
+ * 起点跟着消失，于是「这次会话从哪开始的」只在看 git 时才知道。
+ */
+interface BaseView {
+  /** 起点完整 hash。`null` = 没有（原因看 `status`）。 */
+  rev: string | null
+  /** Hub 给的 `base_rev_status` 五态。**不含本地派生态**（见 `basePhase`）。 */
+  status: 'ok' | 'not_a_repo' | 'no_head' | 'unavailable' | 'unknown'
+  /**
+   * 相对起点的概览。`null` = 还算不出来（起点没有 / 还没问过 / 起点已不在历史里）。
+   *
+   * **两个数分开报**：`commits` 是 `base_rev` 之后的提交数，`files` 是**当前工作区
+   * 未提交**的改动文件数。加起来报一个总数会让用户以为「提交了 3 次、改了 7 个
+   * 文件」里的 7 包含那 3 次的内容。
+   */
+  progress: { commits: number; files: number } | null
+  /**
+   * 概览里的提交数**超过了 `log` 的上限**（找不到起点且 `truncated`）。
+   *
+   * 单独一个字段而不是把 `commits` 写成 `Infinity` 或 `-1`：那两种哨兵值会让
+   * 任何忘记判它的人算出无意义的数（`Infinity` 甚至能一路活到模板里）。
+   */
+  overLimit: boolean
+  /** 起点已不在当前历史里（rebase / 清理过）。不报数，只如实说。 */
+  stale: boolean
+  /** 概览那次 `log` 正在飞（防重入）。 */
+  reading: boolean
+}
+
 interface TabWorkspace {
   /** 面板坞开着吗。 */
   dock: boolean
@@ -307,6 +341,14 @@ interface TabWorkspace {
   views: Record<PanelName, ChannelView>
   /** git 面板的视图状态（分支 / 改动 / diff）。 */
   git: GitView
+  /**
+   * 会话起点与产出概览。
+   *
+   * **与 `git` 平级而不是它的子字段**：`git` 随 git 面板的生命周期起落
+   * （面板卸载了它的取数也就停了），而起点是会话身份的一部分，必须独立
+   * 存活——见 `BaseView` 的注释。
+   */
+  base: BaseView
 }
 
 const workspaces = reactive(new Map<string, TabWorkspace>())
@@ -369,6 +411,16 @@ function blankWorkspace(): TabWorkspace {
       logSelected: null,
       error: null,
     },
+    base: {
+      rev: null,
+      // 初值 `unknown` 而不是 `ok`：与 Hub 侧迁移默认值同一条口径——
+      // 「我还不知道」不能假装成「取到了」。
+      status: 'unknown',
+      progress: null,
+      overLimit: false,
+      stale: false,
+      reading: false,
+    },
   }
 }
 
@@ -384,7 +436,19 @@ function workspaceOf(id: string): TabWorkspace {
 /** 补上缺失的 tab 状态。**不在 computed 里建**：那会在求值过程中写回依赖的 Map。 */
 function ensureWorkspaces(list: TabMeta[]): void {
   for (const tab of list) {
-    if (!workspaces.has(tab.id)) workspaces.set(tab.id, blankWorkspace())
+    const ws = workspaces.get(tab.id)
+    if (!ws) {
+      const fresh = blankWorkspace()
+      // 新 workspace 的起点从 tab 元信息里恢复：刷新页面时先有 `tab.baseRev`
+      // （随 localStorage 来的），`GET /api/sessions` 是稍后的一次请求。
+      // 不先恢复的话，「起点」那一行会在刷新后闪成「未记录」。
+      seedBase(fresh, tab)
+      workspaces.set(tab.id, fresh)
+      continue
+    }
+    // 已存在的 workspace 也要跟着 tab 元信息走：会话列表刷新可能带来更新的
+    // 起点（同一个 id 在另一台设备上刚被补记）。`seedBase` 不动 `progress`。
+    seedBase(ws, tab)
   }
 }
 
@@ -587,7 +651,11 @@ function onPanelFrame(tabId: string, panel: PanelName, frame: ChannelFrame): voi
     return
   }
   if (panel === 'git') {
-    applyGitFrame(ws, frame.payload)
+    // 传 `tab` 而不是只用 `ws`：概览那次 `log` 要发请求，而请求要 tab 元信息
+    // （`gitRequest` 的第一参）。tab 找不到就说明这个 tab 刚被关掉，此时
+    // 什么也不做——帧还会来，但已经没有落点。
+    const tab = tabs.value.tabs.find((t) => t.id === tabId)
+    if (tab) applyGitFrame(ws, tab, frame.payload)
   }
 }
 
@@ -1370,6 +1438,24 @@ function gitKick(tab: TabMeta): void {
   })
 }
 
+/**
+ * 概览那次 `log`：**与历史分段那次是不同的请求**（`limit` 500 vs 30）。
+ *
+ * 不共用 `ws.git.commits`：共用会让用户打开历史分段时看到 500 条，或让概览
+ * 只看到 30 条。两次请求各自落各自的字段（`ws.git.commits` / `ws.base.*`）。
+ *
+ * 只在起点是 `ok` 时才问：没有起点就没有「相对起点」这回事，问了也白问。
+ */
+function baseKick(tab: TabMeta): void {
+  const ws = workspaces.get(tab.id)
+  if (!ws) return
+  if (!ws.base.rev || ws.base.status !== 'ok') return
+  if (ws.base.reading) return
+  ws.base.reading = true
+  // 问不到不是故障（设备忙 / 通道被关）：概览停在 `null`，起点那一行照常显示。
+  if (!gitRequest(tab, 'log', { limit: BASE_LOG_LIMIT })) ws.base.reading = false
+}
+
 /** 用户点了刷新：重问一次 status（丢失 diff 是刻意的，见 `applyGitFrame`）。 */
 function gitRefresh(tab: TabMeta): void {
   const ws = workspaces.get(tab.id)
@@ -1521,18 +1607,25 @@ function gitRequest(
  * `lib/channel.ts` 把 `reason` 也存下来，那是通道层的事，不在本里程碑的
  * 只读面板范围内。这里写下来是为了让下一个人知道「不是设备没说，是页面没读」。
  */
-function applyGitFrame(ws: TabWorkspace, payload: unknown): void {
+function applyGitFrame(ws: TabWorkspace, tab: TabMeta, payload: unknown): void {
   const frame = asRecord(payload)
   if (!frame) return
   switch (frame.op) {
     case 'status':
       applyGitStatus(ws.git, frame)
+      // status 回来了，改动文件数才是真的——这时才问概览那次 `log`。
+      // **必须在 `applyGitStatus` 之后**：`applyBaseLog` 要用 `git.files.length`。
+      if (frame.not_a_repo !== true) baseKick(tab)
       return
     case 'diff':
       applyGitDiff(ws.git, frame)
       return
     case 'log':
+      // 同一条通道上可能有**两种** log 请求（概览 500 条 / 历史 30 条）。
+      // 两者各写自己那份字段，谁也不会覆盖谁——判据只是「这一条在不在当前
+      // 起点的历史里」，与请求本身无关，所以两边都算一遍是安全的。
       applyGitLog(ws.git, frame)
+      applyBaseLog(ws.base, ws.git, frame)
       return
     case 'error':
       // git connector 目前不产生 `op:"error"`（失败走 `channel_error`），
@@ -1589,6 +1682,146 @@ function applyGitStatus(git: GitView, frame: Record<string, unknown>): void {
     if (typeof f.orig === 'string') out.orig = f.orig
     return [out]
   })
+}
+
+// ---------------------------------------------------------------------------
+// 会话起点与产出概览（v0.6.0）
+// ---------------------------------------------------------------------------
+
+/** 概览那一次 `log` 要多少条。`MAX_LOG_LIMIT`（见 `connector/git.rs`）。 */
+const BASE_LOG_LIMIT = 500
+
+/** 起点的短 hash（前 7 位）。与设备侧 `rev` 的 `short` 是同一个截法。 */
+function shortRev(rev: string): string {
+  return rev.slice(0, 7)
+}
+
+/**
+ * 从 tab 元信息里恢复起点（页面刚打开、`log` 还没飞时的初值）。
+ *
+ * **不覆盖已经算出来的概览**：`applyGitStatus` 之后会再调一次，那时
+ * `progress` 已被 `log` 填上，这里不能把它清掉。
+ */
+function seedBase(ws: TabWorkspace, tab: TabMeta): void {
+  ws.base.rev = tab.baseRev
+  ws.base.status = tab.baseRevStatus
+}
+
+/**
+ * 起点在页面上处于哪一档。
+ *
+ * **Hub 的五态之外，页面再派生三档**（后端都不产生，所以不进 API）：
+ * - `stale`：Hub 说 `ok`，但 `log` 里找不到那个 hash（被 rebase / 清理过）；
+ * - `over_limit`：同样找不到，但 `truncated` 说「还有更早的没列出来」——那
+ *   说明起点不是「不在历史里」，而是「比第 500 条还早」；
+ * - `device_removed`：设备已被删除，起点**照常显示**（它是历史事实，
+ *   不因设备消失而失效），但概览不再请求（开不了通道）。
+ *
+ * `truncated` 必须能把后两者分开：`truncated` 的判据是「取到 `limit + 1`
+ * 条」，所以「恰好 500 条且起点是第 501 条」与「恰好 500 条且起点不在历史里」
+ * 是同一个帧的前半段，只有 `truncated` 不同。把它写成 `>=` 会让两者混淆。
+ */
+function basePhase(ws: TabWorkspace): BaseView['status'] | 'stale' | 'over_limit' | 'device_removed' {
+  if (ws.base.status !== 'ok') return ws.base.status
+  if (ws.base.overLimit) return 'over_limit'
+  if (ws.base.stale) return 'stale'
+  return 'ok'
+}
+
+/**
+ * `log` 帧到达后算出「相对起点有多少产出」。
+ *
+ * **提交数与未提交文件数分开**：`commits` 是 `base_rev` 之后的提交数，
+ * `files` 是当前工作区未提交的改动文件数。加起来会让用户以为后者包含前者。
+ *
+ * **起点本身不算产出**：所以 `commits` 取的是 `base_rev` 在列表里的**下标**，
+ * 不是下标 +1。
+ */
+function applyBaseLog(base: BaseView, git: GitView, frame: Record<string, unknown>): void {
+  base.reading = false
+  const rev = base.rev
+  if (!rev) return
+  const raw = Array.isArray(frame.commits) ? frame.commits : []
+  const hashes = raw.flatMap((entry) => {
+    const c = asRecord(entry)
+    return c && typeof c.hash === 'string' ? [c.hash] : []
+  })
+  const truncated = frame.truncated === true
+  const index = hashes.indexOf(rev)
+
+  if (index >= 0) {
+    // 起点自身不算产出：取下标，不是下标 + 1。
+    base.progress = { commits: index, files: git.files.length }
+    base.overLimit = false
+    base.stale = false
+    return
+  }
+  // 找不到起点，两档必须靠 `truncated` 分开（见 `basePhase`）。
+  base.progress = null
+  base.overLimit = truncated
+  base.stale = !truncated
+}
+
+/**
+ * 一句话的产出概览。**不用图表、不显示「完成度」**：产出没有目标，
+ * 编一个分母就是在假装有意义。
+ *
+ * 返回 `null` = 这一档没有概览可讲（起点本来就没有 / 还没算出来）。
+ */
+function progressLine(ws: TabWorkspace): string | null {
+  const phase = basePhase(ws)
+  if (phase === 'ok') {
+    const p = ws.base.progress
+    if (!p) return null
+    const head = `本次会话：从 ${ws.base.rev ? shortRev(ws.base.rev) : '?'} 起`
+    const commits = p.commits === 1 ? '提交 1 次' : `提交 ${p.commits} 次`
+    if (p.files === 0) return `${head}，${commits}，工作区无未提交改动`
+    return `${head}，${commits}，另有 ${p.files} 个文件未提交`
+  }
+  if (phase === 'over_limit') {
+    // 只报下界，不报一个确切数字：`truncated` 意味着至少 `limit + 1` 条。
+    return `本次会话：从 ${ws.base.rev ? shortRev(ws.base.rev) : '?'} 起，提交超过 ${BASE_LOG_LIMIT} 次`
+  }
+  if (phase === 'stale') {
+    return `本次会话：起点 ${ws.base.rev ? shortRev(ws.base.rev) : '?'} 已不在当前历史里（可能被 rebase 或清理过）`
+  }
+  if (phase === 'device_removed') {
+    return '本次会话：设备已被移除，无法统计产出'
+  }
+  return null
+}
+
+/**
+ * 起点那一行（会话身份）。五态 + 设备已删，每一档一句**互不相同**的话。
+ *
+ * 与 `progressLine` 分开：起点是「有没有」，产出是「有多少」。合成一句会在
+ * 没有起点时把「为什么没有」和「所以统计不了」挤成半句。
+ */
+function baseIdentityLine(ws: TabWorkspace): string {
+  const phase = basePhase(ws)
+  if (phase === 'ok' || phase === 'stale' || phase === 'over_limit') {
+    return ws.base.rev ? shortRev(ws.base.rev) : '未知'
+  }
+  if (phase === 'device_removed') {
+    // 设备没了，起点仍在——它是一个历史事实。
+    return ws.base.rev ? shortRev(ws.base.rev) : '未记录'
+  }
+  if (phase === 'not_a_repo') return '不是 git 仓库'
+  if (phase === 'no_head') return '仓库还没有提交'
+  if (phase === 'unavailable') return '未能读取'
+  return '未记录'
+}
+
+/** 起点那一行的 `title`：完整 hash + 一句时间说明。 */
+function baseIdentityTitle(ws: TabWorkspace): string {
+  const phase = basePhase(ws)
+  if (ws.base.rev && (phase === 'ok' || phase === 'stale' || phase === 'over_limit' || phase === 'device_removed')) {
+    return `起点 ${ws.base.rev}（这次会话建立时工作区的 HEAD）`
+  }
+  if (phase === 'not_a_repo') return '这个目录不是 git 仓库，所以这次会话没有起点'
+  if (phase === 'no_head') return '这个仓库还没有任何提交，所以没有 HEAD 可作起点'
+  if (phase === 'unavailable') return '建会话时没能从设备读到起点（设备离线 / 超时 / 没装 git）'
+  return '起点未记录（v0.6.0 之前建立的会话）'
 }
 
 /** `op:"diff"`：一份 unified diff。 */
@@ -1912,6 +2145,8 @@ function metaOf(session: SessionSummary): TabMeta {
     title: sessionTitle(session),
     path: session.workspace.path,
     nodeId: session.workspace.node_id,
+    baseRev: session.base_rev,
+    baseRevStatus: session.base_rev_status,
   }
 }
 
@@ -1931,7 +2166,9 @@ function metaOf(session: SessionSummary): TabMeta {
  * `offline`，与「设备已删除」那一态在类型上仍然分得开。
  */
 function unknownTabMeta(id: string): TabMeta {
-  return { id, title: `会话 ${id}`, path: '', nodeId: '' }
+  // 起点同样是「未知」而不是「没有」：这条 id 连会话都没有，谈不上起点。
+  // 用 `unknown` 而不是 `not_a_repo` 之类——后者是一个具体的论断。
+  return { id, title: `会话 ${id}`, path: '', nodeId: '', baseRev: null, baseRevStatus: 'unknown' }
 }
 
 /** 一个 tab 的设备归属是否已知。判据只看 `nodeId`，不认识 `path` / `title`。 */
@@ -2258,6 +2495,20 @@ onBeforeUnmount(() => {
         <span class="af-t-mute">·</span>
         <span class="af-t-mute" data-agent-badge>{{ agentLabel }}</span>
         <span class="af-t-mute">·</span>
+        <!--
+          起点：会话身份的一部分（与设备、路径同级），所以在这里、不在 git 面板里。
+          切到终端 / 文件树时它必须还在——那正是「换工具不该丢掉『这次从哪开始』」
+          的全部理由。`title` 给完整 hash。
+        -->
+        <span v-if="activeWs" class="af-wb__baserev" data-base-rev>
+          <span class="af-t-mute">起点</span>
+          <code
+            class="af-fp"
+            :title="baseIdentityTitle(activeWs)"
+            :data-base-status="basePhase(activeWs)"
+          >{{ baseIdentityLine(activeWs) }}</code>
+        </span>
+        <span class="af-t-mute">·</span>
         <span>{{ startedLabel }}</span>
       </div>
 
@@ -2465,6 +2716,21 @@ onBeforeUnmount(() => {
               （`gitRequest` / `applyGitFrame`），面板只吃 props、只发 intent。
             -->
             <template #git>
+              <!--
+                本次会话产出概览。**放在 `GitPanel` 之上、由本页自己渲染**，
+                而不是给 `GitPanel` 加一个 slot：面板只吃 props、只发 intent，
+                而这份概览的数据源（`ws.base`）不属于 git 面板的视图状态。
+                放这里也满足「优先不改 `GitPanel.vue`」——它的 12 个 props 一个没动。
+
+                只在有话说的时候渲染：没有起点时这一行会是空白，白白吃掉一条高度。
+              -->
+              <p
+                v-if="activeWs.panel === 'git' && progressLine(activeWs)"
+                class="af-wb__baseov"
+                data-base-overview
+              >
+                {{ progressLine(activeWs) }}
+              </p>
               <GitPanel
                 v-if="activeWs.panel === 'git'"
                 :state="activeWs.views.git.state"
