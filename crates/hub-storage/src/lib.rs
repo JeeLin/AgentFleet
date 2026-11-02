@@ -19,7 +19,7 @@ pub use error::StorageError;
 pub use repo::{
     base64url_decode, base64url_of, Device, DeviceRepo, DeviceStatus, NewDevice, SecretRepo,
 };
-pub use session::{Session, SessionDetail, SessionRepo, SessionState};
+pub use session::{BaseRevStatus, Session, SessionDetail, SessionRepo, SessionState};
 pub use trajectory::{Gap, NewEvent, TrajectoryEvent, TrajectoryRepo, TurnBounds, TURN_END_KIND};
 pub use workspace::{
     list_sessions, recent_sessions, SessionListItem, Workspace, WorkspaceRepo, WorkspaceSession,

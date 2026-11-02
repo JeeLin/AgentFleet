@@ -9,7 +9,7 @@ use tracing::info;
 use crate::error::{Result, StorageError};
 
 /// 当前 schema 版本。新增表/列时 +1 并在此处追加迁移。
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// 一个迁移：版本号 + 在该事务内执行的 SQL。
 struct Migration {
@@ -52,6 +52,13 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("schema_v3.sql"),
         // v3 去外键：SQLite 不支持 DROP CONSTRAINT，只能重建 workspace / session
         rebuilds_tables: true,
+    },
+    Migration {
+        version: 4,
+        sql: include_str!("schema_v4.sql"),
+        // 两条 ADD COLUMN，不重建表。**必须为 false**：为 true 会去关外键，
+        // 而这里没有任何要重建的东西——多关一次只会让迁移期间的外键检查失效。
+        rebuilds_tables: false,
     },
 ];
 
@@ -671,5 +678,82 @@ mod tests {
             )
             .unwrap();
         assert_eq!(col, 1, "v2 已经跑过一次，列在库里");
+    }
+
+    /// v4：两列都加上，且**存量行**的 `base_rev_status` 必须是 `'unknown'`。
+    ///
+    /// 这条不是「列在不在」，而是**默认值对不对**：`ALTER TABLE ADD COLUMN`
+    /// 会把 DEFAULT 填给存量行。若默认值写成 `'ok'`，所有 v0.6.0 之前建的
+    /// 会话都会声称「我的起点是 0x…」，而 `base_rev` 是 NULL——一个看起来
+    /// 正常、实际毫无意义的谎话。
+    #[test]
+    fn migration_v4_adds_columns_with_unknown_for_existing_rows() {
+        let mut c = memory();
+        // 逐个跑到 v3：模拟一个 v0.6.0 之前就存在、里面有数据的库。
+        // 这里直接内联 v1..v3 的 SQL（与 `run` 同一批 `MIGRATIONS`，只是提前停）。
+        for m in MIGRATIONS.iter().filter(|m| m.version <= 3) {
+            let tx = c.transaction().unwrap();
+            tx.execute_batch(m.sql).unwrap();
+            tx.pragma_update(None, "user_version", m.version).unwrap();
+            tx.commit().unwrap();
+        }
+        // 在 v3 的形状里插一条会话（此时还没有那两列）。
+        c.execute_batch(
+            "INSERT INTO device (id, name, key_fingerprint, enrolled_at)
+                 VALUES ('n_a', 'pi', 'fp_a', 'unix:0');
+             INSERT INTO workspace (id, node_id, path, created_at)
+                 VALUES ('w_a', 'n_a', '/srv/app', 'unix:0');
+             INSERT INTO session (id, workspace_id, agent_id, state, created_at)
+                 VALUES ('s_old', 'w_a', 'opencode', 'running', 'unix:0');",
+        )
+        .unwrap();
+
+        run(&mut c).unwrap();
+        assert_eq!(
+            c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            4,
+            "必须升到 v4"
+        );
+
+        let (rev, status): (Option<String>, String) = c
+            .query_row(
+                "SELECT base_rev, base_rev_status FROM session WHERE id = 's_old'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(rev, None, "老会话没有起点");
+        assert_eq!(
+            status, "unknown",
+            "老会话必须是 unknown（「我不知道」），不是 ok"
+        );
+    }
+
+    /// v4 幂等：闸门生效，连跑两次不报 `duplicate column name`。
+    ///
+    /// `ALTER TABLE ADD COLUMN` **没有** `IF NOT EXISTS` 形式，重复执行会直接
+    /// 报错。所以这条测的是 `user_version` 闸门，而不是 DDL 本身宽容。
+    #[test]
+    fn migration_v4_is_idempotent() {
+        let mut c = memory();
+        run(&mut c).unwrap();
+        run(&mut c).unwrap();
+        run(&mut c).unwrap();
+        assert_eq!(
+            c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            4
+        );
+        for name in ["base_rev", "base_rev_status"] {
+            let n: i64 = c
+                .query_row(
+                    "SELECT count(*) FROM pragma_table_info('session') WHERE name=?1",
+                    [name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "session.{name} 只能有一列，不能重复加");
+        }
     }
 }

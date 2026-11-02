@@ -144,6 +144,41 @@ ACP **没有「重发第 N 条通知」的机制**。`session/load` 的重放实
 - 轨迹事件的表结构见 §7；工作区产物与 blob 的存储位置与保留策略见
   `workspace-and-sync.md`。
 
+### 6.1 会话起点（`session.base_rev` / `base_rev_status`，v0.6.0 / schema v4）
+
+`session` 表加两列，回答「这次会话基于哪个 rev 开始」：
+
+| 列 | 类型 | 语义 |
+|----|------|------|
+| `base_rev` | `TEXT` | 会话建立那一刻工作区的 HEAD，**完整 40 位**；没有起点时 `NULL` |
+| `base_rev_status` | `TEXT NOT NULL DEFAULT 'unknown'` | 起点为什么有／没有，五态之一 |
+
+`base_rev_status` 的**五态**：
+
+| 值 | 含义 | `base_rev` | 谁产生 |
+|----|------|-----------|--------|
+| `ok` | 取到了 | 40 位十六进制 | 建会话时探测成功 |
+| `not_a_repo` | 工作区不是 git 仓库 | `NULL` | 建会话时探测 |
+| `no_head` | 仓库还没有提交 | `NULL` | 建会话时探测 |
+| `unavailable` | 问了但没拿到（设备离线 / 超时 / 通道打不开 / connector 没上报） | `NULL` | 建会话时探测 |
+| `unknown` | 迁移前的老会话，从没记过 | `NULL` | **只有迁移默认值** |
+
+三条设计约束：
+
+1. **默认值是 `unknown` 不是 `ok`**。`ALTER TABLE ADD COLUMN` 会把默认值填给
+   **存量行**；填 `ok` 会让所有老会话声称「我的起点是 NULL」，一个看起来正常、
+   实际无意义的谎话。
+2. **`unknown` 与 `unavailable` 绝不合并**。前者是历史事实（那时还没有这个
+   功能），后者是「试过了、设备没给」。合并会把历史事实显示成一次故障。
+3. **不加 `CHECK` 约束**。`ADD COLUMN` 的 `CHECK` 会让存量行拿 `DEFAULT` 去过检查，
+   而这里需要的是「值非 `unknown` 时才校验 `base_rev` 非空」这种条件约束，
+   表达不了。合法性由 Rust 枚举 `BaseRevStatus` 的 `FromStr` 兜住，
+   解析失败报 `InvalidBaseRevStatus`（**不回落成 `Unknown`**，与 `SessionState`
+   对第三态的处理同一条口径）。
+
+起点**不是门禁**：取不到就如实记原因，建会话照常成功。理由见
+`docs/PRODUCT.md` §3.1「Git 操作界面」——非 git 工作区从 v0.2.0 起一直是合法用法。
+
 ---
 
 ## 7. 轨迹事件表（初版）

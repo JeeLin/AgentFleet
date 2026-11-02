@@ -285,7 +285,8 @@ pub fn recent_sessions(
     let conn = repo.pool().get()?;
     let mut stmt = conn.prepare(
         "SELECT w.id, w.node_id, w.removed_node_id, w.path, w.created_at,
-                s.id, s.workspace_id, s.agent_id, s.acp_session_id, s.state, s.created_at, s.ended_at
+                s.id, s.workspace_id, s.agent_id, s.acp_session_id, s.state, s.created_at,
+                s.ended_at, s.base_rev, s.base_rev_status
          FROM workspace w
          JOIN session s ON s.id = (
              SELECT s2.id FROM session s2
@@ -296,6 +297,9 @@ pub fn recent_sessions(
          ORDER BY w.created_at, w.id",
     )?;
     let rows = stmt.query_map(params![node_id], |r| {
+        // 偏移 **5** 是工作区那一段的列数；会话段在它之后，现在是九列。
+        // 这个数字不随 v0.6.0 的加列变化（变的是会话段的长度，而
+        // `from_row` 自己按 offset 往后取）。
         let raw = crate::session::RawSession::from_row(r, 5)?;
         Ok((row_to_workspace_at(r, 0)?, raw))
     })?;
@@ -329,7 +333,8 @@ pub struct SessionListItem {
 pub fn list_sessions(repo: &WorkspaceRepo) -> Result<Vec<SessionListItem>> {
     let conn = repo.pool().get()?;
     let mut stmt = conn.prepare(
-        "SELECT s.id, s.workspace_id, s.agent_id, s.acp_session_id, s.state, s.created_at, s.ended_at,
+        "SELECT s.id, s.workspace_id, s.agent_id, s.acp_session_id, s.state, s.created_at,
+                s.ended_at, s.base_rev, s.base_rev_status,
                 w.node_id, w.removed_node_id, w.path
          FROM session s
          JOIN workspace w ON w.id = s.workspace_id
@@ -337,10 +342,15 @@ pub fn list_sessions(repo: &WorkspaceRepo) -> Result<Vec<SessionListItem>> {
     )?;
     let rows = stmt.query_map([], |r| {
         let raw = crate::session::RawSession::from_row(r, 0)?;
-        // 从 7 起，不是 6：会话那一段多了一列 `acp_session_id`。写错的话
-        // `node_id` 会读到 `s.ended_at`，而 `ended_at` 是文本、`node_id` 是
-        // 可空文本——类型对得上，于是**静默错位**而不是报错。
-        Ok((raw, r.get(7)?, r.get(8)?, r.get(9)?))
+        // 从 **9** 起，不是 6 也不是 7：会话那一段现在是九列（v0.6.0 加了
+        // `base_rev` / `base_rev_status`，它们排在 `ended_at` 之后）。
+        //
+        // 这是同一个陷阱的**第二次实战**：写错的话 `node_id` 会读到
+        // `s.base_rev_status`（一个非空文本）而不是 `w.node_id`——类型对得上，
+        // 于是**静默错位**而不是报错。上一次是 `node_id` 读到 `s.ended_at`。
+        // 判据在测试里：`create_persists_the_base_rev_and_its_status` 交叉比对
+        // `find` / `detail` / `list` 三条路径读到的值，错一位必红。
+        Ok((raw, r.get(9)?, r.get(10)?, r.get(11)?))
     })?;
     rows.map(|r| {
         let (raw, node_id, removed_node_id, path) = r?;
@@ -359,7 +369,7 @@ mod tests {
     use super::*;
     use crate::db::open;
     use crate::repo::DeviceRepo;
-    use crate::session::{SessionRepo, SessionState};
+    use crate::session::{BaseRevStatus, SessionRepo, SessionState};
 
     const TS: &str = "unix:1700000000";
 
@@ -381,7 +391,7 @@ mod tests {
     }
 
     fn create(sr: &SessionRepo, node: &str, path: &str, at: &str) -> crate::session::Session {
-        sr.create(node, path, None, at).unwrap()
+        sr.create(node, path, None, at, None, BaseRevStatus::Unknown).unwrap()
     }
 
     /// 建会话即挂载工作区：一次调用同时产生 workspace 与 session 两行，
@@ -390,7 +400,14 @@ mod tests {
     fn creating_a_session_mounts_its_workspace_in_one_call() {
         let (_d, _wr, sr) = setup();
         let s = sr
-            .create("n_a", "~/src/app", Some("claude-code"), TS)
+            .create(
+                "n_a",
+                "~/src/app",
+                Some("claude-code"),
+                TS,
+                None,
+                BaseRevStatus::Unknown,
+            )
             .unwrap();
         assert_eq!(s.state, SessionState::Running);
         assert_eq!(s.agent_id.as_deref(), Some("claude-code"));
@@ -508,7 +525,7 @@ mod tests {
     #[test]
     fn a_workspace_cannot_reference_an_unknown_device() {
         let (_d, wr, sr) = setup();
-        let err = sr.create("n_ghost", "/srv/app", None, TS).unwrap_err();
+        let err = sr.create("n_ghost", "/srv/app", None, TS, None, BaseRevStatus::Unknown).unwrap_err();
         assert!(
             matches!(&err, StorageError::NoSuchDevice(n) if n == "n_ghost"),
             "an unknown device must be refused by name, got {err:?}"

@@ -45,6 +45,56 @@ impl FromStr for SessionState {
     }
 }
 
+/// 会话起点为什么有（或没有）。
+///
+/// **五态，不是三态**。前四态由建会话时的探测产生，`Unknown` 只由迁移 v4 的
+/// 列默认值产生——它是「v0.6.0 之前建的会话，那时还没有这个功能」。
+///
+/// **`Unknown` 与 `Unavailable` 绝不合并**：前者是历史事实（没什么可排查），
+/// 后者是「试过了、设备没给」（有东西可看）。合并会把一个历史事实显示成一次
+/// 故障，把用户引去查一个并不存在的问题。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BaseRevStatus {
+    /// 取到了，`base_rev` 是完整 hash。
+    Ok,
+    /// 工作区不是 git 仓库。
+    NotARepo,
+    /// 仓库还没有提交。
+    NoHead,
+    /// 问了但没拿到：设备离线 / 超时 / 通道打不开 / connector 没上报。
+    Unavailable,
+    /// 迁移前的老会话，从没记过。**只有迁移默认值产生这个值。**
+    Unknown,
+}
+
+impl BaseRevStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::NotARepo => "not_a_repo",
+            Self::NoHead => "no_head",
+            Self::Unavailable => "unavailable",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl FromStr for BaseRevStatus {
+    type Err = StorageError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "ok" => Ok(Self::Ok),
+            "not_a_repo" => Ok(Self::NotARepo),
+            "no_head" => Ok(Self::NoHead),
+            "unavailable" => Ok(Self::Unavailable),
+            "unknown" => Ok(Self::Unknown),
+            other => Err(StorageError::InvalidBaseRevStatus(other.to_string())),
+        }
+    }
+}
+
 /// 会话行。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -69,6 +119,24 @@ pub struct Session {
     pub created_at: String,
     /// `running` 时恒 `None`。
     pub ended_at: Option<String>,
+    /// 会话建立那一刻工作区的 HEAD（完整 40 位）。`None` = 没有起点，
+    /// 原因看 `base_rev_status`。
+    ///
+    /// **完整 hash 而不是短 hash**：短 hash 的长度会随仓库规模增长而变化
+    /// （`core.abbrev` 与对象数共同决定），拿它当基准的话同一个提交在不同
+    /// 时间可能给出不同的串。
+    pub base_rev: Option<String>,
+    /// 起点为什么有／没有（五态）。见 [`BaseRevStatus`]。
+    #[serde(default = "unknown_base_rev")]
+    pub base_rev_status: BaseRevStatus,
+}
+
+/// `base_rev_status` 的反序列化缺省值。
+///
+/// 取 `Unknown` 而不是 `Ok`：反序列化缺这个字段时，最保守的解释是
+/// 「我们不知道」，不是「它是好的」。
+fn unknown_base_rev() -> BaseRevStatus {
+    BaseRevStatus::Unknown
 }
 
 /// 会话 + 它的 `(node_id, path)`。工作区是只读定位（建会话时选定即锁定），
@@ -95,14 +163,21 @@ pub(crate) struct RawSession {
     state: String,
     created_at: String,
     ended_at: Option<String>,
+    base_rev: Option<String>,
+    base_rev_status: String,
 }
 
 impl RawSession {
-    /// 从行映射里的 `offset` 列起读**七列**会话列。
+    /// 从行映射里的 `offset` 列起读**九列**会话列。
     ///
     /// 联表查询（工作区 × 会话）用它把两段列拼回各自的形状：SQL 层选出来的
-    /// 列是平铺的，而这里是强类型的，两者靠**列序**对齐，所以那两条联表 SQL
-    /// 的 SELECT 列表与 `SESSION_COLUMNS` 必须逐字相同。
+    /// 列是平铺的，而这里是强类型的，两者靠**列序**对齐，所以那几条联表 SQL
+    /// 的 SELECT 列表必须与下面这九个 `r.get` 逐字同序。
+    ///
+    /// **v0.6.0 从七列扩到九列**（加 `base_rev` / `base_rev_status`）。凡是
+    /// 按 `offset` 往后取工作区列的地方（`detail` 的 `row_to_workspace_at`、
+    /// `list_sessions` 的 `r.get`），偏移都要同步 +2——写错的话读到的是隔壁
+    /// 那个**类型也对得上**的列，于是静默错位而不是报错。
     pub(crate) fn from_row(
         r: &Row<'_>,
         offset: usize,
@@ -115,6 +190,8 @@ impl RawSession {
             state: r.get(offset + 4)?,
             created_at: r.get(offset + 5)?,
             ended_at: r.get(offset + 6)?,
+            base_rev: r.get(offset + 7)?,
+            base_rev_status: r.get(offset + 8)?,
         })
     }
 
@@ -127,6 +204,8 @@ impl RawSession {
             state: SessionState::from_str(&self.state)?,
             created_at: self.created_at,
             ended_at: self.ended_at,
+            base_rev: self.base_rev,
+            base_rev_status: BaseRevStatus::from_str(&self.base_rev_status)?,
         })
     }
 }
@@ -153,12 +232,30 @@ impl SessionRepo {
     /// 建会话即挂载工作区：`upsert workspace` + `insert session` 在**同一个
     /// 事务**里，任一步失败都整体回滚——半截工作区（只有 workspace 没有
     /// session）会让概览里出现一个点进去什么都没有的条目。
+    ///
+    /// # `state` 为什么在这里就写死 `'running'`
+    ///
+    /// 新会话当然是 running。但这一条**不只是语义**：`v0.6.0` 起建会话时要在
+    /// 刚插入的会话上开一条 git 通道探起点，而开通道的入口
+    /// （`stream.rs::open_device_channel`）第一件事就查
+    /// `detail.session.state != Running` → 409。所以这行的 `'running'` 是
+    /// 「起点能探到」的**唯一前提**。改它之前先看那个门禁。
+    ///
+    /// # 为什么起点是建会话时的入参、不是事后回填
+    ///
+    /// `base_rev` 必须与「会话诞生」同一时刻产生，否则定义上就偏了（页面先问
+    /// 再带上，中间 agent 可能自己 commit 过）。代价是两条入库路径：`create`
+    /// 写初值（这里是 `None` + `Unknown`），探测完由 `set_base_rev` 回填。
+    /// 那个几十毫秒的窗口里 `status` 是 `unknown` 而不是 `ok`——`unknown` 是
+    /// 「不知道」，不会显示成一个错的起点。
     pub fn create(
         &self,
         node_id: &str,
         path: &str,
         agent_id: Option<&str>,
         now: &str,
+        base_rev: Option<&str>,
+        base_rev_status: BaseRevStatus,
     ) -> Result<Session> {
         let mut conn = self.pool.get()?;
         // `transaction()` 而非 `unchecked_transaction()`：见
@@ -169,15 +266,17 @@ impl SessionRepo {
         let ws = self.workspaces.upsert_in(&tx, node_id, path, now)?;
         let id = crate::workspace::new_id();
         tx.execute(
-            "INSERT INTO session (id, workspace_id, agent_id, state, created_at)
-             VALUES (?1, ?2, ?3, 'running', ?4)",
-            params![id, ws.id, agent_id, now],
+            "INSERT INTO session
+                 (id, workspace_id, agent_id, state, created_at, base_rev, base_rev_status)
+             VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6)",
+            params![id, ws.id, agent_id, now, base_rev, base_rev_status.as_str()],
         )?;
         // 从事务里读回：刚写的行与其余行走同一套映射，`state` 的 CHECK 与
         // 解析器口径不一致时不会静默放过。
         let row = tx
             .query_row(
-                "SELECT id, workspace_id, agent_id, acp_session_id, state, created_at, ended_at
+                "SELECT id, workspace_id, agent_id, acp_session_id, state, created_at, ended_at,
+                        base_rev, base_rev_status
                  FROM session WHERE id = ?1",
                 params![id],
                 raw_session,
@@ -185,6 +284,31 @@ impl SessionRepo {
             .into_session()?;
         tx.commit()?;
         Ok(row)
+    }
+
+    /// 回填写入会话起点。建会话时探测完成（或探测失败）后调用。
+    ///
+    /// 单独一个方法而不是在 `create` 里等探测结果：探测要开通道，而开通道要求
+    /// 会话行已存在（见 `create` 的文档注释）。顺序只能是「先落行 → 探测 →
+    /// 回填」。
+    /// 回填的会话不存在时报错，**不静默成功**——与 `set_acp_session_id` 同一条
+    /// 口径。静默成功的话「回填给了一个已被删掉的会话」永远不被发现，
+    /// 而它的症状要到下次打开页面看起点时才浮现，已经离现场很远。
+    pub fn set_base_rev(
+        &self,
+        id: &str,
+        rev: Option<&str>,
+        status: BaseRevStatus,
+    ) -> Result<()> {
+        let conn = self.pool.get()?;
+        let n = conn.execute(
+            "UPDATE session SET base_rev = ?2, base_rev_status = ?3 WHERE id = ?1",
+            params![id, rev, status.as_str()],
+        )?;
+        if n == 0 {
+            return Err(StorageError::NoSuchSession(id.to_string()));
+        }
+        Ok(())
     }
 
     /// 结束会话。
@@ -219,7 +343,8 @@ impl SessionRepo {
     pub fn find(&self, id: &str) -> Result<Option<Session>> {
         let conn = self.pool.get()?;
         conn.query_row(
-            "SELECT id, workspace_id, agent_id, acp_session_id, state, created_at, ended_at
+            "SELECT id, workspace_id, agent_id, acp_session_id, state, created_at, ended_at,
+                    base_rev, base_rev_status
              FROM session WHERE id = ?1",
             params![id],
             raw_session,
@@ -265,13 +390,16 @@ impl SessionRepo {
         let conn = self.pool.get()?;
         conn.query_row(
             "SELECT s.id, s.workspace_id, s.agent_id, s.acp_session_id, s.state,
-                    s.created_at, s.ended_at,
+                    s.created_at, s.ended_at, s.base_rev, s.base_rev_status,
                     w.id, w.node_id, w.removed_node_id, w.path, w.created_at
              FROM session s JOIN workspace w ON w.id = s.workspace_id
              WHERE s.id = ?1",
             params![id],
-            // 7 而不是 6：会话那一段多了一列 `acp_session_id`。
-            |r| Ok((raw_session(r)?, row_to_workspace_at(r, 7)?)),
+            // 9 而不是 6 或 7：会话那一段现在是九列（v0.6.0 加了
+            // `base_rev` / `base_rev_status`）。**这个数字与上面 SELECT 里
+            // `s.` 开头的列数必须相等**，差一位就会把 `w.id` 当成
+            // `base_rev_status` 读——两者都能读成字符串，于是静默错位。
+            |r| Ok((raw_session(r)?, row_to_workspace_at(r, 9)?)),
         )
         .optional()?
         .map(|(s, w)| {
@@ -345,7 +473,8 @@ mod tests {
         .unwrap();
         let got: Session = tx
             .query_row(
-                "SELECT id, workspace_id, agent_id, acp_session_id, state, created_at, ended_at
+                "SELECT id, workspace_id, agent_id, acp_session_id, state, created_at, ended_at,
+                        base_rev, base_rev_status
                  FROM session WHERE id = 's_tx'",
                 [],
                 raw_session,
@@ -356,15 +485,21 @@ mod tests {
         tx.commit().unwrap();
         assert_eq!(got.id, "s_tx");
         assert_eq!(got.state, SessionState::Running);
+        // 上面那条 INSERT **故意不写**这两个新列：它验的正是列默认值——
+        // `base_rev` 落 NULL、`base_rev_status` 落 'unknown'。如果默认值被写成
+        // 'ok'，所有不显式给起点的写入路径都会声称「取到了」，而 `base_rev`
+        // 是 NULL——一个看起来正常的谎话。
+        assert_eq!(got.base_rev, None);
+        assert_eq!(got.base_rev_status, BaseRevStatus::Unknown);
         assert_eq!(got.workspace_id, ws.id);
     }
 
     #[test]
     fn sessions_are_listed_newest_first() {
         let (_d, sr) = setup();
-        let a = sr.create("n_a", "/a", None, "unix:10").unwrap();
-        let b = sr.create("n_a", "/b", None, "unix:20").unwrap();
-        sr.create("n_a", "/c", None, "unix:20").unwrap();
+        let a = sr.create("n_a", "/a", None, "unix:10", None, BaseRevStatus::Unknown).unwrap();
+        let b = sr.create("n_a", "/b", None, "unix:20", None, BaseRevStatus::Unknown).unwrap();
+        sr.create("n_a", "/c", None, "unix:20", None, BaseRevStatus::Unknown).unwrap();
 
         let ids: Vec<String> = sr
             .list()
@@ -388,7 +523,7 @@ mod tests {
     #[test]
     fn a_broken_row_is_reported_instead_of_dropped_from_the_list() {
         let (_d, sr) = setup();
-        let id = sr.create("n_a", "/a", None, TS).unwrap().id;
+        let id = sr.create("n_a", "/a", None, TS, None, BaseRevStatus::Unknown).unwrap().id;
         corrupt_state(&sr);
 
         // 丢掉这一行会让页面少一个条目，而页面上没有任何地方能提示用户
@@ -407,7 +542,7 @@ mod tests {
     #[test]
     fn ending_a_session_records_when_it_ended() {
         let (_d, sr) = setup();
-        let s = sr.create("n_a", "/a", None, TS).unwrap();
+        let s = sr.create("n_a", "/a", None, TS, None, BaseRevStatus::Unknown).unwrap();
         sr.end(&s.id, "unix:1700000099").unwrap();
 
         let got = sr.find(&s.id).unwrap().unwrap();
@@ -427,7 +562,7 @@ mod tests {
     #[test]
     fn ending_an_already_ended_session_is_not_an_error() {
         let (_d, sr) = setup();
-        let s = sr.create("n_a", "/a", None, TS).unwrap();
+        let s = sr.create("n_a", "/a", None, TS, None, BaseRevStatus::Unknown).unwrap();
         sr.end(&s.id, "unix:10").unwrap();
         sr.end(&s.id, "unix:20").unwrap();
         assert_eq!(
@@ -440,7 +575,7 @@ mod tests {
     #[test]
     fn a_session_reports_its_device_and_path() {
         let (_d, sr) = setup();
-        let s = sr.create("n_a", "/srv/app", None, TS).unwrap();
+        let s = sr.create("n_a", "/srv/app", None, TS, None, BaseRevStatus::Unknown).unwrap();
         let d = sr.detail(&s.id).unwrap().expect("detail");
         assert_eq!(d.workspace.node_id.as_deref(), Some("n_a"));
         assert_eq!(d.workspace.removed_node_id, None, "设备还在时不填 removed");
@@ -457,7 +592,7 @@ mod tests {
     #[test]
     fn detail_also_reports_a_broken_row() {
         let (_d, sr) = setup();
-        let s = sr.create("n_a", "/a", None, TS).unwrap();
+        let s = sr.create("n_a", "/a", None, TS, None, BaseRevStatus::Unknown).unwrap();
         corrupt_state(&sr);
         assert!(matches!(
             sr.detail(&s.id).unwrap_err(),
@@ -484,7 +619,7 @@ mod tests {
     #[test]
     fn the_acp_session_id_is_none_until_it_is_recorded_then_round_trips() {
         let (_d, sr) = setup();
-        let s = sr.create("n_a", "/srv/app", Some("opencode"), TS).unwrap();
+        let s = sr.create("n_a", "/srv/app", Some("opencode"), TS, None, BaseRevStatus::Unknown).unwrap();
         assert_eq!(
             s.acp_session_id, None,
             "刚建的会话还没有 ACP id，设备侧据此走 session/new"
@@ -516,7 +651,7 @@ mod tests {
     #[test]
     fn recording_the_same_acp_session_id_twice_is_not_an_error() {
         let (_d, sr) = setup();
-        let s = sr.create("n_a", "/srv/app", Some("opencode"), TS).unwrap();
+        let s = sr.create("n_a", "/srv/app", Some("opencode"), TS, None, BaseRevStatus::Unknown).unwrap();
         sr.set_acp_session_id(&s.id, "ses_abc").unwrap();
         sr.set_acp_session_id(&s.id, "ses_abc").unwrap();
         assert_eq!(
@@ -537,5 +672,189 @@ mod tests {
             matches!(err, StorageError::NoSuchSession(ref id) if id == "s_missing"),
             "实际 {err:?}"
         );
+    }
+
+    /// 起点与状态**三条读取路径读到同一个值**。
+    ///
+    /// 这一条是「九列对齐」的实际守卫：`find` / `detail` / `list` 各有一份手写
+    /// SELECT，任何一处偏移写错一位，读到的就是隔壁那列。而 `base_rev` 与
+    /// `base_rev_status` 都是文本，**类型对得上，所以只会静默错位**——
+    /// 三条路径的值一旦不一致，这条立刻红。
+    #[test]
+    fn create_persists_the_base_rev_and_its_status() {
+        let (_d, sr) = setup();
+        let rev = "3f2a1b0c4d5e6f708192a3b4c5d6e7f809a1b2c3";
+        let s = sr
+            .create(
+                "n_a",
+                "/srv/app",
+                Some("opencode"),
+                TS,
+                Some(rev),
+                BaseRevStatus::Ok,
+            )
+            .unwrap();
+        // ① create 的事务内读回
+        assert_eq!(s.base_rev.as_deref(), Some(rev));
+        assert_eq!(s.base_rev_status, BaseRevStatus::Ok);
+
+        // ② find
+        let f = sr.find(&s.id).unwrap().unwrap();
+        assert_eq!(f.base_rev.as_deref(), Some(rev), "find 读到的起点不对");
+        assert_eq!(f.base_rev_status, BaseRevStatus::Ok, "find 读到的状态不对");
+
+        // ③ detail（`row_to_workspace_at(r, 9)` 的偏移）
+        let d = sr.detail(&s.id).unwrap().unwrap();
+        assert_eq!(d.session.base_rev.as_deref(), Some(rev), "detail 读到的起点不对");
+        assert_eq!(
+            d.session.base_rev_status,
+            BaseRevStatus::Ok,
+            "detail 读到的状态不对"
+        );
+        // detail 的工作区段也必须仍然对（偏移 +2 之后没把 w.* 读歪）
+        assert_eq!(d.workspace.path, "/srv/app", "detail 的工作区段错位了");
+        assert_eq!(d.workspace.node_id.as_deref(), Some("n_a"));
+
+        // ④ list（`r.get(9..=11)` 的偏移）
+        let ws = crate::workspace::list_sessions(&sr.workspaces).unwrap();
+        let one = ws.iter().find(|w| w.session.id == s.id).expect("在列表里");
+        assert_eq!(
+            one.session.base_rev.as_deref(),
+            Some(rev),
+            "list 读到的起点不对"
+        );
+        assert_eq!(
+            one.session.base_rev_status,
+            BaseRevStatus::Ok,
+            "list 读到的状态不对"
+        );
+        // list 的工作区三列也要对：偏移 9/10/11 写错时这里先红
+        assert_eq!(one.node_id.as_deref(), Some("n_a"), "list 的 node_id 错位了");
+        assert_eq!(one.path, "/srv/app", "list 的 path 错位了");
+        assert_eq!(one.removed_node_id, None);
+    }
+
+    /// 没有 rev 不等于没有 status：`Unavailable` 时 `base_rev` 是 NULL，
+    /// 而 `status` 必须照实读回——否则页面无从知道「为什么没有起点」。
+    #[test]
+    fn create_with_unavailable_status_has_no_rev() {
+        let (_d, sr) = setup();
+        let s = sr
+            .create("n_a", "/srv/app", None, TS, None, BaseRevStatus::Unavailable)
+            .unwrap();
+        assert_eq!(s.base_rev, None);
+        let f = sr.find(&s.id).unwrap().unwrap();
+        assert_eq!(f.base_rev, None);
+        assert_eq!(f.base_rev_status, BaseRevStatus::Unavailable);
+    }
+
+    /// 库里的状态不是五态之一 → 报错，**不回落成 Unknown**。
+    ///
+    /// 回落的话，「库里存了一个我们不认识的值」（数据损坏 / 有人手工改库）
+    /// 会被显示成「这是 v0.6.0 之前的老会话」——一个看起来正常的谎话。
+    /// 与 `SessionState` 对第三态的处理口径一致（`corrupt_state` 那条用例）。
+    #[test]
+    fn an_unknown_status_cannot_be_parsed_as_ok() {
+        let (_d, sr) = setup();
+        let s = sr.create("n_a", "/a", None, TS, None, BaseRevStatus::Ok).unwrap();
+        let conn = sr.pool.get().unwrap();
+        conn.execute(
+            "UPDATE session SET base_rev_status = 'okayish' WHERE id = ?1",
+            params![s.id],
+        )
+        .unwrap();
+        let err = sr.find(&s.id).unwrap_err();
+        assert!(
+            matches!(err, StorageError::InvalidBaseRevStatus(ref v) if v == "okayish"),
+            "必须报 InvalidBaseRevStatus，实际 {err:?}"
+        );
+    }
+
+    /// `set_base_rev` 回填后，`find` 读到的是新值——建会话「先落行 → 探测 →
+    /// 回填」的第二步真的落库了。
+    #[test]
+    fn set_base_rev_backfills_the_row() {
+        let (_d, sr) = setup();
+        let s = sr
+            .create("n_a", "/a", None, TS, None, BaseRevStatus::Unknown)
+            .unwrap();
+        let rev = "aaaa1111bbbb2222cccc3333dddd4444eeee5555";
+        sr.set_base_rev(&s.id, Some(rev), BaseRevStatus::Ok).unwrap();
+
+        let f = sr.find(&s.id).unwrap().unwrap();
+        assert_eq!(f.base_rev.as_deref(), Some(rev));
+        assert_eq!(f.base_rev_status, BaseRevStatus::Ok);
+    }
+
+    /// 回填给不存在的会话要报错（与 `set_acp_session_id` 同一条口径）。
+    #[test]
+    fn set_base_rev_on_an_unknown_session_is_an_error() {
+        let (_d, sr) = setup();
+        let err = sr
+            .set_base_rev("s_missing", None, BaseRevStatus::Unavailable)
+            .unwrap_err();
+        assert!(
+            matches!(err, StorageError::NoSuchSession(ref id) if id == "s_missing"),
+            "实际 {err:?}"
+        );
+    }
+
+    /// **`create` 落下的行必须是 `Running`。**
+    ///
+    /// 这条锁的是子任务 3 的隐式前提：建会话时要在刚插入的会话上开 git 通道探
+    /// 起点，而开通道的入口（`stream.rs::open_device_channel`）第一件事就查
+    /// `state != Running` → 409。`create` 里那个 `'running'` 字面量一旦被删或
+    /// 被改，**每一个**会话的起点都会变成 `unavailable`，而症状会出现在很远
+    /// 的地方（建会话的集成测试里）。在存储层这里先钉住，报错能直接指根因。
+    #[test]
+    fn create_leaves_the_session_running() {
+        let (_d, sr) = setup();
+        let s = sr
+            .create("n_a", "/a", None, TS, None, BaseRevStatus::Unknown)
+            .unwrap();
+        assert_eq!(
+            s.state,
+            SessionState::Running,
+            "新会话必须是 Running——它是「建会话时能探起点」的唯一前提"
+        );
+        // 走一遍库也不变（不是只在返回值上改的）
+        assert_eq!(sr.find(&s.id).unwrap().unwrap().state, SessionState::Running);
+    }
+
+    /// 五态的字面量往返：`as_str` / `from_str` 一一对应。
+    ///
+    /// 加一态却忘了改其中一个方向时，这一条会红——否则新态在库里存得进、
+    /// 读不出（或反之），而错误只会在某个真实会话上出现。
+    #[test]
+    fn every_base_rev_status_round_trips_through_its_literal() {
+        for st in [
+            BaseRevStatus::Ok,
+            BaseRevStatus::NotARepo,
+            BaseRevStatus::NoHead,
+            BaseRevStatus::Unavailable,
+            BaseRevStatus::Unknown,
+        ] {
+            let lit = st.as_str();
+            assert_eq!(
+                BaseRevStatus::from_str(lit).unwrap(),
+                st,
+                "{lit:?} 必须能读回同一个态"
+            );
+        }
+        // 五个字面量必须互不相同（否则两个态在库里不可区分）
+        let mut all: Vec<&str> = [
+            BaseRevStatus::Ok,
+            BaseRevStatus::NotARepo,
+            BaseRevStatus::NoHead,
+            BaseRevStatus::Unavailable,
+            BaseRevStatus::Unknown,
+        ]
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+        all.sort_unstable();
+        let n = all.len();
+        all.dedup();
+        assert_eq!(all.len(), n, "五态的字面量不得重复");
     }
 }

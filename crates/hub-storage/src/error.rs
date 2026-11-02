@@ -38,6 +38,14 @@ pub enum StorageError {
     #[error("invalid session.state in database: {0:?}")]
     InvalidSessionState(String),
 
+    /// 库里的 `session.base_rev_status` 不在五态里。
+    ///
+    /// **不静默回落 `Unknown`**：那会把「库里存了一个我们不认识的值」（数据
+    /// 损坏 / 迁移漏了 / 有人手工改库）显示成「这是 v0.6.0 之前的老会话」，
+    /// 一个看起来正常的谎话。与上面两条同一条口径。
+    #[error("invalid session.base_rev_status in database: {0:?}")]
+    InvalidBaseRevStatus(String),
+
     /// 工作区路径不合法。`reason` 是**规则**而不是「非法」——
     /// 页面上要显示它，用户得知道该改成什么。
     #[error("invalid workspace path {path:?}: {reason}")]

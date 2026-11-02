@@ -1593,7 +1593,14 @@ fn seed_session_without_an_agent(hub: &common::Hub, node_id: &str) -> String {
         .node_id()
         .to_string();
     hub_storage::SessionRepo::new(hub.state.pool().clone())
-        .create(&device, "~/src/app", None, &hub_core::registry::now_stamp())
+        .create(
+            &device,
+            "~/src/app",
+            None,
+            &hub_core::registry::now_stamp(),
+            None,
+            hub_storage::BaseRevStatus::Unknown,
+        )
         .expect("插一条 no-agent 会话")
         .id
 }

@@ -479,6 +479,8 @@ mod tests {
                 "/srv/app",
                 Some("opencode"),
                 "2026-01-01T00:00:00Z",
+                None,
+                crate::session::BaseRevStatus::Unknown,
             )
             .unwrap();
         let conn = pool.get().unwrap();

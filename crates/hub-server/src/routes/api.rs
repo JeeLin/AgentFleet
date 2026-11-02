@@ -581,6 +581,10 @@ pub async fn create_session(
             &body.path,
             Some(agent_id),
             &hub_core::registry::now_stamp(),
+            // v0.6.0：起点由紧随其后的探测回填（见下方 `set_base_rev`）。
+            // 初值用 `Unknown` 而不是随便一个态——它是「我还不知道」。
+            None,
+            hub_storage::BaseRevStatus::Unknown,
         )
         .map_err(|e| ApiError::internal_with("cannot create the session", e))?;
 
