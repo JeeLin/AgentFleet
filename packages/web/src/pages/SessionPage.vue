@@ -138,6 +138,15 @@ function connOf(nodeId: string | null): TabConn {
  * **对话 / 命令这条发送路**：设备没了，`workspace.node_id` 是 NULL，开通道只会
  * 换回 `device_removed` 409——拦不住的话，横幅说「设备已被删除」而输入框仍可
  * 打字、按钮仍可点，两句话互相打架。
+ *
+ * **这里只判 `node_id` 一个字段，是故意的，不要与 `setBaseDevice` 那个两字段
+ * 判据「统一」**：两者回答的不是同一个问题。这里问「有没有一个能发过去的
+ * 设备」——`node_id` 为 NULL 就发不出去，设备是删了还是从没归属过都一样，
+ * 所以一个字段就够。`setBaseDevice` 问「该对用户说『已被移除』还是『当前
+ * 不可达』」，那是两句话指向两个不同的下一步，才需要 `removed_node_id` 一起判。
+ * 把这里改成两字段判据会让「`node_id` 为 NULL 但没有 `removed_node_id`」
+ * 的会话**放行发送**，而那一次发送必然 409——横幅说的是「不知道设备在哪」，
+ * 用户点了却没反应。
  */
 const deviceRemoved = computed(() => current.value?.workspace.node_id === null)
 
@@ -476,9 +485,14 @@ function ensureWorkspaces(list: TabMeta[]): void {
  * 的判据要用 `WorkspaceRef` 的两个字段（`TabMeta` 只留了一个 `nodeId`，
  * 那一个字段**故意不够判别**——它把「已删」与「离线」压成同一个 `null`）。
  *
- * `offline` 从 `ws.views.git.error` 读：那是通道层把 Hub 的 `err::*` 码原样
- * 放进来的地方（见 `syncViews`）。只认 `OFFLINE` / `NOT_REPORTED` 两个码——
- * 其余错误（`channel_error`、`device_busy`）说明通道开起来了，不是不可达。
+ * `offline` 从 `ws.views.git.error` 读：那是通道层把 Hub 的错误码原样放进来的
+ * 地方（见 `syncViews`）。只认 `device_offline` / `connector_not_reported`
+ * 两个码——其余错误（`channel_error`、`device_busy`）说明通道开起来了，不是不可达。
+ *
+ * 这两个码是**字符串字面量**，与 `lib/channel.ts::channelErrorLabel` 和
+ * `lib/api.ts` 的同一个 switch 里那两份是同一条口径（Hub 侧是
+ * `crates/hub-server/src/lib.rs` 的 `err::OFFLINE` / `err::NOT_REPORTED`）。
+ * 本仓库前端没有一处把错误码收进枚举，此处不单独引入一个——只跟既有写法一致。
  */
 function syncBaseDevice(list: TabMeta[]): void {
   for (const tab of list) {

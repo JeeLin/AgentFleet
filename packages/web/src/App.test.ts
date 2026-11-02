@@ -549,6 +549,36 @@ describe('App：品牌区与导航合并成一列', () => {
     expect(closeBlock, '折叠态底部按钮规则必须存在').not.toBe('')
     expect(closeBlock).toContain('width: 40px')
   })
+
+  it('收起态不该有可拖动的横向滚动条（用户反馈 2026-10-28）', () => {
+    const css = readRepoFile('packages/web/src/styles/components.css')
+    // **必须取顶层那条规则**：`cssRuleOf(css, '.af-sidebar')` 会先命中
+    // `[data-rail='collapsed'] .af-sidebar { align-items: center; }`（它包含
+    // 子串 `.af-sidebar {`），于是断言读到的是那条覆盖规则、永远不含
+    // `overflow-x`。实测踩过：报 `expected '{ align-items: center; ' to
+    // contain 'overflow-x: hidden'`，看起来像修复没生效，其实是读错了规则。
+    const at = css.indexOf('\n.af-sidebar {')
+    expect(at, '顶层 .af-sidebar 规则必须存在').toBeGreaterThan(-1)
+    const block = css.slice(css.indexOf('{', at) + 1, css.indexOf('}', at))
+
+    // 这条断言锁的是一件容易被当成「没事」的事：**只写 `overflow-y: auto`
+    // 时 `overflow-x` 的计算值是 `auto`，不是 `visible`**。CSS Overflow
+    // 规范规定一轴非 visible 会把另一轴的 visible 提升成 auto，于是侧栏里
+    // 任何横向溢出都长成一条可拖动的滚动条，而它拖出来是一片空白。
+    //
+    // **必须剥掉注释再断言**。实测踩过：直接 `toContain('overflow-x: hidden')`
+    // 时，把那条声明删掉用例照样绿——因为解释为什么需要它的注释里就有这串字。
+    // 断言分不清「写了这条声明」与「写了这句散文」，那就是同义复述。
+    const decls = block.replace(/\/\*[\s\S]*?\*\//g, '')
+    // 反向验证（实测过）：删掉 `overflow-x: hidden` 这条声明，本用例必须红。
+    // 只断言 `overflow-y: auto` 存在是不够的——那条一直在，bug 也一直在。
+    expect(decls, 'overflow-x 必须显式收掉').toContain('overflow-x: hidden')
+
+    // 网格项默认 `min-width: auto`：内容比轨道宽时它会把侧栏顶宽，
+    // 顶宽之后 `overflow-x: hidden` 也只是把溢出裁掉、不留滚动条，
+    // 但侧栏会盖到主区上。两者一起才够。
+    expect(decls, '网格项必须允许收窄').toContain('min-width: 0')
+  })
 })
 
 describe('App：会话页自动收起侧栏（v0.5.0）', () => {

@@ -130,7 +130,13 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
    折叠不是「藏起来」，品牌标识得留下。 */
 .af-app[data-rail='collapsed'] .af-brand {
   flex-direction: column; align-items: center;
-  gap: var(--af-space-4); padding: var(--af-space-3) 0;
+  /* 收起态内容区实测 40px：`gap: var(--af-space-4)`（12px）加上竖排名字的
+     字宽会把这一列撑到 40px 以外，横向溢出因此产生。给一个 1px 的 gap 是
+     够的（竖排名字自己带 `letter-spacing`，行距不缺），而 padding 收到 0
+     是因为 `.af-sidebar` 自己已有 `space-3` 的左右内边距，这里再叠一层就
+     双重缩进。 */
+  gap: var(--af-space-1); padding: var(--af-space-3) 0;
+  min-width: 0;
 }
 .af-app[data-rail='collapsed'] .af-brand__name {
   writing-mode: vertical-rl;
@@ -142,7 +148,18 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
   padding: var(--af-space-3);
   background: var(--af-surface-1);
   border-right: 1px solid var(--af-border-subtle);
+  /* **`overflow-x: hidden` 不能省**（2026-10-28 用户反馈）。
+     只写 `overflow-y: auto` 时 `overflow-x` 的计算值**是 `auto` 而不是
+     `visible`**（CSS Overflow 规范：一轴非 visible 会把另一轴的 visible
+     提升成 auto），于是侧栏里任何一点横向溢出都变成一条可拖动的横向滚动条。
+     收起态内容区只有 40px（52px 减左右各 6px），竖排 `AGENTFLEET` 的
+     `letter-spacing` 与 `.af-brand` 的 `gap` 很容易越出去，那条滚动条就
+     出现了，而它拖出来是一片空白——用户把它读成「页面坏了」。
+     侧栏本来就没有横向可看的东西，纵向滚就够，所以直接裁掉。 */
+  overflow-x: hidden;
   overflow-y: auto;
+  /* 网格项默认 `min-width: auto` 会被内容顶宽，收到 52px 的轨道之外。 */
+  min-width: 0;
 }
 /* 只负责 1px 的条目间距。上一版这里还有分组标题（`.af-navgroup__title`），
    但三个组各只有一项——标题与它唯一的条目说的常常是同一个词，所以标题与
