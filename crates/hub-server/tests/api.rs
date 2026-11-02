@@ -219,6 +219,46 @@ async fn enrolled_device_reporting(
     (node_id, est)
 }
 
+/// 与 [`enrolled_device_reporting`] 相同，但**额外上报 `git` connector**。
+///
+/// # 为什么需要单独一个（v0.6.0）
+///
+/// `v0.6.0` 起建会话会向设备探一次起点，而探针的第四道门禁要求设备**上报了
+/// `git`**——没上报就直接折成 `unavailable`，一个帧都不发（见
+/// `routes::base_rev`）。原 helper 只报 `terminal`，于是用它造出的会话
+/// `base_rev_status` 恒为 `unavailable`，测不到 `ok` / `not_a_repo` 那两态。
+///
+/// 不改原 helper 的签名而是并列一个：它有十余个调用点，且**那些用例测的东西
+/// 与 git 毫无关系**——让它们凭空多上报一个 connector，会把探针的帧塞进原本
+/// 干净的帧流（`tests/channel_flow.rs` 因此栽过一次，见那边的
+/// `report_connectors_without_git`）。
+async fn enrolled_device_reporting_with_git(
+    hub: &common::Hub,
+    agents: Value,
+    expect_rows: usize,
+) -> (String, node_core::conn::Established) {
+    let (mut est, node_id, _kp) = common::connect_enrolled(hub).await;
+    common::send_heartbeat(
+        &mut est,
+        json!({
+            "node_version": "0.1.0",
+            "capabilities": {"connectors": ["terminal", "git"], "agents": agents},
+            "resources": {"cpu": 34, "mem": 61},
+            "workspace_roots": [],
+        }),
+    )
+    .await;
+    common::wait_until(Duration::from_secs(2), || {
+        hub.state
+            .agent_runtime()
+            .list_for_node(&node_id)
+            .map(|rows| rows.len() == expect_rows)
+            .unwrap_or(false)
+    })
+    .await;
+    (node_id, est)
+}
+
 // ---------------------------------------------------------------------------
 // 标准③：未认证一律 401，且不得是 404 / 200
 // ---------------------------------------------------------------------------
@@ -595,6 +635,248 @@ async fn creating_a_session_returns_a_detail_with_its_locked_workspace() {
     assert_eq!(items.as_array().unwrap().len(), 1);
     assert_eq!(items[0]["id"], v["id"]);
     assert_eq!(items[0]["workspace"]["path"], json!("~/src/app"));
+}
+
+// ---------------------------------------------------------------------------
+// 子任务 4（v0.6.0）：起点随会话列表带出，且五态在 API 层可区分
+// ---------------------------------------------------------------------------
+
+/// 只 enroll 一台设备（不发心跳），返回 **Hub 实际签发的** node_id。
+///
+/// 注意返回值：`enroll` 会忽略 `NewDevice.id` 并用 `identity::issue_node_id()`
+/// 自己发一个（`registry.rs::enroll`），所以传进去的 id 只会落成 `device.id`
+/// 之前的临时值——拿它去插会话会报 `NoSuchDevice`。必须用这里返回的那个。
+fn enroll_only(hub: &common::Hub, label: &str) -> String {
+    hub.state
+        .registry()
+        .enroll(
+            &identity::KeyPair::generate().public_key_bytes(),
+            hub_storage::repo::NewDevice {
+                id: label.to_string(),
+                name: label.into(),
+                key_fingerprint: String::new(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                hostname: label.into(),
+                node_version: "0.1.0".into(),
+            },
+        )
+        .expect("enroll")
+        .node_id()
+        .to_string()
+}
+
+/// 列表里**每一行**都带 `base_rev` 与 `base_rev_status` 两键，且三行三种态。
+///
+/// 造三行不同来源的会话：
+/// - `ok`：设备回了一个真 hash（走真入口 `POST /api/sessions` + 桩设备）；
+/// - `not_a_repo`：设备回 `not_a_repo: true`（同上）；
+/// - `unknown`：迁移前的老会话——`SessionRepo::create` 直接传 `Unknown`，
+///   这是它**唯一**的产生方式（正常入口一定会探测并覆盖成前四态之一）。
+///
+/// **两键必须在**，哪怕值是 `null`：`skip_serializing_if` 会让键整个消失，
+/// 于是「老 Hub + 新页面」与「新 Hub 正常返回无起点」在 TS 里长得一样。
+/// 所以这里断言的是 `contains_key`，不是「值非空」。
+#[tokio::test]
+async fn the_session_list_carries_both_base_rev_keys_for_every_row() {
+    let hub = common::Hub::boot().await;
+    // **必须上报 `git`**：探针的第四道门禁要求它，否则两条会话都是 `unavailable`。
+    let (node_id, _keepalive) = enrolled_device_reporting_with_git(
+        &hub,
+        json!([{"id": "opencode", "name": "opencode", "version": "2.1.4", "available": true}]),
+        1,
+    )
+    .await;
+    let h = Harness::from_hub(hub).await;
+
+    // --- 第 3 行：迁移前的老会话（`unknown`）。先插，免得被上面的探测串扰。
+    let legacy_node = enroll_only(&h.hub, "v4-list-legacy");
+    let legacy_id = hub_storage::SessionRepo::new(h.hub.state.pool().clone())
+        .create(
+            &legacy_node,
+            "~/legacy",
+            None,
+            &hub_core::registry::now_stamp(),
+            None,
+            hub_storage::BaseRevStatus::Unknown,
+        )
+        .expect("插一条老会话")
+        .id;
+
+    // --- 先在设备侧起一个应答器，再用真入口建两个会话。
+    const HEAD: &str = "3f2a1b0c4d5e6f708192a3b4c5d6e7f809a1b2c3";
+    let replies = vec![
+        json!({"op":"rev","not_a_repo":false,"head":HEAD,"short":&HEAD[..7],"branch":"main","detached":false}),
+        json!({"op":"rev","not_a_repo":true,"head":null,"short":null,"branch":null,"detached":false}),
+    ];
+    // 整条连接移进桩任务：`Established` 不是 `Clone`，而桩要独占它的读写。
+    let stub = spawn_list_rev_stub(_keepalive, replies);
+
+    let ok_row = h
+        .create_session(json!({"node_id": node_id, "path": "~/src/ok", "agent_id": "opencode"}))
+        .await;
+    assert_eq!(ok_row.status, StatusCode::CREATED, "body: {}", ok_row.body);
+    let not_repo_row = h
+        .create_session(json!({"node_id": node_id, "path": "~/src/hg", "agent_id": "opencode"}))
+        .await;
+    assert_eq!(
+        not_repo_row.status,
+        StatusCode::CREATED,
+        "body: {}",
+        not_repo_row.body
+    );
+    let _ = tokio::time::timeout(Duration::from_secs(5), stub).await;
+
+    let items = h.get("/api/sessions").await.json();
+    let rows = items.as_array().expect("列表必须是数组");
+    assert_eq!(rows.len(), 3, "本例要三行：ok / not_a_repo / unknown");
+
+    // 每一行都必须有这两个键——**不管值是什么**。
+    for row in rows {
+        let obj = row.as_object().expect("每一行是对象");
+        assert!(
+            obj.contains_key("base_rev"),
+            "每一行都必须有 base_rev 键（null 也算），实际缺了：{row}"
+        );
+        assert!(
+            obj.contains_key("base_rev_status"),
+            "每一行都必须有 base_rev_status 键，实际缺了：{row}"
+        );
+    }
+
+    // 三行的 status 分别是 ok / not_a_repo / unknown，且 `ok` 那行带完整 hash。
+    let by_status: std::collections::HashMap<&str, &Value> = rows
+        .iter()
+        .map(|r| (r["base_rev_status"].as_str().unwrap_or(""), r))
+        .collect();
+    assert_eq!(
+        by_status.len(),
+        3,
+        "三行必须是三种不同的状态，实际 {:?}",
+        by_status.keys().collect::<Vec<_>>()
+    );
+    let ok = by_status.get("ok").expect("必须有一行 ok");
+    assert_eq!(ok["base_rev"], json!(HEAD));
+    assert_eq!(ok["id"], json!(ok_row.json()["id"]));
+    let nr = by_status.get("not_a_repo").expect("必须有一行 not_a_repo");
+    assert_eq!(nr["base_rev"], Value::Null, "not_a_repo 没有 rev");
+    let unknown = by_status.get("unknown").expect("必须有一行 unknown");
+    assert_eq!(unknown["id"], json!(legacy_id));
+    assert_eq!(unknown["base_rev"], Value::Null, "老会话没有 rev");
+}
+
+/// 迁移前的老会话在列表里是 `"unknown"`——**不是 `null`、不是缺失、更不是 `ok`**。
+///
+/// 五态在 API 层必须可区分，否则子任务 5 的文案没法分档：`unknown`
+/// （「这次会话没有记录起点」）与 `unavailable`（「问了没拿到」）与 `ok`
+/// 在小页面上是三句完全不同的话。
+#[tokio::test]
+async fn an_old_session_from_before_v4_reports_unknown_not_null() {
+    let hub = common::Hub::boot().await;
+    let node = enroll_only(&hub, "v4-unknown");
+    let id = hub_storage::SessionRepo::new(hub.state.pool().clone())
+        .create(
+            &node,
+            "~/src/app",
+            None,
+            &hub_core::registry::now_stamp(),
+            None,
+            hub_storage::BaseRevStatus::Unknown,
+        )
+        .expect("插一条老会话")
+        .id;
+
+    let h = Harness::from_hub(hub).await;
+    let items = h.get("/api/sessions").await.json();
+    let row = items
+        .as_array()
+        .expect("列表是数组")
+        .iter()
+        .find(|r| r["id"] == json!(id))
+        .expect("老会话必须出现在列表里");
+
+    assert_eq!(
+        row["base_rev_status"],
+        json!("unknown"),
+        "迁移前的会话是 unknown，不是 null、不是 ok，body: {row}"
+    );
+    // `unknown` 不是字符串 "null"、也不是 JSON null——这三者在 TS 里都能判，
+    // 但只有真字符串才能被前端五态分档读到。
+    assert!(
+        row["base_rev_status"].is_string(),
+        "必须是字符串字面量而不是 null，实际 {}",
+        row["base_rev_status"]
+    );
+    assert_eq!(row["base_rev"], Value::Null);
+}
+
+/// 设备侧桩：读下行帧，遇 `open_channel` 回 `channel_ready`，遇 `rev` 按次序回一条，
+/// 遇 `close_channel` 记一笔。收齐 `replies.len()` 次关闭就退出。
+///
+/// 与 `tests/base_rev.rs` 的同名夹具同款——那个文件是单子任务 3 的白盒用例，
+/// 这里只需要「让真入口拿到两种不同的结果」，所以不复用它（跨测试文件不共享夹具）。
+fn spawn_list_rev_stub(
+    mut est: node_core::conn::Established,
+    replies: Vec<Value>,
+) -> tokio::task::JoinHandle<()> {
+    use protocol::channel::{ChannelData, CloseChannel};
+    use protocol::frame::Frame;
+    use protocol::message::types;
+
+    tokio::spawn(async move {
+        let mut n = 0usize;
+        let mut closed = 0usize;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while tokio::time::Instant::now() < deadline {
+            let Some(text) = est.next_text().await.unwrap_or_default() else {
+                break;
+            };
+            let Ok(f) = serde_json::from_str::<Frame>(&text) else {
+                continue;
+            };
+            match f.msg_type.as_str() {
+                types::OPEN_CHANNEL => {
+                    let Ok(open) = f.payload::<protocol::channel::OpenChannel>() else {
+                        continue;
+                    };
+                    est.send(&Frame::push(
+                        types::CHANNEL_READY,
+                        0,
+                        json!({"channel_id": open.channel_id}),
+                    ))
+                    .await
+                    .ok();
+                }
+                types::CHANNEL_DATA => {
+                    let Ok(data) = f.payload::<ChannelData>() else {
+                        continue;
+                    };
+                    if data.payload.get("op").and_then(Value::as_str) != Some("rev") {
+                        continue;
+                    }
+                    if let Some(body) = replies.get(n) {
+                        est.send(&Frame::push(
+                            types::CHANNEL_DATA,
+                            0,
+                            json!({"channel_id": data.channel_id, "payload": body}),
+                        ))
+                        .await
+                        .ok();
+                    }
+                    n += 1;
+                }
+                types::CLOSE_CHANNEL => {
+                    if f.payload::<CloseChannel>().is_ok() {
+                        closed += 1;
+                    }
+                    if closed >= replies.len() {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    })
 }
 
 /// 两个会话指向同一个 `(node_id, path)`：工作区是主实体（子任务 5c 的裁决）。

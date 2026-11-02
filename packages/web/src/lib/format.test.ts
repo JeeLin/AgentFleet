@@ -115,6 +115,8 @@ describe('workspaceName / sessionTitle', () => {
       state: 'running' as const,
       created_at: 'unix:1700000000',
       ended_at: null,
+      base_rev: null,
+      base_rev_status: 'unknown' as const,
       workspace: { node_id: 'n_1', path: '/srv/agentfleet', path_locked: true },
     }
     expect(sessionTitle(session)).toBe('agentfleet')

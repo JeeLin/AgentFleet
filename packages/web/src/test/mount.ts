@@ -71,6 +71,10 @@ export function session(over: Partial<SessionSummary> = {}): SessionSummary {
     state: 'running',
     created_at: 'unix:1700000000',
     ended_at: null,
+    // 缺省给 `unknown` 而不是 `ok`：与 Hub 侧迁移默认值同一条口径——
+    // 「我还不知道」不能假装成「取到了」。用例要别的态就自己 `over`。
+    base_rev: null,
+    base_rev_status: 'unknown',
     workspace: { node_id: 'n_1', path: '/srv/app', path_locked: true },
     ...over,
   }

@@ -80,6 +80,16 @@ export interface SessionSummary {
   state: 'running' | 'ended'
   created_at: string
   ended_at: string | null
+  /**
+   * 会话建立那一刻工作区的 HEAD，完整 40 位。`null` = 没有起点，原因看
+   * `base_rev_status`。
+   *
+   * **键恒在**（Hub 侧明确不加 `skip_serializing_if`），所以 `null` 与「键不存在」
+   * 不是同一件事：后者只可能来自更老的 Hub。
+   */
+  base_rev: string | null
+  /** 起点为什么有／没有。五态的取值语义见 `docs/architecture/session-and-trajectory.md` §6.1。 */
+  base_rev_status: 'ok' | 'not_a_repo' | 'no_head' | 'unavailable' | 'unknown'
   workspace: WorkspaceRef
 }
 
