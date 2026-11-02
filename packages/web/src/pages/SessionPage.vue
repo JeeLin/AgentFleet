@@ -71,6 +71,7 @@ import type {
   SessionSummary,
   TrajectoryEvent,
   TrajectoryGap,
+  WorkspaceRef,
 } from '@/lib/api'
 import { cancelConversation, getTrajectory, listDevices, listSessions } from '@/lib/api'
 import {
@@ -235,6 +236,20 @@ interface BaseView {
   overLimit: boolean
   /** 起点已不在当前历史里（rebase / 清理过）。不报数，只如实说。 */
   stale: boolean
+  /**
+   * 会话所属的设备**已被删除**（`workspace.node_id === null`）。
+   *
+   * **与「设备离线」必须是两个字段**：它们是两次不同的处置（一个该等设备
+   * 上线，一个该找管理员恢复设备）。判据见 `setBaseDevice`。
+   */
+  deviceRemoved: boolean
+  /**
+   * 设备还在，但现在开不了通道（离线 / 没上报 git connector / 通道被关）。
+   *
+   * 判据**不是**「概览算不出来」——起点本来就可能是 `not_a_repo`，
+   * 那种情况下概览也不存在，但那不是设备不可达。
+   */
+  deviceOffline: boolean
   /** 概览那次 `log` 正在飞（防重入）。 */
   reading: boolean
 }
@@ -419,6 +434,8 @@ function blankWorkspace(): TabWorkspace {
       progress: null,
       overLimit: false,
       stale: false,
+      deviceRemoved: false,
+      deviceOffline: false,
       reading: false,
     },
   }
@@ -449,6 +466,28 @@ function ensureWorkspaces(list: TabMeta[]): void {
     // 已存在的 workspace 也要跟着 tab 元信息走：会话列表刷新可能带来更新的
     // 起点（同一个 id 在另一台设备上刚被补记）。`seedBase` 不动 `progress`。
     seedBase(ws, tab)
+  }
+}
+
+/**
+ * 把**会话列表里那份 `workspace`** 与通道层的错误码喂给起点的设备两档。
+ *
+ * 单独一个函数而不是塞进 `seedBase`：`seedBase` 只有 `TabMeta`，而「设备已删」
+ * 的判据要用 `WorkspaceRef` 的两个字段（`TabMeta` 只留了一个 `nodeId`，
+ * 那一个字段**故意不够判别**——它把「已删」与「离线」压成同一个 `null`）。
+ *
+ * `offline` 从 `ws.views.git.error` 读：那是通道层把 Hub 的 `err::*` 码原样
+ * 放进来的地方（见 `syncViews`）。只认 `OFFLINE` / `NOT_REPORTED` 两个码——
+ * 其余错误（`channel_error`、`device_busy`）说明通道开起来了，不是不可达。
+ */
+function syncBaseDevice(list: TabMeta[]): void {
+  for (const tab of list) {
+    const ws = workspaces.get(tab.id)
+    const session = sessionsById.value.get(tab.id)
+    if (!ws || !session) continue
+    const code = ws.views.git.error
+    const offline = code === 'device_offline' || code === 'connector_not_reported'
+    setBaseDevice(ws.base, session.workspace, offline)
   }
 }
 
@@ -615,6 +654,9 @@ function ensureChannel(tab: TabMeta, panel: PanelName): ChannelHandle {
     // git 与 files 同一条理由：面板挂上就问一次 status。不问的话用户看到的
     // 是一块「还没问过」的空壳，而通道明明是好的——两种空被读反（§3.12）。
     if (state === 'ready' && panel === 'git') gitKick(tab)
+    // 起点那一行也要跟着通道层走：`views.git.error` 刚被写成 `device_offline`
+    // 时，「设备当前不可达」这句话得立刻出现，而不是等下一次全量刷新。
+    if (panel === 'git') syncBaseDevice(tabs.value.tabs)
   })
   channelUnsubs.set(key, unsub)
   const unframe = handle.onFrame((frame) => onPanelFrame(tab.id, panel, frame))
@@ -1708,24 +1750,73 @@ function seedBase(ws: TabWorkspace, tab: TabMeta): void {
 }
 
 /**
+ * 页面侧的起点派生档。**后端都不产生，所以不进 API**。
+ */
+type BasePhase =
+  | BaseView['status']
+  | 'stale'
+  | 'over_limit'
+  | 'device_removed'
+  | 'device_offline'
+
+/**
  * 起点在页面上处于哪一档。
  *
- * **Hub 的五态之外，页面再派生三档**（后端都不产生，所以不进 API）：
+ * **Hub 的五态之外，页面再派生四档**：
+ * - `device_removed`：设备已被删除。起点**照常显示**（它是历史事实，不因设备
+ *   消失而失效），但概览不再请求（开不了通道）；
+ * - `device_offline`：设备还在但开不了通道（离线 / 没上报 git）。起点同样照常
+ *   显示，概览同样不请求。**与上一档分开**：一个该等设备上线，一个该找管理员
+ *   恢复设备，两句话指向两个不同的下一步；
  * - `stale`：Hub 说 `ok`，但 `log` 里找不到那个 hash（被 rebase / 清理过）；
  * - `over_limit`：同样找不到，但 `truncated` 说「还有更早的没列出来」——那
- *   说明起点不是「不在历史里」，而是「比第 500 条还早」；
- * - `device_removed`：设备已被删除，起点**照常显示**（它是历史事实，
- *   不因设备消失而失效），但概览不再请求（开不了通道）。
+ *   说明起点不是「不在历史里」，而是「比第 500 条还早」。
  *
- * `truncated` 必须能把后两者分开：`truncated` 的判据是「取到 `limit + 1`
+ * **顺序有语义**：设备两档排在前面。设备不可达时 `log` 根本没发出去，
+ * `overLimit` / `stale` 都还是上一轮的残留值——先判 `ok` 再判它们，会把
+ * 「设备离线」显示成「起点已不在历史里」，那是一句**关于仓库的错话**。
+ *
+ * `truncated` 必须能把后两档分开：`truncated` 的判据是「取到 `limit + 1`
  * 条」，所以「恰好 500 条且起点是第 501 条」与「恰好 500 条且起点不在历史里」
  * 是同一个帧的前半段，只有 `truncated` 不同。把它写成 `>=` 会让两者混淆。
  */
-function basePhase(ws: TabWorkspace): BaseView['status'] | 'stale' | 'over_limit' | 'device_removed' {
+function basePhase(ws: TabWorkspace): BasePhase {
+  if (ws.base.deviceRemoved) return 'device_removed'
   if (ws.base.status !== 'ok') return ws.base.status
+  if (ws.base.deviceOffline) return 'device_offline'
   if (ws.base.overLimit) return 'over_limit'
   if (ws.base.stale) return 'stale'
   return 'ok'
+}
+
+/**
+ * 按会话的 `workspace` 两个字段判定「设备已删」与「设备离线」。
+ *
+ * **判据必须是两个字段的组合**（见 `WorkspaceRef`）：
+ *
+ * ```ts
+ * workspace.node_id          // 设备被删时为 null；设备还在时是字符串（含离线）
+ * workspace.removed_node_id  // 设备被删时为原 node_id；设备还在时为 undefined
+ * ```
+ *
+ * 只判 `node_id === null` 会把「设备离线」也显示成「设备已被移除」。
+ * 这里还额外要求 `removed_node_id` 在场：`node_id` 为 null 而它不存在的
+ * 形状在当前 Hub 上不产生，但一旦出现，说「设备已被移除」是编造——
+ * 那时只能说设备不可达。
+ *
+ * `offline` 参数来自**通道层的事实**（开通道回来的 `err::OFFLINE` /
+ * `err::NOT_REPORTED`），不是「概览算不出来」：起点本来就可能是
+ * `not_a_repo`，那时概览也不存在，但那不是设备不可达。
+ */
+function setBaseDevice(base: BaseView, ws: WorkspaceRef, offline: boolean): void {
+  base.deviceRemoved = ws.node_id === null && ws.removed_node_id !== undefined
+  // 设备已删就不再谈离线：两档互斥，且「已被移除」是更强的那句话。
+  //
+  // `node_id === null` **但**没有 `removed_node_id` 时落到离线档：这种形状下
+  // 我们没有归属设备可连，说「当前不可达」是能确证的那句话，说「已被移除」
+  // 则是编造（见 `setBaseDevice` 的注释与本文件那三条用例）。
+  const noDevice = ws.node_id === null
+  base.deviceOffline = !base.deviceRemoved && (noDevice || offline)
 }
 
 /**
@@ -1788,6 +1879,11 @@ function progressLine(ws: TabWorkspace): string | null {
   if (phase === 'device_removed') {
     return '本次会话：设备已被移除，无法统计产出'
   }
+  // `device_offline` 与上一档**不是同一条处置**：这台设备还会回来。
+  // 所以不说「无法统计产出」（听起来像永久），说「现在」。
+  if (phase === 'device_offline') {
+    return '本次会话：设备当前不可达，暂时统计不了产出'
+  }
   return null
 }
 
@@ -1802,8 +1898,10 @@ function baseIdentityLine(ws: TabWorkspace): string {
   if (phase === 'ok' || phase === 'stale' || phase === 'over_limit') {
     return ws.base.rev ? shortRev(ws.base.rev) : '未知'
   }
-  if (phase === 'device_removed') {
-    // 设备没了，起点仍在——它是一个历史事实。
+  // 设备已删 / 设备离线：起点仍在——它是会话建立那一刻的历史事实，
+  // 与设备现在能不能连通无关。**不能因为开不了通道就说「未记录」**，
+  // 那是把一个已知的事实说成不知道。
+  if (phase === 'device_removed' || phase === 'device_offline') {
     return ws.base.rev ? shortRev(ws.base.rev) : '未记录'
   }
   if (phase === 'not_a_repo') return '不是 git 仓库'
@@ -1815,7 +1913,14 @@ function baseIdentityLine(ws: TabWorkspace): string {
 /** 起点那一行的 `title`：完整 hash + 一句时间说明。 */
 function baseIdentityTitle(ws: TabWorkspace): string {
   const phase = basePhase(ws)
-  if (ws.base.rev && (phase === 'ok' || phase === 'stale' || phase === 'over_limit' || phase === 'device_removed')) {
+  if (
+    ws.base.rev &&
+    (phase === 'ok' ||
+      phase === 'stale' ||
+      phase === 'over_limit' ||
+      phase === 'device_removed' ||
+      phase === 'device_offline')
+  ) {
     return `起点 ${ws.base.rev}（这次会话建立时工作区的 HEAD）`
   }
   if (phase === 'not_a_repo') return '这个目录不是 git 仓库，所以这次会话没有起点'
@@ -2328,6 +2433,9 @@ async function load(): Promise<void> {
     const restored = loadTabs(storage(), fallback)
     tabs.value = restored
     ensureWorkspaces(restored.tabs)
+    // 列表到手了，`workspace` 的两个字段才可读——设备两档在这里定下来。
+    // 通道层的事实此刻还没有（git 通道还没建），所以先按「能连」喂。
+    syncBaseDevice(restored.tabs)
     const target = restored.tabs.find((t) => t.id === id)
     if (target) {
       tabs.value = activateTabState(restored, target.id)

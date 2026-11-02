@@ -85,7 +85,18 @@ interface Ctx {
   src: () => FakeEventSource | undefined
 }
 
-async function mountWorkbench(seed: TabMeta[] = TWO_TABS, id = 's_1'): Promise<Ctx> {
+async function mountWorkbench(
+  seed: TabMeta[] = TWO_TABS,
+  id = 's_1',
+  /**
+   * 覆盖默认桩响应（v0.6.0 起）。
+   *
+   * 只给需要**另一种 Hub 答复**的用例用（例：设备已删的会话、开通道回
+   * `device_offline`）。默认桩保持原样，是因为本文件几十条用例都建立在
+   * 「一个健康会话 + 一条建得起来的通道」这个前提上，改默认值会一起动它们。
+   */
+  over: Record<string, unknown> = {},
+): Promise<Ctx> {
   sessionStorage.setItem(STORAGE_KEY, JSON.stringify(seed))
   window.history.replaceState(null, '', `/sessions/${id}`)
   route.value = matchRoute(`/sessions/${id}`)
@@ -112,6 +123,7 @@ async function mountWorkbench(seed: TabMeta[] = TWO_TABS, id = 's_1'): Promise<C
         incomplete: false,
       },
     },
+    ...over,
   })
   const w = mountIn(SessionPage)
   await flush(w)
@@ -3202,5 +3214,128 @@ describe('会话起点（v0.6.0）', () => {
     expect(line, 'stale 档要说起点已不在历史里').toContain('已不在当前历史里')
     expect(line, 'stale 档不能说「超过」').not.toContain('超过')
     expect(line, 'stale 档不报数').not.toMatch(/提交 \d+ 次/)
+  })
+})
+
+/* ===========================================================================
+   v0.6.0 子任务 6：起点失效与边界
+   ---------------------------------------------------------------------------
+   这一组锁的是「起点用不上时页面怎么说」。三档（起点已不在历史里 /
+   设备已删 / 设备离线）必须说三句不同的话：它们指向三个不同的下一步。
+
+   最要紧的一条是「设备已删」与「设备离线」**不能合并**——
+   判据是 `WorkspaceRef` 的两个字段组合，只在 `node_id === null` 时就把
+   离线也报成「已删除」，用户会一直等一台已经被删掉的机器。
+   =========================================================================== */
+describe('会话起点的失效边界（v0.6.0）', () => {
+  it('起点已不在当前历史里：说 stale，且一个数字都不报', async () => {
+    const { w } = await mountWorkbench([
+      { id: 's_1', title: 'alpha', path: '/srv/alpha', nodeId: 'n_1', baseRev: BASE_HEAD, baseRevStatus: 'ok' },
+    ])
+    await interact(w)
+    const src = FakeEventSource.instances[0]
+    await frame(w, src, {
+      op: 'status',
+      branch: 'main',
+      head: 'fff0000',
+      detached: false,
+      clean: false,
+      // 有未提交改动也不该被报出来：起点不在了，「相对起点」这回事就不成立。
+      files: [{ x: ' ', y: 'M', path: 'src/a.rs' }],
+    })
+    // 历史里没有 BASE_HEAD，且 truncated === false → 起点确实不在了。
+    await frame(w, src, {
+      op: 'log',
+      commits: [{ hash: 'fff0000aaaa', author: 'u', when: 'now', subject: 'c2' }],
+      truncated: false,
+    })
+
+    const line = w.element.querySelector('[data-base-overview]')?.textContent ?? ''
+    expect(line).toContain('已不在当前历史里')
+    // **正则断言不匹配任何一个数**：`stale` 时从某个猜出来的位置数出来的
+    // 提交数是错的，而图上看不出来。宁可少一行。
+    expect(line, 'stale 档不能出现「N 次」').not.toMatch(/\d+ 次/)
+    expect(line, '不能说「超过」').not.toContain('超过')
+    // 起点本身照常显示：它是一个历史事实，不因历史被改写而消失。
+    expect(baseRevText(w)).toContain('3f2a1b0')
+  })
+
+  it('设备已被删除：起点照常显示，概览说「已被移除」', async () => {
+    // 起点从**会话列表**来（真实路径：`metaOf` 把 `base_rev` 映射进 TabMeta）。
+    // 只把 `baseRev` 放 localStorage 的 seed 里是不够的——`isTabMeta` 要求
+    // `nodeId` 是字符串，而设备已删的会话 `nodeId` 是 `null`，那份 seed 会被
+    // 丢弃、回落到 `metaOf` 造的那份。测试必须走真实路径。
+    const removed = [
+      session({
+        id: 's_1',
+        base_rev: BASE_HEAD,
+        base_rev_status: 'ok',
+        workspace: { node_id: null, removed_node_id: 'n_old', path: '/srv/alpha', path_locked: true },
+      }),
+    ]
+    const { w } = await mountWorkbench(
+      [{ id: 's_1', title: 'alpha', path: '/srv/alpha', nodeId: null, baseRev: BASE_HEAD, baseRevStatus: 'ok' }],
+      's_1',
+      { '/api/sessions': { body: removed } },
+    )
+    await interact(w)
+
+    // 起点仍在——**不能因为设备没了就说「未记录」**，那是把已知说成不知道。
+    expect(baseRevText(w), '设备已删时起点必须照常显示').toContain('3f2a1b0')
+    const line = w.element.querySelector('[data-base-overview]')?.textContent ?? ''
+    expect(line).toContain('设备已被移除')
+    expect(line, '不能报数').not.toMatch(/\d+ 次/)
+    // 与离线那一档的措辞必须不同（下一例是它的对偶）。
+    expect(line).not.toContain('当前不可达')
+  })
+
+  it('设备离线不能被报成「已被移除」', async () => {
+    // `node_id` 是字符串、**没有** `removed_node_id` → 设备还在，只是连不上。
+    // 反向验证：把判据改回「只判 `node_id === null`」，这条与上一条会同时
+    // 落到同一档，两句话变成一句。
+    const { w } = await mountWorkbench(
+      [{ id: 's_1', title: 'alpha', path: '/srv/alpha', nodeId: 'n_1', baseRev: BASE_HEAD, baseRevStatus: 'ok' }],
+      's_1',
+      { '/api/channels': { status: 409, body: { error: 'device_offline' } } },
+    )
+    await interact(w)
+
+    expect(baseRevText(w), '设备离线时起点照样显示').toContain('3f2a1b0')
+    const line = w.element.querySelector('[data-base-overview]')?.textContent ?? ''
+    expect(line).toContain('当前不可达')
+    expect(line, '离线不是「已移除」——两句指向两个不同的下一步').not.toContain('已被移除')
+    expect(line, '不能报数').not.toMatch(/\d+ 次/)
+  })
+
+  it('`node_id` 为 null 但没有 `removed_node_id`：只说不可达，不编造「已被移除」', async () => {
+    // **这条是「两个字段组合」判据唯一真正被锁住的地方**（见实现记录里的
+    // 反向验证考据）：上两例的输入在「只判 node_id === null」的变异下
+    // 也能得到同样的结论——`node_id` 是字符串时两种判据都判 false，
+    // 是 null 且带 `removed_node_id` 时两种判据都判 true。它们区分不出来。
+    //
+    // 只有这一种输入能区分：`node_id` 为 null 而 `removed_node_id` 缺席。
+    // 那时「设备已被移除」是**编造**的（我们不知道它是不是被删了），
+    // 只能说不具名的那句话。
+    const odd = [
+      session({
+        id: 's_1',
+        base_rev: BASE_HEAD,
+        base_rev_status: 'ok',
+        // 刻意不带 `removed_node_id`：当前 Hub 不产生这个形状，
+        // 但判据不该因为「现在不产生」就把话说满。
+        workspace: { node_id: null, path: '/srv/alpha', path_locked: true },
+      }),
+    ]
+    const { w } = await mountWorkbench(
+      [{ id: 's_1', title: 'alpha', path: '/srv/alpha', nodeId: 'n_1', baseRev: BASE_HEAD, baseRevStatus: 'ok' }],
+      's_1',
+      { '/api/sessions': { body: odd } },
+    )
+    await interact(w)
+
+    expect(baseRevText(w), '起点是历史事实，照样显示').toContain('3f2a1b0')
+    const line = w.element.querySelector('[data-base-overview]')?.textContent ?? ''
+    expect(line, '不知道是不是被删了就不能说「已被移除」').not.toContain('已被移除')
+    expect(line).toContain('当前不可达')
   })
 })
