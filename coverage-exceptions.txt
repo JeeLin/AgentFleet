@@ -74,8 +74,6 @@ crates/hub-server/src/routes/stream.rs:2136: 同上面的 `Closed` 臂： `panic
 crates/hub-server/src/routes/stream.rs:2137: 夹具的收尾：`Streams` 自己握着发送端， 流在测试期间从不结束，所以这条 `break` 打不到；它不是被测逻辑的分支。
 crates/hub-server/src/routes/stream.rs:2138: 夹具的收尾：`Streams` 自己握着发送端， 流在测试期间从不结束，所以这条 `break` 打不到；它不是被测逻辑的分支。
 crates/hub-server/src/routes/stream.rs:2147: 同上面的 `Closed` 臂： `panic!` 的参数行被 llvm-cov 记为 miss（多行宏已知现象）。
-crates/hub-server/src/routes/stream.rs:2236: 同上面的 `Closed` 臂： `panic!` 的参数行被 llvm-cov 记为 miss（多行宏已知现象）。
-crates/hub-server/src/routes/stream.rs:2237: 同上面的 `Closed` 臂： `panic!` 的参数行被 llvm-cov 记为 miss（多行宏已知现象）。
 crates/hub-server/src/routes/ws.rs:141: 同上面的收尾行：单测里 task 被 runtime 取消， `Err` 臂走不到，故这行日志不可达。
 crates/hub-server/src/routes/ws.rs:275: 表里没它：旧连接已在自己的断开处理器里被摘掉。 要触达需让它在 insert 之后、send 之前被另一个 task 摘表（极窄窗口）。
 crates/hub-server/src/routes/ws.rs:281: 控制帧队列 8 格而顶替只推一帧，要满得让同一连接被 连续顶替 9 次且一次都不消费。

@@ -1,7 +1,7 @@
 {
   "name": "@agentfleet/web",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.5.0",
   "type": "module",
   "description": "AgentFleet Web 控制台（Vue 3 + Bun + Vite）",
   "scripts": {

@@ -774,38 +774,36 @@ function focusPanelBody(): void {
 }
 
 /**
- * 下一个面板（按 `PANEL_ORDER` 轮转）。
+ * `[` / `]`：换成上一个 / 下一个工具。
  *
- * v0.3.0 时这里是「两个面板里的另一个」，三个面板之后那句话没有意义了：
- * 「另一个」不再唯一。轮转保住原语义——`]` 在三个面板下仍然是一个有确定
- * 含义的键（下一个，回环）。
+ * ── 为什么在 `PANEL_ORDER` 上轮转，而不是在 `ws.mounted` 上 ──────────
+ * v0.5.0 起右侧只有一格（裁决 C），而 `ws.mounted` 的**唯一**写入点是
+ * `openPanel` 的 `ws.mounted = [panel]`（整体替换），`blankWorkspace` 也
+ * 只放一个。所以它恒为长度 0 或 1——在它上面「轮转」永远原地不动，`[` 与
+ * `]` 会变成同一个键（都只是「把当前那个重新打开一次」）。
+ *
+ * 于是轮转的基准换成 `PANEL_ORDER`（三个工具的固定顺序）：`]` 往后一个、
+ * `[` 往前一个，回环。这才是「上一个 / 下一个工具」，也才让 `delta` 真的
+ * 有两个方向。
+ *
+ * ── 代价（已知降级，不在此缓解）─────────────────────────────────────
+ * 换到另一个工具 = 释放当前工具的通道。对终端就是**杀掉正在跑的 shell**
+ * （`terminal.rs:305` 的 `close()` 走 `pty.close()`）。键位文案与 `?` 面板
+ * 都如实写了这一句（见 `lib/keynav.ts` 的 `panel:prev` / `panel:next`）。
  */
-function otherPanel(name: PanelName): PanelName {
-  const i = PANEL_ORDER.indexOf(name)
-  return PANEL_ORDER[(i + 1) % PANEL_ORDER.length] as PanelName
-}
-
 function cyclePanel(delta: number): void {
   const ws = activeWs.value
   if (!ws) return
-  if (!ws.dock) {
+  // 坞收着时，`[` / `]` 等同于「打开当前那个」（没有「下一个」可言）
+  if (!ws.dock || ws.panel === null) {
     openPanel(ws.panel ?? DEFAULT_PANEL)
     return
   }
-  const order = ws.mounted
-  if (!order.length) {
-    openPanel(DEFAULT_PANEL)
-    return
-  }
-  if (order.length < 2) {
-    // 只挂过一个面板时 `[` / `]` 是**开另一个**（原型 `cyclePanel` 的同一条）：
-    // 在这两个键的语义里「切换」包括了「把另一个拉进坞」——否则坞里永远
-    // 只有终端，而「坞能同时放两个」这条（§5.4）在键盘上就走不到。
-    openPanel(otherPanel(ws.panel ?? order[0] ?? DEFAULT_PANEL))
-    return
-  }
-  const idx = ws.panel ? order.indexOf(ws.panel) : 0
-  const next = order[(idx + delta + order.length) % order.length] as PanelName
+  const i = PANEL_ORDER.indexOf(ws.panel)
+  // `i < 0` 只可能来自 `panel` 里有 `PANEL_ORDER` 不认的值（类型层已排除）。
+  // 兜到 0 而不是让 `NaN` 传播进取模。
+  const from = i < 0 ? 0 : i
+  const next = PANEL_ORDER[(from + delta + PANEL_ORDER.length) % PANEL_ORDER.length] as PanelName
   openPanel(next)
 }
 
@@ -1090,6 +1088,15 @@ const isNarrow = narrow.matches
  */
 let narrowPushed = false
 
+/**
+ * 抽屉入栈时那个容器的账本。
+ *
+ * **出栈时必须用它，不能现读 `dockEl.value`**：出栈的时机恰好是元素被 `v-if`
+ * 卸载之后，那时 `dockEl` 已是 `null`，而 `pop(undefined)` 关的是栈顶（可能是
+ * 别人的层）。详见 `popNarrowDrawer` 的注释。
+ */
+let narrowLayerEl: HTMLElement | null = null
+
 /** 抽屉真正作为一层浮层挂着的条件。 */
 const drawerIsLayer = computed(() => isNarrow.value && (activeWs.value?.dock ?? false))
 
@@ -1108,15 +1115,37 @@ function pushNarrowDrawer(): void {
   // `opener` 显式给「打开面板」按钮：它是用户刚才按的那个，
   // 关掉抽屉要把焦点还回去，而不是丢给 `main`。
   push(el, { opener: openButtonEl.value })
+  narrowLayerEl = el
   narrowPushed = true
   document.addEventListener('keydown', onNarrowKeydown)
 }
 
+/**
+ * 把抽屉移出焦点栈。
+ *
+ * ── 为什么必须记住 `el`，不能现读 `dockEl.value` ────────────────────
+ * `dockEl` 绑在 `v-if="activeWs?.dock"` 的那个元素上，而本函数唯一的调用
+ * 时机就是「抽屉不该再是浮层了」——那一刻 `dock` 已为 false（或视口已变宽），
+ * 元素被 `v-if` 卸载，`dockEl.value` **必然**是 `null`。
+ *
+ * 于是 `pop(dockEl.value ?? undefined)` 会退化成**无参 `pop()`**，而它关的是
+ * **栈顶**——栈顶可能是别人的层（窄屏下抽屉开着时按 `?` 打开帮助面板，栈顶
+ * 就是帮助）。结果：帮助被无关关闭，抽屉的容器却还留在栈里，成了一个指向
+ * 已卸载元素的僵尸层。此后 `depth()` 永久虚高，`inertOthers` 按僵尸层重算
+ * 把 body 下所有内容标成 inert——**整页点不动，Esc 也救不回来**。
+ * （`App.vue` 的帮助面板踩过同一个坑，那里留了警告注释。）
+ *
+ * 所以 `push` 时就把容器存进账本，出栈时用它定位自己那一层。
+ */
 function popNarrowDrawer(): void {
   if (!narrowPushed) return
   narrowPushed = false
   document.removeEventListener('keydown', onNarrowKeydown)
-  pop(dockEl.value ?? undefined)
+  const el = narrowLayerEl
+  narrowLayerEl = null
+  // 账本为空说明这一层从未真的入栈（`push` 被 `dockEl` 为 null 挡下了）。
+  // 此时**什么都不做**：无参 `pop()` 会去关栈顶，那是别人的层。
+  if (el) pop(el)
 }
 
 /**
@@ -2370,7 +2399,6 @@ onBeforeUnmount(() => {
           >
           <PanelDock
             :panel="activeWs.panel"
-            :mounted="activeWs.mounted"
             :device-name="deviceLabel"
             :path="current.workspace.path"
             :channel="channelView"

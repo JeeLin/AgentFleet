@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { readdirSync, readFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { NARROW_MAX_PX, NARROW_QUERY, watchMediaQuery } from '@/lib/media'
 import { readRepoFile } from '@/test/css'
@@ -58,7 +61,65 @@ describe('media：断点只有一处字面量', () => {
       expect(px, 'CSS 断点必须等于 NARROW_MAX_PX').toBe(NARROW_MAX_PX)
     }
   })
+
+  /*
+    ⚠️ 上面那条**只扫 `SessionPage.vue`**，不是全仓。
+
+    本模块的契约范围就是「窄屏抽屉的那个断点」，而抽屉只长在会话页上。
+    `SettingsPage.vue` / `NewSessionPage.vue` 也有 900px 的媒体查询，但那两处
+    跟抽屉语义无关，**故意不纳入**——把它们一起扫进来，会让「改设置页的响应式
+    断点」无缘无故地把这条窄屏抽屉用例弄红。
+
+    下面这条钉的才是**分布本身**：全仓 `src` 下所有 `.vue` 里出现 900px 断点的文件
+    集合。若有人新增 / 删除 / 改了某一处，说明断点分布变了，`media.ts` 文件头
+    那段「本文件不是全仓唯一源」的说明需要跟着复核。
+
+    ── 为什么必须真扫目录，不能写死一个文件清单 ────────────────────────
+    初版写成 `const files = [...三个文件...]` 再断言 `files.filter(...)` 全中。
+    那种写法只能发现「这三个里少了一处」，**发现不了「第四个文件新增了一处」**——
+    而后者正是本条要防的。文件名含「全仓」而实现只查清单，是名不符实。
+    现在用 `readdirSync` 真扫，第四处新增会让 `toEqual` 红。
+
+    ── 扫描范围：`src/` 下全部 `.vue`，按文件名（basename）比对 ──────────
+    为什么是「全 `src/` 递归」而不是只扫 `pages/`：`.vue` 不只长在 `pages/` 下，
+    `src/App.vue` 与 `src/components/*.vue` 同样是样式落点。只扫 `pages/`
+    仍然漏得掉「在 `App.vue` 里新增一处」。为什么按 basename 而不按相对路径：
+    断言要钉的是「哪几个文件含这个断点」，路径前缀只会让期望值随目录搬迁而无谓地红，
+    而那与断点分布无关。
+
+    ⚠️ 扫描集合是**按 `.vue` 后缀**筛出来的：`src/pages/SessionPage.test.ts` 里也
+    有这个字面量，但它不是 `.vue`，不在集合内——这是预期的，测试文件不该算作
+    「全仓断点分布」的一部分。
+  */
+  it('全仓 .vue 里出现 900px 断点的文件集合就是这三个（新增第四处会红）', () => {
+    const webSrc = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+    const withBreakpoint = walkVue(webSrc)
+      .filter((p) => readFileSync(p, 'utf8').includes('@media (max-width: 900px)'))
+      .map((p) => p.slice(webSrc.length + 1))
+      .sort()
+
+    // 反向验证：在 `src/` 下任一 .vue（含 `App.vue` / `components/`）新增一句
+    // `@media (max-width: 900px)` → 这条红；把任一现有文件的 900 改成 899 →
+    // 这条也红（该文件从集合里消失）。
+    expect(withBreakpoint, '全仓（src/ 下所有 .vue）的 900px 断点就这三处').toEqual([
+      'pages/NewSessionPage.vue',
+      'pages/SessionPage.vue',
+      'pages/SettingsPage.vue',
+    ])
+  })
 })
+
+/** `root` 下所有 `.vue` 文件的绝对路径（递归，跳过 node_modules）。 */
+function walkVue(root: string): string[] {
+  const out: string[] = []
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (entry.name === 'node_modules') continue
+    const full = join(root, entry.name)
+    if (entry.isDirectory()) out.push(...walkVue(full))
+    else if (entry.name.endsWith('.vue')) out.push(full)
+  }
+  return out
+}
 
 describe('media：watchMediaQuery', () => {
   it('初值取当前的 matches', () => {

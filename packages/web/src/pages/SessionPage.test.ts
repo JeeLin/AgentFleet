@@ -5,6 +5,8 @@ import { device, mountIn, session } from '@/test/mount'
 import { settle, stubFetch } from '@/test/http'
 import { cssRuleOf, readRepoFile } from '@/test/css'
 import { STORAGE_KEY, type TabMeta } from '@/lib/tabs'
+import { SPLIT_MIN } from '@/lib/split'
+import { PANEL_ORDER } from '@/lib/panel'
 import { matchRoute, route } from '@/router'
 
 /* ------------------------------------------------------------------ 假 SSE */
@@ -262,7 +264,15 @@ function currentPanel(w: ReturnType<typeof mountIn>): string | null {
   return hit ? hit[0] : null
 }
 
-/** 工具名 → 显示名。与 `PanelDock.vue` 的 `PANEL_LABEL` 一一对应。 */
+/*
+  工具名 → 显示名，与 `@/lib/panel` 的 `PANEL_LABEL` 一一对应。
+
+  **保留这份副本，不改成 import**：这里要的是独立口径——测试从渲染出的文字
+  反查工具名，如果直接引用产品常量，断言就退化成「常量等于它自己」。
+  产品那边把「终端」写成「Terminal」时，这条副本刚好能抓到。
+
+  （位置：常量在 v0.5.0 已从 `PanelDock.vue` 提到 `lib/panel.ts`。）
+*/
 const PANEL_LABELS: ReadonlyArray<readonly [string, string]> = [
   ['terminal', '终端'],
   ['files', '文件'],
@@ -1729,6 +1739,49 @@ describe('面板坞：三个面板与「＋」入口', () => {
     expect(currentPanel(w), 'git 之后回环到 terminal').toBe('terminal')
   })
 
+  /*
+    步骤4 指出的缺口：上面那条只走 `]`，`[`（panel:prev）**没有任何断言**。
+    于是把 `cyclePanel` 的 `delta` 写死成 `+1`（或把 `[` 的 delta 也传 +1）
+    时，全部用例依然绿——方向差异没有被任何断言看得见。
+
+    这条从同一个起点分别走 `]` 与 `[`，断言落点**相反**。只断言「换了一个
+    工具」不够：那种写法在方向写死时同样绿。
+  */
+  it('`]` 与 `[` 方向相反：同为 git 起点，`]`→terminal、`[`→files', async () => {
+    // `readonly` 保住字面量元组类型，`indexOf` 的入参才是联合而不是 string。
+    const ks = PANEL_ORDER as readonly ['terminal', 'files', 'git']
+    // 前提自检：这条用例的可区分性完全依赖这三个工具的顺序，先把它钉住。
+    // 若有人改了 `PANEL_ORDER`，这里必须先红，而不是让下面两条静默同向。
+    expect(PANEL_ORDER, '工具顺序就是「终端 → 文件 → Git」').toEqual(['terminal', 'files', 'git'])
+
+    const nextOf = (cur: (typeof ks)[number]): string => ks[(ks.indexOf(cur) + 1) % ks.length] as string
+    const prevOf = (cur: (typeof ks)[number]): string =>
+      ks[(ks.indexOf(cur) + ks.length - 1) % ks.length] as string
+
+    // ── 方向 A：`]` 往后一个 ──
+    const a = await mountWorkbench()
+    expect(currentPanel(a.w), '两侧起点相同，都是缺省的 git').toBe('git')
+    press(']')
+    await flush(a.w)
+    const afterNext = currentPanel(a.w)
+    expect(afterNext, '`]` 是「下一个」').toBe(nextOf('git'))
+    a.w.unmount()
+
+    // ── 方向 B：`[` 往前一个（同一个起点）──
+    const b = await mountWorkbench()
+    expect(currentPanel(b.w), '起点必须与上面一致，否则比的是两个起点').toBe('git')
+    press('[')
+    await flush(b.w)
+    const afterPrev = currentPanel(b.w)
+    expect(afterPrev, '`[` 是「上一个」').toBe(prevOf('git'))
+    b.w.unmount()
+
+    // 反向验证（本条的核心）：若 delta 只有一个方向，两者会相同。
+    // 实测把 `[` 的 delta 改成 +1 → this line 红。
+    expect(afterPrev, '`[` 与 `]` 必须落到不同工具（同向时这里会相等）').not.toBe(afterNext)
+    expect(prevOf('git'), '顺序只有三项时「前一个」与「后一个」不能重合').not.toBe(nextOf('git'))
+  })
+
   it('关掉坞之后 openDock 能从关着的状态再把坞打开（走回落分支）', async () => {
     // `openDock` 的注释说「保留回落分支，因为 `closeDock()` 之后的用例仍要能
     // 从关着的状态打开」——在此之前**没有任何用例**走那条分支（实测 31 次
@@ -2762,11 +2815,23 @@ describe('分栏：只有左右一条，且每个 tab 各自保留自己的比�
     sep.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }))
     await flush(w)
     expect(sep.getAttribute('aria-valuenow')).toBe('30')
-    // 夹取发生在百分比层面（`clampSplit`），所以窄屏下算出的像素只会更小，
-    // **不会**变成负数或 NaN——这正是「百分比下限而不是像素下限」的理由
-    // （lib/split.ts 文件头）。这里把那个数真的算出来，防止有人改成像素。
-    const px = (30 / 100) * 412
-    expect(Number.isFinite(px) && px > 0).toBe(true)
+
+    /*
+      v0.5.0 步骤5 审查改写（原断言恒真）：
+
+      原来这里写 `const px = (30 / 100) * 412` 再断言 `px > 0` 与 `px >= 123`。
+      那两个数都是**测试自己写的字面量**，`px` 编译期就是 `123.6`，不读任何
+      产品符号——注释却说「防止有人改成像素」，而它根本读不到 `lib/split.ts`。
+      实测：把 `SPLIT_MIN` 从 30 改成 10，红的仍是上面那条 `aria-valuenow`
+      （`expected '10' to be '30'`），`px` 两条从未参与判定。
+
+      改写为读**产品常量**：这样 `SPLIT_MIN` 一变，下面的期望值就跟着变，
+      「30% 的那一份宽度在 412px 窄列上仍够用」才是真的被守护着。
+    */
+    const SPLIT_MIN_PCT = 30
+    expect(SPLIT_MIN, '产品常量必须与这条用例的前提一致').toBe(SPLIT_MIN_PCT)
+    const px = (SPLIT_MIN / 100) * 412
+    expect(Number.isFinite(px), '下限算出来不能是 NaN').toBe(true)
     expect(px).toBeGreaterThanOrEqual(123)
   })
 })
@@ -2780,8 +2845,6 @@ describe('分栏：只有左右一条，且每个 tab 各自保留自己的比�
    =========================================================================== */
 describe('窄屏：右侧一格转覆盖式抽屉（v0.5.0）', () => {
   const realMatchMedia = window.matchMedia
-  const realDock = { ...{} } as Record<string, never>
-  void realDock
 
 
   /**

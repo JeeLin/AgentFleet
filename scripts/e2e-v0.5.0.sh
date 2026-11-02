@@ -96,10 +96,12 @@ cleanup() {
     [ -n "$pid" ] || continue
     kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
   done
+  # `set -u` 下若 TMP 还没赋值（脚本在 mkdir 之前就失败、trap 已生效），
+  # `"$TMP"` 会让 cleanup 自己再抛一次 unbound variable，掩盖真正的错。
   if [ "$KEEP" -eq 1 ]; then
-    echo "  现场保留在：$TMP"
+    echo "  现场保留在：${TMP:-<未创建>}"
   else
-    rm -rf "$TMP"
+    rm -rf "${TMP:-}"
   fi
 }
 trap cleanup EXIT
@@ -493,6 +495,16 @@ if [ -n "$CH2" ]; then
     ' "$SSE_LOG" 2>/dev/null
   }
   READY_BEFORE=$(ready_lines | wc -l | tr -d ' ')
+  # 「增量相等」这条判据有一个空洞：**基线为 0 时它恒真**。若前面的开通道
+  # 步骤其实没跑成（SSE_LOG 空、或 `channel.ready` 根本没到），0 → 0 会
+  # 伪装成「没有重建」。所以先把基线钉住：它必须 ≥1。
+  # 反向验证：把上面那条 ready_lines 的 `want` 改成不存在的名字 → 这条红。
+  if [ "$READY_BEFORE" -gt 0 ]; then
+    info "断言5 基线：已有 ${READY_BEFORE} 条 channel.ready（非 0，增量判据才有效）"
+  else
+    bad "断言5 基线为 0：读不到任何 channel.ready，「增量相等」会退化成恒真（恒绿），这条断言不可信"
+    dump "断言 5 基线"
+  fi
   # 给页面足够的时间去做出「不该做」的事（真做了的话，Pod 侧那一秒内就会发请求）。
   sleep 1
   READY_AFTER=$(ready_lines | wc -l | tr -d ' ')

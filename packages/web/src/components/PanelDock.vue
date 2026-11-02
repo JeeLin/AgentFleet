@@ -40,8 +40,6 @@ export interface ChannelView {
 const props = defineProps<{
   /** 当前面板。`null` 表示还没选过（坞开着但空）。 */
   panel: PanelName | null
-  /** 这个 tab 已打开的面板（决定坞标签显示哪些）。 */
-  mounted: PanelName[]
   /** 会话所属设备名（面板头左侧重复一次，两个终端并排时靠它分）。 */
   deviceName: string
   /** 会话工作区路径。 */
@@ -92,7 +90,7 @@ const lines = computed(() => {
  * 「＋」是否展开着候选。
  *
  * **放在组件里而不是页面上**：它是纯粹的视觉瞬时态（展开 / 收起），
- * 不跨渲染保存、也不影响通道——通道由页面的 `mounted` 决定。搬上页面
+ * 不跨渲染保存、也不影响通道——通道由页面按 `panel` 决定。搬上页面
  * 只会让页面多一个与业务无关的字段。
  */
 const adding = ref(false)

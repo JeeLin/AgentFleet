@@ -902,25 +902,19 @@ kbd, .kbd {
 /* 输入区是单键不抢的唯一例外区（keynav.js §7）——但要让人看得见 */
 .af-compose__input:focus { border-color: var(--af-accent); box-shadow: 0 0 0 3px var(--af-accent-bg); }
 
-/* 面板坞标签 */
-/* `flex-wrap: wrap` + `min-width: 0`：v0.4.0 起坞里有三个面板，标签条加「＋」
-   候选后宽度明显超过 412px 窄列。不换行就会横向溢出——那正是 v0.3.0 刚修过的
-   「窄列里按钮被顶出去」的同一类问题（`.af-compose__target` 的 `min-width: 0`）。
-   换行而不是压缩：标签上的中文被压到折字比换行难读。 */
+/* 面板坞头：当前工具名 + 「＋」 + ✕（v0.5.0 起没有坞标签条） */
+/* `flex-wrap: wrap` + `min-width: 0`：候选展开后宽度明显超过 412px 窄列。
+   不换行就会横向溢出——那正是 v0.3.0 刚修过的「窄列里按钮被顶出去」的
+   同一类问题（`.af-compose__target` 的 `min-width: 0`）。
+   换行而不是压缩：候选上的中文被压到折字比换行难读。
+
+   `.af-docktabs__b`（v0.4.0 的坞标签按钮）已随标签条一起删除：裁决 C 之后
+   右侧只有一格，「当前是哪个工具」由 `.af-docktabs__current` 表达，没有
+   可切换的标签。留着那几条规则会让下一个读样式的人以为坞仍有可选中的标签。 */
 .af-docktabs {
   display: flex; flex-wrap: wrap; min-width: 0; gap: 1px;
   background: var(--af-surface-1); border-bottom: 1px solid var(--af-border-subtle); flex: 0 0 auto;
 }
-.af-docktabs__b {
-  display: flex; align-items: center; gap: var(--af-space-2);
-  padding: var(--af-space-2) var(--af-space-4); border: 0; background: none;
-  cursor: pointer; font-family: inherit; font-size: var(--af-text-sm);
-  color: var(--af-fg-tertiary); border-bottom: 2px solid transparent;
-  transition: color var(--af-dur-instant) linear, background-color var(--af-dur-instant) linear;
-}
-.af-docktabs__b:hover { background: var(--af-surface-2); color: var(--af-fg-primary); }
-.af-docktabs__b[aria-selected='true'] { color: var(--af-fg-primary); border-bottom-color: var(--af-accent); background: var(--af-surface-0); }
-.af-docktabs__b .af-badge { font-size: var(--af-text-2xs); }
 .af-docktabs__spacer { flex: 1 1 auto; }
 .af-docktabs__close {
   padding: var(--af-space-2) var(--af-space-3); border: 0; background: none;
