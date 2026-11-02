@@ -1,12 +1,16 @@
-//! git connector：**只读**的工作区 git 视图（状态 / diff / 历史提交）。
+//! git connector：**只读**的工作区 git 视图（状态 / diff / 历史提交 / 当前 rev）。
 //!
-//! 三个 op 各回答一个不同的问题（`v0.4.0` 设计核对第 11 条）：
+//! 各 op 各回答一个不同的问题（`v0.4.0` 设计核对第 11 条）：
 //!
 //! | 请求 | 回答的问题 |
 //! |------|-----------|
 //! | `{"op":"status"}` | 工作区有哪些改动、在哪个分支 |
 //! | `{"op":"diff","path":…}` / `{"staged":true}` / `{"commit":…}` | 某个改动 / 暂存区 / 某个历史提交改了什么 |
 //! | `{"op":"log","limit":N}` | 最近这些提交是什么 |
+//! | `{"op":"rev"}` | 现在在哪个提交上（完整 hash / 短 hash / 分支 / 是否 detached） |
+//!
+//! 头三个 op 是 `v0.4.0` 就有的；第四个 `rev` 在 `v0.6.0` 加入，**仍然只读**——
+//! 它只是把 `rev-parse` 的结果报出来，一个字节都不写。
 //!
 //! **没有任何写操作，且这不是「暂未实现」**：commit / stage / checkout 要连带决定
 //! 提交者身份从哪来、钩子要不要跑、失败怎么回滚，三件都不是「看它改了什么」需要的。
@@ -60,7 +64,7 @@ const PAYLOAD_BUDGET: usize = protocol::frame::MAX_FRAME_BYTES * 3 / 4;
 /// 两份都成立。
 const NOT_OPEN: &str = "git channel is not open";
 
-/// `git` 通道认的三个 op。
+/// `git` 通道认的 op。
 ///
 /// **白名单与分派表从这里同一张表派生**（`on_data` 校验用 `parse`，线程里
 /// 分派也用 `parse`）：早先它们是两处手写字符串——`match op { "status" | "log"
@@ -71,6 +75,7 @@ enum GitOp {
     Status,
     Diff,
     Log,
+    Rev,
 }
 
 impl GitOp {
@@ -80,6 +85,7 @@ impl GitOp {
             "status" => Ok(Self::Status),
             "diff" => Ok(Self::Diff),
             "log" => Ok(Self::Log),
+            "rev" => Ok(Self::Rev),
             other => Err(ConnectorError::Invalid {
                 detail: format!("unknown git operation: {other}"),
             }),
@@ -303,6 +309,88 @@ impl Git {
             // 与 `log` 用的是同一套，不另写。
             Err(e) if is_empty_repo(&e) => Ok(None),
             Err(e) => Err(e),
+        }
+    }
+
+    /// 工作区现在在哪个提交上。`v0.6.0` 加的第四个只读 op。
+    ///
+    /// **不接收任何参数**：三个既有 op 各有参数（`diff` 的 path/staged/commit、
+    /// `log` 的 limit），`rev` 一个都不收——它回答的是「现在在哪」，只有一个答案。
+    ///
+    /// 三帧的键集合**逐字相同**，只有值不同。理由与 `status()` 那段注释一样：
+    /// 只在某一支带上某个键，会让读它的值拿到 `true` 和 `undefined` 两种结果。
+    fn rev(&self) -> Result<Vec<OutFrame>, ConnectorError> {
+        let root = self.root_checked()?;
+
+        // 完整 hash 是 `base_rev` 的**存储形态**，所以这里必须用
+        // `rev-parse HEAD`（不带 `--short`）：短 hash 的长度随仓库规模会变
+        // （`core.abbrev` / 对象数增长时 git 会自动加长），拿它当基准的话
+        // 同一个提交在不同时间可能给出不同的串。
+        //
+        // 「空仓库」与「不是仓库」都在这里被摘下错误路径，理由是同一个：
+        // 通道层只往页面传错误码，detail 里那句 stderr 到不了页面，于是页面
+        // 既画不出中性说明，也分不清「没有仓库 / 没有提交」和「git 真的挂了」。
+        let head = match self.run_git(root, &["rev-parse", "HEAD"]) {
+            Ok(raw) => Some(String::from_utf8_lossy(&raw).trim().to_string()),
+            Err(e) if is_not_a_repo(&e) => {
+                return Ok(vec![OutFrame::new(serde_json::json!({
+                    "op": "rev",
+                    "not_a_repo": true,
+                    "head": null,
+                    "short": null,
+                    "branch": null,
+                    "detached": false,
+                }))]);
+            }
+            Err(e) if is_empty_repo(&e) => None,
+            // 其余 `Err` 原样传播（git 挂了 / 权限不对 / 索引损坏）。**不许
+            // `unwrap_or(None)`**——`head_short` 的注释记的就是这条教训：吞掉它
+            // 会让「这个仓库还没有 HEAD」与「读 HEAD 失败了」显示成同一句话。
+            Err(e) => return Err(e),
+        };
+
+        // 没有 HEAD 时**不再跑后面两条命令**：空仓库上 `rev-parse --abbrev-ref HEAD`
+        // 同样以非零退出（同一条 `ambiguous argument`），再跑一次只是把同一个
+        // 已知事实重新变成一次错误。直接给 null/false。
+        let (short, branch, detached) = match &head {
+            // 短 hash 从**同一个完整 hash** 截前 7 位，不另起一次
+            // `git rev-parse --short`：两次子进程之间 HEAD 可能被别的东西推进
+            // （用户的编辑器插件、agent 自己 commit），于是 `head` 与 `short`
+            // 指向两个不同提交——而页面会把它们并排显示。
+            //
+            // 这与 `status()` 的做法不同（那里 `head_short` 独立取一次），
+            // **是刻意的差异**：`status` 的 `head` 是给人看的分支状态附注，
+            // 而 `rev` 的这一对值要一起落进 `base_rev`，不许有窗口。
+            Some(h) => {
+                let short = h.chars().take(7).collect::<String>();
+                let (branch, detached) = self.branch_of(root)?;
+                (Some(short), branch, detached)
+            }
+            None => (None, None, false),
+        };
+
+        Ok(vec![OutFrame::new(serde_json::json!({
+            "op": "rev",
+            "not_a_repo": false,
+            "head": head,
+            "short": short,
+            "branch": branch,
+            "detached": detached,
+        }))])
+    }
+
+    /// 当前分支名 + 是否 detached。detached 时 `branch` 为 `None`。
+    ///
+    /// 判据与 `parse_status` 用的同一套（detached 时 `--abbrev-ref` 回字面量
+    /// `HEAD`），不另写一份「`branch == "HEAD"` 算 detached」的第二处实现——
+    /// 两处判据迟早会分叉，而分叉的那天没有任何测试会红。
+    fn branch_of(&self, root: &Path) -> Result<(Option<String>, bool), ConnectorError> {
+        let raw = self.run_git(root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        let name = String::from_utf8_lossy(&raw).trim().to_string();
+        if name == "HEAD" || name.is_empty() {
+            Ok((None, true))
+        } else {
+            Ok((Some(name), false))
         }
     }
 
@@ -654,6 +742,19 @@ fn is_not_a_repo(e: &ConnectorError) -> bool {
 /// **`needed a single revision` 也在表里**：`rev-parse --short HEAD` 在还没有
 /// 任何提交的仓库上说的是这句，而不是 `log` 那两句。`status` 要靠这里的判定
 /// 才能把「空仓库」与「真读失败了」分开（见 `head_short`）。
+///
+/// **`ambiguous argument 'head': unknown revision` 也在表里**（`v0.6.0` 加）：
+/// `rev-parse HEAD`（**不带** `--short`）在空仓库上说的既不是 `log` 那两句、
+/// 也不是 `Needed a single revision`，而是
+/// `fatal: ambiguous argument 'HEAD': unknown revision or path not in the working tree.`
+/// （git 2.39.5 实测）。少了这一条，`rev()` 会把「刚 init、还没提交」的仓库
+/// 当成真错误抛出去，于是 `base_rev_status` 落成 `unavailable`（「没能从设备
+/// 读到起点」）而不是 `no_head`（「仓库还没有提交」）——前者把人引去排查设备，
+/// 而真相只是这个仓库还空着。
+///
+/// 判据里带 `'head':` 与 `unknown revision` 两段限制，是为了不与「不是仓库」
+/// 那条 stderr（`not a git repository`）交叠：两者必须互斥，否则
+/// `rev()` 的分支顺序会决定结果。
 fn is_empty_repo(e: &ConnectorError) -> bool {
     match e {
         ConnectorError::Failed { detail, .. } => {
@@ -662,6 +763,7 @@ fn is_empty_repo(e: &ConnectorError) -> bool {
                 || d.contains("does not have any commits")
                 || d.contains("bad default revision")
                 || d.contains("needed a single revision")
+                || d.contains("ambiguous argument 'head': unknown revision")
         }
         _ => false,
     }
@@ -916,6 +1018,7 @@ fn run_op(
         Ok(GitOp::Status) => worker.status(),
         Ok(GitOp::Diff) => worker.diff(payload),
         Ok(GitOp::Log) => worker.log(payload),
+        Ok(GitOp::Rev) => worker.rev(),
         // coverage: excluded — `on_data` 在起线程之前已经 `GitOp::parse` 过了，
         // 所以线程里这一臂不可达。留着是因为这里拿到的是 `&str`（要重新解析），
         // 而「默认放行」在安全上是洞（未知 op 静默成功）。
@@ -1979,6 +2082,332 @@ mod tests {
                 "{op:?} 要落到 Invalid，实际 {err:?}"
             );
         }
+
+        // `v0.6.0` 加了第四个 op `rev`：它**不在**上面那份黑名单里，必须能过
+        // `parse`。这条正向断言是黑名单与白名单的对偶守卫——将来若有人为了
+        // 「收紧只读面」把 `rev` 也塞进那个循环，这里立刻红，而不是让本用例
+        // 静默继续绿下去。
+        assert!(
+            GitOp::parse("rev").is_ok(),
+            "\"rev\" 是 v0.6.0 起的合法 op，不得落进未知 op 名单"
+        );
+        // 反过来也守一条：四个 op 的名字都还在白名单上。
+        for op in ["status", "diff", "log", "rev"] {
+            assert!(GitOp::parse(op).is_ok(), "{op:?} 必须是合法 op");
+        }
+    }
+
+    /// `rev` 在正常仓库上指到 HEAD：完整 hash 是 40 位且等于真实 `rev-parse HEAD`，
+    /// 短 hash 就是它的前 7 位，分支名与 detached 都对。
+    ///
+    /// 「40 位十六进制」这条不是凑数：`--short` 也回十六进制、也能被当成
+    /// 「像个 hash」，只有长度与等值比较一起才能把两者分开（见突变矩阵）。
+    #[test]
+    fn rev_of_a_repo_points_at_head() {
+        let (_base, ws) = sandbox();
+        repo_with_commit(&ws);
+        let mut g = open(&ws);
+
+        let got = call(&mut g, serde_json::json!({"op": "rev"})).expect("rev must succeed");
+
+        let head = got["head"].as_str().expect("head must be a string");
+        assert_eq!(head.len(), 40, "head 必须是完整 40 位，实际 {head:?}");
+        assert!(
+            head.chars().all(|c| c.is_ascii_hexdigit()),
+            "head 必须是十六进制，实际 {head:?}"
+        );
+
+        // 与宿主机上直接跑的真值比：这是本用例唯一的独立来源，不是「读同一个
+        // 字段再自比」。
+        let want = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&ws)
+                .output()
+                .expect("run git")
+                .stdout,
+        )
+        .expect("utf8");
+        assert_eq!(head, want.trim(), "head 必须等于真实的 rev-parse HEAD");
+
+        let short = got["short"].as_str().expect("short must be a string");
+        assert_eq!(short, &head[..7], "短 hash 必须是完整 hash 的前 7 位");
+        assert_eq!(got["branch"], serde_json::json!("main"));
+        assert_eq!(got["detached"], serde_json::json!(false));
+        assert_eq!(got["not_a_repo"], serde_json::json!(false));
+        assert_eq!(got["op"], serde_json::json!("rev"));
+    }
+
+    /// 再提交一次后 `rev` 报的 hash 必须变——它读的是提交指针，不是缓存。
+    #[test]
+    fn rev_sees_a_new_commit_after_the_first() {
+        let (_base, ws) = sandbox();
+        repo_with_commit(&ws);
+        let mut g = open(&ws);
+        let s1 = call(&mut g, serde_json::json!({"op": "rev"}))
+            .expect("rev 1")
+            ["head"]
+            .as_str()
+            .expect("head 1")
+            .to_string();
+
+        std::fs::write(ws.join("a.txt"), "two\n").expect("write");
+        git_in(&ws, &["commit", "-aqm", "second commit"]);
+
+        let s2 = call(&mut g, serde_json::json!({"op": "rev"}))
+            .expect("rev 2")
+            ["head"]
+            .as_str()
+            .expect("head 2")
+            .to_string();
+
+        assert_ne!(s2, s1, "新提交之后 rev 必须报不同的 hash");
+    }
+
+    /// 非仓库目录：**正常回帧**说 `not_a_repo: true`，不是 `Err`。
+    ///
+    /// 回 `Err` 的话通道层只会往页面送一个错误码，detail 里那句
+    /// `not a git repository` 到不了页面，于是页面分不清「不是仓库」和
+    /// 「git 挂了」。
+    #[test]
+    fn rev_outside_a_repo_is_a_normal_frame_saying_so() {
+        let (_base, ws) = sandbox();
+        let mut g = open(&ws);
+
+        let got = call(&mut g, serde_json::json!({"op": "rev"}))
+            .expect("非仓库必须回 Ok 帧，不是 Err");
+
+        assert_eq!(got["not_a_repo"], serde_json::json!(true));
+        assert_eq!(got["head"], serde_json::Value::Null);
+        assert_eq!(got["short"], serde_json::Value::Null);
+        assert_eq!(got["branch"], serde_json::Value::Null);
+        assert_eq!(got["detached"], serde_json::json!(false));
+    }
+
+    /// 空仓库（`git init` 但没有提交）：回帧 `not_a_repo: false`、`head: null`。
+    ///
+    /// **与上一条并排写**：两帧的键集合相同，只有值不同——这正是「两帧键集合
+    /// 必须逐字相同」这条纪律的可测形态。
+    ///
+    /// 这条同时是 `is_empty_repo` 判据增补的守卫：`rev-parse HEAD` 在空仓库上
+    /// 说的是 `ambiguous argument 'HEAD': unknown revision`，不增补判据时
+    /// `rev()` 会回 `Err`，本用例因此红。**不许**为了让它变绿而改成
+    /// 「`rev` 也可以回 Err」——那等于把「空仓库」重新混成「读失败」。
+    #[test]
+    fn rev_of_a_repo_without_commits_has_no_head() {
+        let (_base, ws) = sandbox();
+        git_in(&ws, &["init", "-q", "-b", "main", "."]);
+        let mut g = open(&ws);
+
+        let got = call(&mut g, serde_json::json!({"op": "rev"}))
+            .expect("空仓库必须回 Ok 帧，不是 Err");
+
+        assert_eq!(
+            got["not_a_repo"],
+            serde_json::json!(false),
+            "空仓库是仓库，只是没有提交"
+        );
+        assert_eq!(got["head"], serde_json::Value::Null);
+        assert_eq!(got["short"], serde_json::Value::Null);
+    }
+
+    /// `is_empty_repo` 的判据本身：空仓库的 stderr 匹配，非仓库的**不**匹配。
+    ///
+    /// 不经过 `rev()`：锁的是判据函数，避免将来有人为了「更稳」把它放宽成
+    /// `d.contains("head")` 之类——那样「不是仓库」会被误吞成「空仓库」，
+    /// 页面上从此显示「仓库还没有提交」而不是「这个目录不是 git 仓库」。
+    ///
+    /// **两处 `detail` 都按生产路径的真实形态构造**：`run_git` 走到
+    /// `classify_failure(&stderr)`（`:232`）时，`not a git repository` 那条已被
+    /// 摘成**不带 `fatal:` 前缀**的固定串，而空仓库那条保留原样的首行。
+    /// 手写 `fatal: not a git repository` 会与生产形态不符，于是
+    /// `is_not_a_repo` 的 `starts_with` 判据测不到真实输入。
+    #[test]
+    fn an_empty_repo_is_not_mistaken_for_a_broken_git() {
+        let empty = ConnectorError::Failed {
+            op: "rev-parse".to_string(),
+            detail: "fatal: ambiguous argument 'HEAD': unknown revision or path not in the \
+                     working tree."
+                .to_string(),
+        };
+        assert!(
+            is_empty_repo(&empty),
+            "空仓库的 stderr 必须被 is_empty_repo 认出来"
+        );
+
+        // 生产形态：`classify_failure` 把 `not a git repository` 摘成固定串。
+        let not_repo = ConnectorError::Failed {
+            op: "rev-parse".to_string(),
+            detail: classify_failure(
+                "fatal: not a git repository (or any of the parent directories): .git",
+            ),
+        };
+        assert_eq!(
+            not_repo_detail(&not_repo),
+            "not a git repository",
+            "classify_failure 必须把这条摘成不带 fatal: 前缀的固定串"
+        );
+        assert!(
+            !is_empty_repo(&not_repo),
+            "「不是仓库」不得被 is_empty_repo 误吞"
+        );
+        // 两者互斥的正面证据：同一个错误只能落进一个分支。
+        assert!(is_not_a_repo(&not_repo));
+        assert!(!is_not_a_repo(&empty));
+    }
+
+    /// 取 `Failed` 的 detail（测试辅助，避免每处都写一遍 `match`）。
+    fn not_repo_detail(e: &ConnectorError) -> &str {
+        match e {
+            ConnectorError::Failed { detail, .. } => detail,
+            _ => "",
+        }
+    }
+
+    /// detached HEAD：`detached: true`、`branch: null`，而 `head` 仍有值
+    /// （detached 时那个 hash 是唯一的信息来源）。
+    #[test]
+    fn rev_in_detached_head_reports_detached() {
+        let (_base, ws) = sandbox();
+        repo_with_commit(&ws);
+        git_in(&ws, &["checkout", "-q", "--detach", "HEAD"]);
+        let mut g = open(&ws);
+
+        let got = call(&mut g, serde_json::json!({"op": "rev"})).expect("rev");
+
+        assert_eq!(got["detached"], serde_json::json!(true));
+        assert_eq!(got["branch"], serde_json::Value::Null);
+        let head = got["head"].as_str().expect("detached 时 head 必须有值");
+        assert_eq!(head.len(), 40);
+    }
+
+    /// 三个回帧（有 HEAD / 非仓库 / 空仓库）的**键集合逐字相同**。
+    #[test]
+    fn the_three_frames_carry_the_same_keys() {
+        fn keys(v: &serde_json::Value) -> Vec<String> {
+            let mut k: Vec<String> = v
+                .as_object()
+                .expect("payload must be an object")
+                .keys()
+                .cloned()
+                .collect();
+            k.sort();
+            k
+        }
+
+        // ① 有 HEAD
+        let (_b1, ws1) = sandbox();
+        repo_with_commit(&ws1);
+        let k1 = keys(&call(&mut open(&ws1), serde_json::json!({"op": "rev"})).expect("rev"));
+
+        // ② 非仓库
+        let (_b2, ws2) = sandbox();
+        let k2 = keys(&call(&mut open(&ws2), serde_json::json!({"op": "rev"})).expect("rev"));
+
+        // ③ 空仓库
+        let (_b3, ws3) = sandbox();
+        git_in(&ws3, &["init", "-q", "-b", "main", "."]);
+        let k3 = keys(&call(&mut open(&ws3), serde_json::json!({"op": "rev"})).expect("rev"));
+
+        assert_eq!(k1, k2, "有 HEAD 与「不是仓库」两帧的键集合必须相同");
+        assert_eq!(k1, k3, "有 HEAD 与「空仓库」两帧的键集合必须相同");
+        assert_eq!(
+            k1,
+            vec![
+                "branch".to_string(),
+                "detached".to_string(),
+                "head".to_string(),
+                "not_a_repo".to_string(),
+                "op".to_string(),
+                "short".to_string(),
+            ],
+            "键集合本身也要钉住，否则三帧一起多出一键时上面两条照样绿"
+        );
+    }
+
+    /// `rev` 回答的是**提交指针**，不是工作区状态：有未提交改动时 hash 不变。
+    #[test]
+    fn rev_does_not_read_the_index_or_the_worktree() {
+        let (_base, ws) = sandbox();
+        repo_with_commit(&ws);
+        let mut g = open(&ws);
+        let before = call(&mut g, serde_json::json!({"op": "rev"}))
+            .expect("rev before")["head"]
+            .as_str()
+            .expect("head before")
+            .to_string();
+
+        // 未提交的改动：改了已跟踪文件 + 加一个未跟踪文件。
+        std::fs::write(ws.join("a.txt"), "dirty\n").expect("write");
+        std::fs::write(ws.join("new.txt"), "untracked\n").expect("write");
+
+        let after = call(&mut g, serde_json::json!({"op": "rev"}))
+            .expect("rev after")["head"]
+            .as_str()
+            .expect("head after")
+            .to_string();
+
+        assert_eq!(before, after, "工作区脏不脏不影响 rev 报的提交指针");
+    }
+
+    /// 短 hash 来自**同一个**完整 hash，不是第二次子进程。
+    ///
+    /// 用按参数分支的假 git 让两条命令给出**不同的**值：若实现改回「再跑一次
+    /// `rev-parse --short`」，`short` 会变成 `$FAKE_SHORT`，本用例红。
+    ///
+    /// **脚本必须按 `$2` 分支**——一个对任何参数都回同一值的假 git 会让
+    /// `short` 与「第二次调用的输出」恰好相等，于是用例恒绿（同义复述）。
+    #[test]
+    fn short_is_derived_from_the_same_hash_not_a_second_call() {
+        let (_base, ws) = sandbox();
+        // 两个前 7 位不同的 40 位十六进制串。
+        const FAKE_FULL: &str = "1111111222222222333333334444444455555555";
+        const FAKE_SHORT: &str = "9999999888888888777777776666666655555555";
+        assert_ne!(&FAKE_FULL[..7], &FAKE_SHORT[..7], "前提：两者前 7 位不同");
+
+        let script = _base.path().join("fake-git.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n\
+                 case \"$2\" in\n\
+                 \x20 HEAD) printf '%s\\n' \"{FAKE_FULL}\" ;;\n\
+                 \x20 --short) printf '%s\\n' \"{FAKE_SHORT}\" ;;\n\
+                 \x20 --abbrev-ref) printf '%s\\n' \"main\" ;;\n\
+                 \x20 *) exit 1 ;;\n\
+                 esac\n"
+            ),
+        )
+        .expect("write script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+
+        let mut g = Git::with_git_bin(&script);
+        Connector::open(
+            &mut g,
+            OpenReq::new(ws.to_string_lossy(), serde_json::json!({})),
+        )
+        .expect("open");
+
+        let got = call(&mut g, serde_json::json!({"op": "rev"})).expect("rev");
+
+        assert_eq!(
+            got["head"], FAKE_FULL,
+            "假 git 的 HEAD 分支没被调用，本用例没有验证任何东西"
+        );
+        assert_eq!(
+            got["short"],
+            &FAKE_FULL[..7],
+            "短 hash 必须由同一个完整 hash 截得"
+        );
+        assert_ne!(
+            got["short"], &FAKE_SHORT[..7],
+            "短 hash 不得来自第二次 rev-parse --short 调用"
+        );
     }
 
     /// 通道没开时任何 op 都回 `Invalid`（而不是「解帧失败」）。
