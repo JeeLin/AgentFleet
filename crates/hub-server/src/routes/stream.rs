@@ -171,6 +171,44 @@ impl Streams {
         id
     }
 
+    /// 订阅**原始事件**（不进 SSE 编码），供 Hub 进程内部的探针使用。
+    ///
+    /// 为什么单独一个方法而不是复用 [`Streams::subscribe`]：那个返回
+    /// `BoxStream<Result<Event, _>>`，而 `axum::response::sse::Event` 是
+    /// **只写**的（字段私有、只有 `data`/`event` 这类构造方法），读不回来。
+    /// 探针要的是事件名与 JSON 载荷本身，绕一趟 SSE 编码再解析既多余又做不到。
+    ///
+    /// `last` 的语义与 [`Streams::subscribe`] 完全一致（同样走
+    /// `subscribe_parts`，因此同样在锁内完成「快照 + 订阅」，不会重发或漏）。
+    pub(crate) fn subscribe_raw(
+        &self,
+        last: Option<u64>,
+    ) -> futures_util::stream::BoxStream<'static, Envelope> {
+        let (backlog, rx) = self.subscribe_parts(last);
+        // `boxed()` 而不是返回裸的 `impl Stream`：`unfold` 的 async 块不是
+        // `Unpin`，而装箱之后调用方可以直接 `&mut` 它（探针把一个可变引用
+        // 传进 `wait_for_rev`）。与 [`Streams::subscribe`] 同一个理由。
+        futures_util::stream::unfold(
+            (backlog.into_iter(), rx),
+            |(mut backlog, mut rx)| async move {
+                if let Some(env) = backlog.next() {
+                    return Some((env, (backlog, rx)));
+                }
+                loop {
+                    match rx.recv().await {
+                        Ok(env) => return Some((env, (backlog, rx))),
+                        // 读得太慢被甩掉：对探针来说等同于「那几条没看见」，
+                        // 继续等后面的事件即可（探针只关心自己那条通道，
+                        // 且它自己还有 3 秒超时兜底）。
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                    }
+                }
+            },
+        )
+        .boxed()
+    }
+
     /// 回放缓冲里序号 `> last` 的事件。
     ///
     /// **只服务测试**：生产路径的快照由 [`Streams::subscribe_parts`] 在锁内
@@ -824,34 +862,50 @@ pub async fn close_channel(
     Extension(auth): Extension<Authenticated>,
     Path(channel_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let binding = match state
-        .bindings()
-        .unbind_if_owned(&channel_id, auth.subject())
-    {
+    close_channel_inner(&state, &auth, &channel_id, "closed by the console")?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// 关通道的**唯一实现**。`DELETE /api/channels/{id}` 与建会话时探起点
+/// （`base_rev.rs`）都走这里。
+///
+/// 为什么不各写一份：这里有三件必须按序发生的事——解除绑定、给设备发
+/// `close_channel`、推 `channel.closed` 给页面。抄一份的话，改动其中一处
+/// 时另一处会静默保留旧顺序（比如先推事件再解绑），而症状是「页面显示关了、
+/// 设备的句柄还开着」，离现场很远。
+///
+/// `reason` 进 `CloseChannel` 帧，只给设备侧看，用于日志排查。
+pub(crate) fn close_channel_inner(
+    state: &AppState,
+    auth: &Authenticated,
+    channel_id: &str,
+    reason: &str,
+) -> Result<(), ApiError> {
+    let binding = match state.bindings().unbind_if_owned(channel_id, auth.subject()) {
         // 幂等：Hub 侧已经没有了（面板早就关过，或设备掉线时整节点清掉了）
-        UnbindOutcome::NotFound => return Ok(StatusCode::NO_CONTENT.into_response()),
+        UnbindOutcome::NotFound => return Ok(()),
         UnbindOutcome::NotYours => return Err(ApiError::forbidden(err::FORBIDDEN)),
         UnbindOutcome::Removed(b) => b,
     };
     let closing = protocol::channel::CloseChannel {
-        channel_id: channel_id.clone(),
-        reason: "closed by the console".to_string(),
+        channel_id: channel_id.to_string(),
+        reason: reason.to_string(),
     };
     let frame = Frame::push(
         types::CLOSE_CHANNEL,
         0,
         protocol::payload_or(
             &closing,
-            protocol::channel::fallback::close(&channel_id, "closed"),
+            protocol::channel::fallback::close(channel_id, "closed"),
         ),
     );
-    // 设备已经不在 → 照样 204：Hub 侧的通道账本随连接一起清掉了（§7.1），
+    // 设备已经不在 → 照样成功：Hub 侧的通道账本随连接一起清掉了（§7.1），
     // 没有需要通知的对象。
     //
     // **但「队列满」不能当成「设备不在」**：那是设备还在、只是读不过来。
     // 一并吞掉会让页面认为通道已关，而设备侧的 PTY 继续跑、继续吃信用。
     // 所以只有 `OFFLINE` 被忽略，其余原样返回（`BUSY` → 503，与开通道时同口径）。
-    match send_to_device(&state, &binding.node_id, frame) {
+    match send_to_device(state, &binding.node_id, frame) {
         Ok(()) => {}
         Err(e) if e.code() == err::OFFLINE => {
             tracing::debug!(
@@ -864,19 +918,19 @@ pub async fn close_channel(
             // 那一帧 `close_channel` 没发出去，通道在设备上**还开着**：
             // 把归属放回去，页面重试 DELETE 才关得掉它（否则重试会拿到
             // 幂等的 204，页面以为关了而设备的 PTY 还在跑）。
-            state.bindings().bind(&channel_id, binding);
+            state.bindings().bind(channel_id, binding);
             return Err(e);
         }
     }
     state
         .streams()
-        .channel_closed(&binding.node_id, &binding.session_id, &channel_id);
+        .channel_closed(&binding.node_id, &binding.session_id, channel_id);
     tracing::info!(
         node_id = %binding.node_id,
         channel_id = %channel_id,
-        "browser closed a channel"
+        "a channel was closed"
     );
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1553,6 +1607,58 @@ mod tests {
     fn publishing_with_no_subscriber_is_not_an_error() {
         let s = Streams::new();
         assert!(s.device_status("n_1", "offline") > 0);
+    }
+
+    /// **`subscribe_raw` 不重放「订阅之前」发布的事件**——这条是起点探针
+    /// （`base_rev.rs`）那句「先订阅、再发送」的**真正**依据。
+    ///
+    /// # 为什么这条必须单独立在这里
+    ///
+    /// `base_rev.rs` 的集成用例 `the_probe_subscribes_before_it_sends` 看着像是在
+    /// 锁这个顺序，**其实锁不住**：`send_channel_data` → `send_to_device` →
+    /// `state.outbound().send(...)` 只是把帧塞进下行队列，**全程没有 `.await`、
+    /// 不让出执行权**，所以同一个任务里「先订阅再发」与「先发再订阅」在测试中
+    /// 观察不到任何差别（把订阅挪到发送之后，那条用例照样全绿——已实测）。
+    /// 顺序真正起作用的条件是设备在**另一个任务/另一台机器**上：帧出队、设备处理、
+    /// 回复帧上行、`publish` 投递，这中间隔着真实的异步边界。
+    ///
+    /// 所以顺序的正确性在这里锁：锁的是 `subscribe_raw` 的语义本身
+    /// （broadcast 不重放）。有了这条，「订阅晚于发送就会丢帧」才是被验证过的
+    /// 事实，而不是照抄文档里的一句话。
+    #[tokio::test]
+    async fn subscribing_after_publishing_misses_the_event() {
+        use futures_util::StreamExt as _;
+
+        let s = Streams::new();
+        // 订阅**之前**就发布（等价于「先发后订阅」那次发送已经跑完）。
+        s.channel_frame("n_1", "ch_before", json!({"op": "rev", "head": "aa"}));
+
+        let mut late = s.subscribe_raw(None);
+        // 再发一条：只有这条应该被看到。
+        s.channel_frame("n_1", "ch_after", json!({"op": "rev", "head": "bb"}));
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), late.next())
+            .await
+            .expect("订阅之后的发布必须收得到")
+            .expect("流不该结束");
+        assert!(
+            first.data.contains("ch_after"),
+            "订阅之后发布的那条必须收到，实际 {}",
+            first.data
+        );
+        assert!(
+            !first.data.contains("ch_before"),
+            "订阅之前发布的那条**不该**被重放，实际 {}",
+            first.data
+        );
+
+        // 再确认一次「之前那条永远不会来」：短超时内不会再有事件。
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), late.next())
+                .await
+                .is_err(),
+            "订阅之前的事件不得补发——这是「必须先用 subscribe_raw 再发送」的全部理由"
+        );
     }
 
     /// 整个 Hub 关闭（最后一个发送端被丢弃）→ 流**正常结束**，不是挂死。

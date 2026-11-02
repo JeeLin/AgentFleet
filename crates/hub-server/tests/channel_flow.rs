@@ -169,6 +169,30 @@ async fn report_connectors(hub: &Hub, est: &mut node_core::conn::Established) {
     report_capabilities(hub, est, &["terminal", "files", "git"]).await
 }
 
+/// 上报 `terminal` + `files`，**不报 `git`**。
+///
+/// 用在「测通道记账 / 帧形状，但会从设备侧读帧」的用例上。
+///
+/// # 为什么需要它（`v0.6.0`）
+///
+/// `v0.6.0` 起，**建会话时会向设备探一次起点**（`routes::base_rev`）：若设备上报了
+/// `git`，`POST /api/sessions` 会在这条设备连接上开一条 `git` 通道、下发
+/// `{"op":"rev"}`、再关掉它。设备侧本来就在读同一条 WS，于是夹具会在自己的
+/// `open_channel` 之前先读到**探针的三帧**（`open_channel` / `channel_data` /
+/// `close_channel`），用例里那句「设备收到的第一帧是我的」随之错位。
+///
+/// 本文件这些用例测的是**通道记账与帧形状**，不是起点，也不开 `git` 通道——
+/// 所以它们干脆不上报 `git`：探针的第四道门禁（`not_reported`）会把它直接折成
+/// `unavailable`，**一个帧都不发给设备**，帧流因此与 `v0.5.0` 完全一致。
+///
+/// **这不是把断言改松**：受影响用例的每一条断言都原样保留，只是让夹具不再
+/// 往它们的帧流里掺入与测试目标无关的帧。需要 `git` 的用例（`three_channels_...`
+/// 的循环、`the_git_connector_opens_a_channel_end_to_end`）仍然走
+/// [`report_connectors`]。
+async fn report_connectors_without_git(hub: &Hub, est: &mut node_core::conn::Established) {
+    report_capabilities(hub, est, &["terminal", "files"]).await
+}
+
 /// 上报**指定的** connector 集合，并等 Hub 记下。
 ///
 /// 与 [`report_connectors`] 共用一个实现：两处各抄一份载荷时，改字段
@@ -586,7 +610,7 @@ async fn reconnecting_resets_the_credit_to_credit_start() {
 async fn a_bad_open_channel_gets_an_explicit_error() {
     let hub = Hub::boot().await;
     let (mut est, node_id, _kp) = connect_enrolled(&hub).await;
-    report_connectors(&hub, &mut est).await;
+    report_connectors_without_git(&hub, &mut est).await;
     let page = Page::new(hub).await;
     let session = page.make_session(&node_id).await;
     let ch = page.open_channel(&session, "terminal").await;
@@ -658,7 +682,7 @@ async fn a_bad_open_channel_gets_an_explicit_error() {
 async fn data_on_an_unknown_channel_is_an_error_not_a_disconnect() {
     let hub = Hub::boot().await;
     let (mut est, node_id, _kp) = connect_enrolled(&hub).await;
-    report_connectors(&hub, &mut est).await;
+    report_connectors_without_git(&hub, &mut est).await;
     let page = Page::new(hub).await;
     let session = page.make_session(&node_id).await;
     let ch = page.open_channel(&session, "terminal").await;
@@ -744,7 +768,7 @@ async fn an_unexpected_channel_frame_is_ignored_without_closing() {
 async fn the_open_channel_frame_carries_the_protocol_credit_start() {
     let hub = Hub::boot().await;
     let (mut est, node_id, _kp) = connect_enrolled(&hub).await;
-    report_connectors(&hub, &mut est).await;
+    report_connectors_without_git(&hub, &mut est).await;
     let page = Page::new(hub).await;
     let session = page.make_session(&node_id).await;
     let ch = page.open_channel(&session, "terminal").await;
@@ -833,7 +857,7 @@ async fn the_same_channel_id_on_two_nodes_stays_separate() {
 async fn a_flooding_node_is_slow_read_not_killed_on_the_first_burst() {
     let hub = Hub::boot().await;
     let (mut est, node_id, _kp) = connect_enrolled(&hub).await;
-    report_connectors(&hub, &mut est).await;
+    report_connectors_without_git(&hub, &mut est).await;
     let page = Page::new(hub).await;
     let session = page.make_session(&node_id).await;
 
@@ -1021,7 +1045,7 @@ async fn forty_uplink_frames_get_credit_refill_and_no_error() {
     let (mut est, node_id, _kp) = connect_enrolled(&hub).await;
     // 设备要先上报能力：`POST /api/sessions` 与 `POST /api/channels` 都拿
     // 心跳里的 connectors 做硬过滤，没上报就是 `device_offline`。
-    report_connectors(&hub, &mut est).await;
+    report_connectors_without_git(&hub, &mut est).await;
     let page = Page::new(hub).await;
     let session = page.make_session(&node_id).await;
     let channel_id = page.open_channel(&session, "terminal").await;
@@ -1093,6 +1117,45 @@ async fn forty_uplink_frames_get_credit_refill_and_no_error() {
 
 /// `connector:"git"` 能开通道，且设备侧收到的帧里 `connector` 逐字是 `git`。
 ///
+/// 读设备侧收到的 `open_channel`，**只认 `want` 那条**。
+///
+/// # 为什么不能直接用 [`open_spec_on`]（`v0.6.0`）
+///
+/// `v0.6.0` 起建会话会向设备探一次起点：设备上报了 `git` 时，`POST /api/sessions`
+/// 会先在这条连接上开一条 `git` 通道探 `rev` 再关掉。于是设备侧在用例真正那条
+/// `open_channel` 之前，先收到**探针那条** `open_channel`。
+///
+/// [`open_spec_on`] 拿到的就会是探针的 id，用例里那句
+/// 「设备收到的必须是页面上那条通道」随即失败——而失败的原因与它要测的
+/// （Hub 原样透传 `connector` 名）**毫无关系**。
+///
+/// 所以这里按 id 取：跳过探针那条（以及任何别的 `open_channel`），
+/// **断言本身一条没改**，只是不再被无关的帧顶掉。
+///
+/// 探针那条通道 id 的唯一性由 `identity::random_id()` 保证（22 字符 base64url），
+/// 不会与本用例自己那条撞上。
+async fn open_spec_for(
+    est: &mut node_core::conn::Established,
+    want: &str,
+) -> protocol::channel::OpenChannel {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let text = est.next_text().await.unwrap().expect("hub must reply");
+        let f: Frame = serde_json::from_str(&text).unwrap();
+        if f.msg_type == types::OPEN_CHANNEL {
+            let spec = f
+                .payload::<protocol::channel::OpenChannel>()
+                .expect("open_channel payload");
+            if spec.channel_id == want {
+                return spec;
+            }
+            // 不是我们要的那条（探针的）：继续读，不把它当结果。
+            continue;
+        }
+        assert!(Instant::now() < deadline, "5s 内没收到 {want} 那条 open_channel");
+    }
+}
+
 /// 只断言 `channel_id` 对得上是不够的：`open_channel` 的载荷里 `connector`
 /// 若在透传中被换成别的名字（或掉了），设备会拿它去查注册表并回
 /// `channel_error{unsupported}`——那正是 `v0.2.0` 那种「两侧各自全绿、
@@ -1107,7 +1170,10 @@ async fn the_git_connector_opens_a_channel_end_to_end() {
     let session_id = page.make_session(&node_id).await;
     let channel_id = page.open_channel(&session_id, "git").await;
 
-    let spec = open_spec_on(&mut est).await;
+    // 按 id 取：设备上报了 `git`，所以建会话时探针已经在同一条连接上开过
+    // 一条 `git` 通道（见 `open_spec_for` 的注释）。断言本身没有放宽——
+    // 「设备收到的必须是页面上那条通道」照样成立，只是不再被探针那条顶掉。
+    let spec = open_spec_for(&mut est, &channel_id).await;
     assert_eq!(
         spec.channel_id, channel_id,
         "设备收到的必须是页面上那条通道"

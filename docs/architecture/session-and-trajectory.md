@@ -179,6 +179,36 @@ ACP **没有「重发第 N 条通知」的机制**。`session/load` 的重放实
 起点**不是门禁**：取不到就如实记原因，建会话照常成功。理由见
 `docs/PRODUCT.md` §3.1「Git 操作界面」——非 git 工作区从 v0.2.0 起一直是合法用法。
 
+#### 建会话时怎么钉住起点
+
+`POST /api/sessions` 的顺序是**先落行、再探测、再回填**：
+
+1. 门禁全部通过后 `create(..., base_rev = NULL, base_rev_status = "unknown")`
+   落一行（`state = 'running'`）；
+2. 用这个**真实会话 id** 开一条 `git` 通道，下发 `{"op":"rev"}`，等一条
+   `op == "rev"` 的帧，然后**无论成败都关掉通道**；
+3. `set_base_rev(id, rev, status)` 回填。
+
+**为什么不能「先探测再插入」**：开通道的既有入口 `open_device_channel` 第一件事
+就是按 `session_id` 查会话并要求 `state == Running`——会话行不存在时它无路可走。
+另一条路是给 `ChannelBinding.session_id` 填一个占位 id，但那个字段正是
+`POST /api/channels/{id}/*` 归属校验的依据，占位值会让这条通道的归属变成谎话，
+比多一次 `UPDATE` 坏得多。
+
+**代价与它为什么可以接受**：两次写库之间有一个几十毫秒的窗口，窗口内另一个
+标签页刷新会话列表会看到 `base_rev_status == "unknown"`（「起点未记录」），
+刷新一次即正确。关键在于**它不会显示成错误的起点**——`unknown` 不是 `ok`。
+因此不加锁、不加临时的「探测中」状态。
+
+**钉起点是一次 best-effort 探测，失败不阻塞建会话**：设备没上报 `git`、通道开
+不起来、等帧超时（探针自带 3 秒上限）、设备回 `not_a_repo` / `no_head`——这五类
+结局都只落成对应的 `base_rev_status`，`POST /api/sessions` 照常 201。会话本身
+已经建好且可用，没有理由因为「少一条元信息」让用户丢一次成功的创建。
+
+**通道一定会被关掉**：探测走的是与 `DELETE /api/channels/{id}` 同一份内部逻辑
+（解除绑定 → 发 `close_channel` 帧 → 推 `channel.closed`），收尾失败不改变探测
+结果，也不改变建会话的成败。
+
 ---
 
 ## 7. 轨迹事件表（初版）

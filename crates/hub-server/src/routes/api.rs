@@ -437,6 +437,18 @@ pub struct SessionSummary {
     pub state: hub_storage::SessionState,
     pub created_at: String,
     pub ended_at: Option<String>,
+    /// 会话建立那一刻工作区的 HEAD（完整 40 位）。`null` = 没有起点，
+    /// 原因看 `base_rev_status`。
+    ///
+    /// **明确不加 `skip_serializing_if`**：加了的话取不到起点时这个键会整个
+    /// 消失，于是「老 Hub + 新页面」（键不在）与「新 Hub 正常返回无起点」
+    /// （键在、值为 null）在 TypeScript 里长得一样。键恒在。
+    pub base_rev: Option<String>,
+    /// 起点为什么有／没有（五态），取值语义见
+    /// `docs/architecture/session-and-trajectory.md` §6.1。
+    ///
+    /// 不是 `Option`，所以本来就恒在。
+    pub base_rev_status: hub_storage::BaseRevStatus,
     pub workspace: WorkspaceRef,
 }
 
@@ -476,6 +488,8 @@ fn summary_of(item: &hub_storage::SessionListItem) -> SessionSummary {
         state: item.session.state,
         created_at: item.session.created_at.clone(),
         ended_at: item.session.ended_at.clone(),
+        base_rev: item.session.base_rev.clone(),
+        base_rev_status: item.session.base_rev_status,
         workspace: WorkspaceRef::new(&item.node_id, &item.removed_node_id, &item.path),
     }
 }
@@ -581,12 +595,33 @@ pub async fn create_session(
             &body.path,
             Some(agent_id),
             &hub_core::registry::now_stamp(),
-            // v0.6.0：起点由紧随其后的探测回填（见下方 `set_base_rev`）。
+            // 起点由紧随其后的探测回填（见下面的 `probe_base_rev`）。
             // 初值用 `Unknown` 而不是随便一个态——它是「我还不知道」。
             None,
             hub_storage::BaseRevStatus::Unknown,
         )
         .map_err(|e| ApiError::internal_with("cannot create the session", e))?;
+
+    // **先落行、再探测、再回填。** 顺序不能反：探测要走 `open_device_channel`，
+    // 而它第一件事就是 `SessionRepo::detail(session_id)` 并查
+    // `state == Running`（`stream.rs::open_device_channel`）。「先探测再插入」
+    // 要求给 `ChannelBinding.session_id` 填一个尚无会话的占位值，而那个字段是
+    // `POST /api/channels/{id}/*` 归属校验的依据——占位值会让这条通道的归属
+    // 变成谎话，比多一次 `UPDATE` 坏得多。
+    //
+    // 代价是**一个几十毫秒的窗口**：另一个标签页若恰好在这段时间里刷新了会话
+    // 列表，会看到 `base_rev_status == "unknown"`（「起点未记录」），刷新一次
+    // 即正确。**它不会显示成错误的起点**——`unknown` 不是 `ok`。不加锁、
+    // 不加额外的进度状态。
+    let (base_rev, base_rev_status) =
+        super::base_rev::probe_base_rev(&state, &auth, &session.id, &body.node_id).await;
+
+    // 写库失败是一件**真错**（不是「取不到起点」）：会话行已在，但它的起点
+    // 状态会永远停在 `unknown`——与「用户看到一个看起来成功、实际起点永远未知
+    // 的会话」是同一件事。静默吞掉会让它变成「起点偶尔是未知的」，无从排查。
+    hub_storage::SessionRepo::new(state.devices().pool().clone())
+        .set_base_rev(&session.id, base_rev.as_deref(), base_rev_status)
+        .map_err(|e| ApiError::internal_with("cannot record the session's base revision", e))?;
 
     let detail = SessionSummary {
         id: session.id.clone(),
@@ -594,6 +629,8 @@ pub async fn create_session(
         state: session.state,
         created_at: session.created_at.clone(),
         ended_at: session.ended_at.clone(),
+        base_rev,
+        base_rev_status,
         // 刚建出来的会话，设备必然存在（上面刚验过 `device.id`），
         // 所以这里 node_id 一定有值、removed 一定为 None。
         workspace: WorkspaceRef::new(&Some(device.id.clone()), &None, &body.path),
