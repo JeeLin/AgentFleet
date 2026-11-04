@@ -9,7 +9,7 @@ use tracing::info;
 use crate::error::{Result, StorageError};
 
 /// 当前 schema 版本。新增表/列时 +1 并在此处追加迁移。
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// 一个迁移：版本号 + 在该事务内执行的 SQL。
 struct Migration {
@@ -58,6 +58,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("schema_v4.sql"),
         // 两条 ADD COLUMN，不重建表。**必须为 false**：为 true 会去关外键，
         // 而这里没有任何要重建的东西——多关一次只会让迁移期间的外键检查失效。
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 5,
+        sql: include_str!("schema_v5.sql"),
+        // 四张 CREATE TABLE + session 的 ADD COLUMN，全是新增，不重建任何表。
         rebuilds_tables: false,
     },
 ];
@@ -712,8 +718,8 @@ mod tests {
         assert_eq!(
             c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            4,
-            "必须升到 v4"
+            SCHEMA_VERSION,
+            "必须升到当前版本（这条用例只关心 v4 的两列，但 `run` 会一路升到最新）"
         );
 
         let (rev, status): (Option<String>, String) = c
@@ -743,7 +749,7 @@ mod tests {
         assert_eq!(
             c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            4
+            SCHEMA_VERSION
         );
         for name in ["base_rev", "base_rev_status"] {
             let n: i64 = c
@@ -755,5 +761,139 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "session.{name} 只能有一列，不能重复加");
         }
+    }
+
+    // ---- v5：项目与绑定（v0.7.0 子任务 1）----
+
+    /// v5 建出四张表，且 `session.execution_id` 列存在。
+    ///
+    /// 判据是**表真的在**，不是"迁移没报错"——`CREATE TABLE IF NOT EXISTS`
+    /// 写错表名不会失败，只会在使用时才炸。
+    #[test]
+    fn migration_v5_creates_the_four_tables_and_the_execution_column() {
+        let mut c = memory();
+        run(&mut c).unwrap();
+        assert_eq!(
+            c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        for table in ["project", "binding", "task", "execution"] {
+            let n: i64 = c
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "v5 必须建出 {table} 表");
+        }
+        let n: i64 = c
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('session') WHERE name='execution_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "session.execution_id 必须存在");
+    }
+
+    /// **老会话可读，且 `execution_id` 是 `NULL`（不回填）。**
+    ///
+    /// 这条是本里程碑最关键的一条验收：v0.6.0 时代的会话迁到 v5 之后，
+    /// 必须仍然读得出来、`base_rev` 仍在，而 `execution_id` 保持 `NULL`
+    /// ——设计里写死「不回填」，理由见 `schema_v5.sql`。
+    #[test]
+    fn migration_v5_leaves_old_sessions_unattached() {
+        let mut c = memory();
+        // 先跑到 v4：模拟一个 v0.6.0 时代的库。
+        for m in MIGRATIONS.iter().filter(|m| m.version <= 4) {
+            let tx = c.transaction().unwrap();
+            tx.execute_batch(m.sql).unwrap();
+            tx.pragma_update(None, "user_version", m.version).unwrap();
+            tx.commit().unwrap();
+        }
+        c.execute_batch(
+            "INSERT INTO device (id, name, key_fingerprint, enrolled_at)
+                 VALUES ('n_a', 'pi', 'fp_a', 'unix:0');
+             INSERT INTO workspace (id, node_id, path, created_at)
+                 VALUES ('w_a', 'n_a', '/srv/app', 'unix:0');
+             INSERT INTO session (id, workspace_id, agent_id, state, created_at,
+                                  base_rev, base_rev_status)
+                 VALUES ('s_old', 'w_a', 'opencode', 'running', 'unix:0',
+                         'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef', 'ok');",
+        )
+        .unwrap();
+
+        run(&mut c).unwrap();
+
+        let (rev, status, exec): (Option<String>, String, Option<String>) = c
+            .query_row(
+                "SELECT base_rev, base_rev_status, execution_id
+                   FROM session WHERE id = 's_old'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("老会话在迁移后必须仍然读得出来");
+        assert_eq!(
+            rev.as_deref(),
+            Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+            "base_rev 必须原样保留"
+        );
+        assert_eq!(status, "ok", "base_rev_status 必须原样保留");
+        assert_eq!(
+            exec, None,
+            "老会话的 execution_id 必须是 NULL —— 设计里写死『不回填』"
+        );
+    }
+
+    /// v5 幂等：闸门生效，连跑两次不报 `duplicate column name`。
+    #[test]
+    fn migration_v5_is_idempotent() {
+        let mut c = memory();
+        run(&mut c).unwrap();
+        run(&mut c).unwrap();
+        assert_eq!(
+            c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        let n: i64 = c
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('session') WHERE name='execution_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "session.execution_id 只能有一列，不能重复加");
+    }
+
+    /// v5 的唯一约束真的生效：同一 `(project_id, device_id)` 不能插两行。
+    ///
+    /// 这张表的全部意义就是这个唯一性（里程碑 §4）。**这条验的是 DDL 本身**，
+    /// 不是仓储层的 upsert——两者都要有，前者挡住绕过仓储层的写入。
+    #[test]
+    fn migration_v5_binding_is_unique_per_project_and_device() {
+        let mut c = memory();
+        run(&mut c).unwrap();
+        c.execute_batch(
+            "INSERT INTO project (id, name, shape, created_at)
+                 VALUES ('p_a', 'app', 'central', 'unix:0');
+             INSERT INTO binding
+                 (id, project_id, device_id, fixed_dir, cleanup_policy, created_at)
+                 VALUES ('b_a', 'p_a', 'n_a', '/srv/app', 'balanced', 'unix:0');",
+        )
+        .unwrap();
+        let e = c
+            .execute_batch(
+                "INSERT INTO binding
+                     (id, project_id, device_id, fixed_dir, cleanup_policy, created_at)
+                     VALUES ('b_b', 'p_a', 'n_a', '/srv/other', 'balanced', 'unix:1');",
+            )
+            .unwrap_err();
+        assert!(
+            e.to_string().contains("UNIQUE"),
+            "第二条同 (project, device) 的绑定必须撞唯一约束，实际: {e}"
+        );
     }
 }

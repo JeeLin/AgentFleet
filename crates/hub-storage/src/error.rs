@@ -75,6 +75,87 @@ pub enum StorageError {
     #[error("no such session: {0}")]
     NoSuchSession(String),
 
+    /// 库里的 `project.shape` 不在三态里。
+    ///
+    /// 与 `InvalidSessionState` 同一条口径：**不静默回落 `central`**。回落会让
+    /// 一个隔离式项目在下次读取时声称「代码在 Hub 上」，而 Hub 上什么都没有。
+    #[error("invalid project.shape in database: {0:?}")]
+    InvalidProjectShape(String),
+
+    /// 库里的 `project.theme_color` 不在五色里。
+    ///
+    /// 回落成灰色会把「库里存了一个我们不认识的颜色」显示成「用户选了灰色」，
+    /// 一个能点得动的谎话。
+    #[error("invalid project.theme_color in database: {0:?}")]
+    InvalidThemeColor(String),
+
+    /// 库里没有这个项目。
+    #[error("no such project: {id:?}")]
+    ProjectNotFound { id: String },
+
+    /// 形态变更被拒。**带 `from` / `to` 两端的值**，因为拒绝的理由取决于它们：
+    /// `isolated → central` 是允许的，`central → isolated` 才是「产品做不到
+    /// 把已经上传的代码收回」。只报「不允许」用户不知道该改成什么。
+    #[error("refused to change project shape from {from:?} to {to:?}")]
+    ShapeTransitionRefused {
+        from: &'static str,
+        to: &'static str,
+    },
+
+    /// 库里的 `binding.cleanup_policy` 不在三档里。与其余取值校验同一条口径。
+    #[error("invalid binding.cleanup_policy in database: {0:?}")]
+    InvalidCleanupPolicy(String),
+
+    /// 库里的 `task.state` 不在六态里。
+    #[error("invalid task.state in database: {0:?}")]
+    InvalidTaskState(String),
+
+    /// 库里的 `execution.state` 不在五态里。
+    #[error("invalid execution.state in database: {0:?}")]
+    InvalidExecutionState(String),
+
+    /// 库里没有这个任务。
+    #[error("no such task: {id:?}")]
+    TaskNotFound { id: String },
+
+    /// 库里没有这次执行。
+    #[error("no such execution: {id:?}")]
+    ExecutionNotFound { id: String },
+
+    /// 会话已经挂到别的一次执行下。
+    ///
+    /// 归属只写一次：中途改会让执行的历史归属对不上。
+    #[error("session {session:?} is already attached to execution {existing:?}")]
+    SessionAlreadyAttached { session: String, existing: String },
+
+    /// 没有这条绑定。
+    #[error("no such binding: project {project_id:?} on device {device_id:?}")]
+    NoSuchBinding {
+        project_id: String,
+        device_id: String,
+    },
+
+    /// 改固定目录被拒：该绑定下已有执行记录，它们的 worktree 指向旧目录。
+    ///
+    /// 带 `executions` 条数——用户得知道是"12 条执行记录挡着"还是"1 条"，
+    /// 只有数字能让他判断该不该先清理。
+    #[error(
+        "refused to change the fixed directory of project {project_id:?} on device \
+         {device_id:?}: {executions} execution record(s) still live in the old directory"
+    )]
+    FixedDirInUse {
+        project_id: String,
+        device_id: String,
+        executions: i64,
+    },
+
+    /// 起点已经写过一个不同的值。
+    ///
+    /// 起点是这次执行的历史事实，`set_base_commit` 只填 `NULL`，不改已有的值。
+    /// 撞上这一条说明有两条路径都试图定起点——那是要修的问题，不是能盖过去的事。
+    #[error("execution {id:?} already has base commit {existing:?}: refusing to overwrite it")]
+    BaseCommitAlreadySet { id: String, existing: String },
+
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 }

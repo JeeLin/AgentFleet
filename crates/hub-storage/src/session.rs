@@ -129,6 +129,16 @@ pub struct Session {
     /// 起点为什么有／没有（五态）。见 [`BaseRevStatus`]。
     #[serde(default = "unknown_base_rev")]
     pub base_rev_status: BaseRevStatus,
+    /// 这个会话属于哪一次执行（`execution.id`）。
+    ///
+    /// **可空，且 v0.6.0 时代的老会话恒为 `None`**——那些会话没有 Task、
+    /// 没有 Binding、没有 worktree，硬造一条 execution 只能把 project/task
+    /// 编出来，而编出来的归属会让「失败归因」从第一天就带脏数据。
+    ///
+    /// 可见性后果（文档写明的行为，不是遗漏）：老会话**仍出现在会话列表**，
+    /// 但**不出现在**「项目 → 执行」视图与看板里；页面按「此会话早于项目主轴」
+    /// 提示一句。见 `schema_v5.sql` 的 `session.execution_id` 段。
+    pub execution_id: Option<String>,
 }
 
 /// `base_rev_status` 的反序列化缺省值。
@@ -165,19 +175,21 @@ pub(crate) struct RawSession {
     ended_at: Option<String>,
     base_rev: Option<String>,
     base_rev_status: String,
+    execution_id: Option<String>,
 }
 
 impl RawSession {
-    /// 从行映射里的 `offset` 列起读**九列**会话列。
+    /// 从行映射里的 `offset` 列起读**十列**会话列。
     ///
     /// 联表查询（工作区 × 会话）用它把两段列拼回各自的形状：SQL 层选出来的
     /// 列是平铺的，而这里是强类型的，两者靠**列序**对齐，所以那几条联表 SQL
-    /// 的 SELECT 列表必须与下面这九个 `r.get` 逐字同序。
+    /// 的 SELECT 列表必须与下面这十个 `r.get` 逐字同序。
     ///
-    /// **v0.6.0 从七列扩到九列**（加 `base_rev` / `base_rev_status`）。凡是
-    /// 按 `offset` 往后取工作区列的地方（`detail` 的 `row_to_workspace_at`、
-    /// `list_sessions` 的 `r.get`），偏移都要同步 +2——写错的话读到的是隔壁
-    /// 那个**类型也对得上**的列，于是静默错位而不是报错。
+    /// **v0.6.0 从七列扩到九列**（加 `base_rev` / `base_rev_status`）；
+    /// **v0.7.0 从九列扩到十列**（加 `execution_id`）。凡是按 `offset` 往后取
+    /// 工作区列的地方（`detail` 的 `row_to_workspace_at`、`list_sessions` 的
+    /// `r.get`），偏移都要同步跟着变——写错的话读到的是隔壁那个**类型也对得上**
+    /// 的列，于是静默错位而不是报错。
     pub(crate) fn from_row(
         r: &Row<'_>,
         offset: usize,
@@ -192,6 +204,7 @@ impl RawSession {
             ended_at: r.get(offset + 6)?,
             base_rev: r.get(offset + 7)?,
             base_rev_status: r.get(offset + 8)?,
+            execution_id: r.get(offset + 9)?,
         })
     }
 
@@ -206,6 +219,7 @@ impl RawSession {
             ended_at: self.ended_at,
             base_rev: self.base_rev,
             base_rev_status: BaseRevStatus::from_str(&self.base_rev_status)?,
+            execution_id: self.execution_id,
         })
     }
 }
@@ -276,7 +290,7 @@ impl SessionRepo {
         let row = tx
             .query_row(
                 "SELECT id, workspace_id, agent_id, acp_session_id, state, created_at, ended_at,
-                        base_rev, base_rev_status
+                        base_rev, base_rev_status, execution_id
                  FROM session WHERE id = ?1",
                 params![id],
                 raw_session,
@@ -284,6 +298,52 @@ impl SessionRepo {
             .into_session()?;
         tx.commit()?;
         Ok(row)
+    }
+
+    /// 把会话挂到一次执行下（`session.execution_id`）。
+    ///
+    /// # 为什么不放进 `create`
+    ///
+    /// 会话与执行的生命周期不同：执行由任务派发时创建（`task → execution`），
+    /// 而会话是用户点开对话时创建。两者的先后不固定——执行已经跑起来了但还没
+    /// 有人看对话，是常态。把 `execution_id` 做成建会话时的必填入参，会逼调用方
+    /// 先造一个会话必须属于的执行，而"先有鸡还是先有蛋"在这里没有正确答案。
+    ///
+    /// # 不回填老会话
+    ///
+    /// 本方法**只写一次**（`WHERE execution_id IS NULL`）。v0.6.0 时代的老会话
+    /// 保持 `NULL`，理由见 `schema_v5.sql` 与 `Session::execution_id` 的文档。
+    /// 想改已经挂好的归属会得到 `SessionAlreadyAttached`——归属中途变掉会让
+    /// 执行的历史归属对不上。
+    pub fn set_execution_id(&self, id: &str, execution_id: &str) -> Result<()> {
+        let conn = self.pool.get()?;
+        let n = conn.execute(
+            "UPDATE session SET execution_id = ?2 WHERE id = ?1 AND execution_id IS NULL",
+            params![id, execution_id],
+        )?;
+        if n > 0 {
+            return Ok(());
+        }
+        // 0 行受影响只有三种可能：不存在、已挂同一个（重连/刷新，幂等成功）、
+        // 已挂别的（必须拒）。读一行就够分辨——**不要**去猜是哪一种。
+        let existing: Option<Option<String>> = conn
+            .query_row(
+                "SELECT execution_id FROM session WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match existing {
+            None => Err(StorageError::NoSuchSession(id.to_string())),
+            Some(current) if current.as_deref() == Some(execution_id) => Ok(()),
+            // `None` 与「已挂别的」走同一条：两种情况都是「现在不是一个空位，
+            // 而我这次没写进去」。`None` 只会在并发写入刚把空位填上的瞬间出现，
+            // 报可重试的错误而不是假装成功。
+            Some(current) => Err(StorageError::SessionAlreadyAttached {
+                session: id.to_string(),
+                existing: current.unwrap_or_default(),
+            }),
+        }
     }
 
     /// 回填写入会话起点。建会话时探测完成（或探测失败）后调用。
@@ -339,7 +399,7 @@ impl SessionRepo {
         let conn = self.pool.get()?;
         conn.query_row(
             "SELECT id, workspace_id, agent_id, acp_session_id, state, created_at, ended_at,
-                    base_rev, base_rev_status
+                    base_rev, base_rev_status, execution_id
              FROM session WHERE id = ?1",
             params![id],
             raw_session,
@@ -385,16 +445,15 @@ impl SessionRepo {
         let conn = self.pool.get()?;
         conn.query_row(
             "SELECT s.id, s.workspace_id, s.agent_id, s.acp_session_id, s.state,
-                    s.created_at, s.ended_at, s.base_rev, s.base_rev_status,
+                    s.created_at, s.ended_at, s.base_rev, s.base_rev_status, s.execution_id,
                     w.id, w.node_id, w.removed_node_id, w.path, w.created_at
              FROM session s JOIN workspace w ON w.id = s.workspace_id
              WHERE s.id = ?1",
             params![id],
-            // 9 而不是 6 或 7：会话那一段现在是九列（v0.6.0 加了
-            // `base_rev` / `base_rev_status`）。**这个数字与上面 SELECT 里
-            // `s.` 开头的列数必须相等**，差一位就会把 `w.id` 当成
-            // `base_rev_status` 读——两者都能读成字符串，于是静默错位。
-            |r| Ok((raw_session(r)?, row_to_workspace_at(r, 9)?)),
+            // 10 不是 9 或 6：会话那一段现在是十列（v0.7.0 加了 `execution_id`）。
+            // **这个数字与上面 SELECT 里 `s.` 开头的列数必须相等**，差一位就会
+            // 把 `w.id` 当成 `execution_id` 读——两者都能读成字符串，于是静默错位。
+            |r| Ok((raw_session(r)?, row_to_workspace_at(r, 10)?)),
         )
         .optional()?
         .map(|(s, w)| {
@@ -469,7 +528,7 @@ mod tests {
         let got: Session = tx
             .query_row(
                 "SELECT id, workspace_id, agent_id, acp_session_id, state, created_at, ended_at,
-                        base_rev, base_rev_status
+                        base_rev, base_rev_status, execution_id
                  FROM session WHERE id = 's_tx'",
                 [],
                 raw_session,
@@ -906,5 +965,110 @@ mod tests {
         let n = all.len();
         all.dedup();
         assert_eq!(all.len(), n, "五态的字面量不得重复");
+    }
+
+    // ---- v0.7.0：execution_id（子任务 1）----
+
+    /// **新建的会话 `execution_id` 是 `NULL`。**
+    ///
+    /// 会话由用户点开对话时建，执行由任务派发时建，两者先后不固定——所以
+    /// 归属只能事后挂，不能在 `create` 里必填。这条钉住"默认不挂"。
+    #[test]
+    fn a_fresh_session_is_not_attached_to_any_execution() {
+        let (_d, sr) = setup();
+        let s = sr
+            .create(
+                "n_a",
+                "/a",
+                Some("opencode"),
+                TS,
+                None,
+                BaseRevStatus::NoHead,
+            )
+            .unwrap();
+        assert_eq!(s.execution_id, None);
+        let f = sr.find(&s.id).unwrap().unwrap();
+        assert_eq!(f.execution_id, None);
+        let d = sr.detail(&s.id).unwrap().unwrap();
+        assert_eq!(d.session.execution_id, None);
+    }
+
+    /// 挂上去之后，`find` / `detail` / `list` **三条路径**都必须读到同一个值。
+    ///
+    /// 这是列序陷阱的第四次实战：`execution_id` 是会话段的**最后一列**，
+    /// 联表查询里紧跟其后就是工作区列。偏移写错一位就会把 `w.node_id` 读成
+    /// `execution_id`——两者都能读成字符串，类型对得上，于是静默错位。
+    #[test]
+    fn attaching_an_execution_is_visible_from_every_read_path() {
+        let (_d, sr) = setup();
+        let s = sr
+            .create(
+                "n_a",
+                "/a",
+                Some("opencode"),
+                TS,
+                None,
+                BaseRevStatus::NoHead,
+            )
+            .unwrap();
+        sr.set_execution_id(&s.id, "e_1").unwrap();
+
+        assert_eq!(
+            sr.find(&s.id).unwrap().unwrap().execution_id.as_deref(),
+            Some("e_1")
+        );
+        let d = sr.detail(&s.id).unwrap().unwrap();
+        assert_eq!(d.session.execution_id.as_deref(), Some("e_1"));
+        assert_eq!(
+            d.workspace.node_id.as_deref(),
+            Some("n_a"),
+            "工作区段没被挤坏"
+        );
+
+        let list = sr.list().unwrap();
+        let one = list.iter().find(|i| i.session.id == s.id).unwrap();
+        assert_eq!(one.session.execution_id.as_deref(), Some("e_1"));
+        assert_eq!(
+            one.node_id.as_deref(),
+            Some("n_a"),
+            "列表的 node_id 没被挤坏"
+        );
+        assert_eq!(one.path, "/a");
+    }
+
+    /// 归属**只写一次**：改已挂好的归属被拒。
+    #[test]
+    fn re_attaching_to_a_different_execution_is_refused() {
+        let (_d, sr) = setup();
+        let s = sr
+            .create(
+                "n_a",
+                "/a",
+                Some("opencode"),
+                TS,
+                None,
+                BaseRevStatus::NoHead,
+            )
+            .unwrap();
+        sr.set_execution_id(&s.id, "e_1").unwrap();
+        // 同一个 id 重复挂是幂等成功（重连、页面刷新都会走到）。
+        sr.set_execution_id(&s.id, "e_1").unwrap();
+        let e = sr.set_execution_id(&s.id, "e_2").unwrap_err();
+        assert!(
+            matches!(e, StorageError::SessionAlreadyAttached { .. }),
+            "{e:?}"
+        );
+        assert_eq!(
+            sr.find(&s.id).unwrap().unwrap().execution_id.as_deref(),
+            Some("e_1"),
+            "被拒之后归属不得变"
+        );
+    }
+
+    #[test]
+    fn attaching_a_missing_session_is_named() {
+        let (_d, sr) = setup();
+        let e = sr.set_execution_id("s_missing", "e_1").unwrap_err();
+        assert!(matches!(e, StorageError::NoSuchSession(_)), "{e:?}");
     }
 }

@@ -286,7 +286,7 @@ pub fn recent_sessions(
     let mut stmt = conn.prepare(
         "SELECT w.id, w.node_id, w.removed_node_id, w.path, w.created_at,
                 s.id, s.workspace_id, s.agent_id, s.acp_session_id, s.state, s.created_at,
-                s.ended_at, s.base_rev, s.base_rev_status
+                s.ended_at, s.base_rev, s.base_rev_status, s.execution_id
          FROM workspace w
          JOIN session s ON s.id = (
              SELECT s2.id FROM session s2
@@ -297,8 +297,8 @@ pub fn recent_sessions(
          ORDER BY w.created_at, w.id",
     )?;
     let rows = stmt.query_map(params![node_id], |r| {
-        // 偏移 **5** 是工作区那一段的列数；会话段在它之后，现在是九列。
-        // 这个数字不随 v0.6.0 的加列变化（变的是会话段的长度，而
+        // 偏移 **5** 是工作区那一段的列数；会话段在它之后，现在是十列。
+        // 这个数字不随会话加列变化（变的是会话段的长度，而
         // `from_row` 自己按 offset 往后取）。
         let raw = crate::session::RawSession::from_row(r, 5)?;
         Ok((row_to_workspace_at(r, 0)?, raw))
@@ -334,7 +334,7 @@ pub fn list_sessions(repo: &WorkspaceRepo) -> Result<Vec<SessionListItem>> {
     let conn = repo.pool().get()?;
     let mut stmt = conn.prepare(
         "SELECT s.id, s.workspace_id, s.agent_id, s.acp_session_id, s.state, s.created_at,
-                s.ended_at, s.base_rev, s.base_rev_status,
+                s.ended_at, s.base_rev, s.base_rev_status, s.execution_id,
                 w.node_id, w.removed_node_id, w.path
          FROM session s
          JOIN workspace w ON w.id = s.workspace_id
@@ -342,15 +342,15 @@ pub fn list_sessions(repo: &WorkspaceRepo) -> Result<Vec<SessionListItem>> {
     )?;
     let rows = stmt.query_map([], |r| {
         let raw = crate::session::RawSession::from_row(r, 0)?;
-        // 从 **9** 起，不是 6 也不是 7：会话那一段现在是九列（v0.6.0 加了
-        // `base_rev` / `base_rev_status`，它们排在 `ended_at` 之后）。
+        // 从 **10** 起，不是 6、7 或 9：会话那一段现在是十列（v0.7.0 又加了
+        // `execution_id`，它排在 `base_rev_status` 之后）。
         //
-        // 这是同一个陷阱的**第二次实战**：写错的话 `node_id` 会读到
-        // `s.base_rev_status`（一个非空文本）而不是 `w.node_id`——类型对得上，
-        // 于是**静默错位**而不是报错。上一次是 `node_id` 读到 `s.ended_at`。
-        // 判据在测试里：`create_persists_the_base_rev_and_its_status` 交叉比对
+        // 这是同一个陷阱的**第三次实战**：写错的话 `node_id` 会读到
+        // `s.execution_id`（或更早的 `s.base_rev_status`）而不是 `w.node_id`
+        // ——类型对得上，于是**静默错位**而不是报错。判据在测试里：
+        // `create_persists_the_base_rev_and_its_status` 交叉比对
         // `find` / `detail` / `list` 三条路径读到的值，错一位必红。
-        Ok((raw, r.get(9)?, r.get(10)?, r.get(11)?))
+        Ok((raw, r.get(10)?, r.get(11)?, r.get(12)?))
     })?;
     rows.map(|r| {
         let (raw, node_id, removed_node_id, path) = r?;

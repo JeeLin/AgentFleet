@@ -5,21 +5,29 @@
 //! 多设备高频心跳/状态写入下，零 PRAGMA 必现 `SQLITE_BUSY`）。
 
 pub mod agent;
+pub mod binding;
 pub mod db;
 pub mod error;
+pub mod execution;
 pub mod migrate;
+pub mod project;
 pub mod repo;
 pub mod session;
+pub mod task;
 pub mod trajectory;
 pub mod workspace;
 
 pub use agent::{AgentConfig, AgentConfigRepo, AgentRuntime, AgentRuntimeRepo};
+pub use binding::{Binding, BindingRepo, BindingSpec, CleanupPolicy, FixedDirChange};
 pub use db::{data_dir, open, open_in, set_umask_077, Db};
 pub use error::StorageError;
+pub use execution::{Execution, ExecutionRepo, ExecutionState, NewExecution};
+pub use project::{NewProject, Project, ProjectRepo, ProjectShape, ThemeColor};
 pub use repo::{
     base64url_decode, base64url_of, Device, DeviceRepo, DeviceStatus, NewDevice, SecretRepo,
 };
 pub use session::{BaseRevStatus, Session, SessionDetail, SessionRepo, SessionState};
+pub use task::{DoneWhen, NewTask, Task, TaskRepo, TaskState};
 pub use trajectory::{Gap, NewEvent, TrajectoryEvent, TrajectoryRepo, TurnBounds, TURN_END_KIND};
 pub use workspace::{
     list_sessions, recent_sessions, SessionListItem, Workspace, WorkspaceRepo, WorkspaceSession,

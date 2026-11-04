@@ -93,6 +93,47 @@ secret(          -- M0 建：Hub 自身的秘密（登录密码哈希、session 
   自包含，后者是 Hub 库里的一行）；**工作区与 session 是主从**（见 §4.1）。
   迁移按 `PRAGMA user_version` 驱动（v1 `schema.sql` / v2 `schema_v2.sql`），
   幂等性靠「每条只跑一遍」而不是靠 DDL 本身。
+- **v0.7.0 的 v5 迁移加四张表 + 一列**（`crates/hub-storage/src/schema_v5.sql`）：
+  ```text
+  project(       -- 项目：代码的去处。形态是属性，不是类型
+    id, name,
+    shape        TEXT NOT NULL,    -- 'central' | 'mirror' | 'isolated'
+    theme_color  TEXT,             -- 只做视觉区分，不影响业务；NULL = 用户没选
+    archived_at  TEXT,             -- 非空即已归档（不可删除，只能归档）
+    created_at   TEXT
+  )
+
+  binding(       -- (project, device) → 固定目录。这张表的全部意义是唯一约束
+    id, project_id, device_id,
+    fixed_dir         TEXT NOT NULL,
+    disk_quota_bytes  INTEGER,             -- NULL = 不限额
+    cleanup_policy    TEXT NOT NULL,       -- 'conservative' | 'balanced' | 'aggressive'
+    created_at        TEXT,
+    UNIQUE (project_id, device_id)         -- 同一项目在同一设备上只有一个固定目录
+  )
+
+  task(          -- 看板上的一张卡片
+    id, project_id, title,
+    state                    TEXT NOT NULL,  -- 六态，见 task-model.md §2
+    done_when_criteria       TEXT,           -- 判定码（机器判）
+    done_when_description    TEXT,           -- 给人看的一句话
+    created_by, base_commit, created_at, updated_at
+  )
+
+  execution(     -- 一次「把这个任务放到某台设备上跑」。Task:Execution = 1:N
+    id, task_id, binding_id,
+    base_commit    TEXT,   -- **起点唯一真相源**（v0.6.0 交接规则）
+    worktree_path  TEXT,
+    state          TEXT NOT NULL,  -- 'pending'|'running'|'succeeded'|'failed'|'aborted'
+    created_at     TEXT
+  )
+  ```
+  加 `session.execution_id TEXT`（可空）。**老会话保持 `NULL`，不回填**——
+  v0.6.0 时代的会话没有 Task / Binding / worktree，硬造执行只会让失败归因从
+  第一天就带脏数据。可见性后果：老会话仍在会话列表里可读，但不进「项目 → 执行」
+  视图与看板，页面按「此会话早于项目主轴」提示一句。
+  四张表**不加外键**（延续 v3 的裁定）：删设备、删绑定这些规则由仓储层显式检查
+  并给可读原因，DDL 里的约束只甩一句 `FOREIGN KEY constraint failed`。
 - **没有** environment 表；**没有** resource 表（connector 是有类型的，不是多态实体）。
 - **`capabilities` 必须落库**：它是路由的硬过滤输入，不能只在内存里——Hub 重启后
   设备还没连上时要能回答「有没有这台设备」，见 `scheduling.md` §2.1。
