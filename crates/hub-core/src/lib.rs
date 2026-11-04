@@ -9,6 +9,7 @@ pub mod connections;
 pub mod error;
 pub mod limits;
 pub mod registry;
+pub mod repo;
 pub mod reports;
 pub mod session;
 pub mod time;
@@ -20,6 +21,7 @@ pub use error::CoreError;
 pub use identity::{Fingerprint, KeyPair};
 pub use limits::ReadLimiter;
 pub use registry::Registry;
+pub use repo::{BareRepo, RepoError};
 pub use reports::{
     merge_into_stored, presence, report_from_heartbeat, Presence, Report, Reports, OFFLINE_AFTER,
 };
