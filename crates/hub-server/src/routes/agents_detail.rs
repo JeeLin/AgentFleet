@@ -40,7 +40,7 @@ use axum::Json;
 use serde::Serialize;
 
 use hub_storage::binding::BindingRepo;
-use hub_storage::execution::{ExecutionRepo, ExecutionState};
+use hub_storage::execution::ExecutionRepo;
 
 use crate::routes::devices::FailureBreakdown;
 use crate::{ApiError, AppState};
@@ -155,18 +155,13 @@ pub async fn get_agent(
                 .map_err(|e| ApiError::internal_with("cannot list executions", e))?;
             for run in runs {
                 device_runs += 1;
-                match run.state {
-                    ExecutionState::Succeeded => breakdown.succeeded += 1,
-                    ExecutionState::Failed => breakdown.failed += 1,
-                    ExecutionState::Aborted => breakdown.aborted += 1,
-                    ExecutionState::Pending | ExecutionState::Running => breakdown.in_flight += 1,
-                }
+                breakdown.record(run.state);
                 task_history.push(AgentTaskRun {
                     execution_id: run.id,
                     task_title: task_title(&state, &run.task_id),
                     task_id: run.task_id,
                     project_id: b.project_id.clone(),
-                    project_name: project_name(&state, &b.project_id),
+                    project_name: super::project_name(&state, &b.project_id),
                     device_id: node_id.clone(),
                     state: run.state.as_str(),
                     created_at: run.created_at,
@@ -225,20 +220,18 @@ pub async fn get_agent(
 /// 早已不存在的行（v5 刻意不给 `execution.task_id` 加外键）。编一个
 /// 「（已删除）」当标题会让用户以为真有个任务叫这个名字。
 fn task_title(state: &AppState, task_id: &str) -> Option<String> {
-    hub_storage::task::TaskRepo::new(state.pool().clone())
-        .get(task_id)
-        .ok()
-        .flatten()
-        .map(|t| t.title)
-}
-
-/// 项目名。不存在时退回 id（项目只归档不删除）。
-fn project_name(state: &AppState, project_id: &str) -> String {
-    match hub_storage::project::ProjectRepo::new(state.pool().clone()).get(project_id) {
-        Ok(Some(p)) => p.name,
-        // coverage: excluded — 项目只归档不删除，所以 `Ok(None)` 正常走不到；
-        // `Err` 是读库失败。两条都退回 id 是为了「有一个能让人对上的标签」
-        // 而不是留一个空标题。
-        Ok(None) | Err(_) => project_id.to_string(),
+    match hub_storage::task::TaskRepo::new(state.pool().clone()).get(task_id) {
+        Ok(Some(t)) => Some(t.title),
+        // **任务行已不在**（`Ok(None)`）：项目只归档不删除，但任务可以被清掉。
+        // 页面会显示「任务已不在（<id>）」，那是实情。
+        Ok(None) => None,
+        // **读库失败**：与上面不是一回事——我们不知道那个任务在不在。但为了一行
+        // 标题让整页 500 更糟（其它行的数据仍然成立），所以退回 `None`，与
+        // `project_name` 同一取舍。这里显式写出分支而不是 `.ok().flatten()`：
+        // 那种写法把「不存在」与「读不出来」压成同一个值，后来改的人看不出
+        // 这两件事被合并过。
+        //
+        // coverage: excluded — 走到这里必须把库读坏（连接池取不到 / SQLite 报错）。
+        Err(_) => None,
     }
 }

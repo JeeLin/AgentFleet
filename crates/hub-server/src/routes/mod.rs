@@ -82,6 +82,25 @@ pub fn masked_fingerprint(fp: &str) -> String {
     format!("{head}***{tail}")
 }
 
+/// 项目名；项目不存在时退回 id（项目只归档不删除，正常情况不会走到）。
+///
+/// **定义在这里而不是每个路由模块各写一份**：设备详情与 agent 详情都要把
+/// `binding.project_id` 翻成一个人能读的名字，而这两页是同一件事的两个视角
+/// ——同一批绑定行，一个按设备看、一个按 agent 看。各写一份的话，改口径
+/// （比如将来要在名字后面补上归档标记）必然漏一处，于是同一个项目在两个
+/// 页面上显示成两个名字。
+///
+/// 退回 **id 而不是空串**：空串在页面上是一个没有标题的分组，用户点不进去
+/// 也不知道那是谁；id 至少能让人对上是哪个项目。
+pub fn project_name(state: &crate::AppState, project_id: &str) -> String {
+    match hub_storage::project::ProjectRepo::new(state.pool().clone()).get(project_id) {
+        Ok(Some(p)) => p.name,
+        // coverage: excluded — 项目只归档不删除，所以 `Ok(None)` 正常走不到；
+        // `Err` 是读库失败。两条都退回 id，让页面至少有一个能对上的标签。
+        Ok(None) | Err(_) => project_id.to_string(),
+    }
+}
+
 /// 把 `Last-Event-ID` 头取成序号（SSE 断线重连语义，子任务 5a）。
 ///
 /// 定义在这里而不是挂在某个路由模块上：M1 没有 agent 会话，「订阅哪条会话」

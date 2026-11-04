@@ -18,7 +18,7 @@ pub mod trajectory;
 pub mod workspace;
 
 pub use agent::{AgentConfig, AgentConfigRepo, AgentRuntime, AgentRuntimeRepo};
-pub use binding::{Binding, BindingRepo, BindingSpec, CleanupPolicy, FixedDirChange};
+pub use binding::{Binding, BindingRepo, BindingSpec, CleanupPolicy};
 pub use db::{data_dir, open, open_in, set_umask_077, Db};
 pub use error::StorageError;
 pub use execution::{Execution, ExecutionRepo, ExecutionState, NewExecution};

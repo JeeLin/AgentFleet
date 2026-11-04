@@ -20,8 +20,9 @@
 //! # `fixed_dir` 有执行记录之后不能改
 //!
 //! worktree 建在固定目录下，改了目录等于让正在跑的执行失去归属。存储层已经
-//! 在事务里判过（[`hub_storage::binding::FixedDirChange`]），这里只负责把它翻成
-//! **可区分的 409**——笼统的 400 会让用户以为是自己填错了。
+//! 在同一事务里判过（`upsert` 返回 [`hub_storage::StorageError::FixedDirInUse`]，
+//! 带执行条数），这里只负责把它翻成**可区分的 409**——笼统的 400 会让用户
+//! 以为是自己填错了。
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -95,7 +96,7 @@ fn now() -> String {
     format!("unix:{secs}")
 }
 
-/// 把 `FixedDirChange::HasExecutions` 翻成带条数的 409。
+/// 把 `StorageError::FixedDirInUse` 翻成带条数的 409。
 ///
 /// **带条数**是刻意的：用户要知道「有 3 条执行记录」，而不是只看到「不能改」。
 /// 只说「不能改」的话，他无法判断是「等一下再说」还是「永远不行」。
@@ -233,7 +234,9 @@ fn put(
         disk_quota_bytes: body.disk_quota_bytes,
         // `upsert` 收的是完整 spec，而"不给策略"要沿用默认值。
         // 这里给出存储层的默认值，而不是在路由层再定一份。
-        cleanup_policy: cleanup_policy.unwrap_or(CleanupPolicy::Balanced),
+        // 不给策略时用存储层的默认档（`impl Default for CleanupPolicy`）。
+        // **不在这里写 `Balanced`**：那是默认值，不是路由层的决定。
+        cleanup_policy: cleanup_policy.unwrap_or_default(),
     };
 
     // 先查一次是否已有这一行：存储层的 `upsert` 只回 `Binding`，不回「新建还是

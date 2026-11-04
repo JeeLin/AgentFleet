@@ -29,7 +29,7 @@ import { computed, onMounted, ref } from 'vue'
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
 import StateBadge from '@/domains/shared/components/StateBadge.vue'
 import type { DeviceBinding, DeviceDetail } from '@/domains/device/api'
-import { describeCleanupPolicy, getDeviceDetail } from '@/domains/device/api'
+import { describeCleanupPolicy, getDeviceDetail, settledCount } from '@/domains/device/api'
 import { describeReadFailure } from '@/shared/http'
 import { percent, relativeTime } from '@/shared/format'
 import { navigate, route } from '@/router'
@@ -106,7 +106,7 @@ const failureRows = computed(() => {
 const failureHeadline = computed(() => {
   const b = breakdown.value
   if (!b) return ''
-  const total = b.succeeded + b.failed + b.aborted
+  const total = settledCount(b)
   if (total === 0) return '还没有跑过任何任务，所以还没有归因可说。'
   if (b.failed === 0) return '没有失败记录。'
   return b.failed > b.succeeded

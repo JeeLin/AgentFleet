@@ -136,6 +136,21 @@ export interface FailureBreakdown {
   in_flight: number
 }
 
+/**
+ * 分母：只算**已经结束**的执行。
+ *
+ * 后端 `FailureBreakdown::settled()` 是同一个口径，`success_rate` 也是按它算的。
+ * 前端需要自己再算一遍的唯一理由是**要把这个数显示出来**（「已结束 N 次」），
+ * 好让用户看得出上面那个百分比是怎么来的。
+ *
+ * **写成共享函数而不是每页各写一遍**：设备页与 agent 页都要这个数，各写一份
+ * 的话，将来「中止算不算结束」这种口径一变（它算，因为用户主动停了也是结束），
+ * 就会一页对一页错——而错的那页会显示一个和 `success_rate` 对不上的分母。
+ */
+export function settledCount(b: FailureBreakdown | null | undefined): number {
+  return b ? b.succeeded + b.failed + b.aborted : 0
+}
+
 /** 删除前置条件的结论，不只是布尔值。 */
 export interface Deletable {
   allowed: boolean

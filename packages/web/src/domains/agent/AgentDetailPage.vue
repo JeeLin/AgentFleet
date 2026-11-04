@@ -27,6 +27,7 @@ import EmptyState from '@/domains/shared/components/EmptyState.vue'
 import StateBadge from '@/domains/shared/components/StateBadge.vue'
 import type { AgentDetail } from '@/domains/agent/api'
 import { getAgentDetail } from '@/domains/agent/api'
+import { settledCount } from '@/domains/device/api'
 import { describeReadFailure } from '@/shared/http'
 import { percent, relativeTime } from '@/shared/format'
 import { navigate, route } from '@/router'
@@ -81,10 +82,7 @@ const breakdown = computed(() => detail.value?.breakdown ?? null)
  */
 const rate = computed(() => percent(detail.value?.success_rate ?? null))
 
-const settled = computed(() => {
-  const b = breakdown.value
-  return b ? b.succeeded + b.failed + b.aborted : 0
-})
+const settled = computed(() => settledCount(breakdown.value))
 
 function openProject(projectId: string): void {
   navigate(`/project/${encodeURIComponent(projectId)}/board`)

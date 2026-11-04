@@ -64,6 +64,17 @@ impl FromStr for CleanupPolicy {
     }
 }
 
+/// **默认值只有这一处**。
+///
+/// 路由层「调用方没给策略」时用它，设备侧的 `worktree` connector 也用它。
+/// 在此之前 `Balanced` 作为默认值散在路由层与 connector 两处，改默认档时
+/// 必然漏一处——症状是「在 Hub 上看着是平衡档，设备实际按激进档清」。
+impl Default for CleanupPolicy {
+    fn default() -> Self {
+        Self::Balanced
+    }
+}
+
 /// 一个绑定。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Binding {
@@ -88,15 +99,6 @@ pub struct BindingSpec {
     pub fixed_dir: String,
     pub disk_quota_bytes: Option<i64>,
     pub cleanup_policy: CleanupPolicy,
-}
-
-/// 固定目录变更被拒的理由。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FixedDirChange {
-    /// 该绑定下已有执行记录，其 worktree 就建在旧目录里。
-    HasExecutions,
-    /// 没有执行记录，可以改。
-    Safe,
 }
 
 /// 绑定仓储。

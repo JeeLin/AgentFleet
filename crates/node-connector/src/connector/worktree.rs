@@ -110,6 +110,16 @@ impl Policy {
     }
 }
 
+/// 默认档：**平衡**，与存储层 `CleanupPolicy` 的默认一致。
+///
+/// 两处各写一个默认值的话，改默认档时必然漏一处——症状是「Hub 上看着是平衡档，
+/// 设备实际按激进档清」，而用户只能从「怎么又要重装依赖」里慢慢发现。
+impl Default for Policy {
+    fn default() -> Self {
+        Self::Balanced
+    }
+}
+
 /// 一次清理要处理的东西。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CleanupPlan {
@@ -201,7 +211,7 @@ impl Worktree {
         Self {
             root: None,
             quota: None,
-            policy: Policy::Balanced,
+            policy: Policy::default(),
         }
     }
 
@@ -305,7 +315,7 @@ struct OpenParams {
 }
 
 fn default_policy() -> Policy {
-    Policy::Balanced
+    Policy::default()
 }
 
 impl Connector for Worktree {

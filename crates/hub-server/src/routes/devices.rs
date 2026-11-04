@@ -120,6 +120,21 @@ pub struct FailureBreakdown {
 }
 
 impl FailureBreakdown {
+    /// 把一条执行记进它自己那一档。
+    ///
+    /// **只有这一份分档逻辑**：设备详情与 agent 详情要算同一个东西（同一条绑定
+    /// 下的执行，一个按设备看、一个按 agent 看）。各写一份 `match` 的话，将来
+    /// `ExecutionState` 多一个变体，两处会分别编译通过、口径却不一致——而
+    /// 「成功率」是一页上最容易被当真的那个数字。
+    pub fn record(&mut self, state: ExecutionState) {
+        match state {
+            ExecutionState::Succeeded => self.succeeded += 1,
+            ExecutionState::Failed => self.failed += 1,
+            ExecutionState::Aborted => self.aborted += 1,
+            ExecutionState::Pending | ExecutionState::Running => self.in_flight += 1,
+        }
+    }
+
     /// 分母：只算**已经结束**的执行。
     fn settled(self) -> u64 {
         self.succeeded + self.failed + self.aborted
@@ -182,12 +197,7 @@ pub async fn get_device(
             .list_for_binding(&b.id)
             .map_err(|e| ApiError::internal_with("cannot list executions", e))?;
         for run in &runs {
-            match run.state {
-                ExecutionState::Succeeded => by_state.succeeded += 1,
-                ExecutionState::Failed => by_state.failed += 1,
-                ExecutionState::Aborted => by_state.aborted += 1,
-                ExecutionState::Pending | ExecutionState::Running => by_state.in_flight += 1,
-            }
+            by_state.record(run.state);
             // **用量不在这里算。** `worktree_path` 是设备上的绝对路径，
             // Hub 没有那台机器的文件系统——按路径前缀去库里查不出字节数，
             // 任何在这里凑出来的数字看起来都和真的一样，但它是编的。
@@ -203,7 +213,7 @@ pub async fn get_device(
         bindings.push(DeviceBinding {
             id: b.id.clone(),
             project_id: b.project_id.clone(),
-            project_name: project_name(&state, &b.project_id),
+            project_name: super::project_name(&state, &b.project_id),
             fixed_dir: b.fixed_dir.clone(),
             disk_quota_bytes: b.disk_quota_bytes,
             cleanup_policy: policy_str(b.cleanup_policy),
@@ -274,31 +284,6 @@ pub async fn get_device(
     }))
 }
 
-/// 项目名。项目不存在时退回 id（只归档不删除，正常情况不会走到）。
-fn project_name(state: &AppState, project_id: &str) -> String {
-    match hub_storage::project::ProjectRepo::new(state.pool().clone()).get(project_id) {
-        Ok(Some(p)) => p.name,
-        // 读库失败时退回 id 而不是空串：空串在页面上是一个没有标题的分组，
-        // 而 id 至少能让人对上是哪个项目。
-        // coverage: excluded — 项目只归档不删除（`Ok(None)` 正常走不到），
-        // `Err` 是读库失败。两者都退回 id。
-        Ok(None) | Err(_) => project_id.to_string(),
-    }
-}
-
 fn policy_str(p: CleanupPolicy) -> &'static str {
     p.as_str()
 }
-
-/// `failure_breakdown` 的人话小标题，页面照抄。
-///
-/// 放在后端而不是前端：同一个词的措辞在设备页与 agent 页必须一致，
-/// 两处各写一份就会漂移（一处写「中止」、一处写「已取消」，用户以为是两回事）。
-///
-/// **顺序写死**：按数量排序会让同一页每次刷新都换一次顺序，两次看到的东西
-/// 没法比较。
-pub const BREAKDOWN_LABELS: &[(&str, &str)] = &[
-    ("succeeded", "成功"),
-    ("failed", "失败"),
-    ("aborted", "中止（不是失败）"),
-];
