@@ -162,14 +162,15 @@ export const ROUTES: readonly RouteDef[] = [
  * `:id` 段的旧地址要单独处理：`LEGACY_PATHS` 是精确匹配表，带参数的进不来。
  * 见 `legacyTarget` 的第二条判据。
  *
- * # `/agents`
+ * # `/agents` 曾经在这里，现在不在了
  *
- * v0.5.0 曾把 Agent 目录并进设备页（`?view=agents`）。v0.7.0 起 Agent 重新
- * 成为一级导航项（`prototype/agents.html`），所以这条旧地址仍保留——
- * 它指向的分段视图在新导航里已经不存在了，落到 Agent 页本身才对。
+ * v0.5.0 把 Agent 目录并进了设备页的 `?view=agents` 分段，所以那时这里有一行
+ * `/agents → /devices?view=agents`。v0.7.0 起按新原型（`prototype/agents.html`）
+ * Agent 重新成为**一级导航项**、`/agents` 重新是**真路由**，`matchRoute` 会先
+ * 命中路由表——这行映射再也走不到，而它指向的分段视图在新设备页里已经没有了。
+ * 一条永远不被调用、且指错目标的映射不是「保险」，是下一次改动的陷阱。
  */
 export const LEGACY_PATHS: Readonly<Record<string, string>> = {
-  '/agents': '/devices?view=agents',
   '/sessions': '/',
   '/sessions/new': '/',
   '/tasks': '/',

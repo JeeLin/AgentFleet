@@ -297,15 +297,28 @@ describe('App：文档标题', () => {
    * 反向验证：把 `App.vue` 里 `redirectLegacy()` 那两次调用删掉，这条会红在
    * 「地址没被换掉」。
    */
-  it('/agents 被重定向到设备页的目录分段，不是 404', async () => {
+  /*
+    `/agents` 在 v0.7.0 起是**真页面**（`prototype/agents.html`），不再是设备页的
+    一个分段。
+
+    v0.5.0 时它确实被重定向到 `/devices?view=agents`，那时侧栏只有三项、Agent
+    目录并进设备页。新原型把它分回来：设备回答「这台机器在不在线」，Agent 回答
+    「这台机器上装了什么、能不能跑」——同一批数据，运维视角与能力视角。
+    所以这条用例现在钉的是**地址不动、页面自己渲染出来**。
+  */
+  it('/agents 是 Agent 页本身，不再重定向到设备分段', async () => {
     stubFetch(EMPTY_API)
     const w = mountApp('/agents')
     await flush(w)
 
-    expect(location.pathname).toBe('/devices')
-    expect(location.search).toBe('?view=agents')
-    // 换成了目录分段：不再是「这个地址没有页面」
-    expect(w.element.querySelector('.af-empty')?.textContent).not.toContain('这个地址没有页面')
+    // 地址**不动**：重定向会把它改成 /devices?view=agents，而那样用户点回来
+    // 就找不到这一页了。
+    expect(location.pathname).toBe('/agents')
+    expect(document.title).toBe('Agent · AgentFleet')
+    // 渲染的是页面本身，不是 404 空态。
+    expect(w.element.querySelector('.af-empty')?.textContent ?? '').not.toContain(
+      '这个地址没有页面',
+    )
   })
 })
 

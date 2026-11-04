@@ -94,13 +94,16 @@ describe('路由表：就是 `prototype/` 的 21 页', () => {
   /**
    * `/agents` 从 v0.7.0 起**重新成为一条路由**（新原型把它单独成一页）。
    *
-   * v0.5.0 曾把它并进 `/devices?view=agents` 并靠 `LEGACY_PATHS` 接住；现在
-   * 它是真路由，所以那条 `LEGACY_PATHS` 条目**仍然保留**但不再是唯一去处——
-   * 保留它是因为老书签 `/agents` 现在直接命中路由表，`legacyTarget` 那条
-   * 只对「还没解析过路由的裸调用」有意义。这里断言的是**它不再是 not-found**。
+   * v0.5.0 曾把它并进 `/devices?view=agents` 并靠 `LEGACY_PATHS` 接住；v0.7.0
+   * 起它是真路由，那条映射**已经删掉**——它永远走不到（`matchRoute` 先命中
+   * 路由表），而它指向的分段视图在新设备页里也不存在了。
+   * 这条用例钉住的是「它命中路由表，而不是落进 legacy 或 404」。
    */
   it('/agents 是路由，不是已删除的地址', () => {
     expect(matchRoute('/agents').name).toBe('agents')
+    // 反向验证：映射若被加回来，这里会红——它会让「旧地址」与「真路由」
+    // 对同一路径给出两种答案，而那正是这次要清掉的东西。
+    expect(legacyTarget('/agents')).toBeNull()
   })
 
   /**
