@@ -183,11 +183,17 @@ impl Git {
         }
         let mut child = cmd
             .spawn()
-            // coverage: excluded — 只在 `git` 可执行文件缺失 / 无执行权限 /
+            // coverage: excluded (racy) — 只在 `git` 可执行文件缺失 / 无执行权限 /
             // 进程表满时才会走到。`with_git_bin` 能指向一个不存在的路径来构造
             // 这一支，但那验的是「我们自己写的 map_err 有没有语法错」，不是
             // 「git 起不来时产品怎么办」——真实世界里这一支的替代路径是
             // `Err` 被通道层翻成 `channel_error{internal}`，那条已有测试。
+            //
+            // 标 `(racy)` 而不是普通例外，是因为**这几行是否被记为 miss 跨运行
+            // 不稳定**：实测同一份代码两次全量跑，一次报 192-194 三行、一次一行
+            // 都不报。原因是那几行落在 `.spawn()` 与 `.map_err(...)` 的 `?` 展开里，
+            // llvm-cov 的区域归属随内联与优化单元的组成而变。按确定性行做集合
+            // 相等核对会让门禁随机红。
             .map_err(|e| ConnectorError::Failed {
                 op: op.clone(),
                 detail: format!("cannot run git: {e}"),

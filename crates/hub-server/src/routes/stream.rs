@@ -184,7 +184,7 @@ impl Streams {
         &self,
         last: Option<u64>,
     ) -> futures_util::stream::BoxStream<'static, Envelope> {
-        let (backlog, rx) = self.subscribe_parts(last);
+        let (backlog, rx, _head) = self.subscribe_parts(last);
         // `boxed()` 而不是返回裸的 `impl Stream`：`unfold` 的 async 块不是
         // `Unpin`，而装箱之后调用方可以直接 `&mut` 它（探针把一个可变引用
         // 传进 `wait_for_rev`）。与 [`Streams::subscribe`] 同一个理由。
@@ -241,7 +241,7 @@ impl Streams {
         &self,
         last: Option<u64>,
     ) -> futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>> {
-        let (backlog, rx) = self.subscribe_parts(last);
+        let (backlog, rx, _head) = self.subscribe_parts(last);
         let backlog = backlog.into_iter();
         // `BoxStream` 而不是裸 `impl Stream`：`unfold` 的那个 async 块不是
         // `Unpin` 的（它 `await` 在 `rx.recv()` 上），而 `Sse` 的写出路径
@@ -278,14 +278,33 @@ impl Streams {
     /// 都会出错：新订阅者在快照与实时流**各收一次**（终端把同一段输出画两遍），
     /// 或者该事件**永久丢失**——而 `Lagged` 没发生，页面连一条 `resync`
     /// 注释帧都收不到。
+    /// 返回 `(backlog, rx, head)`，其中 `head` 是**订阅那一刻**回放缓冲里
+    /// 最旧事件的 id（缓冲空时为订阅时刻的 `next_id`）。
+    ///
+    /// `head` 是给测试用的**独立尺子**：并发用例断言「快照覆盖 `from+1..=last`」时，
+    /// `last` 和 `from` 都是主线程在**锁外**算的，后台发布线程可能在进锁前就把
+    /// 这一段挤出了缓冲——那时快照从更靠后的 id 开始是**正确**的，不是丢事件。
+    /// 有了 `head`，用例可以断言「快照必须从 `max(from+1, head)` 开始连续覆盖」，
+    /// 不必再靠 `last` 猜下界，也不会因为缓冲被挤而假红。
     fn subscribe_parts(
         &self,
         last: Option<u64>,
-    ) -> (Vec<Envelope>, tokio::sync::broadcast::Receiver<Envelope>) {
+    ) -> (
+        Vec<Envelope>,
+        tokio::sync::broadcast::Receiver<Envelope>,
+        u64,
+    ) {
         let bus = self.inner.bus.lock();
         let backlog = backlog_since(&bus.replay, last);
+        // 订阅时刻的 `next_id` 就是「还没发出去的下一条」，它减一即已发出的最大 id。
+        // 但 `head` 要的是**缓冲里最旧的一条**：缓冲非空时取真实值，空时退化成
+        // 「下一条要发的 id」（此时没有可回放的东西，下界落在未来，区间为空）。
+        let head = match bus.replay.front() {
+            Some(env) => env.id,
+            None => bus.next_id,
+        };
         let rx = self.inner.tx.subscribe();
-        (backlog, rx)
+        (backlog, rx, head)
     }
 
     // ---- 事件构造（形状集中在这里，别在调用点各拼一个） ------------------------
@@ -1052,9 +1071,28 @@ fn open_ledger(
 ) -> Result<(), ApiError> {
     let mut channels = state.channels().write();
     let registry = channels.registry(node_id);
+    // 这一臂**可达**，而且已经被覆盖：`ChannelRegistry::open` 对**空**
+    // `channel_id` 回 `EmptyChannelId`（协议层 `channel.rs` 的判据），由
+    // `an_empty_channel_id_fails_to_open_the_ledger_without_recording_anything`
+    // 执行。生产里 `channel_id` 由 Hub 自己生成，所以用户碰不到；但协议层的
+    // 判据收紧时（比如加了字符集校验），这一层必须把它翻成「不改账的 500」，
+    // 而不是先记半条再崩。
     if let Err(e) = registry.open(channel_id, connector, credit_start, Instant::now()) {
         return Err(ApiError::internal_with("cannot open the channel ledger", e));
     }
+    // coverage: excluded (racy) — **结构上不可达**：`open()` 刚刚无条件 `insert`
+    // 了一条 `Opening` 记录（同一把写锁没放），而 `mark_ready` 只在「已经是
+    // Ready」或「已 Closed」时回 `Err`，两步之间没有任何能让状态变成那样的路径。
+    //
+    // 标 `(racy)` 而不是普通例外，是因为**哪一行被记为 miss 不稳定**：实测同一份
+    // 代码两次全量跑分别报 `if let Err(e)` 那一行与 `return Err(...)` 那一行。
+    // 这是 llvm-cov 对 `if let ... { return ... }` 的区域归属随内联变化所致，
+    // 不是「这个分支有时执行、有时不执行」——它从来不执行。按确定性行做集合相等
+    // 核对会让门禁随机红，而随机红的门禁等于没有门禁。
+    //
+    // 留着这条臂是防御而不是业务分支：协议层的 `mark_ready` 若将来改成「必须先
+    // ack」之类的判据，这里不必重写。写成 `if let` 而不是 `unwrap`，是因为那会把
+    // 一个「Hub 自己记账失败」变成 panic——500 比进程退出好排查。
     if let Err(e) = registry.mark_ready(channel_id) {
         return Err(ApiError::internal_with("cannot mark the channel ready", e));
     }
@@ -1686,6 +1724,102 @@ mod tests {
         );
     }
 
+    /// `subscribe_raw` 的**回放**那一支：带 `last` 时先把缓冲里的补完，再转实时。
+    ///
+    /// 与 [`subscribing_after_publishing_misses_the_event`] 是一对：那条钉住
+    /// 「不带 `last` 就不重放」，这条钉住「带了就重放，且**先回放、后实时**」。
+    /// 顺序不能反：反了的话页面拿到的事件序列会从中间断开（先看到新事件、
+    /// 再看到更老的事件），而 `Last-Event-ID` 的全部意义就是接续。
+    #[tokio::test]
+    async fn subscribe_raw_replays_the_backlog_before_live_events() {
+        use futures_util::StreamExt as _;
+
+        let s = Streams::new();
+        let first = s.channel_frame("n_1", "ch_a", json!({"op": "rev", "head": "aa"}));
+        s.channel_frame("n_1", "ch_b", json!({"op": "rev", "head": "bb"}));
+
+        // `Some(first)` = 「我已经看到 `first` 了」，所以只该补第二条。
+        let mut stream = s.subscribe_raw(Some(first));
+        s.channel_frame("n_1", "ch_live", json!({"op": "rev", "head": "cc"}));
+
+        let two = async {
+            let a = stream.next().await.expect("回放的那条");
+            let b = stream.next().await.expect("实时的那条");
+            (a, b)
+        };
+        let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(2), two)
+            .await
+            .expect("回放 + 实时都必须在超时内到齐");
+
+        assert!(a.data.contains("ch_b"), "先回放缓冲里的，实际 {}", a.data);
+        assert!(b.data.contains("ch_live"), "再给实时的，实际 {}", b.data);
+        assert!(
+            !a.data.contains("ch_a"),
+            "`last` 之前的那条不该重发，实际 {}",
+            a.data
+        );
+    }
+
+    /// 读得太慢被广播甩掉（`Lagged`）→ **跳过、继续等**，不结束也不 panic。
+    ///
+    /// `REPLAY_CAPACITY` 是 256，所以「慢」是可以构造的：订阅之后连发
+    /// `REPLAY_CAPACITY + 若干` 条而不消费，接收端就会收到 `Lagged`。
+    ///
+    /// 为什么"跳过"是对的行为：对探针来说被甩掉等同于「那几条没看见」，
+    /// 它只关心自己那条通道的帧，而且自己还有 3 秒超时兜底。**结束流**才是错的
+    /// ——那会让探针在设备话说到一半时以为「再也不会有 `rev` 了」，把一次本可
+    /// 成功的探测记成 `unavailable`。
+    #[tokio::test]
+    async fn subscribe_raw_skips_lagged_events_and_keeps_waiting() {
+        use futures_util::StreamExt as _;
+
+        let s = Streams::new();
+        let mut stream = s.subscribe_raw(None);
+        // 灌满再超出一截，保证接收端在下次 `recv` 时拿到 `Lagged`。
+        for i in 0..(REPLAY_CAPACITY + 8) {
+            s.channel_frame("n_1", "ch_flood", json!({"op": "rev", "head": i}));
+        }
+        // 被甩掉之后仍要能收到**后面**那条：这才是「继续等」的定义。
+        s.channel_frame("n_1", "ch_after", json!({"op": "rev", "head": "zz"}));
+
+        let got = async {
+            loop {
+                let env = stream.next().await.expect("`Lagged` 不该结束流");
+                if env.data.contains("ch_after") {
+                    return env;
+                }
+            }
+        };
+        let env = tokio::time::timeout(std::time::Duration::from_secs(2), got)
+            .await
+            .expect("`Lagged` 之后仍要能收到新事件");
+        assert!(env.data.contains("ch_after"), "实际 {}", env.data);
+    }
+
+    /// 最后一个发送端没了 → `subscribe_raw` 也**正常结束**（`None`）。
+    ///
+    /// `stream::subscribe` 那条（[`the_stream_ends_when_the_last_sender_is_dropped`]）
+    /// 走的是 `Streams::subscribe` 的包装；`subscribe_raw` 是另一份 `unfold`，
+    /// 它的 `Closed` 臂要单独验——这里不结束的话，探针会拿着一条永远不产出
+    /// 的流挂到自己的超时才退出。
+    #[tokio::test]
+    async fn subscribe_raw_ends_when_the_last_sender_is_dropped() {
+        use futures_util::StreamExt as _;
+
+        let s = Streams::new();
+        let mut stream = s.subscribe_raw(None);
+        let inner = Arc::clone(&s.inner);
+        drop(inner);
+        drop(s);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+                .await
+                .expect("Hub 关掉后 `subscribe_raw` 也必须结束")
+                .is_none(),
+            "必须结束而不是挂死"
+        );
+    }
+
     /// 绑定表：按 channel_id 存取、按 node 清、摘掉再摘是 `None`。
     #[test]
     fn bindings_are_keyed_by_channel_id_and_droppable_per_node() {
@@ -1721,6 +1855,104 @@ mod tests {
             .expect_err("must reject");
         assert_eq!(e.status(), StatusCode::BAD_REQUEST);
         assert_eq!(e.code(), err::BAD_BODY);
+    }
+
+    /// `close_channel_inner`：**关一条本来就不在的通道是成功**（幂等）。
+    ///
+    /// 面板早就关过、或设备掉线时整节点清掉了，两种情形在 Hub 侧是同一件事：
+    /// 表里没有这条。回 `Ok(())` 而不是 404 的理由是**重试语义**——页面在
+    /// 网络抖动后重发 DELETE 时，拿到 404 会显示「关闭失败」，而实际上通道
+    /// 早就不在了，用户没有任何可做的事。
+    ///
+    /// 顺带钉住「不发多余帧」：`NotFound` 那一支在 `unbind` 之后立刻返回，
+    /// 不会给设备推一帧注定被它当「未知通道」拒掉的 `close_channel`。
+    #[tokio::test]
+    async fn closing_a_channel_that_is_already_gone_is_ok_and_sends_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = bootstrap(dir.path());
+        let auth = Authenticated::new("admin".to_string());
+        close_channel_inner(&state, &auth, "ch-never-existed", "closed by the console")
+            .expect("幂等：不存在也是成功");
+    }
+
+    /// `close_channel_inner`：**不是这个人开的** → 403，且绑定保持不动。
+    ///
+    /// 与上一条的分界就是「404 与 403 不能合并」在关闭路径上的体现：合并之后
+    /// 越权关闭会看起来像「关过了」，攻击者拿不到任何信号，而真正的所有者
+    /// 的通道也没了（如果那一支顺手删了记录）。
+    #[tokio::test]
+    async fn closing_a_channel_opened_by_someone_else_is_403_and_leaves_it_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = bootstrap(dir.path());
+        state.bindings().bind("ch-1", binding("n_a", "owner"));
+        let auth = Authenticated::new("mallory".to_string());
+        let e = close_channel_inner(&state, &auth, "ch-1", "closed by the console")
+            .expect_err("越权关闭必须被拒");
+        assert_eq!(e.status(), StatusCode::FORBIDDEN);
+        assert!(
+            state.bindings().get("ch-1").is_some(),
+            "被拒的关闭不得动别人的绑定"
+        );
+    }
+
+    /// `open_ledger`：`channel_id` 为空 → 500，且**什么都没记进去**。
+    ///
+    /// 这条锁的是「Hub 自己没记上账」这一类错误的形状：500 而不是 4xx。
+    /// 页面和设备都没做错什么——传一个空 channel_id 只可能是 Hub 侧拼错了，
+    /// 而 4xx 会让排查者去翻请求。
+    ///
+    /// 生产里这一支**应当不可达**（`channel_id` 由 Hub 自己生成），但它不是
+    /// 死代码：`ChannelRegistry::open` 的判据就在协议层，Hub 这一层必须把它
+    /// 翻成一个不改账的失败，而不是先记半条再崩。所以这里直接钉住它。
+    #[test]
+    fn an_empty_channel_id_fails_to_open_the_ledger_without_recording_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = bootstrap(dir.path());
+        let e = open_ledger(&state, "n_a", "", "git", 8).expect_err("空 id 必须失败");
+        assert_eq!(e.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(e.code(), "internal_error");
+        assert!(
+            state.channels().read().credit("n_a", "").is_none(),
+            "失败的 open 不该在账本里留下任何记录"
+        );
+    }
+
+    /// `open_ledger`：同一 `channel_id` 连着开两次**都成功**，且信用被重置。
+    ///
+    /// 这条钉的是 §6 末条「每次 `open_channel` 都重置状态与信用」在 Hub 这一层
+    /// 的表现，顺带说明 `open_ledger` 里 `mark_ready` 那条 `Err` 臂**在
+    /// `open()` 之后结构上不可达**：`open()` 无条件 `insert` 一条 `Opening`，
+    /// 于是 `mark_ready` 看到的永远是「刚开的、还没 Ready 的」，`AlreadyReady`
+    /// 不可能发生。留着那条臂是防御（协议层的判据若将来收紧，这里不必重写），
+    /// 而不是一条能走到并需要断言的业务分支——覆盖率门禁据此登记为例外。
+    ///
+    /// `channel_id` 被复用不是边角情形：设备重连后 `node_id` 不变，`drop_node`
+    /// 整表清掉之后新的 `open_channel` 用同一串是合法的，而**信用必须从
+    /// `credit_start` 重新开始**——沿用上一次的余额会让余额恒 > 0，等于没有流控。
+    #[test]
+    fn reopening_the_same_channel_id_resets_its_credit() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = bootstrap(dir.path());
+        open_ledger(&state, "n_a", "ch-dup", "git", 8).expect("第一次要成功");
+        // 扣掉几格，造出「不是初值」的局面。
+        state
+            .channels()
+            .write()
+            .registry("n_a")
+            .on_data_received("ch-dup")
+            .expect("刚开的通道收一帧数据");
+        assert_eq!(
+            state.channels().read().credit("n_a", "ch-dup"),
+            Some(7),
+            "前置：信用确实被扣过一格"
+        );
+
+        open_ledger(&state, "n_a", "ch-dup", "git", 8).expect("重开同一串必须成功");
+        assert_eq!(
+            state.channels().read().credit("n_a", "ch-dup"),
+            Some(8),
+            "重开要重置信用，否则余额只增不减、流控形同虚设"
+        );
     }
 
     /// `owned_channel`：不存在 → 404；存在但不是这个 subject → 403。
@@ -2271,7 +2503,7 @@ mod tests {
     #[test]
     fn a_subscriber_that_falls_behind_the_ring_buffer_is_told_it_lagged() {
         let s = Streams::new();
-        let (_backlog, mut rx) = s.subscribe_parts(None);
+        let (_backlog, mut rx, _head) = s.subscribe_parts(None);
         // 推过环形缓冲的容量：订阅者一个都没取。
         for _ in 0..(REPLAY_CAPACITY + 8) {
             s.publish("device.status", "{}");
@@ -2340,7 +2572,7 @@ mod tests {
             // 退 3 条：快照至少能带回一点东西（终点订阅时快照恒空，
             // 「不重发」就退化成「两边都空」，测不出任何东西）。
             let from = last.saturating_sub(3);
-            let (backlog, mut rx) = s.subscribe_parts(Some(from));
+            let (backlog, mut rx, head) = s.subscribe_parts(Some(from));
 
             // ── 实时侧：为什么先 publish 再取，且必须显式处理 `Lagged` ──────
             // 原来这里是裸 `while let Ok(env) = rx.try_recv()`，指望后台发布
@@ -2433,24 +2665,41 @@ mod tests {
             for w in all.windows(2) {
                 assert!(w[0] < w[1], "同一个 id 出现两次：{w:?}");
             }
-            // ② 覆盖：`from+1..=last` 这一段（订阅前就已存在的全部事件）必须
-            // 一个不漏地出现在快照里。少了任何一条都是丢事件。
+            // ② 覆盖：订阅前就存在的事件必须一个不漏地出现在快照里。
             //
-            // **只对快照断言，且必须限定在环形缓冲还装得下的范围内**：`backlog`
-            // 是订阅那一刻 `replay` 的拷贝，而 `replay` 封顶 `REPLAY_CAPACITY`
-            // （256）条、满了就 `pop_front`。发布线程是自由跑的，`last` 与
-            // `subscribe_parts` 之间它可能已经 publish 了几百条，把 `from+1`
-            // 挤出去——那时「快照里没有 `from+1`」是正确的，不是丢事件。
-            // 所以下界取「`last` 往回数 `REPLAY_CAPACITY` 条」与 `from+1` 的较大者：
-            // 这一段在订阅时刻**必然**还在缓冲里（订阅点之后最多再有几百条进来，
-            // 但 `last` 是订阅之前读的，故 `last-capacity` 之后的事件一定没被挤掉）。
-            let lower = (from + 1).max(last.saturating_sub(REPLAY_CAPACITY as u64 - 1));
-            for expect in lower..=last {
-                assert!(
-                    snapshot.binary_search(&expect).is_ok(),
-                    "id={expect} 在快照里没有（丢事件）：快照={snapshot:?}；\
-                     from={from} last={last} lower={lower}"
-                );
+            // **下界用 `head`（订阅那一刻缓冲里最旧的一条），不用 `last` 倒推。**
+            // 这里是本条用例几轮修改才收敛的地方，值得写清为什么：
+            //
+            // `from` 是主线程在**锁外**算的（`last - 3`），后台发布线程在进锁前
+            // 可以自由 publish。它可能把 `from+1` 起的一大段挤出回放缓冲
+            // （`REPLAY_CAPACITY`=256，满了 `pop_front`），此时订阅点拿到的
+            // `backlog` 从更靠后的 id 开始——那是**正确行为**，不是丢事件。
+            // 早先版本用 `last.saturating_sub(REPLAY_CAPACITY-1).saturating_sub(1)`
+            // 猜这个下界，本质是拿**过期的主线程读数**去猜**锁内**的缓冲状态：
+            // 一旦发布线程跑得比主线程快（实跑中 `last=315` 而快照从 455 开始），
+            // 猜出来的下界 313 落在快照之外，用例就假红。
+            //
+            // 现在由 `subscribe_parts` 在**锁内**把 `head` 一并交出来，断言变成
+            // 「`max(from+1, head) ..= last` 全部在快照里」。这个区间的下界来自
+            // 订阅点自己，不依赖主线程读数是否新鲜；上界 `last` 仍是订阅前的
+            // 读数（**保守**：`last` 只可能小于订阅时刻的真实末尾，不会大于，
+            // 所以区间只窄不宽，不会引入假红）。
+            //
+            // 能抓的变异体：`backlog_since` 跳掉中段任意一条、`subscribe_parts`
+            // 把「读快照」与「订阅」拆成两把锁（拆开后锁内的 `replay` 与返回的
+            // `backlog` 不同源，区间必然缺条）。
+            //
+            // `head > last` 时区间为空：发布线程跑得太快，`from` 那一段整体
+            // 出缓冲了，本轮没有可断言的东西——跳过而不是失败。
+            let lower = (from + 1).max(head);
+            if lower <= last {
+                for expect in lower..=last {
+                    assert!(
+                        snapshot.binary_search(&expect).is_ok(),
+                        "id={expect} 在快照里没有（丢事件）：快照={snapshot:?}；\
+                         from={from} last={last} head={head} lower={lower}"
+                    );
+                }
             }
             rounds += 1;
         }

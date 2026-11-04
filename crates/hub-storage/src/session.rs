@@ -127,7 +127,16 @@ pub struct Session {
     /// 时间可能给出不同的串。
     pub base_rev: Option<String>,
     /// 起点为什么有／没有（五态）。见 [`BaseRevStatus`]。
-    #[serde(default = "unknown_base_rev")]
+    ///
+    /// **没有 `#[serde(default = "unknown_base_rev")]`**（v0.7.0 移除）：这条
+    /// default 只在**从 JSON 反序列化**时生效，而 `Session` 从来不是从 JSON 读
+    /// 回来的——它唯一的生产构造路径是 `RawSession::into_session()`，从 SQLite
+    /// 的列逐格读、缺列由 SQL 报错。留着的效果只让覆盖率门禁多一条无法触达的
+    /// 未覆盖行（那个函数体永远不执行）。
+    ///
+    /// 「库里缺这一列」的缺省值另有其处，而且**不在 Rust 里**：`schema_v5.sql`
+    /// 的 `ALTER TABLE ... ADD COLUMN ... DEFAULT 'unknown'`，由迁移一次性写进
+    /// 每一行老数据。那是真正需要兜底的地方，且已经生效。
     pub base_rev_status: BaseRevStatus,
     /// 这个会话属于哪一次执行（`execution.id`）。
     ///
@@ -141,20 +150,24 @@ pub struct Session {
     pub execution_id: Option<String>,
 }
 
-/// `base_rev_status` 的反序列化缺省值。
-///
-/// 取 `Unknown` 而不是 `Ok`：反序列化缺这个字段时，最保守的解释是
-/// 「我们不知道」，不是「它是好的」。
-fn unknown_base_rev() -> BaseRevStatus {
-    BaseRevStatus::Unknown
-}
-
 /// 会话 + 它的 `(node_id, path)`。工作区是只读定位（建会话时选定即锁定），
 /// 路径**不存在会话行上**——那是 `workspace_and-sync.md` §2.1 的原话：
 /// 「路径属于设备工作区，不属于会话」。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// **不派生 `Serialize` / `Deserialize`**（v0.7.0 移除，此前是 `#[derive(...,
+/// Serialize, Deserialize)]` 且 `session` 带 `#[serde(flatten)]`）：这个结构只
+/// 从 SQLite 的列构造、只被调用方读字段，**没有任何一处序列化或反序列化它**
+/// ——API 层是对着它的字段自己拼 `SessionSummary` 的。
+///
+/// 与 `Session::base_rev_status` 上删掉的那条 `#[serde(default = ...)]` 属于同
+/// 一次清理：那个 default 只在从 JSON 反序列化时生效，而这条反序列化路径从来
+/// 不存在，于是它成了永远不执行的行，覆盖率门禁把它记成「无法触达」。
+///
+/// 删派生而不是登记例外，是因为它**不是**「将来的接口」：真要从 JSON 读回
+/// 一个 `SessionDetail` 时，形状应当由那一侧的调用方声明，而不是现在先留一个
+/// 没人验过的派生。
+#[derive(Debug, Clone)]
 pub struct SessionDetail {
-    #[serde(flatten)]
     pub session: Session,
     pub workspace: Workspace,
 }

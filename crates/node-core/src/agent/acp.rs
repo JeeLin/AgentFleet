@@ -818,6 +818,13 @@ for raw in sys.stdin:
             if !cancels.is_empty() {
                 break;
             }
+            // coverage: excluded (racy) — 这一圈是否执行取决于「cancel 有没有
+            // 在第一轮读日志之前就落到 `log` 里」。stdin 是异步写的，agent 进程
+            // 又要先起来、读一行、再往日志里追加——同一个用例两次实跑，第一次
+            // 可能第一轮就 `break`（`sleep` 不计覆盖），第二次可能等一轮。这不是
+            // 「断言不成立」，也不该被当成确定性行做集合相等核对：本轮实测
+            // 这两行就是一次算覆盖、一次不算。判据本身由下面 `cancels.len() == 1`
+            // 那条断言给——它是确定的。
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert_eq!(cancels.len(), 1, "agent 那一侧必须收到恰好一条 cancel");

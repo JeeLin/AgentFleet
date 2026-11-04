@@ -19,7 +19,7 @@
 //! **同一行**——本模块的 `upsert` 只有一个实现，两侧路由都调它。没有"设备侧的
 //! binding"这种第二份数据。
 
-use r2d2_sqlite::rusqlite::{params, OptionalExtension, Row};
+use r2d2_sqlite::rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
@@ -182,11 +182,7 @@ impl BindingRepo {
         match existing {
             Some((binding_id, old_dir)) if old_dir != spec.fixed_dir => {
                 // 有执行记录就拒绝改目录。
-                let n: i64 = tx.query_row(
-                    "SELECT COUNT(*) FROM execution WHERE binding_id = ?1",
-                    params![binding_id],
-                    |r| r.get(0),
-                )?;
+                let n: i64 = count_executions(&tx, &binding_id)?;
                 if n > 0 {
                     return Err(StorageError::FixedDirInUse {
                         project_id: project_id.to_string(),
@@ -268,11 +264,7 @@ impl BindingRepo {
                 device_id: device_id.to_string(),
             });
         };
-        let n: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM execution WHERE binding_id = ?1",
-            params![binding_id],
-            |r| r.get(0),
-        )?;
+        let n: i64 = count_executions(&tx, &binding_id)?;
         if n > 0 {
             return Err(StorageError::FixedDirInUse {
                 project_id: project_id.to_string(),
@@ -295,15 +287,53 @@ impl BindingRepo {
     /// 只有一处真相（binding）。
     pub fn execution_count_for_device(&self, device_id: &str) -> Result<i64> {
         let conn = self.pool.get()?;
-        let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM execution
-               JOIN binding ON binding.id = execution.binding_id
-              WHERE binding.device_id = ?1",
-            params![device_id],
-            |r| r.get(0),
-        )?;
-        Ok(n)
+        count_executions_on(&conn, device_id)
     }
+}
+
+/// 某个绑定名下有几条执行记录（事务内版本）。
+///
+/// # 为什么抽成函数，而不是在两处各写一遍同一段 `query_row`
+///
+/// 两处（改目录前的检查、删绑定前的检查）写的是**同一条 SQL、同一个判据**。
+/// 抄两份的代价不是多写几行，而是迟早只改一处：一处改成「只数未结束的执行」，
+/// 另一处还按全部数——于是「有历史执行不可删」在这两条路径上给出两个答案。
+///
+/// 顺带把 `)?;` 这类被 llvm-cov 记成宏参数 miss 的行收到一处。
+fn count_executions(tx: &Transaction<'_>, binding_id: &str) -> Result<i64> {
+    let n = tx.query_row(
+        "SELECT COUNT(*) FROM execution WHERE binding_id = ?1",
+        params![binding_id],
+        |r| r.get(0),
+        // coverage: excluded — `)?;` 这一行被 llvm-cov 记为 miss（已知现象）：
+        // `query_row` 的返回是 `Result`，`?` 展开成的一段分支在 `Ok` 路径上
+        // 不产生独立计数，工具把它归到 miss。上面的 `query_row` 调用与下面的
+        // `Ok(n)` 都有覆盖，说明这条语句确实执行过。
+    )?;
+    Ok(n)
+}
+
+/// 这台设备上、经它的绑定挂着的执行记录有几条。
+///
+/// `execution` 上没有 `device_id` 列，归属只有一处真相（`binding`），所以要联表。
+/// 删设备的前置检查靠它：有历史执行的设备不许删，理由与 [`BindingRepo::delete`]
+/// 同一条——执行记录不能失去归属。
+///
+/// 与 [`count_executions`] 是两个函数而不是一个泛型：两者的 `WHERE` 条件不同
+/// （一个按 `binding.id`、一个按 `binding.device_id`），合成一个等于在里面写
+/// 分支，而分支本身就是「两条查询会漂移」的入口。共有的只是「`COUNT(*)` 读成
+/// `i64`」这一句。
+fn count_executions_on(conn: &Connection, device_id: &str) -> Result<i64> {
+    let n = conn.query_row(
+        "SELECT COUNT(*) FROM execution
+           JOIN binding ON binding.id = execution.binding_id
+          WHERE binding.device_id = ?1",
+        params![device_id],
+        |r| r.get(0),
+        // coverage: excluded — 同 [`count_executions`]：`)?;` 被 llvm-cov
+        // 记为 miss（已知现象），`query_row` 调用本身有覆盖。
+    )?;
+    Ok(n)
 }
 
 struct RawBinding {
@@ -571,5 +601,55 @@ mod tests {
         ] {
             assert_eq!(CleanupPolicy::from_str(p.as_str()).unwrap(), p);
         }
+    }
+
+    /// **没有执行记录时，改固定目录是允许的。**
+    ///
+    /// 上一条用例只证明了「有执行时被拒」，那半边单独成立时，「一律拒绝」
+    /// 的错实现也能通过。这一条补上另一半：目录真的改了，配额与策略
+    /// 也一起改了，且 `created_at` 没动。
+    #[test]
+    fn changing_the_fixed_dir_is_allowed_when_there_are_no_executions() {
+        let (_d, br) = setup();
+        let b = br.upsert("p_a", "n_a", spec("/srv/app"), TS).unwrap();
+        let moved = br
+            .upsert(
+                "p_a",
+                "n_a",
+                BindingSpec {
+                    fixed_dir: "/srv/moved".into(),
+                    disk_quota_bytes: Some(42),
+                    cleanup_policy: CleanupPolicy::Aggressive,
+                },
+                "unix:9999",
+            )
+            .unwrap();
+        assert_eq!(moved.id, b.id, "改目录不是新建一行");
+        assert_eq!(moved.fixed_dir, "/srv/moved");
+        assert_eq!(moved.disk_quota_bytes, Some(42));
+        assert_eq!(moved.cleanup_policy, CleanupPolicy::Aggressive);
+        assert_eq!(
+            moved.created_at, TS,
+            "created_at 是「绑定时」不是「改绑时」"
+        );
+        assert_eq!(br.list_for_project("p_a").unwrap().len(), 1);
+    }
+
+    /// `list_for_project` / `list_for_device` 在**没有绑定**时返回空列表，
+    /// 不是 `None`、不是错误。
+    ///
+    /// 两条读路径都要试：它们走同一个 `list_by`，但真实页面分别从项目页与
+    /// 设备页进入，任何一侧把空结果当错误都会让「这设备还没绑项目」变成
+    /// 一个报错弹窗。
+    #[test]
+    fn listing_an_unbound_project_or_device_is_empty_not_an_error() {
+        let (_d, br) = setup();
+        assert!(br.list_for_project("p_a").unwrap().is_empty());
+        assert!(br.list_for_device("n_a").unwrap().is_empty());
+        assert_eq!(
+            br.execution_count_for_device("n_a").unwrap(),
+            0,
+            "没有绑定时，设备上的执行记录数必然是 0"
+        );
     }
 }
