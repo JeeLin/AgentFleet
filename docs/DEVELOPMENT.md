@@ -114,6 +114,7 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
 | v0.11.0 | **定时任务（自动化）** | 定时与事件触发的调度：cron 式表达 + 「某任务完成后触发」两类来源，落到既有 Task（生成新 Task 而不是绕过六态）。**必须复用 v0.8.0 的任务模型**——定时任务不是另一套调度，触发只是「谁在什么时候创建了 Task」。要点：触发器本身是项目级配置；错过窗口（Hub 停机）后的补偿策略要显式定（跳过 / 补跑，不默认静默跳过）；触发产生的 Task 带 `created_by=schedule` 以便在看板与失败归因里区分。**⚠️ 原「推理网关」已降级为 TODO**（见 `PRODUCT.md` §6.2.1），本号改由定时任务占用 | —（`PRODUCT.md` §6.2 后续项） |
 | v0.12.0 | connector 插件化 + 技能 / MCP | 把协议族（SSH / DB / Redis / S3 / SFTP / TCP 透传）做成插件按需加载（**实现参考 REX**）+ 抓包插件 + 端口转发插件；**同时提供「任务级授予的技能 / MCP」通路**（凭据不进 agent 上下文、每次连接进审计）。**不引入 Resource 抽象**（`DECISIONS.md` D21） | —（`PRODUCT.md` §6.2 后续项）、技能 / MCP |
 | v0.13.0 | 任务连贯性（跨节点续跑） | 检查点 + 断点续跑 + 跨设备重建工作区（见 `architecture/task-continuity.md`）；此时 Task/Execution 已存在，只补「续跑」这一层 | —（`PRODUCT.md` §6.2 后续项） |
+| v0.14.0 | **CI 镜像构建（发布通路）** | 把 §2 里「发布（未落地）」那一整段真正建起来，形态参考 REX：`build-frontend`（bun type-check → lint → test → build，dist 作为 artifact 上传）→ `build-binaries`（**原生编译**，不用交叉编译）→ 三个消费者：`docker-hub`（`afhub` 镜像，`include_dir!` 已在编译期嵌前端，镜像里**不另放 dist**）、`docker-node`（`afcli` 镜像，按 `TARGETARCH` 选二进制）、`release`（GitHub Release + `SHA256SUMS` + 从 `CHANGELOG.md` 抽 body）。镜像推 `ghcr.io/<owner>/agentfleet-hub` / `agentfleet-node`。**顺序紧接任务连贯性**：与前三个里程碑全部无耦合，但**必须等本阶段（v0.7.0–v0.13.0）的对外契约定稿**——镜像里的二进制是对用户的承诺，早于契约定稿发出去等于发一个还会改的接口 | —（`DEVELOPMENT.md` §2 发布段） |
 | 后续 | 后续能力 | 社交软件接入、原生客户端、分布式推理进阶；**暂缓项**（统一配置 agent / 模型配置一处切换） | —（`PRODUCT.md` §6.2 / §6.3） |
 
 > **2026-11-01 里程碑重排的裁定（产品主轴改版）**
