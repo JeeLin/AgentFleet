@@ -145,7 +145,19 @@ function offlineReason(device: DeviceSummary): string {
         >
           <td><StateBadge :state="d.status" :derived="d.derived" /></td>
           <td class="af-dev-name">
-            <span class="af-truncate af-dev-name__name">{{ d.name }}</span>
+            <!-- 设备名本身是进详情页的入口（v0.7.0 子任务 7）：详情页有绑定关系 /
+                 磁盘 / 失败归因，那些是**行里放不下**的内容。用按钮而不是整行可点，
+                 因为整行已经有「⏎ 看详情」的内联展开，两种展开方式撞在一起
+                 会让用户不知道自己刚才点到了哪个。 -->
+            <button
+              class="af-dev-name__link af-truncate"
+              type="button"
+              :title="`看这台设备的绑定、磁盘与失败归因`"
+              :data-detail="d.id"
+              @click.stop="onInspect(d)"
+            >
+              {{ d.name }}
+            </button>
             <span
               class="af-fp af-t-mute af-dev-id"
               :title="`密钥指纹：${d.key_fingerprint}`"
@@ -205,6 +217,7 @@ function offlineReason(device: DeviceSummary): string {
               <button
                 class="af-btn af-btn--sm af-btn--primary"
                 type="button"
+                data-act="create"
                 :disabled="!canCreateSession(d)"
                 :aria-disabled="!canCreateSession(d)"
                 :title="offlineReason(d) || `在这台设备上开一个会话`"
@@ -235,6 +248,18 @@ function offlineReason(device: DeviceSummary): string {
 
    竖向居中而不是基线对齐：两个 span 不同字号（名字 13px / node_id 10px），
    baseline 对齐时基线与视觉中心不重合，node_id 会偏离格子中心。 */
+.af-dev-name__link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--af-accent);
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  max-width: 100%;
+}
 .af-dev-name {
   display: flex;
   align-items: center;

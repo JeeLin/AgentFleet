@@ -31,6 +31,7 @@ import type { DeviceSummary } from '@/domains/device/api'
 import { listAgents } from '@/domains/agent/api'
 import { listDevices } from '@/domains/device/api'
 import { describeReadFailure } from '@/shared/http'
+import { navigate } from '@/router'
 
 const emit = defineEmits<{
   /** 用户点了「用它开会话」。**由父页面决定去哪**：目录不该知道路由。 */
@@ -60,6 +61,17 @@ async function load(): Promise<void> {
 
 /** 父页面的刷新按钮要能一起刷（设备页顶部只有一个刷新）。 */
 defineExpose({ load })
+
+/**
+ * 进 agent 详情页。
+ *
+ * 由本组件自己 `navigate` 而不 emit 给父页面：父页面（设备页的 Agent 分段）
+ * 没有别的信息可加，转一手只是多一层中转。开会话那条仍走 `emit`——那个动作
+ * 的去向（新建页）属于父页面的决定，与这里不同。
+ */
+function openDetail(name: string): void {
+  navigate(`/agents/${encodeURIComponent(name)}`)
+}
 </script>
 
 <template>
@@ -106,9 +118,18 @@ defineExpose({ load })
           class="af-agent"
           :data-usable="a.available ? 'true' : 'false'"
         >
-          <span class="af-badge" :class="a.available ? 'af-badge--agent' : 'af-badge--off'">{{
-            a.name
-          }}</span>
+          <!-- 名字是进详情页的入口（v0.7.0 子任务 7）：详情页有「装在哪几台
+               机器上 / 跑过哪些任务 / 成功率」，那些放不进一行。 -->
+          <button
+            class="af-agent__link"
+            type="button"
+            data-act="detail"
+            :title="`看 ${a.name} 装在哪几台机器上、跑过哪些任务`"
+            :data-agent-detail="a.name"
+            @click="openDetail(a.name)"
+          >
+            {{ a.name }}
+          </button>
           <!-- 不可用的原因**写在这一行**：只把它灰掉，用户看到的是
                「我装了它但系统说没有」，而真正的答案是「它跑不起来」。 -->
           <span v-if="!a.available" class="af-t-mute af-agent__why">
@@ -118,6 +139,7 @@ defineExpose({ load })
           <button
             class="af-btn af-btn--sm"
             type="button"
+            data-act="start"
             :disabled="!a.available"
             :title="a.available ? '用它开会话' : '这个 agent 现在不能对话'"
             @click="emit('start-session')"
@@ -185,6 +207,17 @@ defineExpose({ load })
 /* 不可用的那档整行降亮，但**不删**：原因要看得见 */
 .af-agent[data-usable='false'] {
   color: var(--af-fg-tertiary);
+}
+.af-agent__link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 600;
+  color: var(--af-accent);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 .af-agent__why {
   min-width: 0;

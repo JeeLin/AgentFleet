@@ -37,10 +37,12 @@ import { bindShell, installShellKeys } from '@/shared/shell-keys'
 import { interceptLink, legacyTarget, navigate, route, startRouter, LOGIN_PATH } from '@/router'
 
 import AgentCatalogPage from '@/domains/agent/AgentCatalogPage.vue'
+import AgentDetailPage from '@/domains/agent/AgentDetailPage.vue'
 import ArchivedPage from '@/domains/project/ArchivedPage.vue'
 import BindPage from '@/domains/project/BindPage.vue'
 import BoardPage from '@/domains/project/BoardPage.vue'
 import ButlerPage from '@/domains/butler/ButlerPage.vue'
+import DeviceDetailPage from '@/domains/device/DeviceDetailPage.vue'
 import DevicesPage from '@/domains/device/DevicesPage.vue'
 import ExecutionPage from '@/domains/project/ExecutionPage.vue'
 import InboxPage from '@/domains/inbox/InboxPage.vue'
@@ -74,7 +76,9 @@ import { AUTH_ROUTES } from '@/router'
 const PAGES = {
   overview: OverviewPage,
   devices: DevicesPage,
+  'device-detail': DeviceDetailPage,
   agents: AgentCatalogPage,
+  'agent-detail': AgentDetailPage,
   settings: SettingsPage,
   'projects-new': NewProjectPage,
   'projects-archived': ArchivedPage,

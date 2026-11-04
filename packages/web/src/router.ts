@@ -51,7 +51,9 @@ export type RouteName =
   // 一级导航
   | 'overview'
   | 'devices'
+  | 'device-detail'
   | 'agents'
+  | 'agent-detail'
   | 'settings'
   // 项目内
   | 'board'
@@ -118,7 +120,11 @@ export const ROUTES: readonly RouteDef[] = [
   // ── 一级导航（只有这四项进左栏，见 `App.vue` 的 `NAV`） ──────────────
   { name: 'overview', pattern: '/' },
   { name: 'devices', pattern: '/devices' },
+  // 设备详情。**排在 `/devices` 之后、段数不同**，不会互相吃掉：`/devices`
+  // 是 1 段、`/devices/:id` 是 2 段，`matchPattern` 按段数先筛。
+  { name: 'device-detail', pattern: '/devices/:id' },
   { name: 'agents', pattern: '/agents' },
+  { name: 'agent-detail', pattern: '/agents/:name' },
   { name: 'settings', pattern: '/settings' },
   // ── 项目内 ────────────────────────────────────────────────────────
   { name: 'projects-new', pattern: '/projects/new' },

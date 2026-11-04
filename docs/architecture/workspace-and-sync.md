@@ -116,6 +116,30 @@ node_modules/  .venv/  venv/  target/  dist/  build/  .cache/
 - **依赖在设备本地重建**，不进同步；重建步骤作为 checkpoint 的一步记录，可断点续跑
   （见 `task-continuity.md`）。
 
+### 3.4 落地形态：`worktree` connector（v0.7.0 子任务 5）
+
+上面 §3.2 / §3.3 的同步路线已撤销（项目改用 Hub 侧裸仓库 + 设备侧固定目录，
+见 `project-and-snapshot.md` §3.1.1），但 **worktree 与「永不传输清单」这两条
+留下来了**——它们现在由设备侧的 `worktree` connector 承担：
+
+`crates/node-connector/src/connector/worktree.rs`，注册名 `names::WORKTREE`，
+是 `node-connector` 的**第 5 个 connector**，随心跳能力表上报。
+
+| op | 做什么 |
+|---|---|
+| `worktree.create` | 在固定目录下建一个任务工作树 |
+| `worktree.remove` | 拆掉工作树，**保留 `CACHE_DIRS`** |
+| `worktree.disk_usage` | 量出真实用量与使用率 |
+
+**`CACHE_DIRS`（10 项）就是 §3.3 那份清单的实现**：`node_modules` / `target` /
+`.venv` / `dist` / `.cache` 等，都是「依赖在设备本地重建、不进同步」的产物。
+删工作树时**保留**它们（下次冷启动的代价），删除时**不跟随符号链接**
+（`node_modules/.bin` 里全是链接，跟进去会删到工作树外面）。
+
+**用量只有设备量得出来**：Hub 侧设备详情的 `used_bytes` / `percent` 恒为
+`null`（Hub 没有那台设备的文件系统）。这是刻意的——任何在 Hub 侧凑出来的数字
+看起来都和真的一样，但它是编的。
+
 ---
 
 ## 4. 技能与 agent 配置铺设：托管覆盖层

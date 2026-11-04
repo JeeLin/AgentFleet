@@ -368,7 +368,9 @@ async fn patch_sets_an_explicit_color_and_rejects_a_bogus_one() {
 #[tokio::test]
 async fn patch_rejects_a_whitespace_only_name() {
     let h = Harness::new().await;
-    let created = h.create(json!({"name": "有名字", "shape": "isolated"})).await;
+    let created = h
+        .create(json!({"name": "有名字", "shape": "isolated"}))
+        .await;
     let id = created.json()["id"].as_str().unwrap().to_string();
 
     let r = h

@@ -77,3 +77,106 @@ export function deleteDevice(id: string, options?: RequestOptions): Promise<void
 export function canCreateSession(device: DeviceSummary): boolean {
   return device.status !== 'offline'
 }
+
+/* ===========================================================================
+   设备详情（v0.7.0 子任务 7）——**从设备侧看项目**
+   ---------------------------------------------------------------------------
+   `PRODUCT.md` §3 的主轴是「做事从项目进，管理从设备进」。项目主轴改版之后
+   设备页恰恰要**变多**：运维时的第一反应永远是「这台机器怎么了」，而那个
+   问题项目页回答不了。
+
+   三块新数据（绑定关系 / 磁盘 / 失败归因）全部是既有表的读，没有新表。
+   =========================================================================== */
+
+/** 一条绑定在设备视角下的样子（带项目名，省掉一次项目列表请求）。 */
+export interface DeviceBinding {
+  id: string
+  project_id: string
+  project_name: string
+  /** 设备上的路径原文（不展开 `~`：Hub 没有那台设备的文件系统）。 */
+  fixed_dir: string
+  /** `null` = 不限额。**不是 0**：0 是一个会把一切都拦掉的真实配额。 */
+  disk_quota_bytes: number | null
+  cleanup_policy: 'conservative' | 'balanced' | 'aggressive'
+  /**
+   * 这个项目在这台设备上占了多少字节。
+   *
+   * **`null` 不是 0**：真实用量只有设备自己量得出来（它才有那个盘）。
+   * `null` 说的是「设备还没上报」，`0` 说的是「一点不占」——两句话。
+   */
+  used_bytes: number | null
+}
+
+/**
+ * 磁盘那一块的汇总。**没有绑定时整个 `disk` 是 `null`**。
+ *
+ * 回 `{used: 0}` 的话页面会渲染成「已用 0 B」，而用户真正需要知道的是
+ * 「这台机器还没被任何项目用起来」。
+ */
+export interface DeviceDisk {
+  quota_bytes: number | null
+  used_bytes: number | null
+  /** 0–100。`null` = 算不出来（没配额，或设备还没报用量）。**不是 0%**。 */
+  percent: number | null
+  /** 还能不能派活。配额为 0 时是 `false`（一个字节都放不下）。 */
+  accepts_new_work: boolean
+}
+
+/**
+ * 执行结果分布。
+ *
+ * **`aborted` 不是失败**：「我们主动停的」与「它自己挂的」在归因里是两个
+ * 结论，混成一个会让一台从没出过问题的机器看起来有失败。
+ */
+export interface FailureBreakdown {
+  succeeded: number
+  failed: number
+  aborted: number
+  /** 还在跑或还没开工。**不进成功率的分母**。 */
+  in_flight: number
+}
+
+/** 删除前置条件的结论，不只是布尔值。 */
+export interface Deletable {
+  allowed: boolean
+  /** 拒绝的理由（人话）。`allowed === true` 时是 `null`。 */
+  reason: string | null
+  executions: number
+}
+
+/** `GET /api/devices/:id/detail` 的响应。 */
+export interface DeviceDetail {
+  /** 与列表里那一项**同一个形状**：设备页头部本来就用那套字段。 */
+  summary: DeviceSummary
+  /** 空数组 = 真的没绑（页面说「还没有绑定项目」）。 */
+  bindings: DeviceBinding[]
+  disk: DeviceDisk | null
+  failure_breakdown: FailureBreakdown
+  deletable: Deletable
+}
+
+/**
+ * 读设备详情。
+ *
+ * 路径带 `/detail` 而不是复用 `/api/devices/{id}`：后者已经存在吗？没有——
+ * 但 `DELETE /api/devices/{id}` 在，同一路径加一个 GET 会让「读详情」与
+ * 「删设备」共用一条路径，而这两件事的失败后果差了一个数量级。分开更安全。
+ */
+export function getDeviceDetail(
+  id: string,
+  options?: RequestOptions,
+): Promise<DeviceDetail> {
+  return getJson<DeviceDetail>(`/api/devices/${encodeURIComponent(id)}/detail`, options)
+}
+
+/** 清理策略的中文说明。**三档的差别要写出来**，只给名字等于没接这个字段。 */
+export function describeCleanupPolicy(policy: DeviceBinding['cleanup_policy']): string {
+  switch (policy) {
+    case 'conservative':
+      return '保守：依赖缓存留 30 天，产物留最近 3 个做诊断'
+    case 'balanced':
+      return '平衡：依赖缓存留 7 天，产物跑完即清'
+    case 'aggressive':
+      return '激进：依赖缓存尽快清，产物跑完即清'
+  }
+}

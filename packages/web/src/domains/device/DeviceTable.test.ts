@@ -110,7 +110,9 @@ describe('DeviceTable：离线设备', () => {
         onRemove: vi.fn(),
       },
     })
-    const btn = w.element.querySelector<HTMLButtonElement>('tbody button')
+    // 用 `data-act="create"` 而不是「tbody 里第一个 button」：行内现在还有
+    // 设备名那个**进详情页**的按钮，靠顺序取会取错。属性选择器表达的是意图。
+    const btn = w.element.querySelector<HTMLButtonElement>('tbody [data-act="create"]')
     expect(btn?.disabled).toBe(true)
     expect(btn?.getAttribute('aria-disabled')).toBe('true')
     expect(btn?.getAttribute('title')).toContain('45 秒')
@@ -126,7 +128,7 @@ describe('DeviceTable：离线设备', () => {
         onRemove: vi.fn(),
       },
     })
-    const btn = w.element.querySelector<HTMLButtonElement>('tbody button')
+    const btn = w.element.querySelector<HTMLButtonElement>('tbody [data-act="create"]')
     expect(btn?.disabled).toBe(false)
   })
 
@@ -136,7 +138,7 @@ describe('DeviceTable：离线设备', () => {
     const w = mountIn(DeviceTable, {
       props: { devices: [device({ id: 'n_1' })], onInspect, onCreate, onRemove: vi.fn() },
     })
-    await w.element.querySelector<HTMLButtonElement>('tbody button')?.click()
+    await w.element.querySelector<HTMLButtonElement>('tbody [data-act="create"]')?.click()
     expect(onCreate).toHaveBeenCalledTimes(1)
     expect(onInspect).not.toHaveBeenCalled()
   })

@@ -749,7 +749,7 @@ Hub 已初始化，各给**下一步命令**。
 
 | 旧地址 | 去处 | 为什么 |
 |---|---|---|
-| `/agents` | `/devices?view=agents` | v0.5.0 曾并进设备页分段；v0.7.0 起它重新是真路由，这条留着接「已经渲染出去的旧链接」 |
+| ~~`/agents`~~ | —（已删） | v0.5.0 曾并进设备页分段，那时靠一行映射接住。v0.7.0 起它重新是**真路由**，`matchRoute` 先命中路由表，映射永远走不到、且指向的分段视图已不存在，故删掉 |
 | `/sessions`、`/sessions/new`、`/sessions/:id` | `/` | 会话迁到项目下（`/project/:id/session/:sessionId`）。**无法精确还原**：旧地址里没有项目 id，要还原得先查「这个会话属于哪个项目」，那是 IO，而路由表是纯数据 |
 | `/tasks`、`/artifacts` | `/` | 从来不是路由，但曾被写进文档 |
 
@@ -782,6 +782,68 @@ grep -c "pattern:" packages/web/src/router.ts                # 与上表行数�
 | `login.html` / `setup.html` | M1 | 认证错误态分开呈现 |
 | `index.html` / `components.html` | — | 元页面（关于原型），不用外壳 |
 | `panels/terminal.html` / `panels/files.html` | M1 | 面板细看，带「它在会话里」的位置声明 |
+
+> **v0.7.0 换轴**：`prototype/` 已在 `d3d008d` 按**项目主轴**重建成 21 页
+> （项目 → 会话 → 面板三层）。上表是 v0.5.0 的会话轴清单，保留为历史。
+> 生产前端的路由见 `packages/web/src/router.ts` 的 `ROUTES`（25 条 = 21 页
+> + 两个详情地址 + 两条认证路由）。
+
+#### 5.3.1 设备页的新区块（v0.7.0 子任务 7）
+
+`PRODUCT.md` §3 的主轴是「**做事从项目进，管理从设备进**」。项目主轴改版之后
+设备页**变多不变少**——运维时的第一反应永远是「这台机器怎么了」，而那个问题
+项目页回答不了。
+
+`prototype/devices.html` 的详情区（`#detail-a`）落成 `/devices/:id`，
+四块，顺序固定：
+
+| 区块 | 回答什么 | 数据 |
+|---|---|---|
+| **机器** | 在线吗、什么平台、资源余量、指纹 | `summary`（与列表项**同一形状**） |
+| **绑定关系** | 跑了哪些项目、各自钉在哪个目录、清理策略 | `bindings[]`，带 `project_name` |
+| **磁盘** + **失败归因** | 还剩多少 / 栽在哪一类 | `disk`、`failure_breakdown` |
+| **能不能删** | 不能的话理由是什么 | `deletable`，带 `reason` + 条数 |
+
+四条硬口径：
+
+1. **「还没有绑定项目」不是空区块**。`bindings: []` 时页面必须给一句话 +
+   「去项目页绑定」的下一步，而不是留一块空白。
+2. **没有绑定时 `disk` 是 `null`，不是 `{used: 0, quota: null}`**。后者会渲染成
+   「已用 0 B」，而用户真正要知道的是「这台机器还没被用起来」。
+3. **`used_bytes` / `percent` 在 Hub 侧恒为 `null`**（显示「设备未上报」）。
+   Hub 没有那台设备的文件系统。**不编一个看起来像真的数字**——见
+   `project-and-snapshot.md` §5.3.1。
+4. **「中止」单列且措辞是「中止（不是失败）」**。混进失败的话，一台只是被用户
+   主动停了两次的机器会显示「失败 2 次」，用户会去查一个不存在的问题。
+
+「能不能删」要说**理由**，不只是把按钮灰掉：「有 N 条历史执行记录，不能删除。
+要下线就先归档项目，或把项目转到别的设备。」——这句话里的 N 与
+`DELETE /api/devices/{id}` 的前置检查读的是**同一个数**
+（`execution_count_for_device`），页面上说能删、真去删却 409 是最让人困惑的
+一种不一致。
+
+#### 5.3.2 Agent 页的新区块（v0.7.0 子任务 7）
+
+`/agents/:name`，三块：
+
+| 区块 | 回答什么 |
+|---|---|
+| **成功率** | 让它干活，成不成 |
+| **装在哪几台机器上** | 哪几台有它、各自可不可用、跑不起来的原因 |
+| **跑过的任务** | 最近的在前，带任务标题 / 项目名 / 状态 |
+
+两条硬口径：
+
+1. **0/0 显示「—」，不是 0%**。0/0 与 0/10 是两句话：「还没跑过」与「一次都
+   没成」。合成 0% 之后，一个刚装好的 agent 会立刻显示「成功率 0%」。
+   反过来，**真实的 0%（跑过但全败）必须显示 0%**，不能被误伤成「—」。
+   进行中的执行**不进分母**，否则成功率会随「现在有几条在跑」抖动。
+2. **`task_history_caveat` 必须渲染在页面上**，不是只写在代码注释里。
+   `execution` 表**没有 agent 列**，历史是按「执行所在的那台设备上装了这个
+   agent」反推的——同一台设备装了三个 agent 时，它们会共享同一批执行。
+   用户看到「成功率 83%」时会当真，而这个数字的分母可能含别的 agent 干的活。
+   这句话随响应下发（`TASK_HISTORY_CAVEAT`），页面**照抄**，不自己编一句
+   措辞不同的。
 
 ### 5.4 会话工作台
 
@@ -992,6 +1054,81 @@ Mock 形状 = 将来 API 的形状。前端只读。
 `POST /api/sessions` 的响应里。所以 M1 的 `/api/sessions` 每一项带
 `workspace { node_id, path, path_locked }`（`node_id` 在前，因为通道键是
 `(node_id, channel_id)`，约束 4）。
+
+### 6.3 `GET /api/devices/{id}/detail` → `DeviceDetail`（v0.7.0）
+
+```jsonc
+{
+  "summary": { /* 与 §6.1 那一项**逐字段相同** */ },
+  "bindings": [
+    {
+      "id": "b-1",
+      "project_id": "p-1",
+      "project_name": "指标台",          // 设备页不知道项目名就没法显示
+      "fixed_dir": "/srv/metrics",
+      "disk_quota_bytes": 1000,          // null = 不限额（不是 0）
+      "cleanup_policy": "conservative",  // conservative | balanced | aggressive
+      "used_bytes": null                 // 恒为 null：Hub 量不出设备上的盘
+    }
+  ],
+  "disk": {                              // 没有任何绑定时整个是 null
+    "quota_bytes": 1000,
+    "used_bytes": null,                  // 同上，不编数字
+    "percent": null,                     // null ≠ 0%
+    "accepts_new_work": true             // 只在配额为 0 时能下结论（false）
+  },
+  "failure_breakdown": {
+    "succeeded": 5,
+    "failed": 0,
+    "aborted": 2,                        // **不是失败**
+    "in_flight": 1                       // 不进成功率分母
+  },
+  "deletable": {
+    "allowed": false,
+    "reason": "有 2 条历史执行记录，不能删除。要下线就先归档项目，或把项目转到别的设备。",
+    "executions": 2
+  }
+}
+```
+
+**`summary` 是内嵌对象，不是摊平的字段**：两个端点（列表 / 详情）共用同一份
+设备字段，摊平会让字段名各写一遍，改一处漏一处。
+
+**`failure_breakdown` 按状态分，不按失败原因分**。`execution` 表**没有失败
+原因列**（原因在轨迹里），按原因分档需要一条「把轨迹聚成原因」的规则，而那条
+规则不存在——编一个出来就是在统计里造假数据。所以页面显示的是「失败 N 次」，
+不是「磁盘不足 ×2」。
+
+### 6.4 `GET /api/agents/{name}` → `AgentDetail`（v0.7.0）
+
+```jsonc
+{
+  "name": "opencode",
+  "available": true,                    // 至少一台设备上可用
+  "error": null,                        // 全不可用时把各台原因拼起来
+  "devices": [
+    { "node_id": "n_1", "device_name": "mbp.local",
+      "available": true, "probe_error": null, "executions": 3 }
+  ],
+  "task_history": [
+    { "execution_id": "e-1", "task_id": "t-1",
+      "task_title": "加个健康检查",      // 任务行已不存在时是 null
+      "project_id": "p-1", "project_name": "指标台",
+      "device_id": "n_1", "state": "succeeded",
+      "created_at": "unix:1700000000" }
+  ],
+  "breakdown": { "succeeded": 2, "failed": 1, "aborted": 0, "in_flight": 1 },
+  "success_rate": 66,                   // null = 一次都没结束过（显示「—」）
+  "task_history_caveat": "执行记录里没有记「这条是哪个 agent 跑的」……"
+}
+```
+
+**`success_rate` 的 `null` 不是 0**：0/0 与 0/10 是两句不同的话。为 `null` 时
+页面显示「—」，为 `0` 时显示「0%」。
+
+**`task_history_caveat` 是响应的一部分，不是文档的一部分**。它必须显示在页面上
+（见 §5.3.2），因为那个数字的统计口径与它字面意思不完全一致，而用户会把那个
+数字当真。
 
 ---
 
@@ -1478,9 +1615,4 @@ Mock 形状 = 将来 API 的形状。前端只读。
 | `focusPush` / `focusPop` | `lib/focus.ts` | 焦点归最内层容器；背后 `inert`；关闭一定还焦点 |
 | `focusablesIn` | `lib/focus.ts` | 每次 Tab 重算，不缓存快照 |
 | `register` | `lib/keynav.ts` | act 必须在 `KEYS` 表里；不许注册两次 |
-| `unimplemented` | `lib/keynav.ts` | 表里有、没人实现的项 → `?` 面板标注「未实现」 |
-| `?` 帮助面板渲染 | `lib/keynav.ts`（由 `KEYS` 渲染） | **由表渲染**，文档与实现不可能漂移 |
-| 跳转后的落点 | `lib/shell-keys.ts` | 跳过去焦点落在主区，不是停在导航 |
-
-**这六个是同一条纪律的六个切面**：焦点与键位不许分散在页面里。
-上一版 7 条焦点缺陷的共同根因就是「焦点散在各页面各写各的，无统一所有权模型」。
+| `unimplemented` | `lib/keynav.ts` | 表里有、没人实现的项 → `?` 面板标

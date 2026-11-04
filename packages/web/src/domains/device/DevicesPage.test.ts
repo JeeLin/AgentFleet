@@ -175,7 +175,9 @@ describe('DevicesPage：离线设备', () => {
     await flush(w)
 
     expect(w.element.querySelector('tbody [data-row]')).not.toBeNull()
-    const btn = w.element.querySelector<HTMLButtonElement>('tbody button')
+    // 用 `data-act="create"` 而不是「tbody 里第一个 button」：行内现在还有
+    // 设备名那个**进详情页**的按钮，靠顺序取会取错。
+    const btn = w.element.querySelector<HTMLButtonElement>('tbody [data-act="create"]')
     expect(btn?.disabled).toBe(true)
     expect(btn?.getAttribute('title')).toContain('离线')
   })
@@ -185,7 +187,7 @@ describe('DevicesPage：离线设备', () => {
     const w = mountIn(DevicesPage)
     await flush(w)
 
-    await w.element.querySelector<HTMLButtonElement>('tbody button')?.click()
+    await w.element.querySelector<HTMLButtonElement>('tbody [data-act="create"]')?.click()
     expect(location.pathname).toBe('/sessions/new')
     expect(location.search).toBe('?device=n_1')
   })

@@ -77,7 +77,11 @@ describe('AgentCatalog：渲染', () => {
     await flush(w)
 
     const before = location.pathname
-    await w.element.querySelector<HTMLButtonElement>('.af-agent button')?.click()
+    // `[data-act="start"]` 而不是「行里第一个 button」：行内现在还有一个进
+    // 详情页的名字按钮。属性选择器表达的是意图，不依赖顺序。
+    await w.element
+      .querySelector<HTMLButtonElement>('.af-agent [data-act="start"]')
+      ?.click()
     await settle(1)
     expect(w.emitted('start-session')).toHaveLength(1)
     // 反证：组件里没有 `navigate()`，地址不动
@@ -117,10 +121,12 @@ describe('AgentCatalog：渲染', () => {
     // 带出原因：只把它灰掉，用户读到的是「我装了它但系统说没有」
     expect(broken?.textContent).toContain('没有 acp 子命令')
     // 不可点：点了就会进到一个永远选不到它的新建页
-    expect(broken?.querySelector<HTMLButtonElement>('button')?.disabled).toBe(true)
+    expect(
+      broken?.querySelector<HTMLButtonElement>('[data-act="start"]')?.disabled,
+    ).toBe(true)
 
     const ok = rows.find((r) => r.getAttribute('data-usable') === 'true')
-    expect(ok?.querySelector<HTMLButtonElement>('button')?.disabled).toBe(false)
+    expect(ok?.querySelector<HTMLButtonElement>('[data-act="start"]')?.disabled).toBe(false)
   })
 
   it('设备没给原因时不编一句——只说不能对话', async () => {

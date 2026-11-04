@@ -185,6 +185,35 @@ Hub 持有**裸仓库**（bare repo）。三条路：
 
 **必须加的运维护栏**：限制单仓大小、限制单次 push 包体积、定期 `git gc`。
 
+#### 3.1.1 落地形态（v0.7.0 子任务 3）
+
+一期确实走了 CLI，且**包在 `hub_core::repo::BareRepo` 后面**——`hub-server` 的
+路由代码里一个 `"git"` 字面量都没有（`grep -rn '"git' routes/projects.rs` 为空）。
+公开接口只有六个方法，**没有一个参数或返回值提到 git**：
+
+| 方法 | 做什么 |
+|---|---|
+| `open_or_init(root, name)` | 打开或建一个裸仓库（`root/<name>.git`） |
+| `root()` | 裸仓库目录 |
+| `head()` | 当前分支名 |
+| `rev_parse(rev)` | 解析到 commit oid |
+| `fetch(url, refspec)` | 从设备侧的仓库拉 |
+| `merge(rev, message)` | 合并进主干 |
+
+**裸仓库不能直接 `git merge`。** `git merge` 需要一个工作树，而裸仓库故意没有。
+所以 `merge` 走的是：临时目录里 `--work-tree` 检出 → 合并 → 成功后
+`update-ref refs/heads/main` 把结果写回裸仓库。这是实现细节，接口层看不见。
+
+**三处踩过的坑，记在这里免得重踩**：
+
+1. `open_or_init` 必须**先 `create_dir_all`**。不建目录就 `git init` 会失败，
+   而失败的字面是 `No such file or directory`——看起来像「这台机器没装 git」，
+   会把人引去查错的病。
+2. 合并**冲突说明打在 stdout**，不是 stderr。只收 stderr 会得到一个「失败但没有
+   原因」的错误。`run()` 因此合并两个流。
+3. 空仓库判据要包含 `FETCH_HEAD`（`has_any_output`），不能只看 `refs/heads`：
+   一次 fetch 之后、merge 之前，仓库里已经有对象了。
+
 ---
 
 ## 4. 「同一起点」是两层身份，git 只管一层
@@ -234,6 +263,21 @@ git 内建它、排除清单读取它、D9 的论证指向它。
 
 改绑目录是**允许的**，但代价明确：该设备上这个项目的缓存作废，下次任务冷启动。
 
+#### 5.1.1 `fixed_dir` 一旦有执行记录就锁死（v0.7.0 子任务 4）
+
+上面那句「改绑目录是允许的」有一个**前置条件**：这台设备上这个项目**还没跑过
+任何任务**。一旦有了执行记录，改 `fixed_dir` 会被拒（HTTP 409
+`fixed_dir_locked`，`detail.executions` 带条数）。
+
+理由不是「怕麻烦」：执行记录里存的是 `worktree_path`，它是**旧目录下的绝对
+路径**。改了根目录之后，那些路径指向的地方要么不存在、要么是别人的东西——
+诊断「上次为什么失败」时会看到一棵假的文件树。
+
+**PUT 是全仓唯一 upsert**：`PUT /api/projects/{id}/bindings/{deviceId}` 与
+`PUT /api/devices/{id}/bindings/{projectId}` 是**同一条写路径**的两个入口
+（项目视角 / 设备视角），都落到 `BindingRepo::upsert`。201 = 新建、
+200 = 更新。两个入口各写一份 `INSERT OR REPLACE` 的话，改字段时必然漏一处。
+
 ### 5.2 用 worktree 分任务，不用多个 clone
 
 在固定目录里，**一个任务一个 worktree**：
@@ -279,6 +323,35 @@ git 内建它、排除清单读取它、D9 的论证指向它。
 
 **为什么缓存按 lockfile 哈希而不是按分支**：同一个 lockfile 意味着同一份依赖，
 分支名不说明任何事。按分支分缓存会在每次换分支时冷启动，等于没有缓存。
+
+#### 5.3.1 落地形态：设备侧 `worktree` connector（v0.7.0 子任务 5）
+
+四层处置全部实现在 `crates/node-connector/src/connector/worktree.rs`——它是
+`node-connector` 的**第 5 个 connector**（注册名 `names::WORKTREE`），随心跳
+能力表上报，所以设备页能如实显示「这台机器支不支持 worktree 清理」。
+
+> 规格原文写的是 `node-core/src/worktree.rs`，**用户 2026-11-04 裁定改到这里**。
+> 理由：worktree 是**设备侧真碰盘**的动作，和 pty / fs 同类，而 `node-core` 是
+> 协议与状态，不该有副作用。心跳能力表因此多出一项 `worktree`，那是对的。
+
+三个 op：`worktree.create` / `worktree.remove` / `worktree.disk_usage`。
+
+**`plan_cleanup` 是纯函数**：给策略 + 目录清单 → 返回「删哪些、留哪些」。
+它不碰盘，所以 18 条清理用例全是纯数据比对，不需要真建目录树。
+
+**`CACHE_DIRS`**（10 项，含 `node_modules` / `target` / `.venv`）里的东西
+`remove_products` **一律保留**——那是缓存，删了下次要重新下载。删除时
+**不跟随符号链接**：`node_modules/.bin` 里全是符号链接，跟进去会删到工作树外面。
+
+**配额判据 `QUOTA_STOP_PERCENT = 90`**，落在 `DiskUsage::accepts_new_work`。
+配额为 0 时是 `false`（一个字节都放不下）——`percent` 也对 `Some(0)` 返回 100，
+不去做除法。
+
+**Hub 侧不重复这个判断。** 设备详情里的 `disk.used_bytes` / `disk.percent`
+**恒为 `null`**：Hub 没有那台设备的文件系统，任何凑出来的数字都是编的
+（`worktree_path` 是设备上的绝对路径，按它去库里查字节数只会得到一个看起来
+很真的假数）。真实用量只有设备的 `worktree.disk_usage` 报得出。
+`accepts_new_work` 因此在 Hub 侧只在**配额为 0** 时能下结论。
 
 ---
 

@@ -14,7 +14,7 @@ import {
   startRouter,
 } from '@/router'
 
-describe('路由表：就是 `prototype/` 的 21 页', () => {
+describe('路由表：`prototype/` 的 21 页 + 两个详情地址', () => {
   it('路由表与 `prototype/` 的页面对照表逐条一致', () => {
     // 这张表是 v0.7.0 子任务 8 的落点清单。**顺序有意义**：`/projects/new`
     // 必须排在 `/projects/:id/...` 之前，否则新建会被当成 id 为 `new` 的项目。
@@ -23,7 +23,13 @@ describe('路由表：就是 `prototype/` 的 21 页', () => {
     expect(ROUTES.map((r) => `${r.name} ${r.pattern}`)).toEqual([
       'overview /',
       'devices /devices',
+      // 设备详情与 agent 详情（v0.7.0 子任务 7）：**从设备 / agent 侧看项目**。
+      // 它们不是原型里独立的第 22、23 页——原型用「同一页上的详情区」表达
+      // 这件事，而生产环境给了它一个能深链接的地址：设备页的绑定 / 磁盘 /
+      // 失败归因放不进一行，且用户会想把它发给别人。
+      'device-detail /devices/:id',
       'agents /agents',
+      'agent-detail /agents/:name',
       'settings /settings',
       'projects-new /projects/new',
       'projects-archived /projects/archived',
@@ -60,7 +66,9 @@ describe('路由表：就是 `prototype/` 的 21 页', () => {
     const samples: Record<string, string> = {
       overview: '/',
       devices: '/devices',
+      'device-detail': '/devices/n_a',
       agents: '/agents',
+      'agent-detail': '/agents/opencode',
       settings: '/settings',
       'projects-new': '/projects/new',
       'projects-archived': '/projects/archived',

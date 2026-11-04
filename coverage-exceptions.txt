@@ -27,6 +27,23 @@
 # 理由」并有计数）。**不在这里写死数字**：手写它必然漂移——本文件写下时写的是
 # 27，而当时实际就是 39；本轮重建后又变成 25。要看当前值就跑 `--check`。
 crates/hub-core/src/registry.rs:155: Err(e) 主体由 enroll_inner_statement_error_rolls_back_and_propagates 覆盖。 下面的 `if let Err(rb)` 不可达：只要闭包返回 Err 事务仍活跃，SQLite 的 ROLLBACK 必然成功；该分支仅防御连接级 故障，无可控测试手段。而「回滚失败」这条本身也不该被覆盖—— 原错误才是调用方要的，它只负责留痕。
+crates/hub-core/src/repo.rs:102: 建不了目录是权限 / 磁盘故障， 要求把那个路径变成不可写才走得到。
+crates/hub-core/src/repo.rs:103: 建不了目录是权限 / 磁盘故障， 要求把那个路径变成不可写才走得到。
+crates/hub-core/src/repo.rs:114: 建不了目录是权限 / 磁盘故障， 要求把那个路径变成不可写才走得到。
+crates/hub-core/src/repo.rs:183: 建不了目录是权限 / 磁盘故障， 要求把那个路径变成不可写才走得到。
+crates/hub-core/src/repo.rs:216: `head()` 余下的失败只有 git 起不来。
+crates/hub-core/src/repo.rs:229: 建不了临时目录是磁盘 / 权限故障。
+crates/hub-core/src/repo.rs:230: 建不了临时目录是磁盘 / 权限故障。
+crates/hub-core/src/repo.rs:244: 非冲突的合并失败（git 起不来、仓坏）。
+crates/hub-core/src/repo.rs:254: 刚合并成功的临时工作区读不出 HEAD， 意味着仓已经坏了。
+crates/hub-core/src/repo.rs:255: 刚合并成功的临时工作区读不出 HEAD， 意味着仓已经坏了。
+crates/hub-core/src/repo.rs:261: 裸仓库写不回引用是盘 / 权限故障。
+crates/hub-core/src/repo.rs:262: 裸仓库写不回引用是盘 / 权限故障。
+crates/hub-core/src/repo.rs:324: 走到这里说明 git 二进制根本起不来 （没装 / 不可执行），测试机上有 git，构造不出来。
+crates/hub-core/src/repo.rs:325: 走到这里说明 git 二进制根本起不来 （没装 / 不可执行），测试机上有 git，构造不出来。
+crates/hub-core/src/repo.rs:341: 「stderr 空、stdout 非空」的失败形态。 实测 git 的失败几乎都同时写 stderr；这一档是格式完整性兜底。
+crates/hub-core/src/repo.rs:358: 本模块目前不调 `for-each-ref`。
+crates/hub-core/src/repo.rs:362: 兜底：加了新动词但忘了翻译时也不 panic。 `every_known_verb_gets_its_own_readable_step_name` 保证已知的三个 动词都走不到这一行。
 crates/hub-core/src/reports.rs:103: 锁中毒意味着另一个持锁者 panic 了， 而 workspace lint 把 panic 禁成 deny（生产代码无 panic 路径）； 那种情况下进程的状态已不可信，静默丢弃这次上报不会更糟。
 crates/hub-core/src/reports.rs:114: 同 record：锁中毒只在别的持锁者 panic 时出现。
 crates/hub-core/src/reports.rs:248: 同 record：锁中毒只在别的持锁者 panic 时出现。
@@ -34,21 +51,25 @@ crates/hub-server/src/channels.rs:116: **回填 Hub 侧账本**：只发 `channe
 crates/hub-server/src/channels.rs:260: 只在断言失败时执行；`panic!` 的格式串行被 llvm-cov 记为 miss（多行宏已知现象）。
 crates/hub-server/src/channels.rs:262: 只在断言失败时执行；`panic!` 的格式串行被 llvm-cov 记为 miss（多行宏已知现象）。
 crates/hub-server/src/main.rs:43: 建不出 OS 线程（fd/内存耗尽或线程数受限）， 无可控手段在测试里构造；守卫逻辑本身由各处错误分支覆盖。
-crates/hub-server/src/routes/api.rs:318: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
-crates/hub-server/src/routes/api.rs:319: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
-crates/hub-server/src/routes/api.rs:323: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
-crates/hub-server/src/routes/api.rs:324: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
-crates/hub-server/src/routes/api.rs:325: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
+crates/hub-server/src/routes/agents_detail.rs:120: 单台设备读不出来不该让整页 500：其它设备上的事实仍然成立。 要走到这里必须把 `agent_runtime` 读坏 （连接池取不到 / SQLite 报错）。这条兜底的意义正是「库坏了一台 机器时页面还能显示别的」，而那种故障没有可控的测试手段。
+crates/hub-server/src/routes/agents_detail.rs:125: 单台设备读不出来不该让整页 500：其它设备上的事实仍然成立。 要走到这里必须把 `agent_runtime` 读坏 （连接池取不到 / SQLite 报错）。这条兜底的意义正是「库坏了一台 机器时页面还能显示别的」，而那种故障没有可控的测试手段。
+crates/hub-server/src/routes/agents_detail.rs:126: 单台设备读不出来不该让整页 500：其它设备上的事实仍然成立。 要走到这里必须把 `agent_runtime` 读坏 （连接池取不到 / SQLite 报错）。这条兜底的意义正是「库坏了一台 机器时页面还能显示别的」，而那种故障没有可控的测试手段。
+crates/hub-server/src/routes/agents_detail.rs:242: 项目只归档不删除，所以 `Ok(None)` 正常走不到； `Err` 是读库失败。两条都退回 id 是为了「有一个能让人对上的标签」 而不是留一个空标题。
+crates/hub-server/src/routes/api.rs:321: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
+crates/hub-server/src/routes/api.rs:322: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
 crates/hub-server/src/routes/api.rs:326: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
-crates/hub-server/src/routes/api.rs:657: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
-crates/hub-server/src/routes/api.rs:702: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
-crates/hub-server/src/routes/api.rs:705: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
-crates/hub-server/src/routes/api.rs:706: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
-crates/hub-server/src/routes/api.rs:708: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
-crates/hub-server/src/routes/api.rs:709: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
-crates/hub-server/src/routes/api.rs:710: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
-crates/hub-server/src/routes/api.rs:711: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
-crates/hub-server/src/routes/api.rs:712: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
+crates/hub-server/src/routes/api.rs:327: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
+crates/hub-server/src/routes/api.rs:328: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
+crates/hub-server/src/routes/api.rs:329: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
+crates/hub-server/src/routes/api.rs:679: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
+crates/hub-server/src/routes/api.rs:724: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
+crates/hub-server/src/routes/api.rs:727: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
+crates/hub-server/src/routes/api.rs:728: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
+crates/hub-server/src/routes/api.rs:730: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
+crates/hub-server/src/routes/api.rs:731: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
+crates/hub-server/src/routes/api.rs:732: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
+crates/hub-server/src/routes/api.rs:733: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
+crates/hub-server/src/routes/api.rs:734: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
 crates/hub-server/src/routes/assets.rs:100: 构造上不可达：`build.rs` 在 dist 缺失时写的就是 index.html。 真走到这里（有人手工改 AF_WEB_DIST）也不该 panic——那是一台 活着但页面打不开的 Hub，比进程退出好排查。 上面三行已说明：这条分支结构上不可达。
 crates/hub-server/src/routes/assets.rs:101: 构造上不可达：`build.rs` 在 dist 缺失时写的就是 index.html。 真走到这里（有人手工改 AF_WEB_DIST）也不该 panic——那是一台 活着但页面打不开的 Hub，比进程退出好排查。 上面三行已说明：这条分支结构上不可达。
 crates/hub-server/src/routes/assets.rs:102: 构造上不可达：`build.rs` 在 dist 缺失时写的就是 index.html。 真走到这里（有人手工改 AF_WEB_DIST）也不该 panic——那是一台 活着但页面打不开的 Hub，比进程退出好排查。 上面三行已说明：这条分支结构上不可达。
@@ -59,6 +80,17 @@ crates/hub-server/src/routes/base_rev.rs:127: 同上面那条 `code = e.code()`�
 crates/hub-server/src/routes/base_rev.rs:157: 同上面那条：多行宏的参数行被 llvm-cov 记为 miss。 这一臂本身由上面那条队列满用例执行（它连 `close_channel` 都发不出去）。
 crates/hub-server/src/routes/base_rev.rs:533: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
 crates/hub-server/src/routes/base_rev.rs:732: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/hub-server/src/routes/bindings.rs:250: 同 `internal` 的理由：余下的是数据库故障。
+crates/hub-server/src/routes/bindings.rs:252: 同 `internal` 的理由：余下的是数据库故障。
+crates/hub-server/src/routes/bindings.rs:267: 同 `internal` 的理由：余下的是数据库故障。
+crates/hub-server/src/routes/bindings.rs:268: 同 `internal` 的理由：余下的是数据库故障。
+crates/hub-server/src/routes/bindings.rs:269: 同 `internal` 的理由：余下的是数据库故障。
+crates/hub-server/src/routes/bindings.rs:272: 要走到这里必须把库读坏（见 `internal` 的理由）。 留它不是防御性编程：把「库坏了」翻译成 404 会让用户以为项目没了。
+crates/hub-server/src/routes/bindings.rs:274: 要走到这里必须把库读坏（见 `internal` 的理由）。 留它不是防御性编程：把「库坏了」翻译成 404 会让用户以为项目没了。
+crates/hub-server/src/routes/bindings.rs:282: 上面那个 `Fn` 的构造行：闭包体只在错误路径执行。
+crates/hub-server/src/routes/devices.rs:246: 要走到这里必须把库读坏。这条不能「退成 0」： 那会让一台有执行记录的设备在页面上显示「可以删」。
+crates/hub-server/src/routes/devices.rs:249: 要走到这里必须把库读坏。这条不能「退成 0」： 那会让一台有执行记录的设备在页面上显示「可以删」。
+crates/hub-server/src/routes/devices.rs:285: 读库失败时退回 id 而不是空串：空串在页面上是一个没有标题的分组， 而 id 至少能让人对上是哪个项目。 项目只归档不删除（`Ok(None)` 正常走不到）， `Err` 是读库失败。两者都退回 id。
 crates/hub-server/src/routes/projects.rs:287: `StorageError` 余下的变体都是数据库故障（连接池取不到、 SQLite 报错、序列化失败）。它们要求把库打坏才走得到，而那类故障在 `hub-storage` 自己的单测里已经有专门构造。这里保留兜底是为了**不把 未知错误翻译成 404**——那会让「库坏了」看起来像「项目不存在」。
 crates/hub-server/src/routes/projects.rs:305: 同 `change_project_shape` 的兜底：余下的变体是数据库故障， 正常文件系统构造不出。留它是为了不把「库坏了」说成「项目不存在」。
 crates/hub-server/src/routes/projects.rs:320: 同 `archive_project` 的兜底。
@@ -80,6 +112,7 @@ crates/hub-server/src/routes/stream.rs:2481: 夹具的收尾：`Streams` 自己�
 crates/hub-server/src/routes/stream.rs:2482: 夹具的收尾：`Streams` 自己握着发送端， 流在测试期间从不结束，所以这条 `break` 打不到；它不是被测逻辑的分支。
 crates/hub-server/src/routes/stream.rs:2483: 夹具的收尾：`Streams` 自己握着发送端， 流在测试期间从不结束，所以这条 `break` 打不到；它不是被测逻辑的分支。
 crates/hub-server/src/routes/stream.rs:2492: 同上面的 `Closed` 臂： `panic!` 的参数行被 llvm-cov 记为 miss（多行宏已知现象）。
+crates/hub-server/src/routes/stream.rs:2565: (racy) — 见上。
 crates/hub-server/src/routes/stream.rs:2703: (racy) — 与上面 publish 那行同源：断言是否被求值 取决于后台发布线程的抢跑程度，非确定性。删掉这个 marker 会让门禁 在「本轮一次都没走到这里」时随机红，而不是暴露真问题。
 crates/hub-server/src/routes/ws.rs:141: 同上面的收尾行：单测里 task 被 runtime 取消， `Err` 臂走不到，故这行日志不可达。
 crates/hub-server/src/routes/ws.rs:275: 表里没它：旧连接已在自己的断开处理器里被摘掉。 要触达需让它在 insert 之后、send 之前被另一个 task 摘表（极窄窗口）。
@@ -317,6 +350,26 @@ crates/node-connector/src/connector/terminal.rs:744: `pipe2` 失败需 fd 表耗
 crates/node-connector/src/connector/terminal.rs:745: `pipe2` 失败需 fd 表耗尽。
 crates/node-connector/src/connector/terminal.rs:746: `pipe2` 失败需 fd 表耗尽。
 crates/node-connector/src/connector/terminal.rs:747: `pipe2` 失败需 fd 表耗尽。
+crates/node-connector/src/connector/worktree.rs:272: 要走到这里必须有一个读不进去的子目录 （权限被撤 / 目录在遍历中途被删）。这是并发与权限故障， 测试里造不出稳定复现的一刻。
+crates/node-connector/src/connector/worktree.rs:316: `OpenReq::root()` 为 `None` 只在 Hub 没下发 固定目录时发生，而那样它压根不会派活到本连接器。
+crates/node-connector/src/connector/worktree.rs:317: `OpenReq::root()` 为 `None` 只在 Hub 没下发 固定目录时发生，而那样它压根不会派活到本连接器。
+crates/node-connector/src/connector/worktree.rs:322: `OpenReq::root()` 为 `None` 只在 Hub 没下发 固定目录时发生，而那样它压根不会派活到本连接器。
+crates/node-connector/src/connector/worktree.rs:324: 建不了固定目录是权限 / 磁盘故障。
+crates/node-connector/src/connector/worktree.rs:325: 建不了固定目录是权限 / 磁盘故障。
+crates/node-connector/src/connector/worktree.rs:332: 目录刚建出来就 canonicalize 不了， 意味着权限在两步之间被撤了。
+crates/node-connector/src/connector/worktree.rs:333: 目录刚建出来就 canonicalize 不了， 意味着权限在两步之间被撤了。
+crates/node-connector/src/connector/worktree.rs:387: 建不了工作树目录是磁盘 / 权限故障。
+crates/node-connector/src/connector/worktree.rs:388: 建不了工作树目录是磁盘 / 权限故障。
+crates/node-connector/src/connector/worktree.rs:389: 建不了工作树目录是磁盘 / 权限故障。
+crates/node-connector/src/connector/worktree.rs:411: 删不掉目录是权限故障。
+crates/node-connector/src/connector/worktree.rs:412: 删不掉目录是权限故障。
+crates/node-connector/src/connector/worktree.rs:413: 删不掉目录是权限故障。
+crates/node-connector/src/connector/worktree.rs:419: 同上。
+crates/node-connector/src/connector/worktree.rs:420: 同上。
+crates/node-connector/src/connector/worktree.rs:421: 同上。
+crates/node-connector/src/connector/worktree.rs:461: 删不掉的其它原因（权限 / 忙）。
+crates/node-connector/src/connector/worktree.rs:474: 删不掉的其它原因（权限 / 忙）。
+crates/node-connector/src/connector/worktree.rs:476: 读不进去（权限 / 忙）。
 crates/node-connector/src/pty.rs:149: 下面这一臂（含错误串的 `format!` 参数行）要求 `forkpty` 失败：`/dev/ptmx` 用尽或 fd 耗尽，测试环境无可控构造手段 （防御性兜底）。
 crates/node-connector/src/pty.rs:150: 下面这一臂（含错误串的 `format!` 参数行）要求 `forkpty` 失败：`/dev/ptmx` 用尽或 fd 耗尽，测试环境无可控构造手段 （防御性兜底）。
 crates/node-connector/src/pty.rs:151: 下面这一臂（含错误串的 `format!` 参数行）要求 `forkpty` 失败：`/dev/ptmx` 用尽或 fd 耗尽，测试环境无可控构造手段 （防御性兜底）。
