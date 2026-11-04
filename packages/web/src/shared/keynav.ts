@@ -81,8 +81,14 @@ export const KEYS: readonly KeyGroup[] = [
     group: '跳转',
     scope: 'global',
     keys: [
-      { keys: ['g', 's'], act: 'nav:sessions', label: pageTitle('sessions'), scope: 'global' },
+      /*
+        `g s` 从 v0.7.0 起是「总览」而不是「会话」：会话轴改成项目轴之后，
+        会话不再是顶层地址（`/sessions` 落进 `LEGACY_PATHS`）。键位**没有改**，
+        改的是语义——`g s` 是「去起点」这个手势，起点从会话列表变成了总览。
+      */
+      { keys: ['g', 's'], act: 'nav:overview', label: pageTitle('overview'), scope: 'global' },
       { keys: ['g', 'd'], act: 'nav:devices', label: pageTitle('devices'), scope: 'global' },
+      { keys: ['g', 'a'], act: 'nav:agents', label: pageTitle('agents'), scope: 'global' },
       { keys: ['g', ','], act: 'nav:settings', label: pageTitle('settings'), scope: 'global' },
     ],
   },

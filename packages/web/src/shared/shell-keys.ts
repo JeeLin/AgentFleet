@@ -72,11 +72,11 @@ export function installShellKeys(): void {
     return bindings.focusSearch()
   })
 
-  registerInternal('nav:sessions', () => nav('/sessions'))
-  // 不注册 `nav:new-session`：`KEYS` 里没有键序列映射到它（`g n` 已随导航收敛
-  // 一起删掉），而 `shell-keys` 的派发只走 `KEYS` 推导出的 `PREFIX`。注册了也
-  // 永远不会被调用——与先前删掉的 `nav:agents` 是同一种死注册。
+  // `g s` 从 v0.7.0 起是「总览」：会话轴改成项目轴后 `/sessions` 不再是路由，
+  // 它落进 `LEGACY_PATHS`，而起点是总览。键位没改，改的是去哪个地址。
+  registerInternal('nav:overview', () => nav('/'))
   registerInternal('nav:devices', () => nav('/devices'))
+  registerInternal('nav:agents', () => nav('/agents'))
   registerInternal('nav:settings', () => nav('/settings'))
 
   document.addEventListener('keydown', onKeydown)

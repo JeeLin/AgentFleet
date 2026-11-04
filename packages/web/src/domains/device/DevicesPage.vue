@@ -90,6 +90,9 @@ function inspect(device: DeviceSummary): void {
 }
 
 function createSession(device: DeviceSummary): void {
+  // v0.7.0 起会话地址是 `/project/:id/session/:sessionId`，所以新建页需要项目 id
+  // 才能把用户送回去。设备页是**管理面**（「管理从设备进」），它本身不带项目
+  // 上下文——这里只把设备带下去，项目由新建页按缺省处理（落到总览）。
   navigate(`/sessions/new?device=${encodeURIComponent(device.id)}`)
 }
 

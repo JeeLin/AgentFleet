@@ -42,9 +42,9 @@
    排队会让重连之后一整段字符乱序灌进 PTY，比丢几个字符难查得多。
 
    ── 为什么切 tab 用 replaceState 而不是 navigate ─────────────────
-   `/sessions/:id` 只表达「激活这个 tab」（§5.5.6），切 tab 是视图切换：
-   用 navigate 会进历史记录，于是「后退」变成在 tab 之间来回跳，
-   而 tab 集合本身并不可深链接。replaceState 让地址栏跟着当前 tab 走
+   `/project/:id/session/:sessionId` 只表达「激活这个 tab」（§5.5.6），
+   切 tab 是视图切换：用 navigate 会进历史记录，于是「后退」变成在 tab 之间
+   来回跳，而 tab 集合本身并不可深链接。replaceState 让地址栏跟着当前 tab 走
    （刷新后回到同一个），但不制造历史条目。
    =========================================================================== */
 
@@ -111,8 +111,21 @@ const loadError = ref<string | null>(null)
 const sessionsById = computed(() => new Map(sessions.value.map((s) => [s.id, s])))
 const devicesById = computed(() => new Map(devices.value.map((d) => [d.id, d])))
 
+/**
+ * 当前会话的 id。
+ *
+ * v0.7.0 起路由是 `/project/:id/session/:sessionId`——**第一个具名段是项目**，
+ * 第二个才是会话。取 `params.id` 拿到的是项目 id，`sessionsById` 里当然查不到，
+ * 症状是每条会话链接都显示「这个会话不存在」。
+ *
+ * 用 `params.sessionId ?? params.id` 而不是只写 `sessionId`：本组件在 v0.7.0
+ * 之前挂在 `/sessions/:id` 上，而**测试与少量旧调用点仍按老形状构造路由**。
+ * 回落只为它们存在，不是给生产路径的第二条路——生产路径只有新路由。
+ */
+const sessionId = computed(() => route.value.params.sessionId ?? route.value.params.id ?? '')
+
 const current = computed<SessionSummary | null>(
-  () => sessionsById.value.get(route.value.params.id) ?? null,
+  () => sessionsById.value.get(sessionId.value) ?? null,
 )
 const ended = computed(() => current.value?.state === 'ended')
 
@@ -2215,7 +2228,7 @@ const startedLabel = computed(() =>
  * 工作台头的 agent 标记。
  *
  * `SessionSummary` 只带 `agent_id`（没有 agent 的显示名），所以选过 agent 时
- * 显示的就是那个 id——与 `SessionTable` 的 agent 列同一份数据、同一个口径。
+ * 显示的就是那个 id——与设备页 agent 列同一份数据、同一个口径。
  * 没有 agent 时说的是**此刻的事实**：这个会话没有 agent，因而不能对话
  * （判据与 `ConvFlow` 的 `:agent-id` 同一个值）。
  */
@@ -2307,14 +2320,46 @@ function isKnownTab(tab: TabMeta): boolean {
 const unknownWhy = computed(() => {
   const tab = activeTab.value
   if (!tab || isKnownTab(tab)) {
-    return '它可能已经被删掉，或者这条链接指向一个从未建成的会话。回到会话列表看看现在有哪些。'
+    return `它可能已经被删掉，或者这条链接指向一个从未建成的会话。${BACK_HINT}`
   }
-  return `会话 ${tab.id} 不在会话列表里，所以它的归属设备也不得而知——这不是「设备已被删除」。这条链接可能打错了，或者它指向的会话已被删掉。回到会话列表看看现在有哪些。`
+  return `会话 ${tab.id} 不在会话列表里，所以它的归属设备也不得而知——这不是「设备已被删除」。这条链接可能打错了，或者它指向的会话已被删掉。${BACK_HINT}`
 })
 
-/** 地址栏跟随当前 tab，但**不制造历史条目**（见文件头）。 */
+/**
+ * 「回去」去哪：**项目看板**，不是旧的全站会话列表。
+ *
+ * v0.7.0 起会话挂在项目下面（`PROJECT.md` 的 `Project → Task → Execution → Session`），
+ * 所以这个会话的上下文是它所属的项目。`/sessions` 已经不是路由（`LEGACY_PATHS`），
+ * 再把用户送过去只会被重定向到总览——那等于「点了回去，结果到了一个没见过的地方」。
+ *
+ * 拿不到项目 id 时落到总览：宁可回入口，也不要回一条已删除的地址。
+ */
+const backTo = computed(() => {
+  const projectId = route.value.params.id
+  return projectId ? `/project/${encodeURIComponent(projectId)}/board` : '/'
+})
+
+/** 空态里的「下一步」描述。与 {@link backTo} 指向同一个地方。 */
+const BACK_HINT = '回到项目看板就能看到它的其他会话。'
+
+
+/**
+ * 地址栏跟随当前 tab，但**不制造历史条目**（见文件头）。
+ *
+ * v0.7.0 起地址是 `/project/:id/session/:sessionId`，所以**必须保留项目段**：
+ * 直接拼 `/sessions/<id>` 会把地址写回一条已被删除的旧地址（`LEGACY_PATHS`），
+ * 下一刷新就被重定向到总览，用户会以为会话丢了。这里替换的是**最后一段**。
+ */
 function syncUrl(id: string): void {
   if (typeof history === 'undefined') return
+  const projectId = route.value.params.id
+  const prefix = projectId ? `/project/${encodeURIComponent(projectId)}` : ''
+  if (prefix) {
+    history.replaceState(null, '', `${prefix}/session/${encodeURIComponent(id)}`)
+    return
+  }
+  // 没有项目段（旧形状的路由，如测试直接构造的 `/sessions/:id`）：保持原样不动，
+  // 不要凭空编一个项目 id。
   history.replaceState(null, '', `/sessions/${encodeURIComponent(id)}`)
 }
 
@@ -2342,7 +2387,9 @@ function closeOneTab(id: string): void {
   saveTabs(storage(), tabs.value)
 
   if (!result.nextActive) {
-    navigate('/sessions')
+    // 手上一个会话都不剩了：回**项目看板**（会话的上下文），不是旧的全站列表
+    // ——`/sessions` 已不是路由，去那儿只会被重定向到总览。
+    navigate(backTo.value)
     return
   }
   if (wasActive) {
@@ -2442,7 +2489,7 @@ async function load(): Promise<void> {
     // 路由里的 id 是「激活这个会话」，即使它不在列表里也要建一份 tab 元信息，
     // 好让页面能给出「找不到 / 已结束」而不是一片空白。这份元信息的形状见
     // `unknownTabMeta`——它的 `nodeId` 是 `''` 而不是 `null`，不会被读回时丢掉。
-    const id = route.value.params.id
+    const id = sessionId.value
     const known = list.find((s) => s.id === id)
     const fallback: TabMeta[] = known ? [metaOf(known)] : [unknownTabMeta(id)]
     const restored = loadTabs(storage(), fallback)
@@ -2469,7 +2516,7 @@ async function load(): Promise<void> {
  * 把那个会话开成 tab 并激活。**不释放任何已有 tab 的通道**。
  */
 watch(
-  () => route.value.params.id,
+  () => sessionId.value,
   (id) => {
     if (!id) return
     const known = sessionsById.value.get(id)
@@ -2535,7 +2582,7 @@ onBeforeUnmount(() => {
       :text="loadError"
     >
       <button class="af-btn af-btn--sm" type="button" @click="load">重试</button>
-      <button class="af-btn af-btn--sm" type="button" @click="navigate('/sessions')">回到会话列表</button>
+      <button class="af-btn af-btn--sm" type="button" @click="navigate(backTo)">回到项目看板</button>
     </EmptyState>
 
     <EmptyState
@@ -2544,8 +2591,8 @@ onBeforeUnmount(() => {
       title="这个会话不存在"
       :text="unknownWhy"
     >
-      <button class="af-btn af-btn--primary af-btn--sm" type="button" @click="navigate('/sessions')">
-        回到会话列表
+      <button class="af-btn af-btn--primary af-btn--sm" type="button" @click="navigate(backTo)">
+        回到项目看板
       </button>
     </EmptyState>
 

@@ -36,27 +36,85 @@ import { pageTitle } from '@/shared/page-titles'
 import { bindShell, installShellKeys } from '@/shared/shell-keys'
 import { interceptLink, legacyTarget, navigate, route, startRouter, LOGIN_PATH } from '@/router'
 
+import AgentCatalogPage from '@/domains/agent/AgentCatalogPage.vue'
+import ArchivedPage from '@/domains/project/ArchivedPage.vue'
+import BindPage from '@/domains/project/BindPage.vue'
+import BoardPage from '@/domains/project/BoardPage.vue'
+import ButlerPage from '@/domains/butler/ButlerPage.vue'
 import DevicesPage from '@/domains/device/DevicesPage.vue'
+import ExecutionPage from '@/domains/project/ExecutionPage.vue'
+import InboxPage from '@/domains/inbox/InboxPage.vue'
+import ActivityPage from '@/domains/inbox/ActivityPage.vue'
+import IntegrationsSettingsPage from '@/pages/IntegrationsSettingsPage.vue'
 import LoginPage from '@/pages/LoginPage.vue'
-import NewSessionPage from '@/domains/session/NewSessionPage.vue'
+import NewProjectPage from '@/domains/project/NewProjectPage.vue'
+import NotificationsSettingsPage from '@/pages/NotificationsSettingsPage.vue'
+import OverviewPage from '@/domains/project/OverviewPage.vue'
+import ProjectSettingsPage from '@/domains/project/ProjectSettingsPage.vue'
+import ProjectSchedulesPage from '@/domains/project/ProjectSchedulesPage.vue'
+import ProjectTaskPage from '@/domains/project/ProjectTaskPage.vue'
+import ReplayPage from '@/domains/project/ReplayPage.vue'
 import SessionPage from '@/domains/session/SessionPage.vue'
-import SessionsPage from '@/domains/session/SessionsPage.vue'
 import SettingsPage from '@/pages/SettingsPage.vue'
 import SetupPage from '@/pages/SetupPage.vue'
+import SkillsSettingsPage from '@/pages/SkillsSettingsPage.vue'
+import TimelinePage from '@/domains/project/TimelinePage.vue'
 import { AUTH_ROUTES } from '@/router'
 
+/**
+ * 页面组件表。**与 `router.ts` 的 `ROUTES` 一一对应**（v0.7.0 子任务 8）。
+ *
+ * 两张表分开是故意的：`ROUTES` 知道「什么地址是什么页」，这张表知道
+ * 「那个页是哪个组件」。合一会让 `router.ts` 依赖每一个页面组件，
+ * 而它现在是一个纯函数模块（好测、不拉组件树）。
+ *
+ * 代价是**必须同步**：加了路由不加这一行，`page` 会是 `undefined`，
+ * 页面区一片空白。所以 `router.test.ts` 有一条用例逐条比对两张表的键集。
+ */
 const PAGES = {
-  sessions: SessionsPage,
-  'new-session': NewSessionPage,
-  session: SessionPage,
+  overview: OverviewPage,
   devices: DevicesPage,
+  agents: AgentCatalogPage,
   settings: SettingsPage,
+  'projects-new': NewProjectPage,
+  'projects-archived': ArchivedPage,
+  board: BoardPage,
+  'project-task': ProjectTaskPage,
+  execution: ExecutionPage,
+  replay: ReplayPage,
+  timeline: TimelinePage,
+  session: SessionPage,
+  'project-bind': BindPage,
+  'project-settings': ProjectSettingsPage,
+  'project-schedules': ProjectSchedulesPage,
+  inbox: InboxPage,
+  'inbox-activity': ActivityPage,
+  butler: ButlerPage,
+  'settings-skills': SkillsSettingsPage,
+  'settings-integrations': IntegrationsSettingsPage,
+  'settings-notifications': NotificationsSettingsPage,
   login: LoginPage,
   setup: SetupPage,
 } as const
 
 const page = computed(() => (route.value.name === 'not-found' ? null : PAGES[route.value.name]))
-const pageKey = computed(() => `${route.value.name}:${route.value.params.id ?? ''}`)
+
+/**
+ * 换页的 key。
+ *
+ * **要把所有具名段都算进去**，不只 `id`：看板与项目任务是不同的页但共享
+ * `/project/:id` 前缀；`/project/:id/session/:sessionId` 换会话时也必须重建
+ * 组件（否则上一个会话的通道句柄会留在内存里）。只拼 `id` 时，
+ * 「同一个项目里换会话」不会触发重建——实测过，症状是新会话显示旧输出。
+ */
+const pageKey = computed(() => {
+  const p = route.value.params
+  const parts = Object.keys(p)
+    .sort()
+    .map((k) => `${k}=${p[k]}`)
+    .join(',')
+  return `${route.value.name}:${parts}`
+})
 
 /* ---------------------------------------------------------- 已删除的旧地址 */
 
@@ -95,32 +153,38 @@ const isAuthPage = computed(() => AUTH_ROUTES.has(route.value.name))
 /* ---------------------------------------------------------------- 侧栏 */
 
 /**
- * 一级导航。**三项**：会话 / 设备 / 设置。
+ * 一级导航。**四项**：总览 / 设备 / Agent / 设置。
  *
  * 标签与键位提示都从 `keynav.ts` / `page-titles.ts` 读：手抄一份的话，改了
  * 键位表而忘了改这里，侧栏就会显示一个按了没反应的键（症状与「改了 `PREFIX`
  * 而侧栏没跟着变」完全一样）。
  *
- * # 为什么只有三项
+ * # 为什么是这四项
  *
- * 用户裁定「只要区分会话页、设置页和其他页」，收敛成会话 / 设备 / 设置：
- * - **`Agent 目录` 并进了设备页**（`?view=agents` 分段）：两者看的是同一个
- *   对象——「这台机器上有什么」。设备说它在不在线，目录说它上面装了什么，
- *   分两个地址只是历史原因。旧 `/agents` 地址由 `LEGACY_PATHS` 接住。
- * - **`新建会话` 不再是导航项**：它不是一个「地方」，是一个**动作**。导航
- *   项承诺「这里有一块内容」，而新建会话要么从会话页发起、要么从设备行
- *   「用它开会话」发起——两条路都带着上下文（要建在哪台机器上），而导航项
- *   带不了上下文。
+ * `AGENTS.md` §1 的产品主轴：**「做事从项目进，管理从设备进」**。
+ * - **总览**是「做事」的入口——项目列表，进去是某个项目的看板。
+ * - **设备**与 **Agent** 是「管理面」。v0.5.0 曾把 Agent 并进设备页的
+ *   `?view=agents` 分段，那时侧栏只留三项；v0.7.0 按新原型把它们重新分成
+ *   两页：设备回答「这台机器在不在线」，Agent 回答「这台机器上装了什么、
+ *   能不能跑」——同一批数据，但一个是运维视角、一个是能力视角。
+ *   旧 `/agents` 地址仍由 `LEGACY_PATHS` 接住。
+ * - **设置**是整站配置。
  *
- * 路由 `/sessions/new` 仍然存在（有上下文的那两条路要走它），只是不在这里列。
+ * # 项目内页面不进左栏
+ *
+ * 看板 / 任务 / 执行 / 绑定 / 项目设置**不是「地方」，是「在某个项目里」**。
+ * 把它们列进左栏会要求左栏知道「当前是哪个项目」，而切换项目时左栏整列都
+ * 要跟着变——用户会失去「我在哪」的稳定参照。它们从总览点进去。
+ *
+ * `新建项目` 同样不进左栏：它是**动作**，不是地方。
  */
 const NAV = [
   {
-    to: '/sessions',
-    label: pageTitle('sessions'),
+    to: '/',
+    label: pageTitle('overview'),
     icon: '◈',
-    act: 'nav:sessions',
-    match: ['sessions', 'session', 'new-session'],
+    act: 'nav:overview',
+    match: ['overview', 'board', 'projects-new', 'projects-archived'],
   },
   {
     to: '/devices',
@@ -130,11 +194,18 @@ const NAV = [
     match: ['devices'],
   },
   {
+    to: '/agents',
+    label: pageTitle('agents'),
+    icon: '◆',
+    act: 'nav:agents',
+    match: ['agents'],
+  },
+  {
     to: '/settings',
     label: pageTitle('settings'),
     icon: '⚙',
     act: 'nav:settings',
-    match: ['settings'],
+    match: ['settings', 'settings-skills', 'settings-integrations', 'settings-notifications'],
   },
 ]
 
@@ -527,10 +598,10 @@ watch(
         v-else
         glyph="◌"
         title="这个地址没有页面"
-        text="检查一下链接。会话工作台是 /sessions/&lt;id&gt;，设备列表是 /devices。"
+        text="检查一下链接。项目页是 /project/&lt;项目 id&gt;/board，设备列表是 /devices，总览是 /。"
       >
-        <a class="af-btn af-btn--primary" href="/sessions" @click="onNavClick($event, $event.currentTarget as HTMLAnchorElement)">
-          回到会话列表
+        <a class="af-btn af-btn--primary" href="/" @click="onNavClick($event, $event.currentTarget as HTMLAnchorElement)">
+          回到总览
         </a>
       </EmptyState>
     </main>

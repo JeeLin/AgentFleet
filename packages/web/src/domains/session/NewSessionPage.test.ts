@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
+import { matchRoute, route } from '@/router'
+
 import NewSessionPage from '@/domains/session/NewSessionPage.vue'
 import { agent, device, mountIn } from '@/test/mount'
 import { settle, stubFetch } from '@/test/http'
@@ -246,7 +248,7 @@ describe('NewSessionPage：提交', () => {
     await w.element.querySelector<HTMLButtonElement>('.af-submit button')?.click()
     await flush(w)
 
-    expect(location.pathname).toBe('/sessions/s_new')
+    expect(location.pathname).toBe('/')
     expect(submittedBody(fn)).toEqual({ node_id: 'n_1', path: '/srv/alpha', agent_id: 'opencode' })
   })
 
@@ -432,7 +434,7 @@ describe('NewSessionPage：提交', () => {
     await w.element.querySelector<HTMLButtonElement>('.af-submit button')?.click()
     await flush(w)
 
-    expect(location.pathname).toBe('/sessions/s_new')
+    expect(location.pathname).toBe('/')
     expect(submittedBody(fn)).toMatchObject({ node_id: 'n_1', path: '/srv/alpha' })
   })
 
@@ -458,7 +460,7 @@ describe('NewSessionPage：提交', () => {
     expect(w.element.querySelector<HTMLButtonElement>('.af-submit button')?.disabled).toBe(false)
   })
 
-  it('取消回会话列表', async () => {
+  it('取消回总览（会话不再有顶层列表）', async () => {
     stubFetch({ '/api/devices': { body: [ONLINE] }, '/api/agents': { body: [] } })
     const w = mountIn(NewSessionPage)
     await flush(w)
@@ -466,7 +468,45 @@ describe('NewSessionPage：提交', () => {
     const cancel = Array.from(w.element.querySelectorAll<HTMLAnchorElement>('.af-submit a'))[0]
     cancel!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
     await flush(w)
-    expect(location.pathname).toBe('/sessions')
+    expect(location.pathname).toBe('/')
+  })
+
+  /**
+   * 带项目上下文时，建完会话落到 `/project/:id/session/:sessionId`。
+   *
+   * v0.7.0 起会话挂在项目下，**没有顶层地址**。项目 id 从查询串带进来
+   * （项目页 / 设备页发起时拼上）。不测这条的话，回退分支（落总览）会
+   * 悄悄变成唯一分支——那等于把「建好的会话打不开」写成正常行为。
+   */
+  it('带 project 查询串时落到项目下的会话地址', async () => {
+    stubFetch({
+      '/api/devices': { body: [ONLINE] },
+      '/api/agents': { body: [] },
+      '/api/sessions': {
+        status: 201,
+        body: {
+          id: 's_new',
+          agent_id: 'opencode',
+          state: 'running',
+          created_at: 'unix:1700000000',
+          ended_at: null,
+          workspace: { node_id: 'n_1', path: '/srv/alpha', path_locked: true },
+        },
+      },
+    })
+    const path = '/sessions/new?device=n_1&project=p_1'
+    window.history.replaceState(null, '', path)
+    route.value = matchRoute(path)
+
+    const w = mountIn(NewSessionPage)
+    await flush(w)
+    await fill(w, '/srv/alpha')
+    await w.element.querySelector<HTMLButtonElement>('.af-submit button')?.click()
+    await flush(w)
+
+    expect(location.pathname).toBe('/project/p_1/session/s_new')
+    expect(route.value.name).toBe('session')
+    expect(route.value.params).toEqual({ id: 'p_1', sessionId: 's_new' })
   })
 })
 

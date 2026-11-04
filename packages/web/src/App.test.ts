@@ -29,24 +29,31 @@ const EMPTY_API = {
 }
 
 describe('App：外壳骨架', () => {
-  // 用户裁定「只要区分会话页、设置页和其他页」，收敛成三项。
-  // `Agent 目录` 并进设备页的 `?view=agents` 分段；`新建会话` 是**动作**
-  // 而不是地方，路由还在（有上下文的两条路要走它），但不进侧栏。
-  it('一级导航只有 3 项（会话 / 设备 / 设置）', async () => {
+  // 一级导航是**四项**（v0.7.0 子任务 8）：总览 / 设备 / Agent / 设置。
+  // 项目内页面（看板 / 任务 / 绑定 / 设置）**不进左栏**——它们从总览点进去，
+  // 属于「在某个项目里做事」，而不是「去一个地方」。
+  // `新建项目` 是**动作**而不是地方，路由还在，但不进侧栏。
+  it('一级导航只有 4 项（总览 / 设备 / Agent / 设置）', async () => {
     stubFetch(EMPTY_API)
-    const w = mountApp('/sessions')
+    const w = mountApp('/')
     await flush(w)
 
     const items = Array.from(w.element.querySelectorAll<HTMLElement>('.af-sidebar__item'))
-    expect(items.map((el) => el.getAttribute('aria-label'))).toEqual(['会话', '设备', '设置'])
+    expect(items.map((el) => el.getAttribute('aria-label'))).toEqual([
+      '总览',
+      '设备',
+      'Agent',
+      '设置',
+    ])
     expect(items.map((el) => el.querySelector('.af-sidebar__hint')?.textContent)).toEqual([
       'g s',
       'g d',
+      'g a',
       'g ,',
     ])
     /*
-      分组标题已删：三个组各只有一项，标题与它唯一的条目常常是同一个词
-      （第一组是「会话 / 会话」）。这里断言**渲染出来的层级里不再有标题这类
+      分组标题已删：每组只有一项，标题与它唯一的条目常常是同一个词
+      （第一组是「总览 / 总览」）。这里断言**渲染出来的层级里不再有标题这类
       中间层**——`count` 必须是 0，`toContain` 之类的写法看不见重复。
 
       反向验证：把 `.af-navgroup__title` 那个 div 加回模板 → `count` 变 1，红。
@@ -55,15 +62,15 @@ describe('App：外壳骨架', () => {
   })
 
   /*
-    「会话」在侧栏里**只出现一次**：一次是导航项自己的文字，不是「标题 + 条目」。
+    「总览」在侧栏里**只出现一次**：一次是导航项自己的文字，不是「标题 + 条目」。
 
     必须是「恰好一次」而不是 `toContain`：后者对多出来的那一份视而不见，
     重复正是这条缺陷本身。数的是侧栏的**直接文字**——`aria-label` 与 `title`
     是同一句话的属性副本，不算第二次渲染。
   */
-  it('侧栏里「会话」只出现一次（没有和标题重复）', async () => {
+  it('侧栏里「总览」只出现一次（没有和标题重复）', async () => {
     stubFetch(EMPTY_API)
-    const w = mountApp('/sessions')
+    const w = mountApp('/')
     await flush(w)
 
     const sidebar = w.element.querySelector<HTMLElement>('.af-sidebar')
@@ -72,7 +79,7 @@ describe('App：外壳骨架', () => {
     const text = Array.from(sidebar.querySelectorAll<HTMLElement>('*'))
       .filter((el) => el.children.length === 0)
       .map((el) => el.textContent ?? '')
-    expect(text.filter((t) => t.includes('会话')).length).toBe(1)
+    expect(text.filter((t) => t.includes('总览')).length).toBe(1)
   })
 
   it('当前页在导航上有 aria-current，会话工作台仍高亮「会话」', async () => {
@@ -88,18 +95,18 @@ describe('App：外壳骨架', () => {
 
   it('导航项是真 <a href>：中键 / ⌘ 点击能走浏览器自己的路径', async () => {
     stubFetch(EMPTY_API)
-    const w = mountApp('/sessions')
+    const w = mountApp('/')
     await flush(w)
 
     const hrefs = Array.from(w.element.querySelectorAll<HTMLAnchorElement>('.af-sidebar__item')).map(
       (a) => a.getAttribute('href'),
     )
-    expect(hrefs).toEqual(['/sessions', '/devices', '/settings'])
+    expect(hrefs).toEqual(['/', '/devices', '/agents', '/settings'])
   })
 
   it('main 是 tabindex="-1"（可编程聚焦，但不由键盘穿过）', async () => {
     stubFetch(EMPTY_API)
-    const w = mountApp('/sessions')
+    const w = mountApp('/')
     await flush(w)
 
     expect(w.element.querySelector('main')?.getAttribute('tabindex')).toBe('-1')
@@ -113,7 +120,7 @@ describe('App：跳转后焦点落在 main', () => {
 
   it('首屏就把焦点交给 main（换页的 watch 不会为初始值触发）', async () => {
     stubFetch(EMPTY_API)
-    const w = mountApp('/sessions')
+    const w = mountApp('/')
     await flush(w)
 
     expect(document.activeElement).toBe(w.element.querySelector('main'))
@@ -121,7 +128,7 @@ describe('App：跳转后焦点落在 main', () => {
 
   it('换页后焦点也落在 main，并给 h1 补上 tabindex 让 ⇧Tab 能回到标题', async () => {
     stubFetch(EMPTY_API)
-    const w = mountApp('/sessions')
+    const w = mountApp('/')
     await flush(w)
 
     const other = document.createElement('button')
@@ -147,7 +154,7 @@ describe('App：键位帮助由 KEYS 渲染', () => {
 
   it('打开帮助后列出 KEYS 的全部组与条目（不手写第二份表）', async () => {
     stubFetch(EMPTY_API)
-    const w = mountApp('/sessions')
+    const w = mountApp('/')
     await flush(w)
 
     await w.element.querySelector<HTMLElement>('[title^="键位帮助"]')?.click()
@@ -168,7 +175,7 @@ describe('App：键位帮助由 KEYS 渲染', () => {
 
   it('标题里说明这张表就是键位实现本身', async () => {
     stubFetch(EMPTY_API)
-    const w = mountApp('/sessions')
+    const w = mountApp('/')
     await flush(w)
 
     await w.element.querySelector<HTMLElement>('[title^="键位帮助"]')?.click()
@@ -179,7 +186,7 @@ describe('App：键位帮助由 KEYS 渲染', () => {
 
   it('点帮助面板里的关闭按钮能关掉它', async () => {
     stubFetch(EMPTY_API)
-    const w = mountApp('/sessions')
+    const w = mountApp('/')
     await flush(w)
 
     await w.element.querySelector<HTMLElement>('[title^="键位帮助"]')?.click()
@@ -192,7 +199,7 @@ describe('App：键位帮助由 KEYS 渲染', () => {
 
   it('帮助开着时把外壳置 inert——背后不是「还能 Tab 过去」的', async () => {
     stubFetch(EMPTY_API)
-    const w = mountApp('/sessions')
+    const w = mountApp('/')
     await flush(w)
     const sidebar = w.element.querySelector<HTMLElement>('.af-sidebar')
 
@@ -220,7 +227,7 @@ describe('App：帮助面板的 Esc / 焦点栈', () => {
 
   /** 会话工作台的路由：轨迹抽屉只在那页上注册 `traj:toggle`。 */
   function mountWorkbench(): ReturnType<typeof mountIn> {
-    return mountApp('/sessions/s_1')
+    return mountApp('/project/p_1/session/s_1')
   }
 
   it('? → t → Esc：关掉的是栈顶那一层，另一层不动，栈也不残留', async () => {
@@ -278,9 +285,9 @@ describe('App：不知道的地址', () => {
 describe('App：文档标题', () => {
   it('每个页面都有独立标题', async () => {
     stubFetch(EMPTY_API)
-    const w = mountApp('/sessions')
+    const w = mountApp('/')
     await flush(w)
-    expect(document.title).toBe('会话 · AgentFleet')
+    expect(document.title).toBe('总览 · AgentFleet')
   })
 
   /**
@@ -412,7 +419,7 @@ describe('App：登出', () => {
 
   it('顶栏有登出入口', async () => {
     stubFetch(EMPTY_API)
-    const w = mountApp('/sessions')
+    const w = mountApp('/')
     await flush(w)
 
     expect(logoutButton(w)).not.toBeNull()
@@ -421,7 +428,7 @@ describe('App：登出', () => {
   it('点登出会先 POST /logout 再去登录页', async () => {
     const assign = vi.spyOn(location, 'assign').mockImplementation(() => {})
     const fetchMock = stubFetch(EMPTY_API)
-    const w = mountApp('/sessions')
+    const w = mountApp('/')
     await flush(w)
 
     logoutButton(w)?.click()
@@ -439,7 +446,7 @@ describe('App：登出', () => {
 
   it('Hub 清 cookie 失败也要去登录页（否则人被困在一堆 401 弹框里）', async () => {
     stubFetch({ ...EMPTY_API, '/logout': { status: 500 } })
-    const w = mountApp('/sessions')
+    const w = mountApp('/')
     await flush(w)
 
     logoutButton(w)?.click()
@@ -468,7 +475,7 @@ describe('App：登出', () => {
 describe('App：品牌区与导航合并成一列', () => {
   it('品牌区是 nav 的子节点，不是并列的另一块', async () => {
     stubFetch(EMPTY_API)
-    const w = mountApp('/sessions')
+    const w = mountApp('/')
     await flush(w)
 
     const brand = w.element.querySelector('.af-brand')
@@ -619,11 +626,11 @@ describe('App：会话页自动收起侧栏（v0.5.0）', () => {
 
   it('进会话页收起侧栏，离开后回到进入前的值', async () => {
     stubFetch(SESSIONS_API)
-    const w = mountApp('/sessions')
+    const w = mountApp('/')
     await flush(w)
     expect(railOf(), '列表页不该收侧栏').toBe('open')
 
-    go('/sessions/s_1')
+    go('/project/p_1/session/s_1')
     await flush(w)
     expect(railOf(), '会话页必须收起').toBe('collapsed')
 
@@ -652,14 +659,14 @@ describe('App：会话页自动收起侧栏（v0.5.0）', () => {
   */
   it('会话里每次点开关都立刻生效，且拨动即用户意图', async () => {
     stubFetch(SESSIONS_API)
-    const w = mountApp('/sessions')
+    const w = mountApp('/')
     await flush(w)
 
     // ① 列表页、用户意图 open（初值）
     expect(railOf(), '列表页开着').toBe('open')
 
     // ② 进会话：自动收起
-    go('/sessions/s_1')
+    go('/project/p_1/session/s_1')
     await flush(w)
     expect(railOf(), '会话页必须收起').toBe('collapsed')
 
@@ -696,7 +703,7 @@ describe('App：会话页自动收起侧栏（v0.5.0）', () => {
     await clickTopbarRail(w)
     expect(railOf(), '用户自己收起').toBe('collapsed')
 
-    go('/sessions/s_1')
+    go('/project/p_1/session/s_1')
     await flush(w)
     expect(railOf(), '会话页收起').toBe('collapsed')
 
@@ -714,14 +721,14 @@ describe('App：会话页自动收起侧栏（v0.5.0）', () => {
 
   it('深链直接进会话页也收起（不是只有「从列表点进来」才收）', async () => {
     stubFetch(SESSIONS_API)
-    const w = mountApp('/sessions/s_1')
+    const w = mountApp('/project/p_1/session/s_1')
     await flush(w)
     expect(railOf()).toBe('collapsed')
   })
 
   it('会话页里侧栏开关仍在顶栏的 Tab 序列里（手动展开可达）', async () => {
     stubFetch(SESSIONS_API)
-    const w = mountApp('/sessions/s_1')
+    const w = mountApp('/project/p_1/session/s_1')
     await flush(w)
     const btn = w.element.querySelector<HTMLElement>('.af-topbar button[aria-label="折叠 / 展开侧栏"]')
     if (!btn) throw new Error('no rail toggle')

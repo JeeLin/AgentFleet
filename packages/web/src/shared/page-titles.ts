@@ -14,11 +14,32 @@
 
 /** 页面名 → 中文名。键与 `router.ts` 的 `RouteName` 一一对应。 */
 export const PAGE_TITLE: Readonly<Record<string, string>> = {
-  sessions: '会话',
-  'new-session': '新建会话',
-  session: '会话工作台',
+  // ── 一级导航 ──────────────────────────────────────────────────────
+  overview: '总览',
   devices: '设备',
+  agents: 'Agent',
   settings: '设置',
+  // ── 项目内 ────────────────────────────────────────────────────────
+  board: '看板',
+  'projects-new': '新建项目',
+  'projects-archived': '已归档的项目',
+  'project-task': '任务',
+  execution: '执行监控',
+  replay: '执行复盘',
+  timeline: '时间线',
+  session: '会话',
+  'project-bind': '绑定设备',
+  'project-settings': '项目设置',
+  'project-schedules': '定时任务',
+  // ── 收件箱与管家 ──────────────────────────────────────────────────
+  inbox: '收件箱',
+  'inbox-activity': '动态',
+  butler: '管家',
+  // ── 设置子页 ──────────────────────────────────────────────────────
+  'settings-skills': '技能与 MCP',
+  'settings-integrations': '外部 issue 导入',
+  'settings-notifications': '通知出口',
+  // ── 认证流程 ──────────────────────────────────────────────────────
   login: '登录',
   setup: '首次 setup',
   'not-found': '找不到页面',
@@ -26,7 +47,7 @@ export const PAGE_TITLE: Readonly<Record<string, string>> = {
 
 /**
  * 一个页面的中文名。表里没有的名字**原样返回**——
- * 路由名是闭集（`ROUTES` 的 7 条 + `not-found`，共 8 个），落到表外说明调用方
+ * 路由名是闭集（`ROUTES` 的 23 条 + `not-found`），落到表外说明调用方
  * 传错了，而把错的路由名原样显示出来比编一个「找不到页面」更接近真相。
  */
 export function pageTitle(name: string): string {

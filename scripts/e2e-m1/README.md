@@ -89,9 +89,9 @@ TMPDIR=/tmp/opencode bash scripts/e2e-m1.sh   # 换临时目录根（默认 /tmp
 
 面板参数与前端**逐字一致**（这是断言的一部分）：
 
-- terminal：`{"cwd": <会话路径>, "cols": 80, "rows": 24}` — `packages/web/src/domains/session/SessionPage.vue:648`
-- files：`{}` — 同一个 `hub.handle(key, { connector: panel, params: … })` 调用点，`panel !== 'terminal'` 时走 `{}`（`packages/web/src/domains/session/SessionPage.vue:648`）；工作区根由 Hub 按会话补
-- exec：`{"command": …, "args": […], "cwd": ""}` — `runCommand()` 里的 `hub.handle(key, { connector: 'exec', params: … })`（`packages/web/src/domains/session/SessionPage.vue:2172`）
+- terminal：`{"cwd": <会话路径>, "cols": 80, "rows": 24}` — `packages/web/src/domains/session/SessionPage.vue:654`
+- files：`{}` — 同一个 `hub.handle(key, { connector: panel, params: … })` 调用点，`panel !== 'terminal'` 时走 `{}`（`packages/web/src/domains/session/SessionPage.vue:654`）；工作区根由 Hub 按会话补
+- exec：`{"command": …, "args": […], "cwd": ""}` — `runCommand()` 里的 `hub.handle(key, { connector: 'exec', params: … })`（`packages/web/src/domains/session/SessionPage.vue:2185`）
 
 ---
 
@@ -194,7 +194,7 @@ SIGCONT → 继续观察回到 online
   **Hub** 塞进 params（Hub 从 `session.workspace_id` 查出 `(node_id, path)`）」。
 - 实际：`crates/hub-server/src/routes/stream.rs:574` 的 `open_channel` 如今先调
   `params_with_workspace_root` 把会话工作区根**覆盖**进 params（`:874` 是那个函数），
-  而前端 files 面板发的就是 `{}`（`packages/web/src/domains/session/SessionPage.vue:648`）。
+  而前端 files 面板发的就是 `{}`（`packages/web/src/domains/session/SessionPage.vue:654`）。
 - 设备侧：`files` / `exec` 的 `open` 都要求 `OpenReq.workspace_root`
   （`crates/node-connector/src/connector/files.rs:193`、`crates/node-connector/src/connector/exec.rs:186`），
   缺了就直接回 `channel_error`。

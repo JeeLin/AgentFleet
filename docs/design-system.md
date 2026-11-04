@@ -244,7 +244,7 @@
 
 ## 3. 基础组件契约
 
-22 组组件，全部在 `packages/web/src/styles/components.css`（22 节：§0 复位 + §1–21 组件）。
+23 组组件，全部在 `packages/web/src/styles/components.css`（23 节：§0 复位 + §1–22 组件）。
 状态一律用 `data-*` 属性表达（`data-state` / `data-open` / `data-inert` / `data-tone` /
 `data-level`），**不用 JS 加 class**——class 是样式实现，`data-*` 是契约。
 
@@ -518,7 +518,7 @@ Esc、点遮罩、点关闭按钮、路由跳转前——四条路四条实现�
 **为什么不允许「表外键位」**：用户能发现的键位 = 能查到的键位。
 一个不能被 `?` 查到的键位，对键盘用户等于不存在。
 
-**当前键位表（20 个 act）**：
+**当前键位表（21 个 act）**：
 
 | 组 | 键位 | act | 说明 |
 |----|------|-----|------|
@@ -528,8 +528,9 @@ Esc、点遮罩、点关闭按钮、路由跳转前——四条路四条实现�
 | | `Tab` | `focus:next` | 焦点前进（有浮层时在浮层内循环） |
 | | `⇧Tab` | `focus:prev` | 焦点后退 |
 | | `⌃B` | `rail:toggle` | 折叠 / 展开侧栏 |
-| **跳转** | `g s` | `nav:sessions` | 会话列表 |
-| | `g d` | `nav:devices` | 设备（含 Agent 目录分段） |
+| **跳转** | `g s` | `nav:overview` | 总览 |
+| | `g d` | `nav:devices` | 设备 |
+| | `g a` | `nav:agents` | Agent |
 | | `g ,` | `nav:settings` | 设置 |
 | **列表 / 树** | `↑ ↓` / `j k` | `list:move` | 移动焦点行 |
 | | `⏎` | `list:enter` | 进入选中项 |
@@ -709,43 +710,63 @@ Hub 已初始化，各给**下一步命令**。
 
 ### 5.2 路由与深链接
 
-| 路由 | 页面 | 导航 |
-|------|------|------|
-| `/sessions` | 会话列表 | ✅ |
-| `/sessions/new` | 新建会话（三步） | —（动作，不是地方） |
-| `/sessions/:id` | **会话工作台（重心）**——同时开多个，用 tab 条切换（§5.5） | — |
-| `/devices` | 设备列表 | ✅ |
-| `/devices?view=agents` | Agent 目录（只读聚合，设备页的一个分段） | ✅（同「设备」） |
-| `/settings` | 设置 | ✅ |
-| `/login` | 登录 | 认证流程 |
-| `/setup` | 首次 setup | 认证流程 |
-| `/projects` | 项目列表（v0.7.0） | ✅ |
-| `/project/:id/board` | **项目页默认落在看板**（v0.7.0；`/project/:id` 重定向到此） | ✅ |
-| `/project/:id/settings` | 项目设置：形态、主题色、归档（v0.7.0） | ✅（同「项目」） |
-| `/project/:id/bindings` | 绑定：每台设备一行，固定目录、配额、清理策略（v0.7.0） | ✅（同「项目」） |
+**一级导航只有四项**：总览 / 设备 / Agent / 设置。「做事从项目进，管理从设备进」
+（`AGENTS.md` §1）。项目内页面从总览进去，不进左栏。
 
-**已删除、但有去处的地址**：`/agents` → `/devices?view=agents`（前端
-`LEGACY_PATHS` 重定向，`replace` 不留历史）。它曾是一级导航项，书签与文档
-链接都指向它——静默 404 的症状是「点收藏夹看到『这个地址没有页面』」，
-而内容就在隔壁。
+| 路由 | 页面 | 导航 | 本里程碑状态 |
+|------|------|------|------|
+| `/` | **总览**——项目列表 + 待办摘要（`prototype/index.html`） | ✅ | 真数据（项目列表） |
+| `/devices` | 设备列表 | ✅ | 真数据 |
+| `/agents` | Agent 目录（`prototype/agents.html`） | ✅ | 真数据 |
+| `/settings` | 设置 | ✅ | 真数据 |
+| `/projects/new` | 新建项目 + 三形态选择卡 | —（动作） | 真数据 |
+| `/projects/archived` | 已归档的项目 | —（从总览进） | 真数据 |
+| `/project/:id/board` | **项目页默认落在看板** | — | 六列骨架 |
+| `/project/:id/task/:taskId` | 任务详情 | — | 骨架（v0.8.0） |
+| `/project/:id/execution/:execId` | 执行监控 | — | 骨架（v0.8.0） |
+| `/project/:id/execution/:execId/replay` | 执行复盘 | — | 骨架（v0.8.0） |
+| `/project/:id/timeline` | 时间线（看板的第二种投影） | — | 骨架（v0.8.0） |
+| `/project/:id/session/:sessionId` | **会话工作台**（tab 条切换多会话，§5.5） | — | 真数据（`SessionPage`） |
+| `/project/:id/bind` | 绑定设备：固定目录、配额、清理策略 | — | 骨架（v0.7.0） |
+| `/project/:id/settings` | 项目设置：形态、主题色、归档 | — | 骨架（v0.7.0） |
+| `/project/:id/schedules` | 定时任务 | — | 骨架（v0.11.0） |
+| `/inbox` | 收件箱（**唯一决策入口**） | — | 骨架（v0.8.0） |
+| `/inbox/activity` | 动态 | — | 骨架（v0.8.0） |
+| `/butler` | 管家（IM 侧对话与内容审查） | — | 骨架（v0.9.0） |
+| `/settings/skills` | 技能与 MCP | — | 骨架（v0.12.0） |
+| `/settings/integrations` | 外部 issue 导入 | — | 骨架（v0.10.0） |
+| `/settings/notifications` | 通知出口 | — | 骨架（v0.8.0） |
+| `/login` | 登录 | 认证流程 | 真 |
+| `/setup` | 首次 setup | 认证流程 | 真 |
+
+**骨架页不是占位承诺**：骨架路由给后续里程碑预留挂载点，它**只能从项目页内部
+进入、不进一级导航**，且页面顶部必须写明本页在哪个版本开放。这条界线的理由见
+`packages/web/src/router.ts` 的头注释——老约束反对的是「导航里灰掉的条目」，
+不是「路由表里有这条路径」。
+
+**已删除、但有去处的地址**（`LEGACY_PATHS` + `LEGACY_PREFIXES`，重定向用
+`replace` 不留历史）：
+
+| 旧地址 | 去处 | 为什么 |
+|---|---|---|
+| `/agents` | `/devices?view=agents` | v0.5.0 曾并进设备页分段；v0.7.0 起它重新是真路由，这条留着接「已经渲染出去的旧链接」 |
+| `/sessions`、`/sessions/new`、`/sessions/:id` | `/` | 会话迁到项目下（`/project/:id/session/:sessionId`）。**无法精确还原**：旧地址里没有项目 id，要还原得先查「这个会话属于哪个项目」，那是 IO，而路由表是纯数据 |
+| `/tasks`、`/artifacts` | `/` | 从来不是路由，但曾被写进文档 |
 
 **没有的路由（架构上不存在，不是暂缓）**：
 
-- ~~`/w/:nodeId/*path`~~ —— **工作区没有地址**，
-  所以它不可能成为目的地。详见 §7 的决断⓪。
+- ~~`/w/:nodeId/*path`~~ —— **工作区没有地址**，所以它不可能成为目的地（§7 决断⓪）。
 - ~~`/workspace`~~ —— 同上。
-- ~~`/tasks`~~ —— 任务分发是 M5，**不留占位页**：
-  留一个灰掉的导航项等于在导航里承诺一件本阶段做不到的事。
-  任务没有独立路由：它只作为**看板上的一张卡片**存在（`/project/:id/board`），
-  卡片点开是面板而不是页面——「任务不是地方，是列里的一格」。
-- ~~`/artifacts`~~、~~`/devices/:id`~~ —— M2，结构已定但不留页面。
+- ~~`DELETE /api/projects/:id`~~ —— 项目只归档不删除（`PRODUCT.md` §3.2）。
+- ~~`/project/:id`（裸项目地址）~~ —— 项目页**默认落在看板**，不另设中转路由：
+  一条永远只是重定向的路由，会让「后退」多走一步。
 
 **验证方法**（这三条是可 grep 的，改指真实前端）：
 
 ```bash
-grep -rn "path: '/workspace" packages/web/src/router.ts   # 零命中
-grep -rn "'/w/" packages/web/src/                        # 零命中
-grep -rn 'panel' packages/web/src/pages/DevicesPage.vue   # 零命中（面板只在会话里）
+grep -rn "'/workspace" packages/web/src/router.ts            # 零命中
+grep -rn "'/w/" packages/web/src/                            # 零命中
+grep -c "pattern:" packages/web/src/router.ts                # 与上表行数一致
 ```
 
 ### 5.3 页面清单
@@ -1417,7 +1438,7 @@ Mock 形状 = 将来 API 的形状。前端只读。
 |---|---|
 | 本文件（判断依据） | `docs/design-system.md` |
 | §2 token 定义（129 个变量） | `packages/web/src/styles/tokens.css` |
-| §3 组件样式（22 节） | `packages/web/src/styles/components.css` |
+| §3 组件样式（23 节） | `packages/web/src/styles/components.css` |
 | §4 交互范式 / 焦点栈 / 键位表 | `packages/web/src/shared/keynav.ts` + `shared/focus.ts` + `shared/shell-keys.ts` |
 | 外壳与导航 | `packages/web/src/App.vue` + `page-chrome.css` | 
 | 页面级数据访问 | `domains/device/api.ts` / `domains/agent/api.ts` / `domains/session/api.ts`（传输层在 `shared/http.ts`） |

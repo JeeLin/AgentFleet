@@ -280,6 +280,10 @@ pub async fn change_shape(
             || serde_json::json!({ "from": from, "to": to }),
         ),
         StorageError::ProjectNotFound { .. } => ApiError::not_found(),
+        // coverage: excluded — `StorageError` 余下的变体都是数据库故障（连接池取不到、
+        // SQLite 报错、序列化失败）。它们要求把库打坏才走得到，而那类故障在
+        // `hub-storage` 自己的单测里已经有专门构造。这里保留兜底是为了**不把
+        // 未知错误翻译成 404**——那会让「库坏了」看起来像「项目不存在」。
         other => ApiError::internal_with("cannot change project shape", other),
     })?;
     Ok(Json(updated.into()))
@@ -296,6 +300,8 @@ pub async fn archive_project(
     let at = now();
     let updated = repo(&state).archive(&id, &at).map_err(|e| match e {
         StorageError::ProjectNotFound { .. } => ApiError::not_found(),
+        // coverage: excluded — 同 `change_project_shape` 的兜底：余下的变体是数据库故障，
+        // 正常文件系统构造不出。留它是为了不把「库坏了」说成「项目不存在」。
         other => ApiError::internal_with("cannot archive project", other),
     })?;
     Ok(Json(updated.into()))
@@ -310,6 +316,7 @@ pub async fn unarchive_project(
 ) -> Result<Json<ProjectView>, ApiError> {
     let updated = repo(&state).unarchive(&id).map_err(|e| match e {
         StorageError::ProjectNotFound { .. } => ApiError::not_found(),
+        // coverage: excluded — 同 `archive_project` 的兜底。
         other => ApiError::internal_with("cannot unarchive project", other),
     })?;
     Ok(Json(updated.into()))

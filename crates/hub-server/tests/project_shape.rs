@@ -323,6 +323,69 @@ async fn patch_cannot_smuggle_a_shape_change() {
     );
 }
 
+/// 显式给一个颜色要真写进去（与「没给」「给 null」三分）。
+///
+/// 三条分支各自对应一句不同的话：没给 = 别动、`null` = 清掉、给了值 = 设成它。
+/// 少测「给了值」这条，`Some(Some(s))` 就只剩解析失败那条路径被走到——
+/// 颜色能设但设不进去，页面上会表现成「选了颜色，刷新又变回去」。
+#[tokio::test]
+async fn patch_sets_an_explicit_color_and_rejects_a_bogus_one() {
+    let h = Harness::new().await;
+    let created = h
+        .create(json!({"name": "换色", "shape": "isolated", "theme_color": "blue"}))
+        .await;
+    let id = created.json()["id"].as_str().unwrap().to_string();
+
+    let ok = h
+        .mutate(
+            "PATCH",
+            &format!("/api/projects/{id}"),
+            Some(json!({"theme_color": "orange"})),
+        )
+        .await;
+    assert_eq!(ok.status, StatusCode::OK, "body: {}", ok.body);
+    assert_eq!(ok.json()["theme_color"], json!("orange"));
+
+    // 颜色表是闭集：写错一个词的后果是它在四套主题下都找不到对应令牌。
+    let bad = h
+        .mutate(
+            "PATCH",
+            &format!("/api/projects/{id}"),
+            Some(json!({"theme_color": "warm"})),
+        )
+        .await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST, "body: {}", bad.body);
+    assert_eq!(
+        h.get(&format!("/api/projects/{id}")).await.json()["theme_color"],
+        json!("orange"),
+        "被拒的改名不该留下半截写入"
+    );
+}
+
+/// 名字**只由空白组成**要拒——`is_empty()` 拦不住它，`trim()` 才拦得住。
+///
+/// 放过去的话，列表里会出现一行看不见名字的项目：用户点得到、说不出是哪条。
+#[tokio::test]
+async fn patch_rejects_a_whitespace_only_name() {
+    let h = Harness::new().await;
+    let created = h.create(json!({"name": "有名字", "shape": "isolated"})).await;
+    let id = created.json()["id"].as_str().unwrap().to_string();
+
+    let r = h
+        .mutate(
+            "PATCH",
+            &format!("/api/projects/{id}"),
+            Some(json!({"name": "   "})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "body: {}", r.body);
+    assert_eq!(
+        h.get(&format!("/api/projects/{id}")).await.json()["name"],
+        json!("有名字"),
+        "被拒的改名不该落库"
+    );
+}
+
 // ---- 形态转换 ------------------------------------------------------------
 
 /// 测试标准 2c（允许方向）：`isolated → central` 成功。
@@ -496,6 +559,30 @@ async fn unarchiving_brings_the_project_back() {
         Some(1),
         "取消归档后必须回到默认列表"
     );
+}
+
+/// 归档 / 取消归档一个**不存在**的项目：404，而不是 200 的空壳。
+///
+/// 存储层的 `archive` 用的是「读回一行」来区分「不存在」与「已归档」，
+/// 所以这条路径在 repo 层是通的；但接口层的 `map_err` 若写漏，
+/// 症状是**删掉的项目还能被归档**——返回 200 一个凭空造出来的 ProjectView，
+/// 用户以为它还在。
+#[tokio::test]
+async fn archiving_or_unarchiving_a_missing_project_is_404() {
+    let h = Harness::new().await;
+
+    for (verb, path) in [
+        ("POST", "/api/projects/p_nope/archive"),
+        ("POST", "/api/projects/p_nope/unarchive"),
+    ] {
+        let r = h.mutate(verb, path, None).await;
+        assert_eq!(r.status, StatusCode::NOT_FOUND, "{verb} {path}：{}", r.body);
+        assert_eq!(
+            r.json()["error"],
+            json!("not_found"),
+            "{verb} {path} 必须是固定的错误码，前端按它选文案"
+        );
+    }
 }
 
 /// **没有删除路径**（测试标准 5 的接口面）：`DELETE /api/projects/{id}` 不存在。

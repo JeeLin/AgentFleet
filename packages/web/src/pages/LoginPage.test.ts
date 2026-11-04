@@ -170,9 +170,9 @@ describe('LoginPage：成功', () => {
 
     await login(w, 'correct horse battery')
 
-    expect(INDEX_PATH).toBe('/sessions')
-    expect(location.pathname).toBe('/sessions')
-    expect(route.value.name).toBe('sessions')
+    expect(INDEX_PATH).toBe('/')
+    expect(location.pathname).toBe('/')
+    expect(route.value.name).toBe('overview')
     expect(history.length).toBe(before)
   })
 
@@ -205,6 +205,6 @@ describe('LoginPage：成功', () => {
 
     release!()
     await flush(w)
-    expect(location.pathname).toBe('/sessions')
+    expect(location.pathname).toBe('/')
   })
 })

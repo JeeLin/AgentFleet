@@ -223,17 +223,28 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
    =========================================================================== */
 .af-page { max-width: 1400px; margin: 0 auto; padding: var(--af-space-10) var(--af-space-11); }
 .af-page--flush { max-width: none; padding: 0; height: 100%; }
+/* 页头是「标题 + 右侧动作」的一行。两侧**顶对齐**而不是底对齐：标题是两行时，
+   动作按钮要贴着第一行，贴着最后一行会看起来掉下来。 */
 .af-page__head {
-  display: flex; align-items: flex-end; gap: var(--af-space-4);
-  margin-bottom: var(--af-space-8);
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: var(--af-space-4); margin-bottom: var(--af-space-8);
 }
 .af-page__title {
   font-size: var(--af-text-xl); font-weight: var(--af-weight-semibold);
   margin: 0 0 var(--af-space-2); letter-spacing: -0.01em;
 }
+.af-page__actions { display: flex; align-items: center; gap: var(--af-space-3); flex: 0 0 auto; }
 .af-page__sub {
   margin: 0; color: var(--af-fg-secondary); font-size: var(--af-text-md);
   line-height: var(--af-leading-base); max-width: 76ch;
+}
+/* 页内次级区块的标题。**间距写在它自己身上**而不是外面的 `.af-page__section`
+   ——每个区块的第一行就是它，多一条容器规则只是把同一件事说两遍。
+   **这一族有硬上限**（`components.test.ts` 三族 ≤30 条）：加规则前先问
+   「它真的属于页面外壳吗」，内容样式归 `.af-<领域>` 那一族。 */
+.af-page__subtitle {
+  font-size: var(--af-text-lg); font-weight: var(--af-weight-semibold);
+  margin: var(--af-space-11) 0 var(--af-space-4); letter-spacing: -0.005em;
 }
 .af-col { display: flex; flex-direction: column; }
 .af-col.gap-1 { gap: var(--af-space-1); } .af-col.gap-2 { gap: var(--af-space-2); }
@@ -1232,3 +1243,210 @@ kbd, .kbd {
    压到次要前景而不是全不透明，是既能被找到又不与名字抢注意力 */
 .af-tab:has(.af-tab__label[aria-selected='true']) .af-tab__x { opacity: 0.55; }
 .af-tab:has(.af-tab__label[aria-selected='true']) .af-tab__x:hover { opacity: 1; }
+
+/* ===========================================================================
+   22. 项目轴：页面头、项目列表、看板、形态卡、骨架页
+   -------------------------------------------------------------------------
+   v0.7.0 子任务 8 按 `prototype/` 重排路由后新增的布局类。**一律只使用
+   `tokens.css` 的变量**（约束 17：不写死颜色），所以四套主题与明暗切换
+   自动跟着走，这里不出现任何十六进制。
+
+   ── 为什么状态都要带文字 ────────────────────────────────────────────
+   规范 §3.4：颜色不是唯一通道。下面每个「形态」「列」都同时给**名字**与
+   **说明句**，色点只是附加。灰度打印与色觉障碍下仍能区分。
+   =========================================================================== */
+
+/* ---- 页面头扩展：页内次级区块 ------------------------------------------ */
+
+/* `.af-page__head` / `.af-page__actions` / `.af-page__title` / `.af-page__section`
+   的规则都在 §2「布局原语」里——它们与页头同家，放这里会变成两处各存一半、
+   改一处漏一处。本节只放**不属于页面外壳**的东西：领域级的列表、看板、
+   形态卡、骨架页。 */
+
+/* 次要说明句（「正在读取…」「归档不删除任何东西」）。**不是** `.af-t-mute`：
+   那个是行内小字，这个是整段说明，要给行高与最大宽度。 */
+.af-muted {
+  margin: 0 0 var(--af-space-5); color: var(--af-fg-tertiary);
+  font-size: var(--af-text-sm); line-height: var(--af-leading-base); max-width: 72ch;
+}
+
+/* ---- 项目列表（总览 / 已归档） ----------------------------------------- */
+
+/* 一行一个项目。用 `ul` 而不是表格：项目少（个人自托管），不需要列对齐；
+   表格会给每一行一个「这是数据」的观感，而项目是用户要去的地方。 */
+.af-projectlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.af-projectlist__row {
+  display: flex; align-items: center; gap: var(--af-space-4);
+  padding: var(--af-space-3) var(--af-space-2);
+  border-bottom: 1px solid var(--af-border-subtle);
+  min-height: var(--af-row-regular);
+}
+.af-projectlist__row:last-child { border-bottom: 0; }
+.af-projectlist__row:hover { background: var(--af-surface-2); }
+
+/* 整行是**一个按钮**，不是「名字是链接、其余是文字」：点行里任何地方都该进去。
+   左侧对齐、占满剩余空间，把形态与色点推到右边。 */
+.af-projectlist__link {
+  flex: 1 1 auto; display: flex; flex-direction: column; gap: var(--af-space-1);
+  align-items: flex-start; text-align: left;
+  padding: 0; border: 0; background: none; cursor: pointer;
+  font-family: inherit; color: inherit;
+}
+.af-projectlist__link:focus-visible { outline: 2px solid var(--af-border-focus); outline-offset: 2px; border-radius: var(--af-radius-sm); }
+.af-projectlist__name { font-size: var(--af-text-md); font-weight: var(--af-weight-medium); color: var(--af-fg-primary); }
+.af-projectlist__hint { font-size: var(--af-text-sm); color: var(--af-fg-tertiary); }
+
+/* 形态名。**宽度固定**：三个中文词长短不同，不固定的话右侧色点会跟着左右跳。 */
+.af-projectlist__shape {
+  flex: 0 0 auto; min-width: 4.5em; text-align: right;
+  font-size: var(--af-text-sm); color: var(--af-fg-secondary);
+}
+
+/* 主题色点。**色值来自 `[data-color]` 对应的语义令牌**，不是写死的十六进制；
+   它与旁边的形态名一起出现，所以色点本身不是唯一通道（§3.4）。 */
+.af-projectlist__dot {
+  flex: 0 0 auto; width: 8px; height: 8px; border-radius: var(--af-radius-full);
+  background: var(--af-fg-disabled); position: relative;
+}
+.af-projectlist__dot[data-color='blue'] { background: var(--af-info); }
+.af-projectlist__dot[data-color='green'] { background: var(--af-ok); }
+.af-projectlist__dot[data-color='purple'] { background: var(--af-agent); }
+.af-projectlist__dot[data-color='orange'] { background: var(--af-warn); }
+.af-projectlist__dot[data-color='gray'] { background: var(--af-fg-tertiary); }
+/* 色点里的文字是给读屏与 hover 用的（`theme_color` 原文），视觉上不显示。 */
+.af-projectlist__dot { font-size: 0; color: transparent; overflow: hidden; }
+
+/* ---- 项目切换器（看板页头） -------------------------------------------- */
+
+/* 项目之间横向切换。**不是下拉菜单**：切换项目是这一页最常做的动作之一，
+   藏进菜单要多两次点击，而且菜单开着的时候看不到自己现在在哪。 */
+.af-projectpick { display: flex; align-items: center; gap: var(--af-space-3); }
+.af-projectpick__label { font-size: var(--af-text-sm); color: var(--af-fg-tertiary); }
+.af-projectpick__select {
+  height: var(--af-row-compact); padding: 0 var(--af-space-4);
+  background: var(--af-surface-2); color: var(--af-fg-primary);
+  border: 1px solid var(--af-border-default); border-radius: var(--af-radius-sm);
+  font-family: inherit; font-size: var(--af-text-md); font-weight: var(--af-weight-medium);
+  cursor: pointer;
+}
+.af-projectpick__select:hover { border-color: var(--af-border-strong); }
+.af-projectpick__select:focus-visible { outline: 2px solid var(--af-border-focus); outline-offset: 1px; }
+
+/* ---- 项目内导航（看板 / 时间线 / 绑定 / 设置） ------------------------- */
+
+/* 项目内的一排入口。**不是第二个侧栏**：它随页面内容走，不参与整站导航，
+   所以做成页头下面的一行按钮而不是左侧第二列。 */
+.af-projectnav { display: flex; align-items: center; gap: var(--af-space-1); flex: 0 0 auto; }
+.af-projectnav__item {
+  height: var(--af-row-compact); padding: 0 var(--af-space-4);
+  background: none; color: var(--af-fg-secondary);
+  border: 1px solid transparent; border-radius: var(--af-radius-sm);
+  font-family: inherit; font-size: var(--af-text-sm); cursor: pointer;
+  transition: background-color var(--af-dur-instant) linear, color var(--af-dur-instant) linear;
+}
+.af-projectnav__item:hover { background: var(--af-surface-2); color: var(--af-fg-primary); }
+.af-projectnav__item:focus-visible { outline: 2px solid var(--af-border-focus); outline-offset: 1px; }
+
+/* ---- 看板：六列 -------------------------------------------------------- */
+
+/* 六列横向排开。**列不收缩**（`flex: 1 0 …`）：任务列被挤窄会让卡片里的标题
+   变成两三个字一行，而看板的价值就在于扫一眼能看全。容器横向滚动。 */
+.af-board {
+  display: grid; grid-template-columns: repeat(6, minmax(180px, 1fr));
+  gap: var(--af-space-4); align-items: start;
+  overflow-x: auto; padding-bottom: var(--af-space-4);
+}
+.af-board__col {
+  display: flex; flex-direction: column; gap: var(--af-space-3);
+  background: var(--af-surface-1); border: 1px solid var(--af-border-subtle);
+  border-radius: var(--af-radius-md); padding: var(--af-space-4);
+  min-height: 220px;
+}
+.af-board__colhead { display: flex; align-items: center; justify-content: space-between; }
+.af-board__coltitle {
+  margin: 0; font-size: var(--af-text-sm); font-weight: var(--af-weight-semibold);
+  color: var(--af-fg-primary); letter-spacing: var(--af-tracking-label);
+}
+/* 列的说明句（「失败的任务停在这里，不会自动回待办」）。它是**列语义的一部分**，
+   不是装饰：六态的名字对第一次见到的人不足以说明「为什么失败要单独一列」。 */
+.af-board__hint {
+  margin: 0; font-size: var(--af-text-xs); color: var(--af-fg-tertiary);
+  line-height: var(--af-leading-snug);
+}
+/* 列里的空态要**小一号**：六列并排时，与整页空态同尺寸会把看板撑成六块大留白，
+   用户会以为加载失败。 */
+.af-board__col .af-empty { padding: var(--af-space-6) var(--af-space-2); }
+.af-board__col .af-empty__glyph { font-size: var(--af-text-xl); }
+.af-board__col .af-empty__text { font-size: var(--af-text-xs); }
+
+/* ---- 新建项目：形态选择卡 ---------------------------------------------- */
+
+.af-form { display: flex; flex-direction: column; gap: var(--af-space-8); max-width: 72ch; }
+.af-form__actions { display: flex; align-items: center; justify-content: flex-end; gap: var(--af-space-3); }
+.af-form__error { margin: 0; font-size: var(--af-text-sm); color: var(--af-danger-fg); }
+
+.af-fieldset { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--af-space-3); }
+.af-fieldset > legend { padding: 0; margin-bottom: var(--af-space-1); }
+
+/* 三张卡并排。窄屏折成一列（见下面的媒体查询）。 */
+.af-shapecards { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--af-space-4); }
+
+/* 形态卡。**选中的状态不只靠颜色**：边框加粗 + 左上角字形 + `data-selected`
+   属性三处同时变（§3.4）。radio 本身视觉隐藏但**保留在无障碍树里**，
+   所以 `Tab` / 方向键照常能选。 */
+.af-shapecard {
+  position: relative; display: flex; flex-direction: column; gap: var(--af-space-2);
+  padding: var(--af-space-5); cursor: pointer;
+  background: var(--af-surface-1); border: 1px solid var(--af-border-default);
+  border-radius: var(--af-radius-md);
+  transition: border-color var(--af-dur-instant) linear, background-color var(--af-dur-instant) linear;
+}
+.af-shapecard:hover { border-color: var(--af-border-strong); background: var(--af-surface-2); }
+.af-shapecard[data-selected='true'] {
+  border-color: var(--af-accent); background: var(--af-accent-bg);
+  box-shadow: inset 0 0 0 1px var(--af-accent);
+}
+/* 选中标记：一个字形而不是只换颜色。 */
+.af-shapecard[data-selected='true']::before {
+  content: '✓'; position: absolute; top: var(--af-space-3); right: var(--af-space-3);
+  width: 16px; height: 16px; border-radius: var(--af-radius-full);
+  display: flex; align-items: center; justify-content: center;
+  background: var(--af-accent); color: var(--af-fg-on-accent);
+  font-size: var(--af-text-2xs); line-height: 1;
+}
+/* 视觉隐藏但可聚焦：不 `display: none`，否则键盘与读屏都够不着它。 */
+.af-shapecard__radio {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.af-shapecard:focus-within { outline: 2px solid var(--af-border-focus); outline-offset: 2px; }
+.af-shapecard__name { font-size: var(--af-text-md); font-weight: var(--af-weight-semibold); color: var(--af-fg-primary); }
+.af-shapecard__flow { font-size: var(--af-text-sm); color: var(--af-fg-secondary); font-family: var(--af-font-mono); }
+.af-shapecard__hint { font-size: var(--af-text-sm); color: var(--af-fg-tertiary); line-height: var(--af-leading-base); }
+
+/* 窄屏：三列折成一列，看板改成纵向堆叠（横向滚动的六列在手机上没法用）。 */
+@media (max-width: 900px) {
+  .af-shapecards { grid-template-columns: 1fr; }
+  .af-board { grid-template-columns: 1fr; overflow-x: visible; }
+  .af-page { padding: var(--af-space-7) var(--af-space-5); }
+}
+
+/* ---- 骨架页（`SkeletonPage.vue`） -------------------------------------- */
+
+/* 骨架页的身体：一块虚线框，**明说这是预留位置**而不是加载中。虚线在任何
+   主题下都与实线卡片不同，且不依赖颜色（灰度打印也区分得出）。 */
+.af-skeletonpage__note {
+  margin: var(--af-space-2) 0 0; font-size: var(--af-text-sm);
+  color: var(--af-fg-secondary); line-height: var(--af-leading-base);
+}
+.af-skeletonpage__note code {
+  font-family: var(--af-font-mono); font-size: var(--af-text-xs);
+  padding: 1px var(--af-space-2); border-radius: var(--af-radius-sm);
+  background: var(--af-surface-2); color: var(--af-fg-secondary);
+}
+.af-skeletonpage__body {
+  border: 1px dashed var(--af-border-default); border-radius: var(--af-radius-md);
+  padding: var(--af-space-8) var(--af-space-7); background: var(--af-surface-1);
+}
+.af-skeletonpage__list { margin: 0; padding-left: var(--af-space-6); color: var(--af-fg-secondary); font-size: var(--af-text-sm); line-height: var(--af-leading-loose); }
+.af-skeletonpage__empty { margin: 0; color: var(--af-fg-tertiary); font-size: var(--af-text-sm); }

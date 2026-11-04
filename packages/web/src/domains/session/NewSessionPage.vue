@@ -185,8 +185,22 @@ async function submit(): Promise<void> {
       // `NULL` 表示「没有 agent」，空串是一句不同的话（会被当成有值）。
       agent_id: pickedAgent.value || null,
     })
-    // `replace`：提交过的表单不该留在后退路径上
-    navigate(`/sessions/${encodeURIComponent(session.id)}`, { replace: true })
+    // `replace`：提交过的表单不该留在后退路径上。
+    //
+    // ── 为什么地址里要带项目 id ────────────────────────────────────
+    // v0.7.0 起会话挂在项目下（`/project/:id/session/:sessionId`），会话不再有
+    // 顶层地址。建会话这一步本身只认设备与路径，**项目 id 从查询串带进来**
+    // （`/sessions/new?device=n_1&project=p_1`，由设备页或项目页发起）。
+    // 没带项目 id 时落到总览：**不要编一个项目 id**，那样会写进一条 404 地址，
+    // 用户看到的是「建好了，但打不开」。
+    const projectId = route.value.query.get('project')
+    if (projectId) {
+      navigate(`/project/${encodeURIComponent(projectId)}/session/${encodeURIComponent(session.id)}`, {
+        replace: true,
+      })
+      return
+    }
+    navigate('/', { replace: true })
   } catch (err) {
     submitError.value =
       err instanceof ApiError ? createSessionErrorLabel(err.code) : '建会话没有成功：Hub 没有回应。'
@@ -380,7 +394,7 @@ async function submit(): Promise<void> {
           <button class="af-btn af-btn--primary af-btn--lg" type="button" :disabled="!canSubmit" @click="submit">
             {{ submitting ? '建立中…' : '创建会话' }}
           </button>
-          <a class="af-btn af-btn--lg" href="/sessions" @click.prevent="navigate('/sessions')">取消</a>
+          <a class="af-btn af-btn--lg" href="/" @click.prevent="navigate('/')">取消</a>
           <span class="af-spacer"></span>
           <span class="af-t-mute af-keyhint">三项齐了才能建；缺哪项，错误就指哪一项</span>
         </div>

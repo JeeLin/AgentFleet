@@ -53,7 +53,7 @@ describe('KEYS 与设计文档一致（grep 校验，不靠人眼）', () => {
   it('§4.2 表格里的每个 act 都出现在 KEYS 里（文档写了、表里没有 = 死键）', () => {
     const doc = readFileSync(DESIGN_DOC, 'utf-8')
     const section = doc.slice(doc.indexOf('### 4.2'), doc.indexOf('### 4.3'))
-    // 表格第三列是 act，形如 `nav:sessions`；首列是键位（`| **全局** | ...`）。
+    // 表格第三列是 act，形如 `nav:overview`；首列是键位（`| **全局** | ...`）。
     const inTable = new Set<string>()
     for (const line of section.split('\n')) {
       if (!line.startsWith('|')) continue
@@ -117,14 +117,14 @@ describe('token / 组件数与设计文档一致', () => {
     expect(actual).toBe(declared)
   })
 
-  it('components.css 的小节数与 §3 的「22 组组件（22 节）」一致', () => {
+  it('components.css 的小节数与 §3 的「23 组组件（23 节）」一致', () => {
     const doc = readFileSync(DESIGN_DOC, 'utf-8')
-    const m = doc.match(/（22 节/)
+    const m = doc.match(/（23 节/)
     expect(m, 'design-system.md §3 不再声明组件节数').not.toBeNull()
     const css = readFileSync(COMPONENTS_CSS, 'utf-8')
     // 小节标题是 `   3. Button` 这种「行首缩进 + 序号 + 点 + 标题」的形状。
     const sections = (css.match(/^\s+\d+\.\s+\S/gm) ?? []).length
-    expect(sections).toBe(22)
+    expect(sections).toBe(23)
   })
 
   it('每个 token 只在 :root 里定义一次，重复出现的名字只在 reduce-motion 里覆写', () => {
@@ -174,7 +174,7 @@ describe('unimplemented', () => {
 
   it('unimplemented 逐条回答「这个 act 实现了吗」', () => {
     expect(unimplemented('search:focus')).toBe(false)
-    expect(unimplemented('nav:sessions')).toBe(true)
+    expect(unimplemented('nav:butler')).toBe(true)
   })
 
   it('声明为已实现（实现不住在全局表里）的 act 不算缺失', () => {
@@ -278,7 +278,7 @@ describe('g 序列', () => {
   // 与 `g a`（Agent 目录）——两者都已并出导航（见 design-system §5.1）。
   it('三个跳转目标都指向表内的 act，且窗口是 800ms', () => {
     expect(PREFIX_MS).toBe(800)
-    expect(PREFIX.size).toBe(4)
+    expect(PREFIX.size).toBe(5)
     for (const act of PREFIX.values()) expect(hasAct(act), `${act} 不在 KEYS 表里`).toBe(true)
   })
 
@@ -295,7 +295,7 @@ describe('actForKey / hintOf（键位 → act 的反查）', () => {
   })
 
   it('g 序列用空格连接两个键', () => {
-    expect(actForKey('g s')).toBe('nav:sessions')
+    expect(actForKey('g s')).toBe('nav:overview')
     expect(actForKey('g g')).toBe('traj:toggle')
   })
 
@@ -306,7 +306,7 @@ describe('actForKey / hintOf（键位 → act 的反查）', () => {
 
   it('hintOf 给出键位提示，act 不在表里时是空串', () => {
     expect(hintOf('panel:open')).toBe('o')
-    expect(hintOf('nav:sessions')).toBe('g s')
+    expect(hintOf('nav:overview')).toBe('g s')
     expect(hintOf('nope:nope')).toBe('')
   })
 

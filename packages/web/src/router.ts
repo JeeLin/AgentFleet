@@ -1,45 +1,79 @@
 /* ===========================================================================
    router.ts —— 路由表（设计规范 §5.2）
    ---------------------------------------------------------------------------
-   这个项目**不引 vue-router**。前端只有 8 条路由、没有嵌套布局、没有路由级
-   数据加载，引一个库换来的是一份要跟着升级的依赖和一层与规范术语不同的
-   抽象（`RouterView` / `useRoute` 与 §5.2 的表格对不上号）。这里 60 行
-   能做完的事，不该用 60 行配置去做。
+   这个项目**不引 vue-router**，现在是 23 条路由也仍然不引。理由不是「行数还
+   不够多」，而是这个文件实际只有三件事：一张模式表、一个按段比对的匹配器、
+   一个 `port` 与模式表的对应。`matchPattern` 从 v0.5.0 起就支持任意层具名段
+   （`/project/:id/task/:taskId` 不需要新机制），23 条路由的匹配逻辑与 8 条
+   时**一模一样**——涨的是表里的行数，不是逻辑。
 
-   ── 路由表就是 §5.2 的表格 ───────────────────────────────────────────
-   `/sessions/:id` 只表达「**激活**这个会话 tab」，不表达「第 3 个 tab」
-   （§5.5.6：tab 集合本身不可深链接）。
+   `vue-router` 换来的是 `RouterView` / `useRoute` 一层抽象，而 §5.2 的表格
+   用的是「页面 / 地址 / 导航」三列。多一层对不上号的术语，在多一个人接手时
+   就是多一次翻译。**判据是逻辑的重复度，不是表的长短。**
+
+   ── 页面照 `prototype/`，不照旧会话轴 ──────────────────────────────
+   路由结构以 `prototype/` 的 21 页为准（v0.7.0 子任务 8）：
+   总览是入口，项目下挂看板 / 任务 / 执行 / 会话，会话不再是顶层。
+
+   ── 骨架路由 ≠ 占位承诺 ─────────────────────────────────────────────
+   v0.7.0 之前这里写着「没有 `/tasks` / `/artifacts`，规范写的是『不留占位页』，
+   留一个灰掉的导航项等于在导航里承诺一件本阶段做不到的事」。
+   那条理由**依然成立**，但它针对的是「**导航里灰掉的条目**」，不是「路由表里
+   有这条路径」。两者不是一件事：
+
+   - 灰条目 = 对用户承诺一个功能。用户点进去看到「敬请期待」，会以为是我们忘做了。
+   - 骨架路由 = 给后续里程碑预留的挂载点。它只能从项目页内部进入，
+     不进一级导航，且页面顶部**必须写明本页在哪个版本开放**。
+
+   所以子任务 8 建了 13 个骨架页，**一级导航仍然只有四项**
+   （总览 / 设备 / Agent / 设置）。这条边界改一次就够，别再来回改。
 
    ── `/login` 与 `/setup` 是「认证流程」，不是导航项 ────────────────
-   §5.2 的表格里这两行的「导航」列写的是「认证流程」而不是 ✅：
-   它们出现在路由表里，但**不进 §5.1 的 5 项一级导航**，也不带外壳渲染
-   （`AUTH_ROUTES`，见 `App.vue`）。缺了这两条路由的后果不是「少两个页面」，
-   而是 401/403 的落点变成 404 空态——登录页本身打不开，等于没有登录流程。
+   它们出现在路由表里但不进一级导航，也不带外壳渲染（`AUTH_ROUTES`，见
+   `App.vue`）。缺了这两条路由的后果不是「少两个页面」，而是 401/403 的落点
+   变成 404 空态——登录页本身打不开，等于没有登录流程。
 
    **没有工作区路由**：`/w/:nodeId/*path` 与 `/workspace` 在架构上不存在
    （§5.2 否决项、§7.0）。所以这张表里连一个能长出它们的占位都没有。
 
-   ── 没有 `/tasks` / `/artifacts` / `/devices/:id` ──────────────────
-   规范写的是「不留占位页」。留一个灰掉的导航项等于在导航里承诺一件本阶段
-   做不到的事——用户点进去看到「敬请期待」，会以为是我们忘做了。
-
    ── 为什么用 History API 而不是 hash ──────────────────────────────
-   Hub 自己托管 `dist/`（子任务 6），同源相对路径成立；hash 路由会把
-   `/sessions/abc` 变成 `/sessions#/sessions/abc`，把「工作区没有地址」
-   这条已经理清的事又搅回去。
+   Hub 自己托管 `dist/`，同源相对路径成立；hash 路由会把 `/project/x/board`
+   变成 `/project#/project/x/board`，把「工作区没有地址」这条已经理清的事
+   又搅回去。
    =========================================================================== */
 
 import { shallowRef, type ShallowRef } from 'vue'
 
 import { focusMain } from '@/shared/focus'
 
-/** 路由名。与 §5.2 表格的「页面」一列一一对应。 */
+/** 路由名。与 `prototype/` 的页面对照表一一对应（子任务 8）。 */
 export type RouteName =
-  | 'sessions'
-  | 'new-session'
-  | 'session'
+  // 一级导航
+  | 'overview'
   | 'devices'
+  | 'agents'
   | 'settings'
+  // 项目内
+  | 'board'
+  | 'project-task'
+  | 'execution'
+  | 'replay'
+  | 'timeline'
+  | 'session'
+  | 'projects-new'
+  | 'project-bind'
+  | 'project-settings'
+  | 'project-schedules'
+  | 'projects-archived'
+  // 收件箱与管家
+  | 'inbox'
+  | 'inbox-activity'
+  | 'butler'
+  // 设置子页
+  | 'settings-skills'
+  | 'settings-integrations'
+  | 'settings-notifications'
+  // 认证流程
   | 'login'
   | 'setup'
   | 'not-found'
@@ -69,19 +103,44 @@ interface RouteDef {
 }
 
 /**
- * 路由表。**顺序有意义**：`/sessions/new` 必须排在 `/sessions/:id` 之前，
- * 否则「新建会话」会被匹配成 id 为 `new` 的会话。
+ * 路由表。**顺序有意义**：`/projects/new` 必须排在 `/projects/:id/...` 之前，
+ * 否则「新建项目」会被匹配成 id 为 `new` 的项目。
  *
- * 两条认证路由排在最后：它们与其余路径没有前缀关系（`/login` / `/setup`
- * 都是单段字面量），顺序对匹配结果没有影响，放末尾是为了让
- * 「一级导航的六条」连成一片、一眼看全 §5.2 的两张名单。
+ * 长模式要排在它的前缀短模式之前吗？不需要——`matchPattern` 按**段数**先筛，
+ * `/projects/new`（2 段）与 `/project/:id/board`（3 段）段数就不同，不会互相
+ * 吃掉。真正需要小心的是**同段数**的：`/projects/new` vs `/projects/:id`
+ * （后者不存在，归档页是固定段 `/projects/archived`，所以这条也安全）。
+ *
+ * 认证路由排在最后：它们与其余路径没有前缀关系，放末尾是为了让「页面路由」
+ * 连成一片。
  */
 export const ROUTES: readonly RouteDef[] = [
-  { name: 'sessions', pattern: '/sessions' },
-  { name: 'new-session', pattern: '/sessions/new' },
-  { name: 'session', pattern: '/sessions/:id' },
+  // ── 一级导航（只有这四项进左栏，见 `App.vue` 的 `NAV`） ──────────────
+  { name: 'overview', pattern: '/' },
   { name: 'devices', pattern: '/devices' },
+  { name: 'agents', pattern: '/agents' },
   { name: 'settings', pattern: '/settings' },
+  // ── 项目内 ────────────────────────────────────────────────────────
+  { name: 'projects-new', pattern: '/projects/new' },
+  { name: 'projects-archived', pattern: '/projects/archived' },
+  { name: 'board', pattern: '/project/:id/board' },
+  { name: 'project-task', pattern: '/project/:id/task/:taskId' },
+  { name: 'execution', pattern: '/project/:id/execution/:execId' },
+  { name: 'replay', pattern: '/project/:id/execution/:execId/replay' },
+  { name: 'timeline', pattern: '/project/:id/timeline' },
+  { name: 'session', pattern: '/project/:id/session/:sessionId' },
+  { name: 'project-bind', pattern: '/project/:id/bind' },
+  { name: 'project-settings', pattern: '/project/:id/settings' },
+  { name: 'project-schedules', pattern: '/project/:id/schedules' },
+  // ── 收件箱与管家 ──────────────────────────────────────────────────
+  { name: 'inbox', pattern: '/inbox' },
+  { name: 'inbox-activity', pattern: '/inbox/activity' },
+  { name: 'butler', pattern: '/butler' },
+  // ── 设置子页 ──────────────────────────────────────────────────────
+  { name: 'settings-skills', pattern: '/settings/skills' },
+  { name: 'settings-integrations', pattern: '/settings/integrations' },
+  { name: 'settings-notifications', pattern: '/settings/notifications' },
+  // ── 认证流程（不带外壳，见 `AUTH_ROUTES`） ────────────────────────
   { name: 'login', pattern: '/login' },
   { name: 'setup', pattern: '/setup' },
 ]
@@ -89,20 +148,51 @@ export const ROUTES: readonly RouteDef[] = [
 /**
  * 已删除路由 → 去处。
  *
- * `agent-catalog` 并进设备页后 `/agents` 不再是路由。**不能就这么让它变成
- * 404**：它是真存在过的地址（§5.2 曾把它列为一级导航），用户的书签、以及
- * 我们自己在文档里写过的链接都指向它。静默 404 的症状是「点了收藏夹里的
- * 链接，看到『这个地址没有页面』」——而内容其实就在隔壁。
+ * # `/sessions*`：会话迁到项目下之后
  *
- * 判据放在 `matchRoute` 里（而不是外壳的渲染分支）：「旧地址去哪」是路由
- * 的知识，让外壳知道它就是把一张不该存在的表塞进视图层。
+ * 会话不再是顶层实体（`PRODUCT.md` §1：项目 → 任务 → 执行 → 会话）。旧地址
+ * `/sessions`、`/sessions/:id`、`/sessions/new` 曾经是真存在过的地址，
+ * 用户的书签与我们写过的文档链接都指向它们。**不能让它静默 404**。
+ *
+ * **但也不能精确还原**：新路由是 `/project/:id/session/:sessionId`，而旧地址
+ * 里没有项目 id。要还原它得先查「这个会话属于哪个项目」——那是页面的活，
+ * 不是路由表的活（路由表是纯数据、无 IO）。所以统一落到总览，并在页面上
+ * **明说**「会话已迁到项目下」，让用户知道该往哪找，而不是看见一片空白。
+ *
+ * `:id` 段的旧地址要单独处理：`LEGACY_PATHS` 是精确匹配表，带参数的进不来。
+ * 见 `legacyTarget` 的第二条判据。
+ *
+ * # `/agents`
+ *
+ * v0.5.0 曾把 Agent 目录并进设备页（`?view=agents`）。v0.7.0 起 Agent 重新
+ * 成为一级导航项（`prototype/agents.html`），所以这条旧地址仍保留——
+ * 它指向的分段视图在新导航里已经不存在了，落到 Agent 页本身才对。
  */
 export const LEGACY_PATHS: Readonly<Record<string, string>> = {
   '/agents': '/devices?view=agents',
+  '/sessions': '/',
+  '/sessions/new': '/',
+  '/tasks': '/',
+  '/artifacts': '/',
 }
 
-/** 根路径落在会话列表：会话是入口（§7.0）。 */
-export const INDEX_PATH = '/sessions'
+/**
+ * 带参数的旧地址前缀 → 去处。
+ *
+ * 与 `LEGACY_PATHS` 分开是因为判据不同：那张表是精确相等，这里按前缀匹配。
+ * 前缀匹配会误伤（`/sessionsX` 也会命中），所以判据里要求前缀之后紧跟 `/`
+ * 或就是结尾——见 `legacyTarget`。
+ */
+const LEGACY_PREFIXES: Readonly<Record<string, string>> = {
+  '/sessions/': '/',
+}
+
+/**
+ * 根路径：**总览**（`prototype/index.html`）。
+ *
+ * v0.7.0 之前是 `/sessions`——那时会话是顶层。现在顶层是项目，总览是入口。
+ */
+export const INDEX_PATH = '/'
 
 /** 登录页路径。`http.ts` 的 401 与外壳的退出登录都指向它（`App.vue` 的 `onLogout`）。 */
 export const LOGIN_PATH = '/login'
@@ -125,7 +215,13 @@ export function matchRoute(input: string): Route {
 
 /** 这条路径是不是一个已删除、但有去处的旧地址。 */
 export function legacyTarget(path: string): string | null {
-  return LEGACY_PATHS[path] ?? null
+  const exact = LEGACY_PATHS[path]
+  if (exact !== undefined) return exact
+  for (const [prefix, target] of Object.entries(LEGACY_PREFIXES)) {
+    // 只认「前缀 + 一段」：`/sessions/abc` 命中，`/sessionsfoo` 不命中。
+    if (path.startsWith(prefix) && path.length > prefix.length) return target
+  }
+  return null
 }
 
 /** 单条模式匹配。命中返回具名段，不中返回 `null`。 */

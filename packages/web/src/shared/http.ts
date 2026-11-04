@@ -311,13 +311,32 @@ export function getJson<T>(path: string, options?: RequestOptions): Promise<T> {
 
 /** POST JSON + 解 JSON。 */
 export function postJson<T>(path: string, body?: unknown, options?: RequestOptions): Promise<T> {
+  return sendJson<T>('POST', path, body, options)
+}
+
+/**
+ * PATCH JSON + 解 JSON。
+ *
+ * 与 `postJson` 共用 `sendJson`：两者的差别只有 method 一个词，各写一份
+ * 必然漂移（曾经 `postJson` 单独处理 `Content-Type` 与 `string` body）。
+ */
+export function patchJson<T>(path: string, body?: unknown, options?: RequestOptions): Promise<T> {
+  return sendJson<T>('PATCH', path, body, options)
+}
+
+function sendJson<T>(
+  method: string,
+  path: string,
+  body: unknown,
+  options?: RequestOptions,
+): Promise<T> {
   const payload: BodyInit | null | undefined =
     body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body)
   const headers = new Headers(options?.headers)
   if (typeof payload === 'string' && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
-  return request(path, { ...options, method: 'POST', headers, body: payload }).then(
+  return request(path, { ...options, method, headers, body: payload }).then(
     (r) => r.json() as Promise<T>,
   )
 }

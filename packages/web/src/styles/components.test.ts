@@ -41,12 +41,10 @@ const OWNED = [
   'packages/web/src/styles/components.css',
   'packages/web/src/domains/agent/AgentCatalog.vue',
   'packages/web/src/domains/device/DeviceTable.vue',
-  'packages/web/src/domains/session/SessionTable.vue',
   'packages/web/src/domains/session/TrajDrawer.vue',
   'packages/web/src/domains/device/DevicesPage.vue',
   'packages/web/src/domains/session/NewSessionPage.vue',
   'packages/web/src/domains/session/SessionPage.vue',
-  'packages/web/src/domains/session/SessionsPage.vue',
 ]
 
 /** 剥掉 `/* *\/` 注释，只留真正的 CSS。 */

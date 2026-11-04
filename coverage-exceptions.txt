@@ -59,6 +59,9 @@ crates/hub-server/src/routes/base_rev.rs:127: 同上面那条 `code = e.code()`�
 crates/hub-server/src/routes/base_rev.rs:157: 同上面那条：多行宏的参数行被 llvm-cov 记为 miss。 这一臂本身由上面那条队列满用例执行（它连 `close_channel` 都发不出去）。
 crates/hub-server/src/routes/base_rev.rs:533: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
 crates/hub-server/src/routes/base_rev.rs:732: 测试自身的失败分支（`expect` / `assert!` 的消息行）：绿的时候永远不执行
+crates/hub-server/src/routes/projects.rs:287: `StorageError` 余下的变体都是数据库故障（连接池取不到、 SQLite 报错、序列化失败）。它们要求把库打坏才走得到，而那类故障在 `hub-storage` 自己的单测里已经有专门构造。这里保留兜底是为了**不把 未知错误翻译成 404**——那会让「库坏了」看起来像「项目不存在」。
+crates/hub-server/src/routes/projects.rs:305: 同 `change_project_shape` 的兜底：余下的变体是数据库故障， 正常文件系统构造不出。留它是为了不把「库坏了」说成「项目不存在」。
+crates/hub-server/src/routes/projects.rs:320: 同 `archive_project` 的兜底。
 crates/hub-server/src/routes/setup.rs:170: `JoinError` 只在任务 panic 或运行时关闭时 产生。本 workspace 的 `panic = deny` 让生产代码不可能 panic， 测试里也造不出来（测试豁免头只在 `mod tests` 内生效，够不到这里）。
 crates/hub-server/src/routes/setup.rs:224: 闭锁的信号量会永远等不到 permit。闸门与 `AppState` 同生命周期，本 workspace 从不调用 `tokio::sync::Semaphore::close()`（已 grep 确认零调用点），所以 `AcquireError` 在本 crate 不可达。注意这是**约定性**不可达 （我们选择不调用），不是结构性的——`close()` 是 pub。 闭锁不是「忙」，必须 500 而不是 429：否则一次内部事故会被伪装成 「服务繁忙」，把真正的根因（有人闭锁了闸门）藏起来。
 crates/hub-server/src/routes/setup.rs:225: 闭锁的信号量会永远等不到 permit。闸门与 `AppState` 同生命周期，本 workspace 从不调用 `tokio::sync::Semaphore::close()`（已 grep 确认零调用点），所以 `AcquireError` 在本 crate 不可达。注意这是**约定性**不可达 （我们选择不调用），不是结构性的——`close()` 是 pub。 闭锁不是「忙」，必须 500 而不是 429：否则一次内部事故会被伪装成 「服务繁忙」，把真正的根因（有人闭锁了闸门）藏起来。

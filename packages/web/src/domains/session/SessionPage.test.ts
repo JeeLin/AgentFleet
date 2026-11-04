@@ -98,8 +98,8 @@ async function mountWorkbench(
   over: Record<string, unknown> = {},
 ): Promise<Ctx> {
   sessionStorage.setItem(STORAGE_KEY, JSON.stringify(seed))
-  window.history.replaceState(null, '', `/sessions/${id}`)
-  route.value = matchRoute(`/sessions/${id}`)
+  window.history.replaceState(null, '', `/project/p_1/session/${id}`)
+  route.value = matchRoute(`/project/p_1/session/${id}`)
 
   const fetchMock = stubFetch({
     '/api/sessions': { body: SESSIONS },
@@ -433,8 +433,8 @@ describe('工作台：结构与默认值', () => {
       },
       '/api/devices': { body: DEVICES },
     })
-    window.history.replaceState(null, '', '/sessions/s_1')
-    route.value = matchRoute('/sessions/s_1')
+    window.history.replaceState(null, '', '/project/p_1/session/s_1')
+    route.value = matchRoute('/project/p_1/session/s_1')
     const w = mountIn(SessionPage)
     await flush(w)
 
@@ -970,8 +970,8 @@ describe('面板正文是 13b / 13c 的真组件，不是 13a 的占位', () => 
       },
       '/api/devices': { body: DEVICES },
     })
-    window.history.replaceState(null, '', '/sessions/s_1')
-    route.value = matchRoute('/sessions/s_1')
+    window.history.replaceState(null, '', '/project/p_1/session/s_1')
+    route.value = matchRoute('/project/p_1/session/s_1')
     void fetchMock
     const w = mountIn(SessionPage)
     await flush(w)
@@ -1076,8 +1076,8 @@ describe('一次性命令走 exec 通道', () => {
 describe('找不到的会话', () => {
   it('给出空态并指回会话列表，而不是一片空白', async () => {
     stubFetch({ '/api/sessions': { body: [] }, '/api/devices': { body: [] } })
-    window.history.replaceState(null, '', '/sessions/s_gone')
-    route.value = matchRoute('/sessions/s_gone')
+    window.history.replaceState(null, '', '/project/p_1/session/s_gone')
+    route.value = matchRoute('/project/p_1/session/s_gone')
     const w = mountIn(SessionPage)
     await flush(w)
 
@@ -1098,8 +1098,8 @@ describe('找不到的会话', () => {
   it('会话未知（不在列表里）时明说「归属未知」，而不说成「设备已被删除」', async () => {
     stubFetch({ '/api/sessions': { body: [] }, '/api/devices': { body: [] } })
     sessionStorage.removeItem(STORAGE_KEY)
-    window.history.replaceState(null, '', '/sessions/s_gone')
-    route.value = matchRoute('/sessions/s_gone')
+    window.history.replaceState(null, '', '/project/p_1/session/s_gone')
+    route.value = matchRoute('/project/p_1/session/s_gone')
     const w = mountIn(SessionPage)
     await flush(w)
 
@@ -1128,8 +1128,8 @@ describe('找不到的会话', () => {
     ]
     stubFetch({ '/api/sessions': { body: sessions }, '/api/devices': { body: [] } })
     sessionStorage.removeItem(STORAGE_KEY)
-    window.history.replaceState(null, '', '/sessions/s_1')
-    route.value = matchRoute('/sessions/s_1')
+    window.history.replaceState(null, '', '/project/p_1/session/s_1')
+    route.value = matchRoute('/project/p_1/session/s_1')
     const w = mountIn(SessionPage)
     await flush(w)
 
@@ -1181,8 +1181,8 @@ async function mountWithAgent(sessions = WITH_AGENT): Promise<Ctx> {
     },
   })
   sessionStorage.setItem(STORAGE_KEY, JSON.stringify([TWO_TABS[0]]))
-  window.history.replaceState(null, '', '/sessions/s_1')
-  route.value = matchRoute('/sessions/s_1')
+  window.history.replaceState(null, '', '/project/p_1/session/s_1')
+  route.value = matchRoute('/project/p_1/session/s_1')
   const w = mountIn(SessionPage)
   await flush(w)
   return {
@@ -1554,8 +1554,8 @@ describe('停止按钮：真的有前端链路（不是只画了个按钮）', (
       '/api/sessions/s_1/conversation/cancel': { empty: true },
     })
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify([TWO_TABS[0]]))
-    window.history.replaceState(null, '', '/sessions/s_1')
-    route.value = matchRoute('/sessions/s_1')
+    window.history.replaceState(null, '', '/project/p_1/session/s_1')
+    route.value = matchRoute('/project/p_1/session/s_1')
     const w = mountIn(SessionPage)
     await flush(w)
 
