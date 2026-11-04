@@ -280,11 +280,27 @@ def resolve_code(tok):
     所以这里按已知布局逐级试，而不是只查一次 exists：
     先按原样（已是全路径的情形），再试 crates/*/src/ 与 packages/web/src/，
     最后按 basename 在全仓搜（同名文件多处命中时取第一个并让调用方报歧义）。
+
+    `packages/web/src` 底下**没有层级假设**：v0.7.0 起前端按领域优先重组，
+    业务代码在 `domains/<领域>/`，共享组件在 `domains/shared/components/`，
+    纯函数工具在 `shared/`。这里逐条列 glob 而不是写成 `**`，是因为 `**`
+    会把 `SessionPage.vue` 同时匹配到 `domains/session/` 与任何同名副本，
+    而**歧义必须被报出来**——递归通配让「同名两处」变得安静。
     """
     t = tok.strip('`').rstrip('.,;:、)）')
     if os.path.exists(t):
         return t
     for pat in ('crates/*/src/' + t, 'packages/web/src/' + t,
+                # 前端按**领域优先**重组后的三层布局（v0.7.0 子任务 1.A）：
+                # `pages/` 只剩登录 / setup / 设置这三个「外壳级」页面，业务页面
+                # 与它们的同目录组件、api 都在 `domains/<领域>/` 下，跨领域共享的
+                # 组件在 `domains/shared/components/`，纯函数工具在 `shared/`。
+                # 这三条 glob 是在 `pages/` 与 `components/` 两条之外**追加**的，
+                # 不是替换：`pages/` 里仍有三个真文件，删掉那条会让
+                # `pages/SettingsPage.vue:N` 这类简写锚点解析失败。
+                'packages/web/src/domains/*/' + t,
+                'packages/web/src/domains/*/components/' + t,
+                'packages/web/src/shared/' + t,
                 'packages/web/src/pages/' + t, 'packages/web/src/components/' + t,
                 'crates/*/' + t):
         hits = sorted(glob.glob(pat))

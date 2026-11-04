@@ -207,7 +207,7 @@ echo "  现场：$TMP（Hub 端口 $PORT，工作区 $WS）"
 # 是自我实现。读不到就退出，不退回写死的值——那正是要防的事。
 #
 # 初值可能写在两处：页面直接写数字（`cols: 80`），或提到共享常量
-# （`DEFAULT_COLS = 80`，见 packages/web/src/lib/channel.ts）。两处都找，
+# （`DEFAULT_COLS = 80`，见 packages/web/src/shared/channel.ts）。两处都找，
 # 先找常量；读不到就退出——**不许**退回写死的 80x24。
 # ---------------------------------------------------------------------------
 WEB_SRC="$ROOT/packages/web/src"
@@ -222,7 +222,7 @@ page_term_dim() {
   local const="$1" field="$2" n
   # 先找共享常量（`DEFAULT_COLS = 80`），再退回页面里的字面量（`cols: 80`）
   n=$(grep -rhoE "$const[^0-9]{0,24}[0-9]+" "$WEB_SRC" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
-  [ -n "$n" ] || n=$(grep -oE "$field:[[:space:]]*[0-9]+" "$WEB_SRC/pages/SessionPage.vue" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+  [ -n "$n" ] || n=$(grep -oE "$field:[[:space:]]*[0-9]+" "$WEB_SRC/domains/session/SessionPage.vue" 2>/dev/null | grep -oE '[0-9]+' | head -1)
   printf '%s' "$n"
 }
 PAGE_COLS=$(page_term_dim DEFAULT_COLS cols)

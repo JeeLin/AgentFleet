@@ -1415,20 +1415,34 @@ Mock 形状 = 将来 API 的形状。前端只读。
 | 本文件（判断依据） | `docs/design-system.md` |
 | §2 token 定义（129 个变量） | `packages/web/src/styles/tokens.css` |
 | §3 组件样式（22 节） | `packages/web/src/styles/components.css` |
-| §4 交互范式 / 焦点栈 / 键位表 | `packages/web/src/lib/keynav.ts` + `lib/focus.ts` + `lib/shell-keys.ts` |
+| §4 交互范式 / 焦点栈 / 键位表 | `packages/web/src/shared/keynav.ts` + `shared/focus.ts` + `shared/shell-keys.ts` |
 | 外壳与导航 | `packages/web/src/App.vue` + `page-chrome.css` | 
-| 页面级数据访问 | `packages/web/src/lib/api.ts` |
-| 会话工作台 | `pages/SessionPage.vue` + `components/PanelDock.vue` / `TerminalPanel.vue` / `FilesPanel.vue` / `TrajDrawer.vue` / `TabBar.vue` |
-| 会话列表 | `pages/SessionsPage.vue` + `components/SessionTable.vue` |
-| 新建会话 | `pages/NewSessionPage.vue` |
-| 设备列表 | `pages/DevicesPage.vue` + `components/DeviceTable.vue` |
-| Agent 目录 | `components/AgentCatalog.vue`（挂在设备页 `?view=agents` 分段，不是独立页面，见 §5.1） |
+| 页面级数据访问 | `domains/device/api.ts` / `domains/agent/api.ts` / `domains/session/api.ts`（传输层在 `shared/http.ts`） |
+| 会话工作台 | `domains/session/SessionPage.vue` + `PanelDock.vue` / `TerminalPanel.vue` / `FilesPanel.vue` / `TrajDrawer.vue` / `TabBar.vue` / `ConvFlow.vue` / `GitPanel.vue` |
+| 会话列表 | `domains/session/SessionsPage.vue` + `SessionTable.vue` |
+| 新建会话 | `domains/session/NewSessionPage.vue` |
+| 设备列表 | `domains/device/DevicesPage.vue` + `DeviceTable.vue` |
+| Agent 目录 | `domains/agent/AgentCatalog.vue`（挂在设备页 `?view=agents` 分段，不是独立页面，见 §5.1） |
 | 设置 | `pages/SettingsPage.vue` |
-| 登录 / setup | `pages/LoginPage.vue` / `SetupPage.vue` + `components/LoginPrompt.vue` |
-| terminal / files 面板 | `components/TerminalPanel.vue` + `lib/channel.ts`；`components/FilesPanel.vue` + `lib/files-path.ts` |
+| 登录 / setup | `pages/LoginPage.vue` / `SetupPage.vue` + `domains/shared/components/LoginPrompt.vue` |
+| terminal / files 面板 | `domains/session/TerminalPanel.vue` + `shared/channel.ts`；`domains/session/FilesPanel.vue` + `shared/files-path.ts` |
+
+> **上表的路径写的是「相对 `packages/web/src/`」的简写**，只有 `styles/` 与
+> `App.vue` 给了全路径——这与全仓文档的惯例一致，`scripts/check.sh` 的锚点
+> 校验也按同一套简写解析（`resolve_code()` 逐条试 `domains/*/`、
+> `domains/*/components/`、`shared/`、`pages/`）。
+>
+> **为什么是「领域优先」而不是「pages / components / lib 三分」**（v0.7.0 子任务 1.A）：
+> 旧的按技术角色分层，让「会话」这一个领域的东西散在三个目录里——改一处会话
+> 面板要同时动 `pages/SessionPage.vue`、`components/PanelDock.vue` 与
+> `lib/channel.ts`，而它们彼此之间**没有任何目录关系可言**。按领域切之后，
+> 一个领域的页面、组件、数据访问在同一个目录，跨领域才共享的才上提到
+> `domains/shared/components/`（组件）与 `shared/`（纯函数工具）。
+> `pages/` 只剩登录 / setup / 设置这三个**不属于任何业务领域**的外壳页面。
 
 > **项目主轴的新页面（看板 / 任务详情 / 收件箱 / 项目摘要）尚未设计**——
 > 它们不在上表里，因为 UIUX 会重做（`PRODUCT.md` §3.3 / §3.7 / §5.4 只定行为，不预设页面结构）。
+> 实现时落在 `packages/web/src/domains/project/`（目录已留好，当前为空）。
 
 ### 9.1 焦点栈是本规范的核心机制
 

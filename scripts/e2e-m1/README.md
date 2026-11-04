@@ -89,9 +89,9 @@ TMPDIR=/tmp/opencode bash scripts/e2e-m1.sh   # 换临时目录根（默认 /tmp
 
 面板参数与前端**逐字一致**（这是断言的一部分）：
 
-- terminal：`{"cwd": <会话路径>, "cols": 80, "rows": 24}` — `packages/web/src/pages/SessionPage.vue:354`
-- files：`{}` — `packages/web/src/pages/SessionPage.vue:354`（工作区根由 Hub 按会话补）
-- exec：`{"command": …, "args": […], "cwd": ""}` — `packages/web/src/pages/SessionPage.vue:1204`
+- terminal：`{"cwd": <会话路径>, "cols": 80, "rows": 24}` — `packages/web/src/domains/session/SessionPage.vue:648`
+- files：`{}` — 同一个 `hub.handle(key, { connector: panel, params: … })` 调用点，`panel !== 'terminal'` 时走 `{}`（`packages/web/src/domains/session/SessionPage.vue:648`）；工作区根由 Hub 按会话补
+- exec：`{"command": …, "args": […], "cwd": ""}` — `runCommand()` 里的 `hub.handle(key, { connector: 'exec', params: … })`（`packages/web/src/domains/session/SessionPage.vue:2172`）
 
 ---
 
@@ -101,7 +101,7 @@ TMPDIR=/tmp/opencode bash scripts/e2e-m1.sh   # 换临时目录根（默认 /tmp
 |---|---|---|
 | 1 `afcli run` 一条命令接入 | `/api/devices` 出现该设备且 `status=online`；supervisor + `run --worker` 两层进程都在；API 只回 `key_fingerprint`、无密钥字段 | 自动 |
 | 2 建会话 | `POST /api/sessions` → 201，`workspace={node_id,path}`、`state=running`；`GET /api/sessions` 里能看到 | 自动 |
-| 3 终端：从页面敲 echo / resize | ①`stty size` → `24 80`（初值从**前端源码**读出——常量 `DEFAULT_COLS/DEFAULT_ROWS`（`packages/web/src/lib/channel.ts`）或页面里的 `cols:/rows:`，读不到就拒绝运行）②`POST /resize 132x40` 后 `stty size` → `40 132` ③`/send` 敲 `echo <marker>` 后，该通道字节流里 marker 出现 **≥2 次** | 自动 |
+| 3 终端：从页面敲 echo / resize | ①`stty size` → `24 80`（初值从**前端源码**读出——常量 `DEFAULT_COLS/DEFAULT_ROWS`（`packages/web/src/shared/channel.ts`）或页面里的 `cols:/rows:`，读不到就拒绝运行）②`POST /resize 132x40` 后 `stty size` → `40 132` ③`/send` 敲 `echo <marker>` 后，该通道字节流里 marker 出现 **≥2 次** | 自动 |
 | 4 文件：浏览目录树、读文件 | 开 files 通道后 `send {"op":"list","path":"."}`，SSE 上出现 `op=list` 且 `entries` 含 `a.txt`/`src`；`{"op":"read","path":"a.txt"}` 回 `text` 含文件内容 | 自动 |
 | 5 越界被拒且错误可读 | 三种构造各发一次 `{"op":"read"}`：`../outside/secret.txt`、`/etc/hostname`、`link-outside.txt`（真符号链接指向界外）——每种都要求页面上出现一条**带原因**的拒绝信号（`channel.frame` 的 `error/code/reason`，或 `channel.error` 事件） | 自动 |
 | 6 exec：一次性命令 | `{"command":"sh","args":["-c","echo OUT; echo ERR >&2; exit 7"],"cwd":""}` → 回帧 `exit_code=7`、`stdout_b64` 解码为 `OUT`、`stderr_b64` 解码为 `ERR` | 自动 |
@@ -194,7 +194,7 @@ SIGCONT → 继续观察回到 online
   **Hub** 塞进 params（Hub 从 `session.workspace_id` 查出 `(node_id, path)`）」。
 - 实际：`crates/hub-server/src/routes/stream.rs:574` 的 `open_channel` 如今先调
   `params_with_workspace_root` 把会话工作区根**覆盖**进 params（`:874` 是那个函数），
-  而前端 files 面板发的就是 `{}`（`packages/web/src/pages/SessionPage.vue:354`）。
+  而前端 files 面板发的就是 `{}`（`packages/web/src/domains/session/SessionPage.vue:648`）。
 - 设备侧：`files` / `exec` 的 `open` 都要求 `OpenReq.workspace_root`
   （`crates/node-connector/src/connector/files.rs:193`、`crates/node-connector/src/connector/exec.rs:186`），
   缺了就直接回 `channel_error`。
@@ -205,7 +205,8 @@ SIGCONT → 继续观察回到 online
 ### 6.2 files 的取数载荷在 Hub 就被改写成了终端载荷（已修）
 
 - 页面取数走 `channel.send(JSON.stringify({op:"list",…}))`
-  （`packages/web/src/pages/SessionPage.vue:776`）→ `POST /api/channels/{id}/send`。
+  （`packages/web/src/domains/session/SessionPage.vue:993`，`terminalInput()` 里的 `handle.send(text)`）→
+  `POST /api/channels/{id}/send`。
 - 该端点把**任何**请求体包成 `{"bytes": <text>}`（`crates/hub-server/src/routes/stream.rs:851`）——
   那是 terminal connector 的载荷形状；而 files connector 只认**顶层** `op`
   （`crates/node-connector/src/connector/files.rs:219`）。
