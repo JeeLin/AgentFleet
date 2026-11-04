@@ -131,29 +131,86 @@ Hub 内存里维护一份 `node_id → 上报`，**只在心跳时更新**，路
 
 ## 3. 硬过滤：先排除，再打分
 
+**过滤顺序固定为三层**，与 `task-model.md` §4.1 是同一套（那边定义语义，这边执行）：
+
 ```text
 候选 = 所有 online 节点
-  ↓ ① 在线？            否 → 排除
-  ↓ ② 有所需 agent？     否 → 排除（该任务点名要 opencode）
-  ↓ ③ 有所需 connector？否 → 排除（要做 git diff，但这个节点没 git）
-  ↓ ④ 内存够？          否 → 排除
-  ↓ ⑤ 磁盘够？          否 → 排除
-  ↓ ⑥ 能拿到代码？      否 → 排除（git 项目要看节点能否连 origin）
+  ↓ ⓪ 任务级 allowed_devices / allowed_agents / required_capabilities？
+  ↓    否 → 排除（派活人说了算，先于一切偏好）
+  ↓ ① 项目级隔离策略通过？  否 → 排除（隔离式项目只有绑定的那台有资格）
+  ↓ ② 有所需 agent？        否 → 排除
+  ↓ ③ 有所需 connector？    否 → 排除
+  ↓ ④ 内存够？              否 → 排除
+  ↓ ⑤ 磁盘够？              否 → 排除（见 §3.2，这是最容易被写漏的一条）
+  ↓ ⑥ 能拿到代码？          否 → 排除
+  ↓ ⑦ 该绑定是否已有任务在跑？是 → 排除（默认串行，见 §3.3）
 得分 → 排序 → 选第一名
 ```
 
-**过滤器是硬的**：不满足就出局，不靠高分补偿。
-能力不够的设备再闲也不能用。
+**过滤器是硬的**：不满足就出局，不靠高分补偿。能力不够的设备再闲也不能用。
+
+> **⓪ 必须在 ①②③ 之前**：如果先按负载挑出「最闲的那台」再检查 `allowed_*`，
+> 拒绝就变成了「挑错了再重挑」——`allowed_*` 在语义上从「约束」降级成「偏好」。
 
 ### 3.1 「能拿到代码」这一条容易漏
 
 任务说「去跑这个仓库的测试」，但那台设备：
 
-- **本地没有这个仓库** → 要么从 origin clone，要么从 Hub CAS 拉快照
-- **连不上 origin**（离线内网、公司墙） → 只有 Hub mirror 或已有快照可用
+- **本地没有这个仓库** → 从 Hub `fetch`（Hub 就是那个远端，见 `project-and-snapshot.md` §7）
+- **连不上 origin**（离线内网、公司墙） → 由 **Hub** 去拉上游（镜像式），节点不直连 origin
 
 所以过滤时要问的是「**这台设备能不能拿到代码**」，而不是「它有没有这个目录」。
-需要预判的话，§4.2 有一票否决的 `pinned` 机制。
+
+### 3.2 磁盘：硬过滤还是打分，取决于「不够会不会导致失败」
+
+**磁盘不是一个数，是两件事，必须分开**：
+
+| | 归属 | 回答 |
+|---|---|---|
+| **配额与清理策略** | 绑定 / 设备管理面 | 「这台机器上这个项目**允许多大**」 |
+| **余量参与派活** | **调度（本节）** | 「现在派过去**跑不跑得动**」 |
+
+判据只有一条：**不够会不会让任务失败。**
+
+```text
+剩余空间 − 安全余量 < worktree 基础开销   → 硬排除（⑤）
+      否则                            → 进入打分（§4.1 第 3.5 键）
+```
+
+**worktree 基础开销怎么算**（这是唯一能事前算准的量）：
+
+```text
+基础开销 = checked-out 文件总大小      ← git 能算：tree 的 blob 总大小
+         + 依赖重建体积                ← 按 lockfile 类型粗估（不是精确值）
+```
+
+**为什么必须前置成硬过滤**：剩余空间不够时，「这台机器比较闲」毫无意义——
+派过去只是**把失败推后到 20 分钟后**，而失败形态会变成 `env_broken`（磁盘满）、
+归因到设备。但真正的原因是**调度器当初不该派**。这条归因污染必须避免。
+
+**这个数诚实地说只有一半**：任务峰值（agent 会写多少临时文件、构建产物多大）
+**事前不可知**。所以：
+
+- **不自作聪明猜一个数**——编数字比不报坏得多（本项目的既有教训）。
+- 改成**执行时监控**：Execution 跑的过程中设备上报 worktree 实际占用，
+  超预算阈值 → **提前中止**并标 `disk_exhausted`（见 `task-model.md` §3），
+  而不是等它把设备写满、把整台机器拖垮。
+- 这个中止要**保留前 N 个产物做诊断**，但**不保留整个工作树**——那正是要避免的磁盘灾难。
+
+**「所有设备都被磁盘排除」不是任务失败，是 `rejected(disk_insufficient)`**：
+不产生 Execution、不占重试次数，且**必须说清是「磁盘不够」而不是「设备离线」**——
+这两种「没设备能跑」处置完全不同，一个去清理，一个去开机。
+
+### 3.3 同一绑定默认串行：这条比估算峰值更有效
+
+> **同一个 `(project, device)` 绑定，默认同一时刻只跑一个任务。**
+
+理由直接来自磁盘：worktree **不共享** `node_modules` / `target`，两个任务并行
+= 两份依赖 + 两套构建产物 + 两份构建临时文件，磁盘占用**不是翻倍，是乘上并发数**；
+而且它们的构建缓存还会互相失效。
+
+需要并行时**在绑定上显式开启**，且并发上限**按磁盘余量算，不按 CPU 算**。
+这不是全局开关——树莓派和服务器该有不同答案。
 
 ---
 
@@ -162,13 +219,18 @@ Hub 内存里维护一份 `node_id → 上报`，**只在心跳时更新**，路
 ### 4.1 排序键（依次比较，第一个不同就分出高下）
 
 ```text
-1. 用户指定 / 任务钉死     → 唯一候选，直接选，不打分
+1. 用户指定 / 任务钉死      → 唯一候选，直接选，不打分
 2. 负载（load_per_core）    → 越低越好
 3. 剩余内存                 → 越多越好
+3.5 剩余磁盘充裕度          → 越多越好（都过了 §3.2 的硬门槛之后）
 4. 「亲和」：已在该节点有工作区 → 优先
 5. 「亲和」：已装目标 agent 且版本匹配 → 优先
-6. 稳定的 tiebreak         → node_id 字典序，保证结果可预测
+6. 稳定的 tiebreak          → node_id 字典序，保证结果可预测
 ```
+
+**为什么磁盘排在负载和内存之后**：三台都够跑时，磁盘充裕度是**最弱的信号**——
+它只在「吃紧」时有意义（吃紧会中途爆），而任务失败的第一因是负载与内存。
+把磁盘排到前面会让「一台几乎没空间的空闲机器」压过「空间充裕的正常机器」。
 
 **为什么负载排在亲和前面**：让设备均衡使用。
 **为什么亲和又重要**：已经 clone 过仓库的设备省一次拉取，已经跑着的 agent 少一次冷启动。
@@ -193,30 +255,55 @@ Hub 内存里维护一份 `node_id → 上报`，**只在心跳时更新**，路
 
 ## 5. 派发与落定
 
-```text
-Hub 选定 node → 落一条 task 记录（node_id + 工作区来源，见 task-continuity §6.1）
-             → 告诉子 agent 「你在 node X，工作区 /w/task-123，任务内容是…」
-             → 子 agent 的每个动作进轨迹（session-and-trajectory §3）
-             → 完成后回报状态 + 产物按 task_id 归档（workspace-and-sync §5）
-```
-
-**状态机**（Hub 侧持久化，节点无状态）：
+> **状态机以 `task-model.md` §2 为准**（`pending / queued / running / review / done / failed`）。
+> 本节只说调度器**在派发那一步**做什么。
 
 ```text
-pending ──派发──> dispatched ──节点确认──> running ──> done
-   │                  │                      │
-   │                  └──节点拒绝─────────────┤
-   └───────────────超时 / 节点失联───────────┴──> failed
+Hub 选定 node
+  → 落一条 execution 记录（device_id + agent_id + worktree_path + base_commit）
+  → task.state = queued
+  → 告诉该 node「项目 P、起点 <commit>、worktree 里的任务内容是…」（project-and-snapshot §6）
+  → 节点校验 HEAD == base_commit？不等 → 立刻报 baseline_mismatch，不硬跑
+  → task.state = running
+  → 每个动作进轨迹（session-and-trajectory §3）
+  → 完成后 push 任务分支 → task.state = review（不是 done）
 ```
 
-- **任务状态在 Hub，不在节点**（约束：状态外置）。节点掉线，任务状态不丢。
-- 节点失联超阈值 → `failed`，可从检查点续跑（见 `task-continuity.md` §3）。
-- **重试不自动换设备**：同一任务重试应回到同一台设备（环境一致）；
-  换设备等于换环境，等于新任务。
+- **任务状态在 Hub，不在节点**（状态外置）。节点掉线，任务状态不丢。
+- **节点失联超阈值 → `failed(interrupted)`**，先试检查点续跑（`task-continuity.md` §3）。
+
+### 5.1 重试**必须换条件**，且磁盘是换设备的理由之一
+
+> **旧文写「重试不自动换设备（环境一致）」——已作废（2026-11-01）。**
+> 该说法假设「同一台设备 = 同样的环境 = 更可靠」，但实测方向相反：
+> **同样的条件下重试不会奇迹般成功**，而失败原因往往正是**那台机器的环境**
+> （`env_broken`：磁盘满、依赖装不上、工具链缺）。
+> 用户已明确要求：**失败重试时换一台设备重新调度。**
+
+| 情形 | 调度器怎么做 |
+|---|---|
+| `env_broken`（含 `disk_exhausted`） | **必须换设备**——回原机重试是把已知坏环境再试一次 |
+| `task_failed` | **换设备**（需人确认或规则放行，见 `task-model.md` §3.2） |
+| `agent_error` | **换 agent 优先于换设备**（同 agent 重启大概率同样崩） |
+| `interrupted` | **先续跑**（同设备，有检查点）；续不上才换设备 |
+| `baseline_mismatch` | 同设备**重新 fetch** 一次；再失败就换设备 |
+| `superseded` | **不重试、不换设备**——需求变了，换机器没用 |
+
+**唯一「回到同一台」的合法情形是有检查点可续**（`interrupted`），
+因为那时要保的是**现场**，不是环境。
+
+**换设备时的磁盘约束仍然生效**：新设备同样要过 §3.2 的硬门槛。
+「换一台试」不等于「换一台不管空间够不够」。
 
 ---
 
 ## 6. 数据表
+
+> **旧的 `task( ... node_id, state = pending/dispatched/running/done/failed )` 已作废（2026-11-01）。**
+> 旧模型把 `node_id` 放在 task 上、把状态压成五态——两条都与 `task-model.md` 冲突：
+> **Task 本身没有设备**（否则重试换设备变成改数据，而不是新生一次执行），
+> 状态是**六态**且 `review` 必须在。
+> 权威形状见 `task-model.md` §5；本节只列调度器**读**什么、**写**什么。
 
 ```text
 -- M0 不建 node_report 表：全量心跳摘要只落 device.capabilities / device.resources
@@ -224,19 +311,28 @@ pending ──派发──> dispatched ──节点确认──> running ──>
 -- 若将来需要冷启动时「离线设备的最后一份能力」，从 device 表读即可，
 -- 不必引入第二份存储。
 
-task(
-  id              TEXT PK,
-  session_id      TEXT,     -- 归属会话（可能为 NULL：纯后台任务）
-  parent_task_id  TEXT,     -- 子任务指向主任务（见 task-continuity §6.1）
-  node_id         TEXT,     -- 钉死或路由选定后落定
-  pinned          INTEGER,  -- 1 = 用户钉死，跳过路由
-  workspace_source TEXT,    -- head / head+dirty / snapshot（分发时用户确认）
-  state           TEXT,     -- pending/dispatched/running/done/failed
-  created_at, started_at, finished_at
+-- 调度器只写这处
+execution(
+  id, task_id,
+  device_id, agent_id,        -- 三件套，只有 execution 有
+  worktree_path, branch,
+  base_commit,                -- 本次实际起点（baseline_mismatch 的比对依据）
+  state,                      -- running / failed / succeeded
+  failure_kind, reason, evidence,
+  interrupted_by_intent, interrupt_count,
+  started_at, ended_at
 )
+
+-- 调度器推进的边（六态见 task-model §2）：pending → queued → running → failed
+task.state
+
+-- 调度器只读，每次路由现取，不落库
+心跳缓存   capabilities / resources / disk.workspace_free_mb / active_sessions
+绑定信息   binding(project_id, node_id) → path, quota, cleanup_policy, max_concurrency
 ```
 
 - `task.state` 每次流转都追加一条事件到轨迹，**不 UPDATE 覆盖历史**。
+- **路由路径读内存不读库**（§2.2）：多设备高频写会 `SQLITE_BUSY`。
 - SQLite：建库必须 `journal_mode=WAL` + `busy_timeout`。
 
 ---

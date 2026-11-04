@@ -10,7 +10,7 @@
 #   「换工具 = 替换 + 释放被换掉那个的通道」
 #
 # 这条语义的唯一证据在**设备侧**：`close_channel` 到了设备之后，
-# `crates/node-core/src/connector/terminal.rs:305` 的 `pty.close()` 会**真的杀掉
+# `crates/node-connector/src/connector/terminal.rs:305` 的 `pty.close()` 会**真的杀掉
 # 用户的 shell**。DOM 测试只能证明页面发了 `DELETE /api/channels/{id}`
 # （`deletes()` 那条 mock 断言），证明不了「设备上那条 PTY 真的没了」。
 # 所以这里起真 afhub、真 afcli、真 PTY，按页面走的那条路逐条断言：

@@ -445,35 +445,57 @@ PYEOF
 # 一段与 `unwrap_or_default` 等价的显式分支才能过闸。现在只禁静默吞错，判据见
 # `AGENTS.md`「生产代码禁 panic 铁律」里 `unwrap_or_default` 那一段。
 
-echo "== C5 原型 CSS 资产只能是转发 shim，不得再存第二份（真相源 = 生产副本）=="
-# 真相源是 `packages/web/src/styles/*.css`；原型同名文件只做一次 @import。
-# 两份逐字相同的文件会各说各话：改原型那份生产页面不变，改生产那份原型展示旧值，
-# 而两份文件头都自称「唯一真相源」——读者无从判断该改哪一份。
-shim_hits=""
+echo "== C4 源文件不得含 NUL 字节（会让 grep 类门禁在该文件上静默失明）=="
+# 为什么需要这一条：Rust 编译器**接受**源文件里的字面 NUL（它是合法 UTF-8），
+# 构建不会红；但 grep 会把整个文件判定为 binary，从此这个文件对 C2/C3 以及
+# 所有 grep 门禁**静默失明**。真实案例：`connector/git.rs` 的注释里为了描述
+# 「一个字节」写了字面 NUL，注释本身没问题，门禁却失效了。
+hits=$(python3 - <<'PYEOF'
+import glob
+bad = []
+for pat in ('crates/**/*.rs', 'packages/web/src/**/*.ts',
+            'packages/web/src/**/*.vue', 'scripts/**/*.sh'):
+    for f in glob.glob(pat, recursive=True):
+        try:
+            d = open(f, 'rb').read()
+        except OSError:
+            continue
+        if b'\x00' in d:
+            ln = d[:d.index(b'\x00')].count(b'\n') + 1
+            bad.append(f'{f}:{ln}')
+print('\n'.join(bad))
+PYEOF
+)
+if [[ -z "$hits" ]]; then ok "无 NUL 字节"; else bad "源文件含 NUL 字节（改用转义写法 \\0）："; echo "$hits" | sed 's/^/      /'; fi
+
+echo "== C5 设计 token / 组件样式的真相源存在且唯一（真身 = packages/web/src/styles/）=="
+# 真相源只有一份：`packages/web/src/styles/{tokens,components}.css`。
+#
+# 判定标准是「**有没有定义 `--af-*` 变量**」，不是文件名。理由：原型
+# （`prototype/assets/`）允许放同名转发 shim —— 只 `@import` 生产副本，
+# 自己一行变量都不定义。这种副本不会造成「两份各说各话」，反而是让原型
+# 与实现共用一套 token 的正确做法。按文件名判定会把合法 shim 误杀。
+#
+# 名字仍叫 C5，不重编号（与 AGENTS.md 约束编号同理：引用处太多，顶替即制造谎言）。
+style_hits=""
 for name in tokens.css components.css; do
-  shim="prototype/assets/$name"
   prod="packages/web/src/styles/$name"
-  if [ ! -f "$shim" ]; then
-    shim_hits="$shim_hits 缺失 $shim\n"
-    continue
-  fi
   if [ ! -f "$prod" ]; then
-    shim_hits="$shim_hits 缺失 $prod\n"
-    continue
+    style_hits="$style_hits 缺失 $prod\n"
   fi
-  if ! grep -qF "@import url(\"../../$prod\")" "$shim"; then
-    shim_hits="$shim_hits $shim 没有 @import 到 $prod\n"
-  fi
-  # shim 里再定义一次 token 变量 = 第二份真相源
-  if grep -qE '^[[:space:]]*--af-' "$shim"; then
-    shim_hits="$shim_hits $shim 仍定义 --af-* 变量（=第二份真相源）\n"
-  fi
+  # 任何同名文件：只要它自己定义了 --af-* 变量，就是第二份真相源
+  while IFS= read -r dup; do
+    [ -z "$dup" ] && continue
+    if grep -qE '^\s*--af-[a-z0-9-]+\s*:' "$dup" 2>/dev/null; then
+      style_hits="$style_hits $dup 定义了 --af-* 变量（真相源只能是 $prod）\n"
+    fi
+  done < <(find . -name "$name" -not -path "./$prod" -not -path "./node_modules/*" -not -path "./target/*" 2>/dev/null)
 done
-if [[ -z "$shim_hits" ]]; then
-  ok "原型 CSS 是转发 shim，真相源在 packages/web/src/styles/"
+if [[ -z "$style_hits" ]]; then
+  ok "设计 token / 组件样式只有一份真相源"
 else
-  bad "原型 CSS 不是转发 shim："
-  printf '%b' "$shim_hits" | sed 's/^/      /'
+  bad "设计 token / 组件样式真相源有问题："
+  printf '%b' "$style_hits" | sed 's/^/      /'
 fi
 
 echo "== C6 systemd unit 必须与 afcli 的真实契约一致 =="

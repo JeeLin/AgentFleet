@@ -21,7 +21,7 @@ v0.5.0 是**纯前端**的布局重排：全局侧栏在会话页收起、tab �
 > **换工具 = 替换当前工具 + 释放被换掉那个工具的通道**（§7.1.3）
 
 这条的唯一证据在**设备侧**：`close_channel` 到了设备之后，
-`crates/node-core/src/connector/terminal.rs:305` 的 `pty.close()` 会**真的杀掉用户的 shell**。
+`crates/node-connector/src/connector/terminal.rs:305` 的 `pty.close()` 会**真的杀掉用户的 shell**。
 DOM 测试只能证明页面发了 `DELETE /api/channels/{id}`（那是 mock 出来的 `deletes()` 断言），
 证明不了设备上那条 PTY 真的没了。所以这里起真 afhub、真 afcli、真 PTY。
 

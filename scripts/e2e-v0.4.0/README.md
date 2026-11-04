@@ -115,7 +115,7 @@ select json_extract(capabilities, '$.connectors') from device where id='<node_id
 所以「不是 git 仓库」若走错误路径，页面拿到的只是一个 code（`unsupported` / `internal`），
 **分不清「不是仓库」和「git 真的挂了」**——也就画不出中性说明。
 
-设备侧因此把它改成**正常回帧**（`crates/node-core/src/connector/git.rs` 的
+设备侧因此把它改成**正常回帧**（`crates/node-connector/src/connector/git.rs` 的
 `is_not_a_repo` 分支）：`{"op":"status","not_a_repo":true,"clean":null,…}`。
 断言 7 验的就是这件事，且**在两个层次上验**：
 

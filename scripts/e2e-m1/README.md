@@ -196,7 +196,7 @@ SIGCONT → 继续观察回到 online
   `params_with_workspace_root` 把会话工作区根**覆盖**进 params（`:874` 是那个函数），
   而前端 files 面板发的就是 `{}`（`packages/web/src/pages/SessionPage.vue:354`）。
 - 设备侧：`files` / `exec` 的 `open` 都要求 `OpenReq.workspace_root`
-  （`crates/node-core/src/connector/files.rs:193`、`crates/node-core/src/connector/exec.rs:186`），
+  （`crates/node-connector/src/connector/files.rs:193`、`crates/node-connector/src/connector/exec.rs:186`），
   缺了就直接回 `channel_error`。
 - 后果：文件面板永远是一棵空树；`exec` 面板提交命令后没有任何反应。
 - **现在**：`open_channel` 调 `params_with_workspace_root`（`crates/hub-server/src/routes/stream.rs:607`）
@@ -208,12 +208,12 @@ SIGCONT → 继续观察回到 online
   （`packages/web/src/pages/SessionPage.vue:776`）→ `POST /api/channels/{id}/send`。
 - 该端点把**任何**请求体包成 `{"bytes": <text>}`（`crates/hub-server/src/routes/stream.rs:851`）——
   那是 terminal connector 的载荷形状；而 files connector 只认**顶层** `op`
-  （`crates/node-core/src/connector/files.rs:219`）。
+  （`crates/node-connector/src/connector/files.rs:219`）。
 - 所以 `{"op":"list"}` 到设备时变成 `{"bytes":"{\"op\":\"list\"…}"}`，
   在边界检查之前就已经走岔了。当年设计上假定「二进制通道（files 读写）走各自的
   connector 载荷，不复用这条裸字节入口」，可**实际没有第二条入口**
   （`/api/channels` 只有 `send` / `resize` / `DELETE`）——那条分离是纸面上的。
-- **现在**：`/send` 按 Content-Type 分派（`crates/hub-server/src/routes/stream.rs:850` 的 `payload_kind`）——
+- **现在**：`/send` 按 Content-Type 分派（`crates/hub-server/src/routes/stream.rs:959` 的 `payload_kind`）——
   `application/json` 原样、`application/octet-stream` 包成 `{"bytes":…}`、
   其余按内容判断。files 面板走 JSON，与 terminal 的裸字节入口分开。
 

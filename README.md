@@ -1,14 +1,12 @@
 # AgentFleet
 
-个人自托管的设备 / Agent 平台 / Personal Self-Hosted Device & Agent Platform
+个人自托管的项目平台 / Personal Self-Hosted Project Platform
 
-把自己拥有的每一台设备——服务器、电脑、手机、树莓派——注册为节点；
-在一个 Web 页面里统一管理，在节点上打开终端与文件、运行 AI agent 会话，
-并按设备能力把任务分发到最合适的节点执行。
+你建一个**项目**，项目下面有**任务**，任务被派到**设备**上用 **agent** 执行，产出的代码回到项目。
+设备是你自己的——服务器、电脑、树莓派——注册成节点，**主动外联，零入站端口**。
 
-Turn every device you own—servers, PCs, phones, Raspberry Pis—into a node of one
-self-hosted fleet: manage them all in one web console, open terminals and files on any
-node, run AI agent sessions, and route tasks to the node best suited to run them.
+Create a **project**, put **tasks** on its board, and let them run on **agents** on your own
+**devices**—servers, PCs, Raspberry Pis—each dialing **out** to the Hub. **No inbound ports.**
 
 > **单用户 · 自托管 · 数据自主掌控 · 零入站端口 · 深色优先**
 > **Single-user · Self-hosted · Data sovereignty · Zero inbound ports · Dark-mode first**
@@ -20,52 +18,44 @@ node, run AI agent sessions, and route tasks to the node best suited to run them
 
 ## 为什么 / Why
 
-- **一个界面管全部设备**，不必逐台 SSH。**One console for every device**—no per-device SSH.
-- **公网与内网同一个服务**，节点反向外联，**零端口暴露**。**One service** for public and LAN, nodes dial out, **zero port exposure**.
+- **做事从项目进，管理从设备进**。项目下面有看板、管家、历史；设备只是执行面。
+  **Work starts from a project**; devices are the execution surface, not the entry point.
+- **公网与内网同一个服务**，节点反向外联，**零端口暴露**。
+  **One service** for public and LAN, nodes dial out, **zero port exposure**.
 - **数据自主掌控**，完全**自托管**。**Data sovereignty**—fully **self-hosted**.
-- **任务按设备能力分发**，交给最合适的节点。**Tasks routed by capability** to the best-fit node.
+- **任务按项目约束 + 设备能力分发**，交给真正能跑的节点；**跑不了就停在待办并说明原因，不降级凑数**。
+  **Tasks routed** by project constraints then device capability—and **parked with a reason**
+  rather than dispatched to a node that can't do it.
+
+> **产品主轴是「项目」，不是「设备 / agent」。** 设备与 agent 管理保留，但它是**管理面**。
+> 「设备 / agent 平台」的旧定位已作废，理由见 `docs/DECISIONS.md` D17。
 
 ---
 
-## 第一版范围 / First Release Scope
+## 产品形状 / Shape
 
-> 「第一版」指**首个可用版本（里程碑 v0.1.0–v0.6.0）**。v0.7.0 起为第二阶段。
-> "First release" = the first usable version (v0.1.0–v0.6.0). v0.7.0 onward is the next stage.
+```text
+Project ──┬── Butler（管家：接意图 / 建派任务 / 督进度 / 写总结）
+          ├── Task 看板（默认视图）
+          └── Binding ──→ Device ──→ Agent
+```
 
-> **当前进度 / Current status：v0.1.0–v0.3.0 已完成，v0.4.0（会话内 git 面板，只读）进行中。**
-> v0.2.0 交付的是**会话容器**（页面级：工作区 + 终端 / 文件 / exec 面板）与 Web 控制台。
-> v0.3.0 把 ACP 接进来：设备上报 agent 运行时、**扫描 + 配置**（agent 由用户自己装，Hub 不代装）、选设备上的 agent 对话、轨迹落库。
-> 下面每项后面的版本号是它真正落地的里程碑——**清单描述的是第一版全貌，不是现在就能用的东西**。
-> Shipped today: v0.1.0 through v0.3.0; v0.4.0 (read-only git panel) is in progress. The version tag on each line is the milestone that actually delivers it.
-
-- **设备接入** `v0.1.0`：一条 CLI 命令注册，单条 WebSocket 主动外联；心跳即能力上报。One CLI command, one outbound WebSocket, heartbeats carry capabilities.
-- **节点身份与状态** `v0.1.0`：Hub 签发 `node_id`，设备密钥对认证，不用静态共享 token。Hub-issued `node_id`, key-pair auth, no static shared token.
-- **Web 控制台与会话面板** `v0.2.0`：设备 / 会话列表与工作台；终端（PTY，含 resize）/ 文件浏览 / 一次性 exec，全部绑定会话工作区 `(node_id, path)`，**零入站端口**。Devices and sessions, a workbench with terminal (PTY, resizable), file browser and one-shot exec—all bound to the session workspace, **zero inbound ports**.
-- **AI agent 管理与对话** `v0.3.0`：各类 agent 统一配置、启动、对话。Configure, launch and chat with any agent in one place.
-- **对话与动作流** `v0.3.0`：dsh 式 Trajectory 逐条可查，列出本次改动的**文件**与 diff。A dsh-style trajectory, step by step, plus changed files and diffs.
-- **会话内 git 面板** `v0.4.0`：完整面板集补齐第三个（终端 / 文件 / git）。The third panel (git) completes the set.
-- ~~**Hub 一键安装 agent**~~ **已撤销（2026-10-26）**：agent 由用户自己在设备上装，Hub 只**扫描**节点上装了什么并保存**启动配置**。让 Hub 往设备写可执行文件等于「一处配置错、全体设备执行未核对代码」。Agent install from the Hub was **dropped**: agents are installed on the device by the user, and the Hub only **scans** what is present and stores launch configuration.
-
-> **2026-10-26 范围裁定**：原第一版里的「工作区供料与统一配置」与「产物归档」**整体撤销**——
-> 产品当前只做**每台设备内自己的对话**，不做任务分发，因此没有项目文件传输的需求。
-> 相关的 CAS / manifest 差分 / A-B-C-D 四档传输规格留在 `docs/architecture/workspace-and-sync.md`
-> 作决策记录（相关小节已标「已撤销」）。
->
-> **Scope decision, 2026-10-26**: the former "workspace feeding / unified config" and
-> "artifact archiving" items are **retired** — the product only does per-device conversations,
-> so there is no project-file transfer surface. The CAS / manifest-diff / four-tier specs remain
-> in `docs/architecture/workspace-and-sync.md` as a decision record (marked as retired).
+- **看板是默认视图**：进项目先看到任务，不是仓库浏览器。
+- **任务六态** `pending / queued / running / review / done / failed`。
+  **失败必须留「为什么」**，停在失败列不自动回待办；**重试必须换条件**（换设备 / 换 agent / 换起点）。
+- **项目三形态**：中心式（Hub 持有仓库）/ 隔离式（代码不出设备）/ 镜像式。
+- **外部 issue 只做单向导入导出**；Hub 内用**收件箱**收待决策的事，不用你去看 issue。
 
 > 完整范围与用户流程见 `docs/PRODUCT.md` §3。
-> Full scope and user flows: `docs/PRODUCT.md` §3.
 
 ---
 
 ## 设计基调 / Design Tone
 
 - **深色优先、等宽字体、高信息密度、键盘优先**。Dark-mode first, monospace, high density, keyboard-oriented.
-- **终端 / 文件 / git 是会话内的面板**，易用即可。**Panels inside a session**—usable is enough.
-- **对话与动作流对标 dsh**：逐条可查，改动可见。Borrow dsh: every step inspectable, every change visible.
+- **终端 / 文件 / git 是会话内的面板**，进会话才建立、退出即释放。**Panels inside a session.**
+- **不编进度百分比**：agent 不上报进度，报**时长 + 最后一次动作 + 是否卡住**。
+  **No invented progress bars**—report elapsed time, last action, and whether it's stuck.
 
 ---
 
@@ -94,8 +84,6 @@ mise run build && mise run start
 
 # 设备接入（在设备上跑，不是 Hub 上）
 afcli run            # 前台阻塞；想脱离终端请用 systemd（见下）或 tmux
-mise run cli         # 开发用：debug 构建，数据落在 data/node
-mise run cli-log -- -n 50
 ```
 
 ### 设备上跑成服务（systemd）
@@ -155,16 +143,34 @@ The two sides default differently — don't conflate them.
   overridable with `AFCLI_DATA_DIR`. `mise run cli` points it at `data/node`.
   Without the override that global identity is shared by every Hub on the machine.
 
+> **`agent` 由用户自己装，Hub 不代装**，只扫描节点上装了什么并保存启动配置——
+> 让 Hub 往设备写可执行文件等于「一处配置错、全体设备执行未核对代码」。
+> **Agents are installed by you on the device**; the Hub only scans and stores launch config.
+
+---
+
+## 现在到哪一步了 / Where It Stands
+
+v0.1.0–v0.6.0 已完成（设备接入 → 会话容器 → ACP 对话 → git 面板 → 缺陷清算 → 执行起点与产出概览）。
+下一步是把这些挂到**项目**这个主轴上（Task 看板、多执行、管家、收件箱）——
+**这是重挂载，不是重写**：已有的会话、轨迹、worktree 机制是底座，差的只是归属关系。
+里程碑见 `docs/DEVELOPMENT.md` §3。
+Shipped: v0.1.0–v0.6.0. Next: remounting them onto projects (board, executions, butler, inbox)—
+a **re-hang**, not a rewrite.
+
 ---
 
 ## 文档 / Documentation
 
-- `docs/PRODUCT.md` — 产品功能边界、用户可见流程、术语表
-- `docs/DEVELOPMENT.md` — 技术栈、crate 结构、里程碑总览
-- `docs/architecture/` — 架构决策目录
-- `AGENTS.md` — 项目约束与协作约定
-- `CHANGELOG.md` — 变更日志
-- `docs/BUGS.md` — 缺陷池
+| 想知道 | 去哪 |
+|---|---|
+| 产品要做什么、不做什么 | `docs/PRODUCT.md` |
+| 为什么这么定、否决了什么方案 | `docs/DECISIONS.md` |
+| 具体机制怎么运转 | `docs/architecture/` |
+| 里程碑、技术栈、质量门禁、审查清单 | `docs/DEVELOPMENT.md` |
+| 已知缺陷 | `docs/BUGS.md` |
+| 项目约束与协作约定 | `AGENTS.md` |
+| 变更日志 | `CHANGELOG.md` |
 
 ---
 

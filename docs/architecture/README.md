@@ -1,11 +1,17 @@
 # 架构总览 / Architecture Overview
 
-> 决策细节见：`ai-gateway.md`（**推理主线：AI Gateway**）、`session-and-trajectory.md`（会话与轨迹）、
-> `task-continuity.md`（任务连贯性）、`workspace-and-sync.md`（工作区供料与同步）、
-> `scheduling.md`（任务分发调度）、`security-and-lifecycle.md`（安全与生命周期）。
-> Detail lives in: ai-gateway.md, session-and-trajectory.md, task-continuity.md,
-> workspace-and-sync.md, scheduling.md, security-and-lifecycle.md.
+> 决策细节见：**`project-and-snapshot.md`（产品主轴：项目与绑定）**、`butler.md`（管家）、
+> `task-model.md`（任务与执行）、`session-and-trajectory.md`（会话与轨迹）、
+> `ai-gateway.md`（推理主线）、`task-continuity.md`（断点续跑）、
+> `workspace-and-sync.md`（托管配置与同步）、`scheduling.md`（调度）、
+> `security-and-lifecycle.md`（安全与生命周期）。
+> Detail lives in: project-and-snapshot.md, butler.md, task-model.md, session-and-trajectory.md,
+> ai-gateway.md, task-continuity.md, workspace-and-sync.md, scheduling.md, security-and-lifecycle.md.
 > `inference.md` is archived local-inference research, not the primary direction.
+
+> **2026-11-01 产品主轴改版**：产品从「设备 / agent 平台」改为「**项目平台**」，
+> 项目 → 管家 / 任务看板 / 历史 / 绑定 → 设备 → agent。旧裁定「不做任务分发」已作废。
+> 见 `PRODUCT.md` §1/§3 与 `DECISIONS.md` D17。
 
 ---
 
@@ -153,8 +159,13 @@ agent 在节点上用自己的工具读写文件，**不经过我们的 files co
 项目文件（按 `(node_id, path)` 物化）、技能/配置（按 `(kind, version)` 铺成托管覆盖层）、
 产物（按 `artifact_id` 归档）。
 
-git 项目走主路径：Hub 只发 commit 引用，节点自己去 origin 拉，**大文件不进 WebSocket**。
-~~非 git 项目走 manifest 差分 + 内容哈希跳过。~~ **已撤销（2026-10-26）**：项目文件不在设备间传输。
+git 项目的主路径（**2026-11-01 改写，以此为准**）：**Hub 自己就是那个远端**。
+Hub 持有裸仓库，节点从 Hub `fetch` 增量（packfile 协商，不是按文件拉）；
+镜像式项目由 **Hub** 去拉上游，节点不直连 origin——内网 / 公司墙的设备也能干活。
+大文件不走 WebSocket（bulk 走 git 自己的 HTTP/Smart 传输）。详见 `project-and-snapshot.md` §3/§7/§8。
+
+> 原文「Hub 只发 commit 引用，节点自己去 origin 拉」**已作废**（前提是「设备连得上 origin」，
+> 而隔离式 / 内网场景下这个前提不成立）。
 
 ## 5. 会话与轨迹
 

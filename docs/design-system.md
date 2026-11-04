@@ -1,11 +1,14 @@
 # 设计规范 / Design System
 
-> AgentFleet Web 控制台的设计语言。**这是最高优先级产出**——原型会变，规范不该变。
+> AgentFleet Web 控制台的设计语言。**这是最高优先级产出**——页面会变，规范不该变。
 > M1 实现阶段（Vue 组件）照 §3 的组件契约写，前端照 §4 的交互范式接线。
 >
 > 规范正文只讲**是什么与为什么**；具体取值在 `packages/web/src/styles/tokens.css`
-> （原型那份 `prototype/assets/tokens.css` 只是转发 shim），
-> 可视化核对在 `prototype/components.html`，双击即可打开，零依赖零构建零网络请求。
+> （唯一真相源，本仓库只此一份）。
+>
+> **原型已删除（2026-11-03）**：`prototype/` 下那 10 页静态 HTML 与 4 份资源
+> 曾用作设计阶段的核对页，现已整体移除——它们描述的是「设备 / 会话」主轴的界面，
+> 与项目主轴不一致，留着只会误导。**可视化核对改由真实前端页面承担**。
 >
 > 决策背景见 `PRODUCT.md`（功能边界）与 `docs/architecture/`（协议与数据模型）。
 > 范围纪律：本规范只描述 M1 范围内的界面，ACP 会话、git 面板、任务分发、AI Gateway
@@ -59,8 +62,7 @@
 
 ## 2. 设计 token
 
-全部定义在 `packages/web/src/styles/tokens.css`（129 个变量），那是被 grep 检查的唯一真相源；
-原型那份 `prototype/assets/tokens.css` 只是转发 shim（`@import` 生产副本），不再抄一份内容。
+全部定义在 `packages/web/src/styles/tokens.css`（129 个变量），那是被 grep 检查的唯一真相源。
 下面只写**判断依据**。
 
 ### 2.0 三条纪律
@@ -237,8 +239,7 @@
 
 ## 3. 基础组件契约
 
-22 组组件，全部在 `packages/web/src/styles/components.css`（22 节：§0 复位 + §1–21 组件）；
-原型那份 `prototype/assets/components.css` 同样是转发 shim。
+22 组组件，全部在 `packages/web/src/styles/components.css`（22 节：§0 复位 + §1–21 组件）。
 状态一律用 `data-*` 属性表达（`data-state` / `data-open` / `data-inert` / `data-tone` /
 `data-level`），**不用 JS 加 class**——class 是样式实现，`data-*` 是契约。
 
@@ -728,12 +729,12 @@ Hub 已初始化，各给**下一步命令**。
   留一个灰掉的导航项等于在导航里承诺一件本阶段做不到的事。
 - ~~`/artifacts`~~、~~`/devices/:id`~~ —— M2，结构已定但不留页面。
 
-**验证方法**（这四条是可 grep 的）：
+**验证方法**（这三条是可 grep 的，改指真实前端——原型已删除，别再对着 `prototype/` 跑）：
 
 ```bash
-grep -rn 'href="[^"]*workspace' prototype/    # 零命中
-grep -rn 'href="[^"]*/w/'        prototype/    # 零命中
-grep -n 'panel' prototype/devices.html         # 零命中（面板只在会话里）
+grep -rn "path: '/workspace" packages/web/src/router.ts   # 零命中
+grep -rn "'/w/" packages/web/src/                        # 零命中
+grep -rn 'panel' packages/web/src/pages/DevicesPage.vue   # 零命中（面板只在会话里）
 ```
 
 ### 5.3 页面清单
@@ -1069,7 +1070,7 @@ Mock 形状 = 将来 API 的形状。前端只读。
 #### 7.1.3 换工具会释放旧通道（已知降级，不缓解）
 
 **行为**：换工具（点「＋」候选 / `[` / `]`）→ 被换掉那个工具的通道**释放**。
-对终端这条路径，释放 = `pty.close()`（`crates/node-core/src/connector/terminal.rs:305`），
+对终端这条路径，释放 = `pty.close()`（`crates/node-connector/src/connector/terminal.rs:305`），
 即**真的杀掉 shell**。
 
 **这是相对 v0.4.0 的行为降级**：v0.4.0 多面板并存，来回切不丢终端输出。
@@ -1386,45 +1387,56 @@ Mock 形状 = 将来 API 的形状。前端只读。
 
 ---
 
-## 9. 原型索引
+## 9. 实现索引
 
-`prototype/index.html` 是入口。全部零依赖、双击即开、无网络请求。
+> **原型目录已于 2026-11-03 整体删除。** 原 `prototype/` 下 10 页静态 HTML 与 4 份资源
+> （`index` / `components` / `sessions` / `new-session` / `session` / `devices` / `agents` /
+> `settings` / `login` / `setup` + `panels/{terminal,files}` + `assets/{tokens.css,
+> components.css,keynav.js,app.js}`）曾是设计阶段的核对页，**现在只存在于 git 历史里**
+> （`git log -- prototype/`）。删掉的理由：
+>
+> - 它们画的是「设备 / 会话」主轴的界面，而产品主轴已改为**项目**（`DECISIONS.md` D17），
+>   留着会让人照着旧信息架构实现；
+> - 它们与生产前端是**两份手抄的键位表与两套页面壳**，已经漂移过（见下 §9.1 末段），
+>   而没有任何门禁能发现；
+> - 用户将重新做 UIUX 设计，旧原型是**需要先清掉的前置**，不是参考。
+>
+> **现在唯一的核对对象是真实前端页面**：`packages/web/src/`。
+> 下面这张表是「设计规范条目 → 生产文件」的映射，即原型索引的替代物。
 
-| 文件 | 内容 | 实现侧对应文件 |
-|------|------|------|
-| `docs/design-system.md` | 本文件 | —（规范本体） |
-| `prototype/index.html` | 总览：IA、四条交互规则、色板、页面索引 | —（总览页，实现侧无对应页面） |
-| `prototype/components.html` | **组件陈列页**：组件四态 + 尺寸档 + 禁用场景 | 逐个组件在 `packages/web/src/components/` |
-| `prototype/assets/tokens.css` | token 定义（129 个变量，每个带理由注释） | `packages/web/src/styles/tokens.css`（**真相源**；原型这份是转发 shim） |
-| `prototype/assets/components.css` | 组件样式（22 节，所有原型页共用） | `packages/web/src/styles/components.css`（**真相源**；原型这份是转发 shim） |
-| `prototype/assets/keynav.js` | **焦点栈 + 键位表**（`?` 面板由它渲染）——交互模型的唯一真相源 | `packages/web/src/lib/keynav.ts`（+ `lib/shell-keys.ts`、`lib/focus.ts`） |
-| `prototype/assets/app.js` | 外壳注入、全站唯一一份 mock、Toast / Modal / 越界反馈 | `packages/web/src/App.vue`（外壳与导航）、`packages/web/src/page-chrome.css`（页面级样式）；数据改走 `packages/web/src/lib/api.ts` |
-| `prototype/session.html` | **会话工作台（重心）**——焦点栈、面板坞、轨迹抽屉、状态模拟 | `packages/web/src/pages/SessionPage.vue` + `components/PanelDock.vue` / `TerminalPanel.vue` / `FilesPanel.vue` / `TrajDrawer.vue` / `TabBar.vue` |
-| `prototype/sessions.html` | 会话列表：进行中 + 历史 | `packages/web/src/pages/SessionsPage.vue` + `components/SessionTable.vue` |
-| `prototype/new-session.html` | 三步建会话，路径锁定 | `packages/web/src/pages/NewSessionPage.vue` |
-| `prototype/devices.html` | 设备列表：三态、能力、资源余量、抽屉详情 | `packages/web/src/pages/DevicesPage.vue` + `components/DeviceTable.vue` |
-| `prototype/agents.html` | Agent 目录：只读聚合，与会话的区别 | `packages/web/src/components/AgentCatalog.vue`（挂在设备页的 `?view=agents` 分段；不再是独立页面，见 §5.1） |
-| `prototype/settings.html` | 设置（M2，控件全禁用） | `packages/web/src/pages/SettingsPage.vue` |
-| `prototype/login.html` / `setup.html` | 认证：五种 / 三种错误态分开呈现 | `packages/web/src/pages/LoginPage.vue` / `SetupPage.vue` + `components/LoginPrompt.vue` |
-| `prototype/panels/terminal.html` | terminal 面板：四态、尺寸协商、丢帧、断线不冻结 | `packages/web/src/components/TerminalPanel.vue` + `lib/channel.ts` |
-| `prototype/panels/files.html` | files 面板：越界四路证据、大文件结论、键盘操作整棵树 | `packages/web/src/components/FilesPanel.vue` + `lib/files-path.ts` |
-| ~~workspace.html~~ | **已删除**（本仓库无此文件）——见 §7.0 的否决项 | — |
-| ~~device.html~~ | **已删除**（本仓库无此文件）——M2，不留占位页（§5.2） | — |
-| ~~artifacts.html~~ | **已删除**（本仓库无此文件）——M2，不留占位页（§5.2） | — |
+| 规范条目 | 生产文件（唯一真相源） |
+|---|---|
+| 本文件（判断依据） | `docs/design-system.md` |
+| §2 token 定义（129 个变量） | `packages/web/src/styles/tokens.css` |
+| §3 组件样式（22 节） | `packages/web/src/styles/components.css` |
+| §4 交互范式 / 焦点栈 / 键位表 | `packages/web/src/lib/keynav.ts` + `lib/focus.ts` + `lib/shell-keys.ts` |
+| 外壳与导航 | `packages/web/src/App.vue` + `page-chrome.css` | 
+| 页面级数据访问 | `packages/web/src/lib/api.ts` |
+| 会话工作台 | `pages/SessionPage.vue` + `components/PanelDock.vue` / `TerminalPanel.vue` / `FilesPanel.vue` / `TrajDrawer.vue` / `TabBar.vue` |
+| 会话列表 | `pages/SessionsPage.vue` + `components/SessionTable.vue` |
+| 新建会话 | `pages/NewSessionPage.vue` |
+| 设备列表 | `pages/DevicesPage.vue` + `components/DeviceTable.vue` |
+| Agent 目录 | `components/AgentCatalog.vue`（挂在设备页 `?view=agents` 分段，不是独立页面，见 §5.1） |
+| 设置 | `pages/SettingsPage.vue` |
+| 登录 / setup | `pages/LoginPage.vue` / `SetupPage.vue` + `components/LoginPrompt.vue` |
+| terminal / files 面板 | `components/TerminalPanel.vue` + `lib/channel.ts`；`components/FilesPanel.vue` + `lib/files-path.ts` |
+
+> **项目主轴的新页面（看板 / 任务详情 / 收件箱 / 项目摘要）尚未设计**——
+> 它们不在上表里，因为 UIUX 会重做（`PRODUCT.md` §3.3 / §3.7 / §5.4 只定行为，不预设页面结构）。
 
 ### 9.1 焦点栈是本规范的核心机制
 
-`keynav.js` 是三样东西的唯一真相源，值得单独记一笔，因为
-**「原型能跑」和「键盘用户能用」之间，差的全是这一份文件**：
+`lib/keynav.ts` 与 `lib/focus.ts` 是这些机制的**唯一真相源**，值得单独记一笔，因为
+**「页面能跑」和「键盘用户能用」之间，差的全是这两个文件**：
 
 | 机制 | 位置 | 解决什么 |
 |------|------|---------|
-| `AF.focusPush/Pop` | keynav.js §3 | 焦点归最内层容器；背后 inert；关闭一定还焦点 |
-| `AF.focusablesIn` | keynav.js §4 | 每次 Tab 重算，不缓存快照 |
-| `AF.register` | keynav.js §2 | act 必须在表里；不许注册两次 |
-| `AF.unimplemented` | keynav.js §2 | 表里有、没人实现的项 → 控制台报警 |
-| `AF.renderHelp` | keynav.js §6 | `?` 面板**由表渲染**，文档与实现不可能漂移 |
-| `AF.focusMain` | keynav.js §9 | 跳转后的落点 |
+| `focusPush` / `focusPop` | `lib/focus.ts` | 焦点归最内层容器；背后 `inert`；关闭一定还焦点 |
+| `focusablesIn` | `lib/focus.ts` | 每次 Tab 重算，不缓存快照 |
+| `register` | `lib/keynav.ts` | act 必须在 `KEYS` 表里；不许注册两次 |
+| `unimplemented` | `lib/keynav.ts` | 表里有、没人实现的项 → `?` 面板标注「未实现」 |
+| `?` 帮助面板渲染 | `lib/keynav.ts`（由 `KEYS` 渲染） | **由表渲染**，文档与实现不可能漂移 |
+| 跳转后的落点 | `lib/shell-keys.ts` | 跳过去焦点落在主区，不是停在导航 |
 
 **这六个是同一条纪律的六个切面**：焦点与键位不许分散在页面里。
 上一版 7 条焦点缺陷的共同根因就是「焦点散在各页面各写各的，无统一所有权模型」。

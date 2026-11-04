@@ -35,8 +35,6 @@ const DESIGN_DOC = resolve(REPO_ROOT, 'docs/design-system.md')
 // 它的数字变了不该让前端门禁变红，反之我们的资产漂了就该红。
 const TOKENS_CSS = resolve(REPO_ROOT, 'packages/web/src/styles/tokens.css')
 const COMPONENTS_CSS = resolve(REPO_ROOT, 'packages/web/src/styles/components.css')
-/** 原型那份手抄的键位表。它不是真相源，但它的漂移必须被看见（见下面那组）。 */
-const PROTOTYPE_KEYNAV = resolve(REPO_ROOT, 'prototype/assets/keynav.js')
 
 function keyEvent(key: string, init: KeyboardEventInit = {}): KeyboardEvent {
   return new KeyboardEvent('keydown', { key, cancelable: true, ...init })
@@ -107,88 +105,6 @@ describe('KEYS 与设计文档一致（grep 校验，不靠人眼）', () => {
   })
 })
 
-describe('原型 keynav.js 与真相源的漂移（没有生成器，靠断言看着）', () => {
-  /**
-   * 原型那份表是**手抄**的（`prototype/*.html` 引不了 TS 与 SFC），它长这样：
-   * `{ k: 'g s', act: 'nav:sessions', desc: '会话列表' },`
-   *
-   * 一份键位在两个文件里各写一遍 = 两个 act 共用一条键位描述的同一类错误，
-   * 只是它的报错时机从「构建期抛错」退到了「用户按下去没反应」。
-   */
-  function prototypeBindings(): Array<{ keys: string; act: string }> {
-    const js = readFileSync(PROTOTYPE_KEYNAV, 'utf-8')
-    return [...js.matchAll(/\{ k: '(.+?)',\s*act: '([^']+)'/g)].map((m) => ({
-      // `dock:toggle` 在原型源码里写成 `'\\'`（JS 字符串字面量转义），
-      // 而生产 `KEYS` 里是 `'\'`——比的是键面不是源码，所以这里解一层。
-      keys: (m[1] as string).replace(/\\\\/g, '\\'),
-      act: m[2] as string,
-    }))
-  }
-
-  /**
-   * 两边共有的 act 的键位描述必须逐字相同。
-   *
-   * 原型把 `↑ ↓` 写成一栏、生产拆成 `['↑','↓']` 再 `join(' ')`，所以比较时
-   * 两边都归一成「空格连接的键位串」。
-   */
-  it('两边共有的 act，键位描述相同（改了生产忘记同步原型 → 红）', () => {
-    const proto = prototypeBindings()
-    expect(proto.length, '原型键位表解析出来是空的——正则或文件布局变了').toBeGreaterThan(0)
-
-    const mine = new Map<string, string[]>()
-    for (const k of flatKeys()) {
-      const list = mine.get(k.act) ?? []
-      list.push(k.keys.join(' '))
-      mine.set(k.act, list)
-    }
-
-    const protoKeys = new Map<string, string[]>()
-    for (const b of proto) {
-      const list = protoKeys.get(b.act) ?? []
-      list.push(b.keys)
-      protoKeys.set(b.act, list)
-    }
-
-    for (const [act, mineKeys] of mine) {
-      const theirs = protoKeys.get(act)
-      if (!theirs) continue
-      expect(
-        [...theirs].sort(),
-        `act ${act} 的键位在两边不同：生产 ${mineKeys.join(' / ')}、原型 ${theirs.join(' / ')}`,
-      ).toEqual([...mineKeys].sort())
-    }
-  })
-
-  /**
-   * 原型多出来的 act **恰好**是已登记的那两条。
-   *
-   * 用差集的**精确相等**而不是 `not.toContain`：`nav:new-session` 与
-   * `nav:agents` 已从导航并出（design-system §5.1），它们是历史欠账、不是
-   * 新的漂移；而**任何第四条**都是新欠账，测试必须红着让人去改原型。
-   */
-  it('原型多出来的 act 恰好是 nav:new-session 与 nav:agents 两条历史欠账', () => {
-    const mine = new Set(acts())
-    const extra = new Set(prototypeBindings().map((b) => b.act).filter((a) => !mine.has(a)))
-    expect([...extra].sort()).toEqual(['nav:agents', 'nav:new-session'])
-  })
-
-  /**
-   * `PREFIX` 是第二张表，与 `KEYS` 同源同理，也抄了两遍。
-   *
-   * 生产那份是从 `KEYS` 推导的（`keynav.ts` 的 `PREFIX`），原型那份是手写的
-   * 字面量对象——所以它能单独漂。这里只锁「原型多出来的目标同样是那两条」。
-   */
-  it('原型 PREFIX 多出来的目标与 KEYS 的差集一致（两张表不许各自漂）', () => {
-    const js = readFileSync(PROTOTYPE_KEYNAV, 'utf-8')
-    const block = /var PREFIX = \{([\s\S]*?)\};/.exec(js)?.[1]
-    expect(block, '原型 keynav.js 里找不到 `var PREFIX = {`').toBeTruthy()
-    const targets = [...(block as string).matchAll(/'([a-z]+:[a-z-]+)'/g)].map((m) => m[1] as string)
-    expect(targets.length).toBeGreaterThan(0)
-
-    const extra = [...new Set(targets)].filter((a) => !hasAct(a)).sort()
-    expect(extra).toEqual(['nav:agents', 'nav:new-session'])
-  })
-})
 
 describe('token / 组件数与设计文档一致', () => {
   it('tokens.css 的变量数与 §1 的「129 个变量」一致', () => {

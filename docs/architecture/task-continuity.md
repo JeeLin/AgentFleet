@@ -100,11 +100,15 @@ agent 的每个动作（含它自己 spawn 的子会话里的动作）同样进�
 
 | 模式 | 内容 | 何时用 |
 |---|---|---|
-| **`HEAD`** | 主工作区当前 commit | 默认；最轻，节点自己去 origin 拉 |
-| **`HEAD` + 工作区** | 当前 commit + 主工作区的未提交改动 | 需要带上正在改的东西 |
-| **`snapshot`** | CAS 里的完整树快照 | 项目不是 git，或明确要一个干净副本 |
+| **`HEAD`** | 主工作区当前 commit | 默认；最轻，从 **Hub** `fetch`（Hub 就是远端，见 `project-and-snapshot.md` §7） |
+| **`HEAD` + 工作区改动** | 当前 commit + 主工作区的未提交改动 | 需要带上正在改的东西 |
+| **`diff 引用`** | 直接指定 `base_commit`，任务产出 = `base_commit..HEAD` | 项目主轴下的默认形态（`task-model.md` §4「失败面板」与 §5「验收面板」都按这个 diff 判定） |
 
-- git 项目：用 worktree 共享 object store，不复制目录。
-- **非 git 项目**：只有 `snapshot` 可用，每个子任务一个独立目录（无 object store 可共享），
-  冲突交给主 agent 按轨迹人工/agent 裁决，不做自动三方合并。
-- 产物按 `task_id` 归档（见 `workspace-and-sync.md`），跨设备续跑时从 Hub 取。
+> **旧文的 `snapshot`（CAS 里的完整树快照）已作废**：CAS 一处都不剩，项目主轴下
+> 快照身份就是 commit。**非 git 项目在项目主轴下不支持**——项目实体本身就是一个 git 裸仓库。
+
+- git 项目：**固定目录 + worktree**，共享 object store，不复制目录（`project-and-snapshot.md` §5）。
+- **非 git 项目**：**项目主轴下不支持**（项目实体 = git 裸仓库）。旧文关于「`snapshot` + 独立目录」的
+  说法随 CAS 一起作废。
+- 产物**不另设归档面**：设备 `push` 一条任务分支回 Hub，那就是产出
+  （`project-and-snapshot.md` §6.4）；跨设备续跑从 Hub 的 commit 重建工作区。
