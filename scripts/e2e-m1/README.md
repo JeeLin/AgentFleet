@@ -79,10 +79,10 @@ TMPDIR=/tmp/opencode bash scripts/e2e-m1.sh   # 换临时目录根（默认 /tmp
 |---|---|---|
 | 设密码 | `POST /setup` + `x-setup-token`（读 `<data>/setup-token.txt`） | `SetupPage.vue` |
 | 登录 | `POST /login` → `af_session` + `af_csrf` cookie | `LoginPage.vue` |
-| 订阅 | `GET /api/stream`（SSE） | `lib/channel.ts` 的 `EventSource` |
+| 订阅 | `GET /api/stream`（SSE） | `shared/channel.ts` 的 `EventSource` |
 | 接入设备 | `AFCLI_DATA_DIR=… AFCLI_HUB_URL=ws://…/ws afcli run` **一条命令** | 用户敲的那条命令 |
 | 建会话 | `POST /api/sessions {node_id, path}` | `SessionPage.vue` 新建会话 |
-| 开面板 | `POST /api/channels {session_id, connector, params}` | `lib/channel.ts::open` |
+| 开面板 | `POST /api/channels {session_id, connector, params}` | `shared/channel.ts::open` |
 | 敲键盘 | `POST /api/channels/{id}/send`（裸字节） | `TerminalPanel` → `channel.send` |
 | 改尺寸 | `POST /api/channels/{id}/resize {cols, rows}` | `TerminalPanel` 的 fit |
 | 收输出 | SSE `channel.frame` 的 `payload.bytes` | 同上 |
@@ -231,8 +231,10 @@ SIGCONT → 继续观察回到 online
 ### 6.4 面板在设备确认之前就显示「已连接」（已修）
 
 - `POST /api/channels` 在把 `open_channel` 塞进设备出站队列之后**立刻**推
-  `channel.ready`（`routes/stream.rs:480`），而页面把这条事件当成「通道可用了」
-  （`lib/channel.ts` 的 `set('ready')`）。设备那边的 `channel_ready` 帧到 Hub 后
+  `channel.ready`（当时在 `crates/hub-server/src/routes/stream.rs` 的 `open_channel`
+  里——现已改为设备回 `channel_ready` 帧时才发，见该文件的 `channel_ready` 注释），
+  而页面把这条事件当成「通道可用了」
+  （`shared/channel.ts` 的 `set('ready')`）。设备那边的 `channel_ready` 帧到 Hub 后
   并不会被转发给页面（同 6.3 的口径）。
 - 后果：从面板出现到设备 `open` 完成之间的输入，会被设备当成未知通道**静默丢弃**
   （`crates/node-core/src/channel.rs:136`「通道不存在 / 已关：静默」），页面上既没有
