@@ -742,6 +742,18 @@ async fn the_session_list_carries_both_base_rev_keys_for_every_row() {
             obj.contains_key("base_rev_status"),
             "每一行都必须有 base_rev_status 键，实际缺了：{row}"
         );
+        // v0.7.0：`execution_id` 同样**键恒在**，值为 null 才算「没有归属」。
+        // 加 `skip_serializing_if` 会让「老 Hub + 新页面」（键不在）与「新 Hub
+        // 正常返回无归属」（键在、值为 null）在 TypeScript 里长得一样。
+        assert!(
+            obj.contains_key("execution_id"),
+            "每一行都必须有 execution_id 键（null 也算），实际缺了：{row}"
+        );
+        assert_eq!(
+            obj["execution_id"],
+            Value::Null,
+            "这几条会话都没有所属执行（老会话不回填），必须是 null：{row}"
+        );
     }
 
     // 三行的 status 分别是 ok / not_a_repo / unknown，且 `ok` 那行带完整 hash。

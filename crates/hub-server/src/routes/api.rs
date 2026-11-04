@@ -449,6 +449,16 @@ pub struct SessionSummary {
     ///
     /// 不是 `Option`，所以本来就恒在。
     pub base_rev_status: hub_storage::BaseRevStatus,
+    /// 这个会话属于哪一次执行（`execution.id`）。
+    ///
+    /// `null` 有两个来源，页面必须能区分它们的**后果**而不是原因：
+    /// 一是 v0.6.0 时代的老会话（永远不会有执行），二是还没有人把它挂上去。
+    /// 两者的可见性后果相同——不进「项目 → 执行」视图、不显示执行面板，
+    /// 页面提示「此会话早于项目主轴」。用 `Option` 而不是空串，因为空串会让
+    /// 前端 `if (executionId)` 恰好也对，但它们表达的不是同一件事。
+    ///
+    /// **同样不加 `skip_serializing_if`**，理由与 `base_rev` 相同：键恒在。
+    pub execution_id: Option<String>,
     pub workspace: WorkspaceRef,
 }
 
@@ -490,6 +500,7 @@ fn summary_of(item: &hub_storage::SessionListItem) -> SessionSummary {
         ended_at: item.session.ended_at.clone(),
         base_rev: item.session.base_rev.clone(),
         base_rev_status: item.session.base_rev_status,
+        execution_id: item.session.execution_id.clone(),
         workspace: WorkspaceRef::new(&item.node_id, &item.removed_node_id, &item.path),
     }
 }
@@ -631,6 +642,9 @@ pub async fn create_session(
         ended_at: session.ended_at.clone(),
         base_rev,
         base_rev_status,
+        // 新建的会话还没有所属执行：执行由任务派发时创建，两者先后不固定。
+        // 挂载走 `SessionRepo::set_execution_id`，不在建会话时定。
+        execution_id: None,
         // 刚建出来的会话，设备必然存在（上面刚验过 `device.id`），
         // 所以这里 node_id 一定有值、removed 一定为 None。
         workspace: WorkspaceRef::new(&Some(device.id.clone()), &None, &body.path),

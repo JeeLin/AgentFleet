@@ -300,11 +300,9 @@ impl ProjectRepo {
     pub fn unarchive(&self, id: &str) -> Result<Project> {
         let conn = self.pool.get()?;
         let exists: Option<i64> = conn
-            .query_row(
-                "SELECT 1 FROM project WHERE id = ?1",
-                params![id],
-                |r| r.get(0),
-            )
+            .query_row("SELECT 1 FROM project WHERE id = ?1", params![id], |r| {
+                r.get(0)
+            })
             .optional()?;
         if exists.is_none() {
             return Err(StorageError::ProjectNotFound { id: id.to_string() });
