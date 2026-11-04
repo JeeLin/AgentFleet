@@ -193,5 +193,14 @@ export function describeCleanupPolicy(policy: DeviceBinding['cleanup_policy']): 
       return '平衡：依赖缓存留 7 天，产物跑完即清'
     case 'aggressive':
       return '激进：依赖缓存尽快清，产物跑完即清'
+    default:
+      // 走到这里说明后端加了第四档而前端没跟上。**把原值露出来**，不要
+      // 编一句「未知策略」——那个词用户搜不到任何东西；原值至少能让
+      // 他在日志与配置里对上。
+      //
+      // 之所以要有这条 `default`：`tsconfig` 没开 `noImplicitReturns`，
+      // 少了它这个函数会在新档上隐式返回 `undefined`，而调用处按 `string`
+      // 用，页面就渲染出一块空白说明。
+      return `未知策略（${String(policy)}）`
   }
 }

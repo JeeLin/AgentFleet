@@ -21,6 +21,14 @@ import { navigate } from '@/router'
 const all = ref<Project[]>([])
 const loading = ref(true)
 const failure = ref('')
+/**
+ * 取消归档失败的提示。**与 `failure` 分开**。
+ *
+ * 两者合用一个 ref 的话，取消归档失败会让整份列表被错误态替掉——而这个失败
+ * 最需要用户看见的恰恰是「那一行还在，我还能再试一次」。读失败是另一回事：
+ * 那时手上没有任何数据，整页变错误态才对。
+ */
+const actionFailure = ref('')
 const busyId = ref('')
 
 /** 只看已归档的。后端按 `archived_at IS NULL` 过滤，这里反向挑。 */
@@ -40,12 +48,12 @@ async function load(): Promise<void> {
 
 async function restore(id: string): Promise<void> {
   busyId.value = id
-  failure.value = ''
+  actionFailure.value = ''
   try {
     await unarchiveProject(id)
     await load()
   } catch (e) {
-    failure.value =
+    actionFailure.value =
       e instanceof ApiError ? `取消归档失败（${e.code}）。` : '取消归档失败：Hub 连不上。'
   } finally {
     busyId.value = ''
@@ -88,7 +96,11 @@ onMounted(load)
       <button type="button" class="af-btn" @click="navigate('/')">回总览</button>
     </EmptyState>
 
-    <ul v-else class="af-projectlist">
+    <!-- 取消归档失败的提示**独立于**列表：两个都要在。合成一个错误态的话，
+         用户看到的是「读取失败」而列表消失，可实际只是那一行动作没成功。 -->
+    <p v-if="actionFailure" class="af-form__error" role="alert">{{ actionFailure }}</p>
+
+    <ul v-if="archived.length > 0" class="af-projectlist">
       <li v-for="p in archived" :key="p.id" class="af-projectlist__row">
         <span class="af-projectlist__name">{{ p.name }}</span>
         <span v-if="p.archived_at" class="af-projectlist__shape">

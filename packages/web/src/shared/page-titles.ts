@@ -47,8 +47,12 @@ export const PAGE_TITLE: Readonly<Record<string, string>> = {
 
 /**
  * 一个页面的中文名。表里没有的名字**原样返回**——
- * 路由名是闭集（`ROUTES` 的 23 条 + `not-found`），落到表外说明调用方
+ * 路由名是闭集（`ROUTES` 里的每条 + `not-found`），落到表外说明调用方
  * 传错了，而把错的路由名原样显示出来比编一个「找不到页面」更接近真相。
+ *
+ * **这里不写路由条数**：手写计数必然漂移（写下时是 23，加完两个详情路由
+ * 就是 25 了，而没有任何东西会因此变红）。要核对「表是否覆盖全部路由」
+ * 请跑 `router.test.ts` 的双向对比，它才是那条判据。
  */
 export function pageTitle(name: string): string {
   return PAGE_TITLE[name] ?? name

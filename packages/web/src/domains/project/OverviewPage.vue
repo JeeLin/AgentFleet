@@ -110,7 +110,7 @@ onMounted(load)
         <button
           type="button"
           class="af-projectlist__link"
-          @click="navigate(`/project/${p.id}/board`)"
+          @click="navigate(`/project/${encodeURIComponent(p.id)}/board`)"
         >
           <span class="af-projectlist__name">{{ p.name }}</span>
           <span class="af-projectlist__hint">{{ SHAPE_HINT[p.shape] ?? '' }}</span>

@@ -1318,19 +1318,68 @@ kbd, .kbd {
 
 /* ---- 项目切换器（看板页头） -------------------------------------------- */
 
-/* 项目之间横向切换。**不是下拉菜单**：切换项目是这一页最常做的动作之一，
-   藏进菜单要多两次点击，而且菜单开着的时候看不到自己现在在哪。 */
-.af-projectpick { display: flex; align-items: center; gap: var(--af-space-3); }
-.af-projectpick__label { font-size: var(--af-text-sm); color: var(--af-fg-tertiary); }
-.af-projectpick__select {
-  height: var(--af-row-compact); padding: 0 var(--af-space-4);
-  background: var(--af-surface-2); color: var(--af-fg-primary);
-  border: 1px solid var(--af-border-default); border-radius: var(--af-radius-sm);
-  font-family: inherit; font-size: var(--af-text-md); font-weight: var(--af-weight-medium);
-  cursor: pointer;
+/* **项目名本身就是按钮**，点开是菜单（见 `prototype/board.html` 的 `.af-switch`）。
+   为什么不用 `<select>`：切换项目是这一页最常做的动作之一，而 `<select>`
+   在选中之前不显示候选、选中之后只显示一个名字；项目名带状态点与形态标签
+   时也塞不进一个 option。为什么不用横向平铺：项目一多会挤掉右侧那一排动作
+   按钮，而左栏收起来之后这个控件要能在手机宽度下独立成立。 */
+.af-switch { position: relative; display: flex; align-items: center; }
+
+.af-switch__btn {
+  display: inline-flex; align-items: center; gap: var(--af-space-2);
+  padding: var(--af-space-1) var(--af-space-2) var(--af-space-1) var(--af-space-1);
+  margin-left: calc(-1 * var(--af-space-1));
+  background: transparent; border: 1px solid transparent; border-radius: var(--af-radius-sm);
+  color: inherit; font: inherit; cursor: pointer;
 }
-.af-projectpick__select:hover { border-color: var(--af-border-strong); }
-.af-projectpick__select:focus-visible { outline: 2px solid var(--af-border-focus); outline-offset: 1px; }
+.af-switch__btn:hover { background: var(--af-surface-2); border-color: var(--af-border-default); }
+.af-switch__btn[aria-expanded='true'] {
+  background: var(--af-surface-2); border-color: var(--af-border-strong);
+}
+.af-switch__title { margin: 0; }
+
+/* 向下小箭头：用边框画，不依赖字体字形（字体缺这个字形时会变成一个方块）。 */
+.af-switch__chev {
+  width: 0; height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--af-fg-tertiary);
+  transition: transform 160ms var(--af-ease-out);
+}
+.af-switch__btn[aria-expanded='true'] .af-switch__chev { transform: rotate(180deg); }
+
+.af-switch__menu {
+  position: absolute; left: 0; top: calc(100% + var(--af-space-2)); z-index: 80;
+  min-width: 268px;
+  background: var(--af-surface-1);
+  border: 1px solid var(--af-border-strong);
+  border-radius: var(--af-radius-md);
+  box-shadow: var(--af-shadow-3);
+  padding: var(--af-space-2);
+  display: none; flex-direction: column; gap: 1px;
+}
+.af-switch[data-open='true'] .af-switch__menu { display: flex; }
+
+.af-switch__item {
+  display: flex; align-items: center; gap: var(--af-space-2);
+  padding: var(--af-space-2) var(--af-space-3);
+  border-radius: var(--af-radius-sm);
+  font-size: var(--af-text-sm); color: var(--af-fg-primary);
+  text-decoration: none;
+  background: transparent; border: 0; width: 100%; text-align: left;
+  font-family: inherit; cursor: pointer;
+}
+.af-switch__item:hover { background: var(--af-surface-3); color: var(--af-fg-primary); }
+/* 当前项目：不只靠底色区分，前面加一个「当前」标签——**状态不能只靠颜色**。 */
+.af-switch__item[aria-current='true'] {
+  background: var(--af-surface-2); font-weight: var(--af-weight-semibold);
+}
+.af-switch__item[aria-current='true'] .af-switch__shape::before {
+  content: '当前 · ';
+  color: var(--af-fg-tertiary); font-weight: var(--af-weight-regular);
+}
+.af-switch__label { flex: 1; min-width: 0; }
+.af-switch__shape { font-size: var(--af-text-xs); color: var(--af-fg-tertiary); font-weight: var(--af-weight-regular); }
 
 /* ---- 项目内导航（看板 / 时间线 / 绑定 / 设置） ------------------------- */
 

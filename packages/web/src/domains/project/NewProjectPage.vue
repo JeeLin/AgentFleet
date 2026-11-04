@@ -60,7 +60,7 @@ async function submit(): Promise<void> {
   try {
     const p = await createProject({ name: trimmed, shape: shape.value })
     // `replace`：用户按「后退」不该回到一张已经提交过的表单。
-    navigate(`/project/${p.id}/board`, { replace: true })
+    navigate(`/project/${encodeURIComponent(p.id)}/board`, { replace: true })
   } catch (e) {
     failure.value =
       e instanceof ApiError ? `建项目失败（${e.code}）。` : '建项目失败：Hub 连不上。'

@@ -71,48 +71,81 @@ async function load(): Promise<void> {
 watch(projectId, load)
 onMounted(load)
 
+/**
+ * 切换器菜单开着没有。
+ *
+ * **项目名本身就是那个按钮**（见 `components.css` 的 `.af-switch`）：左栏收起
+ * 之后这是唯一的换项目入口，所以它必须一直可见，不能藏进二级菜单。
+ */
+const menuOpen = ref(false)
+
+/** 形态的三个人话说法。菜单里每个项目后面带一个，否则同名的两个项目无从区分。 */
+function describeShape(shape: string): string {
+  if (shape === 'central') return '中心式'
+  if (shape === 'mirror') return '镜像式'
+  if (shape === 'isolated') return '隔离式'
+  return shape
+}
+
 function switchTo(id: string): void {
+  // 先关菜单再跳转：不关的话，同一页换了项目之后菜单还开着，
+  // 用户会以为「点了没反应」（其实已经跳了，菜单挡住了新内容）。
+  menuOpen.value = false
   if (id === projectId.value) return
-  navigate(`/project/${id}/board`)
+  // **必须编码**：`matchPattern` 对具名段做 `decodeURIComponent`，id 里含
+  // `/` 或 `%` 时不编码会把路径切成多一段，落进 `not-found`。
+  navigate(`/project/${encodeURIComponent(id)}/board`)
 }
 </script>
 
 <template>
   <section class="af-page">
     <header class="af-page__head">
-      <div class="af-projectpick">
-        <label class="af-projectpick__label" for="af-project-switch">项目</label>
-        <select
-          id="af-project-switch"
-          class="af-projectpick__select"
-          :value="projectId"
-          @change="switchTo(($event.target as HTMLSelectElement).value)"
+      <div class="af-switch" :data-open="menuOpen ? 'true' : 'false'">
+        <button
+          type="button"
+          class="af-switch__btn"
+          aria-haspopup="true"
+          :aria-expanded="menuOpen ? 'true' : 'false'"
+          aria-label="切换项目"
+          @click="menuOpen = !menuOpen"
         >
-          <option v-if="project" :value="project.id">{{ project.name }}</option>
-          <option
-            v-for="p in all.filter((x) => x.id !== projectId)"
+          <h1 class="af-head__title af-switch__title">{{ project?.name ?? '看板' }}</h1>
+          <span class="af-switch__chev" aria-hidden="true"></span>
+        </button>
+        <div v-if="menuOpen" class="af-switch__menu" role="menu" aria-label="项目列表">
+          <button
+            v-for="p in all"
             :key="p.id"
-            :value="p.id"
+            type="button"
+            role="menuitem"
+            class="af-switch__item"
+            :aria-current="p.id === projectId ? 'true' : 'false'"
+            @click="switchTo(p.id)"
           >
-            {{ p.name }}
-          </option>
-        </select>
+            <span class="af-switch__label">{{ p.name }}</span>
+            <span class="af-switch__shape">{{ describeShape(p.shape) }}</span>
+          </button>
+          <button type="button" role="menuitem" class="af-switch__item" @click="navigate('/')">
+            <span class="af-switch__label">全部项目</span>
+          </button>
+        </div>
       </div>
       <nav class="af-projectnav" aria-label="项目内导航">
-        <button type="button" class="af-projectnav__item" @click="navigate(`/project/${projectId}/bind`)">
+        <button type="button" class="af-projectnav__item" @click="navigate(`/project/${encodeURIComponent(projectId)}/bind`)">
           绑定设备
         </button>
         <button
           type="button"
           class="af-projectnav__item"
-          @click="navigate(`/project/${projectId}/timeline`)"
+          @click="navigate(`/project/${encodeURIComponent(projectId)}/timeline`)"
         >
           时间线
         </button>
         <button
           type="button"
           class="af-projectnav__item"
-          @click="navigate(`/project/${projectId}/settings`)"
+          @click="navigate(`/project/${encodeURIComponent(projectId)}/settings`)"
         >
           项目设置
         </button>
