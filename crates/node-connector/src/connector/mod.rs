@@ -22,6 +22,7 @@ pub mod exec;
 pub mod files;
 pub mod git;
 pub mod terminal;
+pub mod worktree;
 
 /// terminal connector 名。**注册表与心跳上报共用这批常量**（约束 14）。
 pub mod names {
@@ -29,6 +30,12 @@ pub mod names {
     pub const FILES: &str = "files";
     pub const EXEC: &str = "exec";
     pub const GIT: &str = "git";
+    /// 按任务分工作区、按策略回收磁盘（v0.7.0 子任务 5）。
+    ///
+    /// 它进能力表是**对的**：Hub 派活前要问「这台机器还能不能放下一个工作区」，
+    /// 而那个答案只能由这台机器自己给。它不像 terminal / files 那样是用户能
+    /// 打开的面板，但「设备能做什么」和「用户能点开什么」本来就是两个问题。
+    pub const WORKTREE: &str = "worktree";
 
     /// 全部内置 connector 名。
     ///
@@ -38,15 +45,15 @@ pub mod names {
     /// （v0.4.0 实测撞上过）。有了这个切片，覆盖所有内置名字的用例
     /// 就能遍历它，新名字自动进入断言。
     ///
-    /// **但它不是「唯一枚举点」**：`the_registered_set_is_exactly_the_four_…`
-    /// 仍手写 `vec![EXEC, FILES, GIT, TERMINAL]`，因为它要断的正是「注册表
-    /// 恰好是这四个」——拿 `ALL` 去比就变成 `ALL == ALL`，恒真。那一条用
-    /// 手写名单是刻意的，不是漏改。
+    /// **但它不是「唯一枚举点」**：`the_registered_set_is_exactly_the_built_in_…`
+    /// 仍手写 `vec![EXEC, FILES, GIT, TERMINAL, WORKTREE]`，因为它要断的正是
+    /// 「注册表恰好是这几个」——拿 `ALL` 去比就变成 `ALL == ALL`，恒真。
+    /// 那一条用手写名单是刻意的，不是漏改。
     ///
     /// **它不参与生产逻辑**：`registered()` 与 `create` 各自显式列名字，
     /// 因为那两处是「这台设备到底提供什么」的真相源，不该被一个数组
     /// 顺手改掉。
-    pub const ALL: &[&str] = &[TERMINAL, FILES, EXEC, GIT];
+    pub const ALL: &[&str] = &[TERMINAL, FILES, EXEC, GIT, WORKTREE];
 }
 
 /// 一条通道的请求参数：`open_channel.params` 的 connector 私有部分。
@@ -251,7 +258,15 @@ fn registered() -> &'static BTreeSet<&'static str> {
     // 与 `create` 的臂**必须同一次改**：两处不一致时下面那两条测试会红。
     // 心跳上报只认这里（子任务 11），所以**这里是「这台设备有什么能力」
     // 的唯一真相源**，不是一份可以随手加的名字清单。
-    NAMES.get_or_init(|| BTreeSet::from([names::TERMINAL, names::FILES, names::EXEC, names::GIT]))
+    NAMES.get_or_init(|| {
+        BTreeSet::from([
+            names::TERMINAL,
+            names::FILES,
+            names::EXEC,
+            names::GIT,
+            names::WORKTREE,
+        ])
+    })
 }
 
 /// 某个 connector 名在这台设备上**是否真的可用**（约束 9 的硬过滤口径）。
@@ -289,6 +304,7 @@ pub fn create(name: &str) -> Option<BoxedConnector> {
         names::FILES => Some(Box::new(crate::connector::files::Files::new())),
         names::EXEC => Some(Box::new(crate::connector::exec::Exec::new())),
         names::GIT => Some(Box::new(crate::connector::git::Git::new())),
+        names::WORKTREE => Some(Box::new(crate::connector::worktree::Worktree::new())),
         _ => None,
     }
 }
@@ -350,11 +366,20 @@ mod tests {
     /// 比「没上报」危险得多，它会让路由把任务派给一台做不到的机器
     /// （约束 9）。所以注册表与 `create` 必须互相印证，且**只有**它们
     /// 认的名字才允许出现在心跳里（`tests/capabilities.rs` 锁住导出那侧）。
+    ///
+    /// 手写名单是刻意的（见 [`names::ALL`] 的注释）：拿 `ALL` 去比就成了
+    /// `ALL == ALL`，这条断言会失去全部意义。
     #[test]
-    fn the_registered_set_is_exactly_the_four_built_in_connectors() {
+    fn the_registered_set_is_exactly_the_built_in_connectors() {
         assert_eq!(
             registered_names(),
-            vec![names::EXEC, names::FILES, names::GIT, names::TERMINAL],
+            vec![
+                names::EXEC,
+                names::FILES,
+                names::GIT,
+                names::TERMINAL,
+                names::WORKTREE,
+            ],
             "注册表就是能力表：加/减一种 connector 时这里必须一起改"
         );
     }
