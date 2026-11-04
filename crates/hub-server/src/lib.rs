@@ -111,6 +111,21 @@ pub mod err {
     /// 错误体额外带 `detail: {from, to}`——拒绝的理由取决于两端是什么，
     /// 只说「不允许」用户不知道该改成什么。
     pub const SHAPE_TRANSITION_REFUSED: &str = "shape_transition_refused";
+    /// 清理策略不在 {`conservative`, `balanced`, `aggressive`} 里。
+    ///
+    /// 与 `shape` / `theme_color` 同一口径：闭集之外的值**报错**，不回落默认值。
+    /// 静默回落成 `balanced` 的后果是「用户以为设成了保守，实际在跑完即清」。
+    pub const INVALID_CLEANUP_POLICY: &str = "invalid_cleanup_policy";
+    /// 绑定改了固定目录，但该绑定下已有执行记录（`v0.7.0` 子任务 4）。
+    ///
+    /// 错误体额外带 `executions`（条数）：用户要知道是「等一下再说」还是
+    /// 「永远不行」，只说一句「不能改」判断不了。
+    pub const FIXED_DIR_LOCKED: &str = "fixed_dir_locked";
+    /// 设备上有历史执行记录，不允许删除（`PRODUCT.md` §6.1）。
+    ///
+    /// 错误体额外带 `executions`（条数），**不是笼统 500**：用户得知道要先
+    /// 归档还是转移项目，而那句提示的依据正是这个数字。
+    pub const DEVICE_HAS_EXECUTIONS: &str = "device_has_executions";
 }
 
 /// 启动期错误：数据目录写不了 / 数据库读不了，Hub 起不来。
@@ -655,6 +670,16 @@ pub fn build_app(state: AppState) -> Router {
             get(routes::api::list_sessions).post(routes::api::create_session),
         )
         .route("/api/agents", get(routes::api::list_agents))
+        // 设备详情 / agent 详情（v0.7.0 子任务 7）：**从设备侧看项目**。
+        //
+        // `PRODUCT.md` §3 的主轴是「做事从项目进，管理从设备进」。项目主轴
+        // 改版之后设备页恰恰要**变多**而不是变少——运维时的第一反应永远是
+        // 「这台机器怎么了」，那是设备视角，项目页替代不了。
+        //
+        // 两条都是只读 GET，但仍然落在下面那条 `.layer(...)` 之前：与同组
+        // 路由写在一起，且「认证在前」这条边界不该因为方法而分裂成两段。
+        .route("/api/devices/{id}/detail", get(routes::devices::get_device))
+        .route("/api/agents/{name}", get(routes::agents_detail::get_agent))
         // 项目（v0.7.0 子任务 2）。**必须在下面那条 `.layer(...)` 之前**：
         // 这些全是状态变更端点（建 / 改 / 归档 / 改形态），落到 layer 之后
         // 就会绕过 session 认证与 CSRF——任意网页都能改用户的项目。
@@ -681,6 +706,30 @@ pub fn build_app(state: AppState) -> Router {
         .route(
             "/api/projects/{id}/unarchive",
             post(routes::projects::unarchive_project),
+        )
+        // 绑定（v0.7.0 子任务 4）：`(项目, 设备) → 固定目录`。
+        //
+        // **两条 GET / 两条 PUT 写的是同一行**（`PRODUCT.md` §6.1 要求项目页与
+        // 设备页均可修改）。两个入口都存在不是为了兼容，是因为用户在两处都会
+        // 想起这件事：看板里想「这个项目该跑在哪台机器上」，设备页里想
+        // 「这台机器上跑了哪些项目」。只有一侧能改的话，另一侧就只是只读视图。
+        //
+        // 全部落在下面那条 `.layer(...)` 之前：PUT 是状态变更端点。
+        .route(
+            "/api/projects/{project_id}/bindings",
+            get(routes::bindings::list_for_project),
+        )
+        .route(
+            "/api/projects/{project_id}/bindings/{device_id}",
+            get(routes::bindings::get_one_from_project).put(routes::bindings::put_from_project),
+        )
+        .route(
+            "/api/devices/{device_id}/bindings",
+            get(routes::bindings::list_for_device),
+        )
+        .route(
+            "/api/devices/{device_id}/bindings/{project_id}",
+            get(routes::bindings::get_one_from_device).put(routes::bindings::put_from_device),
         )
         // 删设备（子任务 12 第 1 条）。**必须是 DELETE 而不是 GET/POST 带参数**：
         // 它是状态变更端点，落在下面那条 `.layer(...)` 之后就会绕过 session

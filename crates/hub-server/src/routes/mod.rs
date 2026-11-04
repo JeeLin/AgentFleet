@@ -123,10 +123,13 @@ mod tests {
 }
 
 pub mod agents;
+pub mod agents_detail;
 pub mod api;
 pub mod assets;
 pub mod base_rev;
+pub mod bindings;
 pub mod conversation;
+pub mod devices;
 pub mod projects;
 pub mod setup;
 pub mod stream;

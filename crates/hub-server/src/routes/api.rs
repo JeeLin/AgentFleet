@@ -284,7 +284,10 @@ fn platform_of(os: Option<&str>, arch: Option<&str>) -> String {
 /// 读库失败时**退回心跳内存**而不是给一个空列表：空列表会被读成「这台设备
 /// 一个 agent 都没有」，而那与「库读不出来」是两件事。留痕由调用方看不到，
 /// 所以这里直接 `tracing::warn`。
-fn device_summary(state: &AppState, device: &hub_storage::repo::Device) -> DeviceSummary {
+pub(crate) fn device_summary(
+    state: &AppState,
+    device: &hub_storage::repo::Device,
+) -> DeviceSummary {
     let now = Instant::now();
     let connected = state.connections().get(&device.id).is_some();
     let presence = hub_core::presence(state.reports(), &device.id, connected, now);
@@ -386,6 +389,25 @@ pub async fn delete_device(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    // **有历史执行记录就不许删**（`PRODUCT.md` §6.1，v0.7.0 子任务 4）。
+    //
+    // 执行记录是历史，而设备是它的归属。删掉设备之后那些记录还在库里（存储层
+    // 刻意只删 `device` 行、保留 `workspace` / `session` / `trajectory_event`），
+    // 但它们会指向一台已不存在的机器——页面上既说不清这条记录跑在哪，也没有
+    // 任何入口能把它转走。所以正确的下一步是「先归档项目或把项目转到别的设备」。
+    //
+    // **带条数**：只说「不能删」用户判断不了该做什么，说「有 12 条历史执行」
+    // 才让人知道这不是一个待会儿再试的问题。
+    let executions = hub_storage::binding::BindingRepo::new(state.pool().clone())
+        .execution_count_for_device(&id)
+        .map_err(|e| ApiError::internal_with("cannot count executions", e))?;
+    if executions > 0 {
+        return Err(ApiError::conflict_with(
+            err::DEVICE_HAS_EXECUTIONS,
+            || serde_json::json!({ "executions": executions }),
+        ));
+    }
+
     let n = state
         .devices()
         .delete_and_mark_removed(&id)
