@@ -56,7 +56,12 @@ function skeletonPages(): { path: string; src: string }[] {
 describe('骨架页：每一页都写明什么时候有', () => {
   it('确实存在多个骨架页（不是一条断言在空集合上恒真）', () => {
     // 反向验证：把所有骨架页删掉，这条会红在「骨架页不见了」。
-    expect(skeletonPages().length).toBeGreaterThanOrEqual(13)
+    //
+    // **这个数会随着骨架页被实现而下降**，下降本身是好事，不是回归。
+    // v0.7.0 收口时 `BindPage` 已实现（它原本是 13 个里的一个），剩 12 个：
+    // 本项目还有 `ProjectSettingsPage` 标着 v0.7.0，v0.8.0 七页、v0.9–12 四页。
+    // 改这个数时必须同时确认**少的那一页是真的实现了**，而不是被谁删掉了。
+    expect(skeletonPages().length).toBeGreaterThanOrEqual(12)
   })
 
   it('每个骨架页都给了 `version`，且形如 vX.Y.Z', () => {

@@ -1015,7 +1015,7 @@ kbd, .kbd {
 }
 .af-git__branch { color: var(--af-fg-secondary); font-size: var(--af-text-sm); }
 /* 空态 / 说明：与文件面板的 `__void` 同一口径（§3.12 的「本来该有东西但没有」）。 */
-.af-git__void { padding: var(--af-space-4); font-size: var(--af-text-sm); line-height: var(--af-leading-normal); }
+.af-git__void { padding: var(--af-space-4); font-size: var(--af-text-sm); line-height: var(--af-leading-snug); }
 .af-git__void p { margin: 0 0 var(--af-space-2); }
 /* 列表与 diff 并排；窄列（< 720px）时上下叠——并排在 412px 里两边都读不了。 */
 .af-git__split { display: flex; flex: 1 1 auto; min-height: 0; min-width: 0; }
@@ -1499,3 +1499,64 @@ kbd, .kbd {
 }
 .af-skeletonpage__list { margin: 0; padding-left: var(--af-space-6); color: var(--af-fg-secondary); font-size: var(--af-text-sm); line-height: var(--af-leading-loose); }
 .af-skeletonpage__empty { margin: 0; color: var(--af-fg-tertiary); font-size: var(--af-text-sm); }
+
+/* ===========================================================================
+   区域与提示条
+   -------------------------------------------------------------------------
+   原型里的 `.af-region` / `.af-callout` 一直没有移植到生产样式表，而
+   `DeviceDetailPage` 与 `BindPage` 都在用 `.af-region`——所以那些块此前
+   渲染成没有边框、没有内边距的裸 `<section>`，看起来像是「页面漏了一块」。
+   这里照 `prototype/assets/app.css` 的定义补齐，令牌换成生产的 `--af-*`。
+   =========================================================================== */
+
+/* 一块区域 = 一个容器。它比页面底亮一档，所以「边界」不用描边就出来了。 */
+.af-region {
+  background: var(--af-surface-1);
+  border: 1px solid var(--af-border-default);
+  border-radius: var(--af-radius-md);
+  overflow: hidden;
+  display: flex; flex-direction: column;
+  min-height: 0; min-width: 0;
+}
+.af-region__head {
+  display: flex; align-items: center; gap: var(--af-space-3);
+  padding: var(--af-space-3) var(--af-space-4);
+  border-bottom: 1px solid var(--af-border-default);
+  background: var(--af-surface-1);
+  flex: 0 0 auto;
+}
+.af-region__title {
+  margin: 0;
+  font-size: var(--af-text-sm); font-weight: var(--af-weight-semibold); color: var(--af-fg-primary);
+  display: flex; align-items: center; gap: var(--af-space-2);
+}
+.af-region__note { font-size: var(--af-text-xs); color: var(--af-fg-tertiary); }
+.af-region__body { padding: var(--af-space-4); min-height: 0; }
+.af-region__body--flush { padding: 0; }
+
+/* ---- 提示条 ------------------------------------------------------------ */
+
+/* 三种语义各一个变体，**同时带边框色与左侧色条**：只靠底色的话，
+   高对比度模式下两块会分不出来。 */
+.af-callout {
+  border: 1px solid var(--af-border-default);
+  border-left: 3px solid var(--af-fg-tertiary);
+  border-radius: var(--af-radius-sm);
+  background: var(--af-surface-2);
+  padding: var(--af-space-3) var(--af-space-4);
+  font-size: var(--af-text-sm); line-height: var(--af-leading-base);
+  display: flex; flex-direction: column; gap: var(--af-space-2);
+}
+.af-callout__k {
+  font-size: var(--af-text-xs); font-weight: var(--af-weight-semibold);
+  color: var(--af-fg-secondary);
+}
+.af-callout--warn {
+  border-color: var(--af-warn-line); border-left-color: var(--af-warn); background: var(--af-warn-bg);
+}
+.af-callout--failed {
+  border-color: var(--af-danger-line); border-left-color: var(--af-danger); background: var(--af-danger-bg);
+}
+.af-callout--info {
+  border-color: var(--af-info-line); border-left-color: var(--af-info); background: var(--af-info-bg);
+}

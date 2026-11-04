@@ -14,7 +14,7 @@
    （非法值 400），前端只负责把拿到的字符串显示出来。
    =========================================================================== */
 
-import { getJson, patchJson, postJson, type RequestOptions } from '@/shared/http'
+import { del, getJson, patchJson, postJson, putJson, type RequestOptions } from '@/shared/http'
 
 /** `GET /api/projects` 的一项。与 `routes/projects.rs` 的 `ProjectView` 逐字一致。 */
 export interface Project {
@@ -88,4 +88,82 @@ export function archiveProject(id: string, options?: RequestOptions): Promise<Pr
 
 export function unarchiveProject(id: string, options?: RequestOptions): Promise<Project> {
   return postJson<Project>(`/api/projects/${encodeURIComponent(id)}/unarchive`, {}, options)
+}
+
+/* ===========================================================================
+   绑定（v0.7.0 子任务 4 的后端 + 子任务 8 之后的 BindPage）
+   ---------------------------------------------------------------------------
+   读写的是同一个 `(project, device)` 组合，**后端只有一条 upsert**。前端因此
+   不需要区分「新建」与「修改」：PUT 一次，201 是新建、200 是更新（状态码由
+   后端区分，页面对两者做同一件事——写成功就重读）。
+   =========================================================================== */
+
+/**
+ * 一条项目绑定的读法。与 `routes/bindings.rs` 的 `BindingView` 逐字一致。
+ *
+ * 与 `DeviceBinding`（设备视角）是**同一行的两种视图**：设备侧多带了
+ * `project_name`（省一次项目列表请求），项目侧多带了 `device_id`。
+ */
+export interface ProjectBinding {
+  id: string
+  project_id: string
+  device_id: string
+  /** 设备上的路径原文。Hub 不展开 `~`，它没有那台设备的文件系统。 */
+  fixed_dir: string
+  /** `null` = 不限额。**不是 0**：0 是一个会把一切都拦掉的真实配额。 */
+  disk_quota_bytes: number | null
+  cleanup_policy: string
+  /**
+   * 这个项目在这台设备上占了多少字节。
+   *
+   * **`null` 不是 0**：真实用量只有设备自己量得出来。`null` 是「还没上报」，
+   * `0` 是「一点不占」。
+   */
+  used_bytes: number | null
+}
+
+/** `GET /api/projects/{id}/bindings`：一个项目的全部绑定。 */
+export function listProjectBindings(
+  projectId: string,
+  options?: RequestOptions,
+): Promise<ProjectBinding[]> {
+  return getJson<ProjectBinding[]>(
+    `/api/projects/${encodeURIComponent(projectId)}/bindings`,
+    options,
+  )
+}
+
+/**
+ * 写一行绑定（**upsert**）。
+ *
+ * `cleanup_policy` 不传时由存储层给默认值（`balanced`），前端**不自己编一个**：
+ * 编的话，「用户没选」和「用户选了 balanced」在库里就成了同一个值。
+ *
+ * 有执行记录时改 `fixed_dir` 会被拒（409 + `detail.executions`）。那不是
+ * 校验错误，是「这个目录上已经有历史了」——页面要把它连同条数一起显示，
+ * 只说「不能改」的话用户分不清是「等一下」还是「永远不行」。
+ */
+export function putProjectBinding(
+  projectId: string,
+  deviceId: string,
+  body: { fixed_dir: string; disk_quota_bytes?: number | null; cleanup_policy?: string },
+  options?: RequestOptions,
+): Promise<ProjectBinding> {
+  return putJson<ProjectBinding>(
+    `/api/projects/${encodeURIComponent(projectId)}/bindings/${encodeURIComponent(deviceId)}`,
+    body,
+    options,
+  )
+}
+
+/** 解除绑定。历史执行记录保留；这台设备上该项目的在跑任务会先被取消。 */
+export function deleteProjectBinding(
+  projectId: string,
+  deviceId: string,
+  options?: RequestOptions,
+): Promise<void> {
+  return del(
+    `/api/projects/${encodeURIComponent(projectId)}/bindings/${encodeURIComponent(deviceId)}`,
+    options,
+  )
 }

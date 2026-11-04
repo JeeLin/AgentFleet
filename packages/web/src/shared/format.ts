@@ -107,6 +107,26 @@ export function orDash(value: number | null): string {
 }
 
 /**
+ * 字节数换成人读的档位。**`null` 画成 `—`，不是 `0 B`**。
+ *
+ * `null` 是「设备还没上报」，`0` 是「一点不占」——两句话。回 `0 B` 会让
+ * 用户以为这台机器干干净净，而真相是 Hub 根本没拿到数。
+ *
+ * 第一档不给小数（`512 B` 比 `512.0 B` 自然），往上每档一位小数。
+ */
+export function bytes(n: number | null): string {
+  if (n === null) return '—'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let v = n
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i += 1
+  }
+  return `${i === 0 ? v : v.toFixed(1)} ${units[i]}`
+}
+
+/**
  * 设备名。
  *
  * 取不到时**回显 `node_id`**：设备列表还没回来时显示「设备」会让人以为

@@ -324,6 +324,16 @@ export function patchJson<T>(path: string, body?: unknown, options?: RequestOpti
   return sendJson<T>('PATCH', path, body, options)
 }
 
+/**
+ * PUT JSON + 解 JSON。
+ *
+ * 全仓只有绑定用它（`PUT /api/projects/{id}/bindings/{device_id}`），而那条是
+ * **唯一的 upsert**：同一路径既能建也能改，所以用 PUT 而不是 POST/PATCH 二分。
+ */
+export function putJson<T>(path: string, body?: unknown, options?: RequestOptions): Promise<T> {
+  return sendJson<T>('PUT', path, body, options)
+}
+
 function sendJson<T>(
   method: string,
   path: string,

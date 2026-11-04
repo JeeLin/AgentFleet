@@ -31,7 +31,7 @@ import StateBadge from '@/domains/shared/components/StateBadge.vue'
 import type { DeviceBinding, DeviceDetail } from '@/domains/device/api'
 import { describeCleanupPolicy, getDeviceDetail, settledCount } from '@/domains/device/api'
 import { describeReadFailure } from '@/shared/http'
-import { percent, relativeTime } from '@/shared/format'
+import { bytes, percent, relativeTime } from '@/shared/format'
 import { navigate, route } from '@/router'
 
 /**
@@ -119,17 +119,6 @@ function openProject(projectId: string): void {
   navigate(`/project/${encodeURIComponent(projectId)}/board`)
 }
 
-function bytes(n: number | null): string {
-  if (n === null) return '—'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let v = n
-  let i = 0
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024
-    i += 1
-  }
-  return `${i === 0 ? v : v.toFixed(1)} ${units[i]}`
-}
 </script>
 
 <template>
