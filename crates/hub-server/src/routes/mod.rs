@@ -127,6 +127,7 @@ pub mod api;
 pub mod assets;
 pub mod base_rev;
 pub mod conversation;
+pub mod projects;
 pub mod setup;
 pub mod stream;
 pub mod ws;

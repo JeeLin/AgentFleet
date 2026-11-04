@@ -98,6 +98,19 @@ pub mod err {
     /// （400，请求形状问题）。合成一个会让页面把「重新选一个」和「去装一个」
     /// 混成同一句提示。
     pub const AGENT_REQUIRED: &str = "agent_required";
+    /// 建项目 / 改形态时 `shape` 不在 {`central`, `mirror`, `isolated`} 里。
+    ///
+    /// **必须报错而不是回落成 `central`**：静默回落会让一个隔离式项目在下次
+    /// 读取时声称「代码在 Hub 上」，而 Hub 上什么都没有（见
+    /// `hub_storage::project::ProjectShape::from_str`）。
+    pub const INVALID_PROJECT_SHAPE: &str = "invalid_project_shape";
+    /// `theme_color` 不在五色里。
+    pub const INVALID_THEME_COLOR: &str = "invalid_theme_color";
+    /// 形态变更被拒（目前只允许 `isolated → central`）。
+    ///
+    /// 错误体额外带 `detail: {from, to}`——拒绝的理由取决于两端是什么，
+    /// 只说「不允许」用户不知道该改成什么。
+    pub const SHAPE_TRANSITION_REFUSED: &str = "shape_transition_refused";
 }
 
 /// 启动期错误：数据目录写不了 / 数据库读不了，Hub 起不来。
@@ -161,6 +174,18 @@ impl ApiError {
     /// 而破例的理由（页面要显示**是什么**让状态冲突）是可见的。
     pub fn conflict_with(code: &'static str, make: impl FnOnce() -> serde_json::Value) -> Self {
         let mut e = Self::new(StatusCode::CONFLICT, code);
+        e.detail = Some(make());
+        e
+    }
+
+    /// 400，且错误体里**额外带一个可显示的字段**。
+    ///
+    /// 目前只有形态转换被拒用它：那条拒绝的理由取决于**两端**是什么
+    /// （`isolated → central` 允许，`central → isolated` 是「产品做不到」），
+    /// 只说「不允许」用户不知道该改成什么。与 [`Self::conflict_with`] 同一个
+    /// 破例口径：`error` 的值仍是固定 code，附加字段另起一个键。
+    pub fn bad_request_with(code: &'static str, make: impl FnOnce() -> serde_json::Value) -> Self {
+        let mut e = Self::new(StatusCode::BAD_REQUEST, code);
         e.detail = Some(make());
         e
     }
@@ -630,6 +655,33 @@ pub fn build_app(state: AppState) -> Router {
             get(routes::api::list_sessions).post(routes::api::create_session),
         )
         .route("/api/agents", get(routes::api::list_agents))
+        // 项目（v0.7.0 子任务 2）。**必须在下面那条 `.layer(...)` 之前**：
+        // 这些全是状态变更端点（建 / 改 / 归档 / 改形态），落到 layer 之后
+        // 就会绕过 session 认证与 CSRF——任意网页都能改用户的项目。
+        .route(
+            "/api/projects",
+            get(routes::projects::list_projects).post(routes::projects::create_project),
+        )
+        .route(
+            "/api/projects/{id}",
+            get(routes::projects::get_project).patch(routes::projects::patch_project),
+        )
+        // 形态变更单独一个入口，不混进 PATCH：它不是「改一个字段」——
+        // `isolated → central` 要求先在设备上推成提交、Hub 建裸仓库并 fetch 成功。
+        .route(
+            "/api/projects/{id}/shape",
+            post(routes::projects::change_shape),
+        )
+        // 归档 / 取消归档。**没有 DELETE**：`PRODUCT.md` §3.2 明文第一版不提供
+        // 项目删除（会让已合入的任务历史、失败归因、成本记录一起丢失）。
+        .route(
+            "/api/projects/{id}/archive",
+            post(routes::projects::archive_project),
+        )
+        .route(
+            "/api/projects/{id}/unarchive",
+            post(routes::projects::unarchive_project),
+        )
         // 删设备（子任务 12 第 1 条）。**必须是 DELETE 而不是 GET/POST 带参数**：
         // 它是状态变更端点，落在下面那条 `.layer(...)` 之后就会绕过 session
         // 认证与 CSRF 双重提交——任意网页都能把用户的设备删掉。
