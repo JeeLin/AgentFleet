@@ -9,12 +9,12 @@
    ③ **跳转后的焦点落点**：`main` 每次换页都拿一次焦点（§4.3）。
    页面自己不管外壳，也不重新声明 `main`。
 
-   ④ **session 过期时的重新登录框**（`LoginPrompt`）：401 由 `lib/http.ts`
+   ④ **session 过期时的重新登录框**（`LoginPrompt`）：401 由 `shared/http.ts`
    弹框、由这里挂载与「取消时跳 /login」。这是外壳而不是页面的事——跳转是
    一个策略（见 `onLoginCancel` 的注释）。
 
    ⑤ **整页跳转的唯一出口**（`fullPageNavigate`）：403 `hub_not_initialized`
-   的跳转也住在这里（`setNotInitializedHandler`），所以 `lib/` 里没有第二个
+   的跳转也住在这里（`setNotInitializedHandler`），所以 `src/shared/` 里没有第二个
    会整页跳转的地方。
 
    ── 折叠态为什么不是「藏起来」 ───────────────────────────────────
@@ -25,22 +25,22 @@
 
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
-import EmptyState from '@/components/EmptyState.vue'
-import LoginPrompt from '@/components/LoginPrompt.vue'
-import { pop, push, topContainer, trapTab } from '@/lib/focus'
-import { SCOPE_LABEL, KEYS, hintOf, missingActs, onHandlersChanged, PREFIX_LEAD } from '@/lib/keynav'
-import { logout } from '@/lib/api'
-import { setNotInitializedHandler } from '@/lib/http'
-import { loginPromptOpen, dismissLoginPrompt } from '@/lib/login-prompt'
-import { pageTitle } from '@/lib/page-titles'
-import { bindShell, installShellKeys } from '@/lib/shell-keys'
+import EmptyState from '@/domains/shared/components/EmptyState.vue'
+import LoginPrompt from '@/domains/shared/components/LoginPrompt.vue'
+import { pop, push, topContainer, trapTab } from '@/shared/focus'
+import { SCOPE_LABEL, KEYS, hintOf, missingActs, onHandlersChanged, PREFIX_LEAD } from '@/shared/keynav'
+import { logout } from '@/shared/auth'
+import { setNotInitializedHandler } from '@/shared/http'
+import { loginPromptOpen, dismissLoginPrompt } from '@/shared/login-prompt'
+import { pageTitle } from '@/shared/page-titles'
+import { bindShell, installShellKeys } from '@/shared/shell-keys'
 import { interceptLink, legacyTarget, navigate, route, startRouter, LOGIN_PATH } from '@/router'
 
-import DevicesPage from '@/pages/DevicesPage.vue'
+import DevicesPage from '@/domains/device/DevicesPage.vue'
 import LoginPage from '@/pages/LoginPage.vue'
-import NewSessionPage from '@/pages/NewSessionPage.vue'
-import SessionPage from '@/pages/SessionPage.vue'
-import SessionsPage from '@/pages/SessionsPage.vue'
+import NewSessionPage from '@/domains/session/NewSessionPage.vue'
+import SessionPage from '@/domains/session/SessionPage.vue'
+import SessionsPage from '@/domains/session/SessionsPage.vue'
 import SettingsPage from '@/pages/SettingsPage.vue'
 import SetupPage from '@/pages/SetupPage.vue'
 import { AUTH_ROUTES } from '@/router'
@@ -545,7 +545,7 @@ watch(
     </footer>
 
     <!-- session 过期时弹出的密码框（§4.7「需要别的动作」那一列）。401 的一条
-         出路是「填个密码继续」，不是「整页跳走」。它由 `lib/http.ts` 开，
+         出路是「填个密码继续」，不是「整页跳走」。它由 `shared/http.ts` 开，
          由这里挂载；取消时跳 /login 是外壳的策略（见 `onLoginCancel`）。
 
          它待在 `af-app` 里面而不是与它平级：外壳那个 `v-else` 的配对是 `<component

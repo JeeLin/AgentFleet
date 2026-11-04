@@ -15,7 +15,7 @@
      会话失效      → 重新登录（这一次是「过期」，不是「输错」）
      429 rate_limited / login_busy → 等（说清为什么等、等的是什么）
 
-   所以错误文案由 `lib/auth.ts` 的 `describeLoginFailure` 按 code 逐条给出，
+   所以错误文案由 `shared/auth.ts` 的 `describeLoginFailure` 按 code 逐条给出，
    这里**只负责呈现**，不在这里再写一遍判断——两处判断必然漂。
 
    ── 为什么「未初始化」是黄色告警块而不是红色错误行 ──────────────────
@@ -38,7 +38,7 @@ import {
   describeLoginFailure,
   postLogin,
   type AuthFailure,
-} from '@/lib/auth'
+} from '@/shared/auth'
 import { navigate, INDEX_PATH, SETUP_PATH } from '@/router'
 
 const password = ref('')

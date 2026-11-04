@@ -31,7 +31,7 @@
 
 import { shallowRef, type ShallowRef } from 'vue'
 
-import { focusMain } from './lib/focus'
+import { focusMain } from '@/shared/focus'
 
 /** 路由名。与 §5.2 表格的「页面」一列一一对应。 */
 export type RouteName =

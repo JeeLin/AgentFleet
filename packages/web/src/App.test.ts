@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from '@/App.vue'
-import { KEYS, actCount } from '@/lib/keynav'
-import { depth, isTabbable } from '@/lib/focus'
+import { KEYS, actCount } from '@/shared/keynav'
+import { depth, isTabbable } from '@/shared/focus'
 import { matchRoute, route } from '@/router'
 import { device, mountIn, session } from '@/test/mount'
 import { settle, stubFetch } from '@/test/http'

@@ -42,8 +42,8 @@ import {
   fetchSetupState,
   submitSetup,
   type AuthFailure,
-} from '@/lib/auth'
-import { ApiError } from '@/lib/http'
+} from '@/shared/auth'
+import { ApiError } from '@/shared/http'
 import { LOGIN_PATH, navigate } from '@/router'
 
 const token = ref('')

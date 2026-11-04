@@ -39,14 +39,14 @@ import { readRepoFile } from '@/test/css'
  */
 const OWNED = [
   'packages/web/src/styles/components.css',
-  'packages/web/src/components/AgentCatalog.vue',
-  'packages/web/src/components/DeviceTable.vue',
-  'packages/web/src/components/SessionTable.vue',
-  'packages/web/src/components/TrajDrawer.vue',
-  'packages/web/src/pages/DevicesPage.vue',
-  'packages/web/src/pages/NewSessionPage.vue',
-  'packages/web/src/pages/SessionPage.vue',
-  'packages/web/src/pages/SessionsPage.vue',
+  'packages/web/src/domains/agent/AgentCatalog.vue',
+  'packages/web/src/domains/device/DeviceTable.vue',
+  'packages/web/src/domains/session/SessionTable.vue',
+  'packages/web/src/domains/session/TrajDrawer.vue',
+  'packages/web/src/domains/device/DevicesPage.vue',
+  'packages/web/src/domains/session/NewSessionPage.vue',
+  'packages/web/src/domains/session/SessionPage.vue',
+  'packages/web/src/domains/session/SessionsPage.vue',
 ]
 
 /** 剥掉 `/* *\/` 注释，只留真正的 CSS。 */
@@ -125,8 +125,8 @@ describe('一条规则只有一个家（跨受管文件数次数，toContain 看
    * 「贴在流上的一条」悄悄变成「第二张卡片」，而六条断言一条都不红。
    */
   it('.af-stage-note 的两份不是逐字重复（合并前必须先定变体）', () => {
-    const catalog = stripComments(readRepoFile('packages/web/src/components/AgentCatalog.vue'))
-    const flow = stripComments(readRepoFile('packages/web/src/components/ConvFlow.vue'))
+    const catalog = stripComments(readRepoFile('packages/web/src/domains/agent/AgentCatalog.vue'))
+    const flow = stripComments(readRepoFile('packages/web/src/domains/session/ConvFlow.vue'))
     expect(catalog).toMatch(/\.af-stage-note\s*\{[^}]*border-radius/)
     expect(catalog).toMatch(/\.af-stage-note__body\s*\{[^}]*--af-text-md/)
     expect(flow).toMatch(/\.af-stage-note\s*\{[^}]*border-bottom/)

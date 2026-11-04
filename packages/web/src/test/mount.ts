@@ -10,7 +10,9 @@ import { mount, type ComponentMountingOptions } from '@vue/test-utils'
 import type { Component } from 'vue'
 import { afterEach, vi } from 'vitest'
 
-import type { AgentSummary, DeviceSummary, SessionSummary } from '@/lib/api'
+import type { AgentSummary } from '@/domains/agent/api'
+import type { DeviceSummary } from '@/domains/device/api'
+import type { SessionSummary } from '@/domains/session/api'
 
 /**
  * 本文件挂过的组件。每个用例结束时**卸载**它们，而不是只清 DOM。
