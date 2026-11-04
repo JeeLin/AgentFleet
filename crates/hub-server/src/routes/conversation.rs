@@ -516,7 +516,14 @@ mod tests {
         let node_id = enrolled.node_id();
 
         let seat = hub_storage::SessionRepo::new(state.pool().clone())
-            .create(node_id, "~/src/app", Some("opencode"), "t0", None, hub_storage::BaseRevStatus::Unknown)
+            .create(
+                node_id,
+                "~/src/app",
+                Some("opencode"),
+                "t0",
+                None,
+                hub_storage::BaseRevStatus::Unknown,
+            )
             .expect("建会话");
 
         let repo = hub_storage::TrajectoryRepo::new(state.pool().clone());
@@ -657,7 +664,14 @@ mod tests {
         let home = enrolled.node_id();
 
         let seat = hub_storage::SessionRepo::new(state.pool().clone())
-            .create(home, "~/src/app", Some("opencode"), "t0", None, hub_storage::BaseRevStatus::Unknown)
+            .create(
+                home,
+                "~/src/app",
+                Some("opencode"),
+                "t0",
+                None,
+                hub_storage::BaseRevStatus::Unknown,
+            )
             .expect("建会话");
 
         // 绑定的 node 与这条会话所属的不一致。

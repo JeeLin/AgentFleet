@@ -177,7 +177,10 @@ pub(crate) async fn probe_base_rev(
 /// - 收到 `channel.closed` → 设备或别处把通道关了，不会有 `rev` 了。
 ///
 /// 其余一切继续等：包括本通道以外的帧（同一会话可能开着别的面板）。
-async fn wait_for_rev(stream: &mut (impl futures_util::Stream<Item = Envelope> + Unpin), channel_id: &str) -> Option<serde_json::Value> {
+async fn wait_for_rev(
+    stream: &mut (impl futures_util::Stream<Item = Envelope> + Unpin),
+    channel_id: &str,
+) -> Option<serde_json::Value> {
     use futures_util::StreamExt as _;
 
     while let Some(env) = stream.next().await {

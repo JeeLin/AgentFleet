@@ -74,12 +74,14 @@ impl Page {
             .body(Body::from(json!({"password": PASSWORD}).to_string()))
             .unwrap();
         // 登录端点不想走 CSRF 双重提交（那张豁免表里有它），但登录前没有 cookie。
-        let resp = app.clone().oneshot(std::mem::replace(
-            &mut req,
-            Request::builder().body(Body::empty()).unwrap(),
-        ))
-        .await
-        .expect("login responds");
+        let resp = app
+            .clone()
+            .oneshot(std::mem::replace(
+                &mut req,
+                Request::builder().body(Body::empty()).unwrap(),
+            ))
+            .await
+            .expect("login responds");
         assert_eq!(resp.status(), StatusCode::OK, "登录必须成功");
 
         let mut session = None;
@@ -135,8 +137,7 @@ impl Page {
             "POST",
             "/api/sessions",
             Body::from(
-                json!({"node_id": self.node_id, "path": path, "agent_id": TEST_AGENT})
-                    .to_string(),
+                json!({"node_id": self.node_id, "path": path, "agent_id": TEST_AGENT}).to_string(),
             ),
         )
         .await
@@ -202,7 +203,10 @@ struct StubLog {
     closed: Vec<String>,
 }
 
-fn spawn_rev_stub(mut est: Established, replies: Vec<Option<Value>>) -> tokio::task::JoinHandle<StubLog> {
+fn spawn_rev_stub(
+    mut est: Established,
+    replies: Vec<Option<Value>>,
+) -> tokio::task::JoinHandle<StubLog> {
     tokio::spawn(async move {
         let mut log = StubLog {
             rev_channels: Vec::new(),
@@ -536,7 +540,9 @@ async fn the_channel_layer_timeout_is_not_mistaken_for_a_rev() {
     let (est, node_id) = enrolled(&hub, &["git"]).await;
     let stub = spawn_rev_stub(
         est,
-        vec![Some(json!({"op": "error", "code": "timeout", "reason": "slow"}))],
+        vec![Some(
+            json!({"op": "error", "code": "timeout", "reason": "slow"}),
+        )],
     );
 
     let mut page = Page::new(&hub).await;

@@ -391,7 +391,8 @@ mod tests {
     }
 
     fn create(sr: &SessionRepo, node: &str, path: &str, at: &str) -> crate::session::Session {
-        sr.create(node, path, None, at, None, BaseRevStatus::Unknown).unwrap()
+        sr.create(node, path, None, at, None, BaseRevStatus::Unknown)
+            .unwrap()
     }
 
     /// 建会话即挂载工作区：一次调用同时产生 workspace 与 session 两行，
@@ -525,7 +526,16 @@ mod tests {
     #[test]
     fn a_workspace_cannot_reference_an_unknown_device() {
         let (_d, wr, sr) = setup();
-        let err = sr.create("n_ghost", "/srv/app", None, TS, None, BaseRevStatus::Unknown).unwrap_err();
+        let err = sr
+            .create(
+                "n_ghost",
+                "/srv/app",
+                None,
+                TS,
+                None,
+                BaseRevStatus::Unknown,
+            )
+            .unwrap_err();
         assert!(
             matches!(&err, StorageError::NoSuchDevice(n) if n == "n_ghost"),
             "an unknown device must be refused by name, got {err:?}"

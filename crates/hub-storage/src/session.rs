@@ -294,12 +294,7 @@ impl SessionRepo {
     /// 回填的会话不存在时报错，**不静默成功**——与 `set_acp_session_id` 同一条
     /// 口径。静默成功的话「回填给了一个已被删掉的会话」永远不被发现，
     /// 而它的症状要到下次打开页面看起点时才浮现，已经离现场很远。
-    pub fn set_base_rev(
-        &self,
-        id: &str,
-        rev: Option<&str>,
-        status: BaseRevStatus,
-    ) -> Result<()> {
+    pub fn set_base_rev(&self, id: &str, rev: Option<&str>, status: BaseRevStatus) -> Result<()> {
         let conn = self.pool.get()?;
         let n = conn.execute(
             "UPDATE session SET base_rev = ?2, base_rev_status = ?3 WHERE id = ?1",
@@ -497,9 +492,14 @@ mod tests {
     #[test]
     fn sessions_are_listed_newest_first() {
         let (_d, sr) = setup();
-        let a = sr.create("n_a", "/a", None, "unix:10", None, BaseRevStatus::Unknown).unwrap();
-        let b = sr.create("n_a", "/b", None, "unix:20", None, BaseRevStatus::Unknown).unwrap();
-        sr.create("n_a", "/c", None, "unix:20", None, BaseRevStatus::Unknown).unwrap();
+        let a = sr
+            .create("n_a", "/a", None, "unix:10", None, BaseRevStatus::Unknown)
+            .unwrap();
+        let b = sr
+            .create("n_a", "/b", None, "unix:20", None, BaseRevStatus::Unknown)
+            .unwrap();
+        sr.create("n_a", "/c", None, "unix:20", None, BaseRevStatus::Unknown)
+            .unwrap();
 
         let ids: Vec<String> = sr
             .list()
@@ -523,7 +523,10 @@ mod tests {
     #[test]
     fn a_broken_row_is_reported_instead_of_dropped_from_the_list() {
         let (_d, sr) = setup();
-        let id = sr.create("n_a", "/a", None, TS, None, BaseRevStatus::Unknown).unwrap().id;
+        let id = sr
+            .create("n_a", "/a", None, TS, None, BaseRevStatus::Unknown)
+            .unwrap()
+            .id;
         corrupt_state(&sr);
 
         // 丢掉这一行会让页面少一个条目，而页面上没有任何地方能提示用户
@@ -542,7 +545,9 @@ mod tests {
     #[test]
     fn ending_a_session_records_when_it_ended() {
         let (_d, sr) = setup();
-        let s = sr.create("n_a", "/a", None, TS, None, BaseRevStatus::Unknown).unwrap();
+        let s = sr
+            .create("n_a", "/a", None, TS, None, BaseRevStatus::Unknown)
+            .unwrap();
         sr.end(&s.id, "unix:1700000099").unwrap();
 
         let got = sr.find(&s.id).unwrap().unwrap();
@@ -562,7 +567,9 @@ mod tests {
     #[test]
     fn ending_an_already_ended_session_is_not_an_error() {
         let (_d, sr) = setup();
-        let s = sr.create("n_a", "/a", None, TS, None, BaseRevStatus::Unknown).unwrap();
+        let s = sr
+            .create("n_a", "/a", None, TS, None, BaseRevStatus::Unknown)
+            .unwrap();
         sr.end(&s.id, "unix:10").unwrap();
         sr.end(&s.id, "unix:20").unwrap();
         assert_eq!(
@@ -575,7 +582,9 @@ mod tests {
     #[test]
     fn a_session_reports_its_device_and_path() {
         let (_d, sr) = setup();
-        let s = sr.create("n_a", "/srv/app", None, TS, None, BaseRevStatus::Unknown).unwrap();
+        let s = sr
+            .create("n_a", "/srv/app", None, TS, None, BaseRevStatus::Unknown)
+            .unwrap();
         let d = sr.detail(&s.id).unwrap().expect("detail");
         assert_eq!(d.workspace.node_id.as_deref(), Some("n_a"));
         assert_eq!(d.workspace.removed_node_id, None, "设备还在时不填 removed");
@@ -592,7 +601,9 @@ mod tests {
     #[test]
     fn detail_also_reports_a_broken_row() {
         let (_d, sr) = setup();
-        let s = sr.create("n_a", "/a", None, TS, None, BaseRevStatus::Unknown).unwrap();
+        let s = sr
+            .create("n_a", "/a", None, TS, None, BaseRevStatus::Unknown)
+            .unwrap();
         corrupt_state(&sr);
         assert!(matches!(
             sr.detail(&s.id).unwrap_err(),
@@ -619,7 +630,16 @@ mod tests {
     #[test]
     fn the_acp_session_id_is_none_until_it_is_recorded_then_round_trips() {
         let (_d, sr) = setup();
-        let s = sr.create("n_a", "/srv/app", Some("opencode"), TS, None, BaseRevStatus::Unknown).unwrap();
+        let s = sr
+            .create(
+                "n_a",
+                "/srv/app",
+                Some("opencode"),
+                TS,
+                None,
+                BaseRevStatus::Unknown,
+            )
+            .unwrap();
         assert_eq!(
             s.acp_session_id, None,
             "刚建的会话还没有 ACP id，设备侧据此走 session/new"
@@ -651,7 +671,16 @@ mod tests {
     #[test]
     fn recording_the_same_acp_session_id_twice_is_not_an_error() {
         let (_d, sr) = setup();
-        let s = sr.create("n_a", "/srv/app", Some("opencode"), TS, None, BaseRevStatus::Unknown).unwrap();
+        let s = sr
+            .create(
+                "n_a",
+                "/srv/app",
+                Some("opencode"),
+                TS,
+                None,
+                BaseRevStatus::Unknown,
+            )
+            .unwrap();
         sr.set_acp_session_id(&s.id, "ses_abc").unwrap();
         sr.set_acp_session_id(&s.id, "ses_abc").unwrap();
         assert_eq!(
@@ -705,7 +734,11 @@ mod tests {
 
         // ③ detail（`row_to_workspace_at(r, 9)` 的偏移）
         let d = sr.detail(&s.id).unwrap().unwrap();
-        assert_eq!(d.session.base_rev.as_deref(), Some(rev), "detail 读到的起点不对");
+        assert_eq!(
+            d.session.base_rev.as_deref(),
+            Some(rev),
+            "detail 读到的起点不对"
+        );
         assert_eq!(
             d.session.base_rev_status,
             BaseRevStatus::Ok,
@@ -729,7 +762,11 @@ mod tests {
             "list 读到的状态不对"
         );
         // list 的工作区三列也要对：偏移 9/10/11 写错时这里先红
-        assert_eq!(one.node_id.as_deref(), Some("n_a"), "list 的 node_id 错位了");
+        assert_eq!(
+            one.node_id.as_deref(),
+            Some("n_a"),
+            "list 的 node_id 错位了"
+        );
         assert_eq!(one.path, "/srv/app", "list 的 path 错位了");
         assert_eq!(one.removed_node_id, None);
     }
@@ -740,7 +777,14 @@ mod tests {
     fn create_with_unavailable_status_has_no_rev() {
         let (_d, sr) = setup();
         let s = sr
-            .create("n_a", "/srv/app", None, TS, None, BaseRevStatus::Unavailable)
+            .create(
+                "n_a",
+                "/srv/app",
+                None,
+                TS,
+                None,
+                BaseRevStatus::Unavailable,
+            )
             .unwrap();
         assert_eq!(s.base_rev, None);
         let f = sr.find(&s.id).unwrap().unwrap();
@@ -756,7 +800,9 @@ mod tests {
     #[test]
     fn an_unknown_status_cannot_be_parsed_as_ok() {
         let (_d, sr) = setup();
-        let s = sr.create("n_a", "/a", None, TS, None, BaseRevStatus::Ok).unwrap();
+        let s = sr
+            .create("n_a", "/a", None, TS, None, BaseRevStatus::Ok)
+            .unwrap();
         let conn = sr.pool.get().unwrap();
         conn.execute(
             "UPDATE session SET base_rev_status = 'okayish' WHERE id = ?1",
@@ -779,7 +825,8 @@ mod tests {
             .create("n_a", "/a", None, TS, None, BaseRevStatus::Unknown)
             .unwrap();
         let rev = "aaaa1111bbbb2222cccc3333dddd4444eeee5555";
-        sr.set_base_rev(&s.id, Some(rev), BaseRevStatus::Ok).unwrap();
+        sr.set_base_rev(&s.id, Some(rev), BaseRevStatus::Ok)
+            .unwrap();
 
         let f = sr.find(&s.id).unwrap().unwrap();
         assert_eq!(f.base_rev.as_deref(), Some(rev));
@@ -818,7 +865,10 @@ mod tests {
             "新会话必须是 Running——它是「建会话时能探起点」的唯一前提"
         );
         // 走一遍库也不变（不是只在返回值上改的）
-        assert_eq!(sr.find(&s.id).unwrap().unwrap().state, SessionState::Running);
+        assert_eq!(
+            sr.find(&s.id).unwrap().unwrap().state,
+            SessionState::Running
+        );
     }
 
     /// 五态的字面量往返：`as_str` / `from_str` 一一对应。

@@ -1152,7 +1152,10 @@ async fn open_spec_for(
             // 不是我们要的那条（探针的）：继续读，不把它当结果。
             continue;
         }
-        assert!(Instant::now() < deadline, "5s 内没收到 {want} 那条 open_channel");
+        assert!(
+            Instant::now() < deadline,
+            "5s 内没收到 {want} 那条 open_channel"
+        );
     }
 }
 

@@ -2076,7 +2076,14 @@ mod tests {
         .expect("设备行要插得进去");
         drop(conn);
         let session = hub_storage::SessionRepo::new(state.pool().clone())
-            .create("n_a", "/repo", None, "unix:1", None, hub_storage::BaseRevStatus::Unknown)
+            .create(
+                "n_a",
+                "/repo",
+                None,
+                "unix:1",
+                None,
+                hub_storage::BaseRevStatus::Unknown,
+            )
             .expect("会话要建得起来");
         state.connections().insert(
             "n_a".into(),
