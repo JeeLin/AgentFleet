@@ -6,6 +6,7 @@ members = [
     "crates/hub-storage",
     "crates/hub-core",
     "crates/hub-server",
+    "crates/node-connector",
     "crates/node-core",
     "crates/node-cli",
 ]
@@ -23,6 +24,7 @@ identity = { path = "crates/identity" }
 hub-storage = { path = "crates/hub-storage" }
 hub-core = { path = "crates/hub-core" }
 hub-server = { path = "crates/hub-server" }
+node-connector = { path = "crates/node-connector" }
 node-core = { path = "crates/node-core" }
 
 # 序列化

@@ -806,6 +806,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "node-connector"
+version = "0.5.0"
+dependencies = [
+ "base64ct",
+ "libc",
+ "protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "node-core"
 version = "0.5.0"
 dependencies = [
@@ -815,6 +830,7 @@ dependencies = [
  "futures-util",
  "identity",
  "libc",
+ "node-connector",
  "protocol",
  "rand 0.8.8",
  "serde",

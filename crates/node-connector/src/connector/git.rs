@@ -1576,7 +1576,7 @@ mod tests {
     /// 「少一条」远好过「整条通道 panic」。
     #[test]
     fn parse_status_skips_a_record_shorter_than_the_status_codes() {
-        // `A ` —— 一个字节，拿不到 XY，必须跳过而不是索引越界。
+        // `A\0` —— 一个字节，拿不到 XY，必须跳过而不是索引越界。
         let got = parse_status(b"A\0");
         assert_eq!(got.files.len(), 0, "短记录要跳过");
         // ` M a.txt` 是正常形状，不能被上一条的规则误伤。
@@ -2144,9 +2144,7 @@ mod tests {
         let (_base, ws) = sandbox();
         repo_with_commit(&ws);
         let mut g = open(&ws);
-        let s1 = call(&mut g, serde_json::json!({"op": "rev"}))
-            .expect("rev 1")
-            ["head"]
+        let s1 = call(&mut g, serde_json::json!({"op": "rev"})).expect("rev 1")["head"]
             .as_str()
             .expect("head 1")
             .to_string();
@@ -2154,9 +2152,7 @@ mod tests {
         std::fs::write(ws.join("a.txt"), "two\n").expect("write");
         git_in(&ws, &["commit", "-aqm", "second commit"]);
 
-        let s2 = call(&mut g, serde_json::json!({"op": "rev"}))
-            .expect("rev 2")
-            ["head"]
+        let s2 = call(&mut g, serde_json::json!({"op": "rev"})).expect("rev 2")["head"]
             .as_str()
             .expect("head 2")
             .to_string();
@@ -2174,8 +2170,8 @@ mod tests {
         let (_base, ws) = sandbox();
         let mut g = open(&ws);
 
-        let got = call(&mut g, serde_json::json!({"op": "rev"}))
-            .expect("非仓库必须回 Ok 帧，不是 Err");
+        let got =
+            call(&mut g, serde_json::json!({"op": "rev"})).expect("非仓库必须回 Ok 帧，不是 Err");
 
         assert_eq!(got["not_a_repo"], serde_json::json!(true));
         assert_eq!(got["head"], serde_json::Value::Null);
@@ -2199,8 +2195,8 @@ mod tests {
         git_in(&ws, &["init", "-q", "-b", "main", "."]);
         let mut g = open(&ws);
 
-        let got = call(&mut g, serde_json::json!({"op": "rev"}))
-            .expect("空仓库必须回 Ok 帧，不是 Err");
+        let got =
+            call(&mut g, serde_json::json!({"op": "rev"})).expect("空仓库必须回 Ok 帧，不是 Err");
 
         assert_eq!(
             got["not_a_repo"],
@@ -2331,8 +2327,7 @@ mod tests {
         let (_base, ws) = sandbox();
         repo_with_commit(&ws);
         let mut g = open(&ws);
-        let before = call(&mut g, serde_json::json!({"op": "rev"}))
-            .expect("rev before")["head"]
+        let before = call(&mut g, serde_json::json!({"op": "rev"})).expect("rev before")["head"]
             .as_str()
             .expect("head before")
             .to_string();
@@ -2341,8 +2336,7 @@ mod tests {
         std::fs::write(ws.join("a.txt"), "dirty\n").expect("write");
         std::fs::write(ws.join("new.txt"), "untracked\n").expect("write");
 
-        let after = call(&mut g, serde_json::json!({"op": "rev"}))
-            .expect("rev after")["head"]
+        let after = call(&mut g, serde_json::json!({"op": "rev"})).expect("rev after")["head"]
             .as_str()
             .expect("head after")
             .to_string();
@@ -2405,7 +2399,8 @@ mod tests {
             "短 hash 必须由同一个完整 hash 截得"
         );
         assert_ne!(
-            got["short"], &FAKE_SHORT[..7],
+            got["short"],
+            &FAKE_SHORT[..7],
             "短 hash 不得来自第二次 rev-parse --short 调用"
         );
     }
