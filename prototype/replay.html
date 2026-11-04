@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>执行复盘 · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css?v=11">
+<link rel="stylesheet" href="styles/theme-neutral.css?v=11" id="af-theme">
+<link rel="stylesheet" href="assets/app.css?v=11">
+</head>
+<body data-nav="board">
+<div class="af-shell">
+  <main class="af-main">
+
+    <header class="af-head">
+      <a class="af-btn af-btn--ghost" href="task.html">← 任务 #1042</a>
+      <h1 class="af-head__title">执行复盘</h1>
+      <span class="af-tag">第 2 次执行</span>
+      <span class="af-tag af-tag--failed">失败</span>
+      <span class="af-head__spacer"></span>
+      <a class="af-btn af-btn--ghost" href="execution.html">执行监控</a>
+      <a class="af-btn af-btn--ghost" href="task.html">失败面板</a>
+    </header>
+
+    <!-- 复盘和失败面板的区别，是这一页首先要说清的事。
+         两个东西长得很像（都是看一次失败的执行），但一个只看、一个能做。
+         不写清，用户会在复盘里找「重跑」按钮，找不到就以为坏了。 -->
+    <div class="af-filters">
+      <span class="af-filters__k">这是只读的</span>
+      <span class="af-2xs af-dim">
+        复盘只回答「它是怎么跑过去的」，所以这里<b>没有重跑、没有改配置、没有下发</b>。
+        要动手请去<a href="task.html">失败面板</a> ——
+        那里才是「看明白了然后做点什么」的地方。
+      </span>
+    </div>
+
+    <div class="af-body">
+      <div style="padding:20px 20px 64px" class="af-stack">
+
+        <!-- 失败原因置顶：复盘是给「看不出哪一步开始出错」用的，
+             所以先把结论摆出来，再让人往下看过程 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">这次为什么失败</h2>
+            <span class="af-region__note">结论先给，过程在下面</span>
+          </div>
+          <div class="af-region__body af-stack">
+            <div class="af-callout af-callout--warn">
+              <span class="af-callout__k">没有可用设备（no_capable_device）</span>
+              <span>
+                第 3 步需要 <span class="af-mono af-xs">node ≥ 20</span>，
+                允许的 3 台设备都不满足 —— device-a 是 node 18、device-b 没装 node、
+                device-c 是 node 16。<b>任务在这里停住了，没有随便找一台跑。</b>
+              </span>
+            </div>
+            <div class="af-2xs af-dim" style="line-height:1.9">
+              <div>看 diff 只能看出「改了两个文件然后停了」，看不出是卡在环境上。</div>
+              <div>复盘能看到：agent 试了 3 次探测 node 版本，每次都换了个目录重试，最后放弃。</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 时间轴：这一页的主体。
+             事件类型就是轨迹表的三组：User / Assistant / Tool。 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">回放</h2>
+            <span class="af-spacer"></span>
+            <span class="af-region__note">42 条事件 · 耗时 6 分 18 秒</span>
+          </div>
+
+          <!-- 播放控制条：静态原型不真的播，只把控件摆出来 -->
+          <div class="af-replaybar">
+            <button class="af-btn af-btn--sm" type="button" aria-label="播放">▶ 播放</button>
+            <button class="af-btn af-btn--sm af-btn--ghost" type="button" disabled>⏸ 暂停</button>
+            <span class="af-replaybar__track" aria-hidden="true">
+              <span class="af-replaybar__fill" style="width:100%"></span>
+              <span class="af-replaybar__knob" style="left:100%"></span>
+              <!-- 失败点标在轨道上：不用来回找 -->
+              <span class="af-replaybar__mark" style="left:76%" title="第 32 条：放弃探测 node 版本"></span>
+            </span>
+            <span class="af-replaybar__time af-mono af-2xs">06:18 / 06:18</span>
+            <span class="af-spacer"></span>
+            <span class="af-2xs af-mute">拖到任意位置可跳转 · 底部有「只看失败」开关</span>
+          </div>
+
+          <div class="af-region__body af-region__body--flush">
+            <ol class="af-replay">
+
+              <!-- ── User ─────────────────────────────────────────────── -->
+              <li class="af-ev af-ev--user">
+                <span class="af-ev__gutter">
+                  <span class="af-ev__dot" aria-hidden="true"></span>
+                  <span class="af-ev__rail" aria-hidden="true"></span>
+                </span>
+                <span class="af-ev__body">
+                  <span class="af-ev__head">
+                    <span class="af-ev__kind">你</span>
+                    <span class="af-ev__time af-mono">00:00</span>
+                  </span>
+                  <span class="af-ev__text">修一下批量重试里任务级约束没逐个检查的问题</span>
+                </span>
+              </li>
+
+              <!-- ── Assistant ────────────────────────────────────────── -->
+              <li class="af-ev af-ev--assistant">
+                <span class="af-ev__gutter">
+                  <span class="af-ev__dot" aria-hidden="true"></span>
+                  <span class="af-ev__rail" aria-hidden="true"></span>
+                </span>
+                <span class="af-ev__body">
+                  <span class="af-ev__head">
+                    <span class="af-ev__kind">助手 · claude</span>
+                    <span class="af-ev__time af-mono">00:02</span>
+                    <span class="af-ev__meta">用时 1.4s · 入 1.2k / 出 380 token</span>
+                  </span>
+                  <span class="af-ev__text">
+                    先看一下重试逻辑在哪。
+                  </span>
+                </span>
+              </li>
+
+              <!-- ── Tool ─────────────────────────────────────────────── -->
+              <li class="af-ev af-ev--tool">
+                <span class="af-ev__gutter">
+                  <span class="af-ev__dot" aria-hidden="true"></span>
+                  <span class="af-ev__rail" aria-hidden="true"></span>
+                </span>
+                <span class="af-ev__body">
+                  <span class="af-ev__head">
+                    <span class="af-ev__kind">工具 · grep</span>
+                    <span class="af-ev__time af-mono">00:03</span>
+                    <span class="af-tag af-tag--done">成功</span>
+                    <span class="af-ev__meta">12ms</span>
+                  </span>
+                  <!-- 输入输出可展开：这是复盘的核心理由 —— 光看 diff 不知道 agent 喂了什么 -->
+                  <details class="af-ev__io">
+                    <summary>输入 / 输出</summary>
+                    <div class="af-ev__io-body">
+                      <div class="af-ev__io-k">输入</div>
+                      <pre class="af-code af-code--sm">pattern: "retry"
+glob: "src/**/*.ts"</pre>
+                      <div class="af-ev__io-k">输出</div>
+                      <pre class="af-code af-code--sm">src/scheduler/retry.ts:88
+src/scheduler/retry.ts:141
+src/task/constraints.ts:23</pre>
+                    </div>
+                  </details>
+                </span>
+              </li>
+
+              <li class="af-ev af-ev--tool">
+                <span class="af-ev__gutter">
+                  <span class="af-ev__dot" aria-hidden="true"></span>
+                  <span class="af-ev__rail" aria-hidden="true"></span>
+                </span>
+                <span class="af-ev__body">
+                  <span class="af-ev__head">
+                    <span class="af-ev__kind">工具 · read_file</span>
+                    <span class="af-ev__time af-mono">00:05</span>
+                    <span class="af-tag af-tag--done">成功</span>
+                  </span>
+                  <span class="af-ev__text af-mono af-xs">src/scheduler/retry.ts · 214 行</span>
+                </span>
+              </li>
+
+              <li class="af-ev af-ev--assistant">
+                <span class="af-ev__gutter">
+                  <span class="af-ev__dot" aria-hidden="true"></span>
+                  <span class="af-ev__rail" aria-hidden="true"></span>
+                </span>
+                <span class="af-ev__body">
+                  <span class="af-ev__head">
+                    <span class="af-ev__kind">助手 · claude</span>
+                    <span class="af-ev__time af-mono">00:08</span>
+                    <span class="af-ev__meta">用时 2.1s</span>
+                  </span>
+                  <span class="af-ev__text">
+                    找到了：<span class="af-mono af-xs">retry.ts:141</span> 在批量重试时只检查了第一次的约束，
+                    后面几次直接复用。要看看测试怎么写的，确认这是不是预期。
+                  </span>
+                </span>
+              </li>
+
+              <!-- ── 子 agent：轨迹里以「子 agent」分组，可下钻 ────────── -->
+              <li class="af-ev af-ev--tool">
+                <span class="af-ev__gutter">
+                  <span class="af-ev__dot" aria-hidden="true"></span>
+                  <span class="af-ev__rail" aria-hidden="true"></span>
+                </span>
+                <span class="af-ev__body">
+                  <span class="af-ev__head">
+                    <span class="af-ev__kind">工具 · run_tests</span>
+                    <span class="af-ev__time af-mono">00:20</span>
+                    <span class="af-tag af-tag--done">成功</span>
+                    <span class="af-ev__meta">1 分 12 秒 · 18 passed</span>
+                  </span>
+                  <span class="af-ev__text af-xs af-dim">cargo test --lib scheduler::retry</span>
+                </span>
+              </li>
+
+              <!-- ── 关键节点：这里开始出问题（高亮）─────────────────── -->
+              <li class="af-ev af-ev--tool af-ev--bad">
+                <span class="af-ev__gutter">
+                  <span class="af-ev__dot" aria-hidden="true"></span>
+                  <span class="af-ev__rail" aria-hidden="true"></span>
+                </span>
+                <span class="af-ev__body">
+                  <span class="af-ev__head">
+                    <span class="af-ev__kind">工具 · shell</span>
+                    <span class="af-ev__time af-mono">01:40</span>
+                    <span class="af-tag af-tag--failed">失败</span>
+                    <span class="af-ev__meta">第 1 次</span>
+                  </span>
+                  <span class="af-ev__text"><b>从这里开始出问题。</b></span>
+                  <details class="af-ev__io" open>
+                    <summary>输入 / 输出</summary>
+                    <div class="af-ev__io-body">
+                      <div class="af-ev__io-k">输入</div>
+                      <pre class="af-code af-code--sm">node --version</pre>
+                      <div class="af-ev__io-k">输出</div>
+                      <pre class="af-code af-code--sm">v18.19.0</pre>
+                      <div class="af-ev__io-k">判定</div>
+                      <pre class="af-code af-code--sm">要求 ≥ 20，实际 18.19.0 → 不满足</pre>
+                    </div>
+                  </details>
+                </span>
+              </li>
+
+              <li class="af-ev af-ev--assistant">
+                <span class="af-ev__gutter">
+                  <span class="af-ev__dot" aria-hidden="true"></span>
+                  <span class="af-ev__rail" aria-hidden="true"></span>
+                </span>
+                <span class="af-ev__body">
+                  <span class="af-ev__head">
+                    <span class="af-ev__kind">助手 · claude</span>
+                    <span class="af-ev__time af-mono">01:42</span>
+                  </span>
+                  <span class="af-ev__text">
+                    node 是 18，不满足。可能是别的目录里装了新版本，试一下。
+                  </span>
+                </span>
+              </li>
+
+              <li class="af-ev af-ev--tool af-ev--bad">
+                <span class="af-ev__gutter">
+                  <span class="af-ev__dot" aria-hidden="true"></span>
+                  <span class="af-ev__rail" aria-hidden="true"></span>
+                </span>
+                <span class="af-ev__body">
+                  <span class="af-ev__head">
+                    <span class="af-ev__kind">工具 · shell</span>
+                    <span class="af-ev__time af-mono">02:05</span>
+                    <span class="af-tag af-tag--failed">失败</span>
+                    <span class="af-ev__meta">第 2 次</span>
+                  </span>
+                  <details class="af-ev__io">
+                    <summary>输入 / 输出</summary>
+                    <div class="af-ev__io-body">
+                      <div class="af-ev__io-k">输入</div>
+                      <pre class="af-code af-code--sm">/usr/local/bin/node --version</pre>
+                      <div class="af-ev__io-k">输出</div>
+                      <pre class="af-code af-code--sm">/usr/local/bin/node: No such file or directory</pre>
+                    </div>
+                  </details>
+                </span>
+              </li>
+
+              <li class="af-ev af-ev--tool af-ev--bad">
+                <span class="af-ev__gutter">
+                  <span class="af-ev__dot" aria-hidden="true"></span>
+                  <span class="af-ev__rail" aria-hidden="true"></span>
+                </span>
+                <span class="af-ev__body">
+                  <span class="af-ev__head">
+                    <span class="af-ev__kind">工具 · shell</span>
+                    <span class="af-ev__time af-mono">02:30</span>
+                    <span class="af-tag af-tag--failed">失败</span>
+                    <span class="af-ev__meta">第 3 次</span>
+                  </span>
+                  <details class="af-ev__io">
+                    <summary>输入 / 输出</summary>
+                    <div class="af-ev__io-body">
+                      <div class="af-ev__io-k">输入</div>
+                      <pre class="af-code af-code--sm">ls ~/.nvm/versions/node/</pre>
+                      <div class="af-ev__io-k">输出</div>
+                      <pre class="af-code af-code--sm">v16.20.1</pre>
+                      <div class="af-ev__io-k">判定</div>
+                      <pre class="af-code af-code--sm">只有 v16，仍然不满足 ≥ 20</pre>
+                    </div>
+                  </details>
+                </span>
+              </li>
+
+              <li class="af-ev af-ev--assistant">
+                <span class="af-ev__gutter">
+                  <span class="af-ev__dot" aria-hidden="true"></span>
+                  <span class="af-ev__rail" aria-hidden="true"></span>
+                </span>
+                <span class="af-ev__body">
+                  <span class="af-ev__head">
+                    <span class="af-ev__kind">助手 · claude</span>
+                    <span class="af-ev__time af-mono">02:35</span>
+                    <span class="af-ev__meta">用时 3.8s</span>
+                  </span>
+                  <span class="af-ev__text">
+                    这台机器上没有 ≥ 20 的 node。任务的约束写的是「node ≥ 20」，
+                    我不该绕过去装一个 —— 那是改环境，不是改代码。交给人决定。
+                  </span>
+                </span>
+              </li>
+
+              <!-- 结束事件：轨迹里最后一个节点 -->
+              <li class="af-ev af-ev--end">
+                <span class="af-ev__gutter">
+                  <span class="af-ev__dot" aria-hidden="true"></span>
+                </span>
+                <span class="af-ev__body">
+                  <span class="af-ev__head">
+                    <span class="af-ev__kind">执行结束</span>
+                    <span class="af-ev__time af-mono">06:18</span>
+                    <span class="af-tag af-tag--failed">failed · no_capable_device</span>
+                  </span>
+                  <span class="af-ev__text af-xs af-dim">
+                    共 42 条事件，这里只显示关键节点。<b>没有改动被合入，工作区已清理。</b>
+                  </span>
+                </span>
+              </li>
+
+            </ol>
+          </div>
+        </section>
+
+        <!-- 说清数据从哪来、边界在哪 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">这份回放是怎么来的</h2>
+            <span class="af-region__note">不新增采集，只是已有轨迹的另一个视角</span>
+          </div>
+          <div class="af-region__body af-stack">
+            <div class="af-callout">
+              <span class="af-callout__k">轨迹本来就是只追加的事件流</span>
+              <span>
+                执行的时候，每一次说话、每一次工具调用都已经记下来了。
+                复盘只是把这些记录按时间串起来给你看 —— <b>不是新加一套埋点</b>。
+                所以「跑过的任务」全都可复盘，不需要事前开启什么。
+              </span>
+            </div>
+            <div class="af-callout af-callout--warn">
+              <span class="af-callout__k">有一个已知的缺口：断线的那段时间会丢事件</span>
+              <span>
+                设备断线期间产生的事件，Hub 拿不到，这部分<b>永久缺失</b>。
+                复盘会在时间轴上标一个空档（「02:35 – 03:10 设备断线，这段没有记录」），
+                而不是把前后两条接起来假装连续 —— 假装连续比缺一段更糟。
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <!-- 复盘和失败面板的对照表 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">复盘和失败面板，什么时候用哪个</h2>
+            <span class="af-region__note">一个看，一个做</span>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead><tr><th>你想知道</th><th>去哪</th><th>为什么</th></tr></thead>
+              <tbody>
+                <tr>
+                  <td class="af-xs">它是从哪一步开始出错的</td>
+                  <td class="af-xs"><b>复盘</b></td>
+                  <td class="af-xs">按时间排的事件，能看到 agent 试了几次、每次都得到什么</td>
+                </tr>
+                <tr>
+                  <td class="af-xs">这次改了什么</td>
+                  <td class="af-xs"><b>失败面板</b></td>
+                  <td class="af-xs">diff 在那边，按文件组织，比时间轴好读</td>
+                </tr>
+                <tr>
+                  <td class="af-xs">我要重试 / 换设备 / 改约束</td>
+                  <td class="af-xs"><b>失败面板</b></td>
+                  <td class="af-xs">复盘只读。这里一个按钮都没有，是故意的</td>
+                </tr>
+                <tr>
+                  <td class="af-xs">这活到底能不能干成</td>
+                  <td class="af-xs"><b>复盘</b></td>
+                  <td class="af-xs">agent 的推理过程在这儿 —— 它为什么放弃，看得见</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <div class="af-row">
+          <a class="af-btn af-btn--primary" href="task.html">去失败面板处理</a>
+          <a class="af-btn af-btn--ghost" href="execution.html">看执行监控</a>
+          <a class="af-btn af-btn--ghost" href="task.html">← 回任务</a>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+  <aside class="af-drawer" id="butler" aria-label="管家">
+    <div class="af-drawer__head">
+      <div>
+        <h2 class="af-drawer__title">这次不怪 agent</h2>
+        <div class="af-drawer__sub">它在该停的地方停了</div>
+      </div>
+      <a class="af-btn af-btn--ghost af-drawer__close" href="#butler-closed" aria-label="关闭管家面板">关闭</a>
+    </div>
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">管家</span>
+        <span class="af-msg__body">
+          它有三次机会绕开约束（自己装个 node、或者换台机器），三次都没绕。
+          这符合预期 —— 约束是人给的，agent 不该自己放宽。
+        </span>
+      </div>
+      <div class="af-callout af-callout--info">
+        <span class="af-callout__k">真要解决，得改的是环境或约束</span>
+        <span class="af-2xs">
+          两条路：给 device-b 装 node 20，或者把任务约束从「node ≥ 20」放宽。
+          前者更对，后者是让事实迁就现状。
+        </span>
+      </div>
+      <div class="af-row af-row--tight">
+        <a class="af-btn af-btn--primary af-btn--sm" href="devices.html">去 device-b 装环境</a>
+        <a class="af-btn af-btn--ghost af-btn--sm" href="task.html">改任务约束</a>
+      </div>
+    </div>
+    <div class="af-drawer__compose">
+      <input class="af-input" type="text" placeholder="问这次执行的事" aria-label="对管家说话">
+      <button class="af-btn af-btn--primary" type="button">发送</button>
+    </div>
+  </aside>
+
+  <a class="af-fab af-fab--off" href="#butler" aria-label="打开管家">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>管家</span>
+  </a>
+  <a class="af-fab af-fab--on" href="#butler-closed" aria-label="收起管家面板">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>收起</span>
+  </a>
+</div>
+
+<script src="assets/shell.js?v=11"></script>
+<script src="assets/swatch.js?v=11"></script>
+</body>
+</html>

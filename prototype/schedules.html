@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>定时任务 · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css?v=11">
+<link rel="stylesheet" href="styles/theme-neutral.css?v=11" id="af-theme">
+<link rel="stylesheet" href="assets/app.css?v=11">
+</head>
+<body data-nav="board">
+<div class="af-shell">
+  <main class="af-main">
+
+    <header class="af-head">
+      <a class="af-btn af-btn--ghost" href="board.html">← 看板</a>
+      <h1 class="af-head__title">定时任务</h1>
+      <span class="af-tag">AgentFleet</span>
+      <span class="af-head__spacer"></span>
+      <a class="af-btn af-btn--primary" href="#new">新建定时任务</a>
+    </header>
+
+    <!-- 这一句是这页最重要的设计说明：定时不是另一套调度 -->
+    <div class="af-filters">
+      <span class="af-filters__k">定时任务不是另一套调度</span>
+      <span class="af-2xs af-dim">
+        触发器只回答「谁在什么时候创建了 Task」。创建出来之后，它和其它任务完全一样：
+        六态、固定过滤顺序、待验收、要你点头才合并。<b>没有「自动合并」这个选项</b>。
+      </span>
+    </div>
+
+    <div class="af-body">
+      <div style="padding:20px 20px 64px" class="af-stack">
+
+        <!-- 两类触发来源 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">两类触发</h2>
+            <span class="af-region__note">时间到了，或者另一件事做完了</span>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead><tr><th>类型</th><th>表达方式</th><th>例子</th></tr></thead>
+              <tbody>
+                <tr>
+                  <td><strong>按时间</strong></td>
+                  <td class="af-xs">cron 式：分 时 日 月 周</td>
+                  <td class="af-xs"><span class="af-mono af-2xs">0 9 * * 1-5</span> 每个工作日早九点</td>
+                </tr>
+                <tr>
+                  <td><strong>按事件</strong></td>
+                  <td class="af-xs">「某任务完成后触发」</td>
+                  <td class="af-xs">「依赖升级」任务完成后，自动跑测试</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 现有规则 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">现在有几条</h2>
+            <span class="af-region__note">3 条启用 · 1 条暂停</span>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead>
+                <tr><th>名字</th><th>触发</th><th>上次</th><th>状态</th><th></th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>
+                    <strong>每日依赖巡检</strong>
+                    <div class="af-2xs af-mute">跑 cargo audit + npm audit，有问题就建任务</div>
+                  </td>
+                  <td class="af-mono af-2xs">0 9 * * *</td>
+                  <td class="af-xs">今天 09:00 · 建了 1 条任务</td>
+                  <td><span class="af-tag af-tag--done">启用</span></td>
+                  <td><button class="af-btn af-btn--sm" type="button">暂停</button></td>
+                </tr>
+                <tr>
+                  <td>
+                    <strong>周一汇总</strong>
+                    <div class="af-2xs af-mute">让管家写周总结，落到时间线</div>
+                  </td>
+                  <td class="af-mono af-2xs">0 8 * * 1</td>
+                  <td class="af-xs">本周一 08:00 · 成功</td>
+                  <td><span class="af-tag af-tag--done">启用</span></td>
+                  <td><button class="af-btn af-btn--sm" type="button">暂停</button></td>
+                </tr>
+                <tr>
+                  <td>
+                    <strong>依赖升级后跑测试</strong>
+                    <div class="af-2xs af-mute">事件触发：任务「依赖升级」完成后</div>
+                  </td>
+                  <td class="af-xs">事件 · 任务完成后</td>
+                  <td class="af-xs">上周五 · 触发过 1 次</td>
+                  <td><span class="af-tag af-tag--done">启用</span></td>
+                  <td><button class="af-btn af-btn--sm" type="button">暂停</button></td>
+                </tr>
+                <tr style="opacity:.6">
+                  <td>
+                    <strong>夜间全量回归</strong>
+                    <div class="af-2xs af-mute">每晚跑全部测试，太吵，先停着</div>
+                  </td>
+                  <td class="af-mono af-2xs">0 2 * * *</td>
+                  <td class="af-xs">停用前 10 月 28 日</td>
+                  <td><span class="af-tag">暂停</span></td>
+                  <td><button class="af-btn af-btn--sm" type="button">启用</button></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 新建：说明为什么要选「在哪跑」 -->
+        <section class="af-region" id="new">
+          <div class="af-region__head">
+            <h2 class="af-region__title">新建一条</h2>
+          </div>
+          <div class="af-region__body af-stack">
+
+            <div class="af-groups">
+              <div class="af-field">
+                <label class="af-field__label" for="sname">名字</label>
+                <input class="af-input" id="sname" value="每日依赖巡检" autocomplete="off">
+              </div>
+              <div class="af-field">
+                <label class="af-field__label" for="stype">什么时候触发</label>
+                <select class="af-input" id="stype">
+                  <option selected>按时间（cron）</option>
+                  <option>按事件（某任务完成后）</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="af-groups">
+              <div class="af-field">
+                <label class="af-field__label" for="cron">cron 表达式</label>
+                <input class="af-input af-mono" id="cron" value="0 9 * * *" autocomplete="off">
+                <span class="af-field__hint">分 时 日 月 周 · 当前含义：每天 09:00</span>
+              </div>
+              <div class="af-field">
+                <label class="af-field__label" for="tz">按哪个时区</label>
+                <select class="af-input" id="tz">
+                  <option selected>跟随项目设置（Asia/Shanghai）</option>
+                  <option>UTC</option>
+                </select>
+                <span class="af-field__hint">库里存 UTC，按这个时区算出下一次</span>
+              </div>
+            </div>
+
+            <div class="af-field">
+              <label class="af-field__label" for="stask">创建什么样的任务</label>
+              <input class="af-input" id="stask" value="检查依赖漏洞，有高危就建一条修复任务" autocomplete="off">
+              <span class="af-field__hint">可以写自然语言，管家会转成带约束的任务</span>
+            </div>
+
+            <!-- 这里是最容易做错的一处 -->
+            <div class="af-field">
+              <span class="af-field__label">建出来的任务，跳过哪些步骤</span>
+              <div class="af-stack" style="gap:6px">
+                <label class="af-row af-row--tight" style="font-size:var(--t-xs)">
+                  <input type="checkbox" disabled checked> 照常走六态（不可跳过）
+                </label>
+                <label class="af-row af-row--tight" style="font-size:var(--t-xs)">
+                  <input type="checkbox" disabled> 自动合并到主干 <span class="af-tag af-tag--failed">不存在这个选项</span>
+                </label>
+                <label class="af-row af-row--tight" style="font-size:var(--t-xs)">
+                  <input type="checkbox"> 跑完自动进「待验收」（仍需你点头才合并）
+                </label>
+              </div>
+            </div>
+
+            <div class="af-callout">
+              <span class="af-callout__k">为什么没有「自动合并」</span>
+              <span>
+                定时任务的价值是「不用你记得去启动」，不是「不用你验收」。
+                真加上自动合并，就等于把合并权升到档 2 以上，而那必须由你显式改设置，
+                不能由一条定时规则偷偷做到。
+              </span>
+            </div>
+
+            <div class="af-row">
+              <button class="af-btn af-btn--primary" type="button">创建</button>
+              <a class="af-btn af-btn--ghost" href="board.html">取消</a>
+            </div>
+          </div>
+        </section>
+
+        <!-- 没触发要能看出来 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">没跑起来怎么办</h2>
+            <span class="af-region__note">定时任务最常见的坏法：静默不跑了</span>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead><tr><th>情况</th><th>表现</th></tr></thead>
+              <tbody>
+                <tr>
+                  <td class="af-xs">到点了但 Hub 没在跑</td>
+                  <td class="af-xs">不算「错过的就算了」。启动时检查，<b>补跑最近一次</b>并标注「补跑」</td>
+                </tr>
+                <tr>
+                  <td class="af-xs">上一次建的还卡在待办</td>
+                  <td class="af-xs">不再重复建。在列表里标「上次未完成」，等你处理</td>
+                </tr>
+                <tr>
+                  <td class="af-xs">连续 3 次都失败了</td>
+                  <td class="af-xs"><b>自动暂停</b>并在收件箱的「动态」里报一条，不无限重试</td>
+                </tr>
+                <tr>
+                  <td class="af-xs">事件的源任务被归档了</td>
+                  <td class="af-xs">这条规则失效，列表里标出来，不静默失效</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+      </div>
+    </div>
+  </main>
+
+  <aside class="af-drawer" id="butler" aria-label="管家">
+    <div class="af-drawer__head">
+      <div>
+        <h2 class="af-drawer__title">你其实只需要两条</h2>
+        <div class="af-drawer__sub">停掉的「夜间全量回归」建议改成按需</div>
+      </div>
+      <a class="af-btn af-btn--ghost af-drawer__close" href="#butler-closed" aria-label="关闭管家面板">关闭</a>
+    </div>
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">管家</span>
+        <span class="af-msg__body">
+          夜间全量回归你停了，说明它太吵。要不要改成「合并到主干之前跑一次」？
+          那样它只在有用的时候跑，一天最多两三次，而不是每晚都吵你。
+        </span>
+      </div>
+      <div class="af-row af-row--tight">
+        <button class="af-btn af-btn--primary af-btn--sm" type="button">改成合并前触发</button>
+        <button class="af-btn af-btn--ghost af-btn--sm" type="button">不用，就停着</button>
+      </div>
+    </div>
+    <div class="af-drawer__compose">
+      <input class="af-input" type="text" placeholder="问定时任务的事" aria-label="对管家说话">
+      <button class="af-btn af-btn--primary" type="button">发送</button>
+    </div>
+  </aside>
+
+  <a class="af-fab af-fab--off" href="#butler" aria-label="打开管家，1 条建议">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>管家</span>
+    <span class="af-fab__badge">1 条建议</span>
+  </a>
+  <a class="af-fab af-fab--on" href="#butler-closed" aria-label="收起管家面板">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>收起</span>
+  </a>
+</div>
+
+<script src="assets/shell.js?v=11"></script>
+<script src="assets/swatch.js?v=11"></script>
+</body>
+</html>

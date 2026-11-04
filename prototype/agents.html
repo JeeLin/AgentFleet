@@ -1,282 +1,204 @@
 <!DOCTYPE html>
-<html class="agents" lang="zh-CN" data-state="online">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Agent 目录 · AgentFleet</title>
-<link rel="stylesheet" href="assets/tokens.css">
-<link rel="stylesheet" href="assets/components.css">
-<style>
-  /* 本页两处页面级样式：① 定义卡片的网格（列数随宽度自减，最窄一列 320px）；
-     ② 「定义 vs 就绪实例」两块之间的分隔间距。 */
-  .defs { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--af-space-5); }
-  .def { display: flex; flex-direction: column; gap: var(--af-space-4); }
-  .def[aria-selected='true'] { background: var(--af-accent-bg); border-color: var(--af-accent-line); }
-  .def__reqs { display: flex; flex-wrap: wrap; gap: var(--af-space-1); }
-  .sep { margin-top: var(--af-space-11); }
-</style>
+<title>Agent · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css?v=11">
+<link rel="stylesheet" href="styles/theme-neutral.css?v=11" id="af-theme">
+<link rel="stylesheet" href="assets/app.css?v=11">
 </head>
-<body data-page="agents">
-<div data-shell>
+<body data-nav="agents">
+<div class="af-shell">
+  <main class="af-main">
 
-  <div class="af-page">
+    <header class="af-head">
+      <h1 class="af-head__title">Agent</h1>
+      <span class="af-head__sub">管理面 · 装了哪些、能不能用、配置有没有漂移</span>
+      <span class="af-head__spacer"></span>
+      <a class="af-btn af-btn--ghost" href="devices.html">设备</a>
+      <button class="af-btn" type="button">重新扫描</button>
+    </header>
 
-    <div class="af-page__head">
-      <div>
-        <h1 class="af-page__title">Agent 目录</h1>
-        <p class="af-page__sub">
-          Hub 知道哪些 agent 定义，以及<b>哪台设备上装好了哪个版本</b>。数据来自心跳的
-          <span class="af-fp">capabilities.agents</span>，没有第二份存储。
-          <b>只读聚合</b>：装 agent 是 M5 的流程，托管覆盖层是 M2，都不在本阶段。
-        </p>
-      </div>
-    </div>
+    <div class="af-body">
+      <div style="padding:20px 20px 64px" class="af-stack">
 
-    <!-- ============ 目录 ≠ 会话（第一次） ============ -->
-    <div class="af-banner" data-tone="info">
-      <span class="af-banner__glyph">◆</span>
-      <div class="af-banner__body">
-        <div class="af-banner__title">这一页<b>没有</b>对话、没有面板、没有时间轴</div>
-        <div class="af-banner__text">
-          <b>目录 = 静态聚合。</b>它回答「哪个节点上能用什么」，可枚举、无运行期；
-          <b>实例离线时目录仍在</b>——「这台设备上装过，但够不着」是一条要保留的事实。
-          <br><b>会话 = 有运行期。</b>一次在某个 node、某条路径上的运行，有对话、有轨迹，
-          断线会冻结成只读（45 秒内是 reconnecting，不冻结）。
-          <br>所以本页每个定义卡片的唯一动作是「用它开会话」，<b>没有「进入目录」这种动作</b>——
-          目录不是一个能进去的地方。
+        <div class="af-callout af-callout--info">
+          <span class="af-callout__k">装 Agent 这件事不归产品管</span>
+          <span>
+            Agent 运行时装在设备上，由你自己装。Hub 只做两件事：扫描设备上有什么，
+            和保存启动配置。它不会代装，也不会替 Agent 决定能干什么。
+          </span>
         </div>
-      </div>
-      <div class="af-banner__actions">
-        <a class="af-btn af-btn--sm" href="sessions.html">看会话 →</a>
+
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">3 台设备上的 6 个 Agent</h2>
+            <span class="af-region__note">可用 5 · 不可用 1</span>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead>
+                <tr>
+                  <th>Agent</th><th>在哪台设备</th><th>可用性</th><th>版本</th>
+                  <th>启动配置</th><th>跑过的任务</th><th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>claude</strong></td>
+                  <td>device-a · device-b · device-c</td>
+                  <td><span class="af-tag af-tag--done">可用</span></td>
+                  <td class="af-2xs af-mono">2.1.4</td>
+                  <td class="af-2xs">Hub 托管，无本地改动</td>
+                  <td class="af-2xs"><span class="af-num">41</span> 个 · 成功率 83%</td>
+                  <td><a href="#cfg">配置</a></td>
+                </tr>
+                <tr>
+                  <td><strong>opencode</strong></td>
+                  <td>device-a · device-b</td>
+                  <td><span class="af-tag af-tag--done">可用</span></td>
+                  <td class="af-2xs af-mono">0.9.2</td>
+                  <td class="af-2xs"><span class="af-tag af-tag--warn">本地有改动（漂移）</span></td>
+                  <td class="af-2xs"><span class="af-num">18</span> 个 · 成功率 89%</td>
+                  <td><a href="#cfg">配置</a></td>
+                </tr>
+                <tr>
+                  <td><strong>aider</strong></td>
+                  <td>device-c</td>
+                  <td>
+                    <span class="af-tag af-tag--failed">不可用</span>
+                    <div class="af-2xs af-mute">找不到可执行文件，可能被卸了</div>
+                  </td>
+                  <td class="af-2xs af-mono">未知</td>
+                  <td class="af-2xs af-dim">—</td>
+                  <td class="af-2xs"><span class="af-num">3</span> 个 · 成功率 33%</td>
+                  <td><a href="#cfg">配置</a></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="af-region" id="cfg">
+          <div class="af-region__head">
+            <h2 class="af-region__title">opencode · device-b 的启动配置</h2>
+            <span class="af-tag af-tag--warn">本地被改过</span>
+          </div>
+          <div class="af-region__body">
+            <div class="af-groups">
+              <div>
+                <h3 class="af-2xs af-mute" style="text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">差异在哪</h3>
+                <div class="af-mono af-xs" style="line-height:1.9;background:var(--inset);border:1px solid var(--line-3);border-radius:var(--r-sm);padding:12px;overflow-x:auto">
+                  <div><span class="af-mute">  model = </span>"claude-sonnet"</div>
+                  <div style="background:var(--del)">- max_tokens = 8192</div>
+                  <div style="background:var(--add)">+ max_tokens = 16384</div>
+                  <div><span class="af-mute">  workdir_mode = </span>"binding"</div>
+                </div>
+                <p class="af-2xs af-mute" style="margin:8px 0 0">
+                  托管文件在设备上只读。本地改动会被标成漂移，不会悄悄覆盖。
+                </p>
+              </div>
+              <div>
+                <h3 class="af-2xs af-mute" style="text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">怎么处置</h3>
+                <div class="af-stack" style="gap:8px">
+                  <p class="af-xs" style="margin:0">
+                    把设备上的改动收上来，还是把 Hub 的配置推下去，由你定。
+                    推下去会覆盖本地那两行。
+                  </p>
+                  <div class="af-row af-row--tight">
+                    <button class="af-btn af-btn--sm" type="button">把本地改动收上来</button>
+                    <button class="af-btn af-btn--sm" type="button">把 Hub 配置推下去</button>
+                    <button class="af-btn af-btn--ghost af-btn--sm" type="button">先不管</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">Agent 能用的能力，由任务授予</h2>
+            <span class="af-region__note">不是默认开放</span>
+          </div>
+          <div class="af-region__body">
+            <table class="af-table">
+              <thead>
+                <tr><th>方式</th><th>能不能</th><th>为什么</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Agent 直接调用任意连接器</td>
+                  <td><span class="af-tag af-tag--failed">禁止</span></td>
+                  <td class="af-xs">等于开一条统一提权通道，还要我们替它维护权限</td>
+                </tr>
+                <tr>
+                  <td>按任务授予「技能」（这个任务可以连 db-prod）</td>
+                  <td><span class="af-tag af-tag--done">主路径</span></td>
+                  <td class="af-xs">任务没声明就没有，不是默认能力</td>
+                </tr>
+                <tr>
+                  <td>设备上起一个 MCP server，Agent 按标准协议连</td>
+                  <td><span class="af-tag af-tag--done">并行支持</span></td>
+                  <td class="af-xs">通用接口，支持 MCP 的 Agent 都能用，我们不必为每个 Agent 写适配</td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="af-xs af-mute" style="margin:12px 0 0">
+              凭据不会进 Agent 的上下文：Agent 说「用 db-prod 跑这条 SQL」，凭据由设备侧注入。
+              每一次连接都进审计轨迹。
+            </p>
+            <div class="af-row af-row--tight" style="margin-top:12px">
+              <a class="af-btn af-btn--sm" href="skills.html">管理凭据与授予</a>
+              <span class="af-2xs af-mute">这一页只讲原则。加数据库、看谁用过、轮换，都在技能与 MCP 页</span>
+            </div>
+          </div>
+        </section>
+
       </div>
     </div>
+  </main>
 
-    <!-- ============ 定义 ============ -->
-    <section aria-labelledby="h-def">
-      <div class="af-row gap-4" style="margin-bottom:var(--af-space-5)">
-        <div class="af-t-label" id="h-def">定义 · <span class="af-t-num" id="cnt">0</span></div>
-        <span class="af-spacer"></span>
-        <span class="af-t-mute" style="font-size:var(--af-text-xs)">
-          <kbd>↑</kbd><kbd>↓</kbd> 移动 · <kbd>⏎</kbd> 用它开会话
+  <aside class="af-drawer" id="butler" aria-label="管家">
+    <div class="af-drawer__head">
+      <div>
+        <h2 class="af-drawer__title">问 Agent 的事</h2>
+        <div class="af-drawer__sub">哪个 Agent 更合适，是调度器算的；跑得好不好，管家知道</div>
+      </div>
+      <a class="af-btn af-btn--ghost af-drawer__close" href="#butler-closed" aria-label="关闭管家面板">关闭</a>
+    </div>
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">管家</span>
+        <span class="af-msg__body">
+          aider 在 device-c 上已经不可用了，它那 3 个任务里 2 次是这个原因失败的。
+          要不要我把「允许 Agent」里的 aider 去掉？去掉之后那些任务的历史还留着。
         </span>
       </div>
-      <div class="defs" id="defs" data-role="list" tabindex="0" role="listbox" aria-label="agent 定义"></div>
-    </section>
-
-    <!-- ============ 按设备的就绪实例 ============ -->
-    <section class="sep" aria-labelledby="h-inst">
-      <div class="af-row gap-4" style="margin-bottom:var(--af-space-5)">
-        <div class="af-t-label" id="h-inst">按设备的就绪实例</div>
-        <span class="af-spacer"></span>
-        <span class="af-t-mute" style="font-size:var(--af-text-xs)">
-          定义 × 设备的笛卡尔积：改动定义不改变已装实例
-        </span>
+      <div class="af-row af-row--tight">
+        <button class="af-btn af-btn--primary af-btn--sm" type="button">从允许列表去掉 aider</button>
+        <button class="af-btn af-btn--ghost af-btn--sm" type="button">先留着</button>
       </div>
-      <table class="af-table">
-        <thead>
-          <tr>
-            <th style="width:150px">agent</th>
-            <th style="width:150px">设备</th>
-            <th style="width:130px">设备状态</th>
-            <th style="width:110px">实例状态</th>
-            <th>装它的版本</th>
-          </tr>
-        </thead>
-        <tbody id="inst" data-role="list" tabindex="0" role="listbox" aria-label="按设备的就绪实例"></tbody>
-      </table>
-      <div class="af-field__hint" style="margin-top:var(--af-space-4)">
-        设备状态与实例状态<b>刻意分成两列</b>：一台离线设备上的实例仍是「已装」的事实，
-        只是此刻不可用。合成一列会让「装过」这件事随着设备掉线一起消失——
-        而目录的全部意义正是把这些事实留住。
-      </div>
-    </section>
+    </div>
+    <div class="af-drawer__compose">
+      <input class="af-input" type="text" placeholder="问某个 Agent 最近为什么老失败" aria-label="对管家说话">
+      <button class="af-btn af-btn--primary" type="button">发送</button>
+    </div>
+  </aside>
 
-    <!-- ============ 目录 ≠ 会话（第二次） ============ -->
-    <section class="sep" aria-labelledby="h-cmp">
-      <div class="af-t-label" id="h-cmp" style="margin-bottom:var(--af-space-5)">目录与会话，差在哪</div>
-      <div class="af-panel">
-        <table class="af-table">
-          <thead>
-            <tr>
-              <th style="width:112px"></th>
-              <th style="width:42%">Agent 目录（本页）</th>
-              <th>会话</th>
-            </tr>
-          </thead>
-          <tbody id="cmp"></tbody>
-        </table>
-      </div>
-    </section>
-
-  </div>
-
+  <a class="af-fab af-fab--off" href="#butler" aria-label="打开管家，aider 不可用">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>管家</span>
+    <span class="af-fab__badge">1 个建议</span>
+  </a>
+  <a class="af-fab af-fab--on" href="#butler-closed" aria-label="收起管家面板">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>收起</span>
+  </a>
 </div>
 
-<script src="assets/keynav.js"></script>
-<script src="assets/app.js"></script>
-<script>
-/* ===========================================================================
-   Agent 目录页 —— 只读聚合。
-   ---------------------------------------------------------------------------
-   这一页存在的理由不是「展示 agent 列表」，而是回答一个具体问题：
-   **「我要用某个 agent，它在哪台设备上是装好的？」**
-
-   所以第二块表的行粒度是 (定义 × 设备) 而不是只有定义：
-   「claude-code 装在 3 台设备上」对一个想开会话的人没用，
-   他需要的是「mbp.local 上就绪，win-desktop 上离线」。
-
-   两个不能省的区分，页首与页尾各说一次（页首说结论，页尾给对照表）：
-     ① 定义 ≠ 实例。改定义不改变已装实例（那是 M5 的托管覆盖层）。
-     ② 目录 ≠ 会话。目录无时间轴、实例离线目录仍在；
-        会话有运行期、断线冻结成只读。
-   =========================================================================== */
-(function () {
-  'use strict';
-  var AF = window.AF;
-  var $ = function (s, r) { return (r || document).querySelector(s); };
-  var $$ = function (s, r) { return [].slice.call((r || document).querySelectorAll(s)); };
-
-  AF.mount('agents', { title: 'Agent 目录' });
-
-  var AGENTS = AF.mock.agents;
-  var DEVICES = AF.mock.devices;
-
-  /* =========================================================================
-     定义卡片
-     -------------------------------------------------------------------------
-     每张卡的唯一动作是「用它开会话」：它带 ?agent= 去新建会话，
-     于是第二步预填这个定义，用户仍要自己选设备与路径。
-     刻意**不做整卡可点**：卡片里有 requires / notes 要读，整卡可点会
-     让「选中」与「想细看」混成一个手势，而这里只有前者是动作。
-     ======================================================================= */
-  function renderDefs() {
-    $('#defs').innerHTML = AGENTS.map(function (a) {
-      var onDevs = DEVICES.filter(function (d) { return d.agents.indexOf(a.id) >= 0; });
-      return '<div class="af-panel def" data-row tabindex="-1" role="option" aria-selected="false" ' +
-          'data-agent="' + AF.esc(a.id) + '">' +
-        '<div class="af-panel__head">' +
-          '<span class="af-panel__title"><span style="color:var(--af-agent)">◇</span> ' +
-            AF.esc(a.label) + '</span>' +
-          '<span class="af-spacer"></span>' +
-          '<span class="af-badge' + (onDevs.length ? ' af-badge--ok' : ' af-badge--off') + '">' +
-            (onDevs.length ? onDevs.length + ' 台就绪' : '无就绪实例') + '</span>' +
-        '</div>' +
-        '<div class="af-panel__body af-panel__body--pad af-col gap-4">' +
-          '<div class="af-field__hint" style="font-size:var(--af-text-sm);color:var(--af-fg-secondary)">' +
-            AF.esc(a.desc) + '</div>' +
-          '<div>' +
-            '<div class="af-t-label" style="margin-bottom:var(--af-space-1)">需要</div>' +
-            '<div class="def__reqs">' + a.requires.map(function (r) {
-              return '<span class="af-badge af-badge--info">' + AF.esc(r) + '</span>';
-            }).join('') + '</div>' +
-          '</div>' +
-          '<div>' +
-            '<div class="af-t-label" style="margin-bottom:var(--af-space-1)">备注</div>' +
-            '<div class="af-field__hint">' + AF.esc(a.notes) + '</div>' +
-          '</div>' +
-        '</div>' +
-        '<div class="af-panel__foot">' +
-          '<span class="af-t-mute">' + AF.esc(a.vendor) + '</span>' +
-          '<span class="af-spacer"></span>' +
-          '<button class="af-btn af-btn--sm af-btn--primary" type="button" ' +
-            'data-use="' + AF.esc(a.id) + '">用它开会话</button>' +
-        '</div>' +
-      '</div>';
-    }).join('');
-    $('#cnt').textContent = AGENTS.length;
-  }
-
-  /* =========================================================================
-     按设备的就绪实例
-     -------------------------------------------------------------------------
-     从 AF.mock.devices × 各自的 agents 数组推导，不另立一份实例表。
-     设备状态走 AF.stateHTML（三态四通道），实例状态是它派生的布尔：
-     设备在线 ⇒ 就绪；reconnecting ⇒ 就绪但不建议（45s 内仍在）；
-     offline ⇒ 已装、此刻不可达。
-     ======================================================================= */
-  function instState(d) {
-    if (d.status === 'online') return { label: '就绪', cls: 'af-badge--ok' };
-    if (d.status === 'reconnecting') return { label: '重连中', cls: 'af-badge--warn' };
-    return { label: '不可达', cls: 'af-badge--off' };
-  }
-
-  function renderInst() {
-    var rows = [];
-    AGENTS.forEach(function (a) {
-      DEVICES.forEach(function (d) {
-        if (d.agents.indexOf(a.id) < 0) return;
-        var s = instState(d);
-        rows.push({ a: a, d: d, s: s });
-      });
-    });
-    $('#inst').innerHTML = rows.map(function (r) {
-      var off = r.d.status === 'offline';
-      return '<tr data-row tabindex="-1" role="option" aria-selected="false" ' +
-          'data-agent="' + AF.esc(r.a.id) + '"' + (off ? ' data-inert="true"' : '') + '>' +
-        '<td style="color:var(--af-fg-primary)">' + AF.esc(r.a.label) + '</td>' +
-        '<td>' + AF.esc(r.d.name) + '</td>' +
-        '<td>' + AF.stateHTML(r.d.status, { derived: !!r.d.derived }) + '</td>' +
-        '<td><span class="af-badge ' + r.s.cls + '">' + r.s.label + '</span></td>' +
-        '<td class="af-t-num">' + AF.esc(r.d.agent_version) + '</td>' +
-      '</tr>';
-    }).join('');
-  }
-
-  /* =========================================================================
-     目录 vs 会话（页尾对照表）
-     -------------------------------------------------------------------------
-     六行对照，逐条对上一个可验证的行为差异，不写形容词。
-     ======================================================================= */
-  var CMP = [
-    ['有没有时间轴', '没有。它是一份快照，任何时刻重算都一样。', '有。轨迹是 append-only 流水，逐条可查。'],
-    ['掉线会怎样', '目录仍在，实例那一行标「不可达」。', '会话冻结成只读；45s 内是 reconnecting，不冻结。'],
-    ['行的粒度', '(定义 × 设备)：哪台设备上装好了哪个版本。', '(会话)：一次在 (node_id, path) 上的运行。'],
-    ['能不能改', '不能。装 agent 是 M5，托管覆盖层是 M2。', '不能换设备 / 换 agent / 改路径；换环境就是新会话。'],
-    ['面板', '没有。面板不在这一层。', '有。终端 / 文件绑定这个会话的工作区。'],
-    ['唯一动作', '「用它开会话」。', '「进入会话」。']
-  ];
-
-  function renderCmp() {
-    $('#cmp').innerHTML = CMP.map(function (r) {
-      return '<tr><td class="af-t-label">' + r[0] + '</td><td>' + r[1] + '</td><td>' + r[2] + '</td></tr>';
-    }).join('');
-  }
-
-  /* =========================================================================
-     行激活：Enter = 用它开会话
-     -------------------------------------------------------------------------
-     两种列表（卡片网格与实例表）都只是跳到同一个目的地，所以同一
-     个 handler。行是 div/tr + data-row + tabindex=-1，Enter 由 keynav 的
-     list:enter 抛 af:enter——注意卡片行内有一个 button，所以 Enter 落到
-     af:enter 之前先被内嵌按钮接住；这里用卡片行的 data-href 与实例表的
-     af:enter 分别处理，两条路同一个 URL。
-     ======================================================================= */
-  function use(id) {
-    location.href = 'new-session.html?agent=' + encodeURIComponent(id);
-  }
-
-  $$('#defs, #inst').forEach(function (list) {
-    list.addEventListener('af:enter', function (e) {
-      var row = e.detail.row;
-      if (row.dataset.agent) use(row.dataset.agent);
-    });
-    /* 卡片行整行可点（网格不是表格，没有行的主操作按钮要抢） */
-    list.addEventListener('click', function (e) {
-      var row = e.target.closest('[data-agent]');
-      if (row && !e.target.closest('[data-use]')) use(row.dataset.agent);
-    });
-  });
-
-  /* 卡片脚部的按钮：与整行同一个目的地，显式给鼠标用户 */
-  $('#defs').addEventListener('click', function (e) {
-    var b = e.target.closest('[data-use]');
-    if (b) { e.stopPropagation(); use(b.dataset.use); }
-  });
-
-  renderDefs();
-  renderInst();
-  renderCmp();
-})();
-</script>
+<script src="assets/shell.js?v=11"></script>
+<script src="assets/swatch.js?v=11"></script>
 </body>
 </html>

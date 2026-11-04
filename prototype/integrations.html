@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>外部 issue 导入 · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css?v=11">
+<link rel="stylesheet" href="styles/theme-neutral.css?v=11" id="af-theme">
+<link rel="stylesheet" href="assets/app.css?v=11">
+</head>
+<body data-nav="integrations">
+<div class="af-shell">
+  <main class="af-main">
+
+    <header class="af-head">
+      <a class="af-btn af-btn--ghost" href="devices.html">← 设备</a>
+      <h1 class="af-head__title">外部 issue 导入</h1>
+      <span class="af-tag af-tag--warn">只做单向</span>
+      <span class="af-head__spacer"></span>
+      <button class="af-btn" type="button">立即同步一次</button>
+    </header>
+
+    <div class="af-filters">
+      <span class="af-filters__k">为什么不双向</span>
+      <span class="af-2xs af-dim">
+        两边都是真相，就得每次冲突都选一边为准，另一边看到的就是假数据。
+        所以：<b>导入把问题搬进 Hub，导出把结论回写一条评论</b>，任务的真身永远只在 Hub。
+      </span>
+    </div>
+
+    <div class="af-body">
+      <div style="padding:20px 20px 64px" class="af-stack">
+
+        <!-- 已经在用的连接 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">已连接的来源</h2>
+            <span class="af-region__note">每个来源绑一个项目</span>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead>
+                <tr><th>来源</th><th>项目</th><th>筛选</th><th>上次同步</th><th>状态</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>
+                    <strong>GitHub</strong>
+                    <div class="af-2xs af-mute af-mono">acme/agentfleet</div>
+                  </td>
+                  <td class="af-xs">AgentFleet</td>
+                  <td class="af-xs">标签含 <span class="af-mono af-2xs">bug</span> 或 <span class="af-mono af-2xs">feature</span></td>
+                  <td class="af-xs">4 分钟前</td>
+                  <td><span class="af-tag af-tag--done">正常</span></td>
+                </tr>
+                <tr>
+                  <td>
+                    <strong>Gitea</strong>
+                    <div class="af-2xs af-mute af-mono">notes/internal</div>
+                  </td>
+                  <td class="af-xs">个人笔记站</td>
+                  <td class="af-xs">全部 issue</td>
+                  <td class="af-xs">1 小时前</td>
+                  <td><span class="af-tag af-tag--warn">凭据 3 天后过期</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 导入之后发生了什么：这是用户最关心的 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">一条 issue 进来之后</h2>
+            <span class="af-region__note">共四步，第二步是「管家替你看一遍」</span>
+          </div>
+          <div class="af-region__body">
+            <ul class="af-timeline">
+              <li class="af-tl">
+                <span class="af-tl__time">第 1 步</span>
+                <span class="af-tl__rail"><span class="af-tl__node" style="background:var(--queued)"></span></span>
+                <span class="af-tl__body">
+                  <span class="af-tl__title">拉进来，生成一条任务</span>
+                  <span class="af-tl__detail">
+                    标题、正文、报告人作为任务描述落地，标 <span class="af-tag af-tag--warn">外部来源</span>，
+                    并记下 <span class="af-mono af-xs">source_issue_id</span> 用来回写
+                  </span>
+                </span>
+              </li>
+              <li class="af-tl">
+                <span class="af-tl__time">第 2 步</span>
+                <span class="af-tl__rail"><span class="af-tl__node" style="background:var(--butler)"></span></span>
+                <span class="af-tl__body">
+                  <span class="af-tl__title">管家先看一遍</span>
+                  <span class="af-tl__detail">
+                    重复的合并、不清楚的反问、能直接派的直接派。
+                    <b>它替你把「看 issue」这件事做了</b>，你只在它拿不准时报一次
+                  </span>
+                </span>
+              </li>
+              <li class="af-tl">
+                <span class="af-tl__time">第 3 步</span>
+                <span class="af-tl__rail"><span class="af-tl__node" style="background:var(--running)"></span></span>
+                <span class="af-tl__body">
+                  <span class="af-tl__title">进看板，正常走六态</span>
+                  <span class="af-tl__detail">
+                    外部来源的任务和其它任务没有区别 —— 不另开一条流程，
+                    否则两条流程会各自漂移
+                  </span>
+                </span>
+              </li>
+              <li class="af-tl">
+                <span class="af-tl__time">第 4 步</span>
+                <span class="af-tl__rail"><span class="af-tl__node" style="background:var(--done)"></span></span>
+                <span class="af-tl__body">
+                  <span class="af-tl__title">结论回写一条评论</span>
+                  <span class="af-tl__detail">
+                    带 Hub 链接。<b>对方在 issue 那边看得见进展，你不用两边同步</b>；
+                    也<b>不会</b>改原 issue 的状态 —— 一改就成双向了
+                  </span>
+                </span>
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- 导入规则：什么该进来，什么不该 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">导入规则</h2>
+            <span class="af-region__note">进不来的要说明为什么，不能悄悄丢</span>
+          </div>
+          <div class="af-region__body af-stack">
+            <div class="af-groups">
+              <div class="af-field">
+                <label class="af-field__label" for="filter">拉哪些</label>
+                <input class="af-input af-mono" id="filter" value="label:bug,feature state:open" readonly>
+                <span class="af-field__hint">按标签和状态筛，不支持表达式</span>
+              </div>
+              <div class="af-field">
+                <label class="af-field__label" for="assign">导进来归谁</label>
+                <select class="af-input" id="assign">
+                  <option selected>先不派，等管家初筛</option>
+                  <option>直接派给指定 agent</option>
+                  <option>先落到待办，等你说</option>
+                </select>
+                <span class="af-field__hint">默认不派：外人提的问题不该直接上设备</span>
+              </div>
+            </div>
+
+            <div class="af-region">
+              <div class="af-region__body af-region__body--flush">
+                <table class="af-table">
+                  <thead><tr><th>情况</th><th>怎么处理</th></tr></thead>
+                  <tbody>
+                    <tr>
+                      <td class="af-xs">同一条 issue 又更新了</td>
+                      <td class="af-xs">把新内容<b>追加</b>到任务描述，不新建任务、不覆盖你改过的内容</td>
+                    </tr>
+                    <tr>
+                      <td class="af-xs">issue 被关了，但任务还没做完</td>
+                      <td class="af-xs">任务照常走。<b>外面关了不等于这里做完了</b>，反过来也一样</td>
+                    </tr>
+                    <tr>
+                      <td class="af-xs">拉进来的 issue 缺信息</td>
+                      <td class="af-xs">管家反问报告人，或用 <span class="af-tag af-tag--warn">缺信息</span> 标着待在待办</td>
+                    </tr>
+                    <tr>
+                      <td class="af-xs">筛选条件外的 issue</td>
+                      <td class="af-xs">不拉，但同步日志里记一条「跳过 N 条」</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 凭据：和 IM 一样，不进 agent 上下文 -->
+        <div class="af-callout af-callout--warn">
+          <span class="af-callout__k">Token 只存在 Hub，不进 agent 的上下文</span>
+          <span>
+            拉 issue 和回写评论都由 Hub 自己发请求。agent 看到的是任务内容，看不到 GitHub token ——
+            所以就算 agent 被提示词攻击，也拿不到能改你仓库的凭据。
+          </span>
+        </div>
+
+        <!-- 回写：写什么是可控的 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">回写什么、什么时候回写</h2>
+          </div>
+          <div class="af-region__body af-stack">
+            <div class="af-stack" style="gap:6px">
+              <label class="af-row af-row--tight" style="font-size:var(--t-xs)">
+                <input type="checkbox" checked> 任务完成时回写一条评论（带 Hub 链接）
+              </label>
+              <label class="af-row af-row--tight" style="font-size:var(--t-xs)">
+                <input type="checkbox" checked> 任务失败时回写一条评论（说明原因，不含内部细节）
+              </label>
+              <label class="af-row af-row--tight" style="font-size:var(--t-xs)">
+                <input type="checkbox"> 任务开始执行时也告知（会变吵，默认关）
+              </label>
+              <label class="af-row af-row--tight" style="font-size:var(--t-xs)" aria-disabled="true">
+                <input type="checkbox" disabled> 关闭原 issue <span class="af-2xs af-mute">— 不做，那是双向</span>
+              </label>
+            </div>
+            <div class="af-callout">
+              <span class="af-callout__k">回写内容不含代码细节</span>
+              <span>
+                评论里写「已完成 + Hub 链接」，不贴 diff、不贴日志。
+                一是外人不该看到内部实现，二是贴出去的东西收不回来。
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <div class="af-row">
+          <button class="af-btn af-btn--primary" type="button">保存</button>
+          <a class="af-btn af-btn--ghost" href="settings.html">返回设置</a>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+  <aside class="af-drawer" id="butler" aria-label="管家">
+    <div class="af-drawer__head">
+      <div>
+        <h2 class="af-drawer__title">我替你先看了一遍</h2>
+        <div class="af-drawer__sub">这周导进来 7 条，我处理了 5 条</div>
+      </div>
+      <a class="af-btn af-btn--ghost af-drawer__close" href="#butler-closed" aria-label="关闭管家面板">关闭</a>
+    </div>
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">管家</span>
+        <span class="af-msg__body">
+          5 条里 2 条和已有任务重复（已合并）、2 条能直接派、1 条缺信息我去问了报告人。
+          剩下 2 条拿不准：一条说的是性能问题但我复现不出来，一条需求写得太模糊。
+        </span>
+      </div>
+      <div class="af-row af-row--tight">
+        <a class="af-btn af-btn--primary af-btn--sm" href="inbox.html">看那 2 条</a>
+      </div>
+    </div>
+    <div class="af-drawer__compose">
+      <input class="af-input" type="text" placeholder="问导入的事" aria-label="对管家说话">
+      <button class="af-btn af-btn--primary" type="button">发送</button>
+    </div>
+  </aside>
+
+  <a class="af-fab af-fab--off" href="#butler" aria-label="打开管家，2 条待你决定">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>管家</span>
+    <span class="af-fab__badge">2 条待定</span>
+  </a>
+  <a class="af-fab af-fab--on" href="#butler-closed" aria-label="收起管家面板">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>收起</span>
+  </a>
+</div>
+
+<script src="assets/shell.js?v=11"></script>
+<script src="assets/swatch.js?v=11"></script>
+</body>
+</html>

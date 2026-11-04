@@ -1,0 +1,1608 @@
+/* ===========================================================================
+   AgentFleet 原型 · 全站样式
+   ---------------------------------------------------------------------------
+   本文件不含任何色值。颜色全部来自 styles/theme-*.css，结构来自 tokens.css。
+   分区靠「亮度阶梯 + 区域容器」，状态靠「形状 + 文字 + 颜色」三重编码。
+
+   护眼这件事不只靠颜色，这里也承担一半：
+   - 行距 1.65、段落限宽 68ch、字重上限 600
+   - 长文用 .af-prose 包起来，避免一行拉满整个屏幕
+   =========================================================================== */
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; height: 100%;
+  background: var(--bg); color: var(--fg);
+  font-family: var(--sans); font-size: var(--t-md); line-height: var(--lh-body);
+  /* 这里刻意不写 -webkit-font-smoothing: antialiased。
+     它会把字形从次像素抗锯齿切到灰度抗锯齿，深底上笔画被削细一圈，
+     正文看着「发虚、发灰」。深色界面里这条是反效果，不是美化。 */
+}
+body { overflow: hidden; }
+
+:focus-visible {
+  outline: 2px solid var(--acc-strong);
+  outline-offset: 2px;
+  border-radius: var(--r-xs);
+}
+
+a { color: var(--acc); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+h1, h2, h3, h4 { margin: 0; color: var(--fg-strong); letter-spacing: -0.01em; }
+
+::selection { background: var(--acc-line); }
+
+/* 滚动条：深色模式下默认滚动条太扎眼 */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--line-3); border-radius: var(--r-full);
+  border: 2px solid transparent; background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--line-4); background-clip: padding-box; }
+
+/* ═══ 外壳 ═══════════════════════════════════════════════════════════ */
+
+.af-shell {
+  display: grid; grid-template-columns: var(--rail-w) 1fr;
+  height: 100vh; height: 100dvh;
+}
+
+/* 左侧栏：导航是分区清单，组标题是它唯一的层级语言 */
+.af-rail {
+  background: var(--bg);
+  border-right: 1px solid var(--line-2);
+  display: flex; flex-direction: column; min-height: 0;
+  overflow-y: auto;
+}
+
+.af-rail__brand {
+  display: flex; align-items: center; gap: var(--s3);
+  padding: var(--s4) var(--s4);
+  min-height: var(--head-h);
+  border-bottom: 1px solid var(--line);
+}
+.af-rail__mark {
+  width: 26px; height: 26px; flex: 0 0 auto;
+  border-radius: var(--r-sm);
+  background: var(--acc-bg); border: 1px solid var(--acc-line);
+  display: grid; place-items: center;
+  color: var(--acc); font-size: var(--t-xs); font-weight: 700;
+}
+.af-rail__name { font-size: var(--t-sm); font-weight: 600; color: var(--fg-strong); }
+.af-rail__sub { font-size: var(--t-2xs); color: var(--fg-3); font-family: var(--mono); }
+
+.af-rail__group {
+  padding: var(--s4) var(--s4) var(--s2);
+  font-size: var(--t-2xs); font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+.af-rail__list { list-style: none; margin: 0; padding: 0 var(--s2); }
+.af-rail__list a {
+  display: flex; align-items: center; gap: var(--s3);
+  min-height: var(--row);
+  padding: 0 var(--s3);
+  border-radius: var(--r-sm);
+  color: var(--fg-2); font-size: var(--t-sm);
+  text-decoration: none;
+  transition: background 140ms var(--ease), color 140ms var(--ease);
+}
+.af-rail__list a:hover { background: var(--surf-1); color: var(--fg-strong); }
+.af-rail__list a[aria-current="page"] {
+  background: var(--surf-2); color: var(--fg-strong);
+  font-weight: 500;
+  box-shadow: inset 0 0 0 1px var(--line-2);
+}
+.af-rail__label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.af-rail__foot {
+  margin-top: auto; padding: var(--s3) var(--s4);
+  border-top: 1px solid var(--line);
+  font-size: var(--t-2xs); color: var(--fg-3); line-height: 1.7;
+}
+
+/* 项目色点：颜色只是辅助，项目名才是身份 */
+.af-dot { width: 7px; height: 7px; border-radius: 2px; flex: 0 0 auto; }
+
+/* ═══ 主区 ═══════════════════════════════════════════════════════════ */
+
+.af-main {
+  min-width: 0; min-height: 0;
+  display: flex; flex-direction: column; position: relative;
+}
+
+.af-head {
+  display: flex; align-items: center; gap: var(--s3);
+  padding: 0 var(--s6);
+  min-height: var(--head-h); flex: 0 0 auto;
+  border-bottom: 1px solid var(--line-2);
+  background: var(--bg);
+}
+.af-head__title {
+  font-size: var(--t-lg); font-weight: 600;
+  white-space: nowrap;
+}
+.af-head__sub { font-size: var(--t-xs); color: var(--fg-3); white-space: nowrap; }
+.af-head__spacer { margin-left: auto; }
+
+.af-body { flex: 1; min-height: 0; overflow: auto; }
+.af-body--pad { padding: var(--s6); }
+.af-body--fill { display: flex; flex-direction: column; overflow: hidden; }
+
+/* ═══ 生效过滤条 ═════════════════════════════════════════════════════ */
+
+.af-filters {
+  display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap;
+  padding: var(--s2) var(--s5); flex: 0 0 auto;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--t-2xs);
+}
+.af-filters__k {
+  font-size: var(--t-2xs); font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-3);
+}
+
+/* ═══ 长文段落：护眼的另一半 ═════════════════════════════════════════ */
+
+/* 一行拉满 1600px 时，眼睛回扫找不到下一行开头。
+   限宽 + 稍大行距，比调颜色更能减少「看久了累」。 */
+.af-prose {
+  max-width: var(--measure);
+  font-size: var(--t-sm);
+  line-height: 1.75;
+  color: var(--fg);
+}
+.af-prose p { margin: 0 0 var(--s3); }
+.af-prose p:last-child { margin-bottom: 0; }
+.af-prose strong { color: var(--fg-strong); font-weight: 600; }
+.af-prose code {
+  font-family: var(--mono); font-size: 0.9em;
+  background: var(--inset); border: 1px solid var(--line-2);
+  border-radius: var(--r-xs); padding: 1px 5px;
+}
+
+/* ═══ 通用件 ═════════════════════════════════════════════════════════ */
+
+.af-mono { font-family: var(--mono); font-size: 0.93em; }
+.af-num { font-variant-numeric: tabular-nums; }
+.af-dim { color: var(--fg-2); }
+.af-mute { color: var(--fg-3); }
+.af-strong { color: var(--fg-strong); }
+.af-xs { font-size: var(--t-xs); }
+.af-2xs { font-size: var(--t-2xs); }
+.af-row { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
+.af-row--tight { gap: var(--s2); }
+.af-stack { display: flex; flex-direction: column; gap: var(--s4); }
+.af-spacer { flex: 1; }
+.af-sep { color: var(--fg-3); }
+.af-sr {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* ── 按钮 ──────────────────────────────────────────────────────────── */
+
+.af-btn {
+  font: inherit; font-size: var(--t-sm); font-weight: 500;
+  display: inline-flex; align-items: center; gap: var(--s2);
+  min-height: var(--row); padding: 0 var(--s3);
+  border: 1px solid var(--line-3); border-radius: var(--r-sm);
+  background: var(--surf-2); color: var(--fg);
+  cursor: pointer; white-space: nowrap; text-decoration: none;
+  transition: background 140ms var(--ease), border-color 140ms var(--ease), color 140ms var(--ease);
+}
+.af-btn:hover { background: var(--surf-3); border-color: var(--line-4); color: var(--fg-strong); text-decoration: none; }
+.af-btn:active { background: var(--surf-4); }
+
+.af-btn--primary {
+  background: var(--acc); border-color: var(--acc);
+  color: var(--on-acc); font-weight: 600;
+}
+.af-btn--primary:hover { background: var(--acc-strong); border-color: var(--acc-strong); color: var(--on-acc); }
+
+.af-btn--ghost { background: transparent; border-color: transparent; color: var(--fg-2); }
+.af-btn--ghost:hover { background: var(--surf-2); border-color: transparent; color: var(--fg-strong); }
+
+.af-btn--danger { color: var(--failed); border-color: var(--failed-line); background: var(--failed-bg); }
+.af-btn--danger:hover { background: var(--failed-bg); border-color: var(--failed); color: var(--failed); }
+
+.af-btn--sm { min-height: 26px; font-size: var(--t-2xs); padding: 0 var(--s2); }
+
+/* ── 标签：形状是胶囊，颜色只做辅助 ────────────────────────────────── */
+
+.af-tag {
+  display: inline-flex; align-items: center; gap: var(--s1);
+  font-size: var(--t-2xs); font-weight: 500; line-height: 1.7;
+  padding: 0 var(--s2); border-radius: var(--r-full);
+  border: 1px solid var(--line-2); color: var(--fg-2); background: transparent;
+  white-space: nowrap;
+}
+.af-tag--pending { color: var(--pending); background: var(--pending-bg); border-color: var(--pending-line); }
+.af-tag--queued  { color: var(--queued);  background: var(--queued-bg);  border-color: var(--queued-line); }
+.af-tag--running { color: var(--running); background: var(--running-bg); border-color: var(--running-line); }
+.af-tag--review  { color: var(--review);  background: var(--review-bg);  border-color: var(--review-line); }
+.af-tag--done    { color: var(--done);    background: var(--done-bg);    border-color: var(--done-line); }
+.af-tag--failed  { color: var(--failed);  background: var(--failed-bg);  border-color: var(--failed-line); }
+.af-tag--butler  { color: var(--butler);  background: var(--butler-bg);  border-color: var(--butler-line); }
+.af-tag--warn    { color: var(--warn);    background: var(--warn-bg);    border-color: var(--warn-line); }
+
+/* ═══ 六态形状：色盲也能分（失败 / 排队色值亮度接近）═════════════════ */
+
+.af-shape { width: 9px; height: 9px; flex: 0 0 auto; display: inline-block; }
+.af-shape--pending {
+  background: transparent; border: 1.5px solid var(--pending); border-radius: 2px;
+}
+.af-shape--queued {
+  background: var(--queued); border-radius: 1px; transform: rotate(45deg);
+}
+.af-shape--running {
+  background: var(--running); border-radius: 50%;
+}
+.af-shape--review {
+  background: transparent; border: 1.5px solid var(--review); border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(0,0,0,0);
+  position: relative;
+}
+.af-shape--review::after {
+  content: ""; position: absolute; inset: 2px;
+  border-radius: 50%; background: var(--review);
+}
+.af-shape--done {
+  background: var(--done); border-radius: 2px;
+}
+.af-shape--failed {
+  background: var(--failed); border-radius: 1px;
+  transform: skewX(-20deg); width: 10px;
+}
+
+/* ═══ 区域容器：分区的主要手段 ═══════════════════════════════════════ */
+
+/* 一块区域 = 一个容器。它比页面底亮一档，所以「边界」不用描边就出来了。 */
+.af-region {
+  background: var(--surf-1);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  display: flex; flex-direction: column;
+  min-height: 0; min-width: 0;
+}
+.af-region__head {
+  display: flex; align-items: center; gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--line-2);
+  background: var(--surf-1);
+  flex: 0 0 auto;
+}
+.af-region__title {
+  font-size: var(--t-sm); font-weight: 600; color: var(--fg-strong);
+  display: flex; align-items: center; gap: var(--s2);
+}
+.af-region__note { font-size: var(--t-2xs); color: var(--fg-3); }
+.af-region__body { padding: var(--s4); min-height: 0; }
+.af-region__body--flush { padding: 0; }
+
+/* 区域标题条上的状态点：让「这块区域是什么状态」不靠读标题 */
+.af-region--warn { border-color: var(--warn-line); }
+.af-region--warn .af-region__head { background: var(--warn-bg); }
+
+/* ═══ 卡片 ═══════════════════════════════════════════════════════════ */
+
+.af-card {
+  display: flex; flex-direction: column; gap: var(--s2);
+  width: 100%; text-align: left;
+  background: var(--surf-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: var(--s3);
+  color: inherit; font: inherit;
+  cursor: pointer; text-decoration: none;
+  transition: background 140ms var(--ease), border-color 140ms var(--ease);
+}
+.af-card:hover { background: var(--surf-3); border-color: var(--line-3); text-decoration: none; }
+.af-card:focus-visible { outline: 2px solid var(--acc-strong); outline-offset: -2px; }
+
+.af-card__title {
+  font-size: var(--t-sm); font-weight: 500; line-height: 1.5;
+  color: var(--fg);
+}
+.af-card__meta {
+  display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap;
+  font-size: var(--t-2xs); color: var(--fg-2);
+}
+
+/* 失败原因：卡片上最该被看见的一行，所以给它底色 + 左线 */
+.af-card__why {
+  font-family: var(--mono); font-size: var(--t-2xs); line-height: 1.55;
+  color: var(--failed);
+  background: var(--failed-bg);
+  border-left: 2px solid var(--failed);
+  border-radius: 0 var(--r-xs) var(--r-xs) 0;
+  padding: var(--s1) var(--s2);
+  display: flex; flex-direction: column; gap: 1px;
+}
+.af-card__why b { font-weight: 600; }
+
+/* 心跳：字母 + 文字都表意，不依赖动画 */
+.af-beat {
+  display: flex; align-items: center; gap: var(--s2);
+  font-size: var(--t-2xs); color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+}
+.af-beat__dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--running); flex: 0 0 auto;
+  animation: af-pulse 2.6s ease-in-out infinite;
+}
+.af-beat__dot--stall {
+  background: transparent; border: 1.5px solid var(--warn);
+  animation: none; border-radius: 1px; transform: rotate(45deg);
+}
+@keyframes af-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+/* 项目色点：颜色只是辅助，项目名才是身份 */
+.dot-a { background: var(--dot-a); }
+.dot-b { background: var(--dot-b); }
+.dot-c { background: var(--dot-c); }
+.af-dot { width: 7px; height: 7px; border-radius: 2px; flex: 0 0 auto; }
+
+/* 迷你读数：仪表旁的「当前值」，不叫进度条因为它不是百分比 */
+.af-mini {
+  height: 5px; border-radius: var(--r-full);
+  background: var(--surf-4); overflow: hidden; min-width: 48px; flex: 1;
+}
+.af-mini__fill { height: 100%; border-radius: var(--r-full); }
+.af-mini__fill--ok   { background: var(--done); }
+.af-mini__fill--warn { background: var(--warn); }
+.af-mini__fill--bad  { background: var(--failed); }
+
+/* 两栏分组列表：每组有头，区与区之间靠底色差分开 */
+.af-groups {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--s4); align-items: start;
+}
+
+/* ═══ 看板 ═══════════════════════════════════════════════════════════ */
+
+.af-board {
+  display: grid; grid-auto-flow: column;
+  grid-auto-columns: minmax(236px, 1fr);
+  gap: var(--s3);
+  padding: var(--s4) var(--s5) var(--s5);
+  height: 100%; min-height: 0; overflow-x: auto;
+  align-items: stretch;
+}
+
+/* 每一列是一块区域容器，列头有一条状态色带（2px）*/
+.af-col {
+  background: var(--surf-1);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  display: flex; flex-direction: column;
+  min-height: 0; min-width: 0; overflow: hidden;
+}
+.af-col__head {
+  display: flex; align-items: center; gap: var(--s2);
+  padding: var(--s3) var(--s3) var(--s3);
+  border-top: 2px solid var(--line-3);
+  border-bottom: 1px solid var(--line-2);
+  flex: 0 0 auto;
+}
+.af-col[data-state="pending"] .af-col__head { border-top-color: var(--pending); }
+.af-col[data-state="queued"]  .af-col__head { border-top-color: var(--queued); }
+.af-col[data-state="running"] .af-col__head { border-top-color: var(--running); }
+.af-col[data-state="review"]  .af-col__head { border-top-color: var(--review); }
+.af-col[data-state="done"]    .af-col__head { border-top-color: var(--done); }
+.af-col[data-state="failed"]  .af-col__head { border-top-color: var(--failed); }
+
+.af-col__name { font-size: var(--t-xs); font-weight: 600; color: var(--fg-strong); }
+.af-col__count {
+  margin-left: auto;
+  font-size: var(--t-2xs); font-weight: 600; color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+  background: var(--surf-2); border-radius: var(--r-full);
+  padding: 0 var(--s2); min-width: 22px; text-align: center;
+}
+.af-col__body {
+  padding: var(--s2);
+  display: flex; flex-direction: column; gap: var(--s2);
+  overflow-y: auto; min-height: 0; flex: 1;
+}
+
+/* ═══ 摘要读数带 ═════════════════════════════════════════════════════ */
+
+.af-meters {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: var(--s4) var(--s5) 0;
+  background: var(--surf-1);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+.af-meter {
+  padding: var(--s3) var(--s4);
+  display: flex; flex-direction: column; gap: 1px;
+  min-width: 0; border-left: 1px solid var(--line);
+  color: inherit; text-decoration: none;
+}
+.af-meter:first-child { border-left: none; }
+a.af-meter:hover { background: var(--surf-2); text-decoration: none; }
+.af-meter--action { background: var(--warn-bg); }
+.af-meter__k {
+  font-size: var(--t-2xs); font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-2);
+  display: flex; align-items: center; gap: var(--s1);
+}
+.af-meter__v {
+  font-size: var(--t-sm); font-weight: 500; color: var(--fg-strong);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.af-meter__v--warn { color: var(--warn); }
+.af-meter__sub { font-size: var(--t-2xs); color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ═══ 表格 ═══════════════════════════════════════════════════════════ */
+
+.af-table { width: 100%; border-collapse: collapse; font-size: var(--t-sm); }
+.af-table th {
+  text-align: left; font-size: var(--t-2xs); font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-3);
+  padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line-2);
+  white-space: nowrap;
+}
+.af-table td {
+  padding: var(--s3); border-bottom: 1px solid var(--line);
+  vertical-align: top; color: var(--fg);
+}
+.af-table tr:last-child td { border-bottom: none; }
+.af-table tbody tr:hover td { background: var(--surf-2); }
+.af-table__num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ═══ 定义列表（详情页的键值对）═════════════════════════════════════ */
+
+.af-kv { display: grid; grid-template-columns: 128px 1fr; gap: var(--s2) var(--s4); font-size: var(--t-sm); }
+.af-kv dt { color: var(--fg-2); font-size: var(--t-xs); padding-top: 2px; }
+.af-kv dd { margin: 0; color: var(--fg); }
+
+/* ═══ 提示块 ═════════════════════════════════════════════════════════ */
+
+.af-callout {
+  border: 1px solid var(--line-2);
+  border-left: 3px solid var(--fg-3);
+  border-radius: var(--r-sm);
+  background: var(--surf-2);
+  padding: var(--s3) var(--s4);
+  font-size: var(--t-sm); line-height: 1.65;
+  display: flex; flex-direction: column; gap: var(--s2);
+}
+.af-callout__k {
+  font-size: var(--t-2xs); font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-2);
+}
+.af-callout--warn   { border-color: var(--warn-line);   border-left-color: var(--warn);   background: var(--warn-bg); }
+.af-callout--failed { border-color: var(--failed-line); border-left-color: var(--failed); background: var(--failed-bg); }
+.af-callout--info   { border-color: var(--acc-line);    border-left-color: var(--acc);    background: var(--acc-bg); }
+.af-callout--done   { border-color: var(--done-line);   border-left-color: var(--done);   background: var(--done-bg); }
+
+/* ═══ 进度：不编百分比，只报可观测的量 ══════════════════════════════ */
+
+.af-bar {
+  height: 5px; border-radius: var(--r-full);
+  background: var(--surf-4); overflow: hidden;
+}
+.af-bar__fill { height: 100%; border-radius: var(--r-full); background: var(--acc); }
+.af-bar__fill--done   { background: var(--done); }
+.af-bar__fill--failed { background: var(--failed); }
+.af-bar__fill--warn   { background: var(--warn); }
+
+/* ═══ 时间线 ═════════════════════════════════════════════════════════ */
+
+.af-timeline { list-style: none; margin: 0; padding: 0; }
+.af-tl {
+  display: grid; grid-template-columns: 96px 20px 1fr; gap: 0 var(--s3);
+  font-size: var(--t-sm);
+}
+.af-tl__time {
+  font-size: var(--t-2xs); color: var(--fg-3); font-variant-numeric: tabular-nums;
+  padding-top: 3px; text-align: right;
+}
+.af-tl__rail { position: relative; display: flex; justify-content: center; }
+.af-tl__rail::before {
+  content: ""; width: 1px; background: var(--line-3);
+  position: absolute; top: 0; bottom: 0;
+}
+.af-tl:first-child .af-tl__rail::before { top: 8px; }
+.af-tl:last-child .af-tl__rail::before { bottom: calc(100% - 8px); }
+.af-tl__node {
+  position: relative; z-index: 1; margin-top: 4px;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--fg-3); border: 2px solid var(--surf-1);
+  box-sizing: content-box;
+}
+.af-tl__body { padding-bottom: var(--s5); min-width: 0; }
+.af-tl__title { font-weight: 500; color: var(--fg); }
+.af-tl__detail { font-size: var(--t-xs); color: var(--fg-2); margin-top: 1px; }
+
+/* ═══ 管家：右下角一个按钮，点开侧滑面板 ═════════════════════════════ */
+
+.af-fab {
+  position: fixed; right: var(--s5); bottom: var(--s5); z-index: 60;
+  display: inline-flex; align-items: center; gap: var(--s2);
+  min-height: 44px; padding: 0 var(--s4) 0 var(--s3);
+  border: 1px solid var(--line-4); border-radius: var(--r-full);
+  background: var(--pop); color: var(--fg-strong);
+  font: inherit; font-size: var(--t-sm); font-weight: 500;
+  cursor: pointer; box-shadow: var(--sh-3); text-decoration: none;
+  transition: background 140ms var(--ease), transform 120ms var(--ease);
+}
+.af-fab:hover { background: var(--surf-4); text-decoration: none; }
+.af-fab:active { transform: translateY(1px); }
+.af-fab__mark {
+  width: 24px; height: 24px; flex: 0 0 auto; border-radius: 50%;
+  background: var(--butler-bg); border: 1px solid var(--butler-line);
+  display: grid; place-items: center;
+  color: var(--butler); font-size: var(--t-2xs); font-weight: 700;
+}
+/* 角标：写清「几条、什么事」，不然待确认会被藏进按钮里 */
+.af-fab__badge {
+  display: inline-flex; align-items: center; gap: var(--s1);
+  font-size: var(--t-2xs); font-weight: 600;
+  padding: 1px var(--s2); border-radius: var(--r-full);
+  background: var(--warn-bg); border: 1px solid var(--warn-line); color: var(--warn);
+}
+.af-fab--on { display: none; }
+
+/* 侧滑面板：overlay 比看板亮一档，靠亮度就能看出「它在上面」 */
+.af-drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 100;
+  width: 420px; max-width: 94vw;
+  background: var(--panel);
+  border-left: 1px solid var(--line-3);
+  box-shadow: var(--sh-3);
+  display: flex; flex-direction: column;
+  transform: translateX(100%);
+  visibility: hidden;
+  transition: transform 220ms var(--ease), visibility 220ms;
+}
+.af-drawer:target { transform: translateX(0); visibility: visible; }
+.af-drawer:target ~ .af-fab--off { display: none; }
+.af-drawer:target ~ .af-fab--on { display: inline-flex; }
+
+.af-drawer__head {
+  display: flex; align-items: flex-start; gap: var(--s3);
+  padding: var(--s4); border-bottom: 1px solid var(--line-2); flex: 0 0 auto;
+}
+.af-drawer__title { font-size: var(--t-md); font-weight: 600; }
+.af-drawer__sub { font-size: var(--t-2xs); color: var(--fg-3); line-height: 1.6; }
+.af-drawer__close { margin-left: auto; flex: 0 0 auto; }
+
+.af-drawer__log {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: var(--s4); display: flex; flex-direction: column; gap: var(--s4);
+}
+
+.af-msg { display: flex; flex-direction: column; gap: 2px; }
+.af-msg__who {
+  font-size: var(--t-2xs); font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-3);
+}
+.af-msg__body { font-size: var(--t-sm); line-height: 1.65; }
+
+/* 建议派活草稿：面板里最重的一块 —— 要人点头才进看板 */
+.af-draft {
+  border: 1px solid var(--butler-line); border-radius: var(--r-md);
+  background: var(--butler-bg); padding: var(--s3);
+  display: flex; flex-direction: column; gap: var(--s2);
+}
+.af-draft__head {
+  font-size: var(--t-2xs); font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--butler);
+}
+.af-draft__row {
+  display: flex; align-items: center; gap: var(--s2);
+  font-size: var(--t-sm);
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--r-sm); padding: var(--s2);
+}
+
+.af-drawer__compose {
+  display: flex; gap: var(--s2);
+  padding: var(--s4); border-top: 1px solid var(--line-2); flex: 0 0 auto;
+}
+
+/* ═══ 输入 ═══════════════════════════════════════════════════════════ */
+
+.af-input, .af-select, .af-textarea {
+  font: inherit; font-size: var(--t-sm);
+  background: var(--inset); color: var(--fg);
+  border: 1px solid var(--line-3); border-radius: var(--r-sm);
+  padding: 0 var(--s3); min-height: var(--row); width: 100%;
+  transition: border-color 140ms var(--ease), box-shadow 140ms var(--ease);
+}
+.af-textarea { padding: var(--s2) var(--s3); min-height: 76px; resize: vertical; line-height: 1.6; }
+.af-input::placeholder, .af-textarea::placeholder { color: var(--fg-3); }
+.af-input:focus, .af-select:focus, .af-textarea:focus {
+  outline: none; border-color: var(--acc); box-shadow: 0 0 0 3px var(--acc-bg);
+}
+.af-field { display: flex; flex-direction: column; gap: var(--s1); }
+.af-field__label { font-size: var(--t-xs); font-weight: 600; color: var(--fg-2); }
+.af-field__hint { font-size: var(--t-2xs); color: var(--fg-3); }
+
+/* ═══ 开关（纯展示，用 aria-checked 表示状态）═══════════════════════ */
+
+.af-switch {
+  display: inline-flex; align-items: center; gap: var(--s2);
+  font-size: var(--t-sm); color: var(--fg);
+}
+.af-switch__track {
+  width: 34px; height: 20px; border-radius: var(--r-full); flex: 0 0 auto;
+  background: var(--surf-4); border: 1px solid var(--line-3);
+  position: relative; transition: background 140ms var(--ease);
+}
+.af-switch__track::after {
+  content: ""; position: absolute; top: 2px; left: 2px;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--fg-2); transition: transform 140ms var(--ease), background 140ms var(--ease);
+}
+.af-switch[aria-checked="true"] .af-switch__track { background: var(--acc); border-color: var(--acc); }
+.af-switch[aria-checked="true"] .af-switch__track::after { transform: translateX(14px); background: var(--on-acc); }
+
+/* ═══ 标签页 ═════════════════════════════════════════════════════════ */
+
+.af-tabs {
+  display: flex; gap: var(--s1); align-items: center;
+  border-bottom: 1px solid var(--line-2);
+  padding: 0 var(--s6); flex: 0 0 auto;
+}
+.af-tab {
+  padding: var(--s3) var(--s2); font-size: var(--t-sm); color: var(--fg-2);
+  text-decoration: none; border-bottom: 2px solid transparent;
+  margin-bottom: -1px; display: inline-flex; align-items: center; gap: var(--s2);
+}
+.af-tab:hover { color: var(--fg-strong); text-decoration: none; }
+.af-tab[aria-current="page"] {
+  color: var(--fg-strong); border-bottom-color: var(--acc); font-weight: 500;
+}
+.af-tab__count {
+  font-size: var(--t-2xs); font-variant-numeric: tabular-nums;
+  color: var(--fg-2); background: var(--surf-2);
+  border-radius: var(--r-full); padding: 0 6px;
+}
+
+/* ═══ 空状态 ═════════════════════════════════════════════════════════ */
+
+.af-empty {
+  display: flex; flex-direction: column; align-items: center; gap: var(--s2);
+  padding: var(--s6) var(--s4); text-align: center;
+  color: var(--fg-3); font-size: var(--t-xs); line-height: 1.7;
+}
+.af-empty__shape {
+  width: 18px; height: 18px; border-radius: var(--r-xs);
+  border: 1.5px dashed var(--line-4);
+}
+
+/* ═══ 双栏布局（详情页）══════════════════════════════════════════════ */
+
+.af-split {
+  display: grid; grid-template-columns: minmax(0, 1fr) 360px;
+  gap: var(--s4); padding: var(--s5); min-height: 0;
+}
+.af-split--fill { flex: 1; overflow: hidden; }
+.af-split__col { display: flex; flex-direction: column; gap: var(--s4); min-height: 0; min-width: 0; overflow-y: auto; }
+
+/* ═══ 原型导览条与配色切换 ═══════════════════════════════════════════ */
+
+
+
+/* ═══ 动效降级 ═══════════════════════════════════════════════════════ */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important; animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ═══ 窄屏：侧栏收起，看板横向滚动 ══════════════════════════════════ */
+
+@media (max-width: 900px) {
+  .af-shell { grid-template-columns: 1fr; }
+  .af-rail { display: none; }
+  .af-split { grid-template-columns: 1fr; }
+  .af-head { padding: 0 var(--s4); }
+  .af-meters { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: var(--s3) var(--s3) 0; }
+  .af-meters .af-meter:nth-child(3) { border-left: none; }
+  .af-board { padding: var(--s3); }
+}
+
+/* ═══ 设置页 · 外观：四张配色卡 ══════════════════════════════════════
+   每张卡里画一个小型界面缩略（顶栏 + 两行文字）用真实色值，
+   因为「甲和丙的区别」光看色点看不出来 —— 得看到文字压在底色上的样子。 */
+
+.af-themes {
+  display: grid; gap: var(--s3);
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  margin-top: var(--s2);
+}
+
+.af-theme {
+  font: inherit; text-align: left; cursor: pointer;
+  display: flex; flex-direction: column; gap: var(--s2);
+  padding: var(--s2);
+  background: var(--surf-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  color: var(--fg);
+  transition: border-color 140ms var(--ease), background 140ms var(--ease);
+}
+.af-theme:hover { border-color: var(--line-4); background: var(--surf-3); }
+.af-theme[aria-checked="true"] {
+  border-color: var(--acc); background: var(--acc-bg);
+  box-shadow: inset 0 0 0 1px var(--acc);
+}
+.af-theme:focus-visible { outline: 2px solid var(--acc-strong); outline-offset: 2px; }
+
+/* 缩略图：用该套配色自己的色值，不跟当前主题走。
+   这是全站唯一写死色值的地方 —— 它的用途就是「显示别套配色的样子」。 */
+.af-theme__prev {
+  display: flex; flex-direction: column; gap: 5px;
+  height: 46px; padding: 6px 8px;
+  border-radius: var(--r-sm);
+  border: 1px solid rgba(0,0,0,0.18);
+  overflow: hidden;
+}
+.af-theme__pv-bar { height: 7px; border-radius: 2px; margin-bottom: 2px; }
+.af-theme__pv-line { height: 4px; border-radius: 2px; width: 82%; }
+.af-theme__pv-line--short { width: 55%; }
+
+/* 甲 中性冷灰 —— 暗 · 冷 */
+[data-theme-pick="neutral"] .af-theme__prev { background: #191d21; }
+[data-theme-pick="neutral"] .af-theme__pv-bar { background: #272c31; }
+[data-theme-pick="neutral"] .af-theme__pv-line { background: #cdd2d9; }
+/* 乙 暖米灰 —— 暗 · 暖 */
+[data-theme-pick="warm"] .af-theme__prev { background: #1d1c19; }
+[data-theme-pick="warm"] .af-theme__pv-bar { background: #2b2a26; }
+[data-theme-pick="warm"] .af-theme__pv-line { background: #d2cec6; }
+/* 丙 纸白偏冷 —— 亮 · 冷 */
+[data-theme-pick="paper"] .af-theme__prev { background: #eceef1; }
+[data-theme-pick="paper"] .af-theme__pv-bar { background: #f8f9fb; }
+[data-theme-pick="paper"] .af-theme__pv-line { background: #2a2f36; }
+/* 丁 米白偏暖 —— 亮 · 暖 */
+[data-theme-pick="cream"] .af-theme__prev { background: #efece4; }
+[data-theme-pick="cream"] .af-theme__pv-bar { background: #faf8f2; }
+[data-theme-pick="cream"] .af-theme__pv-line { background: #33302a; }
+
+/* 选中项的勾：不只靠边框，加一个对号，色盲下也分得出来 */
+.af-theme { position: relative; }
+.af-theme::after {
+  content: "✓";
+  position: absolute; top: 8px; right: 8px;
+  width: 16px; height: 16px; border-radius: var(--r-full);
+  display: grid; place-items: center;
+  font-size: 10px; font-weight: 700; line-height: 1;
+  background: var(--acc); color: var(--on-acc);
+  opacity: 0; transform: scale(0.7);
+  transition: opacity 140ms var(--ease), transform 140ms var(--ease);
+}
+.af-theme[aria-checked="true"]::after { opacity: 1; transform: scale(1); }
+
+.af-theme__name { font-size: var(--t-xs); font-weight: 600; color: var(--fg-strong); }
+.af-theme__desc { font-size: var(--t-2xs); color: var(--fg-2); line-height: 1.5; }
+
+/* 侧栏组标题上的添加入口：只在「项目」这一组出现 */
+.af-rail__group {
+  display: flex; align-items: center; gap: var(--s2);
+}
+.af-rail__group > span { flex: 1; }
+.af-rail__add {
+  width: 18px; height: 18px; flex: 0 0 auto;
+  display: grid; place-items: center;
+  border-radius: var(--r-xs);
+  border: 1px solid var(--line-3);
+  color: var(--fg-2); font-size: var(--t-sm); line-height: 1;
+  text-decoration: none;
+  transition: background 140ms var(--ease), color 140ms var(--ease), border-color 140ms var(--ease);
+}
+.af-rail__add:hover {
+  background: var(--acc-bg); border-color: var(--acc-line);
+  color: var(--acc); text-decoration: none;
+}
+
+/* ═══ 单选卡片：用整块卡片承载一个选项 ═══════════════════════════════ */
+
+/* 形态、清理策略这类选择，光靠一个小圆点看不出差别，
+   所以把整块卡片做成可点的，选中时边框和底色一起变。 */
+.af-shape-card { display: block; cursor: pointer; }
+.af-shape-card > input {
+  position: absolute; opacity: 0; width: 1px; height: 1px;
+}
+.af-shape-card__body {
+  display: flex; flex-direction: column; gap: var(--s2);
+  background: var(--surf-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  padding: var(--s4);
+  height: 100%;
+  transition: background 140ms var(--ease), border-color 140ms var(--ease);
+}
+.af-shape-card:hover .af-shape-card__body {
+  background: var(--surf-3); border-color: var(--line-3);
+}
+.af-shape-card > input:checked + .af-shape-card__body {
+  background: var(--acc-bg);
+  border-color: var(--acc);
+  box-shadow: inset 0 0 0 1px var(--acc);
+}
+.af-shape-card > input:focus-visible + .af-shape-card__body {
+  outline: 2px solid var(--acc-strong); outline-offset: 2px;
+}
+.af-shape-card__head {
+  display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap;
+}
+.af-shape-card__name { font-size: var(--t-md); font-weight: 600; color: var(--fg-strong); }
+.af-shape-card__row { font-size: var(--t-xs); color: var(--fg); line-height: 1.6; }
+.af-shape-card__row b {
+  display: inline-block; min-width: 76px;
+  color: var(--fg-3); font-weight: 400;
+}
+.af-shape-card__note {
+  font-size: var(--t-2xs); color: var(--fg-2); line-height: 1.65;
+  border-top: 1px solid var(--line-2);
+  padding-top: var(--s2); margin-top: auto;
+}
+
+/* ═══ 会话页 · 面板标签（可多开）══════════════════════════════════════
+   终端 / 文件 / Git 不是「三个互斥页面」，是同一会话里能同时开好几个的实例。
+   所以标签写实例名（终端 1、终端 2）而不是功能名。
+   切换用 :target，零脚本 —— 和管家抽屉同一套做法。 */
+
+.af-panetabs {
+  display: flex; align-items: stretch; gap: 2px;
+  padding: 0 var(--s3);
+  background: var(--surf-1);
+  border-bottom: 1px solid var(--line-2);
+  overflow-x: auto;
+  flex: 0 0 auto;
+}
+
+.af-panetab {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px var(--s3);
+  font-size: var(--t-2xs); color: var(--fg-2);
+  border: 1px solid transparent; border-bottom: none;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  white-space: nowrap; text-decoration: none;
+  position: relative; top: 1px;
+  transition: background 120ms var(--ease), color 120ms var(--ease);
+}
+.af-panetab:hover { background: var(--surf-2); color: var(--fg-strong); text-decoration: none; }
+.af-panetab__ico { color: var(--fg-3); font-family: var(--mono); font-size: 10px; }
+.af-panetab__x {
+  color: var(--fg-3); opacity: 0; font-size: 11px; line-height: 1;
+  padding: 0 2px; border-radius: 2px;
+  transition: opacity 120ms var(--ease);
+}
+.af-panetab:hover .af-panetab__x { opacity: 1; }
+.af-panetab__x:hover { color: var(--failed); background: var(--failed-bg); }
+
+.af-panetab--add {
+  padding: 8px 10px; color: var(--fg-3);
+  font-size: var(--t-xs); font-weight: 600;
+}
+
+/* 选中的标签：底部与内容区接上，看起来像一张「压在上面的卡」 */
+.af-panetab[aria-selected="true"],
+.af-panetab.is-active {
+  background: var(--surf-2);
+  border-color: var(--line-2);
+  border-bottom-color: var(--surf-2);
+  color: var(--fg-strong); font-weight: 600;
+}
+.af-panetab[aria-selected="true"] .af-panetab__ico { color: var(--acc); }
+
+/* 面板本体：默认全隐藏，:target 的那个显示。
+   不依赖 :has()，也不用兄弟选择器——两者都有边界情况（:has 兼容性、
+   ~ 只能向后匹配，而兜底面板是第一个，后面的标签盖不掉它）。 */
+.af-pane { display: none; flex: 1 1 auto; min-height: 0; overflow: auto; }
+.af-pane:target { display: block; }
+
+/* 兜底面板：只在「当前没有任何面板被选中」时显示。
+   做法是让 session.js 在 body 上打一个标记，而不是靠 CSS 猜。 */
+body:not(.af-has-pane) .af-pane--default { display: block; }
+
+/* ═══ 会话 · 面板内部结构 ══════════════════════════════════════════════
+   这几个类原先定义在 panels/ 三个页面各自的样式里，合并成 session.html 时
+   没一起搬过来，导致终端、文件树、diff、git 表格全都没有样式。这里补齐。
+
+   注意：这些是「一块内容」的排版，不是新的视觉语言 —— 颜色、圆角、间距
+   全部沿用上面的令牌，保证和全站一致。 */
+
+/* 两栏布局：左边主内容，右边窄栏 */
+.af-dock {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: var(--s3);
+  padding: var(--s3);
+  align-items: start;
+}
+@media (max-width: 1100px) {
+  .af-dock { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ── 终端 ─────────────────────────────────────────────────────────── */
+.af-term {
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  line-height: 1.75;
+  padding: var(--s3) var(--s3) var(--s4);
+  background: var(--inset);
+  color: var(--fg);
+  overflow-x: auto;
+  white-space: pre;
+  tab-size: 2;
+}
+/* 提示符两段：主机名与路径用不同颜色，扫一眼就知道在哪 */
+.af-term .p { color: var(--done); }
+.af-term .c { color: var(--running); }
+.af-term .o { color: var(--fg-2); }
+
+/* ── 文件树 ───────────────────────────────────────────────────────── */
+.af-files { padding: var(--s3); }
+
+.af-tree { list-style: none; margin: 0; padding: 0; }
+.af-tree li { margin: 0; }
+.af-tree a {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 8px; border-radius: var(--r-xs);
+  font-size: var(--t-xs); color: var(--fg);
+  text-decoration: none;
+  transition: background 120ms var(--ease), color 120ms var(--ease);
+}
+.af-tree a:hover { background: var(--surf-3); color: var(--fg-strong); text-decoration: none; }
+/* 层级靠缩进表达，不靠树线 —— 树线在窄栏里会很吵 */
+.af-tree a.d1 { padding-left: 22px; }
+.af-tree a.d2 { padding-left: 36px; }
+.af-tree a[aria-current="page"] {
+  background: var(--acc-bg); color: var(--fg-strong); font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--acc);
+}
+/* 展开/折叠的小三角：固定宽度，避免文字左右跳动 */
+.af-tree .ic {
+  display: inline-block; width: 10px; flex: 0 0 auto;
+  color: var(--fg-3); font-size: 9px; text-align: center;
+}
+
+/* ── 代码 diff ────────────────────────────────────────────────────── */
+.af-code {
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  line-height: 1.7;
+  padding: var(--s2) 0;
+  background: var(--inset);
+  overflow-x: auto;
+}
+.af-code > div { padding: 0 var(--s3) 0 0; white-space: pre; }
+/* 行号右对齐、固定宽，代码才能对齐；用弱色，不抢代码本身 */
+.af-code .ln {
+  display: inline-block; width: 5ch; padding-right: var(--s2);
+  text-align: right; color: var(--fg-3); user-select: none;
+}
+/* 增删不只用颜色：整行底色 + 行首的 + / - 符号（HTML 里已写了符号） */
+.af-code .ad { background: var(--add); }
+.af-code .dl { background: var(--del); }
+
+/* ── Git 状态表 ───────────────────────────────────────────────────── */
+.af-git { width: 100%; border-collapse: collapse; font-size: var(--t-xs); }
+.af-git td { padding: 6px var(--s3); border-bottom: 1px solid var(--line); }
+.af-git tr:last-child td { border-bottom: none; }
+.af-git .path { font-family: var(--mono); font-size: var(--t-2xs); color: var(--fg); }
+.af-git .num {
+  text-align: right; font-family: var(--mono); font-size: var(--t-2xs);
+  color: var(--done); white-space: nowrap; width: 1%;
+}
+/* 状态字母：形状之外再给一个字母，色盲下也能读 */
+.af-git .st {
+  width: 1%; text-align: center;
+  font-family: var(--mono); font-weight: 700; font-size: var(--t-2xs);
+}
+.af-git .st-m { color: var(--queued); }   /* 修改 */
+.af-git .st-a { color: var(--done); }     /* 新增 */
+
+/* ── Git log ──────────────────────────────────────────────────────── */
+.af-log {
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  line-height: 1.9;
+  padding: var(--s2) var(--s3);
+  background: var(--inset);
+}
+.af-log .h { color: var(--queued); }
+.af-log .m { color: var(--fg); }
+.af-log .a { color: var(--fg-3); font-size: var(--t-2xs); }
+
+/* ═══ IM 对话预览 ══════════════════════════════════════════════════════
+   模拟群里收到的样子。刻意做得「像聊天软件」而不像 Hub 的卡片 ——
+   因为差别正是要点：聊天界面让人快速划过去，Hub 界面让人停下来看。 */
+
+.af-im {
+  display: flex; flex-direction: column; gap: var(--s3);
+  padding: var(--s3) var(--s2);
+}
+
+.af-im__msg { display: flex; flex-direction: column; gap: 4px; max-width: 88%; }
+/* 机器人靠左、人靠右 —— 这是聊天软件的肌肉记忆，改了会让人认不出哪句是自己说的 */
+.af-im__msg--bot { align-self: flex-start; align-items: flex-start; }
+.af-im__msg--me  { align-self: flex-end;   align-items: flex-end; }
+
+.af-im__who {
+  font-size: 10.5px; color: var(--fg-3);
+  display: flex; align-items: center; gap: 5px;
+}
+.af-im__bot {
+  font-size: 9px; padding: 0 4px; border-radius: 2px;
+  background: var(--acc-bg); color: var(--acc);
+  border: 1px solid var(--acc-line);
+}
+
+.af-im__bubble {
+  background: var(--surf-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  padding: 9px 12px;
+  font-size: var(--t-xs); line-height: 1.7; color: var(--fg);
+}
+.af-im__msg--me .af-im__bubble {
+  background: var(--acc-bg); border-color: var(--acc-line); color: var(--fg-strong);
+}
+/* 需要你注意的几条：左边一条竖线，像引用块 */
+.af-im__bubble--warn { border-left: 3px solid var(--warn); }
+.af-im__bubble--ok   { border-left: 3px solid var(--done); }
+
+/* 卡片式消息：任务完成通知 */
+.af-im__bubble--card { padding: 0; overflow: hidden; }
+.af-im__card-h {
+  padding: 7px 12px; font-size: var(--t-2xs); font-weight: 600;
+  background: var(--surf-3); color: var(--fg-strong);
+  border-bottom: 1px solid var(--line-2);
+}
+.af-im__card-t {
+  padding: 9px 12px 2px; font-size: var(--t-xs); font-weight: 600; color: var(--fg-strong);
+}
+.af-im__card-meta {
+  padding: 2px 12px; font-size: var(--t-2xs); color: var(--fg-2); line-height: 1.7;
+}
+.af-im__card-meta:last-of-type { padding-bottom: 9px; }
+.af-im__ok { color: var(--done); font-weight: 600; }
+
+/* 泡泡里的按钮：IM 里点进去是「打开 Hub」，不是「直接执行」 */
+.af-im__btn {
+  display: block; text-align: center;
+  margin: 4px 12px 10px;
+  padding: 6px 10px; border-radius: var(--r-sm);
+  background: var(--acc); color: var(--on-acc);
+  font-size: var(--t-2xs); font-weight: 600;
+  text-decoration: none;
+}
+.af-im__btn:hover { text-decoration: none; filter: brightness(1.08); }
+.af-im__btn--ghost {
+  background: transparent; color: var(--acc);
+  border: 1px solid var(--acc-line);
+}
+
+/* ═══ 导航按钮 + 导航面板 ══════════════════════════════════════════════
+   这一组解决的是「左栏没了怎么办」。
+   ---------------------------------------------------------------------------
+   左栏在 <900px 时会整块消失，之前没有任何替代入口 —— 窄屏用户只能靠
+   浮在左下角的原型导览条跳页，那是调试工具，不是产品导航。
+
+   现在给产品导航一个自己的开关：
+   - 桌面（>900px）：按钮在左栏品牌行里，点了把左栏收起来 / 放出来
+   - 窄屏（≤900px）：按钮常驻左上角，点了从底部升起导航面板
+
+   为什么桌面收起是「整体滑走」而不是缩成图标条：
+   13 个导航项里只有 3 个项目色点是有形状的，其余 9 项是抽象概念
+   （设备 / Agent / 定时任务 / 外部来源 / 设置 / 通知出口 / …）。
+   48px 里只能写汉字首字，「设备」和「设置」都变成「设」，并排两个「设」——
+   那个方案当场就不成立。而正文本来就限宽 68ch，收起左栏省下的宽度
+   正文也用不上。所以收起只为一件事：读长内容时把注意力让出来。
+   ═════════════════════════════════════════════════════════════════════ */
+
+/* ── 开关按钮 ─────────────────────────────────────────────────────── */
+
+.af-navbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: var(--s2);
+  min-width: var(--navbtn); min-height: var(--navbtn);
+  padding: 0 var(--s2);
+  border: 1px solid var(--line-2); border-radius: var(--r-sm);
+  background: transparent; color: var(--fg-2);
+  font: inherit; font-size: var(--t-sm);
+  text-decoration: none; cursor: pointer;
+  flex: 0 0 auto;
+}
+.af-navbtn:hover { background: var(--surf-2); color: var(--fg-strong); text-decoration: none; }
+.af-navbtn:active { transform: translateY(1px); }
+
+/* 三条横线的图标：不依赖字体，任何主题下都画得出来 */
+.af-navbtn__bars {
+  display: flex; flex-direction: column; gap: 3px;
+  width: 15px; flex: 0 0 auto;
+}
+.af-navbtn__bars span {
+  display: block; height: 1.5px; border-radius: 1px;
+  background: currentColor;
+}
+
+/* 桌面：塞进左栏品牌行，放在最后 */
+.af-rail__brand .af-navbtn { margin-left: auto; }
+
+/* 窄屏常驻：固定在左上，藏在头部上方，不和头部按钮抢位置 */
+.af-navbtn--float { display: none; }
+
+/* ── 导航面板（窄屏底部升起）──────────────────────────────────────── */
+
+.af-navpanel {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 130;
+  max-height: 82vh; max-height: 82dvh;
+  background: var(--panel);
+  border-top: 1px solid var(--line-3);
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+  box-shadow: var(--sh-3);
+  display: flex; flex-direction: column;
+  transform: translateY(101%);
+  visibility: hidden;
+  transition: transform 220ms var(--ease), visibility 220ms var(--ease);
+  overscroll-behavior: contain;
+}
+.af-navpanel:target { transform: translateY(0); visibility: visible; }
+
+/* 遮罩：点它关面板。它自己也是 :target 的兄弟，
+   所以「按蒙层关闭」不需要 JS —— 蒙层本身就是一个指向 #nav-closed 的链接。 */
+.af-navscrim {
+  position: fixed; inset: 0; z-index: 120;
+  background: var(--scrim);
+  opacity: 0; visibility: hidden;
+  transition: opacity 220ms var(--ease), visibility 220ms var(--ease);
+}
+.af-navpanel:target ~ .af-navscrim { opacity: 1; visibility: visible; }
+
+.af-navpanel__head {
+  display: flex; align-items: center; gap: var(--s3);
+  padding: var(--s4);
+  border-bottom: 1px solid var(--line-2);
+  flex: 0 0 auto;
+}
+.af-navpanel__title { font-size: var(--t-md); font-weight: 600; color: var(--fg-strong); }
+.af-navpanel__close { margin-left: auto; flex: 0 0 auto; }
+
+/* 手把：手机上的面板有没有「能往下拽」的暗示，差别很大 */
+.af-navpanel__grab {
+  width: 34px; height: 3px; border-radius: var(--r-full);
+  background: var(--line-3); margin: var(--s2) auto 0; flex: 0 0 auto;
+}
+
+.af-navpanel__body {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: 0 var(--s3) var(--s5);
+}
+
+/* 面板里的分组：和左栏同一份 NAV，所以长得也该像，
+   只在窄屏下把行高调大一点 —— 手指点不到 32px。 */
+.af-navpanel .af-rail__group {
+  padding: var(--s4) var(--s2) var(--s2);
+}
+.af-navpanel .af-rail__list { padding: 0; }
+.af-navpanel .af-rail__list a {
+  min-height: 44px; padding: 0 var(--s3);
+  font-size: var(--t-md);
+}
+
+.af-navpanel__foot {
+  padding: var(--s3) var(--s4) var(--s5);
+  border-top: 1px solid var(--line-2);
+  font-size: var(--t-2xs); color: var(--fg-3);
+  flex: 0 0 auto;
+}
+
+
+/* ═══ 左栏收起态 ══════════════════════════════════════════════════════
+   桌面收起：整列滑出，内容区吃满。状态存在 <html data-rail="off">，
+   JS 记到 localStorage，刷新后保持 —— 收起是个长期偏好，
+   不该每次换页都弹回来。 */
+
+html[data-rail="off"] .af-shell { grid-template-columns: 0 1fr; }
+html[data-rail="off"] .af-rail {
+  transform: translateX(-100%);
+  visibility: hidden;
+  border-right: none;
+}
+.af-rail { transition: transform 200ms var(--ease), visibility 200ms var(--ease); }
+
+/* 收起后，开关按钮要留在原地 —— 否则收起来就再也点不回去。
+   做法：给按钮单独一份悬浮形态，只在收起时出现。 */
+/* 唤回 + 页面清单：一颗按钮，两个点击区。
+   左栏开着时整颗不显示 —— 那时左边的三横线没有意义，
+   而页面清单也就跟着一起进不来（要看得先收起左栏）。
+   这是刻意的取舍：一个角落只放一个入口，不为了保一个调试工具
+   而在空角落另立一颗按钮。
+   ------------------------------------------------------------------------- */
+.af-recallsplit {
+  position: fixed; left: var(--s3); bottom: var(--s3); z-index: 95;
+  display: none; align-items: stretch;
+  background: var(--pop);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-full);
+  box-shadow: var(--sh-2);
+  overflow: hidden;
+}
+html[data-rail="off"] .af-recallsplit { display: inline-flex; }
+
+.af-recallsplit__rail,
+.af-recallsplit__pages {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: var(--navbtn); padding: 0 var(--s3);
+  background: transparent; border: none; color: var(--fg-2);
+  cursor: pointer; font: inherit;
+}
+.af-recallsplit__rail { border-radius: var(--r-full) 0 0 var(--r-full); }
+.af-recallsplit__pages { border-radius: 0 var(--r-full) var(--r-full) 0; padding: 0 var(--s2); }
+.af-recallsplit__rail:hover,
+.af-recallsplit__pages:hover { background: var(--surf-3); color: var(--fg-strong); }
+.af-recallsplit__rail:active,
+.af-recallsplit__pages:active { background: var(--surf-4); }
+
+/* 分隔线：说明这是两块，不是一块。少了它，人会以为整颗按钮一个动作 */
+.af-recallsplit__sep {
+  width: 1px; background: var(--line-3); margin: var(--s2) 0; flex: 0 0 auto;
+}
+
+/* 向下的小箭头：不用字体里的 ▲▼（不同系统字形差别太大），用边框画 */
+.af-recallsplit__arrow {
+  width: 0; height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+  transition: transform 160ms var(--ease);
+}
+.af-recallsplit__pages[aria-expanded="true"] .af-recallsplit__arrow {
+  transform: rotate(180deg);
+}
+
+@media (max-width: 900px) {
+  /* 窄屏没有「收起」这回事：左栏根本不渲染，靠底部面板 */
+  html[data-rail="off"] .af-shell { grid-template-columns: 1fr; }
+  .af-recallsplit { display: none !important; }
+  .af-navbtn--float {
+    display: inline-flex;
+    position: fixed; left: var(--s3); top: var(--s3); z-index: 95;
+    background: var(--pop); border-color: var(--line-3);
+    box-shadow: var(--sh-2); border-radius: var(--r-full);
+  }
+  /* 窄屏头部要给左上那颗按钮让出位置 */
+  .af-head { padding-left: calc(var(--navbtn) + var(--s3) + var(--s2)); }
+}
+
+/* ═══ 全部页面清单 ════════════════════════════════════════════════════
+   这是评审用的索引：16 页平铺，任意页可达。
+   它从「唤回按钮」右半那块向上展开 —— 不是独立浮在角落的另一颗按钮。
+   -------------------------------------------------------------------------
+   为什么不做成产品导航的一部分：这 16 条里有 7 条是二级页面
+   （建项目 / 绑定设备 / 时间线 / 任务 / 执行监控 / 会话），
+   把它们和「看板」「设备」摆成平级，等于宣称「建项目和看板是一层的」。
+   那是把原型的可达性需求泄漏成了信息架构。
+   所以它待在这个角落，低调、默认收起，但能力完整。 */
+
+.af-pagelist {
+  position: fixed; left: var(--s3); bottom: calc(var(--navbtn) + var(--s4)); z-index: 96;
+  width: 268px;
+  background: var(--pop);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-md);
+  box-shadow: var(--sh-3);
+  display: none; flex-direction: column;
+  overflow: hidden;
+}
+.af-pagelist[data-open="true"] { display: flex; }
+
+.af-pagelist__head {
+  display: flex; align-items: baseline; gap: var(--s2);
+  padding: var(--s3) var(--s3) var(--s2);
+  border-bottom: 1px solid var(--line-2);
+}
+.af-pagelist__title { font-size: var(--t-xs); font-weight: 600; color: var(--fg-strong); }
+/* 明说是评审索引：不给它披「产品功能」的外衣，也不假装它不存在 */
+.af-pagelist__note { font-size: 10px; color: var(--fg-3); margin-left: auto; }
+
+.af-pagelist__body {
+  padding: var(--s2);
+  display: grid; grid-template-columns: 1fr 1fr; gap: 1px;
+  max-height: 52vh; overflow-y: auto;
+}
+.af-pagelist__body a {
+  display: block; padding: 5px var(--s2);
+  border-radius: var(--r-xs);
+  font-size: var(--t-2xs); color: var(--fg-2);
+  text-decoration: none; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.af-pagelist__body a:hover { background: var(--surf-3); color: var(--fg-strong); text-decoration: none; }
+.af-pagelist__body a[aria-current="page"] {
+  background: var(--acc); color: var(--on-acc); font-weight: 600;
+}
+
+/* 窄屏：整块交给底部导航面板，这两个都不显示 */
+@media (max-width: 900px) {
+  .af-pagelist { display: none !important; }
+}
+
+/* ═══ 看板 · 项目切换器 ════════════════════════════════════════════════
+   为什么需要它：左栏有项目列表，但左栏一收起来（全屏读内容、拖窄窗口、
+   手机上）项目就换不了了 —— 而看板正是最需要换项目的地方。
+
+   为什么项目名本身是按钮，而不是「项目名 + 一个下拉箭头按钮」并排：
+   并排会有两个可点目标，人会犹豫点哪个。项目名就是当前位置，
+   它本来就是「切到别处」最自然的入口。
+   ═════════════════════════════════════════════════════════════════════ */
+
+.af-switch { position: relative; display: flex; align-items: center; }
+
+.af-switch__btn {
+  display: inline-flex; align-items: center; gap: var(--s3);
+  padding: var(--s1) var(--s2) var(--s1) var(--s1);
+  margin-left: calc(-1 * var(--s1));
+  background: transparent; border: 1px solid transparent; border-radius: var(--r-sm);
+  color: inherit; font: inherit; cursor: pointer;
+}
+.af-switch__btn:hover { background: var(--surf-2); border-color: var(--line-2); }
+.af-switch__btn[aria-expanded="true"] {
+  background: var(--surf-2); border-color: var(--line-3);
+}
+.af-switch__title { margin: 0; }
+
+/* 向下小箭头：用边框画，不依赖字体字形 */
+.af-switch__chev {
+  width: 0; height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--fg-3);
+  transition: transform 160ms var(--ease);
+}
+.af-switch__btn[aria-expanded="true"] .af-switch__chev { transform: rotate(180deg); }
+
+.af-switch__menu {
+  position: absolute; left: 0; top: calc(100% + var(--s2)); z-index: 80;
+  min-width: 268px;
+  background: var(--pop);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-md);
+  box-shadow: var(--sh-3);
+  padding: var(--s2);
+  display: none; flex-direction: column; gap: 1px;
+}
+.af-switch[data-open="true"] .af-switch__menu { display: flex; }
+
+.af-switch__item {
+  display: flex; align-items: center; gap: var(--s3);
+  padding: var(--s2) var(--s3);
+  border-radius: var(--r-sm);
+  font-size: var(--t-sm); color: var(--fg);
+  text-decoration: none;
+}
+.af-switch__item:hover { background: var(--surf-3); color: var(--fg-strong); text-decoration: none; }
+/* 当前项目：不只靠底色区分，前面加一个「当前」标签 —— 状态不能只靠颜色 */
+.af-switch__item[aria-current="true"] {
+  background: var(--surf-2); color: var(--fg-strong); font-weight: 600;
+}
+.af-switch__item[aria-current="true"] .af-switch__shape::before {
+  content: "当前 · ";
+  color: var(--fg-3); font-weight: 400;
+}
+.af-switch__label { flex: 1; min-width: 0; }
+.af-switch__shape { font-size: var(--t-2xs); color: var(--fg-3); font-weight: 400; }
+
+.af-switch__item--add {
+  margin-top: var(--s2); padding-top: var(--s3);
+  border-top: 1px solid var(--line-2);
+  border-radius: 0 0 var(--r-sm) var(--r-sm);
+  color: var(--fg-2); font-size: var(--t-xs);
+}
+
+/* 空的列：不能什么都不显示 —— 空着本身是信息，但要让人分清
+   「这个项目没有失败」和「失败被筛掉了」 */
+.af-col--empty .af-col__body::after {
+  content: "这一列是空的";
+  display: block;
+  padding: var(--s4) var(--s2);
+  font-size: var(--t-2xs);
+  color: var(--fg-3);
+  text-align: center;
+  border: 1px dashed var(--line-2);
+  border-radius: var(--r-sm);
+}
+
+/* 窄屏：下拉不能被头部挤出屏幕右侧 */
+@media (max-width: 900px) {
+  .af-switch__menu { min-width: 240px; max-width: calc(100vw - var(--s6)); }
+}
+
+/* ═══ 执行复盘 ════════════════════════════════════════════════════════
+   一页要回答「它是怎么跑过去的」。
+   和失败面板的区别是「看 vs 做」，所以这一页刻意没有任何操作按钮 ——
+   复盘里出现「重跑」按钮，就等于在只读视图里埋了一个会改状态的东西。
+   ═════════════════════════════════════════════════════════════════════ */
+
+/* ── 播放条 ───────────────────────────────────────────────────────── */
+
+.af-replaybar {
+  display: flex; align-items: center; gap: var(--s3);
+  padding: var(--s2) var(--s4);
+  border-bottom: 1px solid var(--line-2);
+  background: var(--surf-1);
+  flex-wrap: wrap;
+}
+.af-replaybar__track {
+  position: relative; flex: 1 1 120px; min-width: 120px; height: 6px;
+  background: var(--surf-3); border-radius: var(--r-full);
+}
+.af-replaybar__fill {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  background: var(--acc); border-radius: var(--r-full); opacity: .55;
+}
+.af-replaybar__knob {
+  position: absolute; top: 50%; width: 11px; height: 11px;
+  margin-left: -5.5px; transform: translateY(-50%);
+  background: var(--acc); border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--panel);
+}
+/* 失败点在轨道上：拉到这里就知道「出事的位置在这儿」 */
+.af-replaybar__mark {
+  position: absolute; top: -3px; bottom: -3px; width: 2px;
+  margin-left: -1px; background: var(--failed); border-radius: 1px;
+}
+.af-replaybar__time { white-space: nowrap; color: var(--fg-3); }
+
+/* ── 时间轴 ───────────────────────────────────────────────────────── */
+
+.af-replay {
+  list-style: none; margin: 0; padding: var(--s3) var(--s4) var(--s4);
+}
+
+.af-ev {
+  display: grid; grid-template-columns: 20px minmax(0, 1fr);
+  gap: var(--s3);
+}
+.af-ev__gutter {
+  position: relative; display: flex; flex-direction: column; align-items: center;
+}
+.af-ev__dot {
+  width: 8px; height: 8px; margin-top: 8px; flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--fg-3);
+  box-shadow: 0 0 0 3px var(--bg);
+  position: relative; z-index: 1;
+}
+/* 竖线：相邻两个点之间的连接。最后一条没有线 */
+.af-ev__rail {
+  flex: 1 1 auto; width: 1px; background: var(--line-2);
+  margin: 4px 0 -4px;
+}
+.af-ev:last-child .af-ev__rail { display: none; }
+
+.af-ev__body {
+  display: flex; flex-direction: column; gap: var(--s2);
+  padding-bottom: var(--s4);
+  min-width: 0;
+}
+.af-ev__head {
+  display: flex; align-items: baseline; gap: var(--s3); flex-wrap: wrap;
+}
+.af-ev__kind {
+  font-size: var(--t-2xs); font-weight: 600;
+  color: var(--fg-2);
+}
+.af-ev__time { font-size: var(--t-2xs); color: var(--fg-3); }
+.af-ev__meta { font-size: var(--t-2xs); color: var(--fg-3); }
+.af-ev__text {
+  font-size: var(--t-xs); line-height: 1.75; color: var(--fg);
+}
+
+/* 三种事件用左侧细线区分，不只靠圆点颜色 —— 色盲也要能分清 */
+.af-ev--user .af-ev__dot { background: var(--acc); }
+.af-ev--user .af-ev__text { color: var(--fg-strong); font-weight: 500; }
+.af-ev--assistant .af-ev__dot { background: var(--butler); }
+.af-ev--tool .af-ev__dot { background: var(--fg-3); }
+.af-ev--tool .af-ev__body { padding-bottom: var(--s3); }
+
+/* 出问题的那几步：整块给一个左侧竖条 + 底色，
+   不用红底铺满 —— 一页里红太多，人会失去重点。 */
+.af-ev--bad .af-ev__dot { background: var(--failed); }
+.af-ev--bad .af-ev__body {
+  border-left: 2px solid var(--failed);
+  margin-left: -2px; padding-left: var(--s3);
+}
+.af-ev--end .af-ev__dot { background: var(--failed); }
+
+/* 输入输出：默认折叠。复盘的价值在于「能展开」，不在于「默认全铺开」 */
+.af-ev__io {
+  border: 1px solid var(--line-2); border-radius: var(--r-sm);
+  background: var(--surf-1);
+  font-size: var(--t-2xs);
+}
+.af-ev__io > summary {
+  padding: var(--s2) var(--s3);
+  cursor: pointer; color: var(--fg-2);
+  list-style: none;
+  display: flex; align-items: center; gap: var(--s2);
+}
+.af-ev__io > summary::-webkit-details-marker { display: none; }
+.af-ev__io > summary::before {
+  content: "▸"; color: var(--fg-3); font-size: 9px;
+  transition: transform 140ms var(--ease);
+  display: inline-block;
+}
+.af-ev__io[open] > summary::before { transform: rotate(90deg); }
+.af-ev__io > summary:hover { color: var(--fg-strong); }
+
+.af-ev__io-body { padding: 0 var(--s3) var(--s3); }
+.af-ev__io-k {
+  font-size: 10px; color: var(--fg-3); text-transform: uppercase;
+  letter-spacing: .06em; margin: var(--s2) 0 3px;
+}
+.af-ev__io-k:first-child { margin-top: 0; }
+.af-code--sm { font-size: 11px; padding: var(--s2) var(--s3); margin: 0; }
+
+/* ═══ 折叠区 ══════════════════════════════════════════════════════════
+   用于「该在、但不该占位置」的东西，比如已归档的项目。
+   默认收起，但标题里写清有几个 —— 不然没人会想到点开。 */
+
+.af-fold {
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: var(--surf-1);
+}
+.af-fold__sum {
+  display: flex; align-items: center; gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  cursor: pointer; list-style: none;
+  font-size: var(--t-sm); color: var(--fg-2);
+  flex-wrap: wrap;
+}
+.af-fold__sum::-webkit-details-marker { display: none; }
+.af-fold__sum::before {
+  content: "▸"; color: var(--fg-3); font-size: 10px;
+  transition: transform 140ms var(--ease);
+  display: inline-block;
+}
+.af-fold[open] > .af-fold__sum::before { transform: rotate(90deg); }
+.af-fold__sum:hover { color: var(--fg-strong); }
+.af-fold__body { padding: 0 var(--s4) var(--s4); }
+
+/* ═══ 动态列表 ════════════════════════════════════════════════════════
+   收件箱「动态」区：只列事实，不要动作按钮。
+   时间放在左边固定列，扫读时不用每行重新找位置。 */
+
+.af-activity { list-style: none; margin: 0; padding: 0; }
+
+.af-activity__row {
+  display: grid; grid-template-columns: 56px minmax(0, 1fr);
+  gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  border-top: 1px solid var(--line-2);
+}
+.af-activity__row:first-child { border-top: 0; }
+.af-activity__time { color: var(--fg-3); padding-top: 2px; }
+.af-activity__body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.af-activity__t {
+  display: flex; align-items: baseline; gap: var(--s2); flex-wrap: wrap;
+  font-size: var(--t-xs); color: var(--fg); line-height: 1.6;
+}
+.af-activity__m { line-height: 1.6; }
+.af-activity__row:hover { background: var(--surf-2); }
+
+@media (max-width: 560px) {
+  .af-activity__row { grid-template-columns: 1fr; gap: var(--s1); }
+  .af-activity__time { padding-top: 0; }
+}

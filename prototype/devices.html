@@ -1,225 +1,331 @@
 <!DOCTYPE html>
-<html class="devices" lang="zh-CN" data-state="online">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>设备 · AgentFleet</title>
-<link rel="stylesheet" href="assets/tokens.css">
-<link rel="stylesheet" href="assets/components.css">
-<style>
-  /* 本页两处页面级样式：① 行的主操作按钮与行本体分开——「看一眼详情」和
-     「用它开会话」是两个不同的决定，所以 Enter 与按钮是两个不同的动作；
-     ② 「就绪 / 未装」徽标串的间距。 */
-  .rowacts { display: flex; align-items: center; gap: var(--af-space-2); }
-  .caps { display: flex; flex-wrap: wrap; gap: var(--af-space-1); }
-  .head { display: flex; align-items: center; gap: var(--af-space-4); flex-wrap: wrap; margin-bottom: var(--af-space-8); }
-</style>
+<link rel="stylesheet" href="assets/tokens.css?v=11">
+<link rel="stylesheet" href="styles/theme-neutral.css?v=11" id="af-theme">
+<link rel="stylesheet" href="assets/app.css?v=11">
 </head>
-<body data-page="devices">
-<div data-shell>
+<body data-nav="devices">
+<div class="af-shell">
+  <main class="af-main">
 
-  <div class="af-page">
+    <header class="af-head">
+      <h1 class="af-head__title">设备</h1>
+      <span class="af-head__sub">管理面 · 管的是机器的配置与健康</span>
+      <span class="af-head__spacer"></span>
+      <a class="af-btn af-btn--ghost" href="agents.html">Agent</a>
+      <button class="af-btn af-btn--primary" type="button">加设备</button>
+    </header>
 
-    <div class="af-page__head">
-      <div>
-        <h1 class="af-page__title">设备</h1>
-        <p class="af-page__sub">
-          每台设备一条 WebSocket 主动外联，Hub 无入站端口。状态只看心跳年龄：
-          超过 45 秒判离线，45 秒内是 <b>reconnecting</b>（Hub 内存推导值，不是持久化字段）。
-          <br>「用它开会话」是这一页唯一的会话入口。本页<b>没有打开面板 / 工作区的路径</b>——
-          终端 / 文件是会话内的面板，绑定某个会话的工作区（<span class="af-fp">node_id, path</span>），
-          生命周期随会话（约束 3）。
+    <div class="af-body">
+      <div style="padding:20px 20px 64px" class="af-stack">
+
+        <div class="af-callout">
+          <span class="af-callout__k">这一页不是「做事」的入口</span>
+          <span>
+            派活、看进度、验收都在项目里。设备页回答的是另一串问题：
+            这台机器在线吗、Agent 版本对不对、磁盘还剩多少、绑了哪些项目、失败集中在哪一类。
+            新加一台机器只需在它上面跑一条 <span class="af-mono af-xs">afcli run &lt;hub-url&gt;</span>，
+            Hub 不需要开任何入站端口。
+          </span>
+        </div>
+
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">3 台设备</h2>
+            <span class="af-region__note">在线 2 · 离线 1</span>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead>
+                <tr>
+                  <th>设备</th><th>状态</th><th>系统 / 架构</th><th>绑定的项目</th>
+                  <th>磁盘</th><th>失败集中在</th><th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>
+                    <strong>device-a</strong> <span class="af-2xs af-mute">主力机</span>
+                    <div class="af-2xs af-mute af-mono">afcli 0.6.2</div>
+                  </td>
+                  <td><span class="af-tag af-tag--done">在线</span></td>
+                  <td class="af-2xs">linux / x86-64</td>
+                  <td class="af-2xs">AgentFleet<span class="af-sep"> · </span>个人笔记站</td>
+                  <td>
+                    <div class="af-row" style="gap:6px">
+                      <span class="af-mini" style="max-width:64px"><span class="af-mini__fill af-mini__fill--ok" style="width:41%"></span></span>
+                      <span class="af-num af-2xs">41%</span>
+                    </div>
+                    <div class="af-2xs af-mute">剩 236 GB</div>
+                  </td>
+                  <td class="af-2xs af-dim">没有明显集中</td>
+                  <td><a href="#detail-a">详情</a></td>
+                </tr>
+                <tr>
+                  <td>
+                    <strong>device-b</strong> <span class="af-2xs af-mute">工作笔记本</span>
+                    <div class="af-2xs af-mute af-mono">afcli 0.6.2</div>
+                  </td>
+                  <td><span class="af-tag af-tag--done">在线</span></td>
+                  <td class="af-2xs">macos / aarch64</td>
+                  <td class="af-2xs">AgentFleet</td>
+                  <td>
+                    <div class="af-row" style="gap:6px">
+                      <span class="af-mini" style="max-width:64px"><span class="af-mini__fill af-mini__fill--warn" style="width:74%"></span></span>
+                      <span class="af-num af-2xs">74%</span>
+                    </div>
+                    <div class="af-2xs af-mute">剩 62 GB</div>
+                  </td>
+                  <td class="af-2xs"><span class="af-tag af-tag--warn">依赖安装超时 ×3</span></td>
+                  <td><a href="#detail-b">详情</a></td>
+                </tr>
+                <tr>
+                  <td>
+                    <strong>device-c</strong> <span class="af-2xs af-mute">角落的树莓派</span>
+                    <div class="af-2xs af-mute af-mono">afcli 0.6.0 <span class="af-tag af-tag--warn">落后版本</span></div>
+                  </td>
+                  <td><span class="af-tag af-tag--failed">离线 26 分钟</span></td>
+                  <td class="af-2xs">linux / aarch64</td>
+                  <td class="af-2xs">AgentFleet<span class="af-sep"> · </span>内部指标台</td>
+                  <td>
+                    <div class="af-row" style="gap:6px">
+                      <span class="af-mini" style="max-width:64px"><span class="af-mini__fill af-mini__fill--bad" style="width:91%"></span></span>
+                      <span class="af-num af-2xs">91%</span>
+                    </div>
+                    <div class="af-2xs af-mute">剩 0.3 GB · 不再派新任务</div>
+                  </td>
+                  <td class="af-2xs"><span class="af-tag af-tag--failed">磁盘不足 ×2</span></td>
+                  <td><a href="#detail-c">详情</a></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- device-a：主力机，一切正常。详情块也要有，否则「详情」点了没反应。
+             正常设备的价值在于「确认它正常」—— 所以重点是资源余量，不是告警。 -->
+        <section class="af-region" id="detail-a">
+          <div class="af-region__head">
+            <h2 class="af-region__title">device-a · 主力机</h2>
+            <span class="af-tag af-tag--done">在线</span>
+            <span class="af-spacer"></span>
+            <span class="af-region__note">linux / x86-64 · 心跳 12 秒前</span>
+          </div>
+          <div class="af-region__body">
+            <div class="af-groups">
+              <div>
+                <h3 class="af-2xs af-mute" style="text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">绑定关系</h3>
+                <dl class="af-kv">
+                  <dt>AgentFleet</dt>
+                  <dd class="af-mono af-xs">/home/me/afleet/agentfleet</dd>
+                  <dt>个人笔记站</dt>
+                  <dd class="af-mono af-xs">/home/me/afleet/notes</dd>
+                  <dt>清理策略</dt>
+                  <dd>保守：缓存留 30 天，产物留 3 个做诊断</dd>
+                </dl>
+              </div>
+              <div>
+                <h3 class="af-2xs af-mute" style="text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">磁盘</h3>
+                <dl class="af-kv">
+                  <dt>配额</dt><dd class="af-num">200 GB</dd>
+                  <dt>已用</dt><dd class="af-num">82 GB（41%）</dd>
+                  <dt>其中缓存</dt><dd class="af-num">19 GB</dd>
+                  <dt>余量</dt><dd class="af-dim">充足，可继续派活</dd>
+                </dl>
+              </div>
+              <div>
+                <h3 class="af-2xs af-mute" style="text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">失败归因</h3>
+                <dl class="af-kv">
+                  <dt>超时</dt><dd><span class="af-tag">1 次</span></dd>
+                  <dt>磁盘不足</dt><dd class="af-dim">0 次</dd>
+                  <dt>环境损坏</dt><dd class="af-dim">0 次</dd>
+                </dl>
+                <p class="af-2xs af-mute" style="margin:8px 0 0">
+                  没有集中到某一类，是偶发。
+                </p>
+              </div>
+              <div>
+                <h3 class="af-2xs af-mute" style="text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">能不能删</h3>
+                <div class="af-stack" style="gap:8px">
+                  <p class="af-xs" style="margin:0">
+                    有历史执行记录，<strong>不能删除</strong>。要下线就先归档。
+                  </p>
+                  <div class="af-row af-row--tight">
+                    <button class="af-btn af-btn--sm" type="button">归档这台设备</button>
+                    <button class="af-btn af-btn--sm" type="button" disabled>删除</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- device-b：在线但环境有问题。这是「失败归因」真正有用的场合。 -->
+        <section class="af-region" id="detail-b">
+          <div class="af-region__head">
+            <h2 class="af-region__title">device-b · 工作笔记本</h2>
+            <span class="af-tag af-tag--done">在线</span>
+            <span class="af-tag af-tag--warn">环境可疑</span>
+            <span class="af-spacer"></span>
+            <span class="af-region__note">macos / aarch64 · 心跳 8 秒前</span>
+          </div>
+          <div class="af-region__body">
+            <div class="af-groups">
+              <div>
+                <h3 class="af-2xs af-mute" style="text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">绑定关系</h3>
+                <dl class="af-kv">
+                  <dt>AgentFleet</dt>
+                  <dd class="af-mono af-xs">/Users/me/afleet/agentfleet</dd>
+                  <dt>清理策略</dt>
+                  <dd>平衡：缓存留 7 天，产物跑完即清</dd>
+                </dl>
+              </div>
+              <div>
+                <h3 class="af-2xs af-mute" style="text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">磁盘</h3>
+                <dl class="af-kv">
+                  <dt>配额</dt><dd class="af-num">120 GB</dd>
+                  <dt>已用</dt><dd class="af-num">88.8 GB（74%）</dd>
+                  <dt>其中缓存</dt><dd class="af-num">14 GB</dd>
+                  <dt>余量</dt><dd class="af-dim">还够用，但不算宽裕</dd>
+                </dl>
+              </div>
+              <div>
+                <h3 class="af-2xs af-mute" style="text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">失败归因</h3>
+                <dl class="af-kv">
+                  <dt>依赖安装超时</dt><dd><span class="af-tag af-tag--failed">3 次</span></dd>
+                  <dt>其它</dt><dd class="af-dim">0 次</dd>
+                </dl>
+                <p class="af-2xs af-mute" style="margin:8px 0 0">
+                  同一类失败连续 3 次。<b>按规则这台机器会被标记环境有问题，不再派同类任务</b> ——
+                  原地重跑三次只是浪费电。
+                </p>
+              </div>
+              <div>
+                <h3 class="af-2xs af-mute" style="text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">能不能删</h3>
+                <div class="af-stack" style="gap:8px">
+                  <p class="af-xs" style="margin:0">
+                    有历史执行记录，<strong>不能删除</strong>。
+                  </p>
+                  <div class="af-row af-row--tight">
+                    <button class="af-btn af-btn--sm" type="button">归档这台设备</button>
+                    <button class="af-btn af-btn--sm" type="button" disabled>删除</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 设备详情：绑定关系 + 磁盘 + 失败归因，这是新主轴下变多的三块 -->
+        <section class="af-region" id="detail-c">
+          <div class="af-region__head">
+            <h2 class="af-region__title">device-c · 角落的树莓派</h2>
+            <span class="af-tag af-tag--failed">离线</span>
+            <span class="af-tag af-tag--warn">磁盘 91%</span>
+            <span class="af-spacer"></span>
+            <span class="af-region__note">离线时面板只读，在跑的任务不会迁移</span>
+          </div>
+          <div class="af-region__body">
+            <div class="af-groups">
+              <div>
+                <h3 class="af-2xs af-mute" style="text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">绑定关系</h3>
+                <dl class="af-kv">
+                  <dt>AgentFleet</dt>
+                  <dd class="af-mono af-xs">/srv/afleet/agentfleet</dd>
+                  <dt>内部指标台</dt>
+                  <dd class="af-mono af-xs">/srv/afleet/metrics</dd>
+                  <dt>清理策略</dt>
+                  <dd>平衡：缓存留 7 天，产物跑完即清</dd>
+                </dl>
+              </div>
+              <div>
+                <h3 class="af-2xs af-mute" style="text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">磁盘</h3>
+                <dl class="af-kv">
+                  <dt>配额</dt><dd class="af-num">40 GB</dd>
+                  <dt>已用</dt><dd class="af-num">36.4 GB（91%）</dd>
+                  <dt>其中缓存</dt><dd class="af-num">8.1 GB</dd>
+                  <dt>超过 90%</dt><dd>不再往这台派新任务，并在看板说明原因</dd>
+                </dl>
+              </div>
+              <div>
+                <h3 class="af-2xs af-mute" style="text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">失败归因</h3>
+                <dl class="af-kv">
+                  <dt>磁盘不足</dt><dd><span class="af-tag af-tag--failed">2 次</span></dd>
+                  <dt>环境损坏</dt><dd><span class="af-tag af-tag--warn">1 次</span></dd>
+                  <dt>超时</dt><dd class="af-dim">0 次</dd>
+                </dl>
+                <p class="af-2xs af-mute" style="margin:8px 0 0">
+                  同类环境失败连续 3 次，这台机器会被标记为环境有问题，别再派。
+                </p>
+              </div>
+              <div>
+                <h3 class="af-2xs af-mute" style="text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">能不能删</h3>
+                <div class="af-stack" style="gap:8px">
+                  <p class="af-xs" style="margin:0">
+                    这台设备上有历史执行记录，<strong>所以不能删除</strong>。
+                    可以先归档，或者把项目转移到别的设备上。
+                  </p>
+                  <div class="af-row af-row--tight">
+                    <button class="af-btn af-btn--sm" type="button">归档这台设备</button>
+                    <button class="af-btn af-btn--sm" type="button" disabled>删除</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <p class="af-xs af-mute" style="margin:0">
+          设备的删除规则：有历史执行记录的设备不能删，历史永久保留。失败归因和审计都要靠这些记录。
         </p>
+
       </div>
     </div>
+  </main>
 
-    <div class="head">
-      <span class="af-t-mute" style="font-size:var(--af-text-xs)">
-        <kbd>↑</kbd><kbd>↓</kbd> 移动 · <kbd>⏎</kbd> 看详情 · <kbd>/</kbd> 聚焦顶栏搜索
-      </span>
-      <span class="af-spacer"></span>
-      <span class="af-t-mute" style="font-size:var(--af-text-xs)">
-        <kbd>g n</kbd> 新建会话 · <kbd>g a</kbd> Agent 目录
-      </span>
+  <aside class="af-drawer" id="butler" aria-label="管家">
+    <div class="af-drawer__head">
+      <div>
+        <h2 class="af-drawer__title">问设备上的事</h2>
+        <div class="af-drawer__sub">管家知道每台机器栽过什么，但装软件、改配额要你动手</div>
+      </div>
+      <a class="af-btn af-btn--ghost af-drawer__close" href="#butler-closed" aria-label="关闭管家面板">关闭</a>
     </div>
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">管家</span>
+        <span class="af-msg__body">
+          device-c 离线前磁盘就 91% 了。它上面有一条任务中止在等清理确认，我放到收件箱里了。
+          另外这台 afcli 还是 0.6.0，比另外两台落后两个版本。
+        </span>
+      </div>
+      <div class="af-row af-row--tight">
+        <a class="af-btn af-btn--primary af-btn--sm" href="inbox.html">去处理磁盘</a>
+        <button class="af-btn af-btn--sm" type="button">记下「升级 afcli」</button>
+      </div>
+    </div>
+    <div class="af-drawer__compose">
+      <input class="af-input" type="text" placeholder="问某台设备最近怎么样" aria-label="对管家说话">
+      <button class="af-btn af-btn--primary" type="button">发送</button>
+    </div>
+  </aside>
 
-    <table class="af-table">
-      <thead>
-        <tr>
-          <th style="width:120px">状态</th>
-          <th>名称</th>
-          <th style="width:130px">平台</th>
-          <th style="width:96px" data-num>agent 版本</th>
-          <th style="width:190px">已装 agent</th>
-          <th style="width:76px" data-num>CPU</th>
-          <th style="width:76px" data-num>内存</th>
-          <th style="width:96px">最近心跳</th>
-          <th style="width:120px"></th>
-        </tr>
-      </thead>
-      <tbody id="tbody" data-role="list" tabindex="0" role="listbox" aria-label="设备列表"></tbody>
-    </table>
-
-  </div>
-
+  <a class="af-fab af-fab--off" href="#butler" aria-label="打开管家，device-c 磁盘告警">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>管家</span>
+    <span class="af-fab__badge">2 条待处理</span>
+  </a>
+  <a class="af-fab af-fab--on" href="#butler-closed" aria-label="收起管家面板">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>收起</span>
+  </a>
 </div>
 
-<script src="assets/keynav.js"></script>
-<script src="assets/app.js"></script>
-<script>
-/* ===========================================================================
-   设备列表。
-   ---------------------------------------------------------------------------
-   字段名对齐 crates/hub-storage/src/schema.sql 的 device 列，数据只读 AF.mock。
-   reconnecting 不写库：前端按「WS 断开 + 心跳年龄 ≤45s」自推，所以 AF.stateHTML
-   的那个「推」徽标由 derived 字段驱动——读的人能一眼看出它是推导值。
-
-   这一页刻意只有两个动作：看详情（模态）与「用它开会话」（跳 new-session）。
-   没有任何面板 / 工作区入口——理由见页面副标题与 §「行激活」的注释。
-   =========================================================================== */
-(function () {
-  'use strict';
-  var AF = window.AF;
-  var $ = function (s, r) { return (r || document).querySelector(s); };
-  var $$ = function (s, r) { return [].slice.call((r || document).querySelectorAll(s)); };
-
-  AF.mount('devices');
-
-  var DEVICES = AF.mock.devices;
-  var tbody = $('#tbody');
-
-  /* =========================================================================
-     渲染
-     -------------------------------------------------------------------------
-     行是 <tr data-row tabindex="-1" role="option">：Enter 由 keynav 的
-     list:enter 抛 af:enter（行内确实有一个 button，但那是**另一个动作**，
-     见下面 §行激活——所以 Enter 必须走 af:enter，不能被内嵌按钮吃掉）。
-
-     离线行 data-inert="true"：降亮（af-table §8 已经处理），且行内按钮
-     加 disabled + title。aria-disabled 一并写上，屏幕阅读器读到的是
-     「不可用」而不是静默的按钮。
-     ======================================================================= */
-  function render() {
-    tbody.innerHTML = DEVICES.map(function (d) {
-      var off = d.status === 'offline';
-      var agents = d.agents.map(function (a) {
-        return '<span class="af-badge af-badge--agent">' + AF.esc(a) + '</span>';
-      }).join('') || '<span class="af-badge af-badge--off">未装</span>';
-
-      return '<tr data-row tabindex="-1" role="option" aria-selected="false" ' +
-          'data-id="' + AF.esc(d.id) + '"' + (off ? ' data-inert="true"' : '') + '>' +
-        '<td>' + AF.stateHTML(d.status, { derived: !!d.derived }) + '</td>' +
-        '<td style="color:var(--af-fg-primary)">' + AF.esc(d.name) + '</td>' +
-        '<td>' + AF.esc(d.platform) + '</td>' +
-        '<td data-num>' + AF.esc(d.agent_version) + '</td>' +
-        '<td><span class="caps">' + agents + '</span></td>' +
-        /* 未上报就是 0% 并写清楚，不编一个数字（scheduling §2） */ +
-        '<td data-num>' + (off ? '<span class="af-t-mute">—</span>' : d.cpu + '%') + '</td>' +
-        '<td data-num>' + (off ? '<span class="af-t-mute">—</span>' : d.mem + '%') + '</td>' +
-        '<td>' + AF.esc(d.last_seen) + '前</td>' +
-        '<td><span class="rowacts">' +
-          (off
-            ? '<button class="af-btn af-btn--sm af-btn--primary" type="button" disabled ' +
-                'aria-disabled="true" title="设备已判离线，ACP 端点不可达——会话建不起来">' +
-                '用它开会话</button>'
-            : '<button class="af-btn af-btn--sm af-btn--primary" type="button" ' +
-                'data-use="' + AF.esc(d.id) + '">用它开会话</button>') +
-        '</span></td>' +
-      '</tr>';
-    }).join('');
-  }
-
-  /* =========================================================================
-     行激活：Enter = 看详情
-     -------------------------------------------------------------------------
-     详情用 AF.modal：它进焦点栈（背后 inert、Esc 关闭、焦点回到那一行），
-     所以这里不写任何 overlay 焦点代码。
-
-     「看一眼」与「建会话」分开的原因：设备页的绝大多数访问是扫一眼，
-     把点一下就变成跳走会让扫一眼变得昂贵。反过来，「用它开会话」这个
-     **会改变系统状态**的动作必须是显式按钮，不能藏在 Enter 里。
-     ======================================================================= */
-  function devById(id) {
-    for (var i = 0; i < DEVICES.length; i++) if (DEVICES[i].id === id) return DEVICES[i];
-    return null;
-  }
-
-  function openDetail(d) {
-    var off = d.status === 'offline';
-    var agents = d.agents.map(function (a) {
-      return '<span class="af-badge af-badge--agent">' + AF.esc(a) + '</span>';
-    }).join('') || '<span class="af-t-mute">未装任何 agent——在这台设备上开不了会话</span>';
-
-    var body =
-      '<div class="af-col gap-5">' +
-        '<div class="af-row gap-3">' + AF.stateHTML(d.status, { derived: !!d.derived }) +
-          '<span class="af-spacer"></span>' +
-          '<span class="af-badge af-badge--off">' + AF.esc(d.platform) + '</span>' +
-          (d.gpu ? '<span class="af-badge af-badge--ok">GPU</span>' : '') +
-        '</div>' +
-
-        '<div class="af-kv" style="--af-kv-w:96px">' +
-          '<span class="af-kv__k">node_id</span><span class="af-kv__v af-fp">' + AF.esc(d.id) + '</span>' +
-          '<span class="af-kv__k">afcli</span><span class="af-kv__v">' + AF.esc(d.agent_version) + '</span>' +
-          '<span class="af-kv__k">最近心跳</span><span class="af-kv__v">' + AF.esc(d.last_seen) + '前</span>' +
-          '<span class="af-kv__k">连接</span><span class="af-kv__v">' +
-            (off ? '已断 · 判离线' : d.status === 'reconnecting' ? '已断 · 指数退避重连中' : '单条 WebSocket · 设备主动外联') +
-          '</span>' +
-        '</div>' +
-
-        '<div>' +
-          '<div class="af-t-label" style="margin-bottom:var(--af-space-2)">资源余量</div>' +
-          (off
-            ? '<div class="af-field__hint">未上报：离线期间 Hub 收不到心跳，' +
-              '<b>「未上报」与「0」不是一回事</b>——编一个数字比不报坏得多（scheduling §2）。</div>'
-            : '<div class="af-kv" style="--af-kv-w:96px">' +
-              '<span class="af-kv__k">CPU</span><span class="af-kv__v af-t-num">' + d.cpu + '%</span>' +
-              '<span class="af-kv__k">内存</span><span class="af-kv__v af-t-num">' + d.mem + '%</span>' +
-              '<span class="af-kv__k">GPU</span><span class="af-kv__v">' + (d.gpu ? '已上报' : '未上报') + '</span>' +
-            '</div>') +
-        '</div>' +
-
-        '<div>' +
-          '<div class="af-t-label" style="margin-bottom:var(--af-space-2)">已装 agent（心跳上报，非「支持」）</div>' +
-          '<div class="caps">' + agents + '</div>' +
-          '<div class="af-field__hint" style="margin-top:var(--af-space-2)">' +
-            '完整定义见 <a href="agents.html" style="color:var(--af-accent-fg)">Agent 目录</a>。' +
-            '会话要选的是这里面的一个。</div>' +
-        '</div>' +
-
-        '<div class="af-field__hint">' +
-          '本页不提供终端 / 文件面板的入口：它们绑定某个会话的工作区，' +
-          '进入会话才建立、退出即释放（约束 3）。' +
-        '</div>' +
-      '</div>';
-
-    AF.modal({
-      title: d.name,
-      body: body,
-      actions: off
-        ? [{ label: '知道了', primary: true }]
-        : [{ label: '用它开会话', primary: true,
-             fn: function () { location.href = 'new-session.html?device=' + encodeURIComponent(d.id); } }]
-    });
-  }
-
-  tbody.addEventListener('af:enter', function (e) {
-    var d = devById(e.detail.row.dataset.id);
-    if (d) openDetail(d);
-  });
-
-  /* 行内「用它开会话」：带的 device 让新建会话第一步预填。
-     click 与 Enter 是两条独立的路，所以这里 stopPropagation——Enter 已经
-     由 af:enter 处理成「看详情」，不能让按钮的 click 冒泡把 Enter 也变成跳走。 */
-  tbody.addEventListener('click', function (e) {
-    var b = e.target.closest('[data-use]');
-    if (!b) return;
-    e.stopPropagation();
-    location.href = 'new-session.html?device=' + encodeURIComponent(b.dataset.use);
-  });
-
-  render();
-})();
-</script>
+<script src="assets/shell.js?v=11"></script>
+<script src="assets/swatch.js?v=11"></script>
 </body>
 </html>

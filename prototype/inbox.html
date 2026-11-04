@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>收件箱 · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css?v=11">
+<link rel="stylesheet" href="styles/theme-neutral.css?v=11" id="af-theme">
+<link rel="stylesheet" href="assets/app.css?v=11">
+</head>
+<body data-nav="inbox">
+<div class="af-shell">
+  <main class="af-main">
+
+    <header class="af-head">
+      <a class="af-btn af-btn--ghost" href="index.html">← 总览</a>
+      <h1 class="af-head__title">收件箱</h1>
+      <span class="af-head__sub">等你做决定的东西，不是通知</span>
+      <span class="af-head__spacer"></span>
+      <span class="af-tag af-tag--failed">3 条待决策</span>
+      <button class="af-btn af-btn--ghost" type="button">动态全部标为已读</button>
+    </header>
+
+    <!-- 两区：待决策是默认，因为只有它会卡住东西 -->
+    <nav class="af-tabs" aria-label="收件箱分区">
+      <a class="af-tab" href="inbox.html" aria-current="page">
+        待决策 <span class="af-tab__count">3</span>
+      </a>
+      <a class="af-tab" href="inbox-activity.html">
+        动态 <span class="af-tab__count">12</span>
+      </a>
+    </nav>
+
+    <div class="af-body">
+      <div style="padding:20px 20px 64px" class="af-stack">
+
+        <!-- 为什么分两区，写在页面上，免得被当成通知中心用 -->
+        <div class="af-callout af-callout--info">
+          <span class="af-callout__k">这里和通知的区别</span>
+          <span>
+            通知是广播，「任务完成了」看不看都行。这里放的是「你不选，事情就卡在这」。
+            混在一起，完成通知会把真正要你决定的事淹掉。
+          </span>
+        </div>
+
+        <!-- 待决策 1：磁盘清理。不可逆动作，必须先说清准备删什么 -->
+        <section class="af-region af-region--warn">
+          <div class="af-region__head">
+            <span class="af-tag af-tag--warn">磁盘清理确认</span>
+            <h2 class="af-region__title">device-c 上的任务因磁盘不足中止</h2>
+            <span class="af-region__note">还剩 2 小时超时</span>
+          </div>
+          <div class="af-region__body af-stack">
+            <p style="margin:0;font-size:var(--t-sm);line-height:1.7">
+              <span class="af-mono af-xs">task-1042</span> 的工作树占 <strong>12.4 GB</strong>，
+              清理后能腾出这些空间。要清理什么、各占多少，先摊开给你看：
+            </p>
+            <div class="af-region">
+              <div class="af-region__body af-stack" style="gap:10px">
+                <div class="af-row">
+                  <span class="af-mono af-xs" style="width:180px">node_modules</span>
+                  <span class="af-mini"><span class="af-mini__fill af-mini__fill--warn" style="width:33%"></span></span>
+                  <span class="af-num af-xs" style="width:72px;text-align:right">4.1 GB</span>
+                </div>
+                <div class="af-row">
+                  <span class="af-mono af-xs" style="width:180px">target（Rust 构建）</span>
+                  <span class="af-mini"><span class="af-mini__fill af-mini__fill--bad" style="width:63%"></span></span>
+                  <span class="af-num af-xs" style="width:72px;text-align:right">7.8 GB</span>
+                </div>
+                <div class="af-row">
+                  <span class="af-mono af-xs" style="width:180px">其它产物</span>
+                  <span class="af-mini"><span class="af-mini__fill af-mini__fill--ok" style="width:4%"></span></span>
+                  <span class="af-num af-xs" style="width:72px;text-align:right">0.5 GB</span>
+                </div>
+              </div>
+            </div>
+            <p class="af-xs af-dim" style="margin:0">
+              保留前 3 个产物做诊断，约 40 MB，不清。
+            </p>
+            <div class="af-row">
+              <button class="af-btn af-btn--primary" type="button">清理并续跑</button>
+              <button class="af-btn" type="button">只清理，不续跑</button>
+              <button class="af-btn af-btn--danger" type="button">不清理，判为失败</button>
+            </div>
+            <p class="af-2xs af-mute" style="margin:0">
+              磁盘清理不可逆，所以超时不自动执行：两小时没人管，它会保持中止状态留在这里，
+              不会自己把东西删掉。
+            </p>
+          </div>
+        </section>
+
+        <!-- 待决策 2：Agent 的业务决策。可逆，所以超时能按默认继续 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <span class="af-tag af-tag--review">Agent 的业务决策</span>
+            <h2 class="af-region__title">会话缓存放 Redis 还是 SQLite？</h2>
+            <span class="af-region__note">还剩 40 分钟超时</span>
+          </div>
+          <div class="af-region__body af-stack">
+            <p style="margin:0;font-size:var(--t-sm);line-height:1.7">
+              device-a 上的 <span class="af-mono af-xs">claude</span> 卡在这个选择上，
+              执行标成「等你回复」。它倾向 Redis，因为设备上已经有一个实例在跑。
+            </p>
+            <div class="af-row af-row--tight">
+              <span class="af-tag">来源：任务 #1039</span>
+              <span class="af-tag">device-a</span>
+              <span class="af-tag af-tag--done">默认选项：Redis</span>
+            </div>
+            <div class="af-row">
+              <button class="af-btn af-btn--primary" type="button">用 Redis（默认）</button>
+              <button class="af-btn" type="button">用 SQLite</button>
+              <button class="af-btn" type="button">中止这次执行</button>
+            </div>
+            <p class="af-2xs af-mute" style="margin:0">
+              这是可逆选择，所以超时后按标注的默认项继续跑，并在记录里写明「超时未答，按默认继续」。
+              你要是不想再被问这个，可以选「以后都这么定」，答案会写进项目记忆。
+            </p>
+          </div>
+        </section>
+
+        <!-- 待决策 3：管家自己的待决事项 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <span class="af-tag af-tag--butler">管家的待决事项</span>
+            <h2 class="af-region__title">「批量重试时逐个检查约束」已连败 2 次</h2>
+            <span class="af-region__note">还剩 3 天超时</span>
+          </div>
+          <div class="af-region__body af-stack">
+            <p style="margin:0;font-size:var(--t-sm);line-height:1.7">
+              两次都倒在同一个地方：允许的设备都不满足 <span class="af-mono af-xs">node ≥ 20</span>。
+              再重试第三次大概率还是这个结果，所以我没有继续重试，先问你。
+            </p>
+            <div class="af-row">
+              <button class="af-btn af-btn--primary" type="button">给 device-a 装 node 20</button>
+              <button class="af-btn" type="button">把这条约束放宽到 node 18</button>
+              <button class="af-btn af-btn--ghost" type="button">先放着</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- 明确写出「什么不会进这里」：权限确认永远只在本机 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">不会出现在这里的三种东西</h2>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead>
+                <tr><th>来源</th><th>走哪条路</th><th>进哪个区</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>设备上报的事实（状态、失败原因、磁盘告警）</td>
+                  <td>控制连接 + 心跳</td>
+                  <td>动态</td>
+                </tr>
+                <tr>
+                  <td><strong>Agent 的权限确认</strong>（能不能执行这条命令）</td>
+                  <td><strong>只在本机问，绝不经过 Hub</strong></td>
+                  <td class="af-dim">不进这里</td>
+                </tr>
+                <tr>
+                  <td>Agent 的业务决策（用 Redis 还是 SQLite）</td>
+                  <td>控制连接送到 Hub</td>
+                  <td>待决策</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <p class="af-xs af-mute" style="margin:0">
+          界线一句话：安全许可（能不能执行）只在本机；业务决策（该怎么做）可以进 Hub。
+          Hub 若能把「用户已批准」转发给设备，它就成了设备的远程控制面。
+        </p>
+
+      </div>
+    </div>
+  </main>
+
+  <aside class="af-drawer" id="butler" aria-label="管家">
+    <div class="af-drawer__head">
+      <div>
+        <h2 class="af-drawer__title">问管家这些事</h2>
+        <div class="af-drawer__sub">它知道这三条各自卡在哪、等多久了</div>
+      </div>
+      <a class="af-btn af-btn--ghost af-drawer__close" href="#butler-closed" aria-label="关闭管家面板">关闭</a>
+    </div>
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">管家</span>
+        <span class="af-msg__body">
+          三条里只有磁盘那条是不可逆的，建议先处理它。另外两条放着也不会出事：
+          决策那条超时会按默认继续，重试那条本来就是停着的。
+        </span>
+      </div>
+    </div>
+    <div class="af-drawer__compose">
+      <input class="af-input" type="text" placeholder="问某一条为什么等你" aria-label="对管家说话">
+      <button class="af-btn af-btn--primary" type="button">发送</button>
+    </div>
+  </aside>
+
+  <a class="af-fab af-fab--off" href="#butler" aria-label="打开管家，有 3 条待决策">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>管家</span>
+    <span class="af-fab__badge">3 条待决策</span>
+  </a>
+  <a class="af-fab af-fab--on" href="#butler-closed" aria-label="收起管家面板">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>收起</span>
+  </a>
+</div>
+
+<script src="assets/shell.js?v=11"></script>
+<script src="assets/swatch.js?v=11"></script>
+</body>
+</html>

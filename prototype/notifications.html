@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>通知出口 · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css?v=11">
+<link rel="stylesheet" href="styles/theme-neutral.css?v=11" id="af-theme">
+<link rel="stylesheet" href="assets/app.css?v=11">
+</head>
+<body data-nav="notifications">
+<div class="af-shell">
+  <main class="af-main">
+
+    <header class="af-head">
+      <a class="af-btn af-btn--ghost" href="settings.html">← 设置</a>
+      <h1 class="af-head__title">通知出口</h1>
+      <span class="af-head__sub">把消息送出去，不把决定带回来</span>
+      <span class="af-head__spacer"></span>
+      <button class="af-btn af-btn--primary" type="button">保存</button>
+    </header>
+
+    <!-- 这一句是整个页面的定调，必须放在最上面。 -->
+    <div class="af-filters">
+      <span class="af-filters__k">先说清边界</span>
+      <span class="af-2xs af-dim">
+        通知是广播，看不看都行；收件箱是待办，不处理就卡住。
+        这两件事不能混 —— 所以邮件和 IM 只负责把消息送出去，
+        <b>真正要你选的，还是回 Hub 的收件箱里选</b>。
+      </span>
+    </div>
+
+    <div class="af-body">
+      <div style="padding:20px 20px 64px" class="af-stack">
+
+        <!-- 三个出口，各自说清「能做什么、不能做什么」 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">三个出口</h2>
+            <span class="af-region__note">站内必开，其余可选</span>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead>
+                <tr><th>出口</th><th>状态</th><th>送什么</th><th>能回复吗</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>站内收件箱</strong></td>
+                  <td><span class="af-tag af-tag--done">始终开着</span></td>
+                  <td class="af-xs">全部：动态 + 待决策</td>
+                  <td class="af-xs">能。这里是决策的唯一入口</td>
+                </tr>
+                <tr>
+                  <td><strong>邮件</strong></td>
+                  <td><span class="af-switch" role="switch" aria-checked="false">
+                    <span class="af-switch__track" aria-hidden="true"></span>
+                    <span class="af-2xs">已关闭</span>
+                  </span></td>
+                  <td class="af-xs">只送动态：完成 / 失败 / 磁盘告警 / 每日摘要</td>
+                  <td class="af-xs">
+                    <span class="af-tag af-tag--warn">不能</span>
+                    邮件里只有链接，点了回 Hub
+                  </td>
+                </tr>
+                <tr>
+                  <td><strong>IM 机器人</strong></td>
+                  <td><span class="af-switch" role="switch" aria-checked="true">
+                    <span class="af-switch__track" aria-hidden="true"></span>
+                    <span class="af-2xs">已开启</span>
+                  </span></td>
+                  <td class="af-xs">动态 + 能<b>跟管家对话</b>、审查内容</td>
+                  <td class="af-xs">
+                    能对话、能确认管家建议；
+                    <b>不可逆操作给链接回 Hub</b>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 为什么邮件不能回复，而 IM 可以：这不是技术限制，是刻意的 -->
+        <div class="af-callout">
+          <span class="af-callout__k">为什么邮件不能回复，IM 却能对话</span>
+          <span>
+            邮件没有可靠的「这条回复对应哪件事」的锚点 —— 有人转发、有人改标题、有人过三天才回，
+            回到你手里的东西已经对不上原件了。IM 有会话上下文，能确认「你这句话是在答哪一条」。
+            所以对话只在 IM 开，邮件只做单向送达。
+          </span>
+        </div>
+
+        <!-- IM 的配置：这是有实际内容的部分 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">IM 机器人</h2>
+            <span class="af-region__note">连上一个群，就能在那个群里跟管家说话</span>
+          </div>
+          <div class="af-region__body af-stack">
+
+            <div class="af-groups">
+              <div class="af-field">
+                <label class="af-field__label" for="im-kind">平台</label>
+                <select class="af-input" id="im-kind">
+                  <option selected>飞书 / Lark</option>
+                  <option>Slack</option>
+                  <option>钉钉</option>
+                  <option>企业微信</option>
+                </select>
+                <span class="af-field__hint">一个 Hub 可以连多个，每个群一份配置</span>
+              </div>
+              <div class="af-field">
+                <label class="af-field__label" for="im-room">群</label>
+                <input class="af-input af-mono" id="im-room" value="oc_af3f…（AgentFleet 开发群）" readonly>
+                <span class="af-field__hint">绑定到项目「AgentFleet」</span>
+              </div>
+            </div>
+
+            <div class="af-field">
+              <label class="af-field__label" for="im-hook">Webhook 地址</label>
+              <input class="af-input af-mono" id="im-hook" value="https://open.feishu.cn/open-apis/bot/v2/hook/8f3a…" readonly>
+              <span class="af-field__hint">出站。Hub 主动推，不开入站端口</span>
+            </div>
+
+            <!-- 凭据不进 agent 上下文，这条是硬约束 -->
+            <div class="af-callout af-callout--warn">
+              <span class="af-callout__k">凭据只存在 Hub，不进 agent 的上下文</span>
+              <span>
+                webhook 地址和签名密钥进 secret 表，不写日志、不进 API 响应、不进轨迹事件。
+                agent 读不到它 —— 就算 agent 被提示词攻击，也偷不走这个地址。
+              </span>
+            </div>
+
+            <!-- 这是整个功能最该让人看清的一张表 -->
+            <div class="af-field">
+              <span class="af-field__label">在这个群里，什么能做、什么不能做</span>
+              <div class="af-region" style="margin-top:4px">
+                <div class="af-region__body af-region__body--flush">
+                  <table class="af-table">
+                    <thead><tr><th>你想做的事</th><th>在 IM 里</th><th>为什么</th></tr></thead>
+                    <tbody>
+                      <tr>
+                        <td>问管家「这周做了什么」</td>
+                        <td><span class="af-tag af-tag--done">可以</span></td>
+                        <td class="af-xs">纯读取，不改任何状态</td>
+                      </tr>
+                      <tr>
+                        <td>看任务进展 / 让管家解释一次失败</td>
+                        <td><span class="af-tag af-tag--done">可以</span></td>
+                        <td class="af-xs">也是读取</td>
+                      </tr>
+                      <tr>
+                        <td>看一个任务的总结、验收条件</td>
+                        <td><span class="af-tag af-tag--done">可以</span></td>
+                        <td class="af-xs">聊天气泡装得下</td>
+                      </tr>
+                      <tr>
+                        <td>确认「管家建议把这个任务拆成两个」</td>
+                        <td><span class="af-tag af-tag--done">可以</span></td>
+                        <td class="af-xs">
+                          管家建议不改代码、不合并，最坏结果是多一条任务，
+                          还能在 Hub 里撤回
+                        </td>
+                      </tr>
+                      <tr>
+                        <td>看一份 diff 然后决定合不合</td>
+                        <td><span class="af-tag af-tag--failed">不行</span></td>
+                        <td class="af-xs">
+                          <b>气泡里看不完一份 diff</b>。看不完就批准，等于没审查
+                        </td>
+                      </tr>
+                      <tr>
+                        <td>批准合并到主干</td>
+                        <td><span class="af-tag af-tag--failed">不行</span></td>
+                        <td class="af-xs">不可逆。给链接回 Hub</td>
+                      </tr>
+                      <tr>
+                        <td>确认磁盘清理</td>
+                        <td><span class="af-tag af-tag--failed">不行</span></td>
+                        <td class="af-xs">不可逆，删了找不回</td>
+                      </tr>
+                      <tr>
+                        <td>升合并权档位 / 删设备</td>
+                        <td><span class="af-tag af-tag--failed">不行</span></td>
+                        <td class="af-xs">影响面最大的两类操作</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <!-- 这不是「懒得做」，是有理由的 -->
+            <div class="af-callout">
+              <span class="af-callout__k">不是技术上做不到，是刻意不做</span>
+              <span>
+                IM 里能点「批准」，结果是你会不看就批 —— 因为气泡里放不下该看的东西。
+                那比「多点一次」更糟：它把审查变成了走过场，还留不下「他到底看没看」的记录。
+                所以不可逆操作一律回 Hub：那里有完整的 diff、失败原因和历史执行。
+              </span>
+            </div>
+
+          </div>
+        </section>
+
+        <!-- 谁在什么场景收到什么 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">什么情况下会推送</h2>
+            <span class="af-region__note">推得太多会让人练成「看见就划掉」</span>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead><tr><th>事件</th><th>站内</th><th>邮件</th><th>IM</th></tr></thead>
+              <tbody>
+                <tr><td>任务完成</td><td class="af-xs">动态</td><td class="af-xs">可选 · 默认关</td><td class="af-xs">可选 · 默认开</td></tr>
+                <tr><td>任务失败</td><td class="af-xs">动态</td><td class="af-xs">开</td><td class="af-xs">开</td></tr>
+                <tr><td>磁盘超 90%</td><td class="af-xs">动态</td><td class="af-xs">开</td><td class="af-xs">开</td></tr>
+                <tr><td>设备掉线超过 10 分钟</td><td class="af-xs">动态</td><td class="af-xs">开</td><td class="af-xs">开</td></tr>
+                <tr><td>管家需要你拍板（待决策）</td><td class="af-xs"><b>待决策</b></td><td class="af-xs"><span class="af-tag af-tag--warn">不送</span></td><td class="af-xs">送一条提醒 + 链接</td></tr>
+                <tr><td>外部 issue 导入</td><td class="af-xs">动态</td><td class="af-xs">可选</td><td class="af-xs">可选</td></tr>
+                <tr><td>每日摘要（早 9 点）</td><td class="af-xs">—</td><td class="af-xs">可选</td><td class="af-xs">可选</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <div class="af-callout af-callout--info">
+          <span class="af-callout__k">待决策不发邮件</span>
+          <span>
+            邮件读不了、回不了、也点不了，发过去只会让你在手机上焦虑；
+            IM 里发的是「有一条要你拍板」加一个链接，也不在 IM 里直接批。
+          </span>
+        </div>
+
+        <!-- 发一条测试，是配置页必须有的 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">先发一条试试</h2>
+            <span class="af-region__note">配完了不试，等真出事才发现发不出去</span>
+          </div>
+          <div class="af-region__body af-stack">
+            <div class="af-row">
+              <button class="af-btn" type="button">发一条测试到 IM</button>
+              <button class="af-btn af-btn--ghost" type="button">发一条测试到邮件</button>
+              <span class="af-2xs af-mute">测试消息会写明「这是测试」，不会误当成真事</span>
+            </div>
+            <div class="af-region" style="margin-top:4px">
+              <div class="af-region__body" style="padding:12px 14px">
+                <div class="af-2xs af-dim" style="line-height:1.9">
+                  <div>上次发送 <span class="af-mono">今天 09:00</span> · 成功 · 耗时 240 ms</div>
+                  <div>飞书群 <span class="af-mono">oc_af3f…</span> · 送达</div>
+                </div>
+              </div>
+            </div>
+            <div class="af-callout af-callout--warn">
+              <span class="af-callout__k">发不出去不会静默失败</span>
+              <span>
+                出口连续失败会在站内收件箱的「动态」里报出来，而不是只在日志里。
+                通知系统自己坏了却没人知道，是最常见的坑。
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <div class="af-row">
+          <button class="af-btn af-btn--primary" type="button">保存</button>
+          <a class="af-btn af-btn--ghost" href="settings.html">返回设置</a>
+          <a class="af-btn af-btn--ghost" href="butler-im.html">看 IM 里长什么样</a>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+  <aside class="af-drawer" id="butler" aria-label="管家">
+    <div class="af-drawer__head">
+      <div>
+        <h2 class="af-drawer__title">要不要开邮件</h2>
+        <div class="af-drawer__sub">管家可以解释，但开关只能你动</div>
+      </div>
+      <a class="af-btn af-btn--ghost af-drawer__close" href="#butler-closed" aria-label="关闭管家面板">关闭</a>
+    </div>
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">管家</span>
+        <span class="af-msg__body">
+          你已经有 IM 了，邮件大概率用不上。邮件只在一种情况有用：<b>你已经三天没看 Hub</b>，
+          而且有事卡着 —— 那时候一封摘要比一条群消息更容易被看见。
+        </span>
+      </div>
+      <div class="af-row af-row--tight">
+        <button class="af-btn af-btn--primary af-btn--sm" type="button">只开「三天没看」的摘要</button>
+        <button class="af-btn af-btn--ghost af-btn--sm" type="button">全关</button>
+      </div>
+    </div>
+    <div class="af-drawer__compose">
+      <input class="af-input" type="text" placeholder="问通知配置的事" aria-label="对管家说话">
+      <button class="af-btn af-btn--primary" type="button">发送</button>
+    </div>
+  </aside>
+
+  <a class="af-fab af-fab--off" href="#butler" aria-label="打开管家">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>管家</span>
+  </a>
+  <a class="af-fab af-fab--on" href="#butler-closed" aria-label="收起管家面板">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>收起</span>
+  </a>
+</div>
+
+<script src="assets/shell.js?v=11"></script>
+<script src="assets/swatch.js?v=11"></script>
+</body>
+</html>

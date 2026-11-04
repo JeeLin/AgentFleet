@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>新建项目 · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css?v=11">
+<link rel="stylesheet" href="styles/theme-neutral.css?v=11" id="af-theme">
+<link rel="stylesheet" href="assets/app.css?v=11">
+</head>
+<body data-nav="home">
+<div class="af-shell">
+  <main class="af-main">
+
+    <header class="af-head">
+      <a class="af-btn af-btn--ghost" href="index.html">← 总览</a>
+      <h1 class="af-head__title">新建项目</h1>
+      <span class="af-head__sub">第一步：选形态</span>
+      <span class="af-head__spacer"></span>
+      <a class="af-btn" href="project-bind.html">下一步：绑定设备 →</a>
+    </header>
+
+    <div class="af-body">
+      <div style="padding:20px 20px 64px" class="af-stack">
+
+        <div class="af-callout af-callout--info">
+          <span class="af-callout__k">项目不填目录</span>
+          <span>
+            项目本身只是 Hub 上的一个裸仓库加一份元数据。它落在哪台机器的哪个目录，
+            是「绑定」要做的事，下一步才填。这样同一个项目可以同时挂在好几台设备上，
+            而代码始终只有一份真相。
+          </span>
+        </div>
+
+        <!-- 形态是这一个表单里最重的选择，所以三种并排摆开让人对比 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">项目名与形态</h2>
+            <span class="af-region__note">形态之后可以升级，但方向只有一个</span>
+          </div>
+          <div class="af-region__body af-stack">
+
+            <div class="af-groups" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
+              <div class="af-field">
+                <label class="af-field__label" for="pname">项目名</label>
+                <input class="af-input" id="pname" value="内部指标台" autocomplete="off">
+                <span class="af-field__hint">项目名就是它的身份，之后不能改</span>
+              </div>
+              <div class="af-field">
+                <span class="af-field__label">主题色</span>
+                <div class="af-row af-row--tight">
+                  <span class="af-dot dot-a" aria-hidden="true"></span>
+                  <span class="af-dot dot-b" aria-hidden="true"></span>
+                  <span class="af-dot dot-c" aria-hidden="true"></span>
+                  <span class="af-2xs af-mute">纯视觉，不影响任何逻辑</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- 三种形态：每张卡都说清「代码在哪、Hub 存什么」，这是唯一的差别 -->
+            <div class="af-groups">
+
+              <label class="af-shape-card">
+                <input type="radio" name="shape" value="central" checked>
+                <span class="af-shape-card__body">
+                  <span class="af-shape-card__head">
+                    <span class="af-shape-card__name">中心式</span>
+                    <span class="af-tag af-tag--done">推荐起步</span>
+                  </span>
+                  <span class="af-shape-card__row"><b>代码在哪</b> Hub 上的裸仓库</span>
+                  <span class="af-shape-card__row"><b>Hub 存什么</b> 全部代码 + 元数据</span>
+                  <span class="af-shape-card__row"><b>起点是什么</b> Hub 上的提交</span>
+                  <span class="af-shape-card__note">建完之后直接往 Hub 推送一次就行</span>
+                </span>
+              </label>
+
+              <label class="af-shape-card">
+                <input type="radio" name="shape" value="mirror">
+                <span class="af-shape-card__body">
+                  <span class="af-shape-card__head">
+                    <span class="af-shape-card__name">镜像式</span>
+                  </span>
+                  <span class="af-shape-card__row"><b>代码在哪</b> 上游（比如 GitHub）+ Hub 镜像</span>
+                  <span class="af-shape-card__row"><b>Hub 存什么</b> 镜像的全部代码 + 元数据</span>
+                  <span class="af-shape-card__row"><b>起点是什么</b> Hub 上镜像的提交</span>
+                  <span class="af-shape-card__note">要填一个上游地址，Hub 会定期去拉</span>
+                </span>
+              </label>
+
+              <label class="af-shape-card">
+                <input type="radio" name="shape" value="isolated">
+                <span class="af-shape-card__body">
+                  <span class="af-shape-card__head">
+                    <span class="af-shape-card__name">隔离式</span>
+                    <span class="af-tag af-tag--warn">不可逆</span>
+                  </span>
+                  <span class="af-shape-card__row"><b>代码在哪</b> 只在指定设备上，永不出这台设备</span>
+                  <span class="af-shape-card__row"><b>Hub 存什么</b> 只有元数据</span>
+                  <span class="af-shape-card__row"><b>起点是什么</b> 设备上的提交，Hub 不验证内容</span>
+                  <span class="af-shape-card__note">
+                    对话、本次 diff、总结仍会按需向设备现拉，但不长期存档
+                  </span>
+                </span>
+              </label>
+
+            </div>
+
+            <div class="af-callout">
+              <span class="af-callout__k">方向只有一个：隔离式可以变成中心式，反过来不行</span>
+              <span>
+                隔离式推上去就成了中心式，这一步随时能做。但已经上传的代码收不回来——
+                产品做不到真的收，说能做到才是骗人。所以选隔离式之前想清楚。
+              </span>
+            </div>
+
+            <div class="af-field">
+              <label class="af-field__label" for="upstream">上游地址（只有镜像式要填）</label>
+              <input class="af-input af-mono" id="upstream" placeholder="https://github.com/you/metrics" autocomplete="off">
+              <span class="af-field__hint">留空表示不是镜像式</span>
+            </div>
+
+          </div>
+        </section>
+
+        <!-- 建完之后会发生什么，先说清，别让人建完才发现还要绑设备 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">建完之后</h2>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead><tr><th>步骤</th><th>你要做什么</th><th>之后会怎样</th></tr></thead>
+              <tbody>
+                <tr>
+                  <td><strong>1. 绑定设备</strong></td>
+                  <td>选设备、填这台机器上的固定目录、选清理策略</td>
+                  <td>项目在这台机器上就有了落脚点，任务才派得出去</td>
+                </tr>
+                <tr>
+                  <td><strong>2. 推代码</strong></td>
+                  <td>中心式往 Hub 推一次；隔离式什么都不用做</td>
+                  <td>Hub 有了第一个提交，可以作为任务起点</td>
+                </tr>
+                <tr>
+                  <td><strong>3. 对管家说话</strong></td>
+                  <td>进项目，用一句话说你要什么</td>
+                  <td>管家接住、必要时反问、拆成任务，等你点头才进看板</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <div class="af-row">
+          <a class="af-btn af-btn--primary" href="project-bind.html">建项目，下一步绑设备</a>
+          <a class="af-btn af-btn--ghost" href="index.html">取消</a>
+          <span class="af-2xs af-mute">项目建好后不能删除，只能归档。历史执行记录、失败原因、管家总结都要靠它留着</span>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+  <aside class="af-drawer" id="butler" aria-label="管家">
+    <div class="af-drawer__head">
+      <div>
+        <h2 class="af-drawer__title">还没建好，管家还不在</h2>
+        <div class="af-drawer__sub">管家是跟着项目走的，项目建好它才存在</div>
+      </div>
+      <a class="af-btn af-btn--ghost af-drawer__close" href="#butler-closed" aria-label="关闭管家面板">关闭</a>
+    </div>
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">说明</span>
+        <span class="af-msg__body">
+          每个项目有自己的管家，也有自己的长期记忆。项目还没建，所以这里暂时没有可问的东西。
+          建完并绑定设备之后，进来就能对它说话了。
+        </span>
+      </div>
+    </div>
+    <div class="af-drawer__compose">
+      <input class="af-input" type="text" placeholder="项目建好后在这里说话" disabled aria-label="对管家说话">
+      <button class="af-btn af-btn--primary" type="button" disabled>发送</button>
+    </div>
+  </aside>
+
+  <a class="af-fab af-fab--off" href="#butler" aria-label="打开管家说明">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>管家</span>
+  </a>
+  <a class="af-fab af-fab--on" href="#butler-closed" aria-label="收起管家面板">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>收起</span>
+  </a>
+</div>
+
+<script src="assets/shell.js?v=11"></script>
+<script src="assets/swatch.js?v=11"></script>
+</body>
+</html>

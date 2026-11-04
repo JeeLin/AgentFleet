@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>已归档的项目 · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css?v=11">
+<link rel="stylesheet" href="styles/theme-neutral.css?v=11" id="af-theme">
+<link rel="stylesheet" href="assets/app.css?v=11">
+</head>
+<body data-nav="home">
+<div class="af-shell">
+  <main class="af-main">
+
+    <header class="af-head">
+      <a class="af-btn af-btn--ghost" href="index.html">← 总览</a>
+      <h1 class="af-head__title">已归档的项目</h1>
+      <span class="af-tag">2 个</span>
+      <span class="af-head__spacer"></span>
+      <a class="af-btn af-btn--ghost" href="project-new.html">新建项目</a>
+    </header>
+
+    <!-- 这一页存在的原因：设置页和建项目页都写了「随时能取消归档」，
+         但之前没有任何地方能看到归档的项目。承诺不能是空头的。 -->
+    <div class="af-filters">
+      <span class="af-filters__k">归档不是删除</span>
+      <span class="af-2xs af-dim">
+        归档只是把项目从列表里收起来、停止派新任务。
+        <b>历史执行记录、失败原因、管家总结、轨迹全都留着</b>，
+        点「取消归档」就回到列表里，什么都没少。
+      </span>
+    </div>
+
+    <div class="af-body">
+      <div style="padding:20px 20px 64px" class="af-stack">
+
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">归档列表</h2>
+            <span class="af-region__note">按归档时间倒序</span>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead>
+                <tr>
+                  <th>项目</th><th>形态</th><th>归档时间</th><th>归档时留着什么</th><th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>
+                    <div class="af-row af-row--tight">
+                      <span class="af-dot" style="background:var(--fg-3)" aria-hidden="true"></span>
+                      <strong>旧博客生成器</strong>
+                    </div>
+                    <div class="af-2xs af-mute" style="margin-left:18px">最后活跃 4 个月前</div>
+                  </td>
+                  <td class="af-xs">中心式</td>
+                  <td class="af-xs">2 个月前</td>
+                  <td class="af-xs">
+                    <span class="af-tag">37 次执行</span>
+                    <span class="af-tag">12 份总结</span>
+                    <span class="af-tag">轨迹完整</span>
+                  </td>
+                  <td>
+                    <div class="af-row af-row--tight">
+                      <button class="af-btn af-btn--sm af-btn--primary" type="button">取消归档</button>
+                      <a class="af-btn af-btn--sm af-btn--ghost" href="timeline.html">看历史</a>
+                    </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td>
+                    <div class="af-row af-row--tight">
+                      <span class="af-dot" style="background:var(--fg-3)" aria-hidden="true"></span>
+                      <strong>实验 · 爬虫沙盒</strong>
+                    </div>
+                    <div class="af-2xs af-mute" style="margin-left:18px">最后活跃 7 个月前</div>
+                  </td>
+                  <td class="af-xs">隔离式</td>
+                  <td class="af-xs">5 个月前</td>
+                  <td class="af-xs">
+                    <span class="af-tag">8 次执行</span>
+                    <span class="af-tag">2 份总结</span>
+                    <span class="af-tag af-tag--warn">设备已移除</span>
+                  </td>
+                  <td>
+                    <div class="af-row af-row--tight">
+                      <button class="af-btn af-btn--sm af-btn--primary" type="button">取消归档</button>
+                      <a class="af-btn af-btn--sm af-btn--ghost" href="timeline.html">看历史</a>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 一个真实的边界：隔离式项目的设备被移除了，
+             归档项目还能取消归档，但取消之后没法跑 —— 得先说清 -->
+        <div class="af-callout af-callout--warn">
+          <span class="af-callout__k">「实验 · 爬虫沙盒」取消归档后还需要先绑设备</span>
+          <span>
+            它是隔离式项目，代码只在那台设备上，而那台设备已经移除了。
+            历史记录都在，但取消归档之后<b>没法派新任务</b> —— 得先绑一台新设备，
+            而新设备上没有原来的代码。这是隔离式的固有代价，不是 bug。
+          </span>
+        </div>
+
+        <!-- 为什么没有「删除」 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">为什么这一页没有「删除」</h2>
+            <span class="af-region__note">不是没做，是不提供</span>
+          </div>
+          <div class="af-region__body af-stack">
+            <div class="af-callout">
+              <span class="af-callout__k">项目是 Hub 的真相源</span>
+              <span>
+                删掉一个项目，会让已合入的任务历史、失败归因、成本记录一起消失。
+                一个项目哪怕跑了十次失败，这些记录对排障比「一个干净的空项目」更有价值。
+                所以只有归档，没有删除。
+              </span>
+            </div>
+            <div class="af-callout af-callout--info">
+              <span class="af-callout__k">如果只是想让它消失</span>
+              <span class="af-2xs">
+                归档就够了 —— 它不再出现在总览和看板首页，不派新任务，
+                也不会再占用设备上的工作目录。你在这一页随时能找回来。
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <!-- 归档时会连带发生什么，写清楚 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">归档的时候发生了什么</h2>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <tbody>
+                <tr>
+                  <td class="af-xs" style="width:38%">正在跑的执行</td>
+                  <td class="af-xs"><b>不打断</b>。跑完才归档；跑完的结果照常进待验收</td>
+                </tr>
+                <tr>
+                  <td class="af-xs">待办 / 排队的任务</td>
+                  <td class="af-xs">停止派发。它们仍在这项目里，取消归档后接着走</td>
+                </tr>
+                <tr>
+                  <td class="af-xs">设备上的工作目录</td>
+                  <td class="af-xs">按清理策略回收。历史记录不受影响</td>
+                </tr>
+                <tr>
+                  <td class="af-xs">定时任务</td>
+                  <td class="af-xs">一并暂停，取消归档时不会自动恢复 —— 得你看一眼再开</td>
+                </tr>
+                <tr>
+                  <td class="af-xs">管家记忆</td>
+                  <td class="af-xs">全留着。取消归档后它还记得这个项目发生过什么</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <div class="af-row">
+          <a class="af-btn af-btn--ghost" href="index.html">← 回总览</a>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+  <aside class="af-drawer" id="butler" aria-label="管家">
+    <div class="af-drawer__head">
+      <div>
+        <h2 class="af-drawer__title">归档不是丢掉</h2>
+        <div class="af-drawer__sub">我记着这两个项目干过什么</div>
+      </div>
+      <a class="af-btn af-btn--ghost af-drawer__close" href="#butler-closed" aria-label="关闭管家面板">关闭</a>
+    </div>
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">管家</span>
+        <span class="af-msg__body">
+          「旧博客生成器」最后那 37 次执行里有 6 次是同类失败 —— 图片压缩超时。
+          你要是想再启它，那个坑还在。
+        </span>
+      </div>
+      <div class="af-callout">
+        <span class="af-callout__k">要不要我把失败归因整理一份</span>
+        <span class="af-2xs">
+          归档项目的失败记录也在，能按类别拉出来。这样重启前就知道该先修什么。
+        </span>
+      </div>
+      <div class="af-row af-row--tight">
+        <button class="af-btn af-btn--primary af-btn--sm" type="button">整理一份</button>
+        <button class="af-btn af-btn--ghost af-btn--sm" type="button">不用</button>
+      </div>
+    </div>
+    <div class="af-drawer__compose">
+      <input class="af-input" type="text" placeholder="问归档项目的事" aria-label="对管家说话">
+      <button class="af-btn af-btn--primary" type="button">发送</button>
+    </div>
+  </aside>
+
+  <a class="af-fab af-fab--off" href="#butler" aria-label="打开管家，有 1 条建议">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>管家</span>
+  </a>
+  <a class="af-fab af-fab--on" href="#butler-closed" aria-label="收起管家面板">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>收起</span>
+  </a>
+</div>
+
+<script src="assets/shell.js?v=11"></script>
+<script src="assets/swatch.js?v=11"></script>
+</body>
+</html>

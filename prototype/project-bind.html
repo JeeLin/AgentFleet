@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>绑定设备 · 内部指标台 · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css?v=11">
+<link rel="stylesheet" href="styles/theme-neutral.css?v=11" id="af-theme">
+<link rel="stylesheet" href="assets/app.css?v=11">
+</head>
+<body data-nav="home">
+<div class="af-shell">
+  <main class="af-main">
+
+    <header class="af-head">
+      <a class="af-btn af-btn--ghost" href="project-new.html">← 上一步</a>
+      <h1 class="af-head__title">绑定设备</h1>
+      <span class="af-tag">内部指标台</span>
+      <span class="af-tag af-tag--warn">隔离式</span>
+      <span class="af-head__spacer"></span>
+      <a class="af-btn af-btn--primary" href="board.html?project=metrics">完成，进看板</a>
+    </header>
+
+    <div class="af-body">
+      <div style="padding:20px 20px 64px" class="af-stack">
+
+        <div class="af-callout af-callout--warn">
+          <span class="af-callout__k">隔离式项目只能绑在指定设备上 · 这道限制写死在库里</span>
+          <span>
+            这个项目的代码永不出设备，所以它的绑定只能是「代码已经在的那台」。
+            下面只有 device-c 可选，其余两台不会出现在列表里，免得你选了才发现派不出去。
+          </span>
+        </div>
+
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">选一台设备</h2>
+            <span class="af-region__note">在线 2 台 · 离线 1 台</span>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead>
+                <tr><th></th><th>设备</th><th>状态</th><th>已绑定项目</th><th>磁盘</th></tr>
+              </thead>
+              <tbody>
+                <tr style="opacity:.45">
+                  <td><input type="radio" name="node" disabled aria-label="device-a 不可选"></td>
+                  <td><strong>device-a</strong><div class="af-2xs af-mute">主力机 · linux / x86-64</div></td>
+                  <td><span class="af-tag af-tag--done">在线</span></td>
+                  <td class="af-2xs">AgentFleet · 个人笔记站</td>
+                  <td class="af-2xs">41%</td>
+                </tr>
+                <tr style="opacity:.45">
+                  <td><input type="radio" name="node" disabled aria-label="device-b 不可选"></td>
+                  <td><strong>device-b</strong><div class="af-2xs af-mute">工作笔记本 · macos / aarch64</div></td>
+                  <td><span class="af-tag af-tag--done">在线</span></td>
+                  <td class="af-2xs">AgentFleet</td>
+                  <td class="af-2xs">74%</td>
+                </tr>
+                <tr>
+                  <td><input type="radio" name="node" checked aria-label="选中 device-c"></td>
+                  <td>
+                    <strong>device-c</strong>
+                    <div class="af-2xs af-mute">角落的树莓派 · linux / aarch64</div>
+                  </td>
+                  <td><span class="af-tag af-tag--failed">离线 26 分钟</span></td>
+                  <td class="af-2xs">AgentFleet</td>
+                  <td class="af-2xs"><span class="af-tag af-tag--warn">91% · 只剩 0.3 GB</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <div class="af-callout">
+          <span class="af-callout__k">为什么另外两台不能选</span>
+          <span>
+            不是「灰掉等你升级」，是真的选不了。隔离式项目在库里就带着「只许这台设备」这一条，
+            调度时它是第一道过滤，第二道是项目隔离策略。任何一层筛空，任务就停在待办并说明原因，
+            不会降级凑一台机器去跑。
+          </span>
+        </div>
+
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">固定目录</h2>
+            <span class="af-region__note">这台机器上这个项目永远用这个路径</span>
+          </div>
+          <div class="af-region__body af-stack">
+            <div class="af-groups">
+              <div class="af-field">
+                <label class="af-field__label" for="path">路径</label>
+                <input class="af-input af-mono" id="path" value="/srv/afleet/metrics" autocomplete="off">
+                <span class="af-field__hint">目录必须已存在，且是一个 git 仓库</span>
+              </div>
+              <div class="af-field">
+                <span class="af-field__label">这个目录里已经有什么</span>
+                <div class="af-region" style="margin-top:4px">
+                  <div class="af-region__body" style="padding:10px 12px">
+                    <div class="af-2xs af-mono" style="line-height:1.9">
+                      <div>✓ 是一个 git 仓库，当前分支 <span style="color:var(--acc)">main</span></div>
+                      <div>✓ 最新提交 <span style="color:var(--acc)">4c8e21a</span></div>
+                      <div>✓ 有 2 个既有 worktree</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="af-callout af-callout--info">
+              <span class="af-callout__k">为什么必须固定，不能每次挑</span>
+              <span>
+                设备上的依赖缓存、构建缓存、编辑器配置全都挂在路径上。
+                路径一漂，缓存就全部失效，每次任务都要冷启动——那比不缓存还糟。
+                这个路径改一次，等于把那台机器上这个项目的缓存全部作废，所以改动要你明确确认。
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">任务怎么在这个目录里跑</h2>
+            <span class="af-region__note">目录固定 · 工作树可弃 · 缓存可复 · 产物必清</span>
+          </div>
+          <div class="af-region__body">
+            <dl class="af-kv">
+              <dt>用工作树</dt>
+              <dd>每个任务在这个目录下开一个 git worktree（<span class="af-mono af-xs">.wt/task-NNNN</span>）</dd>
+              <dt>为什么不是再 clone 一份</dt>
+              <dd>工作树共享同一份仓库历史，第 N 个任务不多占一份；clone 每多一个任务就多一份完整历史</dd>
+              <dt>代价</dt>
+              <dd>
+                工作树<b>不共享</b> <span class="af-mono af-xs">node_modules</span> 这类构建产物。
+                所以依赖缓存按 lockfile 哈希复用，任务产物随工作树一起清
+              </dd>
+              <dt>跑完怎么收</dt>
+              <dd>删掉工作树，缓存留着；不清缓存，因为缓存不是产物</dd>
+            </dl>
+          </div>
+        </section>
+
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">磁盘配额与清理策略</h2>
+            <span class="af-region__note">配额决定允许多大，清理决定跑完怎么收回</span>
+          </div>
+          <div class="af-region__body af-stack">
+            <div class="af-groups">
+              <div class="af-field">
+                <label class="af-field__label" for="quota">给这个项目多少磁盘</label>
+                <div class="af-row af-row--tight">
+                  <input class="af-input" id="quota" value="20" style="width:96px">
+                  <span class="af-xs af-dim">GB</span>
+                </div>
+                <span class="af-field__hint">device-c 总共 40 GB，已用 36.4 GB，这里最多只能给到 3 GB</span>
+              </div>
+              <div class="af-field">
+                <span class="af-field__label">清理策略</span>
+                <div class="af-stack" style="gap:6px">
+                  <label class="af-row af-row--tight" style="font-size:var(--t-xs)">
+                    <input type="radio" name="clean" checked> 平衡：缓存留 7 天，产物跑完即清
+                  </label>
+                  <label class="af-row af-row--tight" style="font-size:var(--t-xs)">
+                    <input type="radio" name="clean"> 保守：缓存留 30 天，产物留 3 个做诊断
+                  </label>
+                  <label class="af-row af-row--tight" style="font-size:var(--t-xs)">
+                    <input type="radio" name="clean"> 激进：缓存和产物都尽快清
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <div class="af-callout af-callout--warn">
+              <span class="af-callout__k">这台机器现在就超了</span>
+              <span>
+                device-c 已用 91%，超过「90% 就不再派新任务」这条线。
+                绑定能建成功，但任务会停在待办并写明原因，直到腾出空间。
+                磁盘满了不是性能问题，是任务会静默失败的问题，所以它参与派活前的过滤。
+              </span>
+              <div class="af-row af-row--tight">
+                <a class="af-btn af-btn--sm" href="inbox.html">去看磁盘清理确认</a>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">绑定之后可以改什么</h2>
+            <span class="af-region__note">绑定是双向的：项目页和设备页都能改</span>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead><tr><th>想改</th><th>能不能</th><th>代价</th></tr></thead>
+              <tbody>
+                <tr><td>换设备</td><td><span class="af-tag af-tag--done">可以</span></td><td class="af-xs">新设备要从缓存冷启动一次</td></tr>
+                <tr><td>换固定目录</td><td><span class="af-tag af-tag--warn">可以，但要确认</span></td><td class="af-xs">这台机器上这个项目的缓存全部作废</td></tr>
+                <tr><td>改配额与清理策略</td><td><span class="af-tag af-tag--done">随时可以</span></td><td class="af-xs">不影响正在跑的任务，下次派活生效</td></tr>
+                <tr><td>解除绑定</td><td><span class="af-tag af-tag--warn">可以</span></td><td class="af-xs">历史执行记录保留；这台设备上该项目的在跑任务会先被取消</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <div class="af-row">
+          <a class="af-btn af-btn--primary" href="board.html?project=metrics">完成绑定，进看板</a>
+          <a class="af-btn af-btn--ghost" href="project-new.html">返回上一步</a>
+          <span class="af-2xs af-mute">绑好之后，这个项目就能派活了</span>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+  <aside class="af-drawer" id="butler" aria-label="管家">
+    <div class="af-drawer__head">
+      <div>
+        <h2 class="af-drawer__title">绑定还没完成</h2>
+        <div class="af-drawer__sub">管家已经有了，但还没设备能接活</div>
+      </div>
+      <a class="af-btn af-btn--ghost af-drawer__close" href="#butler-closed" aria-label="关闭管家面板">关闭</a>
+    </div>
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">管家</span>
+        <span class="af-msg__body">
+          项目建好了，我等绑完设备再开始接活。顺带提一句：
+          device-c 现在磁盘 91%，绑上去之后任务会停在待办等着，不会硬跑。
+        </span>
+      </div>
+    </div>
+    <div class="af-drawer__compose">
+      <input class="af-input" type="text" placeholder="绑完之后在这里说话" disabled aria-label="对管家说话">
+      <button class="af-btn af-btn--primary" type="button" disabled>发送</button>
+    </div>
+  </aside>
+
+  <a class="af-fab af-fab--off" href="#butler" aria-label="打开管家，1 条提醒">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>管家</span>
+    <span class="af-fab__badge">1 条提醒</span>
+  </a>
+  <a class="af-fab af-fab--on" href="#butler-closed" aria-label="收起管家面板">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>收起</span>
+  </a>
+</div>
+
+<script src="assets/shell.js?v=11"></script>
+<script src="assets/swatch.js?v=11"></script>
+</body>
+</html>

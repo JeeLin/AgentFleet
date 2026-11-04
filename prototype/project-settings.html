@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>项目设置 · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css?v=11">
+<link rel="stylesheet" href="styles/theme-neutral.css?v=11" id="af-theme">
+<link rel="stylesheet" href="assets/app.css?v=11">
+</head>
+<body data-nav="board">
+<div class="af-shell">
+  <main class="af-main">
+
+    <header class="af-head">
+      <a class="af-btn af-btn--ghost" href="board.html">← 看板</a>
+      <h1 class="af-head__title">项目设置 · AgentFleet</h1>
+      <span class="af-tag">中心式</span>
+      <span class="af-tag">3 台已绑定</span>
+      <span class="af-head__spacer"></span>
+      <a class="af-btn af-btn--ghost" href="project-bind.html">绑定设备</a>
+      <a class="af-btn af-btn--ghost" href="settings.html">全局设置</a>
+    </header>
+
+    <!-- 这一页存在的原因：合并权、隔离、清理、配额、主题色全是「每个项目一个答案」，
+         但之前只有全局设置页，没地方按项目改。全局页上那句
+         「项目级设置 · 默认档 0」没有一个能点到的地方，是空话。 -->
+    <div class="af-filters">
+      <span class="af-filters__k">这些是项目的，不是全局的</span>
+      <span class="af-2xs af-dim">
+        不同项目的答案不一样：个人小工具可以让管家直接合，主仓库不行；
+        隔离式项目只有一台设备有资格，清理策略也不能照抄全局。
+        <b>这里改的只影响 AgentFleet 这个项目</b>，别的项目不动。
+      </span>
+    </div>
+
+    <div class="af-body">
+      <div style="padding:20px 20px 64px;max-width:960px" class="af-stack">
+
+        <!-- ① 合并权：文档 §4.5 的三档，项目级 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">这个项目的合并权</h2>
+            <span class="af-region__note">默认档 0 · 升档只能你来</span>
+          </div>
+          <div class="af-region__body af-stack">
+            <p style="margin:0;font-size:var(--t-sm);line-height:1.7">
+              档位决定管家能不能自己把分支合到主干。这是项目级设置 ——
+              个人小工具和主仓库不该是同一个答案。
+            </p>
+            <div class="af-region">
+              <div class="af-region__body af-region__body--flush">
+                <table class="af-table">
+                  <thead><tr><th>档</th><th>管家能做什么</th><th>适合</th><th></th></tr></thead>
+                  <tbody>
+                    <tr>
+                      <td><strong>档 0</strong> <span class="af-tag af-tag--done">当前</span></td>
+                      <td class="af-xs">只能你或你预设的规则合并。管家能给判断、能推你一把，合主干要你点头</td>
+                      <td class="af-xs af-dim">还没建立信任</td>
+                      <td><button class="af-btn af-btn--sm" type="button" disabled>已选中</button></td>
+                    </tr>
+                    <tr>
+                      <td><strong>档 1</strong></td>
+                      <td class="af-xs">管家可合并，<b>每次合并写进总结并通知你</b></td>
+                      <td class="af-xs af-dim">用过一阵，想省操作</td>
+                      <td><button class="af-btn af-btn--sm" type="button">升到这一档</button></td>
+                    </tr>
+                    <tr>
+                      <td><strong>档 2</strong></td>
+                      <td class="af-xs">管家可合并，<b>仅通知</b>，不写总结</td>
+                      <td class="af-xs af-dim">已经信任</td>
+                      <td><button class="af-btn af-btn--sm" type="button">升到这一档</button></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- 档 0 下「显式规则」是什么，必须举出来 —— 不然「档 0」听起来像「什么都干不了」 -->
+            <div class="af-field">
+              <span class="af-field__label">档 0 下的显式规则 <span class="af-tag">1 条生效</span></span>
+              <div class="af-region">
+                <div class="af-region__body af-stack" style="gap:10px">
+                  <div class="af-row af-row--tight">
+                    <span class="af-mono af-xs">cargo test 全绿</span>
+                    <span class="af-xs af-dim">且</span>
+                    <span class="af-mono af-xs">改动只落在 src/</span>
+                    <span class="af-xs af-dim">→ 允许自动合并</span>
+                  </div>
+                  <div class="af-2xs af-mute">
+                    这也是人给的规则，不是管家自己判断的。所以它属于档 0，
+                    不需要先升档。规则见 <a href="task.html">任务详情</a> 里的验收条件。
+                  </div>
+                </div>
+              </div>
+              <span class="af-field__hint">规则可以随时删。删掉之后，档 0 就是「任何合并都要你点头」</span>
+            </div>
+
+            <div class="af-callout af-callout--warn">
+              <span class="af-callout__k">升档只能由人操作，管家不能自己申请</span>
+              <span>
+                管家可以说「这次我判得对不对」，但不会说「给我升档吧」。
+                自我扩权是这条设计里唯一不能开的口子。
+              </span>
+            </div>
+            <p class="af-xs af-dim" style="margin:0">
+              不管哪一档，合并都留痕：谁合的（人 / 管家）、什么时候、哪个分支合到了哪。
+            </p>
+          </div>
+        </section>
+
+        <!-- ② 隔离：形态决定谁有资格，这是过滤顺序的第二层 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">隔离策略</h2>
+            <span class="af-region__note">形态决定谁有资格跑，不是偏好是约束</span>
+          </div>
+          <div class="af-region__body af-stack">
+            <div class="af-field">
+              <span class="af-field__label">项目形态</span>
+              <div class="af-row af-row--tight">
+                <span class="af-tag af-tag--done">中心式 · 代码在 Hub</span>
+                <span class="af-2xs af-mute">3 台绑定设备都有资格</span>
+              </div>
+              <span class="af-field__hint">
+                形态是项目的属性，不是三种产品。可以随时把隔离式<b>转成</b>中心式（推上去即可），
+                反过来不提供 —— 把已经上传的代码真收回来，产品做不到。
+              </span>
+            </div>
+
+            <div class="af-region">
+              <div class="af-region__body af-region__body--flush">
+                <table class="af-table">
+                  <thead><tr><th>形态</th><th>代码在哪</th><th>Hub 存什么</th><th>「起点」是什么</th></tr></thead>
+                  <tbody>
+                    <tr>
+                      <td class="af-xs"><b>中心式</b> <span class="af-tag af-tag--done">当前</span></td>
+                      <td class="af-xs">Hub 的裸仓库</td>
+                      <td class="af-xs">全部代码 + 元数据</td>
+                      <td class="af-xs">Hub 上的 commit</td>
+                    </tr>
+                    <tr>
+                      <td class="af-xs">镜像式</td>
+                      <td class="af-xs">上游 + Hub 镜像</td>
+                      <td class="af-xs">镜像的全部代码 + 元数据</td>
+                      <td class="af-xs">Hub 上镜像的 commit</td>
+                    </tr>
+                    <tr>
+                      <td class="af-xs">隔离式</td>
+                      <td class="af-xs">只在指定设备，<b>永不出该设备</b></td>
+                      <td class="af-xs">只有元数据</td>
+                      <td class="af-xs">设备上的 commit hash，Hub <b>不验证内容</b></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- 过滤顺序不能换，这是硬规则。写在这里，因为它就是「隔离策略」的语义 -->
+            <div class="af-callout">
+              <span class="af-callout__k">派活时的过滤顺序固定，不可调换</span>
+              <span>
+                ① 任务级 <span class="af-mono af-xs">allowed_devices</span> 派活人说了算 →
+                ② <b>项目级隔离策略</b>（本页这一块）形态决定谁有资格 →
+                ③ 调度器按能力和负载排序谁更合适。
+                <br>
+                顺序不能换：先按负载挑出最闲的那台再查约束，约束就从「必须满足」降级成了「偏好」。
+              </span>
+            </div>
+
+            <div class="af-callout af-callout--warn">
+              <span class="af-callout__k">隔离式项目的代价，现在就说清</span>
+              <span>
+                改成隔离式之后，<b>Hub 上没有代码</b>，Hub 也不核对设备报上来的 commit 内容。
+                你能看到 diff（每次向设备拉取），但看不到「Hub 上的那份」——
+                因为不存在那一份。这是隔离式的定义，不是缺陷。
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <!-- ③ 清理与配额：配额决定多大，清理决定怎么收回 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">磁盘配额与清理</h2>
+            <span class="af-region__note">三件事分开：允许多大 / 跑不跑得动 / 跑完怎么收回</span>
+          </div>
+          <div class="af-region__body af-stack">
+            <div class="af-groups">
+              <div class="af-field">
+                <span class="af-field__label">这个项目在每台设备上的配额</span>
+                <div class="af-row af-row--tight">
+                  <input class="af-input" value="40" style="width:88px" aria-label="每台设备上的项目配额 GB">
+                  <span class="af-xs af-dim">GB</span>
+                </div>
+                <span class="af-field__hint">配额是设备绑定上的，不是项目上的总数 —— 同一项目在三台设备上各占 40 GB</span>
+              </div>
+              <div class="af-field">
+                <span class="af-field__label">清理策略</span>
+                <select class="af-select" aria-label="这个项目的清理策略">
+                  <option>平衡：缓存留 7 天，产物跑完即清</option>
+                  <option>保守：缓存留 30 天，产物留 3 个做诊断</option>
+                  <option>激进：缓存和产物都尽快清</option>
+                </select>
+                <span class="af-field__hint">默认跟随全局，这里改了这个项目就不跟了</span>
+              </div>
+            </div>
+
+            <!-- 三档的实际差别，摊开写。只说「保守/平衡/激进」等于没说 -->
+            <div class="af-region">
+              <div class="af-region__body af-region__body--flush">
+                <table class="af-table">
+                  <thead><tr><th>策略</th><th>依赖缓存</th><th>任务产物</th><th>什么时候该用</th></tr></thead>
+                  <tbody>
+                    <tr>
+                      <td class="af-xs"><b>保守</b></td>
+                      <td class="af-xs">留 30 天</td>
+                      <td class="af-xs">留最近 3 个做诊断</td>
+                      <td class="af-xs af-dim">还在调这个项目，回头要看产物</td>
+                    </tr>
+                    <tr>
+                      <td class="af-xs"><b>平衡</b> <span class="af-tag">全局也是这个</span></td>
+                      <td class="af-xs">留 7 天</td>
+                      <td class="af-xs">跑完即清</td>
+                      <td class="af-xs af-dim">日常</td>
+                    </tr>
+                    <tr>
+                      <td class="af-xs"><b>激进</b></td>
+                      <td class="af-xs">尽快清</td>
+                      <td class="af-xs">跑完即清</td>
+                      <td class="af-xs af-dim">设备紧张，或者项目已经稳了</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="af-callout">
+              <span class="af-callout__k">产物必清，缓存才可以留</span>
+              <span>
+                依赖性目录按 lockfile 哈希复用 —— 但 <b>缓存不是产物</b>。
+                任务产物永远跑完就清，只有缓存受上面三档影响。
+                依赖目录也永远不在设备间搬运：x86-64 和 aarch64 装出来的不是同一份东西。
+              </span>
+            </div>
+            <div class="af-callout af-callout--warn">
+              <span class="af-callout__k">磁盘超 90% 就不再往这台派任务</span>
+              <span class="af-2xs">
+                这是全局水位，不按项目改。满了不是性能问题，是任务会静默失败的问题。
+                真满了会变成一条待决策进 <a href="inbox.html">收件箱</a>，不会自己删东西。
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <!-- ④ 主题色：只做视觉区分，不影响任何逻辑 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">项目主题色</h2>
+            <span class="af-region__note">只用来区分，不影响任何行为</span>
+          </div>
+          <div class="af-region__body af-stack">
+            <div class="af-field">
+              <span class="af-field__label">用在哪</span>
+              <div class="af-row af-row--tight" role="radiogroup" aria-label="项目主题色">
+                <button class="af-btn af-btn--sm" type="button" role="radio" aria-checked="true">
+                  <span class="af-dot dot-a" aria-hidden="true"></span> 蓝（当前）
+                </button>
+                <button class="af-btn af-btn--sm af-btn--ghost" type="button" role="radio" aria-checked="false">
+                  <span class="af-dot dot-b" aria-hidden="true"></span> 绿
+                </button>
+                <button class="af-btn af-btn--sm af-btn--ghost" type="button" role="radio" aria-checked="false">
+                  <span class="af-dot dot-c" aria-hidden="true"></span> 紫
+                </button>
+              </div>
+              <span class="af-field__hint">
+                用在看板卡片左侧色条、<a href="timeline.html">时间线</a>和全局任务流里的项目标签、项目页页眉。
+                <b>纯视觉</b>：改它不会改变任何任务、权限或调度。
+              </span>
+            </div>
+            <div class="af-callout af-callout--info">
+              <span class="af-callout__k">别和配色方案搞混</span>
+              <span class="af-2xs">
+                这里是<b>项目</b>的颜色，账号级共享，团队里看到的是同一个。
+                你自己屏幕的暗/亮和冷暖在<a href="settings.html">全局设置 · 外观</a>，
+                那只存在你这台设备上，改不动别人的屏幕。
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <!-- ⑤ 归档：不可逆的边界，必须说清能取消 -->
+        <section class="af-region af-region--warn">
+          <div class="af-region__head">
+            <h2 class="af-region__title">归档这个项目</h2>
+            <span class="af-region__note">可取消，不是删除</span>
+          </div>
+          <div class="af-region__body af-stack">
+            <div class="af-region">
+              <div class="af-region__body af-region__body--flush">
+                <table class="af-table">
+                  <tbody>
+                    <tr>
+                      <td class="af-xs" style="width:38%">正在跑的执行</td>
+                      <td class="af-xs"><b>不打断</b>，跑完才归档，结果照常进待验收</td>
+                    </tr>
+                    <tr>
+                      <td class="af-xs">待办 / 排队的任务</td>
+                      <td class="af-xs">停止派发。仍在这个项目里，取消归档后接着走</td>
+                    </tr>
+                    <tr>
+                      <td class="af-xs">定时任务</td>
+                      <td class="af-xs">一并暂停。<b>取消归档时不会自动恢复</b> —— 得你看一眼再开</td>
+                    </tr>
+                    <tr>
+                      <td class="af-xs">设备上的工作目录</td>
+                      <td class="af-xs">按上面的清理策略回收。历史记录不受影响</td>
+                    </tr>
+                    <tr>
+                      <td class="af-xs">执行记录、失败归因、总结、轨迹</td>
+                      <td class="af-xs"><b>全留着</b>。归档不是删除</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div class="af-row">
+              <button class="af-btn af-btn--danger" type="button">归档这个项目</button>
+              <a class="af-btn af-btn--ghost" href="archived.html">看已归档的项目</a>
+            </div>
+            <p class="af-2xs af-mute" style="margin:0">
+              没有「删除」。项目是 Hub 的真相源，删掉会让已合入的历史、失败归因、成本记录一起消失。
+              失败归因和排障都要靠它 —— 一个跑了十次失败的项目，比一个干净的空项目有价值。
+            </p>
+          </div>
+        </section>
+
+        <div class="af-row">
+          <a class="af-btn af-btn--ghost" href="board.html">← 回看板</a>
+          <a class="af-btn af-btn--ghost" href="settings.html">全局设置</a>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+  <aside class="af-drawer" id="butler" aria-label="管家">
+    <div class="af-drawer__head">
+      <div>
+        <h2 class="af-drawer__title">这个项目该怎么配</h2>
+        <div class="af-drawer__sub">我能给判断，但升档、归档得你点</div>
+      </div>
+      <a class="af-btn af-btn--ghost af-drawer__close" href="#butler-closed" aria-label="关闭管家面板">关闭</a>
+    </div>
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">管家</span>
+        <span class="af-msg__body">
+          AgentFleet 这个项目最近 20 次执行有 18 次一次过，失败那两次都是环境问题不是代码问题。
+          按这个数据，清理策略可以调激进一点，档位我不建议动 —— 合主干错了没法退。
+        </span>
+      </div>
+      <div class="af-callout">
+        <span class="af-callout__k">数据从哪来</span>
+        <span class="af-2xs">
+          从执行记录和复盘里数出来的，不是估的。你可以自己翻<a href="timeline.html">时间线</a>核对。
+        </span>
+      </div>
+    </div>
+    <div class="af-drawer__compose">
+      <input class="af-input" type="text" placeholder="问这个项目该怎么配" aria-label="对管家说话">
+      <button class="af-btn af-btn--primary" type="button">发送</button>
+    </div>
+  </aside>
+
+  <a class="af-fab af-fab--off" href="#butler" aria-label="打开管家">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>管家</span>
+  </a>
+  <a class="af-fab af-fab--on" href="#butler-closed" aria-label="收起管家面板">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>收起</span>
+  </a>
+</div>
+
+<script src="assets/shell.js?v=11"></script>
+<script src="assets/swatch.js?v=11"></script>
+</body>
+</html>

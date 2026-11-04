@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>执行监控 · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css?v=11">
+<link rel="stylesheet" href="styles/theme-neutral.css?v=11" id="af-theme">
+<link rel="stylesheet" href="assets/app.css?v=11">
+</head>
+<body data-nav="board">
+<div class="af-shell">
+  <main class="af-main">
+
+    <header class="af-head">
+      <span class="af-dot dot-a" aria-hidden="true"></span>
+      <h1 class="af-head__title">执行监控</h1>
+      <span class="af-head__sub">AgentFleet · 正在干活的 Agent</span>
+      <span class="af-head__spacer"></span>
+      <span class="af-tag af-tag--running">3 个在执行</span>
+      <a class="af-btn af-btn--ghost" href="board.html">回看板</a>
+    </header>
+
+    <!-- 第一层：慢变摘要，整个页面主体。秒级刷新就够。 -->
+    <div class="af-filters">
+      <span class="af-filters__k">说明</span>
+      <span class="af-2xs af-dim">
+        这里看的是「正在干活的 Agent」，看板看的是「我要什么」。Agent 不会自己报完成百分比，
+        所以这里只报三样可观测的东西：跑了多久、最后一次动是什么、有没有卡住迹象。
+      </span>
+    </div>
+
+    <div class="af-body">
+      <div style="padding:20px 20px 64px" class="af-stack">
+
+        <!-- 执行体为中心：一行一个执行，不是一列一个状态 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">正在跑的执行</h2>
+            <span class="af-region__note">点开某一行才订阅它的实时动作流，没展开的不订阅</span>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead>
+                <tr>
+                  <th>任务</th><th>设备 / Agent</th>
+                  <th>已跑</th><th>现在在做什么</th><th>最后一次动作</th><th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>
+                    <a href="task.html">修复 git 面板在超大 diff 下卡死</a>
+                    <div class="af-2xs af-mute">第 2 次执行 · 接力复用 812 MB 缓存</div>
+                  </td>
+                  <td>device-b · claude</td>
+                  <td class="af-table__num">18:42</td>
+                  <td>在跑 <span class="af-mono af-2xs">cargo test</span></td>
+                  <td class="af-2xs">12 秒前 · 输出 42 个测试通过</td>
+                  <td><button class="af-btn af-btn--sm" type="button">展开动作</button></td>
+                </tr>
+                <tr>
+                  <td>
+                    <a href="task.html">为项目加主题色（纯视觉）</a>
+                    <div class="af-2xs af-mute">第 1 次执行</div>
+                  </td>
+                  <td>device-a · opencode</td>
+                  <td class="af-table__num">6:10</td>
+                  <td>在改 <span class="af-mono af-2xs">packages/web/src/tokens.css</span></td>
+                  <td class="af-2xs">4 秒前 · 写入 3 行</td>
+                  <td><button class="af-btn af-btn--sm" type="button">展开动作</button></td>
+                </tr>
+                <!-- 卡住信号：这是用户真正想知道的，比任何进度条都有价值 -->
+                <tr>
+                  <td>
+                    <a href="task.html">失败归因：把八种形态接进设备页</a>
+                    <div class="af-2xs af-mute">第 1 次执行</div>
+                  </td>
+                  <td>device-c · claude</td>
+                  <td class="af-table__num">31:05</td>
+                  <td>
+                    <span class="af-tag af-tag--warn">可能卡住</span>
+                    <div class="af-2xs af-mute">3 分 12 秒没有新的工具调用</div>
+                  </td>
+                  <td class="af-2xs">最后一次是读 <span class="af-mono">DeviceDetail.tsx</span></td>
+                  <td><button class="af-btn af-btn--sm" type="button">展开动作</button></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 第二层：展开某一行之后的实时动作 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">
+              <span class="af-shape af-shape--running" aria-hidden="true"></span>
+              第 3 行的实时动作
+            </h2>
+            <span class="af-region__note">只订阅这一条 · 已连着 3 分 12 秒没有新事件</span>
+          </div>
+          <div class="af-region__body">
+            <ul class="af-timeline">
+              <li class="af-tl">
+                <span class="af-tl__time">+31:05</span>
+                <span class="af-tl__rail"><span class="af-tl__node" style="background:var(--fg-3)"></span></span>
+                <span class="af-tl__body">
+                  <span class="af-tl__title">读文件 <span class="af-mono af-xs">DeviceDetail.tsx</span></span>
+                  <span class="af-tl__detail">1,240 行 · 之后没有新动作</span>
+                </span>
+              </li>
+              <li class="af-tl">
+                <span class="af-tl__time">+27:52</span>
+                <span class="af-tl__rail"><span class="af-tl__node"></span></span>
+                <span class="af-tl__body">
+                  <span class="af-tl__title">跑命令 <span class="af-mono af-xs">cargo check -p afleet-hub</span></span>
+                  <span class="af-tl__detail">成功 · 14 秒</span>
+                </span>
+              </li>
+              <li class="af-tl">
+                <span class="af-tl__time">+21:30</span>
+                <span class="af-tl__rail"><span class="af-tl__node"></span></span>
+                <span class="af-tl__body">
+                  <span class="af-tl__title">改了 4 个文件</span>
+                  <span class="af-tl__detail">
+                    <span class="af-mono af-2xs">FailureTag.tsx · DeviceDetail.tsx · types.ts · i18n/zh.ts</span>
+                  </span>
+                </span>
+              </li>
+              <li class="af-tl">
+                <span class="af-tl__time">+00:00</span>
+                <span class="af-tl__rail"><span class="af-tl__node"></span></span>
+                <span class="af-tl__body">
+                  <span class="af-tl__title">开始执行 · 起点 commit <span class="af-mono af-xs">a91f3c2</span></span>
+                </span>
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- 第三层：诚实说明「进度」是怎么来的 -->
+        <div class="af-groups">
+          <section class="af-region">
+            <div class="af-region__head">
+              <h2 class="af-region__title">为什么这里没有进度条</h2>
+            </div>
+            <div class="af-region__body af-stack">
+              <p style="margin:0;font-size:var(--t-sm);line-height:1.7">
+                Agent 不会自己上报「我做了 40%」——协议里没有这个字段。编一个进度条就是自欺。
+                所以这里只有代理指标，而且要能看出它们各自的毛病：
+              </p>
+              <dl class="af-kv">
+                <dt>已跑时长</dt>
+                <dd>最可靠，也最容易误导：跑很久可能只是在装依赖</dd>
+                <dt>实际动作</dt>
+                <dd>改了几个文件、跑了哪条命令、diff 长了多少 —— 这是真进度</dd>
+                <dt>完成判定</dt>
+                <dd>能被判定时，它通过与否就是真进度；不能判定时只能说「还在跑」</dd>
+                <dt>卡住信号</dt>
+                <dd>超过一段时间没有新的工具调用，就标「可能卡住」</dd>
+              </dl>
+            </div>
+          </section>
+
+          <section class="af-region">
+            <div class="af-region__head">
+              <h2 class="af-region__title">这个项目的执行面</h2>
+            </div>
+            <div class="af-region__body">
+              <dl class="af-kv">
+                <dt>汇总范围</dt>
+                <dd>AgentFleet 这一个项目，跨 3 台设备</dd>
+                <dt>入口为什么在项目</dt>
+                <dd>「这台设备上跑着什么」是另一个问题；进了设备页看的才是设备健康</dd>
+                <dt>隔离式项目</dt>
+                <dd>这三层同样看得到，只是每次都要向设备现拉，会慢一些</dd>
+                <dt>没在跑的时候</dt>
+                <dd>
+                  显示空状态并说明最后一台设备什么时候空闲下来的，
+                  不会假装有一个一直在转的图表
+                </dd>
+              </dl>
+            </div>
+          </section>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+  <aside class="af-drawer" id="butler" aria-label="管家">
+    <div class="af-drawer__head">
+      <div>
+        <h2 class="af-drawer__title">管家在盯进度</h2>
+        <div class="af-drawer__sub">卡住、失败、超时、待验收太久，它会先说话</div>
+      </div>
+      <a class="af-btn af-btn--ghost af-drawer__close" href="#butler-closed" aria-label="关闭管家面板">关闭</a>
+    </div>
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">管家</span>
+        <span class="af-msg__body">
+          device-c 上的那个执行已经 3 分钟没动了。它最后一次在读 DeviceDetail.tsx。
+          要我把它取消、换台设备重派吗？
+        </span>
+      </div>
+      <div class="af-row af-row--tight">
+        <button class="af-btn af-btn--primary af-btn--sm" type="button">取消并换设备重派</button>
+        <button class="af-btn af-btn--sm" type="button">再等 5 分钟</button>
+        <button class="af-btn af-btn--ghost af-btn--sm" type="button">不用管</button>
+      </div>
+    </div>
+    <div class="af-drawer__compose">
+      <input class="af-input" type="text" placeholder="问问某个执行卡在哪" aria-label="对管家说话">
+      <button class="af-btn af-btn--primary" type="button">发送</button>
+    </div>
+  </aside>
+
+  <a class="af-fab af-fab--off" href="#butler" aria-label="打开管家，有 1 条执行可能卡住">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>管家</span>
+    <span class="af-fab__badge">1 个卡住</span>
+  </a>
+  <a class="af-fab af-fab--on" href="#butler-closed" aria-label="收起管家面板">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>收起</span>
+  </a>
+</div>
+
+<script src="assets/shell.js?v=11"></script>
+<script src="assets/swatch.js?v=11"></script>
+</body>
+</html>

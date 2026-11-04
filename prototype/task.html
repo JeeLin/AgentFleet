@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>任务 · 修复 git 面板在超大 diff 下卡死 · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css?v=11">
+<link rel="stylesheet" href="styles/theme-neutral.css?v=11" id="af-theme">
+<link rel="stylesheet" href="assets/app.css?v=11">
+</head>
+<body data-nav="board">
+<div class="af-shell">
+  <main class="af-main">
+
+    <header class="af-head">
+      <a class="af-btn af-btn--ghost" href="board.html">← 看板</a>
+      <span class="af-shape af-shape--running" aria-hidden="true"></span>
+      <h1 class="af-head__title">修复 git 面板在超大 diff 下卡死</h1>
+      <span class="af-tag af-tag--running">执行中</span>
+      <span class="af-head__spacer"></span>
+      <button class="af-btn af-btn--ghost" type="button">取消执行</button>
+      <a class="af-btn" href="execution.html">看执行监控</a>
+    </header>
+
+    <div class="af-body af-body--fill">
+      <div class="af-split af-split--fill">
+
+        <!-- 左栏：因果链 + 执行记录 + 复盘。看板看不到的「怎么走到这一步」，都在这 -->
+        <div class="af-split__col">
+
+          <section class="af-region">
+            <div class="af-region__head">
+              <h2 class="af-region__title">这个任务是怎么来的</h2>
+              <span class="af-region__note">因果链：从一句话到一次执行</span>
+            </div>
+            <div class="af-region__body">
+              <ul class="af-timeline">
+                <li class="af-tl">
+                  <span class="af-tl__time">昨天 16:02</span>
+                  <span class="af-tl__rail"><span class="af-tl__node" style="background:var(--butler)"></span></span>
+                  <span class="af-tl__body">
+                    <span class="af-tl__title">你说：「git 面板打开大文件改动就转圈，先修这个」</span>
+                    <span class="af-tl__detail">管家接住这句话，记成一条意图，没有立刻拆任务</span>
+                  </span>
+                </li>
+                <li class="af-tl">
+                  <span class="af-tl__time">昨天 16:05</span>
+                  <span class="af-tl__rail"><span class="af-tl__node" style="background:var(--butler)"></span></span>
+                  <span class="af-tl__body">
+                    <span class="af-tl__title">管家反问一次：「多大算超大？要不要限定只改渲染」</span>
+                    <span class="af-tl__detail">你答：单文件 5000 行以上，可以改渲染，别动 diff 计算</span>
+                  </span>
+                </li>
+                <li class="af-tl">
+                  <span class="af-tl__time">昨天 16:11</span>
+                  <span class="af-tl__rail"><span class="af-tl__node" style="background:var(--acc)"></span></span>
+                  <span class="af-tl__body">
+                    <span class="af-tl__title">建任务，带上三个约束</span>
+                    <span class="af-tl__detail">
+                      允许设备 device-a / device-b · 允许 Agent claude / opencode · 必须具备 git 与 node 20 ·
+                      完成判定：超过 5000 行的 diff 首屏 1 秒内渲染出来
+                    </span>
+                  </span>
+                </li>
+                <li class="af-tl">
+                  <span class="af-tl__time">昨天 16:12</span>
+                  <span class="af-tl__rail"><span class="af-tl__node" style="background:var(--failed)"></span></span>
+                  <span class="af-tl__body">
+                    <span class="af-tl__title">第 1 次执行：device-a / claude — 失败</span>
+                    <span class="af-tl__detail">
+                      原因：Agent 试图改 diff 计算的 Rust 代码，越过了「别动 diff 计算」这条约束，被验收判回
+                    </span>
+                  </span>
+                </li>
+                <li class="af-tl">
+                  <span class="af-tl__time">今天 10:18</span>
+                  <span class="af-tl__rail"><span class="af-tl__node" style="background:var(--running)"></span></span>
+                  <span class="af-tl__body">
+                    <span class="af-tl__title">第 2 次执行：换了 device-b / claude</span>
+                    <span class="af-tl__detail">
+                      换了设备重派（重试必须换条件）· 接力自第 1 次执行，复用了 812 MB 依赖缓存 ·
+                      现在跑到 18 分 42 秒
+                    </span>
+                  </span>
+                </li>
+              </ul>
+            </div>
+          </section>
+
+          <section class="af-region">
+            <div class="af-region__head">
+              <h2 class="af-region__title">执行记录 <span class="af-tag">2 次</span></h2>
+              <span class="af-region__note">同一个任务可以跑多次，每次都留现场，不覆盖上一次</span>
+            </div>
+            <div class="af-region__body af-region__body--flush">
+              <table class="af-table">
+                <thead>
+                  <tr>
+                    <th>次数</th><th>设备 / Agent</th><th>结果</th>
+                    <th class="af-table__num">跑多久</th><th class="af-table__num">排队等了多久</th><th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>第 2 次</td>
+                    <td>device-b · claude</td>
+                    <td><span class="af-tag af-tag--running">执行中</span></td>
+                    <td class="af-table__num">18:42</td>
+                    <td class="af-table__num">0:07</td>
+                    <td><a href="execution.html">实时看</a></td>
+                  </tr>
+                  <tr>
+                    <td>第 1 次</td>
+                    <td>device-a · claude</td>
+                    <td><span class="af-tag af-tag--failed">被验收打回</span></td>
+                    <td class="af-table__num">42:16</td>
+                    <td class="af-table__num">0:03</td>
+                    <td><a href="replay.html">看复盘</a></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- 失败面板：全站唯一一套动作，别处不再提供第二套 -->
+          <section class="af-region" id="failed-panel">
+            <div class="af-region__head">
+              <h2 class="af-region__title">
+                <span class="af-shape af-shape--failed" aria-hidden="true"></span>
+                上次为什么失败
+              </h2>
+            </div>
+            <div class="af-region__body af-stack">
+              <div class="af-callout af-callout--failed">
+                <span class="af-callout__k">失败原因 · 被验收打回</span>
+                <span>
+                  产出越过了任务约束：约定是「别动 diff 计算」，但改动了
+                  <span class="af-mono">crates/diff/src/lib.rs</span> 的计算路径。
+                  结果虽然快，但语义变了，不能合。
+                </span>
+              </div>
+              <div class="af-row">
+                <a class="af-btn af-btn--primary" href="task.html">换一台设备重派</a>
+                <button class="af-btn" type="button">改任务再跑</button>
+                <button class="af-btn" type="button">放宽约束</button>
+                <a class="af-btn" href="replay.html">看第 1 次的复盘</a>
+                <button class="af-btn af-btn--ghost" type="button">关掉这个任务</button>
+              </div>
+              <p class="af-2xs af-mute" style="margin:0">
+                重试有上限：这个任务已用 1 次，上限 3 次。并且重试必须换条件（换设备 / 换 Agent / 换起点），
+                原地重跑只是浪费电。
+              </p>
+            </div>
+          </section>
+
+          <!-- 验收面板：跑完不等于做对，合并主干必须经过这里 -->
+          <section class="af-region" id="review-panel">
+            <div class="af-region__head">
+              <h2 class="af-region__title">
+                <span class="af-shape af-shape--review" aria-hidden="true"></span>
+                验收（跑完之后在这里做）
+              </h2>
+              <span class="af-region__note">现在还没到这一步</span>
+            </div>
+            <div class="af-region__body af-stack">
+              <dl class="af-kv">
+                <dt>完成判定</dt>
+                <dd>超过 5000 行的 diff 首屏 1 秒内渲染出来<span class="af-tag af-tag--done" style="margin-left:8px">可判定</span></dd>
+                <dt>当前状态</dt>
+                <dd class="af-dim">执行还在跑，判定条件尚未开始验证</dd>
+                <dt>合并权</dt>
+                <dd>档 0（默认）：只能你或预设规则合并，管家不会自己合主干</dd>
+              </dl>
+              <div class="af-row">
+                <button class="af-btn af-btn--primary" type="button" disabled>合入主干</button>
+                <button class="af-btn" type="button" disabled>打回并写明原因</button>
+                <button class="af-btn" type="button" disabled>只保留分支</button>
+                <span class="af-2xs af-mute">按钮在任务进入待验收后才可用</span>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <!-- 右栏：约束与成本。任务级约束是调度的第一层过滤，所以它显眼 -->
+        <div class="af-split__col">
+          <section class="af-region">
+            <div class="af-region__head">
+              <h2 class="af-region__title">任务约束</h2>
+              <span class="af-region__note">派活时定的，执行时必须满足</span>
+            </div>
+            <div class="af-region__body">
+              <dl class="af-kv">
+                <dt>允许设备</dt>
+                <dd>device-a、device-b</dd>
+                <dt>允许 Agent</dt>
+                <dd>claude、opencode</dd>
+                <dt>必须具备</dt>
+                <dd>git、node 20</dd>
+                <!-- 技能 = 这个任务可以连什么。和上面三条同一套机制：
+                     没声明就没有，不是 agent 的默认能力。 -->
+                <dt>可连的技能</dt>
+                <dd>
+                  没授予任何技能
+                  <span class="af-2xs af-mute" style="display:block;margin-top:2px">
+                    没授予就一个连接都开不了。要用请去<a href="skills.html">技能与 MCP</a> 挑一个凭据再授予本任务；
+                    <b>凭据内容不会进 agent 的上下文</b>，由设备侧注入。
+                  </span>
+                </dd>
+                <dt>重试上限</dt>
+                <dd>3 次（已用 1 次），重试须换条件</dd>
+              </dl>
+              <div class="af-callout" style="margin-top:16px">
+                <span class="af-callout__k">选机器的顺序</span>
+                <span class="af-2xs af-dim">
+                  ① 先看任务约束 → ② 再看项目隔离策略 → ③ 最后按能力和负载排序。
+                  任何一层筛空，任务就停在待办并说明原因，不会降级凑一台机器跑。
+                </span>
+              </div>
+            </div>
+          </section>
+
+          <section class="af-region">
+            <div class="af-region__head">
+              <h2 class="af-region__title">花的时间和钱</h2>
+            </div>
+            <div class="af-region__body">
+              <dl class="af-kv">
+                <dt>实际跑了</dt>
+                <dd class="af-num">1 小时 0 分 58 秒（两次合计）</dd>
+                <dt>排队等待</dt>
+                <dd class="af-num">10 秒<span class="af-2xs af-mute"> · 等设备和跑设备是两种成本，分开记</span></dd>
+                <dt>token</dt>
+                <dd class="af-num">输入 184,200 · 输出 31,400</dd>
+                <dt>金额</dt>
+                <dd>没接 AI Gateway，所以只显示 token，不算钱</dd>
+                <dt>磁盘</dt>
+                <dd>工作树 1.9 GB · 依赖缓存复用 812 MB</dd>
+              </dl>
+            </div>
+          </section>
+
+          <section class="af-region">
+            <div class="af-region__head">
+              <h2 class="af-region__title">产出</h2>
+              <span class="af-region__note">base_commit..HEAD</span>
+            </div>
+            <div class="af-region__body af-stack">
+              <div class="af-row af-row--tight">
+                <span class="af-tag">分支 task/1042-git-panel</span>
+                <span class="af-tag af-tag--done">+42</span>
+                <span class="af-tag af-tag--failed">−8</span>
+              </div>
+              <div class="af-mono af-2xs af-dim">
+                M packages/web/src/panels/GitPanel.tsx<br>
+                M packages/web/src/panels/virtualList.ts<br>
+                A packages/web/src/panels/virtualList.test.ts
+              </div>
+              <div class="af-row af-row--tight">
+                <a class="af-btn af-btn--sm" href="session.html#pane-git">看 diff</a>
+                <a class="af-btn af-btn--sm" href="session.html#pane-files">看工作区</a>
+              </div>
+            </div>
+          </section>
+
+          <section class="af-region">
+            <div class="af-region__head">
+              <h2 class="af-region__title">管家的判断</h2>
+              <span class="af-tag af-tag--butler">不是验收结论</span>
+            </div>
+            <div class="af-region__body">
+              <p style="margin:0;font-size:var(--t-sm);line-height:1.7">
+                这个任务已经 18 分钟没换过大文件了，进度是正常的。
+                它上次栽在「把 diff 计算也改了」，这次提示里已经写死了边界，
+                我看它只碰了渲染层。等它跑完我给你一份总结，你再来定合不合。
+              </p>
+              <p class="af-2xs af-mute" style="margin:12px 0 0">
+                管家可以给判断，但档 0 下合并要你点头。
+              </p>
+            </div>
+          </section>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+  <aside class="af-drawer" id="butler" aria-label="管家">
+    <div class="af-drawer__head">
+      <div>
+        <h2 class="af-drawer__title">就问这个任务</h2>
+        <div class="af-drawer__sub">上下文已经带上了 task #1042 的全部执行记录</div>
+      </div>
+      <a class="af-btn af-btn--ghost af-drawer__close" href="#butler-closed" aria-label="关闭管家面板">关闭</a>
+    </div>
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">建议</span>
+        <span class="af-msg__body">
+          第 2 次执行还没跑完。要我在它进待验收时提醒你吗？也可以在它跑完前先取消，
+          我已经看到它在改渲染层，符合这次约定的边界。
+        </span>
+      </div>
+      <div class="af-callout af-callout--info">
+        <span class="af-callout__k">你能让我做的事</span>
+        <span class="af-2xs af-dim">
+          确认派活、改派、取消、澄清需求。我不挑设备，也不改代码。
+          合并主干在档 0 下只能你来做。
+        </span>
+      </div>
+    </div>
+    <div class="af-drawer__compose">
+      <input class="af-input" type="text" placeholder="问这个任务，或让它改派" aria-label="对管家说话">
+      <button class="af-btn af-btn--primary" type="button">发送</button>
+    </div>
+  </aside>
+
+  <a class="af-fab af-fab--off" href="#butler" aria-label="打开管家">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>管家</span>
+  </a>
+  <a class="af-fab af-fab--on" href="#butler-closed" aria-label="收起管家面板">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>收起</span>
+  </a>
+</div>
+
+<script src="assets/shell.js?v=11"></script>
+<script src="assets/swatch.js?v=11"></script>
+</body>
+</html>

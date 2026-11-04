@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IM 里跟管家说话 · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css?v=11">
+<link rel="stylesheet" href="styles/theme-neutral.css?v=11" id="af-theme">
+<link rel="stylesheet" href="assets/app.css?v=11">
+</head>
+<body data-nav="butler-im">
+<div class="af-shell">
+  <main class="af-main">
+
+    <header class="af-head">
+      <a class="af-btn af-btn--ghost" href="notifications.html">← 通知出口</a>
+      <h1 class="af-head__title">IM 里跟管家说话</h1>
+      <span class="af-tag">飞书 · AgentFleet 开发群</span>
+      <span class="af-head__spacer"></span>
+      <a class="af-btn af-btn--ghost" href="inbox.html">去收件箱</a>
+    </header>
+
+    <div class="af-filters">
+      <span class="af-filters__k">这一页是演示</span>
+      <span class="af-2xs af-dim">
+        左边是群里实际会收到的样子，右边是同一条对话在 Hub 里留下的记录。
+        关键差别就在右边 —— <b>IM 里说的每句话都留痕，但决定仍记在 Hub</b>。
+      </span>
+    </div>
+
+    <div class="af-body">
+      <div style="padding:20px 20px 64px">
+        <div class="af-split" style="padding:0;grid-template-columns:minmax(0,1fr) 360px">
+
+          <!-- 左：IM 里长什么样 -->
+          <section class="af-region">
+            <div class="af-region__head">
+              <h2 class="af-region__title">群里的对话</h2>
+              <span class="af-region__note">管家以机器人身份出现，@它才回</span>
+            </div>
+            <div class="af-region__body">
+              <div class="af-im">
+
+                <!-- 系统推送：任务完成 -->
+                <div class="af-im__msg af-im__msg--bot">
+                  <div class="af-im__who">AgentFleet 管家 <span class="af-im__bot">机器人</span></div>
+                  <div class="af-im__bubble af-im__bubble--card">
+                    <div class="af-im__card-h">任务完成 · 待验收</div>
+                    <div class="af-im__card-t">修复 git 面板在超大 diff 下卡死</div>
+                    <div class="af-im__card-meta">device-b · 耗时 18 分钟 · 改了 3 个文件</div>
+                    <div class="af-im__card-meta">验收条件：5000 行以上 diff 首屏 1 秒内渲染 · <span class="af-im__ok">已通过</span></div>
+                    <a class="af-im__btn af-im__btn--ghost" href="task.html">看 diff 并验收（在 Hub 打开）</a>
+                  </div>
+                </div>
+
+                <!-- 人问 -->
+                <div class="af-im__msg af-im__msg--me">
+                  <div class="af-im__who">你</div>
+                  <div class="af-im__bubble">@管家 这个改了什么，为什么要动渲染路径</div>
+                </div>
+
+                <!-- 管家答 -->
+                <div class="af-im__msg af-im__msg--bot">
+                  <div class="af-im__who">AgentFleet 管家 <span class="af-im__bot">机器人</span></div>
+                  <div class="af-im__bubble">
+                    原来是整段渲染，5000 行 diff 会一次生成 5000 个 DOM 节点，主线程卡住 3 秒多。
+                    这次改成按可视区渲染，只生成屏幕里那几十行。<br><br>
+                    主要动的是 <span class="af-mono af-xs">virtualList.ts</span>，
+                    另外两个文件是它的测试。
+                  </div>
+                </div>
+
+                <!-- 人继续问，管家给建议 -->
+                <div class="af-im__msg af-im__msg--me">
+                  <div class="af-im__who">你</div>
+                  <div class="af-im__bubble">行，那验收吧</div>
+                </div>
+
+                <div class="af-im__msg af-im__msg--bot">
+                  <div class="af-im__who">AgentFleet 管家 <span class="af-im__bot">机器人</span></div>
+                  <div class="af-im__bubble af-im__bubble--warn">
+                    <b>合并这一步我不能在群里代你点。</b>
+                    这次改的是渲染核心，diff 有 42 行增减，气泡里看不完。
+                    我把它标成「你要验收」，链接放这：
+                    <div style="margin-top:8px">
+                      <a class="af-im__btn" href="task.html">到 Hub 看完整 diff（#1042）</a>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 这就是边界：可对话，不可代批 -->
+                <div class="af-im__msg af-im__msg--bot">
+                  <div class="af-im__who">AgentFleet 管家 <span class="af-im__bot">机器人</span></div>
+                  <div class="af-im__bubble">
+                    另外，我看到有两条任务都卡在同一个「测试环境起不来」上。
+                    <b>要不要我把它们合成一条处理？</b> 回「好」我就做，这条不算不可逆，随时能拆回去。
+                  </div>
+                </div>
+
+                <div class="af-im__msg af-im__msg--me">
+                  <div class="af-im__who">你</div>
+                  <div class="af-im__bubble">好</div>
+                </div>
+
+                <div class="af-im__msg af-im__msg--bot">
+                  <div class="af-im__who">AgentFleet 管家 <span class="af-im__bot">机器人</span></div>
+                  <div class="af-im__bubble af-im__bubble--ok">
+                    已合并，新任务 #1051「修测试环境的依赖安装超时」，原来两条标为合并来源。
+                    这次动作记在项目时间线里了，在 Hub 能看到我怎么判断的。
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          </section>
+
+          <!-- 右：Hub 里留下什么 -->
+          <div class="af-split__col">
+
+            <section class="af-region">
+              <div class="af-region__head">
+                <h2 class="af-region__title">Hub 里留下了什么</h2>
+              </div>
+              <div class="af-region__body af-region__body--flush">
+                <table class="af-table">
+                  <tbody>
+                    <tr>
+                      <td class="af-xs">你问过的话</td>
+                      <td class="af-xs"><span class="af-tag af-tag--done">留痕</span></td>
+                    </tr>
+                    <tr>
+                      <td class="af-xs">管家的回答</td>
+                      <td class="af-xs"><span class="af-tag af-tag--done">留痕</span></td>
+                    </tr>
+                    <tr>
+                      <td class="af-xs">合并两条任务</td>
+                      <td class="af-xs"><span class="af-tag af-tag--done">留痕</span></td>
+                    </tr>
+                    <tr>
+                      <td class="af-xs">合并到主干</td>
+                      <td class="af-xs"><span class="af-tag af-tag--failed">不允许</span></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <!-- 这一张是整个 IM 集成的核心论证 -->
+            <section class="af-region">
+              <div class="af-region__head">
+                <h2 class="af-region__title">为什么合并不能在群里点</h2>
+              </div>
+              <div class="af-region__body">
+                <div class="af-prose" style="font-size:var(--t-sm)">
+                  <p>
+                    群消息是<b>为了快速扫一眼</b>而设计的：短、密、一屏好几条。
+                    一份 42 行增减的 diff 塞进去，你要么划过去，要么直接点批准。
+                  </p>
+                  <p>
+                    而合并是不可逆的。代码进了主干，
+                    之后所有从这里开出来的任务都带着它。
+                    <b>一个看不完的东西，不该有一个这么重的按钮。</b>
+                  </p>
+                  <p>
+                    所以分工是：<b>群用来知道「有事」，Hub 用来决定「怎么办」。</b>
+                  </p>
+                </div>
+              </div>
+            </section>
+
+            <section class="af-region">
+              <div class="af-region__head">
+                <h2 class="af-region__title">什么能在群里直接做</h2>
+                <span class="af-region__note">判据只有一条：做错了能不能退回来</span>
+              </div>
+              <div class="af-region__body af-region__body--flush">
+                <table class="af-table">
+                  <tbody>
+                    <tr><td class="af-xs">问情况、让它解释</td><td class="af-xs"><span class="af-tag af-tag--done">可以</span></td></tr>
+                    <tr><td class="af-xs">让它拆任务、合并重复任务</td><td class="af-xs"><span class="af-tag af-tag--done">可以</span></td></tr>
+                    <tr><td class="af-xs">让它把一条任务标成不需要</td><td class="af-xs"><span class="af-tag af-tag--done">可以</span></td></tr>
+                    <tr><td class="af-xs">合并到主干</td><td class="af-xs"><span class="af-tag af-tag--failed">不行</span></td></tr>
+                    <tr><td class="af-xs">磁盘清理</td><td class="af-xs"><span class="af-tag af-tag--failed">不行</span></td></tr>
+                    <tr><td class="af-xs">升合并权 / 删设备</td><td class="af-xs"><span class="af-tag af-tag--failed">不行</span></td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <div class="af-callout af-callout--info">
+              <span class="af-callout__k">机器人不是第二个管家</span>
+              <span>
+                群里说话的还是项目那个管家，记忆是同一份。
+                不会出现「群里的管家和 Hub 里的管家说法不一样」。
+              </span>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <aside class="af-drawer" id="butler" aria-label="管家">
+    <div class="af-drawer__head">
+      <div>
+        <h2 class="af-drawer__title">和群里是同一个我</h2>
+        <div class="af-drawer__sub">记忆：项目库 + MEMORY.md</div>
+      </div>
+      <a class="af-btn af-btn--ghost af-drawer__close" href="#butler-closed" aria-label="关闭管家面板">关闭</a>
+    </div>
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">管家</span>
+        <span class="af-msg__body">
+          你在群里问的那句，我这里也记着。不会因为换了地方，我说的就不是同一件事。
+        </span>
+      </div>
+    </div>
+    <div class="af-drawer__compose">
+      <input class="af-input" type="text" placeholder="在 Hub 里问同一件事" aria-label="对管家说话">
+      <button class="af-btn af-btn--primary" type="button">发送</button>
+    </div>
+  </aside>
+
+  <a class="af-fab af-fab--off" href="#butler" aria-label="打开管家">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>管家</span>
+  </a>
+  <a class="af-fab af-fab--on" href="#butler-closed" aria-label="收起管家面板">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>收起</span>
+  </a>
+</div>
+
+<script src="assets/shell.js?v=11"></script>
+<script src="assets/swatch.js?v=11"></script>
+</body>
+</html>

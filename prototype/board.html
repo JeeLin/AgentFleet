@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>看板 · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css?v=11">
+<link rel="stylesheet" href="styles/theme-neutral.css?v=11" id="af-theme">
+<link rel="stylesheet" href="assets/app.css?v=11">
+</head>
+<body data-nav="board">
+<div class="af-shell">
+  <main class="af-main">
+
+    <header class="af-head">
+      <!-- 项目切换器：左栏收起来之后就靠它换项目（全屏、拖窄、手机都是这个场景）。
+           它替换了原来写死的项目名，不是并排放 —— 项目名本身就是那个按钮。 -->
+      <div class="af-switch" id="b-switch" data-open="false">
+        <button class="af-switch__btn" id="b-switch-btn" type="button"
+                aria-haspopup="true" aria-expanded="false" aria-label="切换项目">
+          <span class="af-dot dot-a" id="b-switch-dot" aria-hidden="true"></span>
+          <h1 class="af-head__title af-switch__title" id="b-switch-name">AgentFleet</h1>
+          <span class="af-switch__chev" aria-hidden="true"></span>
+        </button>
+        <div class="af-switch__menu" id="b-switch-menu" role="menu" aria-label="项目列表"></div>
+      </div>
+      <span class="af-tag" id="b-shape">中心式项目</span>
+      <span class="af-tag" id="b-bound">3 台已绑定</span>
+      <span class="af-head__spacer"></span>
+      <a class="af-btn af-btn--ghost" href="#filter">筛选 2</a>
+      <a class="af-btn af-btn--ghost" href="timeline.html">时间线</a>
+      <a class="af-btn af-btn--ghost" href="execution.html">执行监控</a>
+      <!-- 会话属于项目层：一个项目可以同时有好几个会话（不同设备、不同任务），
+           所以入口在项目页，而不是绑死在某次执行上。 -->
+      <a class="af-btn af-btn--ghost" href="session.html">会话</a>
+      <!-- 定时规则是按项目走的（一个项目一套），所以在项目页也能进，
+           不必先回全站的管理面。 -->
+      <a class="af-btn af-btn--ghost" href="schedules.html">定时任务</a>
+      <!-- 项目设置：合并权、隔离、清理、主题色、归档都是这个项目的。
+           放页头，因为「这个项目的设置」最自然的找法就是在项目页找。 -->
+      <a class="af-btn af-btn--ghost" href="project-settings.html">项目设置</a>
+      <a class="af-btn af-btn--primary" href="task.html">新建任务</a>
+    </header>
+
+    <!-- 项目摘要四行：每行回答一个问题，每行都能点进去 -->
+    <section class="af-meters" id="b-meters" aria-label="项目摘要，四行"></section>
+
+    <!-- 生效中的过滤：过滤不是附加功能，看板超过 30 张卡就必须靠它 -->
+    <div class="af-filters" id="filter"><!-- 由 board.js 按项目填 --></div>
+
+    <!-- 隔离式项目专用：代码不落 Hub，但 diff 按需拉取看得见。这件事要在看板顶上就说清 -->
+    <div class="af-callout af-callout--warn" id="b-isolation" hidden>
+      <span class="af-callout__k">代码不落 Hub，但你都看得见</span>
+      <span class="af-2xs"></span>
+    </div>
+
+    <div class="af-body af-body--fill">
+      <div class="af-board">
+        <section class="af-col" data-state="pending" aria-labelledby="c-pending">
+          <div class="af-col__head">
+            <span class="af-shape af-shape--pending" aria-hidden="true"></span>
+            <span class="af-col__name" id="c-pending">待办</span>
+            <span class="af-col__count" id="bcount-pending" aria-label="0 张">0</span>
+          </div>
+          <div class="af-col__body" id="bcol-pending"></div>
+        </section>
+
+        <section class="af-col" data-state="queued" aria-labelledby="c-queued">
+          <div class="af-col__head">
+            <span class="af-shape af-shape--queued" aria-hidden="true"></span>
+            <span class="af-col__name" id="c-queued">排队中</span>
+            <span class="af-col__count" id="bcount-queued" aria-label="0 张">0</span>
+          </div>
+          <div class="af-col__body" id="bcol-queued"></div>
+        </section>
+
+        <section class="af-col" data-state="running" aria-labelledby="c-running">
+          <div class="af-col__head">
+            <span class="af-shape af-shape--running" aria-hidden="true"></span>
+            <span class="af-col__name" id="c-running">执行中</span>
+            <span class="af-col__count" id="bcount-running" aria-label="0 张">0</span>
+          </div>
+          <div class="af-col__body" id="bcol-running"></div>
+        </section>
+
+        <section class="af-col" data-state="review" aria-labelledby="c-review">
+          <div class="af-col__head">
+            <span class="af-shape af-shape--review" aria-hidden="true"></span>
+            <span class="af-col__name" id="c-review">待验收</span>
+            <span class="af-col__count" id="bcount-review" aria-label="0 张">0</span>
+          </div>
+          <div class="af-col__body" id="bcol-review"></div>
+        </section>
+
+        <section class="af-col" data-state="done" aria-labelledby="c-done">
+          <div class="af-col__head">
+            <span class="af-shape af-shape--done" aria-hidden="true"></span>
+            <span class="af-col__name" id="c-done">已完成</span>
+            <span class="af-col__count" id="bcount-done" aria-label="0 张">0</span>
+          </div>
+          <div class="af-col__body" id="bcol-done"></div>
+        </section>
+
+        <section class="af-col" data-state="failed" aria-labelledby="c-failed">
+          <div class="af-col__head">
+            <span class="af-shape af-shape--failed" aria-hidden="true"></span>
+            <span class="af-col__name" id="c-failed">失败</span>
+            <span class="af-col__count" id="bcount-failed" aria-label="0 张">0</span>
+          </div>
+          <div class="af-col__body" id="bcol-failed"></div>
+        </section>
+
+      </div>
+    </div>
+  </main>
+
+  <!-- 管家：右下角一个按钮。点开是右侧 420px 面板。
+       面板里只有「确认 / 改派 / 取消 / 澄清」——挑设备是调度器的活，不在这里。 -->
+  <aside class="af-drawer" id="butler" aria-label="管家">
+    <div class="af-drawer__head">
+      <div>
+        <h2 class="af-drawer__title" id="b-butler-title">对这个项目说话</h2>
+        <div class="af-drawer__sub" id="b-butler-sub">
+          AgentFleet 的管家 · 记忆存在项目库和 <span class="af-mono">.afleet/MEMORY.md</span>
+        </div>
+      </div>
+      <a class="af-btn af-btn--ghost af-drawer__close" href="#butler-closed" aria-label="关闭管家面板">关闭</a>
+    </div>
+
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">你</span>
+        <span class="af-msg__body">看板卡片上要能直接看出「这个任务是怎么来的」，别让我点进去查。</span>
+      </div>
+      <div class="af-msg">
+        <span class="af-msg__who">管家</span>
+        <span class="af-msg__body">拆成两个任务。第二个有个点我不确定，所以先问你，没有先派活。</span>
+      </div>
+
+      <div class="af-draft">
+        <div class="af-draft__head">建议派活 · 等你确认 2 条</div>
+        <div class="af-draft__row">
+          <span class="af-tag af-tag--done">1</span>
+          <span style="flex:1">给看板卡片加因果链摘要</span>
+          <span class="af-2xs af-mute">可改文档</span>
+        </div>
+        <div class="af-draft__row">
+          <span class="af-tag af-tag--warn">2</span>
+          <span style="flex:1">隔离式项目：对话也拉不到时怎么办</span>
+          <span class="af-2xs af-mute">需澄清</span>
+        </div>
+
+        <div class="af-callout af-callout--info">
+          <span class="af-callout__k">关于第 2 条</span>
+          <span>
+            隔离式项目的约定是「Hub 拿不到完整仓库，但对话、本次 diff、总结都能看」，
+            这些是按需向设备拉取的，不长期存档。如果连对话都拉不到，它就和「Hub 什么都不知道」没区别了。
+            你要的是哪一种？
+          </span>
+          <div class="af-row af-row--tight">
+            <button class="af-btn af-btn--sm" type="button">拉取失败时也要说清为什么</button>
+            <button class="af-btn af-btn--sm" type="button">我其实想禁止对话外流</button>
+          </div>
+        </div>
+
+        <div class="af-row af-row--tight">
+          <button class="af-btn af-btn--primary af-btn--sm" type="button">下发第 1 条</button>
+          <button class="af-btn af-btn--sm" type="button">两条都下发</button>
+          <button class="af-btn af-btn--ghost af-btn--sm" type="button">都不要</button>
+        </div>
+      </div>
+
+      <div class="af-callout">
+        <span class="af-callout__k">管家不做的事</span>
+        <span class="af-2xs af-dim">
+          它不挑设备，也不改代码。下发之后由调度器按「任务约束 → 项目隔离策略 → 能力与负载」选机器，
+          任务进了看板你就看得见。
+        </span>
+      </div>
+    </div>
+
+    <div class="af-drawer__compose">
+      <input class="af-input" type="text"
+             placeholder="比如：把失败原因写到卡面上" aria-label="对管家说话">
+      <button class="af-btn af-btn--primary" type="button">发送</button>
+    </div>
+  </aside>
+
+  <!-- 一个按钮两种状态：关着是打开，开着是收起。用 :target 实现，零脚本。 -->
+  <a class="af-fab af-fab--off" href="#butler" id="b-butler-fab" aria-label="打开管家，有 2 条等确认的派活">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>管家</span>
+    <span class="af-fab__badge" id="b-butler-badge">2 条待确认</span>
+  </a>
+  <a class="af-fab af-fab--on" href="#butler-closed" aria-label="收起管家面板">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>收起</span>
+  </a>
+</div>
+
+<script src="assets/shell.js?v=11"></script>
+<script src="assets/swatch.js?v=11"></script>
+<script src="assets/board.js?v=11"></script>
+</body>
+</html>

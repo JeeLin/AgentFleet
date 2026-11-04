@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>动态 · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css?v=11">
+<link rel="stylesheet" href="styles/theme-neutral.css?v=11" id="af-theme">
+<link rel="stylesheet" href="assets/app.css?v=11">
+</head>
+<body data-nav="inbox-activity">
+<div class="af-shell">
+  <main class="af-main">
+
+    <header class="af-head">
+      <a class="af-btn af-btn--ghost" href="index.html">← 总览</a>
+      <h1 class="af-head__title">收件箱</h1>
+      <span class="af-tag af-tag--warn">12 条未读动态</span>
+      <span class="af-head__spacer"></span>
+      <button class="af-btn af-btn--ghost" type="button">全部标为已读</button>
+    </header>
+
+    <nav class="af-tabs" aria-label="收件箱分区">
+      <a class="af-tab" href="inbox.html">
+        待决策 <span class="af-tab__count">3</span>
+      </a>
+      <a class="af-tab" href="inbox.html?tab=activity" aria-current="page">
+        动态 <span class="af-tab__count">12</span>
+      </a>
+    </nav>
+
+    <div class="af-body">
+      <div style="padding:20px 20px 64px;max-width:960px" class="af-stack">
+
+        <!-- 为什么「动态」值得看：待决策是「你必须动」，动态是「发生了什么」。
+             两者混在一起，完成通知会把真正卡住的事淹掉。 -->
+        <div class="af-callout af-callout--info">
+          <span class="af-callout__k">动态是给你「回头看」的，不是要你现在动手</span>
+          <span>
+            这里放设备上报的事实和已经发生的事：谁跑完了、谁的磁盘告警、谁落后版本。
+            <b>没有一条在等你回复</b> —— 真正会卡住的东西在
+            <a href="inbox.html">待决策</a> 那一区。混在一起，完成通知会把真正要你决定的事淹掉。
+          </span>
+        </div>
+
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">今天</h2>
+            <span class="af-region__note">按时间倒序 · 只列事实，不做判断</span>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <ul class="af-activity">
+
+              <li class="af-activity__row">
+                <span class="af-activity__time af-mono af-2xs">10:42</span>
+                <span class="af-activity__body">
+                  <span class="af-activity__t">
+                    <span class="af-tag af-tag--done">完成</span>
+                    <a href="task.html">#1044 打包并上传</a> 在 device-c 上跑完
+                  </span>
+                  <span class="af-activity__m af-2xs af-mute">
+                    用时 4 分 12 秒 · 产物 3 个 · 已进待验收
+                  </span>
+                </span>
+              </li>
+
+              <li class="af-activity__row">
+                <span class="af-activity__time af-mono af-2xs">10:18</span>
+                <span class="af-activity__body">
+                  <span class="af-activity__t">
+                    <span class="af-tag af-tag--warn">磁盘</span>
+                    device-c 磁盘用量到 <b>93%</b>，超过 90% 水位
+                  </span>
+                  <span class="af-activity__m af-2xs af-mute">
+                    已经不再往这台派新任务。清理要你确认，已进
+                    <a href="inbox.html">待决策</a> —— 不会自己删东西
+                  </span>
+                </span>
+              </li>
+
+              <li class="af-activity__row">
+                <span class="af-activity__time af-mono af-2xs">09:55</span>
+                <span class="af-activity__body">
+                  <span class="af-activity__t">
+                    <span class="af-tag af-tag--butler">管家</span>
+                    写了 1 份总结：#1041 生成月度报告
+                  </span>
+                  <span class="af-activity__m af-2xs af-mute">
+                    「照旧跑了，没改代码，只换了数据源的时间范围」
+                  </span>
+                </span>
+              </li>
+
+              <li class="af-activity__row">
+                <span class="af-activity__time af-mono af-2xs">09:30</span>
+                <span class="af-activity__body">
+                  <span class="af-activity__t">
+                    <span class="af-tag af-tag--failed">失败</span>
+                    <a href="task.html">#1042 批量重试时逐个检查约束</a> 第 2 次失败
+                  </span>
+                  <span class="af-activity__m af-2xs af-mute">
+                    原因：no_capable_device（允许的 3 台都不满足 node ≥ 20）·
+                    <a href="replay.html">看复盘</a>
+                  </span>
+                </span>
+              </li>
+
+              <li class="af-activity__row">
+                <span class="af-activity__time af-mono af-2xs">08:12</span>
+                <span class="af-activity__body">
+                  <span class="af-activity__t">
+                    <span class="af-tag">设备</span>
+                    device-b 上线，afcli 版本 <span class="af-mono af-xs">0.11.2</span>
+                  </span>
+                  <span class="af-activity__m af-2xs af-mute">
+                    比 Hub 版本落后一个小版本。<a href="devices.html">看设备</a>
+                  </span>
+                </span>
+              </li>
+
+            </ul>
+          </div>
+        </section>
+
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">昨天</h2>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <ul class="af-activity">
+
+              <li class="af-activity__row">
+                <span class="af-activity__time af-mono af-2xs">22:04</span>
+                <span class="af-activity__body">
+                  <span class="af-activity__t">
+                    <span class="af-tag af-tag--done">已合入</span>
+                    <a href="task.html">#1039 会话缓存选型</a> 由<b>你</b>合并到 <span class="af-mono af-xs">main</span>
+                  </span>
+                  <span class="af-activity__m af-2xs af-mute">
+                    档 0，合并要你点头 —— 这次是你点的。谁合的都会留痕
+                  </span>
+                </span>
+              </li>
+
+              <li class="af-activity__row">
+                <span class="af-activity__time af-mono af-2xs">18:40</span>
+                <span class="af-activity__body">
+                  <span class="af-activity__t">
+                    <span class="af-tag af-tag--warn">清理</span>
+                    device-a 上 task-1031 的工作树按「平衡」策略回收，腾出 6.2 GB
+                  </span>
+                  <span class="af-activity__m af-2xs af-mute">
+                    产物清掉、缓存留着。产物被清是因为<b>缓存不是产物</b>
+                  </span>
+                </span>
+              </li>
+
+              <li class="af-activity__row">
+                <span class="af-activity__time af-mono af-2xs">16:20</span>
+                <span class="af-activity__body">
+                  <span class="af-activity__t">
+                    <span class="af-tag">技能</span>
+                    任务 #1044 经技能 <span class="af-mono af-xs">build-host-ssh</span> 连接了 build-01.internal
+                  </span>
+                  <span class="af-activity__m af-2xs af-mute">
+                    1 次连接、3 条操作，全部进了轨迹。<a href="replay.html">看复盘</a> ·
+                    <a href="skills.html">看凭据</a>
+                  </span>
+                </span>
+              </li>
+
+            </ul>
+          </div>
+        </section>
+
+        <!-- 边界：什么不会出现在动态里。和 inbox.html 那张表呼应 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">哪些事不会出现在这里</h2>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead><tr><th>事情</th><th>为什么不在动态</th></tr></thead>
+              <tbody>
+                <tr>
+                  <td class="af-xs">Agent 的权限确认（能不能执行这条命令）</td>
+                  <td class="af-xs"><b>只在本机问，绝不经过 Hub</b> —— 连记录都不会到这里</td>
+                </tr>
+                <tr>
+                  <td class="af-xs">业务决策（用 Redis 还是 SQLite）</td>
+                  <td class="af-xs">那是「等你决定」的，在<a href="inbox.html">待决策</a>，不在动态</td>
+                </tr>
+                <tr>
+                  <td class="af-xs">定时任务的每一次触发</td>
+                  <td class="af-xs">太吵。只在失败或产物有变化时才进动态</td>
+                </tr>
+                <tr>
+                  <td class="af-xs">你自己改设置</td>
+                  <td class="af-xs">你刚做过的事不需要被通知一遍</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <div class="af-row">
+          <a class="af-btn af-btn--primary" href="inbox.html">看 3 条待决策</a>
+          <a class="af-btn af-btn--ghost" href="notifications.html">通知出口</a>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+  <aside class="af-drawer" id="butler" aria-label="管家">
+    <div class="af-drawer__head">
+      <div>
+        <h2 class="af-drawer__title">这 12 条里有 1 条值得看</h2>
+        <div class="af-drawer__sub">其余都是「跑完了」，扫一眼就行</div>
+      </div>
+      <a class="af-btn af-btn--ghost af-drawer__close" href="#butler-closed" aria-label="关闭管家面板">关闭</a>
+    </div>
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">管家</span>
+        <span class="af-msg__body">
+          device-c 那条磁盘告警是整个项目的瓶颈 —— 那台机器已经不接新活了。
+          其他都只是记录，不用管。
+        </span>
+      </div>
+    </div>
+    <div class="af-drawer__compose">
+      <input class="af-input" type="text" placeholder="问某条动态是怎么回事" aria-label="对管家说话">
+      <button class="af-btn af-btn--primary" type="button">发送</button>
+    </div>
+  </aside>
+
+  <a class="af-fab af-fab--off" href="#butler" aria-label="打开管家，有 1 条值得看">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>管家</span>
+    <span class="af-fab__badge">12</span>
+  </a>
+  <a class="af-fab af-fab--on" href="#butler-closed" aria-label="收起管家面板">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>收起</span>
+  </a>
+</div>
+
+<script src="assets/shell.js?v=11"></script>
+<script src="assets/swatch.js?v=11"></script>
+</body>
+</html>

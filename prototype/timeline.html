@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>时间线 · AgentFleet · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css?v=11">
+<link rel="stylesheet" href="styles/theme-neutral.css?v=11" id="af-theme">
+<link rel="stylesheet" href="assets/app.css?v=11">
+</head>
+<body data-nav="board">
+<div class="af-shell">
+  <main class="af-main">
+
+    <header class="af-head">
+      <span class="af-dot dot-a" aria-hidden="true"></span>
+      <h1 class="af-head__title">AgentFleet</h1>
+      <span class="af-tag">中心式项目</span>
+      <span class="af-head__spacer"></span>
+      <a class="af-btn af-btn--ghost" href="board.html">看板</a>
+      <span class="af-tag">时间线</span>
+      <a class="af-btn af-btn--ghost" href="execution.html">执行监控</a>
+    </header>
+
+    <div class="af-filters">
+      <span class="af-filters__k">这是第二视图</span>
+      <span class="af-2xs af-dim">
+        看板回答「现在卡在哪」，时间线回答「什么时候发生了什么」。
+        两者是同一批事实的两种投影，不是两套数据 —— 切视图不改变任何东西，只改变排布。
+      </span>
+      <span class="af-spacer"></span>
+      <span class="af-2xs af-mute">按时间倒序 · 最近 3 天</span>
+    </div>
+
+    <div class="af-body">
+      <div style="padding:20px 20px 64px">
+        <div class="af-split" style="padding:0;grid-template-columns:minmax(0,1fr) 320px">
+
+          <section class="af-region">
+            <div class="af-region__head">
+              <h2 class="af-region__title">发生了什么</h2>
+              <span class="af-region__note">人的话、管家的判断、任务的每一次状态变化，都在同一条线上</span>
+            </div>
+            <div class="af-region__body">
+              <ul class="af-timeline">
+
+                <li class="af-tl">
+                  <span class="af-tl__time">今天 10:18</span>
+                  <span class="af-tl__rail"><span class="af-tl__node" style="background:var(--running)"></span></span>
+                  <span class="af-tl__body">
+                    <span class="af-tl__title">「修复 git 面板卡死」第 2 次执行开始</span>
+                    <span class="af-tl__detail">
+                      换了 device-b，接力复用了 812 MB 依赖缓存 ·
+                      <a href="execution.html">看实时</a>
+                    </span>
+                  </span>
+                </li>
+
+                <li class="af-tl">
+                  <span class="af-tl__time">今天 09:12</span>
+                  <span class="af-tl__rail"><span class="af-tl__node" style="background:var(--done)"></span></span>
+                  <span class="af-tl__body">
+                    <span class="af-tl__title">「项目实体与绑定固定目录」合入主干</span>
+                    <span class="af-tl__detail">由你验收 · 合并权档 0 · 分支 task/1038-project 已删除</span>
+                  </span>
+                </li>
+
+                <li class="af-tl">
+                  <span class="af-tl__time">今天 08:47</span>
+                  <span class="af-tl__rail"><span class="af-tl__node" style="background:var(--butler)"></span></span>
+                  <span class="af-tl__body">
+                    <span class="af-tl__title">管家写了周总结</span>
+                    <span class="af-tl__detail">
+                      「这周在收口 v0.6.0，剩下 3 个问题，其中 2 个卡在测试环境」
+                      · <a href="#summary">看全文</a>
+                    </span>
+                  </span>
+                </li>
+
+                <li class="af-tl">
+                  <span class="af-tl__time">今天 07:30</span>
+                  <span class="af-tl__rail"><span class="af-tl__node" style="background:var(--failed)"></span></span>
+                  <span class="af-tl__body">
+                    <span class="af-tl__title">「批量重试时逐个检查约束」失败</span>
+                    <span class="af-tl__detail">
+                      没有可用设备 · 允许的 3 台都不满足 node ≥ 20 ·
+                      停在失败列，没有自动回待办
+                    </span>
+                  </span>
+                </li>
+
+                <li class="af-tl">
+                  <span class="af-tl__time">昨天 18:30</span>
+                  <span class="af-tl__rail"><span class="af-tl__node" style="background:var(--done)"></span></span>
+                  <span class="af-tl__body">
+                    <span class="af-tl__title">「会话起点 base_commit 落到执行记录」合入主干</span>
+                    <span class="af-tl__detail">按预设规则自动验收（判定条件全绿且只改了 src/）</span>
+                  </span>
+                </li>
+
+                <li class="af-tl">
+                  <span class="af-tl__time">昨天 16:11</span>
+                  <span class="af-tl__rail"><span class="af-tl__node" style="background:var(--butler)"></span></span>
+                  <span class="af-tl__body">
+                    <span class="af-tl__title">管家建了任务「修复 git 面板卡死」，带三个约束</span>
+                    <span class="af-tl__detail">
+                      允许设备 device-a、device-b · 允许 Agent claude、opencode ·
+                      完成判定：5000 行以上 diff 首屏 1 秒内渲染
+                    </span>
+                  </span>
+                </li>
+
+                <li class="af-tl">
+                  <span class="af-tl__time">昨天 16:02</span>
+                  <span class="af-tl__rail"><span class="af-tl__node" style="background:var(--butler)"></span></span>
+                  <span class="af-tl__body">
+                    <span class="af-tl__title">你说：「git 面板打开大文件改动就转圈，先修这个」</span>
+                    <span class="af-tl__detail">管家接住这句话，记成意图，没有立刻拆任务</span>
+                  </span>
+                </li>
+
+                <li class="af-tl">
+                  <span class="af-tl__time">昨天 14:20</span>
+                  <span class="af-tl__rail"><span class="af-tl__node" style="background:var(--fg-3)"></span></span>
+                  <span class="af-tl__body">
+                    <span class="af-tl__title">device-c 从 0.6.0 掉线过一次，12 分钟后自己重连</span>
+                    <span class="af-tl__detail">断线期间在上面跑的任务仍存活，面板转只读，没有被迁移</span>
+                  </span>
+                </li>
+
+              </ul>
+            </div>
+          </section>
+
+          <div class="af-split__col">
+
+            <section class="af-region" id="summary">
+              <div class="af-region__head">
+                <h2 class="af-region__title">管家的最近总结</h2>
+                <span class="af-tag af-tag--butler">1 小时前</span>
+              </div>
+              <div class="af-region__body">
+                <div class="af-prose">
+                  <p>
+                    这周主要在收口 <strong>v0.6.0</strong>。看板六列布局和项目实体都合进去了，
+                    剩下 3 个问题。
+                  </p>
+                  <p>
+                    其中 2 个卡在同一处：<strong>测试环境起不来</strong>，不是 Agent 的问题。
+                    两条任务都倒在同一个依赖安装超时上，我把它们都标了「环境损坏」，
+                    没有继续重试 —— 原地重跑三次只是浪费电。
+                  </p>
+                  <p>
+                    第 3 个是 git 面板的大文件渲染，已经换设备重派，现在在跑。
+                  </p>
+                  <p>
+                    下一步建议：先修测试环境，再动剩下的任务。否则新派的任务大概率还是同一个死法。
+                  </p>
+                </div>
+              </div>
+            </section>
+
+            <section class="af-region">
+              <div class="af-region__head">
+                <h2 class="af-region__title">这条线里能看到几类事件</h2>
+              </div>
+              <div class="af-region__body af-region__body--flush">
+                <table class="af-table">
+                  <tbody>
+                    <tr><td><span class="af-shape af-shape--pending" aria-hidden="true"></span></td><td class="af-xs">任务被建出来、改了约束</td></tr>
+                    <tr><td><span class="af-shape af-shape--queued" aria-hidden="true"></span></td><td class="af-xs">选中设备、开始排队</td></tr>
+                    <tr><td><span class="af-shape af-shape--running" aria-hidden="true"></span></td><td class="af-xs">执行开始、换设备重派</td></tr>
+                    <tr><td><span class="af-shape af-shape--review" aria-hidden="true"></span></td><td class="af-xs">跑完进待验收</td></tr>
+                    <tr><td><span class="af-shape af-shape--done" aria-hidden="true"></span></td><td class="af-xs">验收通过、合入主干</td></tr>
+                    <tr><td><span class="af-shape af-shape--failed" aria-hidden="true"></span></td><td class="af-xs">失败，带原因</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="af-region">
+              <div class="af-region__head">
+                <h2 class="af-region__title">设备和管家的动作也在这</h2>
+              </div>
+              <div class="af-region__body">
+                <p style="margin:0;font-size:var(--t-sm);line-height:1.7">
+                  掉线重连、磁盘告警、管家的每一次反问和总结，都记在同一条线上。
+                  这样你回来看的时候，不用分别去设备页和收件箱里拼时间。
+                </p>
+              </div>
+            </section>
+
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <aside class="af-drawer" id="butler" aria-label="管家">
+    <div class="af-drawer__head">
+      <div>
+        <h2 class="af-drawer__title">从这个项目说话</h2>
+        <div class="af-drawer__sub">记忆：项目库 + <span class="af-mono">.afleet/MEMORY.md</span></div>
+      </div>
+      <a class="af-btn af-btn--ghost af-drawer__close" href="#butler-closed" aria-label="关闭管家面板">关闭</a>
+    </div>
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">管家</span>
+        <span class="af-msg__body">
+          时间线上那 8 条，最该看的是今天 07:30 那条失败：
+          三台设备都不满足 node ≥ 20，再重试也是白跑。要我把它转成「给 device-a 装 node」吗？
+        </span>
+      </div>
+      <div class="af-row af-row--tight">
+        <button class="af-btn af-btn--primary af-btn--sm" type="button">转成安装任务</button>
+        <button class="af-btn af-btn--ghost af-btn--sm" type="button">不用</button>
+      </div>
+    </div>
+    <div class="af-drawer__compose">
+      <input class="af-input" type="text" placeholder="问某个时间点发生了什么" aria-label="对管家说话">
+      <button class="af-btn af-btn--primary" type="button">发送</button>
+    </div>
+  </aside>
+
+  <a class="af-fab af-fab--off" href="#butler" aria-label="打开管家，1 条建议">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>管家</span>
+    <span class="af-fab__badge">1 条建议</span>
+  </a>
+  <a class="af-fab af-fab--on" href="#butler-closed" aria-label="收起管家面板">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>收起</span>
+  </a>
+</div>
+
+<script src="assets/shell.js?v=11"></script>
+<script src="assets/swatch.js?v=11"></script>
+</body>
+</html>

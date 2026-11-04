@@ -1,89 +1,359 @@
 <!DOCTYPE html>
-<html class="settings" lang="zh-CN" data-state="online">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>设置 · AgentFleet</title>
-<link rel="stylesheet" href="assets/tokens.css">
-<link rel="stylesheet" href="assets/components.css">
-<style>
-  .srow { display: flex; align-items: flex-start; gap: var(--af-space-6); padding: var(--af-space-5) 0; border-bottom: 1px solid var(--af-border-subtle); }
-  .srow__t { flex: 0 0 220px; }
-  .srow__c { flex: 1 1 auto; max-width: 560px; display: flex; flex-direction: column; gap: var(--af-space-2); }
-</style>
+<link rel="stylesheet" href="assets/tokens.css?v=11">
+<link rel="stylesheet" href="styles/theme-neutral.css?v=11" id="af-theme">
+<link rel="stylesheet" href="assets/app.css?v=11">
 </head>
-<body data-page="settings">
-<div data-shell>
+<body data-nav="settings">
+<div class="af-shell">
+  <main class="af-main">
 
-  <div class="af-page" style="max-width:900px">
-    <div class="af-page__head">
+    <header class="af-head">
+      <a class="af-btn af-btn--ghost" href="index.html">← 总览</a>
+      <h1 class="af-head__title">设置</h1>
+      <span class="af-head__sub">项目级的东西放项目里，这里放全局的</span>
+      <span class="af-head__spacer"></span>
+      <a class="af-btn af-btn--ghost" href="notifications.html">通知出口</a>
+      <a class="af-btn af-btn--ghost" href="integrations.html">外部来源</a>
+      <a class="af-btn af-btn--primary" href="#appearance">保存</a>
+    </header>
+
+    <div class="af-body">
+      <div style="padding:20px 20px 64px" class="af-stack" style="max-width:960px">
+
+        <!-- 合并权：三档，默认最保守，升档必须人操作 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">AgentFleet 的合并权</h2>
+            <span class="af-region__note">项目级设置 · 默认档 0 · 按项目改在<a href="project-settings.html">项目设置</a></span>
+          </div>
+          <div class="af-region__body af-stack">
+            <p style="margin:0;font-size:var(--t-sm);line-height:1.7">
+              管家能不能自己合主干，这件事在没用过之前答不了，所以做成三档。
+              档位是项目级的：不同项目该有不同答案。升档只能你来操作，管家不能自己申请升档。
+            </p>
+            <div class="af-region">
+              <div class="af-region__body af-region__body--flush">
+                <table class="af-table">
+                  <thead><tr><th>档</th><th>管家能做什么</th><th>适合什么时候</th><th></th></tr></thead>
+                  <tbody>
+                    <tr>
+                      <td><strong>档 0</strong> <span class="af-tag af-tag--done">当前</span></td>
+                      <td>只能你或预设规则合并。管家能给判断、能推你一把，合主干要你点头</td>
+                      <td class="af-xs af-dim">起步阶段，还没建立信任</td>
+                      <td><button class="af-btn af-btn--sm" type="button" disabled>已选中</button></td>
+                    </tr>
+                    <tr>
+                      <td><strong>档 1</strong></td>
+                      <td>管家可以合并，但每次都写进总结并通知你</td>
+                      <td class="af-xs af-dim">用过一段时间，想省点操作</td>
+                      <td><button class="af-btn af-btn--sm" type="button">升到这一档</button></td>
+                    </tr>
+                    <tr>
+                      <td><strong>档 2</strong></td>
+                      <td>管家可以合并，只通知，不写总结</td>
+                      <td class="af-xs af-dim">已经信任，只要知道发生过</td>
+                      <td><button class="af-btn af-btn--sm" type="button">升到这一档</button></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div class="af-callout af-callout--warn">
+              <span class="af-callout__k">为什么默认最保守</span>
+              <span>
+                合主干是唯一会污染主干的动作。其他所有错误都还能退回到某一次执行，
+                只有合错了会变成历史里的一行。所以默认不给这个权力。
+              </span>
+            </div>
+            <p class="af-xs af-dim" style="margin:0">
+              不管哪一档，合并都要留痕：谁合的、什么时候、把哪个分支合到了哪。
+            </p>
+          </div>
+        </section>
+
+        <!-- 超时降级：按可不可逆区分 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">决策请求超时之后怎么处理</h2>
+            <span class="af-region__note">按「做错了能不能退回来」区分</span>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead><tr><th>请求类型</th><th>超时默认</th><th>为什么</th></tr></thead>
+              <tbody>
+                <tr>
+                  <td>业务决策（用 Redis 还是 SQLite）</td>
+                  <td><span class="af-tag af-tag--done">按标注的默认项继续</span></td>
+                  <td class="af-xs">做错了下一步还能改回来，让执行继续比停住更有价值。没标默认项就中止</td>
+                </tr>
+                <tr>
+                  <td>磁盘清理确认</td>
+                  <td><span class="af-tag af-tag--failed">保持中止，不自动清理</span></td>
+                  <td class="af-xs">删了就没了。不可逆操作不该有「超时默认执行」</td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="af-xs af-mute" style="margin:12px 0 0;padding:0 12px 12px">
+              两种情况都要留痕（「超时未答，按默认继续」/「超时未答，保持中止」），
+              收件箱里那条也不会消失——你回来还看得见它发生过什么。
+            </p>
+          </div>
+        </section>
+
+        <!-- 磁盘：配额 / 调度 / 清理三件事分开 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">磁盘</h2>
+            <span class="af-region__note">配额决定允许多大，调度决定现在跑不跑得动，清理决定跑完怎么收回</span>
+          </div>
+          <div class="af-region__body af-stack">
+            <div class="af-groups">
+              <div class="af-field">
+                <span class="af-field__label">超过多少就不再往这台派新任务</span>
+                <div class="af-row af-row--tight">
+                  <input class="af-input" value="90" style="width:88px" aria-label="磁盘水位阈值百分比">
+                  <span class="af-xs af-dim">%</span>
+                </div>
+                <span class="af-field__hint">磁盘满了不是性能问题，是任务会静默失败的问题，所以它参与派活前的过滤</span>
+              </div>
+              <div class="af-field">
+                <span class="af-field__label">默认清理策略</span>
+                <select class="af-select" aria-label="默认清理策略">
+                  <option>平衡：缓存留 7 天，产物跑完即清</option>
+                  <option>保守：缓存留 30 天，产物留 3 个做诊断</option>
+                  <option>激进：缓存和产物都尽快清</option>
+                </select>
+                <span class="af-field__hint">绑定项目时可以逐个改</span>
+              </div>
+            </div>
+            <div class="af-callout">
+              <span class="af-callout__k">依赖目录永远不搬</span>
+              <span>
+                <span class="af-mono af-xs">node_modules</span> 这类目录按 lockfile 在本地重建，不在设备间搬运。
+                x86-64 和 aarch64 装出来的不是同一份东西，根本不存在「同一份依赖」可以搬。
+                复用缓存按 lockfile 哈希命中，产物随工作树一起清。
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <!-- 通知：外部 issue 只做单向 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">通知出口</h2>
+          </div>
+          <div class="af-region__body af-stack">
+            <div class="af-row">
+              <span class="af-switch" role="switch" aria-checked="true">
+                <span class="af-switch__track" aria-hidden="true"></span>
+                <span>站内收件箱</span>
+              </span>
+              <span class="af-switch" role="switch" aria-checked="false">
+                <span class="af-switch__track" aria-hidden="true"></span>
+                <span>邮件</span>
+              </span>
+              <span class="af-switch" role="switch" aria-checked="true">
+                <span class="af-switch__track" aria-hidden="true"></span>
+                <span>IM 机器人</span>
+              </span>
+            </div>
+            <!-- 细节不在这页铺开：邮件/IM 的凭据、推送时机、能做什么不能做什么，
+                 都在「通知出口」页里。这里只留开关，两处不再各写一套。 -->
+            <div class="af-row af-row--tight">
+              <a class="af-btn af-btn--sm" href="notifications.html">配置通知出口</a>
+              <a class="af-btn af-btn--sm af-btn--ghost" href="butler-im.html">看 IM 里长什么样</a>
+              <a class="af-btn af-btn--sm af-btn--ghost" href="integrations.html">外部来源</a>
+            </div>
+            <div class="af-callout">
+              <span class="af-callout__k">外部 issue 只做单向</span>
+              <span>
+                导入会把外部 issue 变成这里的一条任务，之后任务的真身留在 Hub；导出是把结论回写成一条评论。
+                不做双向同步：两边都是真相，就得每次冲突都选一边为准，另一边看到的就是假数据。
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <!-- 外观：这是产品功能，不是原型调试开关。
+             放在设置里，用户找得到、说得清，也不会挡着导航。 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">外观</h2>
+            <span class="af-region__note">只影响这台设备，不同步到别的机器</span>
+          </div>
+          <div class="af-region__body af-stack">
+
+            <!-- 四套配色：直接把「长什么样」摆出来，不靠色块让人猜 -->
+            <div class="af-field">
+              <span class="af-field__label">配色方案</span>
+              <div class="af-themes" role="radiogroup" aria-label="配色方案">
+                <button type="button" class="af-theme" role="radio" data-theme-pick="neutral" aria-checked="true">
+                  <span class="af-theme__prev" aria-hidden="true">
+                    <span class="af-theme__pv-bar"></span>
+                    <span class="af-theme__pv-line"></span>
+                    <span class="af-theme__pv-line af-theme__pv-line--short"></span>
+                  </span>
+                  <span class="af-theme__name">甲 · 中性冷灰</span>
+                  <span class="af-theme__desc">暗色 · 冷调 · 正文 9.3:1</span>
+                </button>
+                <button type="button" class="af-theme" role="radio" data-theme-pick="warm" aria-checked="false">
+                  <span class="af-theme__prev" aria-hidden="true">
+                    <span class="af-theme__pv-bar"></span>
+                    <span class="af-theme__pv-line"></span>
+                    <span class="af-theme__pv-line af-theme__pv-line--short"></span>
+                  </span>
+                  <span class="af-theme__name">乙 · 暖米灰</span>
+                  <span class="af-theme__desc">暗色 · 暖调 · 蓝光更少</span>
+                </button>
+                <button type="button" class="af-theme" role="radio" data-theme-pick="paper" aria-checked="false">
+                  <span class="af-theme__prev" aria-hidden="true">
+                    <span class="af-theme__pv-bar"></span>
+                    <span class="af-theme__pv-line"></span>
+                    <span class="af-theme__pv-line af-theme__pv-line--short"></span>
+                  </span>
+                  <span class="af-theme__name">丙 · 纸白偏冷</span>
+                  <span class="af-theme__desc">亮色 · 冷调 · 正文 12.8:1</span>
+                </button>
+                <button type="button" class="af-theme" role="radio" data-theme-pick="cream" aria-checked="false">
+                  <span class="af-theme__prev" aria-hidden="true">
+                    <span class="af-theme__pv-bar"></span>
+                    <span class="af-theme__pv-line"></span>
+                    <span class="af-theme__pv-line af-theme__pv-line--short"></span>
+                  </span>
+                  <span class="af-theme__name">丁 · 米白偏暖</span>
+                  <span class="af-theme__desc">亮色 · 暖调 · 蓝光更少</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- 跟随系统：很多人要的不是「选一套」，而是「白天亮、晚上暗」 -->
+            <div class="af-row">
+              <span class="af-switch" role="switch" aria-checked="false" id="af-follow-os">
+                <span class="af-switch__track" aria-hidden="true"></span>
+                <span>跟随系统的明暗设置</span>
+              </span>
+              <span class="af-2xs af-mute">打开后不再用上面选的那套，而是按系统自动在冷调 / 暖调里挑</span>
+            </div>
+
+            <div class="af-callout">
+              <span class="af-callout__k">为什么只存在这台设备上</span>
+              <span>
+                配色是看的人的事，不是项目的事。在笔记本上换成暖色，不该把同伴的屏幕也一起改掉。
+                所以这条存浏览器本地，不走 Hub，也不占一次同步。
+              </span>
+            </div>
+
+          </div>
+        </section>
+
+        <!-- 语言：只列真正会做的。
+             摆一个切不动的「English」比不放更糟 —— 用户点完发现没变，就再也不信这个设置了。 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">语言</h2>
+            <span class="af-region__note">影响界面文字、时间和日期格式</span>
+          </div>
+          <div class="af-region__body af-stack">
+
+            <div class="af-field">
+              <label class="af-field__label" for="lang">界面语言</label>
+              <select class="af-input" id="lang" style="max-width:280px">
+                <option value="zh-CN" selected>中文（简体）</option>
+                <option value="zh-TW" disabled>中文（繁體）· 尚未支持</option>
+                <option value="en" disabled>English · 尚未支持</option>
+              </select>
+              <span class="af-field__hint">灰色的不是「即将推出」，是现在就切不了</span>
+            </div>
+
+            <div class="af-callout">
+              <span class="af-callout__k">这一版只有中文，是实话不是偷懒</span>
+              <span>
+                AgentFleet 的整套词都是中文语境里定的：管家、看板、待验收、合并权、隔离式。
+                这些词翻成英文会同时丢掉字面和含义，而术语一旦不一致，同一件事在不同页面就会被当成两件事。
+                所以先只做中文，等术语表稳定了再加别的语言 —— 而不是先摆个开关出来。
+              </span>
+            </div>
+
+            <dl class="af-kv">
+              <dt>时间格式</dt>
+              <dd>跟着语言走。中文下是「今天 10:18」「昨天 18:30」，不用 <span class="af-mono af-xs">2025-11-03 10:18:04</span> 这种</dd>
+              <dt>报告里的时间</dt>
+              <dd>统一按<b>你所在设备的时区</b>显示，库里一律存 UTC。设备跨时区时，输出里的时间也按那个设备换算</dd>
+              <dt>哪些东西不跟语言变</dt>
+              <dd>分支名、<span class="af-mono af-xs">.afleet/</span> 目录名、任务编号、commit message —— 这些是数据不是文案，翻译了就对不上</dd>
+            </dl>
+
+            <div class="af-callout af-callout--info">
+              <span class="af-callout__k">语言是账号级，不是设备级</span>
+              <span>
+                和上面的配色相反：配色存本地，语言跟着账号走。
+                因为语言决定你怎么读那些任务的结论，换台机器还得是同一个语言。
+              </span>
+            </div>
+
+          </div>
+        </section>
+
+        <!-- 不可删的东西，明说 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">哪些东西删不掉</h2>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead><tr><th>对象</th><th>能不能删</th><th>能做什么</th></tr></thead>
+              <tbody>
+                <tr><td>项目</td><td><span class="af-tag af-tag--failed">不能</span></td><td class="af-xs">归档。归档后不出现在列表里、不派新任务，历史和总结全留着，随时能取消归档</td></tr>
+                <tr><td>有历史执行记录的设备</td><td><span class="af-tag af-tag--failed">不能</span></td><td class="af-xs">归档，或先把项目转到别的设备</td></tr>
+                <tr><td>没有历史执行记录的设备</td><td><span class="af-tag af-tag--done">可以</span></td><td class="af-xs">直接删掉</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+      </div>
+    </div>
+  </main>
+
+  <aside class="af-drawer" id="butler" aria-label="管家">
+    <div class="af-drawer__head">
       <div>
-        <h1 class="af-page__title">设置</h1>
-        <p class="af-page__sub">
-          M2 范围——这一页只定结构，不定交互。列在这里是因为导航需要知道它存在，
-          但<b>没有一项是真的能改的</b>：每个控件都禁用，旁边写明它 M2 时会做什么。
-        </p>
+        <h2 class="af-drawer__title">这些设置要不要改</h2>
+        <div class="af-drawer__sub">管家可以解释，但升档、删设备这类事只能你做</div>
       </div>
-      <span class="af-badge af-badge--off" style="margin-bottom:var(--af-space-2)">M2+</span>
+      <a class="af-btn af-btn--ghost af-drawer__close" href="#butler-closed" aria-label="关闭管家面板">关闭</a>
     </div>
-
-    <div class="af-col gap-2">
-      <div class="srow">
-        <div class="srow__t">
-          <b style="color:var(--af-fg-primary)">Hub 连接</b>
-          <div class="af-field__hint">绑定地址、TLS、心跳间隔。</div>
-        </div>
-        <div class="srow__c">
-          <input class="af-input" value="127.0.0.1:8080" disabled aria-label="绑定地址（M2 可改）">
-          <span class="af-field__hint">M2：改这里要重启 Hub，页面上会说明影响。</span>
-        </div>
-      </div>
-
-      <div class="srow">
-        <div class="srow__t">
-          <b style="color:var(--af-fg-primary)">改密码</b>
-          <div class="af-field__hint">单用户唯一凭据。</div>
-        </div>
-        <div class="srow__c">
-          <input class="af-input" type="password" value="000000000000" disabled aria-label="新密码（M2 可改）">
-          <span class="af-field__hint">M2：改完其他会话不失效（会话绑定凭据版本）。</span>
-        </div>
-      </div>
-
-      <div class="srow">
-        <div class="srow__t">
-          <b style="color:var(--af-fg-primary)">模型 API key</b>
-          <div class="af-field__hint">agent 运行时用的密钥。</div>
-        </div>
-        <div class="srow__c">
-          <input class="af-input" type="password" value="sk-…" disabled aria-label="API key（M2 可改）">
-          <span class="af-field__hint">M2：只写不读（回显打点），换 key 不重启会话。</span>
-        </div>
-      </div>
-
-      <div class="srow" style="border-bottom:0">
-        <div class="srow__t">
-          <b style="color:var(--af-fg-primary)">节点凭据</b>
-          <div class="af-field__hint">设备侧 agent 的身份密钥。</div>
-        </div>
-        <div class="srow__c">
-          <div class="af-fp">ed25519:9f3a…c21b</div>
-          <span class="af-field__hint">只显示 fingerprint，永不显示私钥——这里不是保险箱，是展示窗口。</span>
-        </div>
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">管家</span>
+        <span class="af-msg__body">
+          现在档 0，我每次合并前都会停下来等你。等你觉得我判得靠谱了再升档，
+          我不会自己提这个要求。
+        </span>
       </div>
     </div>
-  </div>
+    <div class="af-drawer__compose">
+      <input class="af-input" type="text" placeholder="问某项设置是什么意思" aria-label="对管家说话">
+      <button class="af-btn af-btn--primary" type="button">发送</button>
+    </div>
+  </aside>
 
+  <a class="af-fab af-fab--off" href="#butler" aria-label="打开管家">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>管家</span>
+  </a>
+  <a class="af-fab af-fab--on" href="#butler-closed" aria-label="收起管家面板">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>收起</span>
+  </a>
 </div>
 
-<script src="assets/keynav.js"></script>
-<script src="assets/app.js"></script>
-<script>
-(function () {
-  'use strict';
-  var AF = window.AF;
-  AF.mount('settings', { title: '设置' });
-})();
-</script>
+<script src="assets/shell.js?v=11"></script>
+<script src="assets/swatch.js?v=11"></script>
 </body>
 </html>

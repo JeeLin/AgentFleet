@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>技能与 MCP · AgentFleet</title>
+<link rel="stylesheet" href="assets/tokens.css?v=11">
+<link rel="stylesheet" href="styles/theme-neutral.css?v=11" id="af-theme">
+<link rel="stylesheet" href="assets/app.css?v=11">
+</head>
+<body data-nav="skills">
+<div class="af-shell">
+  <main class="af-main">
+
+    <header class="af-head">
+      <a class="af-btn af-btn--ghost" href="agents.html">← Agent</a>
+      <h1 class="af-head__title">技能与 MCP</h1>
+      <span class="af-tag">3 个凭据</span>
+      <span class="af-tag">2 个 MCP server</span>
+      <span class="af-head__spacer"></span>
+      <a class="af-btn af-btn--ghost" href="settings.html">全局设置</a>
+      <a class="af-btn af-btn--primary" href="#new-cred">新增凭据</a>
+    </header>
+
+    <!-- 这一页的第一件事是回答「为什么不能直接让 agent 连数据库」。
+         不回答这个问题，用户就会觉得「多加一层授予」是多余的繁琐。 -->
+    <div class="af-filters">
+      <span class="af-filters__k">为什么不让 agent 直接连</span>
+      <span class="af-2xs af-dim">
+        直接放开等于给所有 agent 开一条<b>统一的提权通道</b>，而且权限由我们替它维护。
+        所以改成两条路：<b>技能</b>（任务级显式授予，没声明就没有）和
+        <b>MCP</b>（设备上起一个标准 server，任何支持 MCP 的 agent 都能连）。
+        一句话：<b>我们提供通道，但不替 agent 决定能不能用</b> —— 能不能用由人给的任务声明决定。
+      </span>
+    </div>
+
+    <div class="af-body">
+      <div style="padding:20px 20px 64px;max-width:1000px" class="af-stack">
+
+        <!-- ① 安全边界：这一页最重要的内容，放最前面 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">三条写死的边界</h2>
+            <span class="af-region__note">不是策略，是这套东西能成立的前提</span>
+          </div>
+          <div class="af-region__body af-stack">
+            <div class="af-callout">
+              <span class="af-callout__k">① 凭据不进 agent 的上下文</span>
+              <span>
+                agent 说「用 <span class="af-mono af-xs">db-prod</span> 跑这条 SQL」，
+                <b>凭据由设备侧注入</b>，agent 从头到尾看不见连接串和密码。
+                这正是 MCP 相比「把连接串塞进 prompt」的核心价值 ——
+                塞进 prompt 就等于把密码写进了会被记录、会被摘要、会被发到模型服务商的地方。
+              </span>
+            </div>
+            <div class="af-callout">
+              <span class="af-callout__k">② 每一次连接与操作都进轨迹</span>
+              <span>
+                谁、什么时候、连了什么、做了什么 —— 全部记进会话轨迹，和聊天记录一样可复盘。
+                所以下面每一个凭据都能点开看「谁用过它」，不需要另开一套审计日志。
+              </span>
+            </div>
+            <div class="af-callout">
+              <span class="af-callout__k">③ 隔离式项目下，这些操作仍然不出设备</span>
+              <span>
+                技能和 MCP 本来就是设备侧拨号。设备去连内网数据库，
+                流量不经过 Hub、不经过浏览器 —— 和隔离式「代码不出设备」是同一件事。
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <!-- ② 凭据库：这是这一页的主体 -->
+        <section class="af-region" id="new-cred">
+          <div class="af-region__head">
+            <h2 class="af-region__title">凭据库</h2>
+            <span class="af-region__note">存在 Hub，注入在设备 · agent 看不到内容</span>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead>
+                <tr>
+                  <th>名字</th><th>类型</th><th>目标</th><th>谁能用</th><th>最近使用</th><th></th>
+                </tr>
+              </thead>
+              <tbody>
+
+                <tr>
+                  <td>
+                    <div class="af-row af-row--tight">
+                      <span class="af-dot dot-a" aria-hidden="true"></span>
+                      <strong class="af-mono af-xs">db-prod</strong>
+                    </div>
+                    <div class="af-2xs af-mute">只读账号 · 3 个月前录入</div>
+                  </td>
+                  <td class="af-xs">PostgreSQL</td>
+                  <td class="af-xs af-mono">10.0.3.14:5432 / app</td>
+                  <td class="af-xs">
+                    <span class="af-tag af-tag--done">2 个任务被授予</span>
+                  </td>
+                  <td class="af-xs">
+                    2 小时前
+                    <div class="af-2xs af-mute">device-a · task-1039</div>
+                  </td>
+                  <td>
+                    <div class="af-row af-row--tight">
+                      <button class="af-btn af-btn--sm af-btn--ghost" type="button">看使用记录</button>
+                      <button class="af-btn af-btn--sm af-btn--ghost" type="button">轮换</button>
+                    </div>
+                  </td>
+                </tr>
+
+                <tr>
+                  <td>
+                    <div class="af-row af-row--tight">
+                      <span class="af-dot dot-b" aria-hidden="true"></span>
+                      <strong class="af-mono af-xs">s3-artifacts</strong>
+                    </div>
+                    <div class="af-2xs af-mute">写入权限 · 1 个月前录入</div>
+                  </td>
+                  <td class="af-xs">S3 / 兼容对象存储</td>
+                  <td class="af-xs af-mono">s3.internal / fleet-artifacts</td>
+                  <td class="af-xs">
+                    <span class="af-tag af-tag--warn">未被任何任务授予</span>
+                  </td>
+                  <td class="af-xs af-dim">从未使用</td>
+                  <td>
+                    <div class="af-row af-row--tight">
+                      <button class="af-btn af-btn--sm af-btn--ghost" type="button">看使用记录</button>
+                      <button class="af-btn af-btn--sm af-btn--ghost" type="button">轮换</button>
+                    </div>
+                  </td>
+                </tr>
+
+                <tr>
+                  <td>
+                    <div class="af-row af-row--tight">
+                      <span class="af-dot dot-c" aria-hidden="true"></span>
+                      <strong class="af-mono af-xs">build-host-ssh</strong>
+                    </div>
+                    <div class="af-2xs af-mute">密钥 · 5 天前录入</div>
+                  </td>
+                  <td class="af-xs">SSH</td>
+                  <td class="af-xs af-mono">build-01.internal:22</td>
+                  <td class="af-xs">
+                    <span class="af-tag af-tag--done">1 个任务被授予</span>
+                  </td>
+                  <td class="af-xs">昨天 <div class="af-2xs af-mute">device-c · task-1044</div></td>
+                  <td>
+                    <div class="af-row af-row--tight">
+                      <button class="af-btn af-btn--sm af-btn--ghost" type="button">看使用记录</button>
+                      <button class="af-btn af-btn--sm af-btn--ghost" type="button">轮换</button>
+                    </div>
+                  </td>
+                </tr>
+
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 凭据内容永远不显示这件事，要写成可见的状态而不是靠「没做」 -->
+        <div class="af-callout af-callout--warn">
+          <span class="af-callout__k">凭据内容在任何页面上都不显示，包括这一页</span>
+          <span>
+            这一页能看的是「有个叫 db-prod 的东西、连什么、谁用过」。
+            密码和私钥<b>写进去就不再读得出来</b>，连管理员也一样。
+            要换只能「轮换」—— 输入一份新的覆盖旧的，旧的立即作废并记一条轨迹。
+            能读出来的凭据等于能被复制走，那就不是凭据了。
+          </span>
+        </div>
+
+        <!-- ③ 授予：任务级声明，与 required_capabilities 同一套机制 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">授予：任务可以连什么</h2>
+            <span class="af-region__note">任务没声明，就没有这个能力</span>
+          </div>
+          <div class="af-region__body af-stack">
+            <p style="margin:0;font-size:var(--t-sm);line-height:1.7">
+              授予是<b>写在任务上</b>的，不是写在 agent 上的。
+              同一个 agent，跑这个任务能连 <span class="af-mono af-xs">db-prod</span>，
+              跑另一个任务就摸不到 —— 因为另一个任务没声明。
+              这和 <span class="af-mono af-xs">allowed_devices</span>、<span class="af-mono af-xs">required_capabilities</span>
+              是同一套机制，不是新发明的一套权限系统。
+            </p>
+            <div class="af-region">
+              <div class="af-region__body af-region__body--flush">
+                <table class="af-table">
+                  <thead><tr><th>任务</th><th>被授予</th><th>在哪跑</th><th>状态</th></tr></thead>
+                  <tbody>
+                    <tr>
+                      <td class="af-xs"><a href="task.html">#1039 会话缓存选型</a></td>
+                      <td class="af-xs">
+                        <span class="af-mono">db-prod</span>
+                        <span class="af-tag">技能</span>
+                      </td>
+                      <td class="af-xs">device-a</td>
+                      <td class="af-xs"><span class="af-tag af-tag--running">运行中</span></td>
+                    </tr>
+                    <tr>
+                      <td class="af-xs">#1041 生成月度报告</td>
+                      <td class="af-xs">
+                        <span class="af-mono">db-prod</span>
+                        <span class="af-tag">技能</span>
+                      </td>
+                      <td class="af-xs">device-a</td>
+                      <td class="af-xs"><span class="af-tag af-tag--done">已结束</span></td>
+                    </tr>
+                    <tr>
+                      <td class="af-xs"><a href="task.html">#1044 打包并上传</a></td>
+                      <td class="af-xs">
+                        <span class="af-mono">build-host-ssh</span>
+                        <span class="af-tag">技能</span>
+                      </td>
+                      <td class="af-xs">device-c</td>
+                      <td class="af-xs"><span class="af-tag af-tag--done">已结束</span></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- 一个真实的边界：改任务约束不会改已结束的执行 -->
+            <div class="af-callout af-callout--info">
+              <span class="af-callout__k">授予跟着任务走，任务结束就失效</span>
+              <span class="af-2xs">
+                任务结束后，那条授予不再能连任何东西 —— 不需要手工回收。
+                「已结束」那两行的记录留着重看用，不是还活着。
+                这也是为什么不做「永久授予某个 agent」：签出去就收不回来的权限，不是权限。
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <!-- ④ MCP server -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">MCP server</h2>
+            <span class="af-region__note">设备上起，按标准协议连 · 不必为每个 agent 写适配</span>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead><tr><th>server</th><th>在哪台设备</th><th>暴露的能力</th><th>状态</th></tr></thead>
+              <tbody>
+                <tr>
+                  <td class="af-xs"><strong class="af-mono">afleet-connectors</strong></td>
+                  <td class="af-xs">device-a</td>
+                  <td class="af-xs">SQL / Redis / SFTP</td>
+                  <td class="af-xs"><span class="af-tag af-tag--done">运行中</span> <span class="af-2xs af-mute">:7317</span></td>
+                </tr>
+                <tr>
+                  <td class="af-xs"><strong class="af-mono">afleet-connectors</strong></td>
+                  <td class="af-xs">device-b</td>
+                  <td class="af-xs">SQL / SSH</td>
+                  <td class="af-xs"><span class="af-tag af-tag--warn">未启动</span> <span class="af-2xs af-mute">这台没配凭据</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- ⑤ 和 agents.html 那张「能不能」表的呼应，说清分工 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">和「Agent」页是什么关系</h2>
+            <span class="af-region__note">一个说原则，一个管东西</span>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <thead><tr><th>你想做什么</th><th>去哪</th><th>为什么</th></tr></thead>
+              <tbody>
+                <tr>
+                  <td class="af-xs">搞清楚「为什么不让 agent 直接连数据库」</td>
+                  <td class="af-xs"><a href="agents.html">Agent 页</a></td>
+                  <td class="af-xs">那边是三种暴露方式的对照表，讲原则</td>
+                </tr>
+                <tr>
+                  <td class="af-xs">加一个数据库凭据、看谁用过</td>
+                  <td class="af-xs"><b>这一页</b></td>
+                  <td class="af-xs">凭据和授予是「东西」，得有一处管得起来</td>
+                </tr>
+                <tr>
+                  <td class="af-xs">给某个任务开一个连接</td>
+                  <td class="af-xs"><a href="task.html">任务详情 · 约束区</a></td>
+                  <td class="af-xs">授予写在任务上，不在这一页批量开</td>
+                </tr>
+                <tr>
+                  <td class="af-xs">看某次连接具体做了什么</td>
+                  <td class="af-xs"><a href="replay.html">执行复盘</a></td>
+                  <td class="af-xs">连接和操作都进了轨迹，复盘里能逐条看输入输出</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- ⑥ 不做的事，明说 -->
+        <section class="af-region">
+          <div class="af-region__head">
+            <h2 class="af-region__title">这一页刻意不做的事</h2>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <table class="af-table">
+              <tbody>
+                <tr>
+                  <td class="af-xs" style="width:42%">设备级「资源管理台」（把每个连接做成可浏览的对象树）</td>
+                  <td class="af-xs"><span class="af-tag af-tag--failed">不做</span> 那是 REX 的多态 Resource 模型，我们只接它的拨号能力，不接它的产品模型</td>
+                </tr>
+                <tr>
+                  <td class="af-xs">给 agent 一个「永久授权」开关</td>
+                  <td class="af-xs"><span class="af-tag af-tag--failed">不做</span> 授权只挂在任务上，任务结束即失效</td>
+                </tr>
+                <tr>
+                  <td class="af-xs">在页面上查看已存的密码</td>
+                  <td class="af-xs"><span class="af-tag af-tag--failed">不做</span> 能读出来就能被复制走</td>
+                </tr>
+                <tr>
+                  <td class="af-xs">浏览器直连资源（SIP / WS 直通）</td>
+                  <td class="af-xs"><span class="af-tag af-tag--failed">不做</span> 与项目主轴无关，只增加攻击面</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <div class="af-row">
+          <a class="af-btn af-btn--ghost" href="agents.html">← 回 Agent 列表</a>
+          <a class="af-btn af-btn--ghost" href="settings.html">全局设置</a>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+  <aside class="af-drawer" id="butler" aria-label="管家">
+    <div class="af-drawer__head">
+      <div>
+        <h2 class="af-drawer__title">这些凭据要不要清</h2>
+        <div class="af-drawer__sub">我能看谁用过，看不到内容</div>
+      </div>
+      <a class="af-btn af-btn--ghost af-drawer__close" href="#butler-closed" aria-label="关闭管家面板">关闭</a>
+    </div>
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">管家</span>
+        <span class="af-msg__body">
+          <span class="af-mono af-xs">s3-artifacts</span> 录了一个月，一次都没被授予过。
+          要么是建的时候想好了没用上，要么是有任务本该用它却没用。要不要我查一下？
+        </span>
+      </div>
+      <div class="af-callout af-callout--info">
+        <span class="af-callout__k">我连不进去</span>
+        <span class="af-2xs">
+          我能告诉你它有谁用过、什么时候，但我拿不到它的内容 ——
+          凭据不进上下文，对我也一样。
+        </span>
+      </div>
+      <div class="af-row af-row--tight">
+        <button class="af-btn af-btn--primary af-btn--sm" type="button">查一下</button>
+        <button class="af-btn af-btn--ghost af-btn--sm" type="button">不用</button>
+      </div>
+    </div>
+    <div class="af-drawer__compose">
+      <input class="af-input" type="text" placeholder="问凭据或授予的事" aria-label="对管家说话">
+      <button class="af-btn af-btn--primary" type="button">发送</button>
+    </div>
+  </aside>
+
+  <a class="af-fab af-fab--off" href="#butler" aria-label="打开管家，有 1 条建议">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>管家</span>
+  </a>
+  <a class="af-fab af-fab--on" href="#butler-closed" aria-label="收起管家面板">
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>收起</span>
+  </a>
+</div>
+
+<script src="assets/shell.js?v=11"></script>
+<script src="assets/swatch.js?v=11"></script>
+</body>
+</html>
