@@ -153,6 +153,14 @@ jobs:
               sudo apt-get update -qq
               sudo apt-get install -y -qq musl-tools
               echo "CARGO_TARGET_$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')_LINKER=musl-gcc" >> "$GITHUB_ENV"
+              # **必须关 PIE**。Rust 的 `*-linux-musl` 目标默认产 PIE，产物
+              # 因此带上 `interpreter /lib/ld-musl-*.so.1`，即「静态编进了
+              # 一份 musl、运行时又去找系统那份 musl loader」。两者版本不匹配
+              # 时，进程在 `arch_prctl(ARCH_SET_FS)` 之后立刻 SIGSEGV——
+              # strace 显示 `si_code=SI_KERNEL, si_addr=NULL`，日志一行都没有。
+              # 这在容器里表现为「镜像起来就退，什么都不打印」，极难定位。
+              # 本机已用 hello-world 复现：不开这两个 flag，连 `println!` 都崩。
+              echo "RUSTFLAGS=-C relocation-model=static -C link-arg=-no-pie" >> "$GITHUB_ENV"
               ;;
             *-windows-gnu)
               sudo apt-get update -qq
@@ -194,12 +202,48 @@ jobs:
             test -f "$f" || { echo "缺少产物 $f" >&2; exit 1; }
             case "${{ matrix.target }}" in
               *-linux-musl)
-                if ldd "$f" 2>&1 | grep -q 'not a dynamic executable'; then
-                  echo "OK $f: 静态"
-                else
-                  echo "FAIL $f: musl 目标必须静态，实际: $(ldd "$f" 2>&1 | head -5)" >&2
+                # 先捕获输出再判内容，**不看 `ldd` 的退出码**：实测 `ldd` 对
+                # 静态二进制返回 **rc=1**（本机已验：输出 "not a dynamic
+                # executable"、rc=1）。写成 `ldd "$f" || { exit 1; }` 会把
+                # 「正确的静态产物」判成失败，然后人去改构建配置——查错方向
+                # 完全错。两种表述都接受：glibc 的 `ldd` 说 "not a dynamic
+                # executable"，musl 系工具链常输出 "statically linked"。
+                ldd_out=$(ldd "$f" 2>&1 || true)
+                case "$ldd_out" in
+                  *"not a dynamic executable"*|*"statically linked"*)
+                    echo "OK $f: 静态"
+                    ;;
+                  *)
+                    echo "FAIL $f: musl 目标必须静态，ldd 实际输出:" >&2
+                    echo "$ldd_out" | head -5 >&2
+                    exit 1
+                    ;;
+                esac
+                # `ldd` 说静态还不够：**PIE 产物 `ldd` 也报 "statically linked"**，
+                # 却因为 ELF 里带了 `interpreter /lib/ld-musl-*.so.1`，运行时
+                # 会去加载系统那份 musl loader，版本不匹配就在
+                # `arch_prctl(ARCH_SET_FS)` 之后立刻 SIGSEGV——strace 显示
+                # `si_code=SI_KERNEL, si_addr=NULL`，一行日志都没有。容器里
+                # 表现为「起来就退，什么都不打印」。本机已用 hello-world 复现。
+                #
+                # 判据直接查 ELF 有没有 interpreter（PT_INTERP），而不是
+                # `ldd` 的措辞、也不靠执行：两个二进制都没有 `--version`
+                # 子命令（`afhub --version` 会当普通参数忽略并**真启动**，
+                # 连库开端口），拿它当探针会把 CI 卡在启动上。
+                if readelf -l "$f" 2>/dev/null | grep -q 'interpreter'; then
+                  echo "FAIL $f: musl 产物带 interpreter（PIE 未关），运行时会段错误" >&2
+                  readelf -l "$f" | grep 'interpreter' >&2
                   exit 1
                 fi
+                # 纯静态 + 无 PIE 时 `file` 报 "executable"；带 PIE 时报
+                # "pie executable"。两个条件都查，防止将来换工具链后
+                # readelf 的字段名变化让断言静默失效。
+                if file "$f" | grep -q 'pie executable'; then
+                  echo "FAIL $f: musl 产物仍是 PIE" >&2
+                  file "$f" >&2
+                  exit 1
+                fi
+                echo "OK $f: 静态且非 PIE"
                 ;;
               *-linux-gnu)
                 if ldd "$f" | grep -Eq 'libssl|libcrypto'; then
