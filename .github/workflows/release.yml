@@ -280,8 +280,12 @@ jobs:
   # 这种故障能一路走到用户手里而不红任何一步。所以：
   #   - build-binaries 必须 needs 本 job 并下载 artifact；
   #   - 下载后再断言 `packages/web/dist/index.html` 存在（见下面的「校验 dist」）。
+  # 前端产物是**其他 job 的输入**（gate-coverage 需要 dist 才能让覆盖率门禁
+  # 与本地同态；build-binaries 需要 dist 才能编 afhub），所以它只等前端门禁，
+  # **不等 gate-test / gate-coverage**——否则与「gate-coverage 依赖本 job」
+  # 构成循环依赖（GitHub Actions 会直接报 cycle）。
   build-frontend:
-    needs: [gate-static, gate-test, gate-coverage, gate-web]
+    needs: [gate-static, gate-web]
     runs-on: ubuntu-24.04
     # 只读（同上）：编前端不上传任何发布物，artifact 走 Actions 内部存储，
     # 不需要仓库或包的写权限。
