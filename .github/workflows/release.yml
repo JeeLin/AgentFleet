@@ -151,7 +151,11 @@ jobs:
           case "${{ matrix.target }}" in
             *-musl)
               sudo apt-get update -qq
-              sudo apt-get install -y -qq musl-tools
+              # `binutils` 是 `readelf` 的来源。它随 gcc 一起被拉进来，但
+              # **不要依赖这个隐式关系**：下面 PIE 判据用 `readelf`，缺了它
+              # 再配上 `2>/dev/null`，`grep` 拿到空输入就静默通过——断言
+              # 变成永远绿。显式声明依赖比赌 runner 镜像的内容便宜。
+              sudo apt-get install -y -qq musl-tools binutils
               echo "CARGO_TARGET_$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')_LINKER=musl-gcc" >> "$GITHUB_ENV"
               # **必须关 PIE**。Rust 的 `*-linux-musl` 目标默认产 PIE，产物
               # 因此带上 `interpreter /lib/ld-musl-*.so.1`，即「静态编进了
@@ -223,17 +227,18 @@ jobs:
                     ;;
                 esac
                 # `ldd` 说静态还不够：**PIE 产物 `ldd` 也报 "statically linked"**，
-                # 却因为 ELF 里带了 `interpreter /lib/ld-musl-*.so.1`，运行时
-                # 会去加载系统那份 musl loader，版本不匹配就在
-                # `arch_prctl(ARCH_SET_FS)` 之后立刻 SIGSEGV——strace 显示
-                # `si_code=SI_KERNEL, si_addr=NULL`，一行日志都没有。容器里
-                # 表现为「起来就退，什么都不打印」。本机已用 hello-world 复现。
+                # 却因为 ELF 里带了 `interpreter` 而在运行时段错误，容器里表现为
+                # 「起来就退，什么都不打印」。原因与复现见上面装链接器那步。
                 #
-                # 判据直接查 ELF 有没有 interpreter（PT_INTERP），而不是
-                # `ldd` 的措辞、也不靠执行：两个二进制都没有 `--version`
-                # 子命令（`afhub --version` 会当普通参数忽略并**真启动**，
-                # 连库开端口），拿它当探针会把 CI 卡在启动上。
-                if readelf -l "$f" 2>/dev/null | grep -q 'interpreter'; then
+                # 判据直接查 ELF 有没有 PT_INTERP，而不是 `ldd` 的措辞、也不靠
+                # 执行：两个二进制都没有 `--version` 子命令（`afhub --version`
+                # 会当普通参数忽略并**真启动**，连库开端口），拿它当探针会把
+                # CI 卡在启动上。
+                # `readelf` 缺了必须**当场红**，不能让它和 `2>/dev/null` 串成
+                # 「没有输出 → grep 不命中 → 判通过」。
+                command -v readelf >/dev/null \
+                  || { echo "readelf 缺失（binutils 未装），PIE 判据无法执行" >&2; exit 1; }
+                if readelf -l "$f" | grep -q 'interpreter'; then
                   echo "FAIL $f: musl 产物带 interpreter（PIE 未关），运行时会段错误" >&2
                   readelf -l "$f" | grep 'interpreter' >&2
                   exit 1
