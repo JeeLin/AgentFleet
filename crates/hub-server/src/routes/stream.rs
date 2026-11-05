@@ -2514,6 +2514,60 @@ mod tests {
         );
     }
 
+    /// **`try_recv` 的三种返回都要被走到，且 `Lagged` 之后还能继续读**。
+    ///
+    /// 这条用例存在的原因是覆盖率：并发那条用例（`the_snapshot_and_the_live_
+    /// stream_leave_no_gap_or_duplicate`）里的同一段 `match` 靠后台线程抢跑，
+    /// 它的每个臂**命不命中都是掷骰子**，于是只能整段标 `(racy)`。标了以后
+    /// 门禁不再管它——但「跳过被甩掉的那段继续读」这条**语义**也就没人证明了。
+    ///
+    /// 这里换成完全确定的形状：接收端**在自己手里**，什么时候灌满、什么时候
+    /// 新发布，全由本函数决定，一行 `sleep` 都不需要。
+    ///
+    /// 断言的是**行为**而不是覆盖率：`Lagged` 之后必须还能拿到更新的那条，
+    /// 而不是像原来的 `while let Ok(..)` 那样直接收手（那正是让 `live` 恒空、
+    /// 让「快照与实时流不相交」退化成恒真形状的根因）。
+    #[test]
+    fn a_lagged_receiver_can_resume_reading_instead_of_giving_up() {
+        let s = Streams::new();
+        let (_backlog, mut rx, _head) = s.subscribe_parts(None);
+        // 灌到溢出：此后第一次 `try_recv` 必然是 `Lagged`（不是 `Ok`）。
+        for _ in 0..(REPLAY_CAPACITY + 8) {
+            s.publish("device.status", "{}");
+        }
+
+        // 二号坑：在**取之前**再发一条。它一定还在缓冲里，于是「跳过 Lagged
+        // 之后继续读」必然能读到它——这一步不依赖任何调度时序。
+        let fresh = s.publish("device.status", "{}");
+
+        let mut saw_lagged = false;
+        let mut seen: Vec<u64> = Vec::new();
+        loop {
+            match rx.try_recv() {
+                Ok(env) => seen.push(env.id),
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                    saw_lagged = true;
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+            }
+        }
+
+        // 消息里写死数字：用 `{}` 传参会把实参行（那个常量表达式）单独记成一个
+        // 区域，于是它「有没有被执行」取决于这句话有没有被拼出来——而成功的
+        // 用例从来不会拼失败消息，那一行就成了永久的「未覆盖」，只能挂例外。
+        // 把常量烘进字面量既没有这个问题，也不必为它写一条理由。
+        assert!(
+            saw_lagged,
+            "灌满 {REPLAY_CAPACITY} + 8 条之后必须被判 Lagged"
+        );
+        assert!(
+            seen.contains(&fresh),
+            "Lagged 之后必须继续读：新发布的 id={fresh} 没被读到（seen={seen:?}）"
+        );
+    }
+
     /// **快照与实时流之间不留缝**：订阅时读到的回放与随后的实时流首尾相接。
     ///
     /// 「读快照」与「订阅」分开做时，发布方在两步之间被切走会让新订阅者
@@ -2560,9 +2614,13 @@ mod tests {
                 // 这两行一次算覆盖、一次算未覆盖（实测：`rc_cov` 那次不报、
                 // `cov2` 那次报）。按确定性行做双向核对会让门禁随机红，正是
                 // 本仓 `(racy)` 这一类要处理的形态。
+                // 循环体与循环头**各标一次**：`(racy)` 的豁免是按行比对的，
+                // 只标循环体那行时实测 `2565`（`}`）仍会被算成未覆盖并让门禁
+                // 随机红——一次真实发生过的失败就长这样。
                 while !stop.load(Ordering::Relaxed) {
-                    s.publish("device.status", "{}"); // coverage: excluded (racy) — 见上。
-                }
+                    // coverage: excluded (racy) — 见上。
+                    s.publish("device.status", "{}"); // coverage: excluded (racy) — 同上。
+                } // coverage: excluded (racy) — 同上（循环收尾的 `}`）。
             })
         };
 
@@ -2665,7 +2723,7 @@ mod tests {
             for w in all.windows(2) {
                 assert!(w[0] < w[1], "同一个 id 出现两次：{w:?}");
             }
-            // ② 覆盖：订阅前就存在的事件必须一个不漏地出现在快照里。
+            // 覆盖：订阅前就存在的事件必须一个不漏地出现在快照里。
             //
             // **下界用 `head`（订阅那一刻缓冲里最旧的一条），不用 `last` 倒推。**
             // 这里是本条用例几轮修改才收敛的地方，值得写清为什么：
@@ -2692,6 +2750,9 @@ mod tests {
             // `head > last` 时区间为空：发布线程跑得太快，`from` 那一段整体
             // 出缓冲了，本轮没有可断言的东西——跳过而不是失败。
             let lower = (from + 1).max(head);
+            // 区间为空时**不跳过本轮计数**：`rounds` 的判据是「300 轮都跑完了」，
+            // 把它放进下面那个 `if` 里就会退化成「至少有一轮区间非空」。
+            rounds += 1;
             if lower <= last {
                 for expect in lower..=last {
                     assert!(
@@ -2700,8 +2761,11 @@ mod tests {
                          from={from} last={last} head={head} lower={lower}"
                     );
                 }
-            }
-            rounds += 1;
+                // coverage: excluded (racy) — 这个块自己的收尾 `}`。llvm-cov 把
+                // 「`if` 条件为真」这一区域记在块的最后一行上，而它是否被执行取决于
+                // 后台发布线程抢跑得多快（`lower <= last` 非确定）。判据由上面
+                // 那条断言与末尾的 `assert_eq!(rounds, 300)` 给。
+            } // coverage: excluded (racy) — 同上。
         }
         stop.store(true, Ordering::Relaxed);
         publisher.join().expect("publisher");

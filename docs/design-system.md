@@ -1273,7 +1273,7 @@ Mock 形状 = 将来 API 的形状。前端只读。
 
 **百分比口径不动**：下限是 30% 而不是「最小像素」，理由是像素下限随窗口宽度变化
 （同一个 320px 在 1440 屏上是 22%、在 1024 屏上是 31%）——这是既有裁定
-（`lib/split.ts` 文件头），不因本里程碑而推翻。窄屏下（< 900px）右侧是覆盖式抽屉，
+（`shared/split.ts` 文件头），不因本里程碑而推翻。窄屏下（< 900px）右侧是覆盖式抽屉，
 百分比下限根本不参与（§7.1 的响应式一段）。
 
 **响应式**：< 900px 时右侧一格转**覆盖式抽屉**（对话全宽）。
@@ -1293,7 +1293,7 @@ Mock 形状 = 将来 API 的形状。前端只读。
 宽屏是并列的两列，凭什么右边能抢走焦点、把对话区设成 `inert`？
 那会让半屏界面点不动。
 
-所以 `lib/media.ts` 导出 `NARROW_MAX_PX`，`isNarrow` 从这个 ref 来，
+所以 `shared/media.ts` 导出 `NARROW_MAX_PX`，`isNarrow` 从这个 ref 来，
 `focus.push` / `pop` 只在 `isNarrow && dock` 时执行。
 
 **断点只有一个字面量**：CSS 的媒体查询 JS 读不到，所以这个数天然有两份。
@@ -1580,7 +1580,7 @@ Mock 形状 = 将来 API 的形状。前端只读。
 | 外壳与导航 | `packages/web/src/App.vue` + `page-chrome.css` | 
 | 页面级数据访问 | `domains/device/api.ts` / `domains/agent/api.ts` / `domains/session/api.ts`（传输层在 `shared/http.ts`） |
 | 会话工作台 | `domains/session/SessionPage.vue` + `PanelDock.vue` / `TerminalPanel.vue` / `FilesPanel.vue` / `TrajDrawer.vue` / `TabBar.vue` / `ConvFlow.vue` / `GitPanel.vue` |
-| 会话列表 | `domains/session/SessionsPage.vue` + `SessionTable.vue` |
+| 会话列表 | `domains/project/OverviewPage.vue`（总览页里的项目列表；v0.7.0 起会话不再是顶层实体，`SessionsPage.vue` 已删） |
 | 新建会话 | `domains/session/NewSessionPage.vue` |
 | 设备列表 | `domains/device/DevicesPage.vue` + `DeviceTable.vue` |
 | Agent 目录 | `domains/agent/AgentCatalog.vue`（挂在设备页 `?view=agents` 分段，不是独立页面，见 §5.1） |
@@ -1596,7 +1596,8 @@ Mock 形状 = 将来 API 的形状。前端只读。
 > **为什么是「领域优先」而不是「pages / components / lib 三分」**（v0.7.0 子任务 1.A）：
 > 旧的按技术角色分层，让「会话」这一个领域的东西散在三个目录里——改一处会话
 > 面板要同时动 `pages/SessionPage.vue`、`components/PanelDock.vue` 与
-> `lib/channel.ts`，而它们彼此之间**没有任何目录关系可言**。按领域切之后，
+> `lib/channel.ts`（搬迁**前**的路径，现分别是
+> `domains/session/SessionPage.vue`、`domains/session/PanelDock.vue`、`shared/channel.ts`），而它们彼此之间**没有任何目录关系可言**。按领域切之后，
 > 一个领域的页面、组件、数据访问在同一个目录，跨领域才共享的才上提到
 > `domains/shared/components/`（组件）与 `shared/`（纯函数工具）。
 > `pages/` 只剩登录 / setup / 设置这三个**不属于任何业务领域**的外壳页面。
@@ -1607,12 +1608,12 @@ Mock 形状 = 将来 API 的形状。前端只读。
 
 ### 9.1 焦点栈是本规范的核心机制
 
-`lib/keynav.ts` 与 `lib/focus.ts` 是这些机制的**唯一真相源**，值得单独记一笔，因为
+`shared/keynav.ts` 与 `shared/focus.ts` 是这些机制的**唯一真相源**，值得单独记一笔，因为
 **「页面能跑」和「键盘用户能用」之间，差的全是这两个文件**：
 
 | 机制 | 位置 | 解决什么 |
 |------|------|---------|
-| `focusPush` / `focusPop` | `lib/focus.ts` | 焦点归最内层容器；背后 `inert`；关闭一定还焦点 |
-| `focusablesIn` | `lib/focus.ts` | 每次 Tab 重算，不缓存快照 |
-| `register` | `lib/keynav.ts` | act 必须在 `KEYS` 表里；不许注册两次 |
-| `unimplemented` | `lib/keynav.ts` | 表里有、没人实现的项 → `?` 面板标
+| `focusPush` / `focusPop` | `shared/focus.ts` | 焦点归最内层容器；背后 `inert`；关闭一定还焦点 |
+| `focusablesIn` | `shared/focus.ts` | 每次 Tab 重算，不缓存快照 |
+| `register` | `shared/keynav.ts` | act 必须在 `KEYS` 表里；不许注册两次 |
+| `unimplemented` | `shared/keynav.ts` | 表里有、没人实现的项 → `?` 面板标

@@ -10,7 +10,7 @@
 #   Hub → 页面：`GET /api/stream`（SSE，`channel.frame` / `device.status` / `session.state`）
 #   Hub ↔ 设备：`/ws`（协议帧，由真 afcli 自己维持）
 #
-# 终端「从页面敲」用的就是 `lib/channel.ts` 的那三个调用
+# 终端「从页面敲」用的就是 `shared/channel.ts` 的那三个调用
 # （`POST /api/channels` → `POST /api/channels/{id}/send` → SSE `channel.frame`），
 # **不是**在设备侧预置一条命令再断言「有输出」——预置命令能过，而 `/send`
 # 到验收日可能一次都没被真跑过。

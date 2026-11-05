@@ -50,7 +50,7 @@ crates/hub-core/src/reports.rs:248: 同 record：锁中毒只在别的持锁者 
 crates/hub-server/src/channels.rs:116: **回填 Hub 侧账本**：只发 `channel_credit` 而不记账，Hub 侧余额 恒为 0——下一帧又立刻归零，于是**每帧都补一次信用**，node 侧的 余额越滚越大（约束 4 的「每通道独立流控」就此失效）。 补的量与发出去的那一帧一致：Hub 说「再给你 32 格」，它自己的 账本也得有那 32 格。 `on_credit` 只在通道不存在时失败，而这条通道 刚在同一把锁里被 `on_data_received` 成功记过账：两者之间没有能改 这张表的代码路径（同一把写锁）。
 crates/hub-server/src/channels.rs:260: 只在断言失败时执行；`panic!` 的格式串行被 llvm-cov 记为 miss（多行宏已知现象）。
 crates/hub-server/src/channels.rs:262: 只在断言失败时执行；`panic!` 的格式串行被 llvm-cov 记为 miss（多行宏已知现象）。
-crates/hub-server/src/main.rs:43: 建不出 OS 线程（fd/内存耗尽或线程数受限）， 无可控手段在测试里构造；守卫逻辑本身由各处错误分支覆盖。
+crates/hub-server/src/main.rs:47: 建不出 OS 线程（fd/内存耗尽或线程数受限）， 无可控手段在测试里构造；守卫逻辑本身由各处错误分支覆盖。
 crates/hub-server/src/routes/agents_detail.rs:120: 单台设备读不出来不该让整页 500：其它设备上的事实仍然成立。 要走到这里必须把 `agent_runtime` 读坏 （连接池取不到 / SQLite 报错）。这条兜底的意义正是「库坏了一台 机器时页面还能显示别的」，而那种故障没有可控的测试手段。
 crates/hub-server/src/routes/agents_detail.rs:125: 单台设备读不出来不该让整页 500：其它设备上的事实仍然成立。 要走到这里必须把 `agent_runtime` 读坏 （连接池取不到 / SQLite 报错）。这条兜底的意义正是「库坏了一台 机器时页面还能显示别的」，而那种故障没有可控的测试手段。
 crates/hub-server/src/routes/agents_detail.rs:126: 单台设备读不出来不该让整页 500：其它设备上的事实仍然成立。 要走到这里必须把 `agent_runtime` 读坏 （连接池取不到 / SQLite 报错）。这条兜底的意义正是「库坏了一台 机器时页面还能显示别的」，而那种故障没有可控的测试手段。
@@ -112,7 +112,6 @@ crates/hub-server/src/routes/stream.rs:2481: 夹具的收尾：`Streams` 自己�
 crates/hub-server/src/routes/stream.rs:2482: 夹具的收尾：`Streams` 自己握着发送端， 流在测试期间从不结束，所以这条 `break` 打不到；它不是被测逻辑的分支。
 crates/hub-server/src/routes/stream.rs:2483: 夹具的收尾：`Streams` 自己握着发送端， 流在测试期间从不结束，所以这条 `break` 打不到；它不是被测逻辑的分支。
 crates/hub-server/src/routes/stream.rs:2492: 同上面的 `Closed` 臂： `panic!` 的参数行被 llvm-cov 记为 miss（多行宏已知现象）。
-crates/hub-server/src/routes/stream.rs:2703: (racy) — 与上面 publish 那行同源：断言是否被求值 取决于后台发布线程的抢跑程度，非确定性。删掉这个 marker 会让门禁 在「本轮一次都没走到这里」时随机红，而不是暴露真问题。
 crates/hub-server/src/routes/ws.rs:141: 同上面的收尾行：单测里 task 被 runtime 取消， `Err` 臂走不到，故这行日志不可达。
 crates/hub-server/src/routes/ws.rs:275: 表里没它：旧连接已在自己的断开处理器里被摘掉。 要触达需让它在 insert 之后、send 之前被另一个 task 摘表（极窄窗口）。
 crates/hub-server/src/routes/ws.rs:281: 控制帧队列 8 格而顶替只推一帧，要满得让同一连接被 连续顶替 9 次且一次都不消费。
