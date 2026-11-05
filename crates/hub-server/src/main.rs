@@ -21,6 +21,10 @@ use hub_storage::db::{data_dir, ensure_dir, open_in, set_umask_077};
 const ENV_ADDR: &str = "AFHUB_ADDR";
 /// 数据目录环境变量名。缺省走 `hub_storage::db::data_dir()`。
 const ENV_DATA_DIR: &str = "AFHUB_DATA_DIR";
+/// 放行非回环绑定的开关。**只认唯一一个值 [`ALLOW_NON_LOOPBACK_YES`]**。
+const ENV_ALLOW_NON_LOOPBACK: &str = "AFHUB_ALLOW_NON_LOOPBACK";
+/// 开关唯一被接受的值。
+const ALLOW_NON_LOOPBACK_YES: &str = "1";
 /// 默认监听地址。**只绑回环**：Hub 不对局域网暴露，
 /// 远程访问走 Tailscale / SSH 端口转发（§2.4）。
 const DEFAULT_ADDR: &str = "127.0.0.1:8080";
@@ -103,11 +107,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 解析监听地址，**只允许回环**。
+/// 解析监听地址，**缺省只允许回环**。
 ///
-/// 这是约束 1 的落点：Hub 进程永远不绑非回环地址，局域网里就没有可达的 Hub 端口，
+/// 这是约束 1 的落点：Hub 进程缺省永远不绑非回环地址，局域网里就没有可达的 Hub 端口，
 /// 远程访问一律走 Tailscale / SSH 端口转发（§2.4）。传了非回环地址直接**拒绝启动**，
 /// 而不是「先绑上去再说」——self-host 场景下误配 `0.0.0.0` 等于把 `/setup` 暴露给同网段。
+///
+/// ## `AFHUB_ALLOW_NON_LOOPBACK=1`：唯一一个显式放开的口子
+///
+/// Hub 容器必须绑 `0.0.0.0` 才能从容器外访问，而容器网络本身是隔离的——此时
+/// 「同网段」只是容器自己的网桥，风险模型与本机裸跑不同。所以给出显式开关，
+/// **缺省行为一个字都没变**：不设这个变量就仍然只许回环，上面那句「拒绝启动」照旧。
+///
+/// **只认确切的 `1`**：`0` / `false` / 空串 / `true` / `yes` 一律按「没设」处理。
+/// 这是安全开关，宽松解析的代价是「明明写的是 `0`，却把端口放开了」——那种 bug
+/// 在代码里看不出来，只在被扫到的那天才暴露。宁可让 `true` 也不生效，
+/// 让用户去读拒绝信息里写明的唯一合法取值。
 ///
 /// 只接受 **IP 字面量**（`127.0.0.1` / `::1` 或同段），**不接受主机名**（含 `localhost`）：
 /// 主机名解析结果是不是回环依赖 DNS（本地 hosts、容器 DNS、缓存都可能给出不同答案），
@@ -118,10 +133,17 @@ fn resolve_addr() -> Result<SocketAddr, Box<dyn std::error::Error>> {
     let addr: SocketAddr = raw
         .parse()
         .map_err(|e| format!("{ENV_ADDR}={raw}: not a socket address ({e})"))?;
-    if !addr.ip().is_loopback() {
+    // 同上：`var` 的 Err（未设 / 非 UTF-8）与「值不相等」都落到 `false`，
+    // 安全开关的每个异常输入都应当倒向「不放开」。
+    let allow_non_loopback =
+        std::env::var(ENV_ALLOW_NON_LOOPBACK).is_ok_and(|v| v == ALLOW_NON_LOOPBACK_YES);
+    if !addr.ip().is_loopback() && !allow_non_loopback {
         return Err(format!(
             "{ENV_ADDR}={raw}: refusing to bind a non-loopback address; \
-             afhub only listens on loopback (127.0.0.0/8 or ::1)"
+             afhub only listens on loopback (127.0.0.0/8 or ::1). \
+             In a container the network is isolated, so opt in explicitly with \
+             {ENV_ALLOW_NON_LOOPBACK}={ALLOW_NON_LOOPBACK_YES} \
+             (that exact value is the only one accepted)"
         )
         .into());
     }

@@ -93,6 +93,29 @@ fn run_to_completion(env: &[(&str, Option<&str>)]) -> (ExitStatus, String) {
     (status, drain_stderr(&mut hub.0))
 }
 
+/// 跑一个**预期失败**的启动，但**不接受「它其实起来了」**。
+///
+/// [`run_to_completion`] 在预期失败却真起了服务时只能干等 `CHILD_TIMEOUT` 再 panic，
+/// 而「拒绝启动」类断言恰恰最需要**快速、清楚**地红：等 20 秒再报「非零退出失败」
+/// 既不说明是哪个值放行的，也让本地跑一轮门禁变慢。所以这里给一个短的判定窗口，
+/// 超时窗口内没退出 = 它绑上了 = 断言失败，并把用例参数带进消息里。
+fn expect_startup_failure(env: &[(&str, Option<&str>)], what: &str) -> (ExitStatus, String) {
+    /// 拒绝路径是纯计算（解析 + 判断），毫秒级；3s 只留给进程启动本身。
+    const REFUSAL_TIMEOUT: Duration = Duration::from_secs(3);
+    let mut hub = spawn(env);
+    let deadline = Instant::now() + REFUSAL_TIMEOUT;
+    loop {
+        if let Some(status) = hub.0.try_wait().unwrap() {
+            return (status, drain_stderr(&mut hub.0));
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{what}: afhub 仍在运行，说明它接受了这个配置（预期应拒绝启动）"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn drain_stderr(child: &mut Child) -> String {
     let mut out = String::new();
     if let Some(mut pipe) = child.stderr.take() {
@@ -242,18 +265,31 @@ fn rejects_hostname_addr() {
     );
 }
 
-/// 约束 1：非回环地址一律拒绝启动，不存在「先绑上去再说」。
+/// 约束 1（缺省侧）：**不设开关**时非回环地址一律拒绝启动，不存在「先绑上去再说」。
+///
+/// v0.7.1 加了 `AFHUB_ALLOW_NON_LOOPBACK=1` 这个显式口子（Hub 容器需要绑
+/// `0.0.0.0`），所以本用例必须**显式删掉**该变量而不是让它继承——CI 或本地开发
+/// shell 里若恰好设了它，这条断言会静默失效，那正是「安全默认」最不该发生的坏法。
 #[test]
-fn rejects_non_loopback_addr() {
+fn rejects_non_loopback_addr_when_the_opt_in_is_absent() {
     let dir = tempdir();
-    let (status, err) = run_to_completion(&[
-        ("AFHUB_ADDR", Some("0.0.0.0:9999")),
-        ("AFHUB_DATA_DIR", Some(dir.path().to_str().unwrap())),
-        ("RUST_LOG", None),
-    ]);
+    let (status, err) = expect_startup_failure(
+        &[
+            ("AFHUB_ADDR", Some("0.0.0.0:9999")),
+            ("AFHUB_DATA_DIR", Some(dir.path().to_str().unwrap())),
+            ("AFHUB_ALLOW_NON_LOOPBACK", None),
+            ("RUST_LOG", None),
+        ],
+        "AFHUB_ALLOW_NON_LOOPBACK 未设置",
+    );
     assert!(!status.success(), "非回环地址必须非零退出，stderr: {err}");
     assert!(err.contains("non-loopback"), "stderr 应说明拒绝原因: {err}");
     assert!(err.contains("AFHUB_ADDR"), "stderr 应点名配置项: {err}");
+    // 拒绝信息要给出唯一的出路，否则用户只能去读源码
+    assert!(
+        err.contains("AFHUB_ALLOW_NON_LOOPBACK=1"),
+        "stderr 应写明开关与唯一合法取值: {err}"
+    );
     // 配置不合法就不该在磁盘上留下任何东西
     assert!(!dir.path().join("agentfleet.db").exists(), "{err}");
 }
@@ -262,13 +298,77 @@ fn rejects_non_loopback_addr() {
 #[test]
 fn rejects_non_loopback_ipv6_addr() {
     let dir = tempdir();
-    let (status, err) = run_to_completion(&[
-        ("AFHUB_ADDR", Some("[::]:9999")),
-        ("AFHUB_DATA_DIR", Some(dir.path().to_str().unwrap())),
-        ("RUST_LOG", None),
-    ]);
+    let (status, err) = expect_startup_failure(
+        &[
+            ("AFHUB_ADDR", Some("[::]:9999")),
+            ("AFHUB_DATA_DIR", Some(dir.path().to_str().unwrap())),
+            ("AFHUB_ALLOW_NON_LOOPBACK", None),
+            ("RUST_LOG", None),
+        ],
+        "AFHUB_ADDR=[::]:9999",
+    );
     assert!(!status.success(), "非回环地址必须非零退出，stderr: {err}");
     assert!(err.contains("non-loopback"), "stderr 应说明拒绝原因: {err}");
+}
+
+/// 开关的**反向**：除确切 `1` 以外的每个值都必须当作「没设」。
+///
+/// 这是安全开关，宽松解析的代价（`=0` 反而放开）在代码里看不出来，
+/// 只有被扫到的那天才暴露。所以把常见误写逐个钉死，而不是只验 `1` 能用。
+#[test]
+fn the_opt_in_only_accepts_the_exact_value_one() {
+    for value in ["0", "true", "yes", "", " 1", "1 "] {
+        let dir = tempdir();
+        let (status, err) = expect_startup_failure(
+            &[
+                ("AFHUB_ADDR", Some("0.0.0.0:9999")),
+                ("AFHUB_DATA_DIR", Some(dir.path().to_str().unwrap())),
+                ("AFHUB_ALLOW_NON_LOOPBACK", Some(value)),
+                ("RUST_LOG", None),
+            ],
+            &format!("AFHUB_ALLOW_NON_LOOPBACK={value:?}"),
+        );
+        assert!(
+            !status.success(),
+            "AFHUB_ALLOW_NON_LOOPBACK={value:?} 不该放行，stderr: {err}"
+        );
+        assert!(
+            err.contains("non-loopback"),
+            "AFHUB_ALLOW_NON_LOOPBACK={value:?} 应在拒绝信息里说明原因: {err}"
+        );
+    }
+}
+
+/// 开关的**正向**：设成 `1` 之后非回环地址真的绑上了（不是「没报错」）。
+///
+/// 用**预先绑好**的监听器借端口：先 `bind("0.0.0.0:0")` 让内核挑一个空闲端口、
+/// 拿回地址后立刻释放，再把那个端口交给 afhub。不能写 `AFHUB_ADDR=0.0.0.0:0`——
+/// afhub 的 `afhub listening` 日志打的是**请求的**地址（`addr=0.0.0.0:0`），
+/// 不是实际绑上的，从日志里抠端口这条路走不通（试过，会一直等到超时）。
+///
+/// 随后从 **127.0.0.1** 访问：绑在通配地址上时回环地址同样可达，这条断言因此
+/// 能区分「真绑通了」与「其实只绑了回环」（后者连不上）。
+#[test]
+fn the_opt_in_lets_a_non_loopback_addr_bind() {
+    let dir = tempdir();
+    let port = {
+        let l = TcpListener::bind("0.0.0.0:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    let mut hub = spawn(&[
+        ("AFHUB_ADDR", Some(&format!("0.0.0.0:{port}"))),
+        ("AFHUB_DATA_DIR", Some(dir.path().to_str().unwrap())),
+        ("AFHUB_ALLOW_NON_LOOPBACK", Some("1")),
+        ("RUST_LOG", None),
+    ]);
+
+    let resp = wait_for_healthz(addr);
+    assert!(resp.contains("\"status\":\"ok\""), "got: {resp}");
+
+    signal(hub.pid(), libc::SIGTERM);
+    assert!(hub.wait_with_timeout().success(), "SIGTERM 后应优雅退出 0");
 }
 
 /// 配置写错形状（压根不是 socket 地址）→ 非零退出并点名变量。
