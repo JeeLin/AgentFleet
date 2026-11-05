@@ -165,23 +165,35 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-    # 依赖 build-frontend：覆盖率门禁与本地同态——dist 在，`asset()` 的
-    # 成功路径（`WEB_DIST.get_dir("assets")` 有东西）才可达，测试才能真正
-    # 覆盖它。无 dist 时那条分支结构性不可达，而例外表是双向核对
-    # （未登记的未覆盖行红 + 已覆盖的登记行也红），本地有 dist / CI 无 dist
-    # 会让同几行在一边绿一边红，登记也没用。所以给 CI 的 cov 造出 dist。
-    needs: build-frontend
     steps:
       - uses: actions/checkout@v5
 
-      # build.rs 在编译期把 dist 嵌进二进制；没有 dist 时它只造占位页，
-      # `asset()` 成功路径在插桩下就变成「未覆盖的未登记行」。从 artifact
-      # 还原 dist，让门禁测的是真实产物路径。
-      - name: 下载前端产物（覆盖率与本地同态）
-        uses: actions/download-artifact@v6
+      # 覆盖率门禁要与本地同态：本地检出通常有 `packages/web/dist`，测试能覆盖
+      # `asset()` 的成功路径；CI 没有 dist 时那条分支结构性不可达，会变成
+      # 「未覆盖的未登记行」，而例外表是双向核对，登记也没用（本地有 dist 就
+      # stale）。所以这里**自己构建 dist**，让插桩的二进制里嵌的是真实产物树。
+      # 不能改成「依赖 build-frontend」：C7 要求每个产线 job 等全部门禁，
+      # 而本 job 自己就是门禁之一——那就成环了。
+      - name: 读工具链版本（mise.toml [tools] 是唯一出处）
+        id: tools
+        run: |
+          set -euo pipefail
+          bun=$(sed -nE 's/^bun = "([^"]+)".*/\1/p' mise.toml | head -1)
+          [ -n "$bun" ] || { echo "mise.toml 里读不到 bun 的版本" >&2; exit 1; }
+          echo "bun=$bun" >> "$GITHUB_OUTPUT"
+
+      - name: 装 Bun ${{ steps.tools.outputs.bun }}
+        uses: oven-sh/setup-bun@v2
         with:
-          name: web-dist
-          path: packages/web/dist
+          bun-version: ${{ steps.tools.outputs.bun }}
+
+      - name: 构建前端（覆盖率与本地同态，见上）
+        working-directory: packages/web
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bun run build
+          test -f dist/index.html || { echo "dist/index.html 不存在" >&2; exit 1; }
 
       - name: 读工具链版本（mise.toml [tools] 是唯一出处）
         id: tools
@@ -280,12 +292,8 @@ jobs:
   # 这种故障能一路走到用户手里而不红任何一步。所以：
   #   - build-binaries 必须 needs 本 job 并下载 artifact；
   #   - 下载后再断言 `packages/web/dist/index.html` 存在（见下面的「校验 dist」）。
-  # 前端产物是**其他 job 的输入**（gate-coverage 需要 dist 才能让覆盖率门禁
-  # 与本地同态；build-binaries 需要 dist 才能编 afhub），所以它只等前端门禁，
-  # **不等 gate-test / gate-coverage**——否则与「gate-coverage 依赖本 job」
-  # 构成循环依赖（GitHub Actions 会直接报 cycle）。
   build-frontend:
-    needs: [gate-static, gate-web]
+    needs: [gate-static, gate-test, gate-coverage, gate-web]
     runs-on: ubuntu-24.04
     # 只读（同上）：编前端不上传任何发布物，artifact 走 Actions 内部存储，
     # 不需要仓库或包的写权限。
