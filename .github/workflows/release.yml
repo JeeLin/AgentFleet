@@ -189,7 +189,10 @@ jobs:
 
       # 自包含断言（REX 的教训：产出一个动态链接的二进制，到了目标机上
       # 找不到 libssl 才炸）。本仓不链 OpenSSL，真正要判的是：
-      #   - musl：`ldd` 说 "not a dynamic executable" → 真静态；
+      #   - musl：**静态且非 PIE**——`ldd` 说静态只是必要条件，PIE 产物
+      #     `ldd` 同样报 "statically linked"，却带 `interpreter` 会在运行时
+      #     段错误；所以还要查 `readelf -l` 无 `interpreter`、`file` 不报
+      #     `pie executable`（见下面 musl 臂的完整判据）；
       #   - gnu：允许动态（glibc），但**不许**依赖 libssl / libcrypto；
       #   - windows-gnu：`objdump -p` 的 DLL Name 里**不许**出现 libssl / libcrypto。
       - name: 断言二进制自包含 / 不依赖 OpenSSL

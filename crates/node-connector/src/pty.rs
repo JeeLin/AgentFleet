@@ -54,10 +54,10 @@ impl Pty {
         Self::spawn_in(argv0, args, size, None, &[])
     }
 
-    /// 起一个 PTY，在子进程里 `chdir` 后 `execvp`。
+    /// 起一个 PTY，在子进程里 `chdir` 后 `execvpe`（把算好的环境直接交给子进程）。
     ///
     /// `argv` **不含 argv[0]**：调用方给的是命令 + 参数，第一个元素由
-    /// 本函数按 `argv0` 补。这与 `execvp` 的约定一致，也避免了调用方
+    /// 本函数按 `argv0` 补。这与 `execvpe` 的约定一致，也避免了调用方
     /// 在两处地方各写一次程序名。
     ///
     /// `cwd` 与 `env` **在 fork 之前全部备成 C 字符串**：fork 出来的子进程与
@@ -152,9 +152,9 @@ impl Pty {
         }
 
         // coverage: excluded — 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的
-        // **子进程**，父进程那份 llvm-cov 插桩在 `execvp` 成功之后就没了，
+        // **子进程**，父进程那份 llvm-cov 插桩在 `execvpe` 成功之后就没了，
         // 子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与
-        // `execvp` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
+        // `execvpe` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
         if pid == 0 {
             // ---- 子进程 ----
             // `forkpty` 已经替我们做好 setsid + TIOCSCTTY + dup2 0/1/2，
@@ -172,13 +172,9 @@ impl Pty {
                         libc::_exit(126);
                     }
                 }
-                // 用 `execvpe` 直接把 `envp` 交下去，**不写 `libc::environ`**。
-                //   - `libc::environ` 是 **glibc 专有**的可变符号，musl 目标上
-                //     根本不存在（`error[E0425]: cannot find value 'environ' in
-                //     crate 'libc'`）——CI 的 5 平台矩阵里有两个 musl 条目，
-                //     照原写法那两条**必然编译失败**，发布通路第一次跑就红；
-                //   - 语义上也更准：环境本来就已经在 `envp` 里算好了（合并后的
-                //     结果），再往 `environ` 里塞一遍等于**两条真相源**。
+                // 用 `execvpe` 直接把 `envp` 交下去，**不写 `libc::environ`**：
+                // 那个符号是 glibc 专有的，musl 上没有；而且环境已经在 `envp`
+                // 里算好了，再往 `environ` 塞一遍等于两条真相源。
                 libc::execvpe(program.as_ptr(), argv.as_ptr(), envp.as_ptr());
                 libc::_exit(127);
             }
@@ -505,7 +501,7 @@ mod tests {
         assert!(seen > 0, "先读到子进程的输出，再读到 EOF");
     }
 
-    /// 参数里的 NUL 不可能传进 `execvp`（C 字符串没有 NUL 结尾的概念）。
+    /// 参数里的 NUL 不可能传进 `execvpe`（C 字符串没有 NUL 结尾的概念）。
     #[test]
     fn arguments_with_a_nul_are_refused_before_forking() {
         let err = Pty::spawn("echo", &["a\0b".to_string()], Size { cols: 8, rows: 8 })
@@ -588,7 +584,7 @@ mod tests {
 
         // **设备原有的环境必须还在**：这是「追加」之所以是追加的全部意义。
         // 整体替换会让 `PATH` 消失，而一个没有 `PATH` 的 shell 连 `/bin/sh`
-        // 都靠 `execvp` 找不到——那时用户看到的只是「终端打不开」。
+        // 都靠 `execvpe` 找不到——那时用户看到的只是「终端打不开」。
         std::env::set_var("AFCLI_PTY_INHERITED", "kept");
         let mut third = Pty::spawn_in(
             "/bin/sh",
