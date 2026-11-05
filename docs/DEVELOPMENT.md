@@ -56,6 +56,12 @@ check → fmt → lint → test → **cov-gate**（覆盖率 100% 阻塞）→ *
 工具链版本只写在 `mise.toml` 的 `[tools]` 一处，workflow 从那里读——
 覆盖率数值跨工具链不可比，版本写两处迟早只改一处。
 
+**钉死与浮动的分档**：`rust` / `node` 钉死（覆盖率门禁是精确比对，换一次编译器整表漂移；
+`clippy -D warnings` 也会因新版 lint 凭空变红，而没有人改过代码）。`bun` 跟 `latest`——
+依赖由 `packages/web/bun.lock` 锁住（已入库），剩下的风险只有 bun 自己改了构建产物格式，
+那会被 `web-ci` 当场发现。**不要**把 `rust` 改成 `stable`：`stable` 不是「更新的版本」，
+只是「不固定的版本」；要升级就显式改那个数字。
+
 **唯一权威是 `mise.toml` 的 `[tasks.ci].depends`**。新增门禁只加在那里一次，产线不必再抄。
 `scripts/check.sh` 的 C7 会解析 `mise.toml` 与 `release.yml` 的 `gate` 步骤名，**双向比对**：
 漏抄一条会红，多抄一条也会红。这条门禁存在的理由是「少跑的那一道不会红，它只是不存在」。

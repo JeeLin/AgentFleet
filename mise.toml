@@ -1,15 +1,22 @@
 # mise 项目配置：工具链与任务
 #
-# 原则：**工具链版本钉死**，不用 `latest`——否则换一次 stable 就重编译全树，
-# 且 `cargo llvm-cov` 的覆盖率数值跨工具链不可比（覆盖率门禁要求可复现）。
+# 原则（按工具分档，不是一刀切）：
+#
+# - **rust / node 钉死**。`rust` 尤其不能浮动：`cargo llvm-cov` 的覆盖率数值跨
+#   工具链不可比，而覆盖率门禁是**精确比对**（685 vs 685 那种），换一次编译器就
+#   整表漂移；clippy 也吃 `-D warnings`，新版加一条 lint 就让主干凭空变红，而
+#   没有人改过代码。`node` 同理——vue-tsc / eslint / vite 的产物与它对版本敏感。
+# - **bun 跟 `latest`**。它的依赖版本由 `packages/web/bun.lock` 锁住（已入库），
+#   所以依赖面不漂；剩下的风险只有「bun 自己改了 `bun run build` 的产物格式」，
+#   而这会被 CI 的 `web-ci` 当场发现，代价是一次可回退的升级而不是一次静默劣化。
 
 [tools]
-# 顺序与项目一致：node / bun / rust。版本钉死，不用 `latest`——
-# 否则换一次 stable 就重编译全树，且 `cargo llvm-cov` 的覆盖率数值跨工具链
-# 不可比（覆盖率门禁要求可复现）。
+# 顺序与项目一致：node / bun / rust。
 node = "24"
 bun = "latest"
-# 与产线保持一致；升级时同步改 .github/workflows/release.yml 的 `gate`（那里钉的是同一个版本）
+# 钉死：覆盖率与 clippy 门禁要求同一份代码换个时间跑出同样的结果。
+# 升级时显式改这个数字，**不要**改成 `stable`——`stable` 不是「更新的版本」，
+# 只是「不固定的版本」。`.github/workflows/release.yml` 的 `gate` 直接读本值。
 rust = "1.99.0"
 
 # 数据目录钉在仓库内，不落 `~/.local/share/agentfleet/`（`dirs::data_dir()` 的缺省）。
