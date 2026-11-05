@@ -18,18 +18,49 @@ each milestone document's `里程碑起始 ref`. Entry text was not rewritten.
 
 ### Added
 
+- **设备可以从 Hub 自己拉 `afcli`（`GET /api/agent-binary` + 设备页「下载 afcli」按钮）**。
+  接入引导一直是「在设备上跑 `afcli run <hub-url>`」，可那台设备上**首先得有** `afcli`，
+  而 GitHub Release 在两个场景里够不到：**内网/离线部署**（Hub 自己就在隔离网里）、
+  **版本对齐**（Release 页有多个版本，选错就连不上，协议可能已变）。从这一台 Hub 下发，
+  拿到的**一定**是这个 Hub 会认的那一个。二进制读 `AFCLI_BINARY_PATH`（缺省
+  `/usr/local/bin/afcli`，与 `Dockerfile.hub` 的 `COPY` 目标一致，镜像里开箱即用）。
+  **文件缺失或 0 字节返回 `404 agent_binary_unavailable` 而不是 500**——裸机跑 `afhub`
+  时磁盘上本来就没有 `afcli`，那是正常部署形态，500 会让运维去翻一个不存在的 bug；
+  0 字节则会在设备侧 `chmod +x` 后立刻 `Exec format error`，报错发生在设备上。错误体
+  **不含磁盘路径**。它要 session：能匿名取走约 20MB 文件的端点就是白送的放大攻击面。
+  「单二进制」那条硬需求讲的是**前端资产**，所以 `afcli` 不 `include_dir!` 进 `afhub`
+  （那会让镜像多约 20MB 重复） / **Devices can now fetch `afcli` from the Hub itself**
+  (`GET /api/agent-binary`, plus a "download afcli" button in the devices empty state).
+  Onboarding always said "run `afcli run <hub-url>` on the device", but that device needs
+  `afcli` first, and GitHub Releases is unreachable in two situations: **air-gapped or offline
+  deployments**, and **version alignment** (the Release page lists several versions and picking
+  the wrong one silently breaks the protocol). Serving it from this Hub guarantees the binary
+  matches this Hub. It probes a **candidate list** (same order as REX's `AgentBinaries::find`):
+  `AFCLI_BINARY_PATH` (explicit, and exclusive) → per-arch subdirectories → the image's flat
+  `/usr/local/bin/afcli` → bare-metal locations. A single fixed path is not "inflexible", it
+  **silently misses whole deployment shapes**. The `?os=` / `?arch=` parameters **only locate a
+  file; they never fabricate one**: this image ships a single architecture, so a platform it does
+  not have is an honest 404 rather than masquerading as another architecture (which would hand a
+  device a file that survives `chmod +x` and then dies with `Exec format error` on the device).
+  The download filename **carries the platform** and the frontend reads it from
+  `Content-Disposition` instead of hardcoding a second name. **A missing or all-zero-byte set
+  returns `404 agent_binary_unavailable`, never 500**, and zero-byte candidates are skipped.
+  The error body **never carries the disk path**. The route requires a session, because an
+  endpoint that hands out ~20MB anonymously is a free amplification surface. The single-binary
+  requirement is about **frontend assets**, so `afcli` is not embedded into `afhub`.
+
 - **发布通路真的建起来了：打 tag 即出二进制、镜像与 Release**。此前 `docs/DEVELOPMENT.md`
-  §2 的发布段整段标着「未落地」——`ci.yml` 只管门禁，推 tag 之后没有任何东西产出用户能拿
-  的东西。现在 `release.yml` 与它并列同一触发（`push: tags: ['v*']`），跑
-  产线自己先过 `gate`（= `ci.yml` 那串门禁），再 `build-frontend` → `build-binaries`
+  §2 的发布段整段标着「未落地」——门禁只管挡，推 tag 之后没有任何东西产出用户能拿的东西。
+  现在 `release.yml`（`push: tags: ['v*']` 触发）产线自己先过 `gate`（= `mise.toml
+  [tasks.ci]` 的全部门禁），再 `build-frontend` → `build-binaries`
   （4 平台**原生**矩阵）→ `docker-hub` / `docker-node` / `release` 三个消费者。**`build-frontend` 是 `build-binaries` 的硬前置**：`include_dir!`
   在编译期嵌入 dist，dist 缺失时 `build.rs` 只造一个占位页并打 `cargo:warning`——二进制照
   样编得出来、页面却是空的，这种静默降级一旦发出去就是「Hub 打开是占位页」。所以矩阵里
   每个平台在编之前都断言 `packages/web/dist/index.html` 存在，不存在就 fail / **The release
   pipeline now exists: tagging produces binaries, images, and a Release**. Until now the
-  release section of `docs/DEVELOPMENT.md` §2 was marked "not implemented" — `ci.yml` only
-  gated, and pushing a tag produced nothing a user could run. `release.yml` now sits beside
-  it on the same trigger and runs `build-frontend` → `build-binaries` (a five-target **native**
+  release section of `docs/DEVELOPMENT.md` §2 was marked "not implemented" — the gate only
+  gated, and pushing a tag produced nothing a user could run. `release.yml` now runs
+  `gate` and then `build-frontend` → `build-binaries` (a four-target **native**
   matrix) → the three consumers `docker-hub` / `docker-node` / `release`. **The frontend job is
   a hard prerequisite of the binaries**: `include_dir!` embeds `dist` at compile time, and when
   it is missing `build.rs` writes a placeholder page and only emits a `cargo:warning` — the
@@ -56,12 +87,52 @@ each milestone document's `里程碑起始 ref`. Entry text was not rewritten.
   the evidence for the single-binary requirement — while the node image picks its binary by
   `TARGETARCH`.
 - `SHA256SUMS` 与 GitHub Release：Release body 从本文件的对应版本段抽出，**抽不到就 fail**，
-  不给一份空 body / `SHA256SUMS` plus a GitHub Release whose body is extracted from this
-  file's matching version section; **extraction failure fails the job** rather than shipping
-  an empty body.
+  不给一份空 body。**Release 附件只发 musl 静态产物，并用不带后缀的干净名**
+  （`afhub-linux-amd64` / `afcli-linux-arm64`，不是 `…-musl`），固定 6 个：
+  4 个二进制 + `CHANGELOG.md` + `SHA256SUMS`。理由是「下载的」与「容器里跑的」必须是同一份
+  文件——两个镜像都是 `FROM scratch`，里面没有 glibc，gnu 产物进去起不来（缺 `ld-linux` /
+  `libc.so.6` / `libm.so.6` / `libgcc_s.so.1`），把它摆在附件列表里只会让人选错。gnu 产物仍
+  由矩阵编出来并验它能编、无 OpenSSL 依赖，只是不进 Release。`CHANGELOG.md` 也纳入
+  `SHA256SUMS`（同样是被下载的东西），并有一道断言钉住「二进制恰为 4 个且名字不含 musl」，
+  防止产物命名将来变化时 glob 空转、建出一个没有二进制的空 Release /
+  `SHA256SUMS` plus a GitHub Release whose body is extracted from this file's matching
+  version section; **extraction failure fails the job** rather than shipping an empty body.
+  **Release assets ship the musl static builds only, under clean suffix-free names**
+  (`afhub-linux-amd64`, not `…-musl`): four binaries plus `CHANGELOG.md` and `SHA256SUMS`.
+  What users download has to be the same file the containers run — both images are
+  `FROM scratch` with no glibc, so a gnu build cannot start there (no `ld-linux`,
+  `libc.so.6`, `libm.so.6`, `libgcc_s.so.1`) and listing it would only invite the wrong
+  choice. The gnu builds are still produced and checked (they compile, and carry no OpenSSL
+  dependency), they simply do not reach the Release. `CHANGELOG.md` is covered by
+  `SHA256SUMS` too, since it is downloaded like everything else, and an assertion pins
+  "exactly four binaries, none named `musl`" so that a future renaming cannot turn the glob
+  into a no-op and publish an empty Release.
 
 ### Changed
 
+- **删掉 `ci.yml`：门禁从「两份清单」收敛成「一份」**。`ci.yml` 与 `release.yml` 同触发并行，
+  而 `release.yml` 的 `gate` job 已经把全部门禁跑了一遍——`ci.yml` 是纯重复。删掉后
+  `scripts/check.sh` 的 C7 从「两个 workflow 逐条比对」改成「`release.yml` 的 `gate` 必须跑齐
+  `mise.toml [tasks.ci].depends` 的全部 7 项」：**唯一权威只剩 `mise.toml` 一处**，新增门禁只
+  加一次，产线不必再抄一遍，也就不存在「两份清单互相漂移」。C7 仍是双向的（漏抄一条会红，
+  多抄一条也会红）。**代价如实记录**：门禁红时不再有独立的 `CI` run 告诉你哪条挂了——只能看
+  `release` run 里 `gate` job 的步骤名，信息没丢但换了位置 / **`ci.yml` is gone: the gate now
+  has a single source of truth**. The two workflows shared one trigger and ran in parallel,
+  while `release.yml`'s `gate` job already ran every check, so `ci.yml` was pure duplication.
+  `scripts/check.sh`'s C7 now compares the `gate` job against `mise.toml [tasks.ci].depends`
+  (all seven entries) instead of diffing two workflows, in both directions: a missing step
+  fails and so does an extra one. **Cost recorded honestly**: a red gate no longer shows up as
+  its own `CI` run naming the failing step — you read the step names inside the `release` run's
+  `gate` job instead. The information is still there, just elsewhere.
+- **`release.yml` 的前端三道门禁合并成一步 `web-ci`**。`mise.toml` 里 `web-ci` 是聚合任务
+  （`depends = ["web-check", "web-test", "web-build"]`），而 `[tasks.ci].depends` 写的就是
+  `web-ci` 这个名字。产线展开成三步本身没错，但**步骤名对不上 C7 就比对不出来**，而比对不
+  出时门禁只能靠人眼核——那等于没有门禁。改名前 C7 一上线就抓到了这个差异 /
+  **The three frontend gate steps are merged into one `web-ci` step**. In `mise.toml`,
+  `web-ci` is an aggregate task and that is the name `[tasks.ci].depends` refers to; expanding
+  it to three steps on the pipeline was fine in substance but made the **step names**
+  un-matchable by C7, and a check that cannot match can only be verified by eye. C7 caught the
+  mismatch the moment it was rewritten.
 - **版本号从 `0.5.0` 提到 `0.7.1`**（`Cargo.toml` 的 `workspace.package` 与
   `packages/web/package.json` 同步）。此前二进制自报 0.5.0，而里程碑已经走到 v0.7.0——
   「发出去的二进制」与 tag 名失配正是发布通路要消灭的那类问题 / **Version bumped from
@@ -79,22 +150,27 @@ each milestone document's `里程碑起始 ref`. Entry text was not rewritten.
 
 ### Fixed
 
-- **门禁不再只是「给人看的」：`release.yml` 自己等闸**。`ci.yml` 与 `release.yml` 此前只
-  共享触发、互不阻塞——两个 workflow 并行跑，门禁红时镜像照样推上 GHCR、Release 照样建。
+- **门禁不再只是「给人看的」：`release.yml` 自己等闸**。两个 workflow（`ci.yml` 与
+  `release.yml`）此前只共享触发、互不阻塞——并行跑，门禁红时镜像照样推上 GHCR、Release 照样建。
   防线原本是「tag 只在本地 `mise run ci` 全绿后才打」，而纪律挡不住手工打 tag 与
-  `workflow_dispatch` 补发。现在 `release.yml` 第一个 job 是 `gate`（跑与 `ci.yml` 同一串
-  门禁），`build-binaries` / `docker-hub` / `docker-node` / `release` 全部 `needs` 它。
+  `workflow_dispatch` 补发。现在 `release.yml` 第一个 job 是 `gate`（跑 `mise.toml
+  [tasks.ci]` 的全部门禁），`build-binaries` / `docker-hub` / `docker-node` / `release` 全部
+  `needs` 它。
   代价是门禁跑两遍（覆盖率那步最贵），换的是坏产物发不出去 / **The gate now blocks the
   pipeline: `release.yml` runs the same checks in a `gate` job that every publishing job
   depends on**, instead of relying on the convention that tags are only pushed after a
   green local run.
-- **移除 `windows-gnu` 矩阵条目：它从来编不出来**。首次真跑 CI 时该条目 `exit code 101`——
-  `afcli` 依赖的 `node-connector` 是纯 Unix 的（`forkpty` / `pipe2` / `fcntl` /
-  `O_CLOEXEC` / `TIOCSWINSZ`，连 `std::os::fd` 都没有），这不是换 crate 能绕开的细节：
-  会话终端就是一个 PTY，Windows 没有对应物。矩阵按 4 个 Linux 目标（x86_64 / aarch64 ×
-  gnu / musl）发布。要支持 Windows 需先给 `node-connector` 写 ConPTY 支持 /
-  **Dropped the `windows-gnu` target, which could never compile**: `node-connector` is
-  Unix-only by design.
+- **移除 `windows-gnu` 矩阵条目：v0.7.1 不做 Windows 移植，不是永远不支持**。首次真跑 CI
+  时该条目 `exit code 101`——`afcli` 依赖的 `node-connector` 有 81 处 `libc::` 调用，且
+  `exec.rs` 的「`fork` → 改 fd → `execvpe`」执行模型在 Windows 上没有对应物（Windows
+  **没有 `fork`**，要换成 `CreateProcess` + 句柄重定向），会话终端则要从 `forkpty` 换成
+  ConPTY。所以这是移植工程，不是加个矩阵条目：正确顺序是先抽平台无关的 PTY/进程后端、
+  实现两个平台后端、Windows runner 上真跑通过，再把条目加回来。矩阵按 4 个 Linux 目标
+  （x86_64 / aarch64 × gnu / musl）发布。**这项工作已排进 v0.7.2**（设备侧 `afcli`） /
+  **Dropped the `windows-gnu` target: Windows is out of scope for v0.7.1, not
+  permanently unsupported.** `node-connector` is currently a Unix-only implementation
+  (81 `libc::` call sites; the `fork` + `execvpe` execution model has no Windows
+  equivalent, and the PTY path would need ConPTY). Porting it is its own milestone.
 
 ## [0.7.0] - 2026-11-05
 

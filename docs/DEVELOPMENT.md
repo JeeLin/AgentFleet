@@ -50,23 +50,25 @@ packages/
 
 ### 门禁（已有）
 
-`.github/workflows/ci.yml` 跑**门禁**，与本地 `mise run ci` 是同一串：
+门禁是**一回事**：本地 `mise run ci`、产线 `release.yml` 的 `gate` job 跑的是同一串：
 check → fmt → lint → test → **cov-gate**（覆盖率 100% 阻塞）→ **cov-anchors**（例外理由的锚点核对）
-→ web-check / web-test / web-build。
+→ web-ci（= web-check / web-test / web-build）。
 工具链版本只写在 `mise.toml` 的 `[tools]` 一处，workflow 从那里读——
 覆盖率数值跨工具链不可比，版本写两处迟早只改一处。
 
-**门禁清单写两处（`mise.toml` 的 `[tasks.ci].depends` 与 `ci.yml` 的 steps），改一边必须改另一边**：
-漏改的那份会让 CI 少跑一道门禁而没人发现——少跑的那一道不会红，它只是不存在。
-新增门禁时先加进 `mise.toml`，再把同一条抄进 `ci.yml`。
+**唯一权威是 `mise.toml` 的 `[tasks.ci].depends`**。新增门禁只加在那里一次，产线不必再抄。
+`scripts/check.sh` 的 C7 会解析 `mise.toml` 与 `release.yml` 的 `gate` 步骤名，**双向比对**：
+漏抄一条会红，多抄一条也会红。这条门禁存在的理由是「少跑的那一道不会红，它只是不存在」。
+
+> **`ci.yml` 已删除（v0.7.1）**。它曾经是与 `release.yml` 并列的第二个 workflow，两份门禁
+> 清单各写一遍、靠 C7 比对防漂移。删掉的理由：`gate` job 已经把全部门禁跑了一遍，`ci.yml`
+> 是纯重复；而两个 workflow 同触发并行会让页面上出现两个 run（见下面 `gate` 那段的历史）。
+> 代价如实记录：**门禁红时不再有独立的 `CI` run 告诉你哪条挂了**——只能看 `release` run 里
+> `gate` job 的步骤名（`cov-gate（mise run cov-gate）` 之类），信息其实没丢，只是换了位置。
 
 **只在推 tag（`v*`）时触发**：全量插桩的覆盖率是最贵的一步，
 每个 push / PR 都跑一遍等于把 runner 时间烧在没定稿的提交上。
-CI 的定位是「发布前的最后一道闸」，每次提交的反馈由本地 `mise run ci` 承担。
-
-**`ci.yml` 与 `release.yml` 是同触发、两个 workflow**：`ci.yml` 是闸，`release.yml` 是产线。
-已知取舍——两者并行，**门禁红时镜像仍可能被推上去**。所以 tag 只在
-`mise run ci` 全绿之后才打，不靠 CI 互相阻塞。
+产线的定位是「发布前的最后一道闸」，每次提交的反馈由本地 `mise run ci` 承担。
 
 ### 发布（**v0.7.1 落地**）
 
@@ -74,22 +76,38 @@ CI 的定位是「发布前的最后一道闸」，每次提交的反馈由本�
 三个消费者**：
 
 ```text
-gate（= ci.yml 的门禁，产线自己等它；红则下面全部不跑）
+gate（= mise.toml [tasks.ci] 的全部门禁，产线自己等它；红则下面全部不跑）
     ↓ needs
 build-frontend（bun install --frozen-lockfile → build，dist 作为 artifact 上传）
     ↓ needs（硬前置，不是优化）
 build-binaries（4 平台矩阵，**原生编译**）
     ├─→ docker-hub：Hub 镜像（afhub + afcli，前端已编译期嵌入，镜像里不另放 dist）
     ├─→ docker-node：afcli 镜像（linux/amd64 + linux/arm64，按 TARGETARCH 选二进制）
-    └─→ release：GitHub Release + SHA256SUMS + 从 CHANGELOG.md 抽 body
+    └─→ release：GitHub Release + SHA256SUMS + CHANGELOG.md + 从 CHANGELOG.md 抽 body
 ```
 
-**`gate` 为什么会存在**：`ci.yml` 与 `release.yml` 曾经只共享触发、互不阻塞，门禁红时
+**Release 附件只发 musl 静态产物，且用不带后缀的干净名**（`afhub-linux-amd64` 而非
+`afhub-linux-amd64-musl`）。两条理由：
+
+1. **与容器取同一份**。`Dockerfile.hub` / `Dockerfile.node` 都是 `FROM scratch`，里面没有
+   glibc，三个 `COPY` 全指向 `*-musl`。用户下载物与容器原料是同一个文件，才不会出现
+   「镜像能跑、下载的跑不了」这种两份真相源。
+2. **避免制造错误选择**。gnu 产物在 scratch 里起不来（缺 `ld-linux` / `libc.so.6` /
+   `libm.so.6` / `libgcc_s.so.1`），把它摆在附件列表里只会让人选错。去掉 `-musl` 后缀
+   是为了让人不必先懂 glibc 与 musl 的区别就能选对。
+
+gnu 产物**仍由矩阵编出来**（CI 里验它能编、能查到无 OpenSSL 依赖），只是不进 Release——
+它没有任何消费方。附件固定 6 个：`afhub-linux-{amd64,arm64}` / `afcli-linux-{amd64,arm64}`
++ `CHANGELOG.md` + `SHA256SUMS`，且 `CHANGELOG.md` 也在 SUMS 里（同样是被下载的东西）。
+`release` job 有一步断言「二进制恰为 4 个且名字不含 musl」，防止产物命名将来变化时
+glob 空转、建出一个没有二进制的空 Release。
+
+**`gate` 为什么会存在**：`release.yml` 曾经与门禁只共享触发、互不阻塞，门禁红时
 镜像照样推上 GHCR、Release 照样建，`latest` 一旦被污染所有 `docker pull :latest` 的用户
 直接升到坏版本。当时的防线是「tag 只在本地 `mise run ci` 全绿后才打」，而纪律挡不住手工
-打 tag 与 `workflow_dispatch` 补发。所以门禁进产线：`release.yml` 的 `gate` job 跑与
-`ci.yml` **同一串**命令，所有产线 job 都 `needs` 它。**改一边必须改另一边**——两份清单
-各写一遍，漏改的那份会让产线少跑一道闸而没人发现。代价是门禁跑两遍（覆盖率那步最贵）。
+打 tag 与 `workflow_dispatch` 补发。所以门禁进产线：`release.yml` 的 `gate` job 跑
+`mise.toml [tasks.ci]` 的**全部**门禁，所有产线 job 都 `needs` 它。清单只有一处（`mise.toml`），
+C7 双向比对产线的步骤名——不再存在「两份清单互相漂移」这件事。
 
 **`build-frontend` 是硬前置**：`include_dir!` 在编译期嵌入 dist，而 dist 缺失时
 `crates/hub-server/build.rs` 不失败——它造一个占位页、打一条 `cargo:warning`，二进制照编。
@@ -98,22 +116,72 @@ build-binaries（4 平台矩阵，**原生编译**）
 
 | 文件 | 作用 | 状态 |
 |---|---|---|
-| `.github/workflows/ci.yml` | 门禁（= `mise run ci`），**仅 tag 触发** | **已有** |
-| `.github/workflows/release.yml` | 发布全流程（前端 / 二进制矩阵 / 镜像 / Release） | **v0.7.1 落地** |
+| `.github/workflows/release.yml` | 门禁 `gate` + 发布全流程（前端 / 二进制矩阵 / 镜像 / Release）。**唯一 workflow** | **v0.7.1 落地** |
 | `Dockerfile.hub` | Hub 镜像；`FROM scratch` + musl 静态二进制 | **v0.7.1 落地** |
 | `Dockerfile.node` | afcli 镜像；`COPY dist/${TARGETARCH}/afcli-…` | **v0.7.1 落地** |
 | `docker-compose.hub.yaml` / `docker-compose.agent.yaml` | 自托管部署 | **v0.7.1 落地** |
-| Hub 侧「设备从 Hub 拉二进制」的下载路由 | `DEVELOPMENT.md` §2 蓝图里 `/app/node-binaries/` 的**真正用途** | **未落地（v0.8.0）**：二进制已放进镜像，路由还没有 |
+| `GET /api/agent-binary` + 设备页下载按钮 | 设备从 Hub 拉 `afcli`（见下） | **v0.7.1 落地** |
+
+#### 设备从 Hub 拉 `afcli`（`GET /api/agent-binary`）
+
+接入引导一直是「在设备上跑 `afcli run <hub-url>`」，可那台设备上**首先得有** `afcli`。
+GitHub Release 能用，但两个场景会卡死：**内网/离线部署**（Hub 自己就在隔离网里，设备够不到
+GitHub）、**版本对齐**（Release 页上有多个版本，选错就连不上，协议可能已变）。所以多一条路：
+从**这一台** Hub 直接下发。
+
+- **读哪个文件：按候选列表探测**（查找顺序照 REX 的 `AgentBinaries::find`）。单一固定路径
+  的问题不是「不够灵活」，而是**部署形态一多就必然漏**：镜像里在 `/usr/local/bin`、裸机可能
+  在 `/usr/local/lib/agentfleet`、本地调试在 `~/.agentfleet`。所以依次试：
+
+  1. `AFCLI_BINARY_PATH`（显式配置，**独占**——运维写明路径还去猜别的，等于悄悄忽略配置）；
+  2. `/usr/local/bin/{os}/{arch}/afcli`、`…/{os}-{arch}/afcli`、`…/afcli-{os}-{arch}`（分架构摆放）；
+  3. `/usr/local/bin/afcli`（= `Dockerfile.hub` 的 `COPY` 目标，镜像里唯一的形态）；
+  4. `/usr/local/lib/agentfleet/…`、`~/.agentfleet/afcli`（裸机与本地调试）。
+
+  第一个**读得出来且非空**的胜出。「读得出来」而不只是 `exists()`：`exists()` 到 `read()`
+  之间文件可能被删或权限不足，那会把 500 漏出去。
+- **`?os=` / `?arch=` 只用于定位，不虚构**。REX 的镜像内嵌**所有**架构的 agent 二进制，
+  所以它对任意 `os/arch` 都能供货；本仓 `Dockerfile.hub` 只 `COPY` 同架构那一份
+  （`${TARGETARCH}`），于是参数只把「你要的平台」拼进候选路径，要的平台这台 Hub 没有就如实
+  404。**绝不拿本机那份冒充别的架构**——那会让设备下到一个能 `chmod +x` 但运行即
+  `Exec format error` 的文件，而报错发生在设备上。`mac` / `macos` / `darwin` 三个写法等价
+  （`std::env::consts::OS` 在 macOS 上给 `macos`，而产物名与文档用 `mac`）。
+- **下发文件名带平台**（`afcli-linux-aarch64`）。前端**从 `Content-Disposition` 读**而不是
+  另写一个：写死 `afcli` 会让同时有 amd64 与 arm64 两台机器的用户存下两个同名文件，
+  靠肉眼分不出哪个能跑；两处各写一个名字还必然漂移。拿不到头时回落 `afcli`——它是可选头，
+  解析失败不该让下载失败。
+- **不嵌进 Hub 二进制**：`afhub` 与 `afcli` 在镜像里是两个共用同一份静态二进制的进程，
+  把 `afcli` 再 `include_dir!` 进 `afhub` 会让镜像多约 20MB 重复。「单二进制」那条硬需求讲的
+  是**前端资产**，不是把所有可执行文件塞进一个。
+- **找不到、或候选全是 0 字节 → `404 agent_binary_unavailable`，不是 500**。裸机跑 `afhub`
+  （不经容器）时磁盘上本来就没有 `afcli`，这是**正常部署形态**，500 会让运维去翻一个不存在的
+  bug；0 字节则会让设备 `chmod +x` 后立刻 `Exec format error`，报错发生在设备上。0 字节的候选
+  **跳过继续试下一个**（分架构那份坏了，平铺那份可能还好）。错误体只有固定 code，**不含磁盘
+  路径**（约束 13）。
+- **要 session**：它不下发密钥，但一个能匿名取走约 20MB 文件的端点就是白送的放大攻击面。
+  路由注册在 `.layer(require_auth)` 之前，`tests/api.rs` 的认证覆盖表已收它。
+- **入口在设备页空态**：「还没有设备接入」那块下面有「下载 afcli」按钮。三种结果分别处置
+  （成功 / `agent_binary_unavailable` 提示「这台 Hub 没配」/ 其它错误走通用文案）——
+  合并成一句「下载失败」会把「没配」误导成「坏了」。
+- **空串的 `AFCLI_BINARY_PATH` 按「没配」处理**：`AFCLI_BINARY_PATH=` 是「我不想配」的常见
+  写法，当成路径会让候选表只剩一个空路径、永远 404 且日志看不出「你其实配错了」。
 
 - **原生编译优先于交叉编译**：GitHub 有 `ubuntu-24.04-arm` runner，aarch64 直接原生编
   （REX 的教训：交叉编 OpenSSL/zlib 会架构错配）。
-- **没有 Windows 目标，而且要支持它得先写平台分支**：曾经有一条 `x86_64-pc-windows-gnu`，
-  v0.7.1 首次真跑 CI 时暴露它**从来编不出来**（`exit code 101`）——`afcli` 依赖
-  `node-connector`，而后者是纯 Unix 的（`forkpty` / `pipe2` / `fcntl` / `O_CLOEXEC` /
-  `TIOCSWINSZ` / `pid_t`，连 `std::os::fd` 模块都没有）。这不是「换个 crate 能绕开」的
-  细节：会话终端就是一个 PTY，Windows 没有对应物。所以矩阵是 4 个 Linux 目标
-  （x86_64 / aarch64 × gnu / musl）。**要加回 Windows，先给 `node-connector` 写 ConPTY
-  支持**，别只把矩阵条目加回去——那样每次发布必红一条，而报错看起来像缺链接器。
+- **v0.7.1 不提供 Windows 目标——是「本里程碑不做」，不是「永远不支持」**：曾经有一条
+  `x86_64-pc-windows-gnu`，v0.7.1 首次真跑 CI 时 `exit code 101`。`afcli` 依赖
+  `node-connector`，后者有 **81 处 `libc::` 调用**（`pty.rs` 27、`exec.rs` 45、
+  `files.rs` 4、`terminal.rs` 5），且障碍不只是 API 名字：`exec.rs` 的
+  「`fork` → 子进程改 fd → `execvpe`」模型在 Windows 上要整体换成 `CreateProcess`
+  + 句柄重定向，因为 **Windows 没有 `fork`**；会话终端则要从 `forkpty`/`ioctl`
+  换成 ConPTY（`CreatePseudoConsole` / `ResizePseudoConsole`）。
+  **注意别拿 `REX` 类推**：REX 能在 `windows-latest` 上编，是因为它 16 个 crate 全是
+  纯 `std` 的客户端/协议/命令行工具，整个仓库**没有一处 `forkpty`/`openpty`/
+  `TIOCSWINSZ`**，跑子进程只用跨平台的 `std::process::Command`——它从未面对 PTY 移植。
+  所以 v0.7.1 的矩阵是 4 个 Linux 目标（x86_64 / aarch64 × gnu / musl）。
+  **这件事已经排进 v0.7.2**（设备侧 `afcli`，见里程碑表）：正确顺序是抽平台无关的
+  PTY/进程后端 → 实现 ConPTY 与 `CreateProcess` 后端 → Windows runner 上真跑通过 →
+  再把它加回矩阵。别只把矩阵条目加回去，那样每次发布必红一条，而报错看起来像缺链接器。
 - **「静态链 OpenSSL」在本仓不适用，但断言照抄**：`Cargo.toml` 的 `reqwest` 是
   `rustls-tls`（`default-features = false`），整棵树**不链系统 OpenSSL**。所以真正要
   静态的是 libc，用 **musl 目标**解决。REX 那条「产物不依赖 `libssl|libcrypto`」的
@@ -145,7 +213,8 @@ build-binaries（4 平台矩阵，**原生编译**）
 | v0.5.0 ✅ 已完成 | 会话界面重排（对齐 opencode 形态） | 会话页从「全局侧栏 + 会话内一个坞」改为 opencode 形态的**单层工作界面**：进会话即收起全局侧栏、会话铺满页面；顶部一条 tab 条切换会话；**对话在左，右侧一格显示一个工具，工具的唯一入口是头部「＋」（列全部三个，选中即替换当前）**——三个工具（terminal / files / git）平级且**互斥**（2026-10-29 裁决 C；此前一度规划「右上 git/文件 + 右下终端常驻」的两格方案，已被用户推翻）；左右一条分栏可拖拽且按 tab 各自保留比例（**没有上下分栏**）；窄屏（< 900px）降级为一个覆盖式抽屉。**纯前端**：不改任何 connector、帧协议或设备侧代码；`v0.4.0` 的 D10（tab 是视图切换器、切 tab 不释放通道）原样保留。**已知代价**：换工具会释放被替换者的通道，终端则是杀掉 PTY（`node-core` 的 `terminal.close()` 走 `pty.close()`）| 会话界面形态（**新增能力**，无对应 §6.1 能力项） |
 | v0.6.0 ✅ 已完成 | 任务基准（**重挂**，用户 2026-11-03 裁定「视为结束，从 v0.7.0 开始」） | 会话工作区的**起点 + 产出概览**：建会话时用 git connector 的第四个只读 op `rev` 记下 `base_commit`，面板上显示「提交几次 / 另有几个文件未提交」。**产品主轴改版后**：这套逻辑是对的，但它算的是 `base_commit..HEAD`——在项目主轴下这是 **Execution 的产出 diff**，最终该挂在 Execution 上，不是会话上。因此本里程碑**收口为「只修真 bug、不再扩展」**，其「起点」概念作为 v0.7.0 的输入移交 | Git 操作界面（起点部分） |
 | v0.7.0 ✅ 已完成 | **项目与绑定（+ 设备/agent 管理面扩展）** — **含「项目结构按新需求调整」** | **先做两件结构活**：①**crate 拆分**——`node-core` 拆出 `node-connector`（7 → 8 个 crate，纯搬家、单独一个提交，理由只此一条：v0.12.0 的按需加载必须靠 crate 边界）；②按项目主轴重排数据模型与模块分层——`schema` 增加 `project` / `task` / `execution` / `binding` 表与迁移脚本，`crates/` 与 `packages/web/src` 按新归属切分（会话挂到 Execution 下，不再是顶层）。**这是本里程碑的第一件事**，否则后面的项目实体只能挂在旧结构上，等于给会话再加一层壳。然后再做业务：项目实体三形态（中心式 / 隔离式 / 镜像式）；Hub 侧裸仓库（git CLI，藏在接口后）；Binding = `(project, device) → 固定目录`；设备侧 worktree 分任务 + 四层磁盘处置（`architecture/project-and-snapshot.md`）；前端新增 `projects` / `project` 路由，**项目页默认落在看板**。**v0.6.0 的 `base_commit` 概念在此落到 Task 上**：交接规则写死——`execution.base_commit` 是**唯一真相源**，会话上的 `base_rev` 降级为「会话第一段执行的起点快照」，只读、不再参与任何「相对它产出了什么」的计算（那套展示整体移到 Execution 上）。**不保留两份可写的起点**：同一个事实有两个写入口，迟早会出现「会话说基于 A、执行说基于 B」。**同时扩展设备页 / agent 页（不砍反扩）**：绑定关系（这台设备绑了哪些项目、绑在哪个固定目录）、磁盘配额与已用、失败归因（哪类失败集中在这台机器）、改配额与清理策略；agent 页加「该 agent 上跑过哪些任务 / 成功率」 | 项目实体、绑定与固定目录、设备管理、agent 管理 |
-| v0.7.1 ✅ 已完成 | **CI 镜像构建（发布通路）** | 从 v0.14.0 提前而来（用户 2026-11-05 裁定）。本地 `mise run ci` 全绿后打 tag `v0.7.1` 触发 CI，**CI 首验暴露出两个真缺陷**：两个 workflow 互不阻塞（门禁红照样发镜像）、`windows-gnu` 条目从来编不出来——两者都已在同一里程碑内修掉，4 个 Linux 目标均已真编通过（`aarch64-*` 由 CI 的 arm runner 原生真编，11 步全 success）。把 §2 的「发布」那一整段真正建起来：`build-frontend`（bun `--frozen-lockfile` → build，dist 作为 artifact）**硬前置**于 `build-binaries`（4 平台**原生**矩阵：x86_64 / aarch64 × gnu / musl；windows-gnu 曾列在矩阵里但实测编不出来，已在同一里程碑内移除——见同节「没有 Windows 目标」），再分发到三个消费者：`docker-hub`（`afhub` + `afcli`，前端**已在编译期嵌入**，镜像里不另放 dist）、`docker-node`（`afcli`，按 `TARGETARCH` 选二进制）、`release`（GitHub Release + `SHA256SUMS` + 从 `CHANGELOG.md` 抽 body）。镜像推 `ghcr.io/<owner>/agentfleet-hub` / `agentfleet-node`。**`build-frontend` 之所以是硬前置**：dist 缺失时 `build.rs` 只造占位页并打 warning，二进制照编——「Hub 打开是占位页」能不红任何一步地发出去，所以每个平台编之前都断言 `dist/index.html` 存在。**安全边界变更**：`afhub` 缺省仍只绑回环，新增 `AFHUB_ALLOW_NON_LOOPBACK=1` 供容器显式放开，**只认确切的 `1`**。版本号 `0.5.0` → `0.7.1`（tag 与二进制自报版本必须一致） | —（`DEVELOPMENT.md` §2.1 发布段） |
+| v0.7.1 ✅ 已完成 | **CI 镜像构建（发布通路）** | 从 v0.14.0 提前而来（用户 2026-11-05 裁定）。本地 `mise run ci` 全绿后打 tag `v0.7.1` 触发 CI，**CI 首验暴露出两个真缺陷**：门禁红时镜像照样发出去（两个 workflow 只共享触发、互不阻塞）、`windows-gnu` 条目编不出来（`node-connector` 的 `fork`/`exec`/PTY 模型是 Unix-only 实现，移植需先抽平台抽象层）。**前者最终以「删掉 `ci.yml`、门禁并入产线」处置**：`release.yml` 的 `gate` job 跑齐 `mise.toml [tasks.ci]` 的全部 7 项，所有产线 job 都 `needs: gate`，清单只剩一个真相源（C7 双向比对）；**后者按「本里程碑不做移植」移除目标**，排进 v0.7.2。4 个 Linux 目标均已真编通过（`aarch64-*` 由 CI 的 arm runner 原生真编，11 步全 success）。把 §2 的「发布」那一整段真正建起来：`gate` → `build-frontend`（bun `--frozen-lockfile` → build，dist 作为 artifact）**硬前置**于 `build-binaries`（4 目标**原生**矩阵：x86_64 / aarch64 × gnu / musl；windows-gnu 已移除，**v0.7.1 不做移植，不是永远不支持**——见同节「v0.7.1 不提供 Windows 目标」），再分发到三个消费者：`docker-hub`（`afhub` + `afcli`，前端**已在编译期嵌入**，镜像里不另放 dist）、`docker-node`（`afcli`，按 `TARGETARCH` 选二进制）、`release`（GitHub Release + `SHA256SUMS` + `CHANGELOG.md` + 从 CHANGELOG 抽 body，**附件只发 musl 干净名**且稳定版带 `--latest`）。镜像推 `ghcr.io/<owner>/agentfleet-hub` / `agentfleet-node`。**`build-frontend` 之所以是硬前置**：dist 缺失时 `build.rs` 只造占位页并打 warning，二进制照编——「Hub 打开是占位页」能不红任何一步地发出去，所以每个平台编之前都断言 `dist/index.html` 存在。**安全边界变更**：`afhub` 缺省仍只绑回环，新增 `AFHUB_ALLOW_NON_LOOPBACK=1` 供容器显式放开，**只认确切的 `1`**。设备侧安装多了从 Hub 自己下载 `afcli` 的入口（`GET /api/agent-binary` + 设备页按钮），内网/离线部署不必够 GitHub。版本号 `0.5.0` → `0.7.1`（tag 与二进制自报版本必须一致） | —（`DEVELOPMENT.md` §2.1 发布段） |
+| v0.7.2 | **Windows 支持（设备侧 afcli）** | **用户 2026-11-05 裁定**：插一个 v0.7.2 专做 Windows 移植，`v0.8.0` 骨架不动、顺延一位。**只做设备侧 `afcli`**，`afhub` 仍只发 Linux（自托管 Hub 一般跑在服务器/容器，Windows 不是主场景）。**改动面已核对**：`afcli` 的生产依赖链是 `node-cli` → `node-core` → `node-connector`，**不经过 `hub-storage`**；`libc` 附着点是 `node-connector` 的 `pty.rs`(27) / `exec.rs`(45) / `terminal.rs`(5) / `files.rs`(4) 与 `node-core/worker.rs`(5，疑为测试夹具)。**核心难点**：`exec.rs` 的「`fork` → 改 fd → `execvpe`」在 Windows 上没有对应物（**Windows 没有 `fork`**），要整体换成 `CreateProcess` + 句柄重定向；会话终端从 `forkpty`/`ioctl(TIOCSWINSZ)` 换成 ConPTY（`CreatePseudoConsole` / `ResizePseudoConsole`）。**不是「加个矩阵条目」的量级**——先抽平台无关的 PTY/进程后端，再写两个实现，且 Windows 分支在 Linux 上测不了，得要 Windows runner 真跑。CI 目标用 `x86_64-pc-windows-msvc`（`windows-latest` 是 msvc 工具链，不是 gnu）。见 `.mdflow/milestones/v0.7.2-windows-support.md` | —（承接 v0.7.1 推迟的 `windows-gnu`） |
 | v0.8.0 | **任务与看板** | Task 六态 + Task:Execution = 1:N；`done_when` = `criteria` 判定码 + `description`（`DECISIONS.md` D23）；任务级约束与固定过滤顺序（① allowed_* ② 隔离策略 ③ 能力/负载）；失败八形态与重试矩阵（含 `superseded` / `disk_exhausted`）；**执行中改需求的三种处置**；看板六列 + 任务详情页；**看板过滤 / 搜索 / 批量操作**；**项目摘要四行（含管家总结落点）**；**失败面板与验收面板（唯一处置入口）**；**执行复盘（只读轨迹回放）**；**执行监控（`projects/:id/executions`，慢变摘要 + 按行订阅，不编百分比）**；**收件箱（待决策 / 动态两区 + 决策请求 TTL/降级/留痕）**；`disk_exhausted` 时**询问清理并说明清理什么（预演）**；**时间与成本统计（排队与执行分开记，token 拿不到标 unknown）**；执行间接力（缓存复用）；时间线作为第二视图。见 `architecture/task-model.md` | 任务看板、任务与执行、项目时间线、执行监控、执行复盘、收件箱、失败与验收 |
 | v0.9.0 | **管家** | 跑在 Hub 上的项目级 agent：接意图 / 建派任务 / 督进度 / 写总结；**技能集（`project.status` / `task.create` / `task.clarify` / `memory.*`），不写死意图分类**（D22）；两处记忆（库 `project_memory` + 仓库 `.afleet/MEMORY.md`）；**建议派活草稿箱（点下发才进看板）**；与调度器的接口（只提交 task，不指定设备）；决策请求与收件箱的接入。调度器侧补三层过滤（`architecture/scheduling.md` 按此改写）。见 `architecture/butler.md` | 管家 |
 | v0.10.0 | **外部 issue 单向导入** | 导入生成 Task + Hub 内收件箱通知 + 管家初筛 + 结论单向往回写。**不做双向同步**。见 `PRODUCT.md` §5.5 | 外部 issue 单向导入 |

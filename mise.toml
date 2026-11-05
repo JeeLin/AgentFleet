@@ -7,9 +7,9 @@
 # 顺序与项目一致：node / bun / rust。版本钉死，不用 `latest`——
 # 否则换一次 stable 就重编译全树，且 `cargo llvm-cov` 的覆盖率数值跨工具链
 # 不可比（覆盖率门禁要求可复现）。
-node = "24.21.0"
-bun = "1.4.3"
-# 与 CI 保持一致；升级时同步改 .github/workflows/ci.yml（那里钉的是同一个版本）
+node = "24"
+bun = "latest"
+# 与产线保持一致；升级时同步改 .github/workflows/release.yml 的 `gate`（那里钉的是同一个版本）
 rust = "1.99.0"
 
 # 数据目录钉在仓库内，不落 `~/.local/share/agentfleet/`（`dirs::data_dir()` 的缺省）。

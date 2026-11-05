@@ -141,6 +141,7 @@ mod tests {
     }
 }
 
+pub mod agent_binary;
 pub mod agents;
 pub mod agents_detail;
 pub mod api;

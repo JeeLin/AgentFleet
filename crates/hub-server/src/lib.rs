@@ -670,6 +670,18 @@ pub fn build_app(state: AppState) -> Router {
             get(routes::api::list_sessions).post(routes::api::create_session),
         )
         .route("/api/agents", get(routes::api::list_agents))
+        // `afcli` 下载（本里程碑新增）：让「装设备」不必先去 GitHub。
+        //
+        // 内网/离线部署里设备够不到 GitHub；而 Release 页面上有多个版本，
+        // 选错就连不上（协议可能已变）。从 Hub 自己下发，拿到的**一定是**
+        // 这个 Hub 会认的那一个。
+        //
+        // 需要 session，所以注册在 `.layer(require_auth)` 之前——一个能匿名
+        // 取走约 20MB 文件的端点就是个白送的放大攻击面。
+        .route(
+            "/api/agent-binary",
+            get(routes::agent_binary::get_agent_binary),
+        )
         // 设备详情 / agent 详情（v0.7.0 子任务 7）：**从设备侧看项目**。
         //
         // `PRODUCT.md` §3 的主轴是「做事从项目进，管理从设备进」。项目主轴

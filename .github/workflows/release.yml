@@ -1,19 +1,16 @@
 # 发布通路：打 tag（`vX.Y.Z`）即产出二进制、镜像与 GitHub Release。
 #
-# 与 `ci.yml` **同一个触发**（`push: tags: ['v*']`）。两者分工不变：
-# `ci.yml` 是给人看的闸（红了就在页面上告诉你哪条门禁挂了），本文件是产线
-# （产出用户能拿的东西）。区别是**产线自己等闸**：本文件的第一个 job `gate`
-# 跑与 `ci.yml` 同一串门禁，所有产线 job 都 `needs` 它。
+# **这是本仓唯一的 workflow。** 曾经的 `ci.yml` 已删除（v0.7.1）：它与本文件
+# 同触发并行，门禁红时镜像照样推上去（Bug #17）；而本文件的 `gate` job 已经把
+# 全部门禁跑了一遍，`ci.yml` 是纯重复。现在门禁**就在产线里**，唯一权威是
+# `mise.toml` 的 `[tasks.ci].depends`，`scripts/check.sh` 的 C7 双向比对
+# 「mise 定义了哪些门禁」与「本文件的 gate 跑了哪些」。
 #
-# 为什么不住在同一个 workflow 里：把两者编进同一个 job 会让「门禁红」与
-# 「构建红」在页面上长得一样，而它们的修法完全不同。所以保持两个文件，
-# 但**门禁必须进产线**——v0.7.1 首次真跑时这两个 workflow 是并行跑的，
-# 门禁红也挡不住镜像推上去（Bug #17）。当时的防线是「tag 只在本地
-# `mise run ci` 全绿后才打」，而那条纪律挡不住手工打 tag 与
-# `workflow_dispatch` 补发。
+# 代价如实记录：门禁红时不再有独立的 `CI` run 告诉你哪条挂了——只能看 `gate`
+# job 的步骤名（`cov-gate（mise run cov-gate）` 之类）。信息没丢，只是换了位置。
 #
-# 工具链版本仍然只从 `mise.toml [tools]` 读，理由见 `ci.yml` 顶部那段：
-# 覆盖率数值跨工具链不可比，版本写两处迟早只改一处。
+# 工具链版本仍然只从 `mise.toml [tools]` 读：覆盖率数值跨工具链不可比，
+# 版本写两处迟早只改一处。
 name: Release
 
 on:
@@ -46,16 +43,16 @@ jobs:
   # ---------------------------------------------------------------------------
   # 0. 闸：产线自己等门禁，不靠「tag 只在本地全绿后才打」这条人工纪律
   # ---------------------------------------------------------------------------
-  # 曾经 `ci.yml` 与 `release.yml` **只共享触发、互不阻塞**：两个 workflow 各自
+  # 曾经两个 workflow（`ci.yml` 与 `release.yml`）**只共享触发、互不阻塞**：
   # 并行跑，门禁红时镜像照样推上 GHCR、Release 照样建，`latest` 一旦被污染，
   # 所有 `docker pull :latest` 的自托管用户直接升到坏版本（v0.7.1 首次真跑 CI
   # 时实测到两个 run 并行启动，Bug #17）。当时的防线是「tag 只在 `mise run ci`
   # 全绿后才打」——但纪律挡不住手工 `git tag` + `git push`，也挡不住
   # `workflow_dispatch` 补发（那条路径完全不经过本地门禁）。
   #
-  # 所以把门禁搬进产线本身：本 job 跑与 `ci.yml` **同一串**命令，下面每一个
-  # 产线 job 都 `needs` 它。**改一边必须改另一边**——两份清单各写一遍，漏改的
-  # 那份会让产线少跑一道闸而没人发现。
+  # 所以把门禁搬进产线本身（并把重复的 `ci.yml` 删掉）：本 job 跑
+  # `mise.toml [tasks.ci]` 定义的**全部**门禁，下面每一个产线 job 都 `needs` 它。
+  # 清单只有一处，C7 双向比对产线的步骤名。
   #
   # 为什么不用 `workflow_run` 串联两个 workflow：`workflow_run` 的事件上下文
   # 是「另一个 workflow 跑完了」，**拿不到原始 tag 的 `github.ref` /
@@ -64,6 +61,12 @@ jobs:
   # 失败面。代价是门禁跑两遍（覆盖率那步最贵），换的是坏产物发不出去。
   gate:
     runs-on: ubuntu-24.04
+    # 只跑门禁，不推任何东西。顶层 `permissions` 是给 `docker-hub` /
+    # `docker-node`（推 GHCR）与 `release`（建 Release）的，**不能让它漏到这里**：
+    # 一个只跑 `cargo test` / `bun run build` 的 job 手里握着能改仓库内容与推包的
+    # token，某个依赖的 build script 或测试被投毒就能借这条 job 的 token 推东西。
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -98,7 +101,7 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       # 覆盖率门禁要全量插桩 + 链接峰值，脚本要求 ≥6 GiB 空闲磁盘，
-      # runner 默认镜像里的 .NET / GHC 体积大，先清掉（同 ci.yml）。
+      # runner 默认镜像里的 .NET / GHC 体积大，先清掉。
       - name: 腾磁盘
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
@@ -108,7 +111,8 @@ jobs:
         working-directory: packages/web
         run: bun install --frozen-lockfile
 
-      # ---- 以下每步 = mise.toml 的一个 task，与 ci.yml 逐条对应 --------------
+      # ---- 以下每步 = mise.toml 的 [tasks.ci].depends 的一项，必须逐条覆盖 --
+      # 步骤名里的 `（mise run <task>）` 是 `check.sh` C7 的解析锚点，改名会让门禁红。
 
       - name: check（mise run check）
         run: scripts/check.sh
@@ -128,17 +132,18 @@ jobs:
       - name: cov-anchors（mise run cov-anchors）
         run: scripts/coverage-exceptions.sh --check
 
-      - name: web-check（mise run web-check）
+      # 前端三道合一步：`mise.toml` 里它们是聚合任务 `web-ci`
+      # （`depends = ["web-check", "web-test", "web-build"]`），而 `[tasks.ci]`
+      # 的 depends 里写的就是 `web-ci` 这个名字。产线的步骤名必须与它对齐，
+      # 否则 `check.sh` 的 C7 无法把「产线跑了哪些门禁」与「mise 定义了哪些」
+      # 比对上——名字对不上时门禁只能靠人眼核，那就等于没有门禁。
+      - name: web-ci（mise run web-ci）
         working-directory: packages/web
-        run: bun run type-check && bun run lint
-
-      - name: web-test（mise run web-test）
-        working-directory: packages/web
-        run: bun run test
-
-      - name: web-build（mise run web-build）
-        working-directory: packages/web
-        run: bun run build
+        run: |
+          set -euo pipefail
+          bun run type-check && bun run lint
+          bun run test
+          bun run build
 
   # ---------------------------------------------------------------------------
   # 1. 前端先编，dist 作为 artifact 交给 matrix —— **硬前置，不是优化**
@@ -152,6 +157,10 @@ jobs:
   build-frontend:
     needs: gate
     runs-on: ubuntu-24.04
+    # 只读（同上）：编前端不上传任何发布物，artifact 走 Actions 内部存储，
+    # 不需要仓库或包的写权限。
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -193,7 +202,7 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
-  # 2. 5 平台**原生**编译（不用交叉编译）
+  # 2. 4 平台**原生**编译（不用交叉编译）
   # ---------------------------------------------------------------------------
   # 原生优先是 REX 的教训：交叉编 OpenSSL/zlib 会架构错配，而错配的症状是
   # 「二进制在目标机上跑不起来」，本地永远复现不了。GitHub 有 `ubuntu-24.04-arm`
@@ -205,20 +214,35 @@ jobs:
   # `ldd` 会输出 "not a dynamic executable"，这就是「自包含」的可执行判据。
   # gnu 目标仍编（覆盖 glibc 环境，容器里也用它），但发布页面主推 musl。
   #
-  # ## 为什么没有 Windows
+  # ## 为什么没有 Windows（v0.7.1 不提供，不是「永远不支持」）
   #
-  # 曾经有过 `x86_64-pc-windows-gnu` 一条，它**从来编不出来**，v0.7.1 首次
-  # 真跑 CI 时暴露（`exit code 101`）：`afcli` 依赖 `node-connector`，而后者
-  # 是纯 Unix 的——`forkpty` / `pipe2` / `fcntl(F_GETFL)` / `O_CLOEXEC` /
-  # `TIOCSWINSZ` / `pid_t` 在 Windows 上一个都不存在（`std::os::fd` 整个模块
-  # 都没有）。这些不是「换个 crate 能绕开」的细节，是**设备侧能力本身**：
-  # agentfleet 的会话终端就是一个 PTY，Windows 没有对应物（要新写 ConPTY
-  # 支持，那是移植工程，不是发布通路的事）。
+  # 曾经有过 `x86_64-pc-windows-gnu` 一条，v0.7.1 首次真跑 CI 时 `exit code 101`：
+  # `afcli` 依赖 `node-connector`，后者有 **81 处 `libc::` 调用**（`pty.rs` 27、
+  # `exec.rs` 45、`files.rs` 4、`terminal.rs` 5），且不只是「顺手用了 libc」，
+  # 而是执行模型本身建立在 Unix 语义上：
   #
-  # 所以这条目标被移除，不是「暂时关掉、以后再开」——**要支持 Windows 得先
-  # 给 `node-connector` 写平台分支**，做完那件事再把它加回矩阵。直接加回来
-  # 只会让每次发布必红一条，而报错看起来像缺链接器，人会去改下面的 mingw
-  # 安装步骤，查错方向完全错。
+  #   - 会话终端：`forkpty` + `ioctl(TIOCSWINSZ)`；
+  #   - 一次性命令：`fork` + `pipe2(O_CLOEXEC)` + `dup2` + `execvpe` + `waitpid`；
+  #   - 通道读超时：`poll` / `fcntl(F_GETFL|F_SETFL)` / `O_NONBLOCK`。
+  #
+  # **这些在 Windows 上不是「完全没有对应物」**——ConPTY（`CreatePseudoConsole`）
+  # 就是 PTY 的对应物，`ResizePseudoConsole` 对应 `TIOCSWINSZ`。真正的障碍是
+  # **Windows 没有 `fork`**：`exec.rs` 那套「fork 出子进程、在子进程里改 fd 再
+  # exec」的模型在 Windows 上要整体换成 `CreateProcess` + 句柄重定向。所以这不是
+  # 「加个矩阵条目、补个链接器」的量级，而是**先抽一层平台无关的 PTY/进程后端，
+  # 再写两个实现**的移植工程，且 Windows 分支在 Linux 上测不了，得要 Windows runner。
+  #
+  # 对照 `REX`（同一作者的另一项目）为什么能在 `windows-latest` 上编：它的 16 个
+  # crate 全是纯 `std` 的客户端/协议/命令行工具，**整个仓库没有一处 `forkpty`/
+  # `openpty`/`TIOCSWINSZ`**，跑子进程只用跨平台的 `std::process::Command`。它没有
+  # 面对过 PTY 移植问题，所以「REX 能编」不构成「本仓加了目标就能编」的证据。
+  #
+  # v0.7.1 的主题是**发布通路**，不是跨平台移植，所以这条目标移除。**这件事已排进
+  # v0.7.2**（设备侧 `afcli`，`docs/DEVELOPMENT.md` 里程碑表）：正确顺序是抽平台抽象层
+  # → 实现 ConPTY / `CreateProcess` 后端 → Windows runner 上真跑通过 → 再把矩阵条目加
+  # 回来。届时用的是 `x86_64-pc-windows-msvc`（`windows-latest` 是 msvc 工具链），不是
+  # 这里的 gnu。直接只把条目加回去，只会让每次发布必红一条，而报错看起来像缺链接器，
+  # 人会去改下面的 mingw 安装步骤，查错方向完全错。
   build-binaries:
     needs: [gate, build-frontend]
     strategy:
@@ -238,6 +262,9 @@ jobs:
             os: ubuntu-24.04-arm
             suffix: linux-arm64-musl
     runs-on: ${{ matrix.os }}
+    # 只读（同上）：编二进制并上传 artifact，不碰仓库与包。
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -545,11 +572,60 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
+
+          # 附件只发 **musl 静态**那份，并改成不带后缀的干净名。
+          #
+          # 两条理由：
+          # 1. `FROM scratch` 镜像里没有 glibc（`Dockerfile.hub` / `Dockerfile.node`
+          #    都 `COPY … -musl`），而 scratch 里唯一能跑的就是**依赖全打进二进制**
+          #    的那份。用户下载物与容器原料取同一份，才不会出现「镜像能跑、下载的跑不了」
+          #    这种两份真相源。
+          # 2. 干净名（`afhub-linux-amd64`）去掉 `-musl` 后缀，是为了让人不必先懂
+          #    glibc 与 musl 的区别就能选对——gnu 版在 scratch 里起不来，把它摆在
+          #    附件列表里只会制造错误选择。
+          #
+          # gnu 产物仍由 `build-binaries` 编出来（CI 里验它能编、能查到无 OpenSSL 依赖），
+          # 只是**不进 Release**。它没有消费方：三个 `COPY` 全指向 musl。
+          mkdir -p ../out
+          for f in *-musl; do
+            clean="${f%-musl}"
+            mv "$f" "../out/$clean"
+          done
+          cd ../out
+          # 先把 CHANGELOG 放进来**再**算 SUMS：它同样是下载物，也该被校验。
+          # 顺序反了（先算 SUMS 再拷 CHANGELOG）会让附件列表里有一个校验不到的
+          # 文件，而 `sha256sum -c` 又不会因为「少校验一个」报错——静默漏校验。
+          cp ../CHANGELOG.md CHANGELOG.md
           ls -la
           # 排序：`sha256sum *` 的顺序依赖文件系统，不同 runner 上不稳定，
           # 会让同一 tag 两次生成的 SUMS 内容不同（虽然都正确）。
           sha256sum $(ls | sort) > SHA256SUMS
           cat SHA256SUMS
+
+      - name: 断言附件只含 musl 静态产物
+        run: |
+          set -euo pipefail
+          cd out
+          # 上一步的 `*-musl` glob 若一个都没匹配到（产物命名将来变了），
+          # 循环体不执行、`out/` 只剩 CHANGELOG，而下面的 `gh release create`
+          # 照样会建出一个**没有二进制的 Release**——空发布比发布失败更难发现。
+          n=$(ls afhub-linux-* afcli-linux-* 2>/dev/null | wc -l)
+          if [ "$n" -ne 4 ]; then
+            echo "FAIL 期望 4 个二进制（afhub/afcli × amd64/arm64），实际 $n 个：" >&2
+            ls -la >&2
+            exit 1
+          fi
+          # 名字里不许再出现 `-musl`：附件名必须是干净名，否则说明改名那步没生效。
+          if ls | grep -q 'musl'; then
+            echo "FAIL 附件里仍带 musl 后缀：$(ls | grep musl)" >&2
+            exit 1
+          fi
+          echo "OK 附件含 4 个干净名二进制"
+
+      # 前端 `dist/` **不进** Release，这是有意的：
+      # 前端是 `include_dir!` 在编译期嵌进 `afhub` 的（`Dockerfile.hub` 也刻意
+      # 不放 dist）。单独发一份前端会出现「两份真相源」——用户改了 dist 却不生效，
+      # 因为真正服务的是嵌在二进制里那份。要部署前端就用 `afhub`，别发第二份。
 
       # 从 CHANGELOG.md 抽当前版本段做 Release body。
       # **抽不到就 fail**：一份空 body 的 Release 比没有 Release 更糟——
@@ -579,17 +655,74 @@ jobs:
           head -40 release-body.md
 
       # 手动补发时 Release 可能已存在，`create` 会红；先决定用 create 还是 upload。
+      #
+      # `--latest` / `--prerelease` 必须显式给，不能靠 gh 的「automatic」：
+      # 自动判据是「按日期和版本号挑一个」，它对**预发 tag** 没有概念——一个
+      # `v0.8.0-rc.1` 只要建得比 `v0.7.1` 晚、版本号更大，就会被标成 Latest，
+      # 于是所有从 GitHub Releases 页面进来的人看到的「最新版」是个未定稿。
+      # 这与上面的镜像 `latest` 判据（`!contains(ref_name, '-')`）必须是**同一套**
+      # 规则：两处判据不一致时，`docker pull :latest` 和 Releases 页面会指向不同
+      # 版本，而两者都自称「最新」。
       - name: 发布 Release
+        id: rel
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "Release $RELEASE_TAG 已存在，改为上传/覆盖资产"
-            gh release upload "$RELEASE_TAG" dist/* --clobber
+          # 预发判据与镜像 `latest` 完全相同：tag 里带 `-` 即预发。
+          # 写成 `*'-'*` 而不是 `*-rc*` / `*-beta*`，是因为 semver 的预发段可以
+          # 是任意标识符（`-alpha.2`、`-nightly`），列举一定漏。
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            stable=false
           else
-            gh release create "$RELEASE_TAG" dist/* \
+            stable=true
+          fi
+          echo "RELEASE_TAG=$RELEASE_TAG 稳定版=$stable"
+          echo "stable=$stable" >> "$GITHUB_OUTPUT"
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG 已存在，改为覆盖资产并订正标记"
+            gh release upload "$RELEASE_TAG" out/* --clobber
+            # 补发路径也必须订正标记：一个早先被自动判成 Latest 的预发版，
+            # 只上传资产不会改掉它的 Latest 身份，得显式改回来。
+            if [ "$stable" = true ]; then
+              gh release edit "$RELEASE_TAG" --latest
+            else
+              gh release edit "$RELEASE_TAG" --prerelease --latest=false
+            fi
+          else
+            flags=()
+            if [ "$stable" = true ]; then
+              flags+=(--latest)
+            else
+              flags+=(--prerelease --latest=false)
+            fi
+            gh release create "$RELEASE_TAG" out/* \
               --title "$RELEASE_TAG" \
               --notes-file release-body.md \
-              --verify-tag
+              --verify-tag \
+              "${flags[@]}"
           fi
+
+      - name: 断言 Latest 与预发标记正确
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # 发布完再读回来核一遍：`--latest` 是远端状态，命令成功不等于它生效。
+          # 这一段是 `latest` 只跟正式 tag 这条承诺的**唯一机器可验证据**——
+          # 没有它，「镜像 latest 与 Release Latest 用同一套判据」只是注释里的说法。
+          got=$(gh release view "$RELEASE_TAG" --json isLatest,isPrerelease \
+                  --jq '"\(.isLatest) \(.isPrerelease)"')
+          echo "远端状态 isLatest isPrerelease = $got"
+          if [ "${{ steps.rel.outputs.stable }}" = true ]; then
+            want="true false"
+          else
+            want="false true"
+          fi
+          if [ "$got" != "$want" ]; then
+            echo "FAIL $RELEASE_TAG：期望「$want」（isLatest isPrerelease），实际「$got」" >&2
+            echo "     稳定版必须 isLatest=true / isPrerelease=false；预发版反之。" >&2
+            exit 1
+          fi
+          echo "OK $RELEASE_TAG：Latest 标记与预发标记符合判据"

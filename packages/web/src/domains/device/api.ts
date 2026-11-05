@@ -9,7 +9,7 @@
    只声明形状与端点。
    =========================================================================== */
 
-import { del, getJson, type RequestOptions } from '@/shared/http'
+import { del, getJson, request, type RequestOptions } from '@/shared/http'
 
 /** 设备态。与 `hub-server/src/routes/api.rs` 的 `DeviceStatus` 逐字一致。 */
 export type ApiDeviceStatus = 'online' | 'reconnecting' | 'offline'
@@ -203,4 +203,37 @@ export function describeCleanupPolicy(policy: DeviceBinding['cleanup_policy']): 
       // 用，页面就渲染出一块空白说明。
       return `未知策略（${String(policy)}）`
   }
+}
+
+/**
+ * 从**这一台 Hub** 下载 `afcli`（`GET /api/agent-binary`）。
+ *
+ * 为什么不让用户去 GitHub Releases 下：内网/离线部署里设备够不到 GitHub；
+ * 而 Release 页面上有多个版本，选错一个就连不上（协议可能已变）。从 Hub
+ * 自己下发，拿到的**一定**是这个 Hub 会认的那一个。
+ *
+ * 返回 `Blob` 而不是直接触发下载：触发下载要碰 `document`/`URL`，那是
+ * 页面的事；这一层只负责把字节拿回来，才能被单测覆盖（`URL.createObjectURL`
+ * 在 jsdom 里要 mock 一大堆）。
+ *
+ * **Hub 上没有可下发的 afcli 时抛 `ApiError`，`code` 是
+ * `agent_binary_unavailable`**：裸机跑 `afhub`（不经镜像）就是这个状态，
+ * 属正常部署形态而非故障，所以页面要按「没配」而不是「坏了」来提示。
+ */
+export function downloadAgentBinary(
+  options?: RequestOptions,
+): Promise<{ blob: Blob; filename: string }> {
+  return request('/api/agent-binary', { ...options, method: 'GET' }).then(async (r) => {
+    // 文件名**从响应头读**，不在前端另写一个。
+    //
+    // 服务端下发的文件名带着平台（`afcli-linux-aarch64`），前端写死的 `??
+    // 'afcli'` 会把这一信息丢掉——用户同时有 amd64 与 arm64 两台机器时，存下来
+    // 的两个文件同名，靠肉眼分不出哪个能跑。两处各写一个名字还必然漂移。
+    //
+    // 解析失败时回落 `afcli`：拿不到头不是下载失败的理由（RFC 里
+    // `Content-Disposition` 是可选头），只是名字退化成旧名字。
+    const cd = r.headers.get('content-disposition') ?? ''
+    const m = /filename="?([^";]+)"?/.exec(cd)
+    return { blob: await r.blob(), filename: m?.[1] ?? 'afcli' }
+  })
 }

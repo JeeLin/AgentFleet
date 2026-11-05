@@ -27,7 +27,7 @@ import AgentCatalog from '@/domains/agent/AgentCatalog.vue'
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
 import DeviceTable from '@/domains/device/DeviceTable.vue'
 import type { DeviceSummary } from '@/domains/device/api'
-import { deleteDevice, listDevices } from '@/domains/device/api'
+import { deleteDevice, downloadAgentBinary, listDevices } from '@/domains/device/api'
 import { describeReadFailure } from '@/shared/http'
 import { percent, relativeTime } from '@/shared/format'
 import { navigate, route } from '@/router'
@@ -87,6 +87,53 @@ async function load(): Promise<void> {
  *  模态会锁焦点，而「扫一眼设备」不该打断用户本来在做的事。 */
 function inspect(device: DeviceSummary): void {
   inspected.value = inspected.value?.id === device.id ? null : device
+}
+
+/**
+ * 从这一台 Hub 下载 `afcli`。
+ *
+ * 空态里那条「在设备上跑 afcli run」，前提是那台设备上**已经有** afcli。
+ * 没有的人在离线/内网环境里够不到 GitHub，于是空态就成了一句空话——所以
+ * 这里给它一条实际的路。
+ *
+ * 三种结果分别处置，**不能合并成一条「下载失败」**：
+ * - 成功 → 触发浏览器下载；
+ * - `agent_binary_unavailable` → 裸机跑 afhub 时磁盘上没有 afcli，这是
+ *   **正常部署形态**，提示应说「这台 Hub 没配」，不是「坏了」；
+ * - 其它 → 真的出错了。
+ */
+const downloadState = ref<'idle' | 'busy'>('idle')
+const downloadError = ref<string | null>(null)
+
+async function downloadCli(): Promise<void> {
+  downloadState.value = 'busy'
+  downloadError.value = null
+  try {
+    const { blob, filename } = await downloadAgentBinary()
+    // `URL.createObjectURL` + 一个隐藏 `<a>`：这是唯一在主流浏览器上都能
+    // 触发下载、且不必让用户先存到别处的做法。用完立刻 revoke——不释放会在
+    // 页面存活期间一直占着这份 blob。
+    const url = URL.createObjectURL(blob)
+    try {
+      const a = document.createElement('a')
+      a.href = url
+      // 用服务端给的文件名：它带平台，用户同时有多台异构机器时分得清。
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+    } finally {
+      URL.revokeObjectURL(url)
+    }
+  } catch (err) {
+    const code = (err as { code?: string } | null)?.code
+    downloadError.value =
+      code === 'agent_binary_unavailable'
+        ? '这台 Hub 没有可下发的 afcli：直接跑 afhub（不经容器）时它是外挂文件，需要在 Hub 机器上配 AFCLI_BINARY_PATH 指向它。'
+        : describeReadFailure(err, 'afcli')
+  } finally {
+    downloadState.value = 'idle'
+  }
 }
 
 function createSession(device: DeviceSummary): void {
@@ -207,7 +254,20 @@ async function remove(device: DeviceSummary): Promise<void> {
         glyph="▣"
         title="还没有设备接入"
         text="在设备上跑一条命令就会出现在这里：afcli run &lt;hub-url&gt;。首次启动会自动注册并生成密钥对，Hub 只存指纹。"
-      />
+      >
+        <!-- 上面那句「在设备上跑 afcli run」有个前提：那台设备上得**先有**
+             afcli。离线/内网环境里够不到 GitHub，那段话就成了一句空话——
+             所以这里给它一条实际的路。 -->
+        <button
+          class="af-btn af-btn--sm"
+          type="button"
+          :disabled="downloadState === 'busy'"
+          @click="downloadCli"
+        >
+          {{ downloadState === 'busy' ? '正在准备下载…' : '下载 afcli' }}
+        </button>
+        <p v-if="downloadError" class="af-t-mute" role="alert">{{ downloadError }}</p>
+      </EmptyState>
 
       <template v-else>
         <DeviceTable

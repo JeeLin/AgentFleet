@@ -570,64 +570,106 @@ sys.exit(1 if bad else 0)
 PYEOF
   [[ $? -ne 0 ]] && { echo "  ❌ systemd unit 与代码契约不一致"; fail=1; } || ok "unit 与代码契约一致"
 
-echo "== C7 ci.yml 与 release.yml 的门禁清单必须逐条一致 =="
-# `ci.yml` 给人看门禁红在哪，`release.yml` 的 `gate` job 负责真的挡住发布。
-# 两份清单各写一遍，漏改的那份会让产线少跑一道闸**而没人发现**——`ci.yml` 绿、
-# 产线也绿，只是有一道检查根本没跑。这类漂移没有编译错误、没有测试能拦，
-# 只能靠这条门禁比对。
+echo "== C7 release.yml 的 gate 必须跑齐 mise.toml 的全部门禁，且产线各 job 都等它 =="
+# 唯一权威是 `mise.toml` 的 `[tasks.ci].depends`——本地 `mise run ci` 跑的就是它。
+# `release.yml` 的 `gate` job 是产线里的同一串命令，**必须逐条覆盖**：
+# 少抄一条，产线就少跑一道闸而没人发现（`ci.yml` 曾经是第二份拷贝，靠它比对；
+# 现在那份已删除，改成直接与 `mise.toml` 比 —— 只剩一个真相源，也就不存在
+# 「两份清单互相漂移」这件事了）。
 python3 - <<'PYEOF'
-import sys, os
+import sys, os, re
 try:
     import yaml
 except ImportError:
-    print('      缺 PyYAML：无法比对两个 workflow（不要跳过——跳过等于假绿）')
+    print('      缺 PyYAML：无法核对 release.yml（不要跳过——跳过等于假绿）')
     sys.exit(1)
 
 bad = []
-def gate_steps(path, job):
-    if not os.path.exists(path):
-        bad.append(f'缺少 {path}')
-        return {}
-    doc = yaml.safe_load(open(path, encoding='utf-8'))
-    jobs = doc.get('jobs') or {}
+
+RELEASE_YML = '.github/workflows/release.yml'
+MISE_TOML = 'mise.toml'
+
+def read_mise_ci_tasks():
+    """从 `mise.toml` 的 `[tasks.ci]` 读 `depends` 列表。
+
+    手写解析而不是引 tomllib：本仓要兼容 Python 3.9（`tomllib` 是 3.11+），
+    而这一段的输入形状固定（`depends = ["a", "b"]` 单行数组）。
+    读不到就返回 None，由调用方判成 bad —— 静默返回空列表会让
+    「不知道有哪些门禁」冒充「没有门禁」。
+    """
+    try:
+        with open(MISE_TOML, encoding='utf-8') as f:
+            text = f.read()
+    except OSError as e:
+        bad.append(f'{MISE_TOML} 读取失败：{e}')
+        return None
+    m = re.search(r'^\[tasks\.ci\][^\[]*?^depends\s*=\s*\[(.*?)\]', text, re.M | re.S)
+    if not m:
+        bad.append(f'{MISE_TOML} 里找不到 [tasks.ci] 的 depends')
+        return None
+    tasks = re.findall(r'"([^"]+)"', m.group(1))
+    if not tasks:
+        bad.append(f'{MISE_TOML} 的 [tasks.ci].depends 解析出 0 项')
+        return None
+    return tasks
+
+_parsed = {}
+def load_jobs(path):
+    if path not in _parsed:
+        try:
+            with open(path, encoding='utf-8') as f:
+                _parsed[path] = (yaml.safe_load(f) or {}).get('jobs') or {}
+        except yaml.YAMLError as e:
+            # 解析失败要说清「是文件本身写坏了」，不能让它冒成 traceback 被外层
+            # 一句笼统的失败概括掉——那会把排障方向引到「去比对门禁步」，
+            # 而真正原因是语法错。
+            bad.append(f'{path} YAML 解析失败：{e}')
+            _parsed[path] = {}
+        except OSError as e:
+            bad.append(f'{path} 读取失败：{e}')
+            _parsed[path] = {}
+    return _parsed[path]
+
+def gate_tasks(path, job):
+    """取该 job 里「`mise run <task>）` 结尾」的那些步，返回 {task: run}。"""
+    jobs = load_jobs(path)
     if job not in jobs:
         bad.append(f'{path} 里没有 job `{job}`')
         return {}
     out = {}
     for s in jobs[job].get('steps') or []:
         name = s.get('name') or ''
-        # 只比「门禁命令」那些步：以 `（mise run …）` 结尾的
-        if 'mise run' in name:
-            out[name] = (s.get('run') or '').strip()
+        m = re.search(r'mise run ([a-z-]+)）', name)
+        if m:
+            out[m.group(1)] = (s.get('run') or '').strip()
     return out
 
-ci = gate_steps('.github/workflows/ci.yml', 'ci')
-rel = gate_steps('.github/workflows/release.yml', 'gate')
+want = read_mise_ci_tasks()
+got = gate_tasks(RELEASE_YML, 'gate')
 
-if ci or rel:
-    if not ci:
-        bad.append('ci.yml 的 ci job 里没有一条 `mise run` 门禁步')
-    if not rel:
-        bad.append('release.yml 的 gate job 里没有一条 `mise run` 门禁步')
-    for name in sorted(set(ci) - set(rel)):
-        bad.append(f'`{name}` 只在 ci.yml 有，release.yml 的 gate 少跑这道闸')
-    for name in sorted(set(rel) - set(ci)):
-        bad.append(f'`{name}` 只在 release.yml 有，ci.yml 少跑这道闸')
-    for name in sorted(set(ci) & set(rel)):
-        if ci[name] != rel[name]:
-            bad.append(f'`{name}` 两份命令体不同：ci={ci[name]!r} gate={rel[name]!r}')
-    if not bad:
-        print(f'      两份清单逐条一致（{len(ci)} 道门禁）')
+if want is not None:
+    if not got:
+        bad.append(f'{RELEASE_YML} 的 gate job 里没有一条 `mise run` 门禁步')
+    for t in sorted(set(want) - set(got)):
+        bad.append(f'`{t}` 在 mise.toml 的 [tasks.ci] 里，但 {RELEASE_YML} 的 gate 没跑')
+    for t in sorted(set(got) - set(want)):
+        bad.append(f'`{t}` 在 {RELEASE_YML} 的 gate 里，但 mise.toml 的 [tasks.ci] 没有')
+    if want is not None and got and not (set(want) ^ set(got)):
+        print(f'      产线 gate 覆盖 mise.toml 的全部 {len(want)} 道门禁')
 
 # 产线各 job 必须等 gate：门禁红时不许推镜像/发 Release。
-rp = '.github/workflows/release.yml'
-if os.path.exists(rp):
-    doc = yaml.safe_load(open(rp, encoding='utf-8'))
-    jobs = doc.get('jobs') or {}
+# 这一段没有 `if os.path.exists(...)` 守卫：文件缺失/读不了时 `load_jobs` 已经把
+# 原因写进 `bad`，而门禁失败的正确反应就是「红」，不是「跳过这段」。用守卫包起来
+# 会让「文件找不到」退化成「产线各 job 都等 gate ✓」——断言恰恰在最该红时消失。
+jobs = load_jobs(RELEASE_YML)
+if not jobs:
+    bad.append(f'{RELEASE_YML} 没有可解析的 job：产线各 job 是否等 gate 无从判断')
+else:
     if 'gate' not in jobs:
         bad.append('release.yml 没有 gate job：产线不等门禁就等于没有闸')
     for j in ('build-frontend', 'build-binaries', 'docker-hub', 'docker-node', 'release'):
         if j not in jobs:
+            bad.append(f'{RELEASE_YML} 里没有 job `{j}`：无法确认它等 gate')
             continue
         needs = jobs[j].get('needs') or []
         if isinstance(needs, str):
@@ -639,7 +681,7 @@ for b in bad:
     print(f'      {b}')
 sys.exit(1 if bad else 0)
 PYEOF
-  [[ $? -ne 0 ]] && { echo "  ❌ 两个 workflow 的门禁清单不一致"; fail=1; } || ok "两份门禁清单一致，且产线各 job 都等 gate"
+  [[ $? -ne 0 ]] && { echo "  ❌ release.yml 的 gate 与 mise.toml 门禁清单不一致"; fail=1; } || ok "产线 gate 覆盖 mise.toml 全部门禁，且各 job 都等 gate"
 
 echo
 if [[ $fail -eq 0 ]]; then echo "门禁通过"; else echo "门禁未通过"; exit 1; fi

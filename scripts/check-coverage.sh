@@ -79,6 +79,25 @@ declared="$(grep -vE '^\s*(#|$)' "$EXCEPTIONS" \
     | cut -d: -f1,2 \
     | LC_ALL=C sort -u)"
 
+# 「登记例外为 0 条」是不可能的：本仓有几百条带理由的例外，一条都读不出来
+# 说明这条管线本身坏了，**不是覆盖率变好了**。
+#
+# 为什么必须显式断言：下面的双向比对在两个集合都为空时会直接走完两个
+# `while read`（空输入不进入循环）、`fail` 保持 0，然后打印 PASS。
+# 于是「0 == 0」冒充了「两边一致」。实测触发过一次：`/usr/bin/sort` 被换成
+# 0 字节的空文件，`grep | cut | sort -u` 输出恒为空，门禁照样 PASS——
+# 而此时任何真正的未覆盖行都会被静默放过。
+#
+# 同样的道理适用于 `$actual`：它不是不可能为空（理论上覆盖率可以 100%），
+# 但**两边同时为空**一定意味着至少一侧的管线坏了。所以两处都断言，
+# 让故障在这里就炸掉，而不是等到有人改坏覆盖率时才发现门禁早就瞎了。
+if [ -z "$declared" ]; then
+    echo "FATAL: 从 $EXCEPTIONS 解析出 0 条登记例外。" >&2
+    echo "       这不可能（该文件有几百条带理由的例外），说明 grep/cut/sort 出了故障。" >&2
+    echo "       检查这些工具是否可用：grep -c . $EXCEPTIONS / sort --version" >&2
+    exit 1
+fi
+
 # 覆盖性**非确定**的行：源码里带 `// coverage: excluded (racy)` 标注的那些。
 #
 # 为什么要有这一类：`tokio::select!` 对多条就绪的臂是**随机轮询**的，于是
@@ -134,6 +153,16 @@ fi
 echo
 
 fail=0
+
+# 剔除 racy 之后两边**同时**为空：这不是「覆盖率完美」，而是至少一侧的管线
+# 坏了（`llvm-cov` 没输出未覆盖行 / `uncovered-lines.sh` 解析失败 / 工具故障）。
+# 没有这条断言，两个空集合会在下面两个 `while read` 里直接走完、`fail` 保持 0，
+# 门禁打印 PASS——「0 == 0」冒充了「两边一致」。见上面 `$declared` 处的长注释。
+if [ -z "$declared_checked" ] && [ -z "$actual_checked" ]; then
+    echo "FATAL: 剔除 racy 行后，登记例外与实际未覆盖集**同时为空**。" >&2
+    echo "       这不是覆盖率完美，而是管线故障（llvm-cov 无输出 / 解析失败 / 工具被替换）。" >&2
+    exit 1
+fi
 
 # 未覆盖但没登记 → 门禁失败
 while IFS= read -r miss; do

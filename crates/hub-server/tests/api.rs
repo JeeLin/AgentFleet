@@ -128,15 +128,23 @@ fn cookie_of(resp: &axum::response::Response, name: &str) -> Option<String> {
 struct Reply {
     status: StatusCode,
     body: String,
+    /// 响应头原样留着。
+    ///
+    /// 少数几处断言必须看头而不是看体：下载端点（`/api/agent-binary`）的
+    /// `Content-Disposition` 决定用户存下来的文件名，而 `body` 被
+    /// `from_utf8_lossy` 洗过，二进制文件的内容与它无关。
+    headers: axum::http::HeaderMap,
 }
 
 impl Reply {
     async fn new(resp: axum::response::Response) -> Self {
         let status = resp.status();
+        let headers = resp.headers().clone();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         Self {
             status,
             body: String::from_utf8_lossy(&bytes).into_owned(),
+            headers,
         }
     }
 
@@ -273,6 +281,9 @@ async fn api_routes_are_covered_by_the_auth_layer() {
         // 配置端点同样是状态变更口：未认证必须 401，不能是 404（没挂上）
         // 也不能是 200（认证层没覆盖到）。
         "/api/agents/config",
+        // afcli 下载：不下发密钥，但「谁能把约 20MB 的二进制拿走」不该对未登录者
+        // 开放。这条同时钉住「路由挂上了」（不是 404）与「认证层覆盖到」（不是 200）。
+        "/api/agent-binary",
     ] {
         let resp = h
             .app
@@ -2601,5 +2612,231 @@ fn the_device_acp_connector_name_is_still_acp() {
         node_core::channel::EXTERNAL_CONNECTOR_NAME,
         "acp",
         "设备侧 EXTERNAL_CONNECTOR_NAME 与 Hub 侧 ACP_CONNECTOR 必须同为 acp"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `GET /api/agent-binary`：从这一台 Hub 下发 afcli
+// ---------------------------------------------------------------------------
+//
+// 三个用例，各自钉一条**会真的出错**的分支，而不是「调一下看返回 200」：
+//   ① 配置指向的文件存在 → 内容逐字节一致、附件头正确；
+//   ② 配置指向不存在的路径 → 404 + `agent_binary_unavailable`（**不是 500**：
+//      裸机跑 afhub 时磁盘上本来就没有 afcli，那是正常部署形态，不是故障）；
+//   ③ 0 字节文件 → 同样 404（当成成功下发会让设备拿到一个 `chmod +x` 后
+//      立刻 `Exec format error` 的文件，而报错发生在设备上、不在 Hub 这边）。
+//
+// 三个用例都要改环境变量，而环境变量是**进程级**的——所以放进一个测试里顺序跑，
+// 并用 `tempfile` 建真实文件。分成三个 `#[tokio::test]` 会并行改同一个变量，
+// 互相串味，那种 flaky 测试比没有测试更糟。
+
+/// 串行化「改进程级环境变量」的那几个用例。
+///
+/// `AFCLI_BINARY_PATH` 是 `std::env` 里的**进程级**变量，而 `cargo test` 默认
+/// 让同一个测试二进制里的用例**并行**跑。三个 agent-binary 用例各自设了不同的
+/// 值、又都在断言前读它——没有这把锁时它们会互相覆盖，症状是「偶发 200 却
+/// 内容是别人的 payload」。实测连跑 5 次都过，那是**运气**，不是正确性。
+///
+/// 用 `tokio::sync::Mutex` 而不是 `std::sync::Mutex`：后者拿到的守卫
+/// **不能被跨 `await` 持有**（clippy 的 `await_holding_lock` 会直接报错，
+/// 而它报得对——那样会阻塞整个 worker，测试之间会真的互相卡死）。
+/// 也不用 `serial_test` crate：只为一个锁引入依赖不值得，而多一个依赖
+/// 就多一份要维护的版本约束。
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tokio::test]
+async fn agent_binary_is_served_from_the_configured_path() {
+    let h = Harness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("afcli");
+
+    // 用一段**能认出来的**内容而不是真二进制（约 20MB）：这里要验的是
+    // 「读到的字节原样下发」，不是「这个文件是不是合法 ELF」。
+    let payload = b"\x7fELF-fake-afcli-for-test";
+    std::fs::write(&path, payload).unwrap();
+
+    // 锁内「设变量 → 发请求 → 还原」。请求本身是 async，但 `get` 只在
+    // 轮询到第一次 pending 前就读完了变量，而这里用 `block_on` 之外的方式
+    // 不行——所以改成：锁内取一个已完成的 future 不可行，改为让 `with_env_var`
+    // 只包住「设变量 + 发请求」这段最小窗口（见下）。
+    let r = {
+        let guard = ENV_LOCK.lock().await;
+        std::env::set_var("AFCLI_BINARY_PATH", &path);
+        let r = h.get("/api/agent-binary").await;
+        std::env::remove_var("AFCLI_BINARY_PATH");
+        drop(guard);
+        r
+    };
+
+    assert_eq!(r.status, StatusCode::OK, "配了存在的文件就必须 200");
+    assert_eq!(
+        r.body.as_bytes(),
+        payload,
+        "下发的字节必须与磁盘上的文件逐字节一致"
+    );
+}
+
+#[tokio::test]
+async fn agent_binary_missing_file_is_404_not_500() {
+    let h = Harness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    // 指向一个**不存在的显式配置**：显式配置时 `candidate_paths` 只试这一条，
+    // 不会掉进那些候选目录里真的有 afcli 的分支（本机 `/usr/local/bin/afcli`
+    // 在开发者机器上可能真的存在，那会让这条用例变成「看环境脸色」）。
+    let path = dir.path().join("no-such-afcli");
+
+    let r = {
+        let guard = ENV_LOCK.lock().await;
+        std::env::set_var("AFCLI_BINARY_PATH", &path);
+        let r = h.get("/api/agent-binary").await;
+        std::env::remove_var("AFCLI_BINARY_PATH");
+        drop(guard);
+        r
+    };
+
+    // 500 会让运维去翻日志找一个不存在的 bug；404 + 固定 code 说的是
+    // 「这一台 Hub 没有可下发的 afcli」，那才是事实。
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    r.assert_error_code("agent_binary_unavailable");
+    // 错误体里**不许**出现磁盘路径（约束 13）：路径属部署细节，不该告诉探路者。
+    assert!(
+        !r.body.contains(&*path.to_string_lossy()),
+        "错误体泄露了服务端路径：{}",
+        r.body
+    );
+}
+
+#[tokio::test]
+async fn agent_binary_empty_file_is_refused() {
+    let h = Harness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    // 0 字节不是「空的 afcli」，是坏部署：真发出去，设备 `chmod +x` 之后
+    // 立刻 `Exec format error`，而报错发生在设备上——排查会从错误的地方开始。
+    let path = dir.path().join("empty-afcli");
+    std::fs::write(&path, b"").unwrap();
+
+    std::env::set_var("AFCLI_BINARY_PATH", &path);
+    let r = h.get("/api/agent-binary").await;
+    std::env::remove_var("AFCLI_BINARY_PATH");
+
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    r.assert_error_code("agent_binary_unavailable");
+}
+
+/// `candidate_paths` 是纯函数，直接对返回值断言。
+///
+/// 为什么不都走集成测试：路径拼接错了在集成测试里表现为「404 了但文件明明在」，
+/// 排查要起整个 app + 猜环境；这里一次断言就能说清「拼出来的第一个是什么」。
+mod agent_binary_candidates {
+    use hub_server::routes::agent_binary::candidate_paths;
+
+    #[test]
+    fn explicit_configuration_wins_and_is_the_only_candidate() {
+        // 运维写明了路径还去猜别的，等于悄悄忽略配置——所以显式配置时
+        // 候选表**恰好一项**，不是「第一项优先」。
+        let got = candidate_paths(Some("/opt/afcli"), "linux", "x86_64");
+        assert_eq!(got.len(), 1, "显式配置时不该再试探其它路径");
+        assert_eq!(got[0], std::path::PathBuf::from("/opt/afcli"));
+    }
+
+    #[test]
+    fn unconfigured_lists_arch_subdirs_before_the_flat_path() {
+        let got = candidate_paths(None, "linux", "x86_64");
+        let strs: Vec<String> = got.iter().map(|p| p.display().to_string()).collect();
+
+        // 分架构目录必须排在平铺路径之前：分架构那份是**为这个平台准备的**，
+        // 而平铺那份只是「这台 Hub 自己那份」，可能不是调用方要的架构。
+        let arch_idx = strs
+            .iter()
+            .position(|s| s == "/usr/local/bin/linux/x86_64/afcli")
+            .expect("应有 os/arch 子目录候选");
+        let flat_idx = strs
+            .iter()
+            .position(|s| s == "/usr/local/bin/afcli")
+            .expect("应有平铺路径候选");
+        assert!(
+            arch_idx < flat_idx,
+            "分架构候选必须排在平铺路径前，实际 {arch_idx} vs {flat_idx}"
+        );
+
+        // 两种分隔符都要有：`os/arch` 是 REX 的目录习惯，`os-arch` 是 CI artifact
+        // 的命名习惯，只写一种会让另一种部署形态静默 404。
+        assert!(
+            strs.iter().any(|s| s.contains("linux-x86_64")),
+            "缺 `os-arch` 形式的候选：{strs:?}"
+        );
+    }
+
+    #[test]
+    fn mac_naming_variants_resolve_to_the_same_candidates() {
+        // `std::env::consts::OS` 在 macOS 上是 `macos`，而文档/产物名用 `mac`。
+        // 两者必须指向同一组路径，否则「按文档写 mac 就 404」。
+        let a = candidate_paths(None, "mac", "aarch64");
+        let b = candidate_paths(None, "macos", "aarch64");
+        let c = candidate_paths(None, "darwin", "aarch64");
+        assert_eq!(a, b, "`mac` 与 `macos` 必须等价");
+        assert_eq!(a, c, "`mac` 与 `darwin` 必须等价");
+    }
+}
+
+/// 平台参数化：`?os=&arch=` 真的能定位到分架构目录里那一份。
+///
+/// 用 `AFCLI_BINARY_PATH` 指向一个**临时目录**，再加 `/usr/local/bin` 那套候选
+/// ——不行：显式配置会独占候选表（见 `explicit_configuration_wins_...`），
+/// 所以这条必须走「不配置、靠候选路径」的路径。而候选路径里写死了
+/// `/usr/local/bin`，不能在测试里改（那是部署契约，不是可注入的参数）。
+///
+/// 于是这里验的是更本质的一条：**文件名要带上请求的平台**。平台参数化若
+/// 只影响查找、不影响下发文件名，用户存下来之后无法分辨拿到的是哪个架构
+/// ——而多架构 Hub 下发的正是不同架构的文件。
+#[tokio::test]
+async fn agent_binary_filename_carries_the_requested_platform() {
+    let h = Harness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("afcli");
+    std::fs::write(&path, b"\x7fELF-fake").unwrap();
+
+    let r = {
+        let guard = ENV_LOCK.lock().await;
+        std::env::set_var("AFCLI_BINARY_PATH", &path);
+        let r = h.get("/api/agent-binary?os=linux&arch=aarch64").await;
+        std::env::remove_var("AFCLI_BINARY_PATH");
+        drop(guard);
+        r
+    };
+
+    assert_eq!(r.status, StatusCode::OK);
+    let disp = r
+        .headers
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok());
+    let disp = disp.expect("成功下发必须有 Content-Disposition");
+    assert!(
+        disp.contains("afcli-linux-aarch64"),
+        "文件名必须带请求的平台（否则用户无法分辨架构），实际: {disp}"
+    );
+}
+
+/// 空串的 `AFCLI_BINARY_PATH` 按「没配」处理，而不是当成一个空路径。
+///
+/// `AFCLI_BINARY_PATH=` 是「我不想配」的常见写法。当成路径会让候选表只剩
+/// 一个空路径、永远 404，而日志里看不出「你其实是配错了」。
+#[tokio::test]
+async fn empty_path_env_is_treated_as_unset() {
+    let h = Harness::new().await;
+    let r = {
+        let guard = ENV_LOCK.lock().await;
+        std::env::set_var("AFCLI_BINARY_PATH", "   ");
+        let r = h.get("/api/agent-binary").await;
+        std::env::remove_var("AFCLI_BINARY_PATH");
+        drop(guard);
+        r
+    };
+    // 断言点是「没因为空路径 panic / 500」：可能 200（候选路径里碰巧有 afcli）
+    // 也可能 404，但**绝不能 500**。
+    assert_ne!(
+        r.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "空串配置不该导致 500"
     );
 }

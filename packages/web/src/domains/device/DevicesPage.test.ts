@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import DevicesPage from '@/domains/device/DevicesPage.vue'
 import { device, mountIn } from '@/test/mount'
@@ -381,5 +381,170 @@ describe('DevicesPage：设备 / Agent 目录分段', () => {
     expect(history.length).toBe(before)
     // 点完之后目录真的出来了
     expect(w.element.querySelector('[role="note"]')).not.toBeNull()
+  })
+})
+
+describe('DevicesPage：空态里的 afcli 下载', () => {
+  /**
+   * **必须显式把路由摆回设备分段。** `route` 是模块级 `ref`，同一个文件里
+   * 先跑的分段用例会把地址设成 `?view=agents`，而那个值会留到后面的用例里
+   * ——症状是「单独跑绿、全量跑红」，且失败信息说「找不到下载按钮」，让人
+   * 去怀疑模板而不是怀疑路由状态。（本文件的分段 describe 里也有同样一段
+   * 注释，这里踩的就是它说的那个坑。）
+   */
+  beforeEach(() => {
+    window.history.replaceState(null, '', '/devices')
+    route.value = matchRoute('/devices')
+  })
+
+  /**
+   * 空态那句「在设备上跑 afcli run」有个前提——那台设备上**已经有** afcli。
+   * 离线/内网环境里够不到 GitHub，这句话就成了一句空话。所以这里给它一条
+   * 实际的路：从**这一台** Hub 直接下发。
+   *
+   * `stubFetch` 只能造 JSON 响应，触发不了 `blob()`，所以这里手搓 fetch。
+   * `URL.createObjectURL` 在 jsdom 里不存在，必须打桩——不打桩时用例会以
+   * 「URL.createObjectURL is not a function」失败，而那不是被测代码的错。
+   */
+  function stubBlobFetch(onRequest: (path: string) => Response): {
+    revoked: string[]
+    clicked: string[]
+  } {
+    // **只 `spyOn` 那两个方法，绝不 `vi.stubGlobal('URL', {...URL})`**：
+    // 把 `URL` 换成普通对象会让页面里 `new URL(...)` 一类的构造直接不可用
+    // （曾这么写，症状是按钮点了但 fetch 从未发出，断言却报「找不到按钮」，
+    // 排障方向完全被带偏）。
+    const revoked: string[] = []
+    let seq = 0
+    vi.spyOn(URL, 'createObjectURL').mockImplementation(() => {
+      seq += 1
+      return `blob:fake-${seq}`
+    })
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation((u: string) => {
+      revoked.push(u)
+    })
+    // 隐藏 `<a>` 的 click 在 jsdom 下会真的尝试导航；这里只记录它被点过。
+    const clicked: string[] = []
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clicked.push(this.download)
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+        return onRequest(new URL(raw, 'http://hub.local').pathname)
+      }),
+    )
+    return { revoked, clicked }
+  }
+
+  it('空态给出下载入口，点了就从这一台 Hub 取二进制', async () => {
+    const { revoked, clicked } = stubBlobFetch((path) =>
+      path === '/api/agent-binary'
+        ? new Response(new Blob(['\x7fELF-fake']), {
+            status: 200,
+            headers: {
+              'Content-Disposition': 'attachment; filename="afcli-linux-aarch64"',
+            },
+          })
+        : new Response(JSON.stringify([]), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+    )
+    const w = mountIn(DevicesPage)
+    await flush(w)
+
+    const btn = [...w.element.querySelectorAll('button')].find((b) =>
+      (b.textContent ?? '').includes('下载 afcli'),
+    )
+    expect(btn, '空态里必须有下载 afcli 的入口').toBeTruthy()
+    btn!.click()
+    await flush(w)
+
+    // 下载真的被触发，且**用的是响应头里的文件名**（带平台）。
+    // 前端若写死 `afcli`，同时有 amd64 与 arm64 两台机器时两个文件同名，分不清。
+    expect(clicked).toEqual(['afcli-linux-aarch64'])
+    // revoke 必须发生：不释放的话页面存活期间一直占着这份 blob。
+    expect(revoked).toEqual(['blob:fake-1'])
+  })
+
+  it('响应头没给文件名时回落 afcli（拿不到头不是下载失败的理由）', async () => {
+    // `Content-Disposition` 是可选头。服务端没给（或中间层剥了）时，
+    // 下载仍必须成功——只是名字退化成 `afcli`。若这里抛错，一个纯粹的
+    // 命名问题会变成「下载功能坏了」。
+    const { clicked } = stubBlobFetch((path) =>
+      path === '/api/agent-binary'
+        ? new Response(new Blob(['\x7fELF-fake']), { status: 200 })
+        : new Response(JSON.stringify([]), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+    )
+    const w = mountIn(DevicesPage)
+    await flush(w)
+    const btn = [...w.element.querySelectorAll('button')].find((b) =>
+      (b.textContent ?? '').includes('下载 afcli'),
+    )
+    btn!.click()
+    await flush(w)
+
+    expect(clicked).toEqual(['afcli'])
+    expect(w.element.textContent ?? '').not.toMatch(/下载.*失败/)
+  })
+
+  it('Hub 上没有 afcli 时提示「这台 Hub 没配」，而不是「下载失败」', async () => {
+    stubBlobFetch((path) =>
+      path === '/api/agent-binary'
+        ? new Response(JSON.stringify({ error: 'agent_binary_unavailable' }), {
+            status: 404,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        : new Response(JSON.stringify([]), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+    )
+    const w = mountIn(DevicesPage)
+    await flush(w)
+    const btn = [...w.element.querySelectorAll('button')].find((b) =>
+      (b.textContent ?? '').includes('下载 afcli'),
+    )
+    btn!.click()
+    await flush(w)
+
+    const text = w.element.textContent ?? ''
+    // 裸机跑 afhub（不经容器）时磁盘上本来就没有 afcli —— 这是**正常部署
+    // 形态**，不是故障。提示要指向「去配 AFCLI_BINARY_PATH」，而不是让人
+    // 以为 Hub 坏了跑去翻日志。
+    expect(text).toContain('这台 Hub 没有可下发的 afcli')
+    expect(text).toContain('AFCLI_BINARY_PATH')
+  })
+
+  it('其它错误走通用失败文案（不能被当成「没配」）', async () => {
+    stubBlobFetch((path) =>
+      path === '/api/agent-binary'
+        ? new Response(JSON.stringify({ error: 'boom' }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        : new Response(JSON.stringify([]), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+    )
+    const w = mountIn(DevicesPage)
+    await flush(w)
+    const btn = [...w.element.querySelectorAll('button')].find((b) =>
+      (b.textContent ?? '').includes('下载 afcli'),
+    )
+    btn!.click()
+    await flush(w)
+
+    const text = w.element.textContent ?? ''
+    expect(text).not.toContain('这台 Hub 没有可下发的 afcli')
+    expect(text).toContain('afcli')
   })
 })
