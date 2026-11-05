@@ -21,8 +21,8 @@ each milestone document's `里程碑起始 ref`. Entry text was not rewritten.
 - **发布通路真的建起来了：打 tag 即出二进制、镜像与 Release**。此前 `docs/DEVELOPMENT.md`
   §2 的发布段整段标着「未落地」——`ci.yml` 只管门禁，推 tag 之后没有任何东西产出用户能拿
   的东西。现在 `release.yml` 与它并列同一触发（`push: tags: ['v*']`），跑
-  `build-frontend` → `build-binaries`（5 平台**原生**矩阵）→ `docker-hub` / `docker-node` /
-  `release` 三个消费者。**`build-frontend` 是 `build-binaries` 的硬前置**：`include_dir!`
+  产线自己先过 `gate`（= `ci.yml` 那串门禁），再 `build-frontend` → `build-binaries`
+  （4 平台**原生**矩阵）→ `docker-hub` / `docker-node` / `release` 三个消费者。**`build-frontend` 是 `build-binaries` 的硬前置**：`include_dir!`
   在编译期嵌入 dist，dist 缺失时 `build.rs` 只造一个占位页并打 `cargo:warning`——二进制照
   样编得出来、页面却是空的，这种静默降级一旦发出去就是「Hub 打开是占位页」。所以矩阵里
   每个平台在编之前都断言 `packages/web/dist/index.html` 存在，不存在就 fail / **The release
@@ -76,6 +76,25 @@ each milestone document's `里程碑起始 ref`. Entry text was not rewritten.
   still change the public API, so self-hosted users will need to upgrade again. The
   "wait until the external contract settles" premise was overridden by an explicit decision,
   not quietly dropped.
+
+### Fixed
+
+- **门禁不再只是「给人看的」：`release.yml` 自己等闸**。`ci.yml` 与 `release.yml` 此前只
+  共享触发、互不阻塞——两个 workflow 并行跑，门禁红时镜像照样推上 GHCR、Release 照样建。
+  防线原本是「tag 只在本地 `mise run ci` 全绿后才打」，而纪律挡不住手工打 tag 与
+  `workflow_dispatch` 补发。现在 `release.yml` 第一个 job 是 `gate`（跑与 `ci.yml` 同一串
+  门禁），`build-binaries` / `docker-hub` / `docker-node` / `release` 全部 `needs` 它。
+  代价是门禁跑两遍（覆盖率那步最贵），换的是坏产物发不出去 / **The gate now blocks the
+  pipeline: `release.yml` runs the same checks in a `gate` job that every publishing job
+  depends on**, instead of relying on the convention that tags are only pushed after a
+  green local run.
+- **移除 `windows-gnu` 矩阵条目：它从来编不出来**。首次真跑 CI 时该条目 `exit code 101`——
+  `afcli` 依赖的 `node-connector` 是纯 Unix 的（`forkpty` / `pipe2` / `fcntl` /
+  `O_CLOEXEC` / `TIOCSWINSZ`，连 `std::os::fd` 都没有），这不是换 crate 能绕开的细节：
+  会话终端就是一个 PTY，Windows 没有对应物。矩阵按 4 个 Linux 目标（x86_64 / aarch64 ×
+  gnu / musl）发布。要支持 Windows 需先给 `node-connector` 写 ConPTY 支持 /
+  **Dropped the `windows-gnu` target, which could never compile**: `node-connector` is
+  Unix-only by design.
 
 ## [0.7.0] - 2026-11-05
 
