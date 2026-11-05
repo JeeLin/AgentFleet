@@ -143,6 +143,17 @@ C7 双向比对产线的步骤名——不再存在「两份清单互相漂移�
 后果是「Hub 装起来打开是 Not built 占位页」能不红任何一步地走到用户手里。所以矩阵里
 **每个平台在编之前**都断言 `packages/web/dist/index.html` 存在，缺了就 fail。
 
+**GitHub Actions 的版本钉在「Node 24 起步的最低版本」**：GitHub 已弃用 Node.js 20
+运行时，CI 日志里每一步都会打 `Node.js 20 is deprecated ... forced to run on
+Node.js 24`。本 workflow 用的是 `actions/checkout@v5` / `actions/setup-node@v5` /
+`actions/upload-artifact@v6` / `actions/download-artifact@v6`——恰好是**各自改用
+Node 24 runtime 的第一个版本**。为什么不直接上最新的 v7/v8：那两个大版本改的是
+**模块形态**（ESM）与**校验强度**（download-artifact v8 起下载哈希不匹配默认报错），
+属于行为变更而非运行时升级，与「消掉弃用警告」这件事无关，混在一起做会让出问题时
+分不清是哪个变更带来的。`setup-node` v5 起在 `package.json` 有 `packageManager`
+字段时会**自动开 npm 缓存**，这里显式 `package-manager-cache: false`——本仓的包管理器
+是 bun，npm 的缓存条目对 bun 无效，让它去猜只会写出无效缓存。
+
 | 文件 | 作用 | 状态 |
 |---|---|---|
 | `.github/workflows/release.yml` | 门禁 `gate` + 发布全流程（前端 / 二进制矩阵 / 镜像 / Release）。**唯一 workflow** | **v0.7.1 落地** |

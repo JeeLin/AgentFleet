@@ -86,7 +86,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 读工具链版本（mise.toml [tools] 是唯一出处）
         id: tools
@@ -134,7 +134,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 读工具链版本（mise.toml [tools] 是唯一出处）
         id: tools
@@ -166,7 +166,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 读工具链版本（mise.toml [tools] 是唯一出处）
         id: tools
@@ -212,7 +212,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 读工具链版本（mise.toml [tools] 是唯一出处）
         id: tools
@@ -225,9 +225,14 @@ jobs:
           done
 
       - name: 装 Node ${{ steps.tools.outputs.node }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ steps.tools.outputs.node }}
+          # setup-node v5 起，若 package.json 里有 `packageManager` 字段就**自动开缓存**。
+          # 这里的包管理器是 **bun**（`bun install --frozen-lockfile`），bun 的锁文件
+          # 与 npm 的缓存格式不通用——让 setup-node 去猜缓存只会写出无效条目。
+          # 显式关掉：缓存的真相源是 bun 自己的 `bun.lock` 与 bun 的全局缓存。
+          package-manager-cache: false
 
       - name: 装 Bun ${{ steps.tools.outputs.bun }}
         uses: oven-sh/setup-bun@v2
@@ -268,7 +273,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 读工具链版本（mise.toml [tools] 是唯一出处）
         id: tools
@@ -300,7 +305,7 @@ jobs:
             || { echo "packages/web/dist/index.html 不存在，构建产物是空的" >&2; exit 1; }
           ls -la packages/web/dist | head -20
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: web-dist
           path: packages/web/dist
@@ -372,7 +377,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 读工具链版本（mise.toml [tools] 是唯一出处）
         id: tools
@@ -423,7 +428,7 @@ jobs:
 
       # 前端产物落在 build.rs 推算的位置（`crates/hub-server/../../packages/web/dist`）。
       - name: 取回前端产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           name: web-dist
           path: packages/web/dist
@@ -518,7 +523,7 @@ jobs:
           done
           ls -la out
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           # artifact 名带 target，纯为排错时能一眼看出是哪条矩阵红
           name: bin-${{ matrix.target }}
@@ -540,18 +545,18 @@ jobs:
     needs: [gate-static, gate-test, gate-coverage, gate-web, build-binaries]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # 每个 artifact 里是**该平台的两个二进制**（afhub + afcli）：
       # Hub 镜像两个都要（afcli 供设备从 Hub 拉取，见 Dockerfile.hub 的说明）。
       - name: 取回 amd64 产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           name: bin-x86_64-unknown-linux-musl
           path: dist/amd64
 
       - name: 取回 arm64 产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           name: bin-aarch64-unknown-linux-musl
           path: dist/arm64
@@ -608,17 +613,17 @@ jobs:
     needs: [gate-static, gate-test, gate-coverage, gate-web, build-binaries]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # 两个 artifact 都整包取下（各含 afhub + afcli）；本 job 只用 afcli。
       - name: 取回 amd64 产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           name: bin-x86_64-unknown-linux-musl
           path: dist/amd64
 
       - name: 取回 arm64 产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           name: bin-aarch64-unknown-linux-musl
           path: dist/arm64
@@ -671,10 +676,10 @@ jobs:
     needs: [gate-static, gate-test, gate-coverage, gate-web, build-frontend, build-binaries]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 取回全部二进制
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           # 只要 bin-*，不要把 web-dist 也拉进发布包
           pattern: bin-*

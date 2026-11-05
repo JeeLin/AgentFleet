@@ -111,6 +111,14 @@ each milestone document's `里程碑起始 ref`. Entry text was not rewritten.
 
 ### Changed
 
+- **GitHub Actions 依赖升到「Node 24 起步的最低版本」**：GitHub 已弃用 Node.js 20
+  运行时，CI 日志里每一步都会打弃用警告。现在用
+  `actions/checkout@v5` / `actions/setup-node@v5` / `actions/upload-artifact@v6` /
+  `actions/download-artifact@v6`——各自改用 Node 24 runtime 的第一个版本。
+  不直接上 v7/v8 是因为那两代改的是**模块形态**（ESM）与**校验强度**
+  （download-artifact v8 起哈希不匹配默认报错），与「消掉弃用警告」无关。
+  `setup-node` v5 的自动 npm 缓存被显式关掉——本仓的包管理器是 bun。
+
 - **门禁拆成 4 个并行 job，产线 wall clock 从 14m06s 降到 7m09s（省 49%）**。
   同一个 job 内的步骤**永远串行**，而 `test`（普通二进制）与 `cov-gate`（全量插桩
   二进制）是两套互不复用的产物、`web-ci` 与 Rust 侧零交集——三者之间没有任何依赖，
