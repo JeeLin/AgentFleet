@@ -820,22 +820,62 @@ jobs:
       - name: 断言 Latest 与预发标记正确
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # `RELEASE_TAG` 是 **workflow 顶层 env**（第 40 行：`github.event.inputs.tag || github.ref_name`），
+          # 不是上一步的 output——上一步只输出了 `stable`（见 `steps.rel.outputs.stable`）。
+          # 之前这里写 `steps.rel.outputs.tag` 会取到空串，`releases/tags/` 后面
+          # 变成空路径，`gh api` 报错——**空值不会自己显形**。
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
           # 发布完再读回来核一遍：`--latest` 是远端状态，命令成功不等于它生效。
           # 这一段是 `latest` 只跟正式 tag 这条承诺的**唯一机器可验证据**——
           # 没有它，「镜像 latest 与 Release Latest 用同一套判据」只是注释里的说法。
-          got=$(gh release view "$RELEASE_TAG" --json isLatest,isPrerelease \
-                  --jq '"\(.isLatest) \(.isPrerelease)"')
-          echo "远端状态 isLatest isPrerelease = $got"
+          #
+          # **不能用 `gh release view --json isLatest`**：gh CLI 的
+          # `release view --json` 字段表里**根本没有 `isLatest`**（只有
+          # `isPrerelease` / `isDraft` / `tagName` 等），带上它 gh 直接报
+          # `Unknown JSON field: "isLatest"` 并以非零码退出——在
+          # `set -euo pipefail` 下整步红。v0.7.1 的 release 步首次真跑到
+          # 就是这么红的（CI run 42043667668）：前面的门禁先红，release
+          # 步一直没被真执行过，缺陷藏着。
+          # 「是不是 Latest」只能从 **REST API** 问：`releases/latest`
+          # 按 GitHub 的定义只返回**最新的非预发、非草稿**发布。
+          #
+          # 于是判据变成两个可独立验证的事实，而不是一个自造字段：
+          #   ① 预发标记对不对 → `releases/tags/<tag>` 的 `prerelease` 布尔；
+          #   ② 是不是 Latest     → `releases/latest` 的 `tag_name` 是不是本 tag。
+          # 稳定版两条都要成立；预发版 ① 必须是 true、② **必须不成立**
+          # （预发版永远不该占据 Latest 位置）。
+
+          # ① 预发标记：REST 的 `prerelease` 字段。
+          pre=$(gh api "repos/${{ github.repository }}/releases/tags/$RELEASE_TAG" \
+                  --jq '.prerelease')
+          echo "远端 prerelease = $pre"
+
+          # ② Latest 归属：`releases/latest` 只返回最新的非预发发布。
+          # 一个预发版可能让这个接口 404（还没有任何正式发布），
+          # 那种情况下「不是 Latest」成立，不能因此让整步红。
+          latest_tag=$(gh api "repos/${{ github.repository }}/releases/latest" \
+                        --jq '.tag_name' 2>/dev/null || echo "<none>")
+          echo "远端 releases/latest 的 tag = $latest_tag"
+
           if [ "${{ steps.rel.outputs.stable }}" = true ]; then
-            want="true false"
+            if [ "$pre" != "false" ]; then
+              echo "FAIL $RELEASE_TAG：稳定版的 prerelease 必须是 false，实际 $pre" >&2
+              exit 1
+            fi
+            if [ "$latest_tag" != "$RELEASE_TAG" ]; then
+              echo "FAIL $RELEASE_TAG：稳定版必须占据 releases/latest，实际是 $latest_tag" >&2
+              exit 1
+            fi
           else
-            want="false true"
-          fi
-          if [ "$got" != "$want" ]; then
-            echo "FAIL $RELEASE_TAG：期望「$want」（isLatest isPrerelease），实际「$got」" >&2
-            echo "     稳定版必须 isLatest=true / isPrerelease=false；预发版反之。" >&2
-            exit 1
+            if [ "$pre" != "true" ]; then
+              echo "FAIL $RELEASE_TAG：预发版的 prerelease 必须是 true，实际 $pre" >&2
+              exit 1
+            fi
+            if [ "$latest_tag" = "$RELEASE_TAG" ]; then
+              echo "FAIL $RELEASE_TAG：预发版不得占据 releases/latest" >&2
+              exit 1
+            fi
           fi
           echo "OK $RELEASE_TAG：Latest 标记与预发标记符合判据"

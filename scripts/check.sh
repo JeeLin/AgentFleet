@@ -828,4 +828,149 @@ PYEOF
   [[ $? -ne 0 ]] && { echo "  ❌ release.yml 的 gate 未装齐门禁用到的 rust 组件"; fail=1; } || ok "gate 装齐门禁用到的 rust 组件"
 
 echo
+echo "== C9 workflow 里 gh CLI 的 --json 字段必须真实存在 =="
+# 这条门禁是**事后补的**，理由值得记住：`gh release view --json isLatest`
+# 里的 `isLatest` **根本不是 gh CLI 的合法字段**（字段表只有 `isPrerelease` /
+# `isDraft` / `tagName` / `assets` / `publishedAt` 等），带上它 gh 直接报
+# `Unknown JSON field: "isLatest"` 并以非零码退出——在 `set -euo pipefail`
+# 下整步红。v0.7.1 的 release 步首次真跑到就是这么红的（CI run 42043667668）：
+# 前面的门禁先红，release 步一直没被真执行过，这个缺陷藏了很久。
+#
+# 为什么值得单列一条门禁：这类缺陷**没有任何本地检查能发现**——
+# 它不违反 YAML 语法、不违反 shell 语法，只在「真跑 CI 且真到那一步」时
+# 才显形。而 release 步在门禁之后，一旦前面的门禁红，release 步就永远
+# 得不到执行——缺陷与它的遮蔽条件是同一个条件。
+#
+# 判据办法：`gh <子命令> --json` 不带值时会列出该子命令的全部合法字段，
+# 于是「workflow 里用到的字段是否都在表里」可以静态比对。
+# 字段表随 gh 版本变化，所以**只查「用到的字段 ⊆ 该 gh 的字段表」**，
+# 不反向要求「字段表里的都要用」。
+python3 - <<'PYEOF'
+import re, subprocess, sys
+
+RELEASE_YML = '.github/workflows/release.yml'
+bad = []
+
+try:
+    with open(RELEASE_YML, encoding='utf-8') as f:
+        yml = f.read()
+except OSError as e:
+    print(f'      读取 {RELEASE_YML} 失败：{e}')
+    sys.exit(1)
+
+# 抓出所有 `gh <子命令...> --json <字段列表>` 的用法。
+#
+# **子命令可能是多词**（`gh release view --json`），且**字段表是按完整子命令
+# 路径查的**——`gh release --json` 不是合法用法（它会打印子命令列表），
+# 按「第一个词」去查会拿到一份错的字段表（把 `create` / `delete` 这些
+# 子命令名当成字段名，于是合法字段 `isPrerelease` 被误判为不存在）。
+#
+# **`gh` 与 `--json` 之间可以有任意参数**（`gh release view "$TAG" --json`），
+# 所以中间不能只允许空白——用「非换行的任意内容」连接。
+#
+# 字段列表可能跨行（`\` 续行），所以先把续行合并再匹配。
+flat = re.sub(r'\\\s*\n\s*', ' ', yml)
+# 抓「gh」与「--json」之间的**全部**内容（可能是 `release view "$TAG"` 这种
+# 「子命令 + 参数」的混合）。子命令路径由 gh 自己判定（见下），不在这里猜。
+BROAD = re.compile(r'\bgh\s+(.+?)\s+--json\s+'
+                   r'([A-Za-z][A-Za-z0-9]*(?:\s*,\s*[A-Za-z][A-Za-z0-9]*)*)')
+
+# **必须剔掉注释行**：门禁的说明文字里会引用出错的写法当反例
+# （本门禁自己就写着「不能用 `gh release view --json isLatest`」），
+# 把注释也当用法就会自己把自己判红。shell 注释只有「整行以 `#` 开头」
+# 和「`#` 之后到行尾」两种，但 `#` 出现在字符串里的情况极少，
+# 误剔一行注释的代价远小于漏判。
+def strip_comments(text):
+    out = []
+    for line in text.split('\n'):
+        stripped = line.lstrip()
+        if stripped.startswith('#'):
+            continue
+        out.append(line)
+    return '\n'.join(out)
+
+
+def field_table(words):
+    """问 gh：这些词组成的子命令路径有哪些合法 --json 字段。
+
+    返回 (fields, errkind)：
+      fields 非空 → 成功，fields 是合法字段集合；
+      errkind == 'no-such-command' → 路径不对（gh 打印的是子命令列表）；
+      errkind == 'no-json' → 该子命令不支持 --json；
+      errkind == 'error' → 其他问题（gh 异常）。
+
+    **子命令路径由 gh 自己判定**：文本里 `gh` 与 `--json` 之间混着参数
+    （`gh release view "$TAG" --json`），靠正则猜哪几个词是子命令名会错
+    （曾把 `gh release view --json` 的路径截成 `release`，于是查到的是
+    「子命令列表」而非字段表，把合法字段 `isPrerelease` 误判为不存在）。
+    办法是**逐词回退**：先试全部词，gh 说「不认识的命令」就去掉最后一个词
+    再试，直到拿到字段表或用完为止。
+    """
+    words = list(words)
+    while words:
+        try:
+            out = subprocess.run(['gh'] + words + ['--json'],
+                                 capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return set(), 'error'
+        err = out.stderr or ''
+        # **字段表必须以「Specify one or more comma-separated fields」为锚点**。
+        # 不加锚点会把「Available commands:」下面那些**子命令名**
+        # （create / delete / view / upload…）当成字段名——于是
+        # `gh release viewx --json`（子命令不存在）会拿到一份
+        # {create, delete, view, ...} 的假字段表，把合法字段
+        # `isPrerelease` 误判为不存在。锚点区分两种输出形态：
+        #   · 字段表 → "Specify one or more comma-separated fields for `--json`:"
+        #   · 子命令列表 → "Available commands:"
+        if 'Specify one or more' in err:
+            head, _, tail = err.partition('Specify one or more')
+            fields = set(re.findall(r'^\s+([A-Za-z][A-Za-z0-9]*)\s*$', tail, re.M))
+            if not fields:
+                fields = set(re.findall(r'^\s*([A-Za-z][A-Za-z0-9]*)\s*$', tail, re.M))
+            return (fields, 'ok') if fields else (set(), 'no-json')
+        if 'Available commands:' in err or 'unknown command' in err:
+            words.pop()
+            continue
+        return set(), 'error'
+    return set(), 'no-such-command'
+
+
+seen = {}  # (子命令路径, 字段) -> 用法样例
+for m in BROAD.finditer(strip_comments(flat)):
+    words = m.group(1).split()
+    for fld in m.group(2).split(','):
+        fld = fld.strip()
+        if fld:
+            seen.setdefault((fld, tuple(words)), m.group(0)[:80])
+
+if not seen:
+    print('      workflow 里没有 `gh ... --json` 的用法（若已改用 gh api，本门禁无事可做）')
+    sys.exit(0)
+
+for (fld, words), sample in sorted(seen.items()):
+    fields, kind = field_table(words)
+    if kind == 'ok':
+        if fld not in fields:
+            bad.append(f'`gh {" ".join(words)} --json {fld}` 用了**不存在的字段**'
+                       f'（该 gh 版本的合法字段里没有它）——CI 上会报 '
+                       f'`Unknown JSON field: "{fld}"` 并以非零码退出'
+                       f'（用法：{sample}…）')
+    elif kind == 'no-such-command':
+        bad.append(f'`gh {" ".join(words)} --json` 用的是**不存在的子命令路径**'
+                   f'——CI 上 gh 会报 `unknown command`（用法：{sample}…）')
+    elif kind == 'no-json':
+        bad.append(f'`gh {" ".join(words)} --json` 的子命令**不支持 --json**'
+                   f'（用法：{sample}…）')
+    else:
+        print(f'      跑 `gh {" ".join(words)} --json` 失败：本门禁查不了，'
+              f'不当作通过——跳过等于假绿')
+        sys.exit(1)
+
+for b in bad:
+    print(f'      {b}')
+sys.exit(1 if bad else 0)
+PYEOF
+  [[ $? -ne 0 ]] && { echo "  ❌ workflow 用了 gh CLI 不存在的 --json 字段"; fail=1; } || ok "workflow 的 gh --json 字段都真实存在"
+
+echo
 if [[ $fail -eq 0 ]]; then echo "门禁通过"; else echo "门禁未通过"; exit 1; fi

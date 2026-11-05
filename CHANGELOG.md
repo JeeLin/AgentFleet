@@ -163,6 +163,16 @@ each milestone document's `里程碑起始 ref`. Entry text was not rewritten.
 
 ### Fixed
 
+- **Release 的「Latest 与预发标记」断言用了一个 gh CLI 里不存在的字段，
+  整步红**。`gh release view --json isLatest` 里的 `isLatest` **不是合法字段**
+  （该子命令的字段表只有 `isPrerelease` / `isDraft` / `tagName` / `assets` 等），
+  gh 直接报 `Unknown JSON field: "isLatest"` 并以非零码退出。
+  **这条缺陷藏了很久的原因值得记住**：断言步在门禁之后，而前几轮 CI 都在
+  门禁就红了，这一步**从未被真执行过**——缺陷与它的遮蔽条件是同一个条件。
+  现在断言改成两个可独立验证的事实：`releases/tags/<tag>` 的 `prerelease` 布尔，
+  以及 `releases/latest` 的 `tag_name` 是不是本 tag（Latest 语义只有 REST 有）。
+  同时新增门禁 **C9**：workflow 里 `gh ... --json` 用到的字段必须真实存在。
+
 - **覆盖率门禁的 `(racy)` 豁免机制**从来没有真正生效过**，`detect.rs` 里两条
   互斥臂的覆盖结果还会随「跑测试的机器装没装 opencode」翻转**。两条都是
   「本地绿、CI 红」的盲区，CI 真跑才暴露出来：
