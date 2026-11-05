@@ -150,6 +150,23 @@ each milestone document's `里程碑起始 ref`. Entry text was not rewritten.
 
 ### Fixed
 
+- **`gate` 的 `fmt` 一步在 CI 上直接红，而本地全绿**。首次真跑 CI 报
+  `error: 'cargo-fmt' is not installed for the toolchain '1.99.0-x86_64-unknown-linux-gnu'`。
+  根因是 `dtolnay/rust-toolchain` 带 `--profile minimal`，**只装显式列出的组件**，而
+  `components:` 当时只写了 `llvm-tools-preview`——`rustfmt` 与 `clippy` 都不在里面。本地之所以
+  绿，是因为 `cargo fmt` 找不到工具链自带的 `cargo-fmt` 时会从 `$PATH` 捞到 rustup 的 shim、
+  退回 `stable` 那个 rustfmt 并成功返回（实测 `cargo fmt --version` 报
+  `rustfmt 1.10.0-stable`，即**用错工具链还能过**）。现在 `components: rustfmt, clippy,
+  llvm-tools-preview` 列全。同时给 `check.sh` 加了 **C8**：从 `release.yml` 的 `gate` 里读出
+  实际跑到的 `cargo fmt` / `cargo clippy` / `cargo llvm-cov`，与 `components:` 双向比对，缺一条
+  就红；「一个需要组件的命令都读不到」也判红，防「步骤被改名」的假绿。这类「本地绿、CI 红」
+  的差异不会自己暴露，只能靠一条读 workflow 的门禁钉住。 /
+  **The `fmt` gate failed on the very first real CI run while passing locally.** `dtolnay/
+  rust-toolchain` installs with `--profile minimal` and therefore only adds the components
+  listed explicitly; `rustfmt` and `clippy` were missing. Locally `cargo fmt` silently
+  borrowed rustup's shim and ran `stable`'s rustfmt, so a wrong-toolchain format check
+  still passed. `gate` now declares all three components, and a new `check.sh` C8 diffs the
+  commands `gate` actually runs against the components it declares.
 - **门禁不再只是「给人看的」：`release.yml` 自己等闸**。两个 workflow（`ci.yml` 与
   `release.yml`）此前只共享触发、互不阻塞——并行跑，门禁红时镜像照样推上 GHCR、Release 照样建。
   防线原本是「tag 只在本地 `mise run ci` 全绿后才打」，而纪律挡不住手工打 tag 与

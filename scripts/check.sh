@@ -683,5 +683,86 @@ sys.exit(1 if bad else 0)
 PYEOF
   [[ $? -ne 0 ]] && { echo "  ❌ release.yml 的 gate 与 mise.toml 门禁清单不一致"; fail=1; } || ok "产线 gate 覆盖 mise.toml 全部门禁，且各 job 都等 gate"
 
+echo "== C8 release.yml 的 gate 必须装齐门禁用到的 rust 组件 =="
+# 这条门禁是**事后补的**，理由值得记住：`dtolnay/rust-toolchain` 带
+# `--profile minimal`，只装**显式列出**的组件。首次真跑 CI 时 gate 只写了
+# `llvm-tools-preview`，于是 `cargo fmt --check` 报
+# `error: 'cargo-fmt' is not installed for the toolchain`，而**本地全绿**——
+# 因为本地 `cargo fmt` 找不到自带的 `cargo-fmt` 时，会从 `$PATH` 里捞到
+# rustup 的 shim，进而退回 `stable` 那个 rustfmt，静默用错工具链还能过。
+# 「本地绿、CI 红」这类差异不会自己暴露，只能靠一条能读 workflow 的门禁钉住。
+python3 - <<'PYEOF'
+import sys, re
+try:
+    import yaml
+except ImportError:
+    print('      缺 PyYAML：无法核对 release.yml（不要跳过——跳过等于假绿）')
+    sys.exit(1)
+
+RELEASE_YML = '.github/workflows/release.yml'
+
+# 门禁命令 → 它需要的 cargo 子命令所对应的 rust 组件。
+# 只登记**确实是独立组件**的：`cargo build` / `cargo test` / `cargo check`
+# 只需 rustc + rust-std（minimal profile 自带），不必列进来——多登记会让
+# 「装齐」变成「装一堆用不上的」，那不是准确性。
+COMPONENT_OF = {
+    'cargo fmt': 'rustfmt',
+    'cargo clippy': 'clippy',
+    'cargo llvm-cov': 'llvm-tools-preview',
+}
+
+bad = []
+try:
+    with open(RELEASE_YML, encoding='utf-8') as f:
+        jobs = (yaml.safe_load(f) or {}).get('jobs') or {}
+except yaml.YAMLError as e:
+    bad.append(f'{RELEASE_YML} YAML 解析失败：{e}')
+    jobs = {}
+except OSError as e:
+    bad.append(f'{RELEASE_YML} 读取失败：{e}')
+    jobs = {}
+
+gate = jobs.get('gate')
+if gate is None:
+    bad.append(f'{RELEASE_YML} 里没有 job `gate`：无法核对它装了哪些组件')
+else:
+    steps = gate.get('steps') or []
+
+    # 1) gate 里实际跑到的命令 → 需要的组件
+    needed = {}
+    for s in steps:
+        run = s.get('run') or ''
+        for cmd, comp in COMPONENT_OF.items():
+            if re.search(r'\b' + re.escape(cmd) + r'\b', run):
+                needed[comp] = cmd
+
+    # 2) gate 里**声明**装的组件（可能出现在多个 step，合并）
+    declared = set()
+    for s in steps:
+        with_ = s.get('with') or {}
+        for c in str(with_.get('components') or '').split(','):
+            c = c.strip()
+            if c:
+                declared.add(c)
+
+    if not needed:
+        # 一个组件都不需要，说明门禁清单已经面目全非——不当成通过。
+        bad.append('gate 里读不到任何需要 rust 组件的门禁命令（`cargo fmt` / '
+                   '`cargo clippy` / `cargo llvm-cov`）：不是「无需组件」，'
+                   '更可能是步骤被改名或挪走了，先确认门禁还在跑')
+    for comp in sorted(set(needed) - declared):
+        bad.append(f'`{needed[comp]}` 需要组件 `{comp}`，但 gate 的 '
+                   f'`components:` 里没有（CI 上会报 '
+                   f'"\'{comp}\' is not installed for the toolchain"）')
+
+    if needed and not (set(needed) - declared):
+        print(f'      gate 已装齐门禁用到的全部组件：{", ".join(sorted(needed))}')
+
+for b in bad:
+    print(f'      {b}')
+sys.exit(1 if bad else 0)
+PYEOF
+  [[ $? -ne 0 ]] && { echo "  ❌ release.yml 的 gate 未装齐门禁用到的 rust 组件"; fail=1; } || ok "gate 装齐门禁用到的 rust 组件"
+
 echo
 if [[ $fail -eq 0 ]]; then echo "门禁通过"; else echo "门禁未通过"; exit 1; fi

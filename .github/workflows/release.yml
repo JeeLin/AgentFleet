@@ -84,8 +84,15 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.tools.outputs.rust }}
-          # cargo llvm-cov 靠 llvm-tools 出插桩与报告，缺它门禁直接 FATAL
-          components: llvm-tools-preview
+          # **必须显式列全部组件**：本地跑门禁时 `mise` 会自动补装缺的组件，
+          # 而 CI 里 `cargo` 来自这个 action，缺什么就真的没有。
+          #   - rustfmt：`fmt` 门禁（`cargo fmt --check`）
+          #   - clippy：`lint` 门禁（`cargo clippy -- -D warnings`）
+          #   - llvm-tools-preview：`cov-gate` 靠它出插桩与报告，缺了直接 FATAL
+          # 首次真跑 CI 实测：只写 llvm-tools-preview 时 `fmt` 一步
+          # `error: 'cargo-fmt' is not installed for the toolchain`，
+          # 而本地全绿——这类「本地绿、CI 红」的差异只能靠列全躲开。
+          components: rustfmt, clippy, llvm-tools-preview
 
       - name: 装 Node ${{ steps.tools.outputs.node }}
         uses: actions/setup-node@v4

@@ -66,6 +66,13 @@ check → fmt → lint → test → **cov-gate**（覆盖率 100% 阻塞）→ *
 `scripts/check.sh` 的 C7 会解析 `mise.toml` 与 `release.yml` 的 `gate` 步骤名，**双向比对**：
 漏抄一条会红，多抄一条也会红。这条门禁存在的理由是「少跑的那一道不会红，它只是不存在」。
 
+**C8 盯另一件事：`gate` 装的 rust 组件够不够跑那些门禁**。`dtolnay/rust-toolchain` 带
+`--profile minimal`，只装 `components:` 里**显式列出**的东西。首次真跑 CI 时那里只写了
+`llvm-tools-preview`，于是 `cargo fmt --check` 报 `'cargo-fmt' is not installed`——而**本地是绿的**，
+因为 `cargo fmt` 找不到自带的 `cargo-fmt` 时会从 `$PATH` 捞到 rustup 的 shim、退回 `stable` 的
+rustfmt 并成功返回（`cargo fmt --version` 报 `rustfmt 1.10.0-stable`，即用错工具链还能过）。
+所以本地 `mise run ci` 绿**不能证明 CI 绿**，这一层必须由能读 workflow 的门禁来钉。
+
 > **`ci.yml` 已删除（v0.7.1）**。它曾经是与 `release.yml` 并列的第二个 workflow，两份门禁
 > 清单各写一遍、靠 C7 比对防漂移。删掉的理由：`gate` job 已经把全部门禁跑了一遍，`ci.yml`
 > 是纯重复；而两个 workflow 同触发并行会让页面上出现两个 run（见下面 `gate` 那段的历史）。
