@@ -14,6 +14,69 @@ each milestone document's `里程碑起始 ref`. Entry text was not rewritten.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-05
+
+### Added
+
+- **发布通路真的建起来了：打 tag 即出二进制、镜像与 Release**。此前 `docs/DEVELOPMENT.md`
+  §2 的发布段整段标着「未落地」——`ci.yml` 只管门禁，推 tag 之后没有任何东西产出用户能拿
+  的东西。现在 `release.yml` 与它并列同一触发（`push: tags: ['v*']`），跑
+  `build-frontend` → `build-binaries`（5 平台**原生**矩阵）→ `docker-hub` / `docker-node` /
+  `release` 三个消费者。**`build-frontend` 是 `build-binaries` 的硬前置**：`include_dir!`
+  在编译期嵌入 dist，dist 缺失时 `build.rs` 只造一个占位页并打 `cargo:warning`——二进制照
+  样编得出来、页面却是空的，这种静默降级一旦发出去就是「Hub 打开是占位页」。所以矩阵里
+  每个平台在编之前都断言 `packages/web/dist/index.html` 存在，不存在就 fail / **The release
+  pipeline now exists: tagging produces binaries, images, and a Release**. Until now the
+  release section of `docs/DEVELOPMENT.md` §2 was marked "not implemented" — `ci.yml` only
+  gated, and pushing a tag produced nothing a user could run. `release.yml` now sits beside
+  it on the same trigger and runs `build-frontend` → `build-binaries` (a five-target **native**
+  matrix) → the three consumers `docker-hub` / `docker-node` / `release`. **The frontend job is
+  a hard prerequisite of the binaries**: `include_dir!` embeds `dist` at compile time, and when
+  it is missing `build.rs` writes a placeholder page and only emits a `cargo:warning` — the
+  binary builds fine and the page is blank, and shipping that silently means the Hub opens on
+  a placeholder. Every matrix entry therefore asserts `packages/web/dist/index.html` exists
+  before compiling and fails if it does not.
+- **`AFHUB_ALLOW_NON_LOOPBACK=1`：容器唯一被允许的放开方式**。`afhub` 缺省只绑回环（约束 1），
+  而 Hub 容器必须绑 `0.0.0.0` 才能从容器外访问——没有这个开关，`docker run` 就是启动即退出。
+  **缺省行为一个字都没变**：不设变量仍然拒绝非回环地址。**只认确切的 `1`**：`0` / `false` /
+  `true` / `yes` / 空串一律按「没设」处理——这是安全开关，宽松解析的代价是「明明写的是 `0`，
+  却把端口放开了」，那种 bug 在代码里看不出来、只在被扫到的那天才暴露。拒绝信息里写明这个
+  变量和它唯一的合法取值 / **`AFHUB_ALLOW_NON_LOOPBACK=1`: the only sanctioned way to open
+  up for containers**. `afhub` binds loopback only by default (constraint 1), while a Hub
+  container has to bind `0.0.0.0` to be reachable — without the switch `docker run` exits
+  immediately. **The default behaviour is unchanged byte for byte**: leaving the variable
+  unset still refuses non-loopback addresses. **Only the exact value `1` counts**: `0`,
+  `false`, `true`, `yes` and the empty string are all treated as unset, because loose parsing
+  on a security switch means "I wrote `0` and it opened the port", a bug invisible in the code
+  until the day someone scans it. The refusal message names the variable and its one legal value.
+- `Dockerfile.hub` / `Dockerfile.node` / `docker-compose.hub.yaml` / `docker-compose.agent.yaml`：
+  Hub 镜像**不另放 dist**（它已在编译期嵌进二进制，另放一份反而让「单二进制」这条硬需求
+  失去验证），node 镜像按 `TARGETARCH` 选二进制 / The Hub image deliberately **carries no
+  separate `dist`** — it is already inside the binary, and shipping a second copy would void
+  the evidence for the single-binary requirement — while the node image picks its binary by
+  `TARGETARCH`.
+- `SHA256SUMS` 与 GitHub Release：Release body 从本文件的对应版本段抽出，**抽不到就 fail**，
+  不给一份空 body / `SHA256SUMS` plus a GitHub Release whose body is extracted from this
+  file's matching version section; **extraction failure fails the job** rather than shipping
+  an empty body.
+
+### Changed
+
+- **版本号从 `0.5.0` 提到 `0.7.1`**（`Cargo.toml` 的 `workspace.package` 与
+  `packages/web/package.json` 同步）。此前二进制自报 0.5.0，而里程碑已经走到 v0.7.0——
+  「发出去的二进制」与 tag 名失配正是发布通路要消灭的那类问题 / **Version bumped from
+  `0.5.0` to `0.7.1`** in both `workspace.package` and `packages/web/package.json`. The
+  binaries used to report 0.5.0 while the milestones had reached v0.7.0, and a shipped
+  binary that disagrees with its tag is exactly what a release pipeline exists to prevent.
+- `docs/DEVELOPMENT.md`：`~~v0.14.0~~` 那行划掉并注明整行迁至 v0.7.1，**代价如实记录**——
+  v0.7.1 发出去的镜像是 0.7.1 的接口，而 v0.8.0–v0.13.0 仍会改公开 API，届时需要再发版本
+  让自托管用户升级。「必须等对外契约定稿后再发镜像」这条前提被用户裁定推翻，不是悄悄失效的 /
+  The `~~v0.14.0~~` row is struck through and marked as moved to v0.7.1, **with the cost
+  written down**: the image shipped by 0.7.1 speaks the 0.7.1 API while v0.8.0–v0.13.0 will
+  still change the public API, so self-hosted users will need to upgrade again. The
+  "wait until the external contract settles" premise was overridden by an explicit decision,
+  not quietly dropped.
+
 ## [0.7.0] - 2026-11-05
 
 > 里程碑：**项目与绑定**（`DEVELOPMENT.md` v0.7.0 行）。产品主轴从「会话」改为「项目」，
