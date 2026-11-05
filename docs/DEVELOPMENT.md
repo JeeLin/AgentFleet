@@ -63,15 +63,31 @@ check → fmt → lint → test → **cov-gate**（覆盖率 100% 阻塞）→ *
 只是「不固定的版本」；要升级就显式改那个数字。
 
 **唯一权威是 `mise.toml` 的 `[tasks.ci].depends`**。新增门禁只加在那里一次，产线不必再抄。
-`scripts/check.sh` 的 C7 会解析 `mise.toml` 与 `release.yml` 的 `gate` 步骤名，**双向比对**：
-漏抄一条会红，多抄一条也会红。这条门禁存在的理由是「少跑的那一道不会红，它只是不存在」。
+`scripts/check.sh` 的 C7 会解析 `mise.toml` 与 `release.yml` 的 **4 个 gate job
+（`gate-static` / `gate-test` / `gate-coverage` / `gate-web`）的步骤合集**，**双向比对**：
+漏抄一条会红，多抄一条也会红；同一条门禁出现在两个 job 里但 `run` 文本不一致也红
+（复制步骤后只改了一份）。这条门禁存在的理由是「少跑的那一道不会红，它只是不存在」。
 
-**C8 盯另一件事：`gate` 装的 rust 组件够不够跑那些门禁**。`dtolnay/rust-toolchain` 带
+**为什么门禁拆成 4 个并行 job（v0.7.1 收尾改造）**：同一个 job 内的步骤**永远串行**，
+而 `test`（普通二进制）与 `cov-gate`（全量插桩二进制）是两套互不复用的产物，
+`web-ci` 与 Rust 侧零交集——三者之间没有任何依赖，串行只让 wall clock 相加。
+拆开后 wall clock 从「逐项相加」变成「最长那条」：实测 **14m06s → 7m09s（省 49%）**。
+配套的 `Swatinem/rust-cache@v2` 按用途分 prefix-key（静态 / 测试 / 覆盖率 / 二进制矩阵），
+共用一份缓存会互相踩（clippy 用 rlib、测试用测试二进制、覆盖率是独立 target 目录）。
+**腾磁盘（62s）只在 `gate-coverage` 里做**——只有全量插桩 + 链接峰值需要 ≥6 GiB 空闲，
+`gate-test` 用普通二进制，不该为它等那 62 秒。
+
+**C8 盯另一件事：gate job 装的 rust 组件够不够跑那些门禁**（它看的是 4 个 job 的合集：
+命令在 `gate-test` 里跑、组件在 `gate-coverage` 里装是合法分工，反过来才是错）。`dtolnay/rust-toolchain` 带
 `--profile minimal`，只装 `components:` 里**显式列出**的东西。首次真跑 CI 时那里只写了
 `llvm-tools-preview`，于是 `cargo fmt --check` 报 `'cargo-fmt' is not installed`——而**本地是绿的**，
 因为 `cargo fmt` 找不到自带的 `cargo-fmt` 时会从 `$PATH` 捞到 rustup 的 shim、退回 `stable` 的
 rustfmt 并成功返回（`cargo fmt --version` 报 `rustfmt 1.10.0-stable`，即用错工具链还能过）。
 所以本地 `mise run ci` 绿**不能证明 CI 绿**，这一层必须由能读 workflow 的门禁来钉。
+C8 有**两个方向**：① 正向——门禁用到的命令 → 需要的组件必须在 `components:` 里；
+② 反向——跑了覆盖率门禁的 job 必须有 `taiki-e/install-action@cargo-llvm-cov` 安装步
+（`cargo llvm-cov` 由 `scripts/check-coverage.sh` 内部调用，**不出现在任何 workflow 的
+`run:` 文本里**，靠扫文本扫不到——只做正向断言时，删掉整个安装步会假绿）。
 
 > **`ci.yml` 已删除（v0.7.1）**。它曾经是与 `release.yml` 并列的第二个 workflow，两份门禁
 > 清单各写一遍、靠 C7 比对防漂移。删掉的理由：`gate` job 已经把全部门禁跑了一遍，`ci.yml`

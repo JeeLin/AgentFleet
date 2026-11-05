@@ -18,6 +18,7 @@ each milestone document's `里程碑起始 ref`. Entry text was not rewritten.
 
 ### Added
 
+
 - **设备可以从 Hub 自己拉 `afcli`（`GET /api/agent-binary` + 设备页「下载 afcli」按钮）**。
   接入引导一直是「在设备上跑 `afcli run <hub-url>`」，可那台设备上**首先得有** `afcli`，
   而 GitHub Release 在两个场景里够不到：**内网/离线部署**（Hub 自己就在隔离网里）、
@@ -110,6 +111,18 @@ each milestone document's `里程碑起始 ref`. Entry text was not rewritten.
 
 ### Changed
 
+- **门禁拆成 4 个并行 job，产线 wall clock 从 14m06s 降到 7m09s（省 49%）**。
+  同一个 job 内的步骤**永远串行**，而 `test`（普通二进制）与 `cov-gate`（全量插桩
+  二进制）是两套互不复用的产物、`web-ci` 与 Rust 侧零交集——三者之间没有任何依赖，
+  串行只让 wall clock 相加。拆成 `gate-static` / `gate-test` / `gate-coverage` /
+  `gate-web` 四个并行 job 后，墙钟从「逐项相加」变成「最长那条」。配套
+  `Swatinem/rust-cache@v2` 按用途分 prefix-key（静态 / 测试 / 覆盖率 / 二进制矩阵），
+  共用一份缓存会互相踩（clippy 用 rlib、测试用测试二进制、覆盖率是独立 target 目录）。
+  「腾磁盘」（62s）只在 `gate-coverage` 里做——只有全量插桩 + 链接峰值需要 ≥6 GiB 空闲。
+  `scripts/check.sh` 的 C7 随之改成**扫 4 个 job 的步骤合集**与 `mise.toml
+  [tasks.ci].depends` 双向比对（漏一条、多一条、或同一条门禁两处 `run` 文本不一致都红）；
+  下游每个 job 必须 `needs` 全部四个。
+
 - **删掉 `ci.yml`：门禁从「两份清单」收敛成「一份」**。`ci.yml` 与 `release.yml` 同触发并行，
   而 `release.yml` 的 `gate` job 已经把全部门禁跑了一遍——`ci.yml` 是纯重复。删掉后
   `scripts/check.sh` 的 C7 从「两个 workflow 逐条比对」改成「`release.yml` 的 `gate` 必须跑齐
@@ -149,6 +162,21 @@ each milestone document's `里程碑起始 ref`. Entry text was not rewritten.
   not quietly dropped.
 
 ### Fixed
+
+- **覆盖率门禁的 `(racy)` 豁免机制**从来没有真正生效过**，`detect.rs` 里两条
+  互斥臂的覆盖结果还会随「跑测试的机器装没装 opencode」翻转**。两条都是
+  「本地绿、CI 红」的盲区，CI 真跑才暴露出来：
+  ① `--racy` 报的是**标注行**（一行注释），而 llvm-cov 报的未覆盖永远是
+  **代码行** → 剔除是空操作，185 条 racy 理由以普通例外身份进了例外表，
+  哪次实跑覆盖到它们就报 stale exception；
+  ② 豁免的语义单位有时是「一整块分支」（`match` 的两条互斥臂）而不是
+  「几行连续代码」，按连续行收会漏掉另一条臂；
+  ③ 行尾标注会被上方**散文注释块**吸入（散文里提到 `coverage: excluded`
+  这几个字），辖区从标注行错到下一行。
+  处置：辖区判定提为共用函数（行尾标注只辖本行、独立块向下延伸到块闭合
+  并遇另一标注即停），`--racy` 与 `--rebuild` 两条路用同一套规则；两条互斥臂
+  改用注入的假二进制确定性走到，真 PATH 用例保留但标 `(racy)`。
+  例外表已重建，门禁本地与 CI 双绿。
 
 - **`gate` 的 `fmt` 一步在 CI 上直接红，而本地全绿**。首次真跑 CI 报
   `error: 'cargo-fmt' is not installed for the toolchain '1.99.0-x86_64-unknown-linux-gnu'`。

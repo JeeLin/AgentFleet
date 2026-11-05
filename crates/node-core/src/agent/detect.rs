@@ -567,13 +567,23 @@ mod tests {
     /// 装与没装都算通过（CI 上通常没装），所以**两种情形各断言一次**，
     /// 而不是 `if installed { ... }` 之后什么都不做——那样没装时就等于没测。
     ///
-    /// **互斥臂必须各自也能被确定地覆盖**：本条用真 PATH 走两条互斥臂中的
-    /// 一条（哪条取决于本机装没装 opencode，**两台机器会互换哪条 miss**，
-    /// 曾让确定性覆盖率比对在本地与 CI 各红一边）；互补的
-    /// [`a_fake_opencode_binary_covers_both_arms`] 用注入的假二进制把
-    /// 两条臂都确定性走到。覆盖率门禁因此不需要为这条测试登记任何例外。
+    /// **这条测试的互斥臂是「机器相关」的**：本条用真 PATH 走两条互斥臂中的
+    /// 一条，哪条取决于**跑测试的机器装没装 opencode**——本机走 `Ready`、
+    /// CI 走 `NotInstalled`。两条臂的断言行因此在两台机器上各 miss 一半，
+    /// 覆盖率门禁的「未覆盖集 == 登记例外集」是**确定性**双向比对，必然
+    /// 一边红（CI 实测红过，报 detect.rs:586-593 uncovered / 583-584 stale）。
+    ///
+    /// 所以这里必须标 `(racy)`：不是「测试写得不好」，而是「这一条用例的
+    /// 覆盖结果按设计就随环境翻转」，只能按非确定豁免从双向比对里剔除。
+    /// 互补的 [`a_fake_opencode_binary_covers_both_arms`] 用注入的假二进制
+    /// 把两条臂都**确定性**走到，保证逻辑分支本身不缺覆盖——豁免的是
+    /// 「这一条真 PATH 用例的翻转」，不是这两条臂的逻辑。
     #[test]
     fn a_real_opencode_install_is_detected_end_to_end() {
+        // coverage: excluded (racy) — 本机若**真装了** opencode 就走 `Ready` 臂，CI 上
+        // 通常没装就走 `NotInstalled` 臂。两条臂互斥，同一次运行只能覆盖其中一条，
+        // 于是剩下那条恒被报成未覆盖——**换了台机器跑就会翻转**（实测本地与
+        // CI 各红一边）。必须按非确定豁免处理，不能按确定性行做集合相等核对。
         let lookup = path_lookup;
         let probe = detect_one(&KNOWN_AGENTS[0], &lookup, DEFAULT_PROBE_TIMEOUT);
         match probe {

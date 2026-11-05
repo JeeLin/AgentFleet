@@ -250,6 +250,76 @@ def owner(markers, line):
     return None
 
 
+# 「racy 行」= 标注段所辖的**代码行**，不是标注行本身。
+#
+# 为什么不能只报标注行：llvm-cov 报的未覆盖行永远是**代码行**（`}`、
+# `sleep(...)` 这类），而标注写在注释里。只报标注行的后果是——actual 侧
+# 永远没有 821 这一行，`grep -vxF` 剔除是空操作，racy 机制形同虚设；
+# 这些代码行会以 racy 理由文本被登记进例外表，等某次实跑覆盖了它们，
+# 门禁报 stale exception——CI 首跑实测就是这样红的（acp.rs:820/828）。
+#
+# 辖区判定——分三种标注形态，收法不同：
+# 1) 行尾标注（`child_exec(...) // coverage: excluded (racy)`）：只辖标注
+#    所在的那**一行代码**。判据是 `//` 之前有非空白内容，**不看块大小**——
+#    行尾标注上方常紧贴解释用的散文注释块（exec.rs:580-589 整段解释
+#    「为什么标 racy」，物理上与 590 的行尾标注连续），按块大小判定会把
+#    590 吸进散文块、辖区错到下一行（实测让门禁红过）。
+# 2) 独立注释块：`break; }` 这类短臂的代码可能整段写在注释块**上方**
+#    （实测 acp.rs:819-820），只往下找会漏——所以下方取连续代码行、
+#    上方也取紧邻代码行，遇空行即停。
+def racy_code_lines(path, lines):
+    out = []
+    for start, end in comment_blocks(lines):
+        marker_line = next((i for i in range(start, end + 1)
+                            if 'coverage: excluded' in lines[i - 1]), None)
+        if marker_line is None:
+            continue
+        reason = strip_comment(lines, start, end, marker_line)
+        if '(racy)' not in reason:
+            continue
+        code_before_marker = lines[marker_line - 1].split('//')[0].strip()
+        if code_before_marker:
+            # 形态 1：行尾标注 → 只辖本行
+            out.append('%s:%d' % (path, marker_line))
+            continue
+        # 形态 2：独立注释块 → 向下延伸到**本块闭合**（按花括号配对），
+        # 加上方紧邻一行。
+        # 为什么必须延伸到块闭合：有些豁免的语义单位是「一整块分支」
+        # 而不是「几行连续代码」——detect.rs 的真 PATH 测试里
+        # `match probe { NotInstalled => {...} Ready => {...} }` 的两条臂
+        # 互斥（装没装 opencode 决定走哪条），哪条 miss 取决于**跑测试的
+        # 机器**：本机走 Ready、CI 走 NotInstalled。按「连续代码行」收，
+        # 只能收到臂的前几行，另一条臂的断言行（586-593）照样漏出去
+        # → CI 实测红过。收到块闭合为止，两条臂全在辖区里。
+        #
+        # 配对必须按花括号深度，不能见到第一个 `}` 就停——那只是**一条臂**
+        # 的闭合（`NotInstalled => { ... }`），match 本身还没闭合。
+        # 遇到另一个标注（is_marker）时停止延伸：那是一条独立豁免的
+        # 起点（Failed / NotCapable 臂自带普通例外），不该被前一条的
+        # racy 辖区吞掉。
+        i = end + 1
+        depth = 0
+        opened = False
+        while i <= len(lines):
+            s = lines[i - 1].strip()
+            if not s:
+                break
+            if is_marker(lines[i - 1]):
+                break
+            out.append('%s:%d' % (path, i))
+            depth += lines[i - 1].count('{') - lines[i - 1].count('}')
+            if '{' in lines[i - 1]:
+                opened = True
+            if opened and depth <= 0 and s.endswith(('}', '};', '})')):
+                break
+            i += 1
+        if start - 1 >= 1:
+            s = lines[start - 2].strip()
+            if s and not s.startswith('//'):
+                out.append('%s:%d' % (path, start - 1))
+    return out
+
+
 def marker_files():
     """crates/ 下带就地标注的源码文件（按路径排序）。"""
     out = []
@@ -307,57 +377,6 @@ if mode == '--racy':
     # 实跑的结果都可能不同（实测同一份代码四次实跑报错 8 / 3 / 34 条，且集合
     # 成员互不重合）。按确定性行核对它，门禁会随机红——而随机红的门禁等于没有
     # 门禁，开发者无法区分「我改坏了」与「这次运气不好」。
-    # 「racy 行」= 标注段所辖的**代码行**，不是标注行本身。
-    #
-    # 为什么不能只报标注行：llvm-cov 报的未覆盖行永远是**代码行**（`}`、
-    # `sleep(...)` 这类），而标注写在注释里。只报标注行的后果是——actual 侧
-    # 永远没有 821 这一行，`grep -vxF` 剔除是空操作，racy 机制形同虚设；
-    # 这些代码行会以 racy 理由文本被登记进例外表，等某次实跑覆盖了它们，
-    # 门禁报 stale exception——CI 首跑实测就是这样红的（acp.rs:820/828）。
-    #
-    # 辖区判定——分三种标注形态，收法不同：
-    # 1) 行尾标注（`child_exec(...) // coverage: excluded (racy)`）：只辖标注
-    #    所在的那**一行代码**。判据是 `//` 之前有非空白内容，**不看块大小**——
-    #    行尾标注上方常紧贴解释用的散文注释块（exec.rs:580-589 整段解释
-    #    「为什么标 racy」，物理上与 590 的行尾标注连续），按块大小判定会把
-    #    590 吸进散文块、辖区错到下一行（实测让门禁红过）。
-    # 2) 独立注释块：`break; }` 这类短臂的代码可能整段写在注释块**上方**
-    #    （实测 acp.rs:819-820），只往下找会漏——所以下方取连续代码行、
-    #    上方也取紧邻代码行，遇空行即停。
-    def racy_code_lines(path, lines):
-        out = []
-        for start, end in comment_blocks(lines):
-            marker_line = next((i for i in range(start, end + 1)
-                                if 'coverage: excluded' in lines[i - 1]), None)
-            if marker_line is None:
-                continue
-            reason = strip_comment(lines, start, end, marker_line)
-            if '(racy)' not in reason:
-                continue
-            code_before_marker = lines[marker_line - 1].split('//')[0].strip()
-            if code_before_marker:
-                # 形态 1：行尾标注 → 只辖本行
-                out.append('%s:%d' % (path, marker_line))
-                continue
-            # 形态 2：独立注释块 → 下方连续代码行 + 上方**仅紧邻一行**。
-            # 上方多收会把无关的前序语句拉进来（detect.rs:362 标注向上穿
-            # 过 `Err(e) => {` 后把 355-360 的超时臂代码全收了——那些行
-            # 是确定可达的，进 racy 集等于放走真未覆盖）。上方紧邻一行
-            # 够覆盖「短臂写在注释上方」的实测形态（acp.rs:819-820），
-            # 因为那种臂的上一行是 `break`/单语句，不会更长。
-            i = end + 1
-            while i <= len(lines):
-                s = lines[i - 1].strip()
-                if not s or s.startswith('//'):
-                    break
-                out.append('%s:%d' % (path, i))
-                i += 1
-            if start - 1 >= 1:
-                s = lines[start - 2].strip()
-                if s and not s.startswith('//'):
-                    out.append('%s:%d' % (path, start - 1))
-        return out
-
     racy = []
     for p in marker_files():
         racy.extend(racy_code_lines(p, read_lines(p)))
@@ -399,9 +418,12 @@ if mode == '--rebuild':
     # 是先天地无法满足的命题；让它进表 = 让门禁永久红。
     racy_lines = set()
     for p in marker_files():
-        for marker_line, text in marker_blocks(read_lines(p)):
-            if '(racy)' in text:
-                racy_lines.add('%s:%d' % (p, marker_line))
+        # 用**同一套**辖区判定（racy_code_lines）：先前这里用的是
+        # marker_blocks 的标注行，与 --racy 输出的代码行不是一回事 →
+        # rebuild 时 racy 行没被剔除、以普通例外身份进了表，racy 机制
+        # 因此在「重建」这条路上也失效（CI 实测：detect.rs:361/370
+        # 在 racy 集里却仍登记在例外表）。
+        racy_lines.update(racy_code_lines(p, read_lines(p)))
     for item in sorted(uncovered, key=lambda s: (s.rpartition(':')[0], int(s.rpartition(':')[2]))):
         if item in racy_lines:
             continue
