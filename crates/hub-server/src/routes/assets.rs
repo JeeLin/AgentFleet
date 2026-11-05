@@ -59,8 +59,25 @@ pub fn asset_cache_layer() -> SetResponseHeaderLayer<HeaderValue> {
 ///
 /// 未命中 → 404：**不回落到 index.html**。一条缺失的 JS 被当成 HTML 返回，
 /// 浏览器报的是「Unexpected token '<'」，而根因是构建没跑——那种错很难查。
+///
+/// # `{*path}` 提取的是通配符部分，**不含 `/assets/` 前缀**
+///
+/// 请求 `/assets/index-abc.css` 时 `path` 是 `index-abc.css`，而
+/// `include_dir` 嵌入的树是**相对 dist 根**的完整相对路径
+/// （`assets/index-abc.css`）。两个坐标系差一个目录段——不补上，
+/// 每一条带子目录的资产都 404（实测：用户部署 Hub 镜像后
+/// `GET /assets/index-*.css|js` 全 404，白屏）。
+///
+/// 这个 bug 之前没被测试抓住，是因为单测**直接调 handler**、
+/// 手工把 `assets/` 拼进 path——绕过了真实路由的提取行为，
+/// 测的是「handler 假设的输入」而不是「路由实际给的输入」。
+/// 修复后的测试从 axum 路由真正走一遍（见同文件测试）。
 pub async fn asset(Path(path): Path<String>) -> Response {
-    let Some(file) = WEB_DIST.get_file(&path) else {
+    // 路由模式是 `/assets/{*path}`，`path` 缺前缀；嵌入树里的路径带前缀。
+    // 用 `format!` 而不是 `Path::join`：嵌入树里的路径永远是 `/` 分隔
+    // （include_dir 的跨平台约定），而 `Path::join` 在 Windows 上会用 `\`。
+    let embedded_path = format!("assets/{path}");
+    let Some(file) = WEB_DIST.get_file(&embedded_path) else {
         return (StatusCode::NOT_FOUND, "asset not found").into_response();
     };
     let mime = content_type(&path);
@@ -141,6 +158,29 @@ fn content_type(path: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{build_app, AppState, AuthParams, LoginRateLimiter};
+    use axum::body::Body;
+    use std::time::Duration;
+    use tower::ServiceExt; // oneshot
+
+    /// 与 `lib.rs` 测试模块的 `app_at` 同款：临时目录 + 最小成本参数。
+    /// assets 测试不需要认证态——静态路由在 `require_auth` layer 之后。
+    fn app_at(dir: &std::path::Path) -> axum::Router {
+        let pool = hub_storage::db::open_in(dir).unwrap().1;
+        let state = AppState::bootstrap_with(
+            pool,
+            dir,
+            AuthParams {
+                m_cost: 8192,
+                t_cost: 1,
+                p_cost: 1,
+            },
+            Duration::from_millis(200),
+            LoginRateLimiter::new(10, 60),
+        )
+        .unwrap();
+        build_app(state)
+    }
 
     /// 构建产物里的两类文件必须拿到正确的类型：`text/javascript` 判错时
     /// 浏览器会拒绝执行（`nosniff` 下尤其），页面就是白的。
@@ -174,18 +214,27 @@ mod tests {
 
     /// `/assets/*` 真的能从嵌入目录里取到构建产物，且带上长期缓存头。
     ///
+    /// **必须从 axum 路由真正走一遍**（`tower::ServiceExt::oneshot`），
+    /// 不能直接调 handler：`{*path}` 通配符提取出的是**不含 `/assets/` 前缀**
+    /// 的路径，而 `include_dir` 树里的路径**带**前缀——两个坐标系的差异
+    /// 只在真实路由里才显形。修复前单测直接调 handler、手工拼了 `assets/`
+    /// 前缀，等于测「handler 假设的输入」，用户部署后全 404 而本地全绿
+    /// （实测：CI run 42047633770 的产物在浏览器里 `/assets/*.css|js` 404）。
+    ///
     /// 不手写文件名：哈希随每次 `vite build` 变，写死会让「跑过一次前端构建」
     /// 变成测试的隐含前提——而 CI 里 Rust job 未必有 dist。
     #[tokio::test]
     async fn a_hashed_asset_is_served_with_long_lived_cache_headers() {
         // 干净检出里 `packages/web/dist` 被 .gitignore 忽略，`build.rs` 只写一个
         // 占位 `index.html`——那时没有 `assets/` 可取。所以这里钉两条：
-        // **一定有**的那条（index.html）与**构建产物在时**的那条（带哈希的
-        // 文件名）。断言是同一条：「嵌进去的文件能被取到、并带长缓存头」。
+        // **一定有**的那条（index.html，经 fallback → no-cache）与**构建产物
+        // 在时**的那条（带哈希的文件名，经 /assets → 长缓存）。
+        // 两条路径的缓存策略**本来就不同**（见 `INDEX_CACHE` / `ASSET_CACHE`），
+        // 所以分开断言各自的期望值。
         let index = WEB_DIST
             .get_file("index.html")
             .expect("build.rs always writes one");
-        assert_served_with_long_cache("index.html", index.contents()).await;
+        assert_served_with_cache("index.html", INDEX_CACHE, index.contents()).await;
 
         if let Some(file) = WEB_DIST
             .get_dir("assets")
@@ -196,21 +245,39 @@ mod tests {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .expect("asset file name");
-            assert_served_with_long_cache(&format!("assets/{name}"), file.contents()).await;
+            assert_served_with_cache(
+                &format!("assets/{name}"),
+                ASSET_CACHE,
+                file.contents(),
+            )
+            .await;
         }
     }
 
-    /// 「嵌进去的文件能被取到、带长缓存头、字节原样」——这个 handler 的全部
-    /// 契约，三条断言合成一处，免得两个用例各写一遍。
-    async fn assert_served_with_long_cache(path: &str, contents: &[u8]) {
-        let resp = asset(Path(path.to_string())).await;
-        assert_eq!(resp.status(), StatusCode::OK, "{path} 必须取得到");
+    /// 「真实路由请求能取到、带**该路径的**缓存头、字节原样」——这个 handler
+    /// 的全部契约，三条断言合成一处，免得两个用例各写一遍。
+    ///
+    /// 走 `build_app(...)` 的完整路由栈，请求路径就是浏览器会发的那条——
+    /// 前缀差异这类问题在这一步必然显形。
+    async fn assert_served_with_cache(path: &str, want_cache: &str, contents: &[u8]) {
+        let d = tempfile::tempdir().unwrap();
+        let app = app_at(d.path());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/{path}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("in-memory request");
+        assert_eq!(resp.status(), StatusCode::OK, "/{path} 必须取得到");
         assert_eq!(
             resp.headers()
                 .get(header::CACHE_CONTROL)
                 .and_then(|v| v.to_str().ok()),
-            Some(ASSET_CACHE),
-            "带哈希的产物必须长缓存"
+            Some(want_cache),
+            "/{path} 的缓存头不对"
         );
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -224,7 +291,17 @@ mod tests {
     /// 症状与根因（构建没跑 / 资源被删）相距很远。
     #[tokio::test]
     async fn a_missing_asset_is_404_not_the_spa_shell() {
-        let resp = asset(Path("assets/does-not-exist.js".to_string())).await;
+        let d = tempfile::tempdir().unwrap();
+        let app = app_at(d.path());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/assets/does-not-exist.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("in-memory request");
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 

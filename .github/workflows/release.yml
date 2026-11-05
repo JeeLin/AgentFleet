@@ -710,10 +710,11 @@ jobs:
             mv "$f" "../out/$clean"
           done
           cd ../out
-          # 先把 CHANGELOG 放进来**再**算 SUMS：它同样是下载物，也该被校验。
-          # 顺序反了（先算 SUMS 再拷 CHANGELOG）会让附件列表里有一个校验不到的
-          # 文件，而 `sha256sum -c` 又不会因为「少校验一个」报错——静默漏校验。
-          cp ../CHANGELOG.md CHANGELOG.md
+          # **附件里不放 CHANGELOG.md**：它已经在仓库里（`CHANGELOG.md`），
+          # Release 页面也直接链到仓库。再传一份只是多一个可能与仓库版本
+          # 不一致的副本——用户下载到的 CHANGELOG 可能不是这个 tag 对应的那份
+          # （tag 之后仓库里又改了 CHANGELOG，附件却还是旧的）。
+          # Release body 里给仓库链接即可（见下）。
           ls -la
           # 排序：`sha256sum *` 的顺序依赖文件系统，不同 runner 上不稳定，
           # 会让同一 tag 两次生成的 SUMS 内容不同（虽然都正确）。
@@ -725,7 +726,7 @@ jobs:
           set -euo pipefail
           cd out
           # 上一步的 `*-musl` glob 若一个都没匹配到（产物命名将来变了），
-          # 循环体不执行、`out/` 只剩 CHANGELOG，而下面的 `gh release create`
+          # 循环体不执行、`out/` 里什么都不剩，而下面的 `gh release create`
           # 照样会建出一个**没有二进制的 Release**——空发布比发布失败更难发现。
           n=$(ls afhub-linux-* afcli-linux-* 2>/dev/null | wc -l)
           if [ "$n" -ne 4 ]; then
@@ -738,7 +739,15 @@ jobs:
             echo "FAIL 附件里仍带 musl 后缀：$(ls | grep musl)" >&2
             exit 1
           fi
-          echo "OK 附件含 4 个干净名二进制"
+          # 附件清单是**写死**的：多一个或少一个都要红。
+          # CHANGELOG.md 曾是附件之一，但它在仓库里已有一份（用户 2026-11-05 裁定
+          # 不再上传），附件里那份可能是与仓库不一致的旧副本。
+          extra=$(ls | grep -vE '^(afhub-linux-(amd64|arm64)|afcli-linux-(amd64|arm64)|SHA256SUMS)$' || true)
+          if [ -n "$extra" ]; then
+            echo "FAIL 附件里有预期之外的文件：$extra" >&2
+            exit 1
+          fi
+          echo "OK 附件含 4 个干净名二进制 + SHA256SUMS"
 
       # 前端 `dist/` **不进** Release，这是有意的：
       # 前端是 `include_dir!` 在编译期嵌进 `afhub` 的（`Dockerfile.hub` 也刻意
@@ -767,7 +776,9 @@ jobs:
           fi
           {
             printf '%s\n\n' "$body"
-            printf '**Full changelog / 完整变更**：`CHANGELOG.md`\n'
+            # 链接指到**仓库里那一份** CHANGELOG（附件里不再带它）。
+            printf '**Full changelog / 完整变更**：[CHANGELOG.md](%s/blob/%s/CHANGELOG.md)\n' \
+              "${{ github.server_url }}/${{ github.repository }}" "$RELEASE_TAG"
           } > release-body.md
           echo "----- body -----"
           head -40 release-body.md

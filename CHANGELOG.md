@@ -171,6 +171,15 @@ each milestone document's `里程碑起始 ref`. Entry text was not rewritten.
 
 ### Fixed
 
+- **Hub 镜像部署后前端白屏：`/assets/*` 全 404**。axum 的 `{*path}`
+  通配符提取出的是**不含 `/assets/` 前缀**的路径（`index-abc.css`），
+  而 `include_dir` 嵌入的树是**相对 dist 根的完整路径**
+  （`assets/index-abc.css`）——两个坐标系差一个目录段，handler 不补前缀
+  就查不到，每一条带子目录的资产都 404。**单测为什么是绿的**：测试直接调
+  handler、手工把 `assets/` 拼进 path——测的是「handler 假设的输入」，
+  不是「路由实际给的输入」。修复后的测试从 `build_app()` 的完整路由栈
+  走 `oneshot`，前缀差异在这一步必然显形。
+
 - **Release 的「Latest 与预发标记」断言用了一个 gh CLI 里不存在的字段，
   整步红**。`gh release view --json isLatest` 里的 `isLatest` **不是合法字段**
   （该子命令的字段表只有 `isPrerelease` / `isDraft` / `tagName` / `assets` 等），
