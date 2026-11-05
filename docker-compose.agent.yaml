@@ -1,0 +1,53 @@
+# 设备侧 afcli 容器：`docker compose -f docker-compose.agent.yaml up -d`
+#
+# ## 首次运行即 enroll，没有单独的 enroll 子命令
+#
+# `afcli` 只有 `run` / `log` / `--version` / `--help`（见 `crates/node-cli/src/lib.rs`
+# 的 `USAGE`）。设备身份是**第一次 `run` 时自动建立**的：本地生成密钥对、
+# 走协议的首次 enroll（`protocol.md` §3）、Hub 只存指纹。所以：
+#
+#   1. 先把 Hub 初始化好（`/setup` 设完密码）——未初始化的 Hub 拒绝所有 enroll；
+#   2. `docker compose -f docker-compose.agent.yaml up -d`，第一次就在卷里
+#      生成 `node.key` 并注册成一台设备；
+#   3. 之后重启 / 换版本都**不需要**重新 enroll，因为身份在数据卷里。
+#
+# 密钥对在容器内的 `/data` 里生成（0600）。**删卷 = 换一台设备**，
+# 旧设备的会话会挂在「已移除的设备」上且身份无法恢复。
+#
+# ## 与 docker-compose.hub.yaml 的关系
+#
+# 两者**不需要在同一台机器上**，也不共享网络：设备主动外联 Hub（零入站），
+# 所以这里没有任何 `ports:`。绑在同一个 compose 文件里会把「Hub 与设备
+# 同机」变成看起来必需的前提，而它恰恰是产品要否掉的那个部署形态。
+#
+# 如果确实在同一台机器上做演示，`AFCLI_HUB_URL` 可以指向
+# `ws://host.docker.internal:8080/ws`（Linux 上需要
+# `extra_hosts: ["host.docker.internal:host-gateway"]`）。
+services:
+  node:
+    image: ghcr.io/jeelin/agentfleet-node:latest
+    container_name: agentfleet-node
+    # 对应 systemd unit 的 `Restart=always`：容器里没有 systemd，
+    # 「进程没了要拉起来」这件事由 Docker 承担。
+    restart: unless-stopped
+    environment:
+      # **必填**。afcli 自己的缺省是 ws://127.0.0.1:8080/ws，在容器里
+      # 等于连自己、永远注册不上。改成你 Hub 的真实地址（有 TLS 就用 wss://）。
+      AFCLI_HUB_URL: "${AFCLI_HUB_URL:?必须给出 Hub 的 WebSocket 地址}"
+    volumes:
+      # **不要删这个卷**：里面是设备私钥。删了 = 换一台设备，
+      # 旧设备的会话全部挂在「已移除的设备」上，且无法恢复身份。
+      - node-data:/data
+    healthcheck:
+      # scratch 镜像无 curl / wget；afcli 没有探测子命令。
+      # 「是否在线」由 Hub 侧的心跳判定（连续心跳丢失 > 45s），
+      # 这里不写假通过的检查。
+      disable: true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  node-data:

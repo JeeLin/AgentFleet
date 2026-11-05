@@ -1,0 +1,72 @@
+# Hub 镜像：单进程、单端口，前端**已在编译期嵌进二进制**。
+#
+# ## 为什么镜像里没有 dist
+#
+# `crates/hub-server/src/routes/assets.rs` 用 `include_dir!("$AF_WEB_DIST")`
+# 在编译期把 `packages/web/dist` 编进二进制（`DEVELOPMENT.md` §2 的单二进制硬需求）。
+# 镜像里另放一份 dist 会让它变成**两份真相源**：镜像跑起来页面是对的，但你再也
+# 分不清「页面是对的」是嵌入生效了，还是旁边那份被读了。所以这里**只拷二进制**，
+# 让「镜像能用」本身就等于「嵌入生效」。发布 workflow 在编之前断言
+# `dist/index.html` 存在，就是为了让这里可以理直气壮地不放 dist。
+#
+# ## 为什么 FROM scratch 而不是 alpine/debian
+#
+# 用的是 musl 静态二进制（`afhub-linux-*-musl`），不依赖 libc 之外的任何东西，
+# scratch 就够。换了基础镜像会带回一整套用户态的 shell / 包管理器 / CA，
+# 每一个都是镜像里多出来的攻击面，而 Hub 一个都不需要。
+# **代价**：scratch 里没有 `/etc/passwd` 与 shell，所以下面用数字 uid、
+# 用 exec 形式的 ENTRYPOINT（不经 shell）。
+#
+# ## 绑定地址与 `AFHUB_ALLOW_NON_LOOPBACK=1`
+#
+# `afhub` **缺省只绑回环**（`crates/hub-server/src/main.rs` 的约束 1）：
+# self-host 场景里误配 `0.0.0.0` 等于把首次设密码的 `/setup` 暴露给同网段。
+# 容器里必须绑 `0.0.0.0` 才能从外部访问，而容器网络本身是隔离的（此时
+# 「同网段」只是容器自己的网桥），所以镜像是少数几个该显式放开的场景。
+# 开关**只认确切的 `1`**；这里写死它，用户想收紧就把 `AFHUB_ADDR` 改回
+# `127.0.0.1:8080` 并去掉这个 ENV。
+#
+# ## 两个二进制都拷
+#
+# Hub 镜像里还放 `afcli`：`docs/DEVELOPMENT.md` §2 的发布蓝图写的形态是
+# Hub 镜像内嵌全部 arch 的 afcli，供「设备从 Hub 拉二进制」这条路用
+# （节点**不直连 GitHub**，见 `security-and-lifecycle.md` §7.1.4）。
+# 本里程碑只把二进制放到位，**Hub 侧的下载路由尚未实现**（v0.8.0 起做），
+# 这一点在 `DEVELOPMENT.md` 的状态表里如实标注。
+ARG VERSION=dev
+
+# ---------------------------------------------------------------------------
+# 运行镜像
+# ---------------------------------------------------------------------------
+FROM scratch
+
+ARG VERSION
+LABEL org.opencontainers.image.title="AgentFleet Hub" \
+      org.opencontainers.image.description="AgentFleet Hub: web console and device gateway in one binary" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+# buildx 传进来的是目标架构（amd64 / arm64）：按它选对应产物，
+# **不是在镜像里做交叉编译**——二进制是每条原生矩阵各自编好再传上来的。
+ARG TARGETARCH
+COPY dist/${TARGETARCH}/afhub-linux-${TARGETARCH}-musl /usr/local/bin/afhub
+COPY dist/${TARGETARCH}/afcli-linux-${TARGETARCH}-musl /usr/local/bin/afcli
+
+# 数据目录（SQLite WAL 库、setup token、设备凭据）——必须挂卷，
+# 不挂的话 `docker rm` 一次就把整个 Hub 的身份丢掉，而那里面包含
+# 会话 HMAC 密钥与设备指纹，删了无法恢复。
+ENV AFHUB_DATA_DIR=/data
+ENV AFHUB_ADDR=0.0.0.0:8080
+# 见上面「绑定地址」一段：容器是唯一被允许显式放开回环限制的场景。
+ENV AFHUB_ALLOW_NON_LOOPBACK=1
+
+# 数字 uid：scratch 里没有 /etc/passwd，写名字会解析失败。
+# 65532 是 distroless 的约定值（nonroot），不占 0-999 的系统 uid 段。
+USER 65532:65532
+
+WORKDIR /data
+VOLUME ["/data"]
+EXPOSE 8080
+
+# exec 形式：scratch 里没有 shell，`CMD afhub` 这种 shell 形式会直接失败。
+ENTRYPOINT ["/usr/local/bin/afhub"]

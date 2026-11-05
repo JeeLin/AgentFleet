@@ -1,0 +1,51 @@
+# afcli 镜像：设备侧二进制，一条命令 enroll 并常驻。
+#
+# ## 按 TARGETARCH 选二进制
+#
+# `docker buildx` 会为每个目标平台各跑一遍本文件，`TARGETARCH` 就是那一遍的架构。
+# 所以这里**选**产物，不交叉编译：二进制由 `release.yml` 的 5 平台原生矩阵各自
+# 编好、作为 artifact 传上来（原生优先是 REX 的教训——交叉编会架构错配，而错配
+# 只在目标机上暴露）。
+#
+# ## 为什么是 musl 静态
+#
+# scratch 基础镜像里没有 libc，所以只能取 `*-musl` 那份静态二进制。
+#
+# ## 与 systemd 部署的关系
+#
+# `deploy/afcli.service` 是**裸机**部署的说明（supervisor 前台不 daemon 化、
+# systemd 管进程存活）。容器部署把这两件事交给 Docker：`afcli run` 仍是前台
+# 无限 loop，容器的 1 号进程就是它，`docker stop` 的 SIGTERM 直接到达——
+# 语义一致，不需要额外改写。`--restart unless-stopped` 对应 unit 里的
+# `Restart=always`。
+ARG VERSION=dev
+
+FROM scratch
+
+ARG VERSION
+LABEL org.opencontainers.image.title="AgentFleet Node" \
+      org.opencontainers.image.description="AgentFleet device agent (afcli)" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+ARG TARGETARCH
+COPY dist/${TARGETARCH}/afcli-linux-${TARGETARCH}-musl /usr/local/bin/afcli
+
+# 数据目录里有设备私钥（`node.key`）：**必须挂卷**。不挂就是「换一次容器 =
+# 换一台设备」——Hub 侧看到一个新 node_id，旧设备的会话全都挂在已消失的
+# 设备上。这与 `deploy/afcli.env.example` 里 AFCLI_DATA_DIR 那条警告同义。
+ENV AFCLI_DATA_DIR=/data
+
+# Hub 地址**故意不给缺省值**：`afcli` 自己的缺省是 `ws://127.0.0.1:8080/ws`，
+# 在容器里那等于连自己、永远注册不上。给一个看起来像配好了的缺省值比不给更糟，
+# 所以这里留空，由 `docker run -e` / compose 显式给。
+# ENV AFCLI_HUB_URL=wss://hub.example.com/ws
+
+# 数字 uid：scratch 里没有 /etc/passwd。
+USER 65532:65532
+
+WORKDIR /data
+VOLUME ["/data"]
+
+ENTRYPOINT ["/usr/local/bin/afcli"]
+CMD ["run"]

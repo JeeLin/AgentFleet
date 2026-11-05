@@ -1,0 +1,447 @@
+# 发布通路：打 tag（`vX.Y.Z`）即产出二进制、镜像与 GitHub Release。
+#
+# 与 `ci.yml` **同一个触发**（`push: tags: ['v*']`）但**职责分开**：
+# `ci.yml` 是闸（跑不动就红），本文件是产线（产出用户能拿的东西）。
+# 为什么不在一个 workflow 里串起来：门禁失败时产线本来就不该跑，但把两者
+# 编进同一个 job 会让「门禁红」与「构建红」在页面上长得一样，而它们的修法
+# 完全不同。两个 workflow 同触发，靠 GitHub 的并行调度各自跑，谁也不挡谁——
+# 这是已知取舍：**门禁红时镜像仍可能被推上去**，所以 tag 只在 `mise run ci`
+# 全绿之后才打（见 AGENTS.md 的发版步骤），不靠 CI 互相阻塞。
+#
+# 工具链版本仍然只从 `mise.toml [tools]` 读，理由见 `ci.yml` 顶部那段：
+# 覆盖率数值跨工具链不可比，版本写两处迟早只改一处。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  # 手动补发（tag 已存在但某一步失败时用，不必删 tag 重打）：
+  # 输入一个已存在的 tag 名即可。
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（已存在，如 v0.7.1）'
+        required: true
+        type: string
+
+# 最小权限：Release 要写仓库内容、镜像要写 GHCR。不加多余的 token 权限。
+permissions:
+  contents: write
+  packages: write
+
+# 同一 tag 的重复触发（手动补发）串行化，避免两条流水线同时往同一个 Release 里传文件。
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  # 由 `on.push.tags` 或 `workflow_dispatch` 二选一而来，下游一律读它。
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. 前端先编，dist 作为 artifact 交给 matrix —— **硬前置，不是优化**
+  # ---------------------------------------------------------------------------
+  # `include_dir!` 在编译期把 `packages/web/dist` 嵌进 `afhub`。dist 缺失时
+  # `crates/hub-server/build.rs` **不会失败**：它造一个占位页、打一条
+  # `cargo:warning`，二进制照编。于是「Hub 装起来打开是 Not built 占位页」
+  # 这种故障能一路走到用户手里而不红任何一步。所以：
+  #   - build-binaries 必须 needs 本 job 并下载 artifact；
+  #   - 下载后再断言 `packages/web/dist/index.html` 存在（见下面的「校验 dist」）。
+  build-frontend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读工具链版本（mise.toml [tools] 是唯一出处）
+        id: tools
+        run: |
+          set -euo pipefail
+          v=$(sed -nE 's/^bun = "([^"]+)".*/\1/p' mise.toml | head -1)
+          [ -n "$v" ] || { echo "mise.toml 里读不到 bun 的版本" >&2; exit 1; }
+          echo "bun=$v" >> "$GITHUB_OUTPUT"
+
+      - name: 装 Bun ${{ steps.tools.outputs.bun }}
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.tools.outputs.bun }}
+
+      - name: 前端依赖（--frozen-lockfile：lock 与 package.json 不一致就红）
+        working-directory: packages/web
+        run: bun install --frozen-lockfile
+
+      - name: 前端构建
+        working-directory: packages/web
+        run: bun run build
+
+      # dist 为空时 `vite build` 可能「成功」产出个空目录，上传 artifact
+      # 会静默变成一个空包。这里在源头就钉死。
+      - name: 校验 dist 非空
+        run: |
+          set -euo pipefail
+          test -f packages/web/dist/index.html \
+            || { echo "packages/web/dist/index.html 不存在，构建产物是空的" >&2; exit 1; }
+          ls -la packages/web/dist | head -20
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: packages/web/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 2. 5 平台**原生**编译（不用交叉编译）
+  # ---------------------------------------------------------------------------
+  # 原生优先是 REX 的教训：交叉编 OpenSSL/zlib 会架构错配，而错配的症状是
+  # 「二进制在目标机上跑不起来」，本地永远复现不了。GitHub 有 `ubuntu-24.04-arm`
+  # runner，aarch64 直接原生编，所以矩阵里**每个条目都是原生**。
+  #
+  # 为什么用 musl 而不是 gnu：`docs/DEVELOPMENT.md` §2 要求自包含二进制。
+  # 本仓的 `reqwest` 已经是 `rustls-tls`（不依赖系统 OpenSSL），所以没有
+  # 「静态链 OpenSSL」这件事要做；真正剩下的是 libc。musl 目标静态链 libc，
+  # `ldd` 会输出 "not a dynamic executable"，这就是「自包含」的可执行判据。
+  # gnu 目标仍编（覆盖 glibc 环境，容器里也用它），但发布页面主推 musl。
+  build-binaries:
+    needs: build-frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            suffix: linux-amd64
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+            suffix: linux-amd64-musl
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            suffix: linux-arm64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            suffix: linux-arm64-musl
+          - target: x86_64-pc-windows-gnu
+            os: ubuntu-24.04
+            suffix: windows-amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读工具链版本（mise.toml [tools] 是唯一出处）
+        id: tools
+        run: |
+          set -euo pipefail
+          v=$(sed -nE 's/^rust = "([^"]+)".*/\1/p' mise.toml | head -1)
+          [ -n "$v" ] || { echo "mise.toml 里读不到 rust 的版本" >&2; exit 1; }
+          echo "rust=$v" >> "$GITHUB_OUTPUT"
+
+      - name: 装 Rust ${{ steps.tools.outputs.rust }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.tools.outputs.rust }}
+          targets: ${{ matrix.target }}
+
+      # matrix 里 4 个 Linux 目标里有 2 个是 musl：musl 目标的链接器
+      # (`musl-gcc`) 与 Windows-GNU 目标的 (`x86_64-w64-mingw32-gcc`) 都不在
+      # runner 镜像里。按目标装，不要无脑全装（多装的东西会在别的 runner 上
+      # 装不上，把「矩阵某一条红」变成「所有条目红」）。
+      - name: 装目标链接器
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            *-musl)
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq musl-tools
+              echo "CARGO_TARGET_$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')_LINKER=musl-gcc" >> "$GITHUB_ENV"
+              ;;
+            *-windows-gnu)
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq gcc-mingw-w64-x86-64
+              echo "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc" >> "$GITHUB_ENV"
+              ;;
+          esac
+
+      # 前端产物落在 build.rs 推算的位置（`crates/hub-server/../../packages/web/dist`）。
+      - name: 取回前端产物
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: packages/web/dist
+
+      # 与 build-frontend 里那条同源：artifact 传丢了 / 解错路径时，
+      # 没有这一步的后果是编出一个内嵌占位页的 Hub，而所有步骤都是绿的。
+      - name: 校验 dist（include_dir! 的输入）
+        run: |
+          set -euo pipefail
+          test -f packages/web/dist/index.html \
+            || { echo "packages/web/dist/index.html 不在位，拒绝编出内嵌占位页的二进制" >&2; exit 1; }
+
+      - name: 编译 release 二进制
+        run: cargo build --release --workspace --target ${{ matrix.target }}
+
+      # 自包含断言（REX 的教训：产出一个动态链接的二进制，到了目标机上
+      # 找不到 libssl 才炸）。本仓不链 OpenSSL，真正要判的是：
+      #   - musl：`ldd` 说 "not a dynamic executable" → 真静态；
+      #   - gnu：允许动态（glibc），但**不许**依赖 libssl / libcrypto；
+      #   - windows-gnu：`objdump -p` 的 DLL Name 里**不许**出现 libssl / libcrypto。
+      - name: 断言二进制自包含 / 不依赖 OpenSSL
+        run: |
+          set -euo pipefail
+          EXT=""
+          case "${{ matrix.target }}" in *-windows-gnu) EXT=".exe" ;; esac
+          for bin in afhub afcli; do
+            f="target/${{ matrix.target }}/release/${bin}${EXT}"
+            test -f "$f" || { echo "缺少产物 $f" >&2; exit 1; }
+            case "${{ matrix.target }}" in
+              *-linux-musl)
+                if ldd "$f" 2>&1 | grep -q 'not a dynamic executable'; then
+                  echo "OK $f: 静态"
+                else
+                  echo "FAIL $f: musl 目标必须静态，实际: $(ldd "$f" 2>&1 | head -5)" >&2
+                  exit 1
+                fi
+                ;;
+              *-linux-gnu)
+                if ldd "$f" | grep -Eq 'libssl|libcrypto'; then
+                  echo "FAIL $f: 不许依赖 OpenSSL" >&2
+                  exit 1
+                fi
+                echo "OK $f: 无 OpenSSL 依赖"
+                ;;
+              *-windows-gnu)
+                if x86_64-w64-mingw32-objdump -p "$f" | grep -i 'DLL Name' | grep -Eqi 'libssl|libcrypto'; then
+                  echo "FAIL $f: 不许依赖 OpenSSL DLL" >&2
+                  exit 1
+                fi
+                echo "OK $f: 无 OpenSSL DLL 依赖"
+                ;;
+            esac
+          done
+
+      - name: 收集产物（按平台后缀命名）
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          EXT=""
+          case "${{ matrix.target }}" in *-windows-gnu) EXT=".exe" ;; esac
+          for bin in afhub afcli; do
+            cp "target/${{ matrix.target }}/release/${bin}${EXT}" \
+               "out/${bin}-${{ matrix.suffix }}${EXT}"
+          done
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          # artifact 名带 target，纯为排错时能一眼看出是哪条矩阵红
+          name: bin-${{ matrix.target }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 3a. Hub 镜像 —— 前端已在编译期嵌进去，镜像里**不放 dist**
+  # ---------------------------------------------------------------------------
+  # 镜像里另放一份 dist 会让「单二进制」这条硬需求变成「两份真相源」，
+  # 而 `include_dir!` 到底有没有生效从此没人验证：镜像跑起来页面是对的，
+  # 但你分不清是嵌进去的还是旁边那份。所以镜像只拷二进制。
+  #
+  # 用 amd64 的 **musl** 二进制：静态，`FROM scratch` 也不缺 libc。
+  # 因此镜像同时是 amd64 与 arm64 多架构清单的底座——arm64 那份用
+  # `--platform` 拉对应的 arm64-musl 产物（buildx 的 TARGETARCH 分支见下）。
+  docker-hub:
+    needs: build-binaries
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # 每个 artifact 里是**该平台的两个二进制**（afhub + afcli）：
+      # Hub 镜像两个都要（afcli 供设备从 Hub 拉取，见 Dockerfile.hub 的说明）。
+      - name: 取回 amd64 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: bin-x86_64-unknown-linux-musl
+          path: dist/amd64
+
+      - name: 取回 arm64 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: bin-aarch64-unknown-linux-musl
+          path: dist/arm64
+
+      - name: 校验两份产物都在位
+        run: |
+          set -euo pipefail
+          for f in dist/amd64/afhub-linux-amd64-musl dist/amd64/afcli-linux-amd64-musl \
+                   dist/arm64/afhub-linux-arm64-musl dist/arm64/afcli-linux-arm64-musl; do
+            test -f "$f" || { echo "缺少 $f" >&2; exit 1; }
+            chmod +x "$f"
+          done
+          ls -la dist/amd64 dist/arm64
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 镜像 tag 与标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/agentfleet-hub
+          # `latest` 只跟**正式** tag（不含 -rc / -beta），否则一次预发就把
+          # 所有 `docker pull :latest` 的人升到未定稿版本上。
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.hub
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ env.RELEASE_TAG }}
+
+  # ---------------------------------------------------------------------------
+  # 3b. afcli 镜像 —— 按 TARGETARCH 选二进制
+  # ---------------------------------------------------------------------------
+  docker-node:
+    needs: build-binaries
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # 两个 artifact 都整包取下（各含 afhub + afcli）；本 job 只用 afcli。
+      - name: 取回 amd64 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: bin-x86_64-unknown-linux-musl
+          path: dist/amd64
+
+      - name: 取回 arm64 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: bin-aarch64-unknown-linux-musl
+          path: dist/arm64
+
+      - name: 校验两份产物都在位
+        run: |
+          set -euo pipefail
+          for f in dist/amd64/afcli-linux-amd64-musl dist/arm64/afcli-linux-arm64-musl; do
+            test -f "$f" || { echo "缺少 $f" >&2; exit 1; }
+            chmod +x "$f"
+          done
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 镜像 tag 与标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/agentfleet-node
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.node
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ env.RELEASE_TAG }}
+
+  # ---------------------------------------------------------------------------
+  # 3c. GitHub Release + SHA256SUMS
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [build-frontend, build-binaries]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取回全部二进制
+        uses: actions/download-artifact@v4
+        with:
+          # 只要 bin-*，不要把 web-dist 也拉进发布包
+          pattern: bin-*
+          path: dist
+          merge-multiple: true
+
+      - name: 生成 SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -la
+          # 排序：`sha256sum *` 的顺序依赖文件系统，不同 runner 上不稳定，
+          # 会让同一 tag 两次生成的 SUMS 内容不同（虽然都正确）。
+          sha256sum $(ls | sort) > SHA256SUMS
+          cat SHA256SUMS
+
+      # 从 CHANGELOG.md 抽当前版本段做 Release body。
+      # **抽不到就 fail**：一份空 body 的 Release 比没有 Release 更糟——
+      # 用户会以为「这个版本没什么可说的」，而真相是流水线没找到条目。
+      - name: 从 CHANGELOG 抽 Release body
+        id: notes
+        run: |
+          set -euo pipefail
+          # `v0.7.1` → `0.7.1`
+          ver="${RELEASE_TAG#v}"
+          body=$(awk -v v="$ver" '
+            # 段头形如 `## [0.7.1] - 2026-11-05`
+            $0 ~ "^## \\[" v "\\]" { inside = 1; next }
+            # 下一个二级标题即结束（`## [Unreleased]` / 上一个版本）
+            inside && /^## / { exit }
+            inside { print }
+          ' CHANGELOG.md)
+          if [ -z "$(printf '%s' "$body" | tr -d '[:space:]')" ]; then
+            echo "CHANGELOG.md 里找不到 [${ver}] 段；拒绝发出空 body 的 Release" >&2
+            exit 1
+          fi
+          {
+            printf '%s\n\n' "$body"
+            printf '**Full changelog / 完整变更**：`CHANGELOG.md`\n'
+          } > release-body.md
+          echo "----- body -----"
+          head -40 release-body.md
+
+      # 手动补发时 Release 可能已存在，`create` 会红；先决定用 create 还是 upload。
+      - name: 发布 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG 已存在，改为上传/覆盖资产"
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/* \
+              --title "$RELEASE_TAG" \
+              --notes-file release-body.md \
+              --verify-tag
+          fi

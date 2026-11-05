@@ -1,0 +1,48 @@
+# 自托管 Hub：`docker compose -f docker-compose.hub.yaml up -d`
+#
+# 起来之后打开 `http://<这台机器的地址>:8080`，**首次启动的 setup token
+# 在容器日志里**：
+#
+#   docker compose -f docker-compose.hub.yaml logs hub | grep -i 'setup token'
+#
+# 镜像里没有 shell（scratch），所以读不到卷里的 `setup-token.txt` 时这样读：
+#
+#   docker run --rm -v agentfleet_hub-data:/d alpine cat /d/setup-token.txt
+#
+# （卷名前缀是 compose 的项目名，缺省取目录名。）
+#
+# ## 安全边界
+#
+# Hub 容器会绑 `0.0.0.0`（`AFHUB_ALLOW_NON_LOOPBACK=1`，见 `Dockerfile.hub`），
+# 这是容器场景下唯一被放开的写法。**因此 ports 映射不要写成 `0.0.0.0:8080` 之后
+# 就撒手不管**：真机自托管应当只让可信网络可达（防火墙 / 内网 / 反代），
+# 与裸机部署「只绑回环 + Tailscale」是同一个意图，只是容器换了一种表达方式。
+services:
+  hub:
+    image: ghcr.io/jeelin/agentfleet-hub:latest
+    # 想固定版本就把 latest 换成具体 tag（如 :v0.7.1，见 GitHub Release）。
+    # 用 latest 意味着「每次 pull 都可能换一个版本」，自托管生产环境不建议。
+    container_name: agentfleet-hub
+    restart: unless-stopped
+    ports:
+      # 左边是宿主机。只想让本机反代访问就写 `127.0.0.1:8080:8080`。
+      - "8080:8080"
+    volumes:
+      # **不要删这个卷**：里面有 SQLite 库、会话 HMAC 密钥、设备指纹与
+      # setup token。丢了的后果不是「重新初始化」，而是所有已注册设备
+      # 一律验签失败（指纹不在库里）。
+      - hub-data:/data
+    healthcheck:
+      # scratch 镜像里没有 curl / wget，afhub 也没有自探测子命令，
+      # 所以**故意不写一个假通过的 healthcheck**——`disable: true` 明确说
+      # 「这一层没做健康检查」，比写 `CMD true` 诚实。真要看健康，
+      # 由外部对 `GET /healthz` 探测。
+      disable: true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  hub-data:
