@@ -70,11 +70,11 @@ crates/hub-server/src/routes/api.rs:731: 多行宏的参数行被 llvm-cov 记�
 crates/hub-server/src/routes/api.rs:732: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
 crates/hub-server/src/routes/api.rs:733: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
 crates/hub-server/src/routes/api.rs:734: 多行宏的参数行被 llvm-cov 记为 miss（已知现象）， 宏本身在上面的用例里执行过。
-crates/hub-server/src/routes/assets.rs:100: 构造上不可达：`build.rs` 在 dist 缺失时写的就是 index.html。 真走到这里（有人手工改 AF_WEB_DIST）也不该 panic——那是一台 活着但页面打不开的 Hub，比进程退出好排查。 上面三行已说明：这条分支结构上不可达。
-crates/hub-server/src/routes/assets.rs:101: 构造上不可达：`build.rs` 在 dist 缺失时写的就是 index.html。 真走到这里（有人手工改 AF_WEB_DIST）也不该 panic——那是一台 活着但页面打不开的 Hub，比进程退出好排查。 上面三行已说明：这条分支结构上不可达。
-crates/hub-server/src/routes/assets.rs:102: 构造上不可达：`build.rs` 在 dist 缺失时写的就是 index.html。 真走到这里（有人手工改 AF_WEB_DIST）也不该 panic——那是一台 活着但页面打不开的 Hub，比进程退出好排查。 上面三行已说明：这条分支结构上不可达。
-crates/hub-server/src/routes/assets.rs:103: 构造上不可达：`build.rs` 在 dist 缺失时写的就是 index.html。 真走到这里（有人手工改 AF_WEB_DIST）也不该 panic——那是一台 活着但页面打不开的 Hub，比进程退出好排查。 上面三行已说明：这条分支结构上不可达。
-crates/hub-server/src/routes/assets.rs:104: 构造上不可达：`build.rs` 在 dist 缺失时写的就是 index.html。 真走到这里（有人手工改 AF_WEB_DIST）也不该 panic——那是一台 活着但页面打不开的 Hub，比进程退出好排查。 上面三行已说明：这条分支结构上不可达。
+crates/hub-server/src/routes/assets.rs:117: 构造上不可达：`build.rs` 在 dist 缺失时写的就是 index.html。 真走到这里（有人手工改 AF_WEB_DIST）也不该 panic——那是一台 活着但页面打不开的 Hub，比进程退出好排查。 上面三行已说明：这条分支结构上不可达。
+crates/hub-server/src/routes/assets.rs:118: 构造上不可达：`build.rs` 在 dist 缺失时写的就是 index.html。 真走到这里（有人手工改 AF_WEB_DIST）也不该 panic——那是一台 活着但页面打不开的 Hub，比进程退出好排查。 上面三行已说明：这条分支结构上不可达。
+crates/hub-server/src/routes/assets.rs:119: 构造上不可达：`build.rs` 在 dist 缺失时写的就是 index.html。 真走到这里（有人手工改 AF_WEB_DIST）也不该 panic——那是一台 活着但页面打不开的 Hub，比进程退出好排查。 上面三行已说明：这条分支结构上不可达。
+crates/hub-server/src/routes/assets.rs:120: 构造上不可达：`build.rs` 在 dist 缺失时写的就是 index.html。 真走到这里（有人手工改 AF_WEB_DIST）也不该 panic——那是一台 活着但页面打不开的 Hub，比进程退出好排查。 上面三行已说明：这条分支结构上不可达。
+crates/hub-server/src/routes/assets.rs:121: 构造上不可达：`build.rs` 在 dist 缺失时写的就是 index.html。 真走到这里（有人手工改 AF_WEB_DIST）也不该 panic——那是一台 活着但页面打不开的 Hub，比进程退出好排查。 上面三行已说明：这条分支结构上不可达。
 crates/hub-server/src/routes/base_rev.rs:102: 四道门禁（`session_ended` / `device_removed` / `device_offline` / `not_reported`）的语义就是「探测不可用」，不是请求错误。这里是 本里程碑唯一允许把 `ApiError` 丢掉的地方：`probe_base_rev` 的返回 类型里没有 `ApiError`，而建会话不该因为这四件事之一而失败。 前两道在正常流程下不应触发（`create` 刚写 `running`，设备刚从 `find_by_id` 查出来），但**不能因此把它们当不可能**。 多行宏的参数行被 llvm-cov 记为 miss（已知现象）： `code = e.code()` 这一行报 miss，而同宏的 `session_id` / `node_id` 两行有覆盖（它们展开成 `Display` 调用，这一行是方法调用）。这与 `stream.rs:592` 的 `subject = %auth.subject()` 是同一类。
 crates/hub-server/src/routes/base_rev.rs:127: 同上面那条 `code = e.code()`，多行宏的参数行 被 llvm-cov 记为 miss。这一臂本身由 `a_full_outbound_queue_folds_into_unavailable_and_still_closes_the_channel` 执行（队列满 → `send_channel_data` 当场失败）。
 crates/hub-server/src/routes/base_rev.rs:157: 同上面那条：多行宏的参数行被 llvm-cov 记为 miss。 这一臂本身由上面那条队列满用例执行（它连 `close_channel` 都发不出去）。

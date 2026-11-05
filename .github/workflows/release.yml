@@ -165,8 +165,23 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    # 依赖 build-frontend：覆盖率门禁与本地同态——dist 在，`asset()` 的
+    # 成功路径（`WEB_DIST.get_dir("assets")` 有东西）才可达，测试才能真正
+    # 覆盖它。无 dist 时那条分支结构性不可达，而例外表是双向核对
+    # （未登记的未覆盖行红 + 已覆盖的登记行也红），本地有 dist / CI 无 dist
+    # 会让同几行在一边绿一边红，登记也没用。所以给 CI 的 cov 造出 dist。
+    needs: build-frontend
     steps:
       - uses: actions/checkout@v5
+
+      # build.rs 在编译期把 dist 嵌进二进制；没有 dist 时它只造占位页，
+      # `asset()` 成功路径在插桩下就变成「未覆盖的未登记行」。从 artifact
+      # 还原 dist，让门禁测的是真实产物路径。
+      - name: 下载前端产物（覆盖率与本地同态）
+        uses: actions/download-artifact@v6
+        with:
+          name: web-dist
+          path: packages/web/dist
 
       - name: 读工具链版本（mise.toml [tools] 是唯一出处）
         id: tools
