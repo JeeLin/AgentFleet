@@ -118,11 +118,10 @@ impl Pty {
         argv.extend(args_owned.iter().map(|a| a.as_ptr()));
         argv.push(std::ptr::null());
 
-        // `environ` 的类型是 `*mut *mut c_char`，所以元素也必须是 mut——
-        // 这不是「要改它」，而是 libc 在两种平台上的声明本身如此。
-        let mut envp: Vec<*mut libc::c_char> = Vec::with_capacity(env_owned.len() + 1);
-        envp.extend(env_owned.iter().map(|e| e.as_ptr().cast_mut()));
-        envp.push(std::ptr::null_mut());
+        // `execvpe` 收的是 `*const *const c_char`（不必可变：环境只被读）。
+        let mut envp: Vec<*const libc::c_char> = Vec::with_capacity(env_owned.len() + 1);
+        envp.extend(env_owned.iter().map(|e| e.as_ptr()));
+        envp.push(std::ptr::null());
 
         let winsize = libc::winsize {
             ws_row: size.rows,
@@ -173,10 +172,14 @@ impl Pty {
                         libc::_exit(126);
                     }
                 }
-                // `environ` 只被读一次：`execvp` 拿它去解析 PATH，
-                // 换成 `execvpe` 并不能省掉这一次赋值。
-                libc::environ = envp.as_mut_ptr();
-                libc::execvp(program.as_ptr(), argv.as_ptr());
+                // 用 `execvpe` 直接把 `envp` 交下去，**不写 `libc::environ`**。
+                //   - `libc::environ` 是 **glibc 专有**的可变符号，musl 目标上
+                //     根本不存在（`error[E0425]: cannot find value 'environ' in
+                //     crate 'libc'`）——CI 的 5 平台矩阵里有两个 musl 条目，
+                //     照原写法那两条**必然编译失败**，发布通路第一次跑就红；
+                //   - 语义上也更准：环境本来就已经在 `envp` 里算好了（合并后的
+                //     结果），再往 `environ` 里塞一遍等于**两条真相源**。
+                libc::execvpe(program.as_ptr(), argv.as_ptr(), envp.as_ptr());
                 libc::_exit(127);
             }
         }
