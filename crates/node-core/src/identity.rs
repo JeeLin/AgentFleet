@@ -635,7 +635,14 @@ mod tests {
     #[test]
     fn data_dir_prefers_afcli_data_dir() {
         // 只测纯拼接的那一半：不改进程 env（会与并行测试竞争）。
-        let base = std::path::Path::new("/afcli-should-win");
+        //
+        // base **必须落在临时目录下**，不能写 `/afcli-should-win` 这类根路径：
+        // `data_dir_in` 会真的 `create_dir_all`，而 CI runner 不是 root，
+        // 对 `/` 没有写权限 → `PermissionDenied`。这条用例曾经写成根路径，
+        // 本地以 root 跑全绿、CI 一跑就红，属于「本地环境掩盖了缺陷」——
+        // 用临时目录后，无论以谁的身份跑，「base 参与拼接」这个语义都测得到。
+        let d = tmpdir();
+        let base = d.path();
         assert_eq!(
             data_dir_in(base).unwrap(),
             base.join("agentfleet"),
