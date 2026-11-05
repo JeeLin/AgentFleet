@@ -174,18 +174,18 @@ jobs:
       # stale）。所以这里**自己构建 dist**，让插桩的二进制里嵌的是真实产物树。
       # 不能改成「依赖 build-frontend」：C7 要求每个产线 job 等全部门禁，
       # 而本 job 自己就是门禁之一——那就成环了。
-      - name: 读工具链版本（mise.toml [tools] 是唯一出处）
-        id: tools
+      - name: 读 Bun 版本（mise.toml [tools] 是唯一出处）
+        id: tools-bun
         run: |
           set -euo pipefail
           bun=$(sed -nE 's/^bun = "([^"]+)".*/\1/p' mise.toml | head -1)
           [ -n "$bun" ] || { echo "mise.toml 里读不到 bun 的版本" >&2; exit 1; }
           echo "bun=$bun" >> "$GITHUB_OUTPUT"
 
-      - name: 装 Bun ${{ steps.tools.outputs.bun }}
+      - name: 装 Bun ${{ steps.tools-bun.outputs.bun }}
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: ${{ steps.tools.outputs.bun }}
+          bun-version: ${{ steps.tools-bun.outputs.bun }}
 
       - name: 构建前端（覆盖率与本地同态，见上）
         working-directory: packages/web
