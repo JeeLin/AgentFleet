@@ -245,12 +245,7 @@ mod tests {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .expect("asset file name");
-            assert_served_with_cache(
-                &format!("assets/{name}"),
-                ASSET_CACHE,
-                file.contents(),
-            )
-            .await;
+            assert_served_with_cache(&format!("assets/{name}"), ASSET_CACHE, file.contents()).await;
         }
     }
 
