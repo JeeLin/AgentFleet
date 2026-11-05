@@ -64,34 +64,54 @@ check → fmt → lint → test → **cov-gate**（覆盖率 100% 阻塞）→ *
 每个 push / PR 都跑一遍等于把 runner 时间烧在没定稿的提交上。
 CI 的定位是「发布前的最后一道闸」，每次提交的反馈由本地 `mise run ci` 承担。
 
-### 发布（**未落地**，参考 REX 的形态）
+**`ci.yml` 与 `release.yml` 是同触发、两个 workflow**：`ci.yml` 是闸，`release.yml` 是产线。
+已知取舍——两者并行，**门禁红时镜像仍可能被推上去**。所以 tag 只在
+`mise run ci` 全绿之后才打，不靠 CI 互相阻塞。
 
-`main` 合入打 tag（`vX.Y.Z`）触发。计划中的形态是**构建一次，三个消费者**：
+### 发布（**v0.7.1 落地**）
+
+打 tag（`vX.Y.Z`）触发 `.github/workflows/release.yml`，形态是**前端先编、二进制一次、
+三个消费者**：
 
 ```text
-build-binaries（5 平台矩阵，原生编译）
-    ├─→ docker-hub：Hub 镜像，内嵌全部 arch 的 afcli 到 /app/node-binaries/
+build-frontend（bun install --frozen-lockfile → build，dist 作为 artifact 上传）
+    ↓ needs（硬前置，不是优化）
+build-binaries（5 平台矩阵，**原生编译**）
+    ├─→ docker-hub：Hub 镜像（afhub + afcli，前端已编译期嵌入，镜像里不另放 dist）
     ├─→ docker-node：afcli 镜像（linux/amd64 + linux/arm64，按 TARGETARCH 选二进制）
-    └─→ release：GitHub Release + SHA256SUMS + 从 CHANGELOG 抽 body
-build-frontend（bun install --frozen-lockfile → type-check → lint → test → build）
-    └─→ Rust 侧 include_dir! 编译期嵌入，运行时不需要 dist 目录
+    └─→ release：GitHub Release + SHA256SUMS + 从 CHANGELOG.md 抽 body
 ```
+
+**`build-frontend` 是硬前置**：`include_dir!` 在编译期嵌入 dist，而 dist 缺失时
+`crates/hub-server/build.rs` 不失败——它造一个占位页、打一条 `cargo:warning`，二进制照编。
+后果是「Hub 装起来打开是 Not built 占位页」能不红任何一步地走到用户手里。所以矩阵里
+**每个平台在编之前**都断言 `packages/web/dist/index.html` 存在，缺了就 fail。
 
 | 文件 | 作用 | 状态 |
 |---|---|---|
 | `.github/workflows/ci.yml` | 门禁（= `mise run ci`），**仅 tag 触发** | **已有** |
-| 发布 workflow（多平台二进制 / 镜像 / Release） | 上述发布全流程 | 未落地（v0.2.0 不需要） |
-| `Dockerfile.hub` | Hub 镜像；`COPY dist/nodes/ /app/node-binaries/` | 未落地 |
-| `Dockerfile.node` | afcli 镜像；`COPY dist/afcli-${TARGETARCH}` | 未落地 |
-| `docker-compose.hub.yaml` / `.agent.yaml` | 自托管部署 | 未落地 |
+| `.github/workflows/release.yml` | 发布全流程（前端 / 二进制矩阵 / 镜像 / Release） | **v0.7.1 落地** |
+| `Dockerfile.hub` | Hub 镜像；`FROM scratch` + musl 静态二进制 | **v0.7.1 落地** |
+| `Dockerfile.node` | afcli 镜像；`COPY dist/${TARGETARCH}/afcli-…` | **v0.7.1 落地** |
+| `docker-compose.hub.yaml` / `docker-compose.agent.yaml` | 自托管部署 | **v0.7.1 落地** |
+| Hub 侧「设备从 Hub 拉二进制」的下载路由 | `DEVELOPMENT.md` §2 蓝图里 `/app/node-binaries/` 的**真正用途** | **未落地（v0.8.0）**：二进制已放进镜像，路由还没有 |
 
 - **原生编译优先于交叉编译**：GitHub 有 `ubuntu-24.04-arm` runner，aarch64 直接原生编
   （REX 的教训：交叉编 OpenSSL/zlib 会架构错配）。
-- **必须静态链 OpenSSL + zlib**，产出自包含二进制；REX 加了 `dumpbin /dependents`
-  断言 exe 不依赖 `libssl|libcrypto` DLL，**这个断言照抄**。
+- **「静态链 OpenSSL」在本仓不适用，但断言照抄**：`Cargo.toml` 的 `reqwest` 是
+  `rustls-tls`（`default-features = false`），整棵树**不链系统 OpenSSL**。所以真正要
+  静态的是 libc，用 **musl 目标**解决。REX 那条「产物不依赖 `libssl|libcrypto`」的
+  自包含断言仍然照抄，只是判据按平台分开：musl 用 `ldd` 判「not a dynamic executable」，
+  gnu 用 `ldd` 判不含 `libssl|libcrypto`，windows-gnu 用
+  `x86_64-w64-mingw32-objdump -p` 判 DLL 列表里没有它们。**断言在 workflow 里，不在文档里**。
 - **节点只从 Hub 拉二进制，不直连 GitHub**（REX 有 GitHub 回退，我们刻意不做，
   见 `architecture/security-and-lifecycle.md` §7.1.4）。
-- 镜像推到 `ghcr.io/<owner>/agentfleet-hub` 与 `agentfleet-node`。
+- 镜像推到 `ghcr.io/<owner>/agentfleet-hub` 与 `agentfleet-node`。只有正式 tag 才更新
+  `latest`（tag 名里带 `-` 的预发版本不会顶掉它）。
+- **Hub 容器必须显式放开回环限制**：`afhub` 缺省只绑回环（约束 1）。容器网络是隔离的，
+  所以 `Dockerfile.hub` 设 `AFHUB_ALLOW_NON_LOOPBACK=1` + `AFHUB_ADDR=0.0.0.0:8080`。
+  开关**只认确切的 `1`**（`0` / `true` / 空串一律当没设），理由见
+  `crates/hub-server/src/main.rs` 的 `resolve_addr`。裸机部署不变：仍然只许回环。
 
 ---
 
@@ -107,14 +127,14 @@ build-frontend（bun install --frozen-lockfile → type-check → lint → test 
 | v0.4.0 ✅ 已完成 | Git 界面 | 会话工作区的 git 状态 / diff / 提交视图；**此时会话面板补齐第三个 git 面板**。设备侧补上 `git` connector（此前 `connector/` 里从未实现——v0.1.0 的心跳曾硬编码上报过它，`heartbeat.rs` 的注释与 `the_registered_set_is_exactly_the_three_m1_connectors` 都记着这件事）：**只读子集** `status` / `diff` / `log`，经 `git` 子进程读取工作区。**不做 `commit` 及其它写操作**：v0.4.0 的目标是「看它改了什么」，而写操作要连带解决提交者身份、钩子与失败回滚，属另一件事，有明确需求再排期 | Git 操作界面 |
 | v0.5.0 ✅ 已完成 | 会话界面重排（对齐 opencode 形态） | 会话页从「全局侧栏 + 会话内一个坞」改为 opencode 形态的**单层工作界面**：进会话即收起全局侧栏、会话铺满页面；顶部一条 tab 条切换会话；**对话在左，右侧一格显示一个工具，工具的唯一入口是头部「＋」（列全部三个，选中即替换当前）**——三个工具（terminal / files / git）平级且**互斥**（2026-10-29 裁决 C；此前一度规划「右上 git/文件 + 右下终端常驻」的两格方案，已被用户推翻）；左右一条分栏可拖拽且按 tab 各自保留比例（**没有上下分栏**）；窄屏（< 900px）降级为一个覆盖式抽屉。**纯前端**：不改任何 connector、帧协议或设备侧代码；`v0.4.0` 的 D10（tab 是视图切换器、切 tab 不释放通道）原样保留。**已知代价**：换工具会释放被替换者的通道，终端则是杀掉 PTY（`node-core` 的 `terminal.close()` 走 `pty.close()`）| 会话界面形态（**新增能力**，无对应 §6.1 能力项） |
 | v0.6.0 ✅ 已完成 | 任务基准（**重挂**，用户 2026-11-03 裁定「视为结束，从 v0.7.0 开始」） | 会话工作区的**起点 + 产出概览**：建会话时用 git connector 的第四个只读 op `rev` 记下 `base_commit`，面板上显示「提交几次 / 另有几个文件未提交」。**产品主轴改版后**：这套逻辑是对的，但它算的是 `base_commit..HEAD`——在项目主轴下这是 **Execution 的产出 diff**，最终该挂在 Execution 上，不是会话上。因此本里程碑**收口为「只修真 bug、不再扩展」**，其「起点」概念作为 v0.7.0 的输入移交 | Git 操作界面（起点部分） |
-| v0.7.0 🔄 当前 | **项目与绑定（+ 设备/agent 管理面扩展）** — **含「项目结构按新需求调整」** | **先做两件结构活**：①**crate 拆分**——`node-core` 拆出 `node-connector`（7 → 8 个 crate，纯搬家、单独一个提交，理由只此一条：v0.12.0 的按需加载必须靠 crate 边界）；②按项目主轴重排数据模型与模块分层——`schema` 增加 `project` / `task` / `execution` / `binding` 表与迁移脚本，`crates/` 与 `packages/web/src` 按新归属切分（会话挂到 Execution 下，不再是顶层）。**这是本里程碑的第一件事**，否则后面的项目实体只能挂在旧结构上，等于给会话再加一层壳。然后再做业务：项目实体三形态（中心式 / 隔离式 / 镜像式）；Hub 侧裸仓库（git CLI，藏在接口后）；Binding = `(project, device) → 固定目录`；设备侧 worktree 分任务 + 四层磁盘处置（`architecture/project-and-snapshot.md`）；前端新增 `projects` / `project` 路由，**项目页默认落在看板**。**v0.6.0 的 `base_commit` 概念在此落到 Task 上**：交接规则写死——`execution.base_commit` 是**唯一真相源**，会话上的 `base_rev` 降级为「会话第一段执行的起点快照」，只读、不再参与任何「相对它产出了什么」的计算（那套展示整体移到 Execution 上）。**不保留两份可写的起点**：同一个事实有两个写入口，迟早会出现「会话说基于 A、执行说基于 B」。**同时扩展设备页 / agent 页（不砍反扩）**：绑定关系（这台设备绑了哪些项目、绑在哪个固定目录）、磁盘配额与已用、失败归因（哪类失败集中在这台机器）、改配额与清理策略；agent 页加「该 agent 上跑过哪些任务 / 成功率」 | 项目实体、绑定与固定目录、设备管理、agent 管理 |
+| v0.7.0 ✅ 已完成 | **项目与绑定（+ 设备/agent 管理面扩展）** — **含「项目结构按新需求调整」** | **先做两件结构活**：①**crate 拆分**——`node-core` 拆出 `node-connector`（7 → 8 个 crate，纯搬家、单独一个提交，理由只此一条：v0.12.0 的按需加载必须靠 crate 边界）；②按项目主轴重排数据模型与模块分层——`schema` 增加 `project` / `task` / `execution` / `binding` 表与迁移脚本，`crates/` 与 `packages/web/src` 按新归属切分（会话挂到 Execution 下，不再是顶层）。**这是本里程碑的第一件事**，否则后面的项目实体只能挂在旧结构上，等于给会话再加一层壳。然后再做业务：项目实体三形态（中心式 / 隔离式 / 镜像式）；Hub 侧裸仓库（git CLI，藏在接口后）；Binding = `(project, device) → 固定目录`；设备侧 worktree 分任务 + 四层磁盘处置（`architecture/project-and-snapshot.md`）；前端新增 `projects` / `project` 路由，**项目页默认落在看板**。**v0.6.0 的 `base_commit` 概念在此落到 Task 上**：交接规则写死——`execution.base_commit` 是**唯一真相源**，会话上的 `base_rev` 降级为「会话第一段执行的起点快照」，只读、不再参与任何「相对它产出了什么」的计算（那套展示整体移到 Execution 上）。**不保留两份可写的起点**：同一个事实有两个写入口，迟早会出现「会话说基于 A、执行说基于 B」。**同时扩展设备页 / agent 页（不砍反扩）**：绑定关系（这台设备绑了哪些项目、绑在哪个固定目录）、磁盘配额与已用、失败归因（哪类失败集中在这台机器）、改配额与清理策略；agent 页加「该 agent 上跑过哪些任务 / 成功率」 | 项目实体、绑定与固定目录、设备管理、agent 管理 |
 | v0.8.0 | **任务与看板** | Task 六态 + Task:Execution = 1:N；`done_when` = `criteria` 判定码 + `description`（`DECISIONS.md` D23）；任务级约束与固定过滤顺序（① allowed_* ② 隔离策略 ③ 能力/负载）；失败八形态与重试矩阵（含 `superseded` / `disk_exhausted`）；**执行中改需求的三种处置**；看板六列 + 任务详情页；**看板过滤 / 搜索 / 批量操作**；**项目摘要四行（含管家总结落点）**；**失败面板与验收面板（唯一处置入口）**；**执行复盘（只读轨迹回放）**；**执行监控（`projects/:id/executions`，慢变摘要 + 按行订阅，不编百分比）**；**收件箱（待决策 / 动态两区 + 决策请求 TTL/降级/留痕）**；`disk_exhausted` 时**询问清理并说明清理什么（预演）**；**时间与成本统计（排队与执行分开记，token 拿不到标 unknown）**；执行间接力（缓存复用）；时间线作为第二视图。见 `architecture/task-model.md` | 任务看板、任务与执行、项目时间线、执行监控、执行复盘、收件箱、失败与验收 |
 | v0.9.0 | **管家** | 跑在 Hub 上的项目级 agent：接意图 / 建派任务 / 督进度 / 写总结；**技能集（`project.status` / `task.create` / `task.clarify` / `memory.*`），不写死意图分类**（D22）；两处记忆（库 `project_memory` + 仓库 `.afleet/MEMORY.md`）；**建议派活草稿箱（点下发才进看板）**；与调度器的接口（只提交 task，不指定设备）；决策请求与收件箱的接入。调度器侧补三层过滤（`architecture/scheduling.md` 按此改写）。见 `architecture/butler.md` | 管家 |
 | v0.10.0 | **外部 issue 单向导入** | 导入生成 Task + Hub 内收件箱通知 + 管家初筛 + 结论单向往回写。**不做双向同步**。见 `PRODUCT.md` §5.5 | 外部 issue 单向导入 |
 | v0.11.0 | **定时任务（自动化）** | 定时与事件触发的调度：cron 式表达 + 「某任务完成后触发」两类来源，落到既有 Task（生成新 Task 而不是绕过六态）。**必须复用 v0.8.0 的任务模型**——定时任务不是另一套调度，触发只是「谁在什么时候创建了 Task」。要点：触发器本身是项目级配置；错过窗口（Hub 停机）后的补偿策略要显式定（跳过 / 补跑，不默认静默跳过）；触发产生的 Task 带 `created_by=schedule` 以便在看板与失败归因里区分。**⚠️ 原「推理网关」已降级为 TODO**（见 `PRODUCT.md` §6.2.1），本号改由定时任务占用 | —（`PRODUCT.md` §6.2 后续项） |
 | v0.12.0 | connector 插件化 + 技能 / MCP | 把协议族（SSH / DB / Redis / S3 / SFTP / TCP 透传）做成插件按需加载（**实现参考 REX**）+ 抓包插件 + 端口转发插件；**同时提供「任务级授予的技能 / MCP」通路**（凭据不进 agent 上下文、每次连接进审计）。**不引入 Resource 抽象**（`DECISIONS.md` D21） | —（`PRODUCT.md` §6.2 后续项）、技能 / MCP |
 | v0.13.0 | 任务连贯性（跨节点续跑） | 检查点 + 断点续跑 + 跨设备重建工作区（见 `architecture/task-continuity.md`）；此时 Task/Execution 已存在，只补「续跑」这一层 | —（`PRODUCT.md` §6.2 后续项） |
-| v0.14.0 | **CI 镜像构建（发布通路）** | 把 §2 里「发布（未落地）」那一整段真正建起来，形态参考 REX：`build-frontend`（bun type-check → lint → test → build，dist 作为 artifact 上传）→ `build-binaries`（**原生编译**，不用交叉编译）→ 三个消费者：`docker-hub`（`afhub` 镜像，`include_dir!` 已在编译期嵌前端，镜像里**不另放 dist**）、`docker-node`（`afcli` 镜像，按 `TARGETARCH` 选二进制）、`release`（GitHub Release + `SHA256SUMS` + 从 `CHANGELOG.md` 抽 body）。镜像推 `ghcr.io/<owner>/agentfleet-hub` / `agentfleet-node`。**顺序紧接任务连贯性**：与前三个里程碑全部无耦合，但**必须等本阶段（v0.7.0–v0.13.0）的对外契约定稿**——镜像里的二进制是对用户的承诺，早于契约定稿发出去等于发一个还会改的接口 | —（`DEVELOPMENT.md` §2 发布段） |
+| ~~v0.14.0~~ | ~~CI 镜像构建（发布通路）~~ | **整行迁至 v0.7.1**（用户 2026-11-05 裁定提前）。原文里「必须等 v0.7.0–v0.13.0 对外契约定稿后再发镜像」这一条前提被推翻：用户明确要求现在就打通发布通路并推 tag 触发 CI。**代价如实记录**：v0.7.1 发的镜像是 0.7.1 版本的接口，v0.8.0–v0.13.0 仍会改公开 API，届时需要再发新版本并让自托管用户升级 | —（已合并进 v0.7.1） |
 | 后续 | 后续能力 | 社交软件接入、原生客户端、分布式推理进阶；**暂缓项**（统一配置 agent / 模型配置一处切换） | —（`PRODUCT.md` §6.2 / §6.3） |
 
 > **2026-11-01 里程碑重排的裁定（产品主轴改版）**
