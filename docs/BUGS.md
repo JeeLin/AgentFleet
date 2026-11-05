@@ -8,7 +8,4 @@
 
 ## 待处理 / Pending
 
-| 状态 | 优先级 | 标题 | 来源 | 描述 |
-|------|--------|------|------|------|
-| 待处理 | 🟡 | `secret` 表明文存储的加固项 | 本项目决定（`architecture/security-and-lifecycle.md` §2.2） | 本期不做应用层加密，需未来补：AES-256-GCM 静态加密 + 独立主密钥；secret 值 mlock 不进 core dump；密钥轮换与失效 |
-| 待处理 | 🟢 | 工作区同步的 B 档 / D 档兜底 | `architecture/workspace-and-sync.md` §3 | Hub bare mirror 兜底（节点连不上 origin）与二进制 delta + 断点续传，当前无里程碑归属，等实测证明需要再排期 |
+（空——2026-11-05 planner 已将全部 2 条搬入 v0.7.2 Bugs 表，写入行数 2 == 池条目数 2，成对删行）
