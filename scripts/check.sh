@@ -630,34 +630,49 @@ def load_jobs(path):
             _parsed[path] = {}
     return _parsed[path]
 
-def gate_tasks(path, job):
-    """取该 job 里「`mise run <task>）` 结尾」的那些步，返回 {task: run}。"""
+def gate_tasks(path, job_names):
+    """取一组 job 里「`mise run <task>）` 结尾」的那些步，返回 {task: (job, run)}。
+
+    门禁拆成 4 个并行 job 后（v0.7.1 收尾的提速改造），单 job 内的步骤不再
+    覆盖全部清单，必须扫**合集**。task 出现在多个 job 里不算错也不算重复——
+    例如未来某 job 既 lint 又 test——但同一 task 的 run 文本若不一致，
+    说明有人复制步骤后改了一份忘另一份，必须红。
+    """
     jobs = load_jobs(path)
-    if job not in jobs:
-        bad.append(f'{path} 里没有 job `{job}`')
-        return {}
     out = {}
-    for s in jobs[job].get('steps') or []:
-        name = s.get('name') or ''
-        m = re.search(r'mise run ([a-z-]+)）', name)
-        if m:
-            out[m.group(1)] = (s.get('run') or '').strip()
+    for job in job_names:
+        if job not in jobs:
+            bad.append(f'{path} 里没有 job `{job}`')
+            continue
+        for s in jobs[job].get('steps') or []:
+            name = s.get('name') or ''
+            m = re.search(r'mise run ([a-z-]+)）', name)
+            if m:
+                task = m.group(1)
+                run = (s.get('run') or '').strip()
+                if task in out and out[task][1] != run:
+                    bad.append(f'`{task}` 在 `{out[task][0]}` 与 `{job}` 里都出现，'
+                               f'但两处的 run 不一致（复制步骤后只改了一份？）')
+                out[task] = (job, run)
     return out
 
 want = read_mise_ci_tasks()
-got = gate_tasks(RELEASE_YML, 'gate')
+GATE_JOBS = ['gate-static', 'gate-test', 'gate-coverage', 'gate-web']
+got = gate_tasks(RELEASE_YML, GATE_JOBS)
 
 if want is not None:
     if not got:
-        bad.append(f'{RELEASE_YML} 的 gate job 里没有一条 `mise run` 门禁步')
+        bad.append(f'{RELEASE_YML} 的 {GATE_JOBS} 里没有一条 `mise run` 门禁步')
     for t in sorted(set(want) - set(got)):
-        bad.append(f'`{t}` 在 mise.toml 的 [tasks.ci] 里，但 {RELEASE_YML} 的 gate 没跑')
+        bad.append(f'`{t}` 在 mise.toml 的 [tasks.ci] 里，但 {RELEASE_YML} 的 gate job 们没跑')
     for t in sorted(set(got) - set(want)):
-        bad.append(f'`{t}` 在 {RELEASE_YML} 的 gate 里，但 mise.toml 的 [tasks.ci] 没有')
+        bad.append(f'`{t}` 在 {RELEASE_YML} 的 gate job 们里，但 mise.toml 的 [tasks.ci] 没有')
     if want is not None and got and not (set(want) ^ set(got)):
-        print(f'      产线 gate 覆盖 mise.toml 的全部 {len(want)} 道门禁')
+        where = ', '.join(f'{t}→{got[t][0]}' for t in sorted(got))
+        print(f'      产线 gate（{len(GATE_JOBS)} 个 job 合集）覆盖 mise.toml 的全部 {len(want)} 道门禁')
+        print(f'      {where}')
 
-# 产线各 job 必须等 gate：门禁红时不许推镜像/发 Release。
+# 产线各 job 必须等全部门禁：门禁红时不许推镜像/发 Release。
 # 这一段没有 `if os.path.exists(...)` 守卫：文件缺失/读不了时 `load_jobs` 已经把
 # 原因写进 `bad`，而门禁失败的正确反应就是「红」，不是「跳过这段」。用守卫包起来
 # 会让「文件找不到」退化成「产线各 job 都等 gate ✓」——断言恰恰在最该红时消失。
@@ -665,8 +680,10 @@ jobs = load_jobs(RELEASE_YML)
 if not jobs:
     bad.append(f'{RELEASE_YML} 没有可解析的 job：产线各 job 是否等 gate 无从判断')
 else:
-    if 'gate' not in jobs:
-        bad.append('release.yml 没有 gate job：产线不等门禁就等于没有闸')
+    missing_gates = [g for g in GATE_JOBS if g not in jobs]
+    if missing_gates:
+        bad.append(f'{RELEASE_YML} 缺少 gate job：{", ".join(missing_gates)}'
+                   '——门禁清单被拆分后，少一个 job 就少跑一道闸')
     for j in ('build-frontend', 'build-binaries', 'docker-hub', 'docker-node', 'release'):
         if j not in jobs:
             bad.append(f'{RELEASE_YML} 里没有 job `{j}`：无法确认它等 gate')
@@ -674,8 +691,9 @@ else:
         needs = jobs[j].get('needs') or []
         if isinstance(needs, str):
             needs = [needs]
-        if 'gate' not in needs:
-            bad.append(f'{j} 的 needs 里没有 gate：门禁红时它照样会跑')
+        for g in GATE_JOBS:
+            if g not in needs:
+                bad.append(f'{j} 的 needs 里没有 {g}：这一道门禁红时它照样会跑')
 
 for b in bad:
     print(f'      {b}')
@@ -705,11 +723,24 @@ RELEASE_YML = '.github/workflows/release.yml'
 # 只登记**确实是独立组件**的：`cargo build` / `cargo test` / `cargo check`
 # 只需 rustc + rust-std（minimal profile 自带），不必列进来——多登记会让
 # 「装齐」变成「装一堆用不上的」，那不是准确性。
+#
+# **`cargo llvm-cov` 不在这里**，而且这是个教训：它由
+# `scripts/check-coverage.sh` 内部调用，不出现在任何 workflow 的 `run:` 文本里，
+# 靠扫 `run:` 永远扫不到——C8 据此曾对 `llvm-tools-preview` 长期假绿
+# （删掉该组件也报红不了），直到拆分 gate 做变异验证才暴露。它的等价判据
+# 是下面的 `install-action` 配对：装 cargo-llvm-cov 的 job 必须同时声明
+# llvm-tools-preview 组件（脚本用「llvm-cov 可执行文件 + 工具链自带
+# llvm-tools」两者，缺任一都跑不起来）。
 COMPONENT_OF = {
     'cargo fmt': 'rustfmt',
     'cargo clippy': 'clippy',
-    'cargo llvm-cov': 'llvm-tools-preview',
 }
+# `taiki-e/install-action@cargo-llvm-cov`（安装步）→ 必须同时有的组件。
+REQUIRES_COMPONENT_WITH_USES = {
+    'taiki-e/install-action@cargo-llvm-cov': 'llvm-tools-preview',
+}
+
+GATE_JOBS = ['gate-static', 'gate-test', 'gate-coverage', 'gate-web']
 
 bad = []
 try:
@@ -722,13 +753,19 @@ except OSError as e:
     bad.append(f'{RELEASE_YML} 读取失败：{e}')
     jobs = {}
 
-gate = jobs.get('gate')
-if gate is None:
-    bad.append(f'{RELEASE_YML} 里没有 job `gate`：无法核对它装了哪些组件')
+# 门禁拆成 4 个 job 后，「装了哪些组件」与「跑了哪些命令」都必须看**合集**：
+# 命令在 gate-test 里跑、组件在 gate-coverage 里装，是合法的分工（每个 job 只装
+# 自己要的）；反过来命令所在的 job 没装它需要的组件才是错。
+steps = []
+for jn in GATE_JOBS:
+    if jn not in jobs:
+        # 缺 job 的错误由 C7 报（那里带任务清单语义），这里不重复报。
+        continue
+    steps.extend(jobs[jn].get('steps') or [])
+if not steps:
+    bad.append(f'{RELEASE_YML} 里一个 gate job 都没有：无法核对组件（先看 C7 报了什么）')
 else:
-    steps = gate.get('steps') or []
-
-    # 1) gate 里实际跑到的命令 → 需要的组件
+    # 1) 合集里实际跑到的命令 → 需要的组件
     needed = {}
     for s in steps:
         run = s.get('run') or ''
@@ -736,7 +773,16 @@ else:
             if re.search(r'\b' + re.escape(cmd) + r'\b', run):
                 needed[comp] = cmd
 
-    # 2) gate 里**声明**装的组件（可能出现在多个 step，合并）
+    # 1b) 安装步配对：某 job 装了 X 工具，就必须同时声明 X 依赖的组件。
+    # `run:` 文本扫描对「脚本内部调用的命令」是瞎的（llvm-cov 的教训，
+    # 见 COMPONENT_OF 上面的注释），所以对有专用安装步的工具改用 uses 断言。
+    for s in steps:
+        uses = str(s.get('uses') or '')
+        for action, comp in REQUIRES_COMPONENT_WITH_USES.items():
+            if uses.startswith(action):
+                needed[comp] = f'{action}（{uses}）'
+
+    # 2) 合集里**声明**装的组件（可能出现在多个 job，合并）
     declared = set()
     for s in steps:
         with_ = s.get('with') or {}
@@ -745,18 +791,35 @@ else:
             if c:
                 declared.add(c)
 
+    # 1c) 反向配对：反向断言的缺口（变异4 教训）。删掉 装 cargo-llvm-cov 安装步后，
+    # needed 里 llvm-tools 消失、断言空转 → 假绿。覆盖率门禁脚本
+    # （check-coverage.sh）内部调 cargo llvm-cov，看 run: 文本扫不到，所以
+    # 「谁跑 cov-gate，谁就必须有 cargo-llvm-cov 安装步」用脚本文件名断言。
+    # 两组配对合起来才是双向闭合：装 X → 必须装组件；跑 X 的门禁 → 必须装 X。
+    has_llvm_cov_step = any(
+        str(s.get('uses') or '').startswith('taiki-e/install-action@cargo-llvm-cov')
+        for s in steps
+    )
+    has_cov_gate = any('cov-gate' in (s.get('name') or '') or
+                       'check-coverage.sh' in (s.get('run') or '')
+                       for s in steps)
+    if has_cov_gate and not has_llvm_cov_step:
+        bad.append('gate job 们跑了覆盖率门禁（cov-gate / check-coverage.sh），'
+                   '但没有 装 cargo-llvm-cov 的安装步（taiki-e/install-action@cargo-llvm-cov）'
+                   '——脚本内部调 cargo llvm-cov，工具不存在时门禁 FATAL')
+
     if not needed:
         # 一个组件都不需要，说明门禁清单已经面目全非——不当成通过。
-        bad.append('gate 里读不到任何需要 rust 组件的门禁命令（`cargo fmt` / '
-                   '`cargo clippy` / `cargo llvm-cov`）：不是「无需组件」，'
+        bad.append('gate job 们里读不到任何需要 rust 组件的门禁（`cargo fmt` / '
+                   '`cargo clippy` / cargo-llvm-cov 安装步）：不是「无需组件」，'
                    '更可能是步骤被改名或挪走了，先确认门禁还在跑')
     for comp in sorted(set(needed) - declared):
-        bad.append(f'`{needed[comp]}` 需要组件 `{comp}`，但 gate 的 '
+        bad.append(f'`{needed[comp]}` 需要组件 `{comp}`，但 gate job 们的 '
                    f'`components:` 里没有（CI 上会报 '
                    f'"\'{comp}\' is not installed for the toolchain"）')
 
-    if needed and not (set(needed) - declared):
-        print(f'      gate 已装齐门禁用到的全部组件：{", ".join(sorted(needed))}')
+    if needed and not (set(needed) - declared) and not bad:
+        print(f'      gate job 们已装齐门禁用到的全部组件：{", ".join(sorted(needed))}')
 
 for b in bad:
     print(f'      {b}')

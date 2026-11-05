@@ -288,6 +288,9 @@ crates/node-connector/src/connector/files.rs:324: 元数据读不到要求该项
 crates/node-connector/src/connector/files.rs:678: mkfifo 只可能因 umask/路径/已存在而失败， 这里传的是刚由 tempfile 建出的目录下的新名字。
 crates/node-connector/src/connector/files.rs:1247: mkfifo 只可能因 umask/路径/已存在而失败， 这里传的是刚由 tempfile 建出的目录下的新名字。
 crates/node-connector/src/connector/files.rs:1317: mkfifo 只可能因 umask/路径/已存在而失败， 这里传的是刚由 tempfile 建出的目录下的新名字。
+crates/node-connector/src/connector/git.rs:198: (racy) — 只在 `git` 可执行文件缺失 / 无执行权限 / 进程表满时才会走到。`with_git_bin` 能指向一个不存在的路径来构造 这一支，但那验的是「我们自己写的 map_err 有没有语法错」，不是 「git 起不来时产品怎么办」——真实世界里这一支的替代路径是 `Err` 被通道层翻成 `channel_error{internal}`，那条已有测试。 标 `(racy)` 而不是普通例外，是因为**这几行是否被记为 miss 跨运行 不稳定**：实测同一份代码两次全量跑，一次报 192-194 三行、一次一行 都不报。原因是那几行落在 `.spawn()` 与 `.map_err(...)` 的 `?` 展开里， llvm-cov 的区域归属随内联与优化单元的组成而变。按确定性行做集合 相等核对会让门禁随机红。
+crates/node-connector/src/connector/git.rs:199: (racy) — 只在 `git` 可执行文件缺失 / 无执行权限 / 进程表满时才会走到。`with_git_bin` 能指向一个不存在的路径来构造 这一支，但那验的是「我们自己写的 map_err 有没有语法错」，不是 「git 起不来时产品怎么办」——真实世界里这一支的替代路径是 `Err` 被通道层翻成 `channel_error{internal}`，那条已有测试。 标 `(racy)` 而不是普通例外，是因为**这几行是否被记为 miss 跨运行 不稳定**：实测同一份代码两次全量跑，一次报 192-194 三行、一次一行 都不报。原因是那几行落在 `.spawn()` 与 `.map_err(...)` 的 `?` 展开里， llvm-cov 的区域归属随内联与优化单元的组成而变。按确定性行做集合 相等核对会让门禁随机红。
+crates/node-connector/src/connector/git.rs:200: (racy) — 只在 `git` 可执行文件缺失 / 无执行权限 / 进程表满时才会走到。`with_git_bin` 能指向一个不存在的路径来构造 这一支，但那验的是「我们自己写的 map_err 有没有语法错」，不是 「git 起不来时产品怎么办」——真实世界里这一支的替代路径是 `Err` 被通道层翻成 `channel_error{internal}`，那条已有测试。 标 `(racy)` 而不是普通例外，是因为**这几行是否被记为 miss 跨运行 不稳定**：实测同一份代码两次全量跑，一次报 192-194 三行、一次一行 都不报。原因是那几行落在 `.spawn()` 与 `.map_err(...)` 的 `?` 展开里， llvm-cov 的区域归属随内联与优化单元的组成而变。按确定性行做集合 相等核对会让门禁随机红。
 crates/node-connector/src/connector/git.rs:224: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
 crates/node-connector/src/connector/git.rs:225: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
 crates/node-connector/src/connector/git.rs:226: `wait_with_deadline` 只在 `try_wait` 本身 出错时回 `Err`，而对一个刚 spawn 出来的子进程 `try_wait` 失败 需要内核层面出问题（EPERM / EINTR 未被重试）。构造它要能在 测试里让某个特定的 children 句柄失效，而 std 没有这个口子； 这一支的价值是「别把错误吞成空输出」，逻辑本身无可测的分叉。
@@ -404,8 +407,6 @@ crates/node-core/src/agent/acp.rs:479: 读 stdout 本身出错（非 EOF）。�
 crates/node-core/src/agent/acp.rs:504: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
 crates/node-core/src/agent/acp.rs:551: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
 crates/node-core/src/agent/acp.rs:598: 超时或被回收失败：真的不知道，如实报 `None`，不要编。 要 `wait()` 在 5 s 宽限内既不等完也不报错； 那需要一条无视 SIGKILL/stdin 关闭的进程（或内核回收失败）， 单测里构造不出。这是「宁可说不知道也不编」的兜底。
-crates/node-core/src/agent/acp.rs:820: (racy) — 这一圈是否执行取决于「cancel 有没有 在第一轮读日志之前就落到 `log` 里」。stdin 是异步写的，agent 进程 又要先起来、读一行、再往日志里追加——同一个用例两次实跑，第一次 可能第一轮就 `break`（`sleep` 不计覆盖），第二次可能等一轮。这不是 「断言不成立」，也不该被当成确定性行做集合相等核对：本轮实测 这两行就是一次算覆盖、一次不算。判据本身由下面 `cancels.len() == 1` 那条断言给——它是确定的。
-crates/node-core/src/agent/acp.rs:828: (racy) — 这一圈是否执行取决于「cancel 有没有 在第一轮读日志之前就落到 `log` 里」。stdin 是异步写的，agent 进程 又要先起来、读一行、再往日志里追加——同一个用例两次实跑，第一次 可能第一轮就 `break`（`sleep` 不计覆盖），第二次可能等一轮。这不是 「断言不成立」，也不该被当成确定性行做集合相等核对：本轮实测 这两行就是一次算覆盖、一次不算。判据本身由下面 `cancels.len() == 1` 那条断言给——它是确定的。
 crates/node-core/src/agent/acp.rs:877: (racy) — 这一圈是否执行取决于「cancel 有没有 在第一轮读日志之前就落到 `log` 里」。stdin 是异步写的，agent 进程 又要先起来、读一行、再往日志里追加——同一个用例两次实跑，第一次 可能第一轮就 `break`（`sleep` 不计覆盖），第二次可能等一轮。这不是 「断言不成立」，也不该被当成确定性行做集合相等核对：本轮实测 这两行就是一次算覆盖、一次不算。判据本身由下面 `cancels.len() == 1` 那条断言给——它是确定的。
 crates/node-core/src/agent/acp.rs:889: (racy) — 这一圈是否执行取决于「cancel 有没有 在第一轮读日志之前就落到 `log` 里」。stdin 是异步写的，agent 进程 又要先起来、读一行、再往日志里追加——同一个用例两次实跑，第一次 可能第一轮就 `break`（`sleep` 不计覆盖），第二次可能等一轮。这不是 「断言不成立」，也不该被当成确定性行做集合相等核对：本轮实测 这两行就是一次算覆盖、一次不算。判据本身由下面 `cancels.len() == 1` 那条断言给——它是确定的。
 crates/node-core/src/agent/acp.rs:920: (racy) — 这一圈是否执行取决于「cancel 有没有 在第一轮读日志之前就落到 `log` 里」。stdin 是异步写的，agent 进程 又要先起来、读一行、再往日志里追加——同一个用例两次实跑，第一次 可能第一轮就 `break`（`sleep` 不计覆盖），第二次可能等一轮。这不是 「断言不成立」，也不该被当成确定性行做集合相等核对：本轮实测 这两行就是一次算覆盖、一次不算。判据本身由下面 `cancels.len() == 1` 那条断言给——它是确定的。
@@ -560,12 +561,14 @@ crates/node-core/src/agent/conversation.rs:2813: (racy) — 这一行是否被�
 crates/node-core/src/agent/conversation.rs:2953: (racy) — 这一行是否被执行取决于循环是否先 `break`：被测的那件事一旦在这次调度里先发生，`sleep` 就一次都不跑。同 `select!` 的臂一样是时序非确定，不能按确定性行做双向核对。
 crates/node-core/src/agent/detect.rs:361: (racy) — `try_wait()` 本身失败（子进程句柄 已被内核回收 / 权限被撤）。要构造它得让内核在探测窗口里拒绝 对自己刚起的子进程做 wait，单测里没有可控手段，这一臂永不执行。 标 `(racy)` 而不是普通例外：同一份源码连跑两次，llvm-cov 把 这一臂归到 `Err(e) => {` 与 `return Err(...)` 两个不同的行号上 （实测 361 / 365 各出现一次），于是「集合相等」的严格比对会 随机红。臂本身不可达这件事没变，变的是它被记在哪一行。
 crates/node-core/src/agent/detect.rs:370: (racy) — `try_wait()` 本身失败（子进程句柄 已被内核回收 / 权限被撤）。要构造它得让内核在探测窗口里拒绝 对自己刚起的子进程做 wait，单测里没有可控手段，这一臂永不执行。 标 `(racy)` 而不是普通例外：同一份源码连跑两次，llvm-cov 把 这一臂归到 `Err(e) => {` 与 `return Err(...)` 两个不同的行号上 （实测 361 / 365 各出现一次），于是「集合相等」的严格比对会 随机红。臂本身不可达这件事没变，变的是它被记在哪一行。
-crates/node-core/src/agent/detect.rs:573: 本机若**真装了** opencode 就走 `Ready` 臂，CI 上 通常没装就走 `NotInstalled` 臂。两条臂互斥，同一次运行只能覆盖其中一条， 于是剩下那条恒被报成未覆盖——换了台机器跑就会翻转，不是漏测。
-crates/node-core/src/agent/detect.rs:574: 本机若**真装了** opencode 就走 `Ready` 臂，CI 上 通常没装就走 `NotInstalled` 臂。两条臂互斥，同一次运行只能覆盖其中一条， 于是剩下那条恒被报成未覆盖——换了台机器跑就会翻转，不是漏测。
-crates/node-core/src/agent/detect.rs:585: 本机若**真装了** opencode 就走 `Ready` 臂，CI 上 通常没装就走 `NotInstalled` 臂。两条臂互斥，同一次运行只能覆盖其中一条， 于是剩下那条恒被报成未覆盖——换了台机器跑就会翻转，不是漏测。
-crates/node-core/src/agent/detect.rs:589: 与上面那两条互斥臂**成因不同**：这两臂是 断言失败时的出口（走进来就是红），绿的时候永远不会执行。混进 同一段理由会让「换台机器就翻转」与「红了才走」变成同一句话。
-crates/node-core/src/agent/detect.rs:592: 与 `Failed` 臂同因：走到这里就是红。
-crates/node-core/src/agent/detect.rs:596: 与 `Failed` 臂同因：走到这里就是红。
+crates/node-core/src/agent/detect.rs:583: 真装了却探测失败：走进来就是红， 绿的时候永远不会执行（与下面的 NotCapable 同因）。
+crates/node-core/src/agent/detect.rs:584: 真装了却探测失败：走进来就是红， 绿的时候永远不会执行（与下面的 NotCapable 同因）。
+crates/node-core/src/agent/detect.rs:595: 真装了却探测失败：走进来就是红， 绿的时候永远不会执行（与下面的 NotCapable 同因）。
+crates/node-core/src/agent/detect.rs:598: 真装了却探测失败：走进来就是红， 绿的时候永远不会执行（与下面的 NotCapable 同因）。
+crates/node-core/src/agent/detect.rs:601: 与 `Failed` 臂同因：走到这里就是红。
+crates/node-core/src/agent/detect.rs:605: 与 `Failed` 臂同因：走到这里就是红。
+crates/node-core/src/agent/detect.rs:639: 与 `Failed` 臂同因：走到这里就是红。
+crates/node-core/src/agent/detect.rs:650: 与 `Failed` 臂同因：走到这里就是红。
 crates/node-core/src/channel.rs:318: `live_ids()` 的每个 id 都来自**这张表**的 键（它遍历的就是 `self.channels`），而这里持的是同一张表的 `&mut` 借用，期间不可能被摘掉，所以这个 None 臂不可达。
 crates/node-core/src/channel.rs:319: `live_ids()` 的每个 id 都来自**这张表**的 键（它遍历的就是 `self.channels`），而这里持的是同一张表的 `&mut` 借用，期间不可能被摘掉，所以这个 None 臂不可达。
 crates/node-core/src/channel.rs:320: `live_ids()` 的每个 id 都来自**这张表**的 键（它遍历的就是 `self.channels`），而这里持的是同一张表的 `&mut` 借用，期间不可能被摘掉，所以这个 None 臂不可达。

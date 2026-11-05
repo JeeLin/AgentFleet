@@ -557,13 +557,23 @@ mod tests {
     /// **对真货也成立**——`--version` 的实际输出形态（`opencode v2.1.4`）
     /// 与假脚本的 `9.9.9` 不同，扫描 / 解析上若有假设，只有这条会红。
     ///
+    /// **对真货的输出形态做一次真实探测**（真 PATH + 真子进程）。
+    ///
+    /// 上面几条都用注入的查找表与假脚本，证明的是逻辑；这条证明
+    /// **对真货也成立**——`--version` 的实际输出形态（`opencode v2.1.4`
+    /// 这种带前缀的一行文本）与假脚本的 `9.9.9` 不同，扫描 / 解析上
+    /// 若有假设，只有这条会暴露。
+    ///
     /// 装与没装都算通过（CI 上通常没装），所以**两种情形各断言一次**，
     /// 而不是 `if installed { ... }` 之后什么都不做——那样没装时就等于没测。
+    ///
+    /// **互斥臂必须各自也能被确定地覆盖**：本条用真 PATH 走两条互斥臂中的
+    /// 一条（哪条取决于本机装没装 opencode，**两台机器会互换哪条 miss**，
+    /// 曾让确定性覆盖率比对在本地与 CI 各红一边）；互补的
+    /// [`a_fake_opencode_binary_covers_both_arms`] 用注入的假二进制把
+    /// 两条臂都确定性走到。覆盖率门禁因此不需要为这条测试登记任何例外。
     #[test]
     fn a_real_opencode_install_is_detected_end_to_end() {
-        // coverage: excluded — 本机若**真装了** opencode 就走 `Ready` 臂，CI 上
-        // 通常没装就走 `NotInstalled` 臂。两条臂互斥，同一次运行只能覆盖其中一条，
-        // 于是剩下那条恒被报成未覆盖——换了台机器跑就会翻转，不是漏测。
         let lookup = path_lookup;
         let probe = detect_one(&KNOWN_AGENTS[0], &lookup, DEFAULT_PROBE_TIMEOUT);
         match probe {
@@ -583,9 +593,8 @@ mod tests {
                 assert!(probe.is_available());
             }
             Probe::Failed { ref reason, .. } => {
-                // coverage: excluded — 与上面那两条互斥臂**成因不同**：这两臂是
-                // 断言失败时的出口（走进来就是红），绿的时候永远不会执行。混进
-                // 同一段理由会让「换台机器就翻转」与「红了才走」变成同一句话。
+                // coverage: excluded — 真装了却探测失败：走进来就是红，
+                // 绿的时候永远不会执行（与下面的 NotCapable 同因）。
                 panic!("本机装了 opencode 却探测失败，这是真问题：{reason}");
             }
             // coverage: excluded — 与 `Failed` 臂同因：走到这里就是红。
@@ -595,6 +604,50 @@ mod tests {
                 // ——那会让唯一验证过能对话的 agent 变成「不支持对话」。
                 panic!("opencode 的 acp_args 被清空了？版本 {version}");
             }
+        }
+    }
+
+    /// 用**注入的假 opencode**把上一条测试的两条互斥臂各自确定性走一遍。
+    ///
+    /// 真 PATH 版（[`a_real_opencode_install_is_detected_end_to_end`])两条臂
+    /// 互斥：装了走 Ready、没装走 NotInstalled，且哪条 miss 取决于跑测试的
+    /// 机器。覆盖率门禁做的是「未覆盖集 == 登记例外集」的**确定性**双向比对，
+    /// 机器相关的翻转臂会让两台机器各红一边。所以两条臂各写一条确定用例：
+    /// 注入假二进制 → Ready 臂必走；注入空查找表 → NotInstalled 臂必走。
+    /// 断言口径与真货版一致，逻辑分支的覆盖因此不再依赖环境。
+    #[test]
+    fn a_fake_opencode_binary_covers_both_arms() {
+        let spec = &KNOWN_AGENTS[0];
+
+        // 装了（假货，版本输出形如真货的 `opencode v2.1.4`）→ Ready
+        let d = tempdir();
+        let bin = write_script(&d, spec.bin, "#!/bin/sh\necho \"opencode v9.9.9\"\n");
+        let lookup = lookup_of(vec![(spec.bin, bin.clone())]);
+        let probe = detect_one(spec, &lookup, DEFAULT_PROBE_TIMEOUT);
+        match probe {
+            Probe::Ready {
+                ref version,
+                ref path,
+            } => {
+                assert!(
+                    version.chars().any(|c| c.is_ascii_digit()),
+                    "版本里至少要有数字：{version:?}"
+                );
+                assert_eq!(path, &bin);
+                assert!(probe.is_available());
+            }
+            other => panic!("装了就必须是 Ready，got {other:?}"),
+        }
+
+        // 没装（空查找表）→ NotInstalled
+        let lookup = lookup_of(vec![]);
+        let probe = detect_one(spec, &lookup, DEFAULT_PROBE_TIMEOUT);
+        match probe {
+            Probe::NotInstalled => {
+                assert!(!probe.is_available());
+                assert_eq!(probe.path(), None);
+            }
+            other => panic!("没装就必须是 NotInstalled，got {other:?}"),
         }
     }
 

@@ -50,7 +50,7 @@ jobs:
   # 全绿后才打」——但纪律挡不住手工 `git tag` + `git push`，也挡不住
   # `workflow_dispatch` 补发（那条路径完全不经过本地门禁）。
   #
-  # 所以把门禁搬进产线本身（并把重复的 `ci.yml` 删掉）：本 job 跑
+  # 所以把门禁搬进产线本身（并把重复的 `ci.yml` 删掉）：产线跑
   # `mise.toml [tasks.ci]` 定义的**全部**门禁，下面每一个产线 job 都 `needs` 它。
   # 清单只有一处，C7 双向比对产线的步骤名。
   #
@@ -59,7 +59,25 @@ jobs:
   # `github.ref_name`**；而抽 `CHANGELOG` body、镜像 tag、`gh release
   # --verify-tag` 全都要 tag 名，得再从 API 反查并层层传递，多一层间接、多一个
   # 失败面。代价是门禁跑两遍（覆盖率那步最贵），换的是坏产物发不出去。
-  gate:
+  #
+  # 为什么拆成 4 个 job 而不是一个串行 job：同一 job 内的步骤**永远串行**，
+  # 无法并发。`test`（约 5.5m）与 `cov-gate`（全量插桩，约 10m+）用的是两套
+  # 二进制（插桩产物不能复用普通产物），`web-ci` 与 Rust 侧零交集——这三条
+  # 之间没有任何依赖，串行只让 wall clock 相加。拆开后瓶颈是 coverage 一条，
+  # 总时长从「逐项相加」变成「最长那条」。
+  #
+  # 依赖澄清（曾被人问「后端是不是要等前端」）：**不**。`build.rs` 在 dist 缺失
+  # 时降级为占位页 + `cargo:warning`（实测：删掉 dist 后 `cargo test` 照样绿），
+  # 所以所有 Rust 门禁都不需要前端产物。硬依赖 `build-frontend` 的只有
+  # `build-binaries`——`include_dir!` 编译期嵌入 dist，缺了会编出「能跑但页面
+  # 是占位页」的 Hub，那条校验拒绝的就是这件事（见下方 build-frontend 段）。
+  #
+  # ---- 4 个 job 共用的环境脚手架（每个 job 重复一遍是 Actions 的形态税）----
+  # 步骤名里的 `（mise run <task>）` 是 `check.sh` C7 的解析锚点：C7 扫描
+  # gate-static / gate-test / gate-coverage / gate-web 四个 job 的步骤**合集**
+  # 与 `[tasks.ci].depends` 双向比对，改名会红，漏一条也会红。
+
+  gate-static:
     runs-on: ubuntu-24.04
     # 只跑门禁，不推任何东西。顶层 `permissions` 是给 `docker-hub` /
     # `docker-node`（推 GHCR）与 `release`（建 Release）的，**不能让它漏到这里**：
@@ -85,14 +103,126 @@ jobs:
         with:
           toolchain: ${{ steps.tools.outputs.rust }}
           # **必须显式列全部组件**：本地跑门禁时 `mise` 会自动补装缺的组件，
-          # 而 CI 里 `cargo` 来自这个 action，缺什么就真的没有。
+          # 而 CI 里 `cargo` 来自这个 action（`--profile minimal`，只装列出的），
+          # 缺什么就真的没有。
           #   - rustfmt：`fmt` 门禁（`cargo fmt --check`）
           #   - clippy：`lint` 门禁（`cargo clippy -- -D warnings`）
-          #   - llvm-tools-preview：`cov-gate` 靠它出插桩与报告，缺了直接 FATAL
           # 首次真跑 CI 实测：只写 llvm-tools-preview 时 `fmt` 一步
           # `error: 'cargo-fmt' is not installed for the toolchain`，
           # 而本地全绿——这类「本地绿、CI 红」的差异只能靠列全躲开。
-          components: rustfmt, clippy, llvm-tools-preview
+          components: rustfmt, clippy
+
+      - name: 装工具链版本缓存（cargo 编译产物按 Cargo.lock 键控）
+        uses: Swatinem/rust-cache@v2
+        with:
+          # 每条 job 编出来的东西用途不同（clippy 用 rlib、test 用测试二进制、
+          # coverage 是独立 target 目录），共用一份缓存会互相踩：
+          # `workspaces` 不指定 = 整仓一份 key，`prefix-key` 区分 job 用途。
+          prefix-key: v1-gate-static
+
+      - name: check（mise run check）
+        run: scripts/check.sh
+
+      - name: fmt（mise run fmt）
+        run: cargo fmt --check
+
+      - name: lint（mise run lint）
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  gate-test:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读工具链版本（mise.toml [tools] 是唯一出处）
+        id: tools
+        run: |
+          set -euo pipefail
+          v=$(sed -nE 's/^rust = "([^"]+)".*/\1/p' mise.toml | head -1)
+          [ -n "$v" ] || { echo "mise.toml 里读不到 rust 的版本" >&2; exit 1; }
+          echo "rust=$v" >> "$GITHUB_OUTPUT"
+
+      - name: 装 Rust ${{ steps.tools.outputs.rust }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.tools.outputs.rust }}
+          # `cargo test` 只需 rustc + rust-std（minimal 自带），但 test 目录里有
+          # 编译期断言用到 `rustfmt` 的内容曾属误判——这里如实只装必需的；
+          # 真缺组件时门禁红得明明白白（C8 会先拦住 gate-static 那种遗漏）。
+          components: rustfmt
+
+      - name: 装工具链版本缓存（cargo 编译产物按 Cargo.lock 键控）
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-gate-test
+
+      - name: test（mise run test）
+        run: cargo test --workspace
+
+  gate-coverage:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读工具链版本（mise.toml [tools] 是唯一出处）
+        id: tools
+        run: |
+          set -euo pipefail
+          v=$(sed -nE 's/^rust = "([^"]+)".*/\1/p' mise.toml | head -1)
+          [ -n "$v" ] || { echo "mise.toml 里读不到 rust 的版本" >&2; exit 1; }
+          echo "rust=$v" >> "$GITHUB_OUTPUT"
+
+      - name: 装 Rust ${{ steps.tools.outputs.rust }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.tools.outputs.rust }}
+          # cargo llvm-cov 靠 llvm-tools 出插桩与报告，缺它门禁直接 FATAL
+          components: llvm-tools-preview
+
+      - name: 装 cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      # 覆盖率门禁要全量插桩 + 链接峰值，脚本要求 ≥6 GiB 空闲磁盘，
+      # runner 默认镜像里的 .NET / GHC 体积大，先清掉。
+      # （只有这个 job 需要：test 用普通二进制，没有 6G 的要求。）
+      - name: 腾磁盘
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
+          df -h /
+
+      - name: 装工具链版本缓存（cargo 编译产物按 Cargo.lock 键控）
+        uses: Swatinem/rust-cache@v2
+        with:
+          # llvm-cov 用独立的 target 目录（CARGO_TARGET_TARGET_DIR 注入），
+          # 与 test/static 的缓存天然隔离，靠 prefix 区分即可。
+          prefix-key: v1-gate-coverage
+
+      - name: cov-gate（mise run cov-gate）
+        run: scripts/check-coverage.sh
+
+      - name: cov-anchors（mise run cov-anchors）
+        run: scripts/coverage-exceptions.sh --check
+
+  gate-web:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读工具链版本（mise.toml [tools] 是唯一出处）
+        id: tools
+        run: |
+          set -euo pipefail
+          for t in node bun; do
+            v=$(sed -nE "s/^${t} = \"([^\"]+)\".*/\1/p" mise.toml | head -1)
+            [ -n "$v" ] || { echo "mise.toml 里读不到 $t 的版本" >&2; exit 1; }
+            echo "$t=$v" >> "$GITHUB_OUTPUT"
+          done
 
       - name: 装 Node ${{ steps.tools.outputs.node }}
         uses: actions/setup-node@v4
@@ -104,40 +234,9 @@ jobs:
         with:
           bun-version: ${{ steps.tools.outputs.bun }}
 
-      - name: 装 cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-
-      # 覆盖率门禁要全量插桩 + 链接峰值，脚本要求 ≥6 GiB 空闲磁盘，
-      # runner 默认镜像里的 .NET / GHC 体积大，先清掉。
-      - name: 腾磁盘
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
-          df -h /
-
       - name: 前端依赖
         working-directory: packages/web
         run: bun install --frozen-lockfile
-
-      # ---- 以下每步 = mise.toml 的 [tasks.ci].depends 的一项，必须逐条覆盖 --
-      # 步骤名里的 `（mise run <task>）` 是 `check.sh` C7 的解析锚点，改名会让门禁红。
-
-      - name: check（mise run check）
-        run: scripts/check.sh
-
-      - name: fmt（mise run fmt）
-        run: cargo fmt --check
-
-      - name: lint（mise run lint）
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: test（mise run test）
-        run: cargo test --workspace
-
-      - name: cov-gate（mise run cov-gate）
-        run: scripts/check-coverage.sh
-
-      - name: cov-anchors（mise run cov-anchors）
-        run: scripts/coverage-exceptions.sh --check
 
       # 前端三道合一步：`mise.toml` 里它们是聚合任务 `web-ci`
       # （`depends = ["web-check", "web-test", "web-build"]`），而 `[tasks.ci]`
@@ -162,7 +261,7 @@ jobs:
   #   - build-binaries 必须 needs 本 job 并下载 artifact；
   #   - 下载后再断言 `packages/web/dist/index.html` 存在（见下面的「校验 dist」）。
   build-frontend:
-    needs: gate
+    needs: [gate-static, gate-test, gate-coverage, gate-web]
     runs-on: ubuntu-24.04
     # 只读（同上）：编前端不上传任何发布物，artifact 走 Actions 内部存储，
     # 不需要仓库或包的写权限。
@@ -251,7 +350,7 @@ jobs:
   # 这里的 gnu。直接只把条目加回去，只会让每次发布必红一条，而报错看起来像缺链接器，
   # 人会去改下面的 mingw 安装步骤，查错方向完全错。
   build-binaries:
-    needs: [gate, build-frontend]
+    needs: [gate-static, gate-test, gate-coverage, gate-web, build-frontend]
     strategy:
       fail-fast: false
       matrix:
@@ -288,6 +387,13 @@ jobs:
         with:
           toolchain: ${{ steps.tools.outputs.rust }}
           targets: ${{ matrix.target }}
+
+      - name: 装工具链版本缓存（cargo 编译产物按 Cargo.lock 键控）
+        uses: Swatinem/rust-cache@v2
+        with:
+          # 四条矩阵共用一个 job 定义；cache key 含 matrix.target（action 自动
+          # 把 job 与 matrix 维度揉进 key），musl 与 gnu 的产物不会互相污染。
+          prefix-key: v1-binaries
 
       # matrix 里 4 个目标里有 2 个是 musl：musl 目标的链接器 (`musl-gcc`)
       # 不在 runner 镜像里。按目标装，不要无脑全装（多装的东西会在别的 runner
@@ -431,7 +537,7 @@ jobs:
   # 因此镜像同时是 amd64 与 arm64 多架构清单的底座——arm64 那份用
   # `--platform` 拉对应的 arm64-musl 产物（buildx 的 TARGETARCH 分支见下）。
   docker-hub:
-    needs: [gate, build-binaries]
+    needs: [gate-static, gate-test, gate-coverage, gate-web, build-binaries]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -499,7 +605,7 @@ jobs:
   # 3b. afcli 镜像 —— 按 TARGETARCH 选二进制
   # ---------------------------------------------------------------------------
   docker-node:
-    needs: [gate, build-binaries]
+    needs: [gate-static, gate-test, gate-coverage, gate-web, build-binaries]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -562,7 +668,7 @@ jobs:
   # 3c. GitHub Release + SHA256SUMS
   # ---------------------------------------------------------------------------
   release:
-    needs: [gate, build-frontend, build-binaries]
+    needs: [gate-static, gate-test, gate-coverage, gate-web, build-frontend, build-binaries]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
