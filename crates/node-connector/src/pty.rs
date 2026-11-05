@@ -247,8 +247,6 @@ impl Pty {
                 std::io::ErrorKind::InvalidInput,
                 "write offset ran past the buffer",
             )))?;
-            // coverage: excluded — 写中断的 `EINTR` 重试分支：本仓库的读写都
-            // 很快且非信号密集，这条只在极端时序下发生，无法确定性构造。
             let n = unsafe {
                 libc::write(
                     fd.as_raw_fd(),
@@ -816,6 +814,8 @@ pub(crate) mod testutil {
              读到 0 字节说明子进程一行都还没写出来——先怀疑机器忙 / 子进程没起来，\
              再怀疑被测逻辑；读到了字节却没有 needle，读到的就是子进程实际说的话，\
              那才是「合并逻辑错了」",
+            // coverage: excluded — 下面三个实参只在 `assert!` 失败（panic）时才求值，
+            // 而本仓库的测试全部通过，这条 panic 路径永远走不到。
             started.elapsed(),
             seen.len(),
             String::from_utf8_lossy(&seen),
