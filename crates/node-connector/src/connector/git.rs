@@ -1143,9 +1143,11 @@ mod tests {
     /// A 刚种下 `GIT_DIR`，B 的 `remove_var` 就把它删了，或者 A 的子进程
     /// 读到的是 B 种的值。症状是「单跑全绿、全量随机红」。
     ///
-    /// 锁本体在 [`crate::pty::testutil::env_lock`]：`pty.rs` 也改进程环境，
-    /// 各持一份 `static` 时两把锁互不互斥（实测改其中一份的类型，两份都编译通过）。
-    use crate::pty::testutil::env_lock;
+    /// 锁本体在 [`crate::pty::env_lock`]：PTY 的用例也改进程环境，各持一份
+    /// `static` 时两把锁互不互斥（实测改其中一份的类型，两份都编译通过）。
+    /// 那把锁**不在 `testutil` 里**——那个模块限 Unix，而这条用例在 Windows
+    /// 上也要跑。
+    use crate::pty::env_lock;
 
     /// 继承来的 `GIT_DIR` 不能改变 connector 认定的工作区。
     ///

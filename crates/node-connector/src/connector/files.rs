@@ -865,6 +865,10 @@ mod tests {
     ///
     /// 真 `symlink(2)`：判据不能是 mock——只有真的解析过才能证明
     /// 「树上一个可点的项，点进去读不到界外的东西」。
+    // Windows 上建符号链接要开发者模式或管理员权限，CI runner 上不可靠。
+    // 生产代码本身是跨平台的（走 `symlink_metadata`），这里限 Unix 只是
+    // 因为**造不出测试前提**，不是功能缺失。
+    #[cfg(unix)]
     #[test]
     fn a_symlink_pointing_outside_the_workspace_is_refused() {
         let base = sandbox();
@@ -906,6 +910,8 @@ mod tests {
     /// **第四种构造**：目录里的一级链接指向界内的目录——它**应该**能进，
     /// 否则就把「链接」与「越界」混成同一件事，用户连正常的
     /// `node_modules` 软链都点不开。
+    // 同上：造符号链接在 Windows CI 上不可靠。
+    #[cfg(unix)]
     #[test]
     fn a_symlink_that_stays_inside_the_workspace_is_followed() {
         let base = sandbox();
@@ -940,6 +946,8 @@ mod tests {
 
     /// 越界的错误**可读但不泄漏布局**（§7.4）：`shown` 是用户自己写的
     /// 那个写法，`to_string()` 里不该出现设备上的绝对路径。
+    // 同上：造符号链接在 Windows CI 上不可靠。
+    #[cfg(unix)]
     #[test]
     fn the_boundary_error_shows_the_users_own_spelling_not_the_devices_layout() {
         let base = sandbox();
@@ -1021,6 +1029,8 @@ mod tests {
 
     /// 悬空链接**列得出来、标成链接**：它不指向任何可读的东西，但隐藏它
     /// 会让用户以为树不完整（`design-system.md` §7.4 明确否决了隐藏）。
+    // 同上：造符号链接在 Windows CI 上不可靠。
+    #[cfg(unix)]
     #[test]
     fn a_dangling_symlink_is_listed_as_a_link_with_a_null_target() {
         let base = sandbox();
@@ -1043,6 +1053,8 @@ mod tests {
     }
 
     /// `kind` 那一档不是文件/目录/链接的东西（管道、socket）。
+    // FIFO 是 Unix 特有文件类型，Windows 没有 `mkfifo`。
+    #[cfg(unix)]
     #[test]
     fn a_fifo_is_reported_as_other_rather_than_as_a_file() {
         let base = sandbox();
@@ -1261,6 +1273,9 @@ mod tests {
     ///     空转，却仍然显示绿色。
     ///
     /// 判据是「错误归属读这一步且指名文件」，而不是「errno 是几」。
+    // Unix 域套接字是 Unix 特有；Windows 的 AF_UNIX 存在但语义与
+    // `stat`/`open` 的交互不同，本用例的前提（能 stat、open 报 ENXIO）不成立。
+    #[cfg(unix)]
     #[test]
     fn reading_a_path_that_has_no_bytes_names_the_read_step() {
         let base = sandbox();
@@ -1290,6 +1305,10 @@ mod tests {
     /// 编 0 会让「改过没有」永远显示成「1970-01-01」，而真相是「这个
     /// 时间戳说不出来」——那是两回事。时钟回拨 / 挂载点给出负时间戳时
     /// 会落到这条臂。
+    // 造「纪元前时间戳」要靠 `utimensat` 传负数 `tv_sec`——Windows 的
+    // NTFS 用 1601 起的 64 位计数，没有「纪元前」这个状态，这条臂在那里
+    // 结构上不可达。
+    #[cfg(unix)]
     #[test]
     fn an_mtime_before_the_epoch_is_null_not_a_fabricated_zero() {
         let base = sandbox();

@@ -13,7 +13,7 @@
 //! 它只依赖 `protocol`（帧类型）与标准库。
 //!
 //! `pty` 跟着搬过来而不是留在 `node-core`：`terminal` connector 生产使用它，
-//! 而 `git` connector 的测试要用它的 `testutil::env_lock`（两者都改进程环境，
+//! 而 `git` connector 的测试要用它的 `env_lock`（两者都改进程环境，
 //! 各持一份 `static` 时两把锁互不互斥）。留在 `node-core` 会造成
 //! `node-connector → node-core → node-connector` 的环。
 

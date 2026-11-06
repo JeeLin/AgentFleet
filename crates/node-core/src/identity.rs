@@ -17,11 +17,13 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 #[cfg(unix)]
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use identity::KeyPair;
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use tracing::warn;
 
 /// `identity.json` 的 schema 版本。
@@ -32,9 +34,15 @@ pub const IDENTITY_VERSION: u32 = 1;
 pub const IDENTITY_FILE: &str = "identity.json";
 
 /// 权限必须收紧到的目标：owner rw。
+///
+/// **只在 Unix 上有意义**：Windows 用 ACL，`0o600` 这个数没有对应物。
+/// 那边的等价保护是「用户 profile 目录默认只有本用户可读」——这一点写进
+/// `docs/DEVELOPMENT.md` 的「已知行为差异」。
+#[cfg(unix)]
 const IDENTITY_MODE: u32 = 0o600;
 
-/// 数据目录权限：owner rwx。
+/// 数据目录权限：owner rwx（同上，仅 Unix）。
+#[cfg(unix)]
 const DATA_DIR_MODE: u32 = 0o700;
 
 /// 基目录下的子目录名。
