@@ -133,7 +133,15 @@ pub(crate) fn environment_block(extra: &[(String, String)]) -> Vec<u16> {
     }
     let mut block = Vec::new();
     for (k, v) in merged {
-        if k.contains('\0') || v.contains('\0') {
+        // 跳过含 NUL 的项：环境块是 NUL 分隔的，键或值里混进 NUL 会把
+        // 后面整段截断。
+        //
+        // **键里含 `=` 也要跳过**：环境块里 `KEY=VALUE` 的分隔符是**第一个**
+        // `=`，所以键 `A=B` 拼出来是 `A=B=1`，而 `CreateProcessW` 读到的是
+        // 键 `A`、值 `B=1`——调用方以为自己设了 `A=B`，实际改的是 `A`。这不是
+        // 注入（`=` 逃不出键名），但是一次**静默的错键**，比直接报错更难查。
+        // 环境变量名本来就不允许含 `=`，这种输入只可能是调用方写错了。
+        if k.contains('\0') || v.contains('\0') || k.contains('=') {
             continue;
         }
         block.extend(format!("{k}={v}").encode_utf16());
@@ -299,11 +307,42 @@ mod tests {
         assert!(text.contains("GOOD_TWO=ok"), "后面的项必须还在：{text:?}");
     }
 
+    /// 键里含 `=` 的项被跳过——否则它会静默改掉**另一个**变量。
+    ///
+    /// 环境块里 `KEY=VALUE` 的分隔符是第一个 `=`。若不挡，`("A=B", "1")`
+    /// 拼出 `A=B=1`，`CreateProcessW` 读成「键 `A`、值 `B=1`」：调用方以为
+    /// 设了 `A=B`，实际把 `A` 覆盖了。这条测试钉的就是「宁可不设，也不设错」。
+    #[test]
+    fn an_entry_whose_key_contains_an_equals_is_skipped_not_silently_rekeyed() {
+        let block = environment_block(&[
+            ("A=B".to_string(), "1".to_string()),
+            ("GOOD_KEY".to_string(), "ok".to_string()),
+        ]);
+        let text = String::from_utf16_lossy(&block);
+        // 关键断言：绝不能出现 `A=B=1` 这种「错键」形态。
+        assert!(
+            !text.contains("A=B=1"),
+            "键含 `=` 的项必须整条跳过：{text:?}"
+        );
+        assert!(
+            !text.split('\0').any(|e| e.starts_with("A=B")),
+            "不能留下任何以 `A=B` 开头的项：{text:?}"
+        );
+        // 同批的其他项不受影响。
+        assert!(text.contains("GOOD_KEY=ok"), "后面的项必须还在：{text:?}");
+    }
+
     /// **往返**：把参数拼成命令行，再按 MSVC 规则解析回来，必须一字不差。
     ///
     /// 这条比逐条断言更结实：逐条断言只覆盖到我想到的输入，往返覆盖到
     /// 「解析器怎么读」这个真正的判据。解析器按微软文档的规则手写
     /// （见 `parse_msvc`），它自己也有官方示例的用例守着。
+    ///
+    /// **这条测试的局限要说清**：`parse_msvc` 与 `quote` 是从同一份规则
+    /// 推导出来的两个方向，如果那份规则本身读错了，往返照样全绿。所以它
+    /// 挡不住「两边一起错」，只挡「一边单独改错了」。真正的外部判据是下面
+    /// 两条：`the_parser_agrees_with_the_documented_examples`（微软原文的
+    /// 官方表格）与 `quote_matches_std_quote_auto`（Rust 标准库的实现）。
     #[test]
     fn every_argument_round_trips_through_the_msvc_parser() {
         let cases = [
@@ -331,6 +370,103 @@ mod tests {
                 "参数 {case:?} 拼成 {line:?} 后解析得到 {parsed:?}"
             );
         }
+    }
+
+    /// `quote` 与 Rust 标准库 Windows 侧 `append_arg`（`Quote::Auto`）**逐字节一致**。
+    ///
+    /// 这是 `quote` 的**外部**判据，不依赖本文件任何一份手写规则：`std` 在
+    /// Windows 上拼命令行用的就是 `library/std/src/sys/args/windows.rs` 的
+    /// `append_arg`，把同一个参数喂给它，两边必须给出同一串 UTF-16。
+    ///
+    /// 它为什么能在 Linux 上跑：`append_arg` 里**没有一处系统调用**，就是
+    /// 一次 `match`、一次 `any`、一个逐字符循环。这里按它的源码原样复刻
+    /// （`std_quote_auto`），并注明出处与版本，改动 std 时这里要跟着对一遍。
+    ///
+    /// 覆盖的是「判据」这一侧：`Quote::Auto` 只对**空格 / 制表符 / 空串**加
+    /// 外层引号，而内部 `"` 永远转义。反例 `a"b` 最能说明问题——它不加外层
+    /// 引号（因为没空格），但内部的 `"` 必须写成 `\"`。
+    #[test]
+    fn quote_matches_std_quote_auto() {
+        // 覆盖面刻意做宽：空串、只有空白、只有反斜杠、只有引号、混在一起、
+        // 非 ASCII。`\\` 与 `"` 相邻的每一种长度组合都在里面。
+        let cases = [
+            "",
+            " ",
+            "\t",
+            "a",
+            "a b",
+            "a\tb",
+            " a",
+            "a ",
+            "\"",
+            "a\"b",
+            "a\"\"b",
+            "\"a b\"",
+            "\\",
+            "\\\\",
+            "\\\"",
+            "a\\\"b",
+            "C:\\dir\\",
+            "C:\\Program Files\\x\\",
+            "C:\\Program Files (x86)\\",
+            "\\\\server\\share\\",
+            "a b\\",
+            "a b\"c\\",
+            "中 文",
+            "中",
+            "%PATH%",
+            "& | > < ^",
+            "--flag=x y",
+        ];
+        for case in cases {
+            assert_eq!(
+                quote(case),
+                std_quote_auto(case),
+                "参数 {case:?} 的引号处理与 std 的 Quote::Auto 不一致"
+            );
+        }
+    }
+
+    /// Rust 标准库 Windows 侧 `append_arg` 在 `Quote::Auto` 下的行为。
+    ///
+    /// **逐行复刻**自 `library/std/src/sys/args/windows.rs`（`append_arg`，
+    /// 判断外层引号的那段 `Quote::Auto => (… , true)`）。复刻而不是调用，
+    /// 是因为那个函数是 `std` 私有的、且只在 Windows 上编译。
+    ///
+    /// 注意这里**故意**把它的判据写成源码里的原样（`' '`、`'\t'`、`is_empty`），
+    /// 不要「顺手」改成 `arg.contains([' ', '\t'])` 再和被测实现共用一份——
+    /// 共用一份就等于没对过。
+    fn std_quote_auto(arg: &str) -> String {
+        let bytes = arg.as_bytes();
+        let quote = bytes.iter().any(|c| *c == b' ' || *c == b'\t') || bytes.is_empty();
+        let escape = true;
+        let mut out = String::new();
+        if quote {
+            out.push('"');
+        }
+        let mut backslashes: usize = 0;
+        for x in arg.chars() {
+            if escape {
+                if x == '\\' {
+                    backslashes += 1;
+                } else {
+                    if x == '"' {
+                        for _ in 0..=backslashes {
+                            out.push('\\');
+                        }
+                    }
+                    backslashes = 0;
+                }
+            }
+            out.push(x);
+        }
+        if quote {
+            for _ in 0..backslashes {
+                out.push('\\');
+            }
+            out.push('"');
+        }
+        out
     }
 
     /// 微软文档给的官方示例表（MSVC「Parsing C++ command-line arguments」）。

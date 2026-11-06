@@ -53,10 +53,12 @@ pub fn exit_code_of(status: &std::process::ExitStatus) -> i32 {
 ///
 /// ## 那条 `Err` 分支实际上不可达，这是**查过**的结论
 ///
-/// `std::process::Child::wait` 的文档写明「完成后再次调用返回同一个值」：
-/// 它把 `ExitStatus` 缓存住了。所以「先 wait 一次、再 wait 一次拿 `ECHILD`」
-/// 这种构造**不成立**——实测第二次照样返回 `Ok(0)`，我原先写的那个用例
-/// 就是红在这里。
+/// `std::process::Child::wait` 的文档（`process.rs`，`Child::wait`）原文是
+/// 「This function will continue to have the same return value after it has
+/// been called at least once」——即**调用过一次之后，后续调用返回同一个值**，
+/// 而不是报错。所以「先 wait 一次、再 wait 一次拿 `ECHILD`」这种构造**不成立**：
+/// 实测第二次照样返回 `Ok`（一个正常 `exit 3` 的子进程，两次都是
+/// `Ok(code == 3)`），我原先写的那个用例就是红在这里。
 ///
 /// 补一条：子进程被信号杀死时 `wait` 也返回 `Ok`，只是
 /// `status.code()` 为 `None`，走的是 [`exit_code_of`]。原先那条
@@ -511,14 +513,26 @@ mod tests {
         assert_eq!(exit_code_of(&status), exit_code::CRASH);
     }
 
-    /// `wait` 失败时 `spawn_and_wait` 走崩溃臂、并留下**能搜到**的痕迹。
+    /// **拉不起来**的 worker 算崩溃，并在 journal 里留下**能搜到**的痕迹。
     ///
-    /// 判据是「崩溃 + journal 里有 cannot wait」，不是「返回了非零」：
+    /// 判据是「崩溃 + journal 里有 `cannot spawn worker`」，不是「返回了非零」：
     /// 一个静默返回 CRASH 的实现同样能让 supervisor 继续跑下去，但排障的人
-    /// 只会看到一个反复重启的 worker，没有任何线索说明是回收失败。
+    /// 只会看到一个反复重启的 worker，没有任何线索说明是拉不起来还是回收失败。
     ///
     /// 用 `with_exe` 指向一个**存在但不可执行**的文件来稳定触发 spawn 臂；
     /// 这条路径在生产里对应的正是「二进制被换掉了 / 权限没了」。
+    ///
+    /// **这条用例没有覆盖 `wait` 的失败臂**（`supervisor.rs` 里那处
+    /// `cannot wait for worker` 的日志）。用户可见的两条臂文案不同、判据不同，
+    /// 但只有 spawn 臂能稳定构造；`wait` 臂为什么构造不出来、为什么它的 `Err`
+    /// 分支事实上不可达，写在 [`wait_code`] 的文档里——那里的结论是实测过的
+    /// （`Child::wait` 二次调用返回 `Ok(0)` 而不是 `Err`），不是推测。
+    /// 所以 `"cannot wait for worker"` 这句文案**目前没有任何测试守着**，
+    /// 改掉它不会有任何用例变红——这一点如实记在这里，不假装覆盖到了。
+    ///
+    /// 另：`ran_for_secs == 0` 这个断言**不是在验证测量结果**。spawn 失败时
+    /// `spawn_and_wait` 直接返回 `ExitInfo::new(CRASH, 0)`，那个 0 是写死的，
+    /// 断言只是在钉住「这条路径不许报出非零时长」这个约定。
     #[test]
     fn a_worker_that_cannot_be_spawned_is_a_crash_and_says_so() {
         let d = tmp("cannot-spawn");

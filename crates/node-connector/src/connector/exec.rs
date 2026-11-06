@@ -92,6 +92,14 @@ pub(super) const EXIT_KILLED: i32 = 128 + 9;
 #[cfg(windows)]
 pub(super) const INFINITE: u32 = 0xFFFF_FFFF;
 
+/// 收尾 drain 的硬上限：超时之后最多再花这么久把管道里剩的字节捞出来。
+///
+/// 取 2 秒的依据是「它只影响**已经失败**的那条命令」：正常结束的命令写端
+/// 立刻关闭，`any_open()` 变假，收敛于零耗时；只有「有进程没死干净」时才会
+/// 碰到这个上限。2 秒足够把管道缓冲（默认 64 KiB）里的残留读完，又不至于
+/// 让用户觉得面板卡住。
+const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// 采集时用的 `poll` 粒度。它同时是「超时判定」的分辨率。
 const POLL_SLICE_MS: libc::c_int = 50;
 
@@ -330,13 +338,17 @@ impl Connector for Exec {
 }
 
 /// 一次执行的产出。
-struct Outcome {
-    exit_code: i32,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    truncated: bool,
-    duration: Duration,
-    timed_out: bool,
+///
+/// `pub(super)`：Windows 后端的测试（`connector::exec_windows::tests`）要直接
+/// 断言这里的字段。放成同一个父模块下的可见性，比把字段暴露到 crate 外更紧。
+#[derive(Debug)]
+pub(super) struct Outcome {
+    pub(super) exit_code: i32,
+    pub(super) stdout: Vec<u8>,
+    pub(super) stderr: Vec<u8>,
+    pub(super) truncated: bool,
+    pub(super) duration: Duration,
+    pub(super) timed_out: bool,
 }
 
 /// 结果的 `channel_data` 载荷。**stdout / stderr 都是 base64**：
@@ -362,7 +374,11 @@ fn result_payload(o: &Outcome) -> serde_json::Value {
 ///
 /// `strings` 由 [`Exec::open`] 备好并带进来：参数装不下 C 字符串要在
 /// `open` 那一侧报，不能等到进了线程才炸。
-fn run(plan: &Plan, prepared: &Prepared) -> Result<Outcome, ConnectorError> {
+///
+/// `pub(super)`：理由同 [`Outcome`]——`exec_windows` 的测试要直接驱动这一层，
+/// 才能验证「句柄继承 / 超时退出码」这类**后端专属**行为，而不必绕到
+/// 需要 workspace root 的完整连接器接口上。
+pub(super) fn run(plan: &Plan, prepared: &Prepared) -> Result<Outcome, ConnectorError> {
     let started = std::time::Instant::now();
     let mut child = Child::spawn(plan, prepared)?;
 
@@ -405,7 +421,38 @@ fn run(plan: &Plan, prepared: &Prepared) -> Result<Outcome, ConnectorError> {
     // 收尾：把管道里剩下的都读干净（超时也读，因为剩下的部分正是用户要的）。
     // 空循环体写在同一行是有意的：多行空块的收尾 `}` 会被 llvm-cov 记成未覆盖
     // （已知现象），而这里「读到没得读为止」本来就是空体。
-    while child.any_open() && child.read_into(&mut collected) {}
+    //
+    // ## 这个循环必须有截止时间，否则超时路径会挂死
+    //
+    // 「读到没得读为止」的前提是**写端一定会关**。但这个前提只在
+    // 「我们杀掉了所有持有写端的进程」时成立：
+    //
+    // - Unix 上 `kill(-pid)` 把整个进程组带走，正常情形下够用；
+    // - **Windows 上 `TerminateProcess` 只杀直接子进程**，孙进程（`cmd /c start`
+    //   起的东西）仍然活者并继续持有写端。更要命的是 Windows 的匿名管道是
+    //   阻塞读：`read_into` 会一直等在那里。
+    //
+    // 这条循环没有 deadline 时，上面两种情形都会让 `run()` 永久挂住。而
+    // `run()` 跑在 `afcli-exec` 线程里、`open_channel` 早就返回了——于是
+    // `poll` 永远拿不到结果帧，用户看到的不是「超时」，是**面板永远转圈**
+    // 或者更糟：worker 的 `select!` 里那条臂被占住，设备在 Hub 眼里掉线。
+    //
+    // 所以给收尾限一个不超过 `DRAIN_GRACE` 的窗口：超时之后已经杀过进程了，
+    // 剩下的字节是「尽力捞」而不是「必须捞全」。捞不到的代价是输出少一截
+    // （对一条**已经被判超时**的命令而言可以接受），挂死的代价是整台设备
+    // 失去响应——两者不成比例。
+    let drain_deadline = std::time::Instant::now() + DRAIN_GRACE;
+    while child.any_open() && child.read_into(&mut collected) {
+        if std::time::Instant::now() >= drain_deadline {
+            // 写端还开着（有进程没死干净）。记一条日志：这是「输出可能不全」
+            // 的唯一线索，而排障的人需要知道它，否则只会以为命令真的没输出。
+            tracing::warn!(
+                "exec drain gave up after {:?}: a writer still holds the pipe (output may be truncated)",
+                DRAIN_GRACE
+            );
+            break;
+        }
+    }
 
     let exit_code = child.wait();
     Ok(Outcome {
@@ -474,8 +521,11 @@ struct Child {
 ///
 /// **必须在 fork 之前备齐**：fork 出来的子进程与父进程共享同一份堆，
 /// 此刻任何分配都可能带着别的线程正持有的锁出去。
+///
+/// `pub(super)`：它是 [`run`] 的参数类型，而 `run` 为了让 Windows 后端的
+/// 测试能直接驱动它被放宽到了 `pub(super)`——参数类型不能比函数更私。
 #[cfg(unix)]
-struct ExecStrings {
+pub(super) struct ExecStrings {
     program: CString,
     args: Vec<CString>,
     cwd: Option<CString>,
@@ -916,7 +966,17 @@ impl Default for Exec {
     }
 }
 
-#[cfg(test)]
+// `#[cfg(all(test, unix))]` 而不是 `#[cfg(test)]`：本模块的用例全部起真的
+// `/bin/sh`、断言 `exit 127` / `/bin/pwd` 这类 POSIX 语义，在 Windows 上
+// 跑不了（详见下方用例的注释）。
+//
+// 代价：`clippy.toml` 的 `allow-expect-in-tests` 只在 `#[test]` 函数体与
+// `#[cfg(test)] mod` 内生效，而这里多了个 `unix` 条件，clippy 的边界判定
+// 不再把**模块内非 `#[test]` 的 helper 函数**算作测试代码。所以下面补齐
+// 三条 allow——它们的作用范围只到这个测试模块，生产代码仍由 workspace
+// lint 表 deny。
+#[cfg(all(test, unix))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -1024,6 +1084,42 @@ mod tests {
         );
         // `sleep` 被 SIGKILL → `128 + 9`。它**不是**程序自己返回的 -9。
         assert_eq!(out["exit_code"], 137, "信号死要给 128+signal：{out}");
+    }
+
+    /// 超时之后，即使**还有进程攥着写端**，`run()` 也必须在 `DRAIN_GRACE`
+    /// 之后交回结果，而不是永久挂住。
+    ///
+    /// 造法是让 shell 把自己换成一个「父进程死了它还在写」的形状：子 shell
+    /// 里再起一个 `sleep` 写到 stdout，然后主 shell 被 SIGKILL——孙进程
+    /// 继续持有写端，管道永远等不到 EOF。Unix 上 `kill(-pid)` 通常能把整个
+    /// 进程组带走，所以这条用例会**自然通过**（孙进程也被杀）；它真正钉住的
+    /// 是 `run()` 里有 `DRAIN_GRACE` 这一层兜底，而不是「Unix 上一定挂」。
+    ///
+    /// 判据是**耗时**：`run_plan` 自己的等待上限是 `DEFAULT_TIMEOUT_MS + 5s`，
+    /// 若 drain 没有上限，这里会等到那个上限才报错。所以断言「总耗时
+    /// 明显小于 `DRAIN_GRACE` 加上超时」（留足 CI 抖动的余量）。
+    #[test]
+    fn a_writer_that_outlives_the_kill_cannot_hang_the_drain_loop() {
+        let ws = workspace();
+        let started = std::time::Instant::now();
+        let out = run_plan(
+            ws.path(),
+            serde_json::json!({
+                // 孙进程（`sleep`）继承 stdout 写端；主 shell 会先被我们杀掉。
+                "command": "/bin/sh",
+                "args": ["-c", "sleep 30 & sleep 30"],
+                "timeout_ms": 300,
+            }),
+        )
+        .expect("run must return, not hang");
+        let elapsed = started.elapsed();
+        assert!(out["timed_out"].as_bool().expect("timed_out"), "{out}");
+        // 300 ms 超时 + 最多 2 s drain + 宽裕的 CI 抖动。超过这个数就说明
+        // drain 循环没有被 `DRAIN_GRACE` 截住。
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "收尾必须在上限内放弃，实际耗时 {elapsed:?}——drain 循环挂住了？"
+        );
     }
 
     #[test]

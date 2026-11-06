@@ -242,7 +242,14 @@ pub(crate) mod testutil {
 }
 
 // `mod.rs` 的测试直接构造 `UnixPty`、调 `libc::open` / `pipe2`，
-// 是 Unix 专属的；Windows 侧的 PTY 用例在 `windows.rs` 里另写（需要真 ConPTY）。
+// 是 Unix 专属的；`windows.rs` 里另有一组 Windows 专属用例（需要真 ConPTY，
+// 由 `test-desktop` 的 windows runner 跑）。
+//
+// **两侧覆盖面不对等，如实记在这里**：Unix 这边测的是「`stty` 报的尺寸、
+// 回显、EOF、读取被关闭的 PTY」等细粒度语义；Windows 那边测的是「能起
+// ConPTY 并读到输出、close 之后拒绝再用、resize 后尺寸回读、dup 出来的是
+// 独立句柄、0 尺寸被夹到 1」——**没有**逐条对齐 Unix 的语义断言（ConPTY 的
+// 回显时序与 `stty` 都不存在对应物）。差距记在里程碑报告的「遗留风险」里。
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

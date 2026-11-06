@@ -88,6 +88,21 @@ fn raw(h: &OwnedHandle) -> HANDLE {
     h.as_raw_handle() as HANDLE
 }
 
+/// 零阻塞地判「这根管道现在能不能读」——`ReadFile` 之前的必要一步。
+///
+/// Windows 的匿名管道**没有非阻塞模式**：`ReadFile` 在没数据时会阻塞到有数据
+/// 或写端关闭。而 Unix 侧读端带 `O_NONBLOCK`，`read` 立刻返回 `EAGAIN`。
+/// 这个函数就是那个 `O_NONBLOCK` 的等价物：`WaitForSingleObject(handle, 0)`
+/// 返回 `WAIT_OBJECT_0` 才说明「现在读一定不会阻塞」。
+///
+/// `WAIT_TIMEOUT` = 现在没数据。`WAIT_FAILED`（句柄坏了）也返回 `false`：
+/// 让调用方跳过它，下一轮 `any_open()` 会发现这根管子还在，再由真正需要
+/// 报错的地方处理——不在这里猜。
+fn wait_handle_readable(handle: HANDLE, timeout_ms: u32) -> bool {
+    let rc = unsafe { WaitForSingleObject(handle, timeout_ms) };
+    rc == WAIT_OBJECT_0
+}
+
 /// 建一根管道，**只有写端可继承**，返回 `(读端, 写端)`。
 ///
 /// ## 为什么写端可继承、读端不可继承
@@ -178,16 +193,21 @@ impl Child {
         si.hStdError = raw(&err_w);
 
         let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-        // 三个 `Vec<u16>` 只是为了取 `*mut` 指针，`CreateProcessW` 不写它们；
-        // 但 `as_mut_ptr` 需要 `mut` 绑定，所以这里留 `mut`。
-        let command_line_w = &prepared.command_line;
+        // `lpCommandLine` **是可写参数**：MSDN 原文「the function can modify the
+        // contents of this string」，典型行为是就地改掉第一个 token 来生成
+        // `argv[0]`。`prepared.command_line` 是共享的 `&Vec<u16>`，把它的
+        // `as_ptr()` 转成 `*mut` 交出去，等于允许内核往只读内存里写——即使
+        // 当前实现不写，那也是把一个未定义行为留给「哪天它开始写」。
+        // 所以拷贝一份**可写**缓冲：多一次约 1 KiB 的拷贝，换掉这条 UB。
+        let mut command_line_w = prepared.command_line.clone();
+        // `lpEnvironment` 与 `lpCurrentDirectory` 只读，借用即可。
         let dir_w = prepared.cwd.as_deref();
         let env_block_w = &prepared.env;
 
         let ok = unsafe {
             CreateProcessW(
                 ptr::null(), // 留给命令行解析：这样能按 PATH 找到程序
-                command_line_w.as_ptr() as *mut u16,
+                command_line_w.as_mut_ptr(),
                 ptr::null_mut(),
                 ptr::null_mut(),
                 // **必须 TRUE**：子进程靠句柄继承拿到 `si` 里的三个标准句柄。
@@ -201,16 +221,27 @@ impl Child {
                 &mut pi,
             )
         };
+        // **先取错误码，再 drop 句柄**：`CreateProcessW` 之后我们还要做三次
+        // `CloseHandle`（两个写端 + stdin 读端），而 `CloseHandle` 会改写
+        // `LastError`。等三次 drop 完再读，拿到的就不是 `CreateProcessW` 的
+        // 失败原因了——典型症状是「程序不存在」时报告 `(6) ERROR_INVALID_HANDLE`
+        // 而不是 `(2) 系统找不到指定的文件`，用户完全看不懂。
+        let create_err = if ok == 0 {
+            Some(std::io::Error::last_os_error())
+        } else {
+            None
+        };
         // 写端与 stdin 读端在我们这边必须立刻关掉：
-        // - 写端留着，读端就永远等不到 EOF（「所有写端都关上」才 EOF）；
-        // - stdin 读端留着，子进程那边的写端就不会…… 其实反过来，读端留着
-        //   只是多一个句柄，但一并关掉更干脆。
+        // - **写端**：管道读端「所有写端都关上」才 EOF。父进程若留一份，
+        //   子进程退出后读端照样等不到 EOF，`run()` 会挂到超时。
+        // - **stdin 读端**：它只被用了一次（填进 `si.hStdInput`），
+        //   `CreateProcessW` 返回时子进程的句柄复制已经完成，留着只是白占
+        //   一个句柄。EOF 是前面 `drop(in_w)` 造成的，与这里无关。
         drop(out_w);
         drop(err_w);
         drop(in_r);
 
-        if ok == 0 {
-            let err = std::io::Error::last_os_error();
+        if let Some(err) = create_err {
             let cmd = String::from_utf16_lossy(&prepared.command_line);
             return Err(ConnectorError::Failed {
                 op: OP_RUN.to_string(),
@@ -273,13 +304,27 @@ impl Child {
     /// 与 Unix 侧同约定：读到 EOF（`ERROR_BROKEN_PIPE`）就把那根置 `None`，
     /// 别的错误则摘掉——留着它会让主循环每轮立刻失败又立刻重试（热循环）。
     pub(super) fn read_into(&mut self, out: &mut Collector) -> bool {
-        let mut buf = vec![0u8; super::exec::READ_CHUNK];
         let mut got_any = false;
         for stream in 0..self.pipes.len() {
             let Some(handle) = self.pipes.get(stream).and_then(Option::as_ref) else {
                 continue;
             };
+            // **先确认这根管道真的可读，再 `ReadFile`**。Windows 的匿名管道没有
+            // 非阻塞模式：直接 `ReadFile` 会在没数据时**一直等下去**。Unix 侧的
+            // 读端是 `O_NONBLOCK`，`read` 没数据立刻返回 `EAGAIN`——这一层
+            // 等价物只能在这里补。
+            //
+            // 这不只是「性能」：`run()` 的收尾 drain 循环（`while child.any_open()
+            // && child.read_into(…)`）在没有数据可读时会直接卡在这句 `ReadFile`
+            // 上，而它外面那个 `DRAIN_GRACE` 判据**根本没机会执行**。症状是
+            // 「超时之后面板永久转圈」，而 `run()` 占着 `afcli-exec` 线程。
+            // 零超时 `WaitForSingleObject` 顺带把事情做对了：返回
+            // 「不可读」时就跳过，让上层去判 `any_open()`。
+            if !wait_handle_readable(raw(handle), 0) {
+                continue;
+            }
             let mut got: u32 = 0;
+            let mut buf = vec![0u8; super::exec::READ_CHUNK];
             let ok = unsafe {
                 ReadFile(
                     raw(handle),
@@ -296,9 +341,22 @@ impl Child {
                 }
                 continue;
             }
-            let err = std::io::Error::last_os_error();
-            if ok == 0 && err.raw_os_error() != Some(ERROR_BROKEN_PIPE as i32) {
-                tracing::warn!(stream, error = %err, "pipe read failed; dropping it");
+            // 走到这里只有两种情形：`ReadFile` 失败（`ok == 0`），或成功但
+            // 一个字节都没有（`got == 0`，对端已关）。**只有前者**的
+            // `last_os_error()` 有意义——后者读它拿到的是上一轮残留的值，
+            // 可能恰好等于 `BROKEN_PIPE` 而把一条该打的日志吞掉。所以判据
+            // 先看 `ok`，再看 errno。
+            if ok == 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() != Some(ERROR_BROKEN_PIPE as i32) {
+                    // 字节模式的匿名管道上，`BROKEN_PIPE` 之外基本都是
+                    // 「这根管子坏了」。**摘掉而不重试**：Unix 侧的
+                    // `errno_is_retryable`（EAGAIN/EINTR 继续）在这里没有
+                    // 对应物——`ReadFile` 在 `WaitForMultipleObjects` 说可读
+                    // 之后不会返回 EAGAIN，而 EINTR 也不是 Win32 的概念。
+                    // 差别如实写在 `docs/DEVELOPMENT.md` 的行为差异一节。
+                    tracing::warn!(stream, error = %err, "pipe read failed; dropping it");
+                }
             }
             // 成功但 0 字节 = 对端关了；`BROKEN_PIPE` 也是。都算 EOF。
             if let Some(slot) = self.pipes.get_mut(stream) {
@@ -328,5 +386,161 @@ impl Child {
             // 给 137。只有 > i32::MAX 的码会变负，而那不是任何正常程序的退出码。
             code as i32
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Windows 侧的命令执行用例：**只能在 Windows 上跑**
+// ---------------------------------------------------------------------------
+//
+// `exec.rs` 的 `mod tests` 整块被 `#[cfg(all(test, unix))]` 挡着（它们全是
+// `/bin/sh`、`exit 127`、`/bin/pwd` 这类 POSIX 断言），所以在 `test-desktop`
+// 的 windows runner 上，这条后端**曾经只有编译验证**。这个模块补的就是它。
+//
+// 断言只用 `cmd.exe` 的内建命令（`echo`、`exit`），不依赖任何外部程序，
+// 也不会因为 Windows 版本的输出编码差异而变红（`echo` 的 ASCII 输出在
+// ConPTY 与匿名管道上都是原样的）。
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use crate::connector::exec::{run, Outcome};
+    use std::time::Duration;
+
+    fn plan(command: &str, args: &[&str]) -> Plan {
+        Plan {
+            command: command.to_string(),
+            args: args.iter().map(|a| (*a).to_string()).collect(),
+            cwd: None,
+            timeout: Duration::from_secs(30),
+            max_output: 512 * 1024,
+            env: Vec::new(),
+        }
+    }
+
+    /// `run` 返回的 `Outcome` 里取 stdout。字段名与 `exec.rs` 同形。
+    fn stdout_of(out: &Outcome) -> String {
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// 端到端：跑 `cmd /c echo MARKER`，stdout 必须拿到 MARKER，退出码 0。
+    ///
+    /// **这条是句柄继承模型的判据**。`bInheritHandles = FALSE` 时子进程拿不到
+    /// 写端，父进程 `drop(out_w)` 之后读端立刻 EOF——stdout 会是空的。反过来
+    /// 若读端没被 `SetHandleInformation` 改成不可继承，子进程握着读端就会让
+    /// 「所有写端关闭」永远不成立，这条会挂到超时。两种错法都在这条上现形。
+    #[test]
+    fn a_command_produces_its_stdout() {
+        let p = plan("cmd.exe", &["/c", "echo EXEC-MARKER"]);
+        let prepared = prepare(&p).expect("prepare");
+        let out = run(&p, &prepared).expect("run");
+        assert_eq!(out.exit_code, 0, "cmd /c echo 必须正常退出");
+        assert!(
+            stdout_of(&out).contains("EXEC-MARKER"),
+            "stdout 必须拿到子进程的输出（句柄继承错了？），实际：{:?}",
+            stdout_of(&out)
+        );
+        assert!(!out.timed_out, "不该超时");
+        assert!(!out.truncated, "这么点输出不该被截断");
+    }
+
+    /// stderr 与 stdout 走两根不同的管道，不会串。
+    #[test]
+    fn stderr_stays_on_its_own_pipe() {
+        let p = plan("cmd.exe", &["/c", "echo OUT-ONE & echo ERR-ONE 1>&2"]);
+        let prepared = prepare(&p).expect("prepare");
+        let out = run(&p, &prepared).expect("run");
+        let so = stdout_of(&out);
+        let se = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(so.contains("OUT-ONE"), "stdout 里必须有 OUT-ONE：{so:?}");
+        assert!(se.contains("ERR-ONE"), "stderr 里必须有 ERR-ONE：{se:?}");
+        assert!(
+            !so.contains("ERR-ONE"),
+            "stderr 的内容不能跑到 stdout：{so:?}"
+        );
+    }
+
+    /// 非零退出码原样穿过（`exit 7` → 7）。
+    #[test]
+    fn the_exit_code_comes_through() {
+        let p = plan("cmd.exe", &["/c", "exit 7"]);
+        let prepared = prepare(&p).expect("prepare");
+        let out = run(&p, &prepared).expect("run");
+        assert_eq!(out.exit_code, 7, "exit 7 必须报 7");
+    }
+
+    /// **超时必须报 `timed_out` 且退出码是 137**（`EXIT_KILLED`）。
+    ///
+    /// 这是跨平台约定：Unix 侧靠 `128 + SIGKILL`，Windows 侧靠
+    /// `TerminateProcess(handle, EXIT_KILLED)` 自己给那个码。两平台读同一个
+    /// 数这件事由 `exec.rs` 的 `EXIT_KILLED` 常量保证，这条用例是它的行为
+    /// 判据——也是「超时路径真的把进程杀掉并回收了」的判据（若 `kill` 没
+    /// 生效，`wait()` 会 `INFINITE` 挂住，这条测试会卡死而不是红）。
+    #[test]
+    fn a_timeout_kills_the_child_and_reports_137() {
+        // `ping -n 30 127.0.0.1` 会真睡约 30 秒（`-n` 是次数，不是秒数，
+        // 所以这里足够长），足够被 300 ms 的超时打断。
+        let mut p = plan("cmd.exe", &["/c", "ping -n 30 127.0.0.1 >nul"]);
+        p.timeout = Duration::from_millis(300);
+        let prepared = prepare(&p).expect("prepare");
+        let out = run(&p, &prepared).expect("run");
+        assert!(out.timed_out, "必须报超时");
+        assert_eq!(
+            out.exit_code, EXIT_KILLED,
+            "超时被杀必须报 {EXIT_KILLED}（与 Unix 的 128+9 对齐）"
+        );
+    }
+
+    /// 程序不存在时**当场**报错，错误文案里带 `CreateProcessW` 的真实原因。
+    ///
+    /// 判据是错误码不是 `ERROR_INVALID_HANDLE`（6）：那说明我们在三次
+    /// `CloseHandle` 之后才读 `last_os_error()`，读到的已经是别人的错误。
+    /// 正确实现读到的是 `ERROR_FILE_NOT_FOUND`（2）。
+    #[test]
+    fn a_missing_program_reports_file_not_found_not_a_stale_error() {
+        let p = plan("definitely-not-here-afcli-test.exe", &[]);
+        let prepared = prepare(&p).expect("prepare should not fail on a missing program");
+        let err = run(&p, &prepared).expect_err("must fail");
+        let text = err.to_string();
+        assert!(
+            text.contains("CreateProcessW failed"),
+            "错误必须说清是哪一步：{text}"
+        );
+        // 2 = ERROR_FILE_NOT_FOUND，6 = ERROR_INVALID_HANDLE（陈旧 errno 的症状）。
+        assert!(
+            text.contains("(2)") || text.contains("os error 2"),
+            "必须是「找不到文件」而不是陈旧的句柄错误：{text}"
+        );
+    }
+
+    /// **stdin 是空的**：子进程一读就拿到 EOF，不会把面板挂住。
+    ///
+    /// `hStdInput` 接的是一根「写端已在我们这边关掉」的管道，所以
+    /// `more` / `set /p` 这类要读输入的命令会立刻返回而不是等下去。
+    /// 若 `hStdInput` 继承了我们自己的控制台，这条会挂到超时。
+    #[test]
+    fn stdin_is_empty_so_reading_commands_do_not_hang() {
+        let mut p = plan("cmd.exe", &["/c", "set /p X=& echo AFTER-EOF"]);
+        p.timeout = Duration::from_secs(10);
+        let prepared = prepare(&p).expect("prepare");
+        let out = run(&p, &prepared).expect("run");
+        assert!(!out.timed_out, "读 stdin 的命令不该挂住");
+        assert!(
+            stdout_of(&out).contains("AFTER-EOF"),
+            "读完 EOF 之后必须继续跑：{:?}",
+            stdout_of(&out)
+        );
+    }
+
+    /// 参数里的空格与引号被正确带到子进程（引号规则的端到端判据）。
+    #[test]
+    fn arguments_with_spaces_survive_the_command_line() {
+        let p = plan("cmd.exe", &["/c", "echo", "a b"]);
+        let prepared = prepare(&p).expect("prepare");
+        let out = run(&p, &prepared).expect("run");
+        assert!(
+            stdout_of(&out).contains("a b"),
+            "带空格的参数必须原样到达：{:?}",
+            stdout_of(&out)
+        );
     }
 }

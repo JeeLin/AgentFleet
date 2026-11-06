@@ -503,7 +503,27 @@ impl Default for Terminal {
 /// 真 PTY 的行为（提示符会自己出来、命令的输出会自己回来、resize 落到
 /// 内核上、子进程退了会被认出来）。**判据是真读内核的答案**，不是
 /// 「我们自己记住了一个变量」。
-#[cfg(test)]
+///
+/// ## 为什么整块 `cfg(all(test, unix))`
+///
+/// 这个模块里的每一条用例都通过 `Pty::spawn("/bin/sh")` 起一个**真的
+/// `/bin/sh`**，命令用 `echo` / `stty`，`cwd` 写死 `/tmp`，断言的是
+/// 「字符被 PTY 回显」「`stty size` 读回新尺寸」这类**POSIX 终端语义**。
+/// Windows 上这些前提一条都不成立：没有 `/bin/sh`、没有 `/tmp`、ConPTY 的
+/// 回显时序也不一样。不挡的话，`test-desktop` 的 windows runner 会在
+/// `spawn_in` 的 `ERROR_FILE_NOT_FOUND` 上直接 panic——那不是「发现了一个
+/// bug」，而是一条本来就跑不了的用例把 CI 染红，把真正该看到的红盖掉。
+///
+/// **代价要说清**：Windows 的 PTY 行为因此在 CI 上没有行为验证，只有
+/// `cargo check --target x86_64-pc-windows-msvc` 的编译验证。这是本里程碑
+/// 已知的验证缺口，记在 `docs/DEVELOPMENT.md` 的「已知行为差异」一节和
+/// 里程碑报告的「遗留风险」里，不假装它不存在。
+// `clippy.toml` 的 `allow-expect-in-tests` 只覆盖 `#[test]` 函数体与
+// `#[cfg(test)] mod`；这里多了 `unix` 条件，模块内**非 `#[test]` 的 helper
+// 函数**（如 `run_to_completion`）不再落在它的边界里，需在这里补齐。
+// 作用范围只到这个测试模块，生产代码仍由 workspace lint 表 deny。
+#[cfg(all(test, unix))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::connector::names;

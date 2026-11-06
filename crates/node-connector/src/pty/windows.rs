@@ -186,8 +186,14 @@ pub(super) fn spawn(
     unsafe {
         InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut attrs_size);
     }
-    let mut attrs_buf = vec![0u8; attrs_size];
-    let attrs = attrs_buf.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
+    // **缓冲区必须按指针边界对齐**（MSDN：`InitializeProcThreadAttributeList`
+    // 的缓冲区 "must be aligned on a pointer boundary"）。`Vec<u8>` 只保证
+    // 1 字节对齐——实践中 malloc 往往恰好给 16 字节，于是这个错在 x86_64 上
+    // 通常不显形，但它仍是 UB（ARM64 上有对齐要求的访问会直接出问题）。
+    // 用 `Vec<u64>` 分配：元素对齐 8，x86_64 / aarch64 的指针边界都满足。
+    let words = attrs_size.div_ceil(std::mem::size_of::<u64>());
+    let mut attrs_buf = vec![0u64; words];
+    let attrs = attrs_buf.as_mut_ptr().cast::<core::ffi::c_void>() as LPPROC_THREAD_ATTRIBUTE_LIST;
     let ok = unsafe { InitializeProcThreadAttributeList(attrs, 1, 0, &mut attrs_size) };
     if ok == 0 {
         unsafe { ClosePseudoConsole(conpty) };
@@ -273,6 +279,10 @@ pub(super) fn spawn(
 
 /// 改尺寸：`ResizePseudoConsole`。
 pub(super) fn resize(pty: &mut WindowsPty, size: Size) -> Result<(), PtyError> {
+    // `close()` 之后 ConPTY 已被 `ClosePseudoConsole` 释放，`conpty` 只是
+    // 归零的整数——再传给 `ResizePseudoConsole` 就是拿一个无效句柄去调内核。
+    // Unix 侧对应的是 `master.take()` 之后 `master_side()?` 返回 `Closed`。
+    check_open(pty)?;
     let cols = size.cols.max(1);
     let rows = size.rows.max(1);
     let hr = unsafe {
@@ -285,11 +295,26 @@ pub(super) fn resize(pty: &mut WindowsPty, size: Size) -> Result<(), PtyError> {
         )
     };
     if hr != S_OK {
-        return Err(PtyError::Start(format!(
+        // 这里是 **spawn 之后**的调用，按文件头的判据该归 `Io` 而不是
+        // `Start`：终端明明开着（或刚被关掉），说「开不起来」是错的。
+        return Err(PtyError::Io(std::io::Error::other(format!(
             "ResizePseudoConsole failed: HRESULT 0x{hr:08X}"
-        )));
+        ))));
     }
     pty.size = Size { cols, rows };
+    Ok(())
+}
+
+/// 已关闭的 PTY 不许再用。与 Unix 的 `master_side()?` 同一个判据。
+///
+/// 为什么需要它：`close_conpty` 只把 `conpty` 归零，`input`/`output` 两根管道
+/// 句柄仍在结构体里——`read`/`write` 不查这一下，就会在 `ClosePseudoConsole`
+/// 之后继续对那两根管道读写。此时 `Terminal::is_open()` 若只看「`pty` 是
+/// 不是 `Some`」还会返回 `true`，于是上层以为终端还活着。
+fn check_open(pty: &WindowsPty) -> Result<(), PtyError> {
+    if pty.conpty == NO_CONPTY {
+        return Err(PtyError::Closed);
+    }
     Ok(())
 }
 
@@ -317,18 +342,33 @@ pub(super) fn dup_output(pty: &WindowsPty) -> Result<OwnedHandle, PtyError> {
 /// 写输入。与 Unix 的 `write` 同语义：写不进去 = 终端没了。
 pub(super) fn write(pty: &WindowsPty, bytes: &[u8]) -> Result<(), PtyError> {
     use windows_sys::Win32::Storage::FileSystem::WriteFile;
-    let mut written: u32 = 0;
-    let ok = unsafe {
-        WriteFile(
-            pty.input.as_raw_handle() as HANDLE,
-            bytes.as_ptr(),
-            bytes.len() as u32,
-            &mut written,
-            ptr::null_mut(),
-        )
-    };
-    if ok == 0 {
-        return Err(PtyError::Io(std::io::Error::last_os_error()));
+    check_open(pty)?;
+    // **必须循环**：`WriteFile` 对管道会短写（管道缓冲不够时只写进去一部分，
+    // 返回 `TRUE` + 一个小于请求长度的 `written`）。只看 `ok` 就返回 `Ok(())`
+    // 会把剩下的字节静默丢掉——用户看到的是「粘贴一长段东西只进去一半」。
+    // Unix 侧的 `write` 有同样的 `while off < len` 循环。
+    let handle = pty.input.as_raw_handle() as HANDLE;
+    let mut off = 0usize;
+    while off < bytes.len() {
+        let rest = bytes.get(off..).unwrap_or(&[]);
+        let mut written: u32 = 0;
+        let ok = unsafe {
+            WriteFile(
+                handle,
+                rest.as_ptr(),
+                rest.len() as u32,
+                &mut written,
+                ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(PtyError::Io(std::io::Error::last_os_error()));
+        }
+        if written == 0 {
+            // 成功但一个字节都没写进去：再转一圈就是死循环。
+            return Err(PtyError::Io(std::io::ErrorKind::WriteZero.into()));
+        }
+        off += written as usize;
     }
     Ok(())
 }
@@ -340,6 +380,7 @@ pub(super) fn write(pty: &WindowsPty, bytes: &[u8]) -> Result<(), PtyError> {
 /// 漂移一次，而漂移的那次就是用户每敲一次 `exit` 都看到一句 IO 错误。
 /// Unix 侧的 `read()` 同样只是 `read_handle(self.master_side()?, buf)`。
 pub(super) fn read(pty: &WindowsPty, buf: &mut [u8]) -> Result<usize, PtyError> {
+    check_open(pty)?;
     read_handle(pty.output.as_raw_handle(), buf)
 }
 
@@ -429,9 +470,17 @@ impl Drop for Pty {
 /// `ERROR_BROKEN_PIPE`。认错一次就会让用户每敲一次 `exit` 都看到一句
 /// IO 错误，所以两条路必须共用这同一份判断。
 ///
+/// **`ERROR_PIPE_NOT_CONNECTED` 也算 EOF。** 匿名管道上「所有写端关闭」给的是
+/// `ERROR_BROKEN_PIPE`，但当 ConPTY 的写端是在**另一侧被 `ClosePseudoConsole`
+/// 带走**时，读端在部分 Windows 版本上给的是 `ERROR_PIPE_NOT_CONNECTED`（233）。
+/// 把「对端关了」判成 `IO` 错误的代价恰好就是上面那句注释说的症状。当前环境
+/// 无法实测是哪一个（要真 Windows），所以两个都归到 EOF：`PIPE_NOT_CONNECTED`
+/// 在这种「只剩读端的管道」上本来也不可能是「等一下就有数据」，归到读完了是
+/// 安全的。
+///
 /// **不阻塞**：调用方先用 `wait_readable` 等到可读，那时 `ReadFile` 立刻返回。
 pub(crate) fn read_handle(handle: RawHandle, buf: &mut [u8]) -> Result<usize, PtyError> {
-    use windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE;
+    use windows_sys::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED};
     use windows_sys::Win32::Storage::FileSystem::ReadFile;
     let mut got: u32 = 0;
     let ok = unsafe {
@@ -445,7 +494,11 @@ pub(crate) fn read_handle(handle: RawHandle, buf: &mut [u8]) -> Result<usize, Pt
     };
     if ok == 0 {
         let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
+        if matches!(
+            err.raw_os_error(),
+            Some(code)
+                if code == ERROR_BROKEN_PIPE as i32 || code == ERROR_PIPE_NOT_CONNECTED as i32
+        ) {
             return Ok(0);
         }
         return Err(PtyError::Io(err));
@@ -453,8 +506,18 @@ pub(crate) fn read_handle(handle: RawHandle, buf: &mut [u8]) -> Result<usize, Pt
     Ok(got as usize)
 }
 
-/// 等句柄可读，最多 `budget`。**进程句柄也算**：进程退出同样意味着
-/// 「输出到此为止」，让调用方去读一次就能拿到 `BROKEN_PIPE`。
+/// 等**输出读端**可读，最多 `budget`。返回 `true` = 可以让调用方去读一次。
+///
+/// **只等这一根管道句柄**，不包含进程句柄（`WindowsPty` 根本不持有它：
+/// `spawn` 里 `CloseHandle(pi.hProcess)` 之后就只剩 PID）。所以这里等不到
+/// 「进程退出」这个事件，只能等到「有数据可读」或「写端关闭导致 EOF」。
+///
+/// 那 shell 退出了但输出管道还没 EOF 的情况靠什么收场？靠调用方的轮询
+/// 节奏：`terminal.rs` 的读线程传的是 `READ_POLL_INTERVAL`（100 ms），每
+/// 一个预算用尽就回到循环头检查 `stop` 标志与 `Terminal::close()`；而
+/// `Terminal::close()` 会先置 `stop` 再关 PTY，所以这条路径一定能退出。
+/// 与 Unix 侧「`poll` 说可读 → 读 → 0 字节即 EOF」的机制不同，但收场条件
+/// 一致，差异记在 `docs/DEVELOPMENT.md` 的「已知行为差异」一节。
 pub(crate) fn wait_readable(handle: RawHandle, budget: std::time::Duration) -> bool {
     use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
@@ -462,8 +525,152 @@ pub(crate) fn wait_readable(handle: RawHandle, budget: std::time::Duration) -> b
     let ms = u32::try_from(budget.as_millis().min(u32::MAX as u128)).unwrap_or(u32::MAX);
     let rc = unsafe { WaitForSingleObject(handle as HANDLE, ms) };
     // 只有 `WAIT_TIMEOUT` 表示「这段时间里没得读」；其余（`WAIT_OBJECT_0`、
-    // 以及等待本身失败的 `WAIT_FAILED`）都让调用方去读一次再判。用常量而
-    // 不写字面量 `258`：同 crate 的 `exec_windows.rs` 用的是 `WAIT_TIMEOUT`，
-    // 两边写法不同只会让下一个人去查「258 是什么」。
+    // 以及等待本身失败的 `WAIT_FAILED`）都让调用方去读一次再判——读失败会
+    // 得到 `BROKEN_PIPE`（归到读完了）或别的 errno（归到 `PtyError::Io`），
+    // 两条都比在这里猜「句柄坏了吗」准确。用常量而不写字面量 `258`：同
+    // crate 的 `exec_windows.rs` 用的是 `WAIT_TIMEOUT`，两边写法不同只会让
+    // 下一个人去查「258 是什么」。
     rc != WAIT_TIMEOUT
+}
+
+// ---------------------------------------------------------------------------
+// Windows 侧的 PTY 用例：**只能在 Windows 上跑**
+// ---------------------------------------------------------------------------
+//
+// `mod.rs` 的 PTY 用例整块被 `#[cfg(all(test, unix))]` 挡着（它们起真的
+// `/bin/sh`、用 `stty`、断言 POSIX 终端语义），所以在 `test-desktop` 的
+// windows runner 上，PTY 这块**曾经只有编译验证、零行为验证**。这个模块就是
+// 补那一块的：它用 ConPTY 真起一个 `cmd.exe`，验证「能起进程 / 能读到输出 /
+// 能写进去 / resize 之后尺寸读回变了 / close 之后拒绝再用」。
+//
+// 断言刻意选**与具体 shell 无关**的部分（`echo` 的回显内容、退出行为），
+// 避免把用例绑死在某个 Windows 版本的中文/英文提示符上。
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn size() -> Size {
+        Size { cols: 80, rows: 24 }
+    }
+
+    /// 在一个真 ConPTY 里跑 `cmd /c echo MARKER`，把输出读回来。
+    ///
+    /// 这是本文件唯一一条「端到端」用例：它一次证明了**四件事**——
+    /// `CreatePseudoConsole` 建起来了、属性表挂对了、`CreateProcessW` 起得来、
+    /// 而且输出真的从 ConPTY 流回了我们手里。属性表挂错（比如没
+    /// `UpdateProcThreadAttribute`）时子进程会连不上伪终端，输出根本收不到，
+    /// 这条会红在「读到空」上。
+    #[test]
+    fn a_conpty_runs_a_command_and_we_read_its_output() {
+        let mut pty = Pty::spawn(
+            "cmd.exe",
+            &["/c".into(), "echo CONPTY-MARKER".into()],
+            size(),
+        )
+        .expect("spawn a conpty");
+        let mut seen = String::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if !wait_readable(pty.inner.output.as_raw_handle(), Duration::from_millis(100)) {
+                continue;
+            }
+            let mut buf = [0u8; 4096];
+            match pty.read(&mut buf) {
+                Ok(0) => break, // 对端关了：输出已经全拿到
+                Ok(n) => seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+                Err(e) => panic!("read failed after {seen:?}: {e}"),
+            }
+        }
+        assert!(
+            seen.contains("CONPTY-MARKER"),
+            "ConPTY 的输出没流回来（属性表或句柄接错了？），实际读到：{seen:?}"
+        );
+        pty.close();
+    }
+
+    /// `close()` 之后 `read` / `write` / `resize` 必须一律报 `Closed`，
+    /// **不能**拿着已经 `ClosePseudoConsole` 掉的句柄继续调内核。
+    ///
+    /// 这条钉的是 `check_open`。没有它，`conpty` 被归零之后 `ResizePseudoConsole(0, …)`
+    /// 照样会被调下去；而 `read`/`write` 用的两根管道句柄在
+    /// `ClosePseudoConsole` 之后状态是未定义的。`error` 一栏用 `matches!`
+    /// 而不是比较字符串：文案会变，变体不会。
+    #[test]
+    fn a_closed_pty_refuses_read_write_and_resize() {
+        let mut pty = Pty::spawn("cmd.exe", &["/c".into(), "exit".into()], size()).expect("spawn");
+        pty.close();
+        assert!(!pty.is_open(), "close() 之后 is_open() 必须是 false");
+
+        let mut buf = [0u8; 64];
+        assert!(
+            matches!(pty.read(&mut buf), Err(PtyError::Closed)),
+            "close() 之后 read 必须返回 Closed"
+        );
+        assert!(
+            matches!(pty.write(b"x"), Err(PtyError::Closed)),
+            "close() 之后 write 必须返回 Closed"
+        );
+        assert!(
+            matches!(pty.resize(size()), Err(PtyError::Closed)),
+            "close() 之后 resize 必须返回 Closed"
+        );
+    }
+
+    /// `close()` 可以调用多次，`Drop` 再来一次也不炸（`NO_CONPTY` 哨兵挡住
+    /// 双重 `ClosePseudoConsole`）。
+    #[test]
+    fn closing_twice_is_harmless() {
+        let mut pty = Pty::spawn("cmd.exe", &["/c".into(), "exit".into()], size()).expect("spawn");
+        pty.close();
+        pty.close();
+        assert!(!pty.is_open());
+        drop(pty); // Drop 会再走一次 close_conpty
+    }
+
+    /// `resize` 之后 `size()` 读回新值——这是 `ResizePseudoConsole` 真的被
+    /// 调到了的直接证据（`Pty::size()` 读的是我们自己记的那个字段）。
+    #[test]
+    fn resize_updates_the_reported_size() {
+        let mut pty = Pty::spawn("cmd.exe", &["/c".into(), "exit".into()], size()).expect("spawn");
+        assert_eq!(pty.size(), Size { cols: 80, rows: 24 });
+        pty.resize(Size {
+            cols: 120,
+            rows: 40,
+        })
+        .expect("resize an open conpty");
+        assert_eq!(
+            pty.size(),
+            Size {
+                cols: 120,
+                rows: 40
+            }
+        );
+        pty.close();
+    }
+
+    /// `dup_master()` 出来的句柄是**另一份**读端：关掉它不影响原句柄。
+    /// 读线程靠这个前提独占自己的 fd，否则它一退出就把整个终端关了。
+    #[test]
+    fn dup_master_gives_an_independent_handle() {
+        let pty = Pty::spawn("cmd.exe", &["/c".into(), "exit".into()], size()).expect("spawn");
+        let dup = pty.dup_master().expect("dup the output end");
+        drop(dup);
+        // 原句柄仍然可用：拿它读一次不 panic 就是判据（内容不重要，可能已经 EOF）。
+        let mut buf = [0u8; 16];
+        let _ = pty.read(&mut buf);
+    }
+
+    /// 尺寸下限：`0` 会被当成「未设置」，实际按 1 起（与 Unix 侧同一口径）。
+    #[test]
+    fn a_zero_size_is_clamped_to_one() {
+        let mut pty = Pty::spawn(
+            "cmd.exe",
+            &["/c".into(), "exit".into()],
+            Size { cols: 0, rows: 0 },
+        )
+        .expect("spawn with a zero size");
+        assert_eq!(pty.size(), Size { cols: 1, rows: 1 });
+        pty.close();
+    }
 }

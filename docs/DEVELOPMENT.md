@@ -281,6 +281,11 @@ macOS 上 **POSIX 权限位照常生效**（`0o600` / `0o700` 与 Linux 同义�
 | **符号链接** | `symlink` 任意可建 | 需开发者模式或管理员权限 | 生产代码跨平台（走 `symlink_metadata`），但相关**测试**限 Unix——造不出前提 |
 | **FIFO / Unix 域套接字** | 有 | 没有 FIFO；`AF_UNIX` 语义与 `stat`/`open` 的交互不同 | `files.rs` 对应测试限 Unix；生产代码不依赖这两种类型 |
 | **纪元前时间戳** | 可表示（负 `tv_sec`） | NTFS 用 1601 起的计数，**没有「纪元前」这个状态** | 该分支在 Windows 上结构上不可达 |
+| **管道可读性判定** | 读端带 `O_NONBLOCK`，`read` 没数据立刻 `EAGAIN` | **没有非阻塞模式**。`ReadFile` 没数据就阻塞，所以读之前必须先 `WaitForSingleObject(h, 0)` 确认「现在读一定不会阻塞」 | `exec_windows.rs` 的 `wait_handle_readable` + `read_into`。少了这一步，`run()` 的收尾 drain 循环会卡在 `ReadFile` 上，超时之后面板永久转圈 |
+| **杀进程树** | `kill(-pid, SIGKILL)` 带走整个进程组 | `TerminateProcess` **只杀直接子进程**，孙进程（`cmd /c start …`）继续活着并持有管道写端 | 因此 `run()` 的收尾 drain **必须**有 `DRAIN_GRACE` 上限（两平台共用）。捞不到的残留输出会少一截，并留一条 `warn!` 日志——这是「超时后放弃 drain」的唯一线索 |
+| **PTY 输出端的 EOF 错误码** | `EIO` 归到「读完了」 | `ERROR_BROKEN_PIPE`；**部分情形下是 `ERROR_PIPE_NOT_CONNECTED`**（ConPTY 被 `ClosePseudoConsole` 带走时） | `pty/windows.rs` 的 `read_handle` 把两者都归到 EOF。判错的后果是「用户每敲一次 `exit` 都看到一句 IO 错误」 |
+| **PTY 读线程的唤醒** | `poll` 同时监视 fd 的 `POLLIN`/`POLLHUP` | 只 `WaitForSingleObject` 那一根输出读端，**不含进程句柄**（结构体不持有它） | shell 退出但输出管道未 EOF 时，靠 100 ms 轮询回到循环头检查 `stop` 标志收场。收场条件与 Unix 一致，唤醒机制不同 |
+| **测试覆盖不对等** | Unix 侧 15 条 PTY 用例 + 29 条 exec 用例，断言细粒度语义 | Windows 侧另有 6 条 PTY + 7 条 exec 用例，覆盖「能起 ConPTY 并读到输出 / close 后拒绝再用 / resize / 超时 137 / 程序不存在报文件找不到 / stdin 是 EOF / 带空格参数」，但**没有**逐条对齐 Unix 的语义断言 | `pty/windows.rs` / `exec_windows.rs` 的 `mod tests`。差距如实记在里程碑报告的「遗留风险」里，不假装等价 |
 
 **Windows 上目前不做的事**（都是能力缺失，不是缺陷）：
 
