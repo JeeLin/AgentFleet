@@ -20,6 +20,18 @@
 pub mod connector;
 pub mod pty;
 
+/// Windows 命令行拼装（引号 / 环境块 / UTF-16）的**纯逻辑**。
+///
+/// 放在 crate 根而不是 `connector` 里，是因为 `pty/windows.rs` 也要用它：
+/// 若留在 `connector` 下，`pty` 就得反向依赖 `connector`，而依赖方向本来
+/// 是 `connector → pty`（`connector/terminal.rs` 调用 PTY）。两边都向这个
+/// 中立模块依赖，方向才不打架。
+///
+/// `any(windows, test)`：生产上只有 Windows 编译它，但测试要在 Linux 上跑
+/// ——这正是把它抽出来的全部意义（引号规则错了不该只能靠 Windows CI 发现）。
+#[cfg(any(windows, test))]
+pub(crate) mod win_command;
+
 pub use connector::{
     create, registered_count, registered_names, supports, BoxedConnector, Connector,
     ConnectorError, OpenReq, OutFrame,

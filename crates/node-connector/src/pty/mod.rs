@@ -16,12 +16,13 @@
 //!
 //! ## 平台拆分（v0.7.2）
 //!
-//! 本文件是**平台无关的那一半**：`Size` / `PtyError` / `Pty` 类型、
-//! `read` / `write` / `close` / `resize` / `dup_master` 等 fd 操作、
-//! `read_fd`、`default_shell`。真正依赖 libc 的系统调用在：
+//! 本文件只放**两平台同形的那一半**：`Size` / `PtyError` / `Pty` 的类型
+//! 骨架，以及两个平台共用的 `default_shell` 与测试夹具。`Pty` 的
+//! `read` / `write` / `close` / `resize` / `dup_master` 等**方法**、`spawn` /
+//! `spawn_in`、`read_handle`、`wait_readable` 全部按 `cfg` 落进：
 //!
 //! - `unix.rs`：`forkpty` + `execvpe` + `ioctl(TIOCSWINSZ)`（原 `pty.rs` 的实现）；
-//! - （v0.7.2 子任务 4）`windows.rs`：`CreatePseudoConsole` + `ResizePseudoConsole`。
+//! - `windows.rs`：`CreatePseudoConsole` + `ResizePseudoConsole`。
 //!
 //! `spawn` / `spawn_in` 的**签名两平台一致**，所以不需要 trait——这正是
 //! 里程碑「关键设计问题 1」的倾向：同签名、按 `cfg` 分实现，别让
@@ -42,11 +43,11 @@ pub(crate) use unix::{read_handle, wait_readable};
 #[cfg(windows)]
 pub(crate) use windows::{read_handle, wait_readable};
 
-/// 从任意「读端」读至多 `buf.len()` 字节。**返回 0 = 对端关了**。
+/// 一个「读端」的裸值：Unix 是 `RawFd`，Windows 是 `RawHandle`。
 ///
-/// `ReadEnd` 两平台类型不同（fd vs 句柄），所以这里用泛型参数名
-/// `ReadEnd` 在各自的 `read_handle` 里落地；调用方只写
-/// `crate::pty::read_handle(end, &mut buf)`，不出现任何 `cfg`。
+/// 用**类型别名**而不是泛型：两个平台的 `read_handle` 是各自模块里的具体
+/// 函数，签名里写的就是这个别名。于是调用方只写
+/// `crate::pty::read_handle(end, &mut buf)`，正文里不出现任何 `cfg`。
 #[cfg(unix)]
 pub(crate) type ReadEnd = std::os::fd::RawFd;
 #[cfg(windows)]

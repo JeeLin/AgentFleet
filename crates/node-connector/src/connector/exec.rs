@@ -72,6 +72,26 @@ const MAX_OUTPUT_BYTES: usize = 512 * 1024;
 /// 单次读缓冲。管道是块设备，一次 `read` 可能只给几十字节。
 pub(super) const READ_CHUNK: usize = 64 * 1024;
 
+/// 写进 `ConnectorError::Failed.op` 的操作名，**两平台同串**。
+///
+/// 这个字段会直接进用户可见的错误文案（「哪个操作失败了」）。两平台写成
+/// 两个词，就等于同一个失败在 Windows 上换了个说法；而只在一侧写字面量、
+/// 另一侧抄一遍，迟早会有一处被改掉。
+pub(super) const OP_RUN: &str = "run command";
+
+/// 超时杀掉子进程时用的退出码：与 Unix 的 `128 + SIGKILL(9)` 对齐。
+///
+/// **这是跨平台的约定值**，不是 Windows 独有的常量——`exec.rs` 的 Unix 侧
+/// 靠 `128 + WTERMSIG(status)` 自然得到同一个数，两处的对应关系由集成测试
+/// （断言超时 = 137）守着。放在这里而不是塞进 `exec_windows`，是因为它是
+/// 「两个平台读同一个数」这件事的定义处。
+pub(super) const EXIT_KILLED: i32 = 128 + 9;
+
+/// `WAIT_TIMEOUT` 之外还有一个「一直等」的值：`WaitForSingleObject` 的
+/// `INFINITE`。`windows-sys` 没有导出这个宏，只能自己命名，不写字面量。
+#[cfg(windows)]
+pub(super) const INFINITE: u32 = 0xFFFF_FFFF;
+
 /// 采集时用的 `poll` 粒度。它同时是「超时判定」的分辨率。
 const POLL_SLICE_MS: libc::c_int = 50;
 
@@ -480,7 +500,7 @@ fn make_pipes() -> Result<PipeFds, ConnectorError> {
     for p in [&mut out_pipe, &mut err_pipe] {
         if unsafe { pipe_nonblocking_cloexec(p.as_mut_ptr()) } != 0 {
             return Err(ConnectorError::Failed {
-                op: "run command".to_string(),
+                op: OP_RUN.to_string(),
                 detail: format!("pipe2 failed: {}", std::io::Error::last_os_error()),
             });
         }
@@ -657,7 +677,7 @@ impl Child {
         let pid = unsafe { libc::fork() };
         if pid < 0 {
             return Err(ConnectorError::Failed {
-                op: "run command".to_string(),
+                op: OP_RUN.to_string(),
                 detail: format!("fork failed: {}", std::io::Error::last_os_error()),
             });
         }
@@ -812,7 +832,18 @@ impl Child {
         }
         // `WUNTRACED`/`WCONTINUED` 的 waitpid 下才可能返回，而这里两个
         // 标志都没给，所以剩下的唯一分支就是「被信号杀掉」。
-        128 + libc::WTERMSIG(status)
+        //
+        // **`SIGKILL` 时走 [`EXIT_KILLED`]**，不是一个独立的 `128 + 9`：超时
+        // 杀进程这条路上，Windows 那边是自己给 `TerminateProcess` 一个码，
+        // 它读的就是这个常量。两处各写一份 `137` 就只是两个碰巧相等的数，
+        // 改掉其中一个不会有任何报错——这里显式分支，让「同一个数」由代码
+        // 保证，而不是由注释和集成测试间接保证。
+        let sig = libc::WTERMSIG(status);
+        if sig == libc::SIGKILL {
+            EXIT_KILLED
+        } else {
+            128 + sig
+        }
     }
 }
 

@@ -24,7 +24,6 @@ use std::collections::VecDeque;
 
 // 「读端」两平台类型不同：Unix 是 fd，Windows 是句柄。读线程只认
 // `pty::ReadEnd` 这个别名，正文里不出现 `cfg`。
-#[allow(unused_imports)]
 use crate::pty::{read_handle, OwnedReadEnd, ReadEnd};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
 use std::sync::{mpsc, Arc};

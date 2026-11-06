@@ -31,6 +31,22 @@
 //!   `forkpty` 返回值相同（都是直接子进程），但没有进程组概念。
 //!
 //! 这些差异写进 `docs/DEVELOPMENT.md` 的「已知行为差异」一节（子任务 8）。
+//!
+//! ## 错误类型怎么选：`Start` 还是 `Io`
+//!
+//! 本文件里两处都用得到，判据是**失败发生在哪个阶段**：
+//!
+//! - **`spawn` 期间**（建管道、`CreatePseudoConsole`、属性列表、
+//!   `CreateProcessW`）→ `PtyError::Start`，带上「哪一步 + 参数」的描述。
+//!   用户看到的是「终端开不起来」，需要知道是开哪个 shell 时失败的；把
+//!   `last_os_error()` 塞进 `Io` 会让上层只会说「terminal io failed」，丢掉
+//!   是哪个 shell、哪一步。
+//! - **`spawn` 之后**（`read` / `write` / `dup_output`）→ `PtyError::Io`，
+//!   直接带 `std::io::Error`：那时终端已经开着了，出错就是那次 IO 的事，
+//!   不需要再解释上下文。
+//!
+//! 同一个 `std::io::Error` 在两种阶段变成两种变体，是刻意的；`mod.rs` 里
+//! 两个变体的文案也据此分开（`Start` → "cannot start a terminal"）。
 
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::ptr;
@@ -49,12 +65,12 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use super::{Pty, PtyError, Size};
-// 引号拼接 / 环境块 / UTF-16 都是纯逻辑，独立成 `connector::win_command`
-// （平台无关编译 + 本地单测）。这里只留系统调用。
-use crate::connector::win_command::{command_line, environment_block, wide};
-
-/// `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` 是 `UpdateProcThreadAttribute` 的
-/// 属性 id。`windows-sys` 把它定义成宏式的常量，直接用即可。
+// 引号拼接 / 环境块 / UTF-16 都是纯逻辑，独立成 `crate::win_command`
+// （平台无关编译 + Linux 上就能跑的单测）。这里只留系统调用。
+//
+// 它放在 crate 根而不是 `connector` 下：否则 `pty` 会反向依赖 `connector`，
+// 而依赖方向本是 `connector → pty`。
+use crate::win_command::{command_line, environment_block, wide};
 
 /// 一对匿名管道（ConPTY 需要两根：一根喂输入、一根收输出）。
 struct PipePair {
@@ -287,7 +303,9 @@ pub(super) fn dup_output(pty: &WindowsPty) -> Result<OwnedHandle, PtyError> {
             pty.output.as_raw_handle() as HANDLE,
             READ,
             FILE_SHARE_NONE,
-            0, // 与原件同属性
+            // 这个参数**必须为 0**（MSDN 原文 "This parameter must be zero"）：
+            // 它不是「沿用原件的属性」，传非 0 是未定义行为。
+            0,
         )
     };
     if handle.is_null() {
@@ -316,27 +334,13 @@ pub(super) fn write(pty: &WindowsPty, bytes: &[u8]) -> Result<(), PtyError> {
 }
 
 /// 读输出。返回 0 表示「对端关了」（与 Unix 的 `EIO → Ok(0)` 同一口径）。
+///
+/// **委托给 [`read_handle`]，不另写一份**：判据（`ERROR_BROKEN_PIPE` 归到
+/// 「读完了」）只能有一处。抄一份的后果不是「多几行」，而是两处将来必然
+/// 漂移一次，而漂移的那次就是用户每敲一次 `exit` 都看到一句 IO 错误。
+/// Unix 侧的 `read()` 同样只是 `read_handle(self.master_side()?, buf)`。
 pub(super) fn read(pty: &WindowsPty, buf: &mut [u8]) -> Result<usize, PtyError> {
-    use windows_sys::Win32::Storage::FileSystem::ReadFile;
-    let mut got: u32 = 0;
-    let ok = unsafe {
-        ReadFile(
-            pty.output.as_raw_handle() as HANDLE,
-            buf.as_mut_ptr(),
-            buf.len() as u32,
-            &mut got,
-            ptr::null_mut(),
-        )
-    };
-    if ok == 0 {
-        let err = std::io::Error::last_os_error();
-        // `ERROR_BROKEN_PIPE` = 对端关了：这是「读完了」，不是错误。
-        if err.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE as i32) {
-            return Ok(0);
-        }
-        return Err(PtyError::Io(err));
-    }
-    Ok(got as usize)
+    read_handle(pty.output.as_raw_handle(), buf)
 }
 
 // ---------------------------------------------------------------------------
@@ -410,24 +414,6 @@ impl Pty {
     pub fn is_open(&self) -> bool {
         self.inner.conpty != NO_CONPTY
     }
-
-    /// 只需要「在旁边等一下」的调用方（测试的 poll 超时）才用得上这个裸句柄。
-    ///
-    /// 名字不叫 `raw_fd`：Windows 上没有 fd，`RawHandle` 是内核句柄，
-    /// 两者混用会让人以为它能塞进 `libc::poll` 之类的签名里。
-    ///
-    /// **Windows 侧目前没有调用点**：`poll_wait` 与用到它的用例都在
-    /// `testutil`（`#[cfg(all(test, unix))]`）。这里留着是因为 Windows 的
-    /// PTY 用例（需要真 ConPTY、只能在 CI 上跑）要用它来等输出口可读；
-    /// 在那些用例落地之前它由 `#[allow]` 压住，不留一个安静的未用警告。
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn raw_read_handle(&self) -> Result<RawHandle, PtyError> {
-        if self.inner.conpty == NO_CONPTY {
-            return Err(PtyError::Closed);
-        }
-        Ok(self.inner.output.as_raw_handle())
-    }
 }
 
 #[cfg(windows)]
@@ -470,10 +456,14 @@ pub(crate) fn read_handle(handle: RawHandle, buf: &mut [u8]) -> Result<usize, Pt
 /// 等句柄可读，最多 `budget`。**进程句柄也算**：进程退出同样意味着
 /// 「输出到此为止」，让调用方去读一次就能拿到 `BROKEN_PIPE`。
 pub(crate) fn wait_readable(handle: RawHandle, budget: std::time::Duration) -> bool {
+    use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    // `u32::MAX` 就是 `INFINITE`：预算超过约 49.7 天时按「一直等」处理。
     let ms = u32::try_from(budget.as_millis().min(u32::MAX as u128)).unwrap_or(u32::MAX);
     let rc = unsafe { WaitForSingleObject(handle as HANDLE, ms) };
-    // `WAIT_TIMEOUT`（258）是唯一「没得读」的结果；其余（`WAIT_OBJECT_0` 等）
-    // 都让调用方去读。等待失败也返回值让它去读——真错了会由读路径摘掉。
-    rc != 258
+    // 只有 `WAIT_TIMEOUT` 表示「这段时间里没得读」；其余（`WAIT_OBJECT_0`、
+    // 以及等待本身失败的 `WAIT_FAILED`）都让调用方去读一次再判。用常量而
+    // 不写字面量 `258`：同 crate 的 `exec_windows.rs` 用的是 `WAIT_TIMEOUT`，
+    // 两边写法不同只会让下一个人去查「258 是什么」。
+    rc != WAIT_TIMEOUT
 }

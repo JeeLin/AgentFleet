@@ -29,8 +29,6 @@ mod exec_windows;
 pub mod files;
 pub mod git;
 pub mod terminal;
-#[cfg(any(windows, test))]
-pub(crate) mod win_command;
 pub mod worktree;
 
 /// terminal connector 名。**注册表与心跳上报共用这批常量**（约束 14）。
