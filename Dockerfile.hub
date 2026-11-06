@@ -26,13 +26,19 @@
 # 开关**只认确切的 `1`**；这里写死它，用户想收紧就把 `AFHUB_ADDR` 改回
 # `127.0.0.1:8080` 并去掉这个 ENV。
 #
-# ## 两个二进制都拷
+# ## 三个二进制都拷（v0.7.2：新增两份桌面 afcli）
 #
 # Hub 镜像里还放 `afcli`：`docs/DEVELOPMENT.md` §2 的发布蓝图写的形态是
-# Hub 镜像内嵌全部 arch 的 afcli，供「设备从 Hub 拉二进制」这条路用
+# Hub 镜像内嵌**全部平台**的 afcli，供「设备从 Hub 拉二进制」这条路用
 # （节点**不直连 GitHub**，见 `security-and-lifecycle.md` §7.1.4）。
-# 本里程碑只把二进制放到位，**Hub 侧的下载路由尚未实现**（v0.8.0 起做），
-# 这一点在 `DEVELOPMENT.md` 的状态表里如实标注。
+#
+# v0.7.2 之前只有 Linux 的 amd64/arm64 两份，所以「全部 arch」其实只对了一半；
+# 桌面平台移植完成后补上 Windows 与 macOS 两份，这句话才名副其实。
+#
+# 它们落在 `/opt/agentfleet/dist/` 而不是 `/usr/local/bin/`：前者是「给别的机器
+# 下载的载荷」，后者是「本机要执行的命令」。混在一起会让人以为 Hub 会去跑
+# 一个 `.exe`。本里程碑只把二进制放到位，**Hub 侧的下载路由尚未实现**
+# （v0.8.0 起做），这一点在 `DEVELOPMENT.md` 的状态表里如实标注。
 ARG VERSION=dev
 
 # ---------------------------------------------------------------------------
@@ -51,6 +57,12 @@ LABEL org.opencontainers.image.title="AgentFleet Hub" \
 ARG TARGETARCH
 COPY dist/${TARGETARCH}/afhub-linux-${TARGETARCH}-musl /usr/local/bin/afhub
 COPY dist/${TARGETARCH}/afcli-linux-${TARGETARCH}-musl /usr/local/bin/afcli
+
+# 桌面平台的 afcli：**载荷，不是本机命令**，所以放 `/opt/agentfleet/dist/`。
+# 只拷桌面两份、不拷 Linux 的：Linux 那份已经在 `/usr/local/bin/afcli`，
+# 再放一份就是同一个东西的两个副本，而两份副本迟早不一致。
+COPY dist/windows-amd64/afcli-windows-amd64.exe /opt/agentfleet/dist/afcli-windows-amd64.exe
+COPY dist/macos-arm64/afcli-macos-arm64 /opt/agentfleet/dist/afcli-macos-arm64
 
 # 数据目录（SQLite WAL 库、setup token、设备凭据）——必须挂卷，
 # 不挂的话 `docker rm` 一次就把整个 Hub 的身份丢掉，而那里面包含
