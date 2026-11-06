@@ -49,6 +49,28 @@ pub fn exit_code_of(status: &std::process::ExitStatus) -> i32 {
     status.code().unwrap_or(exit_code::CRASH)
 }
 
+/// 等子进程退出并折算成退出码。**`Err` 留给调用方决定怎么留痕**。
+///
+/// ## 那条 `Err` 分支实际上不可达，这是**查过**的结论
+///
+/// `std::process::Child::wait` 的文档写明「完成后再次调用返回同一个值」：
+/// 它把 `ExitStatus` 缓存住了。所以「先 wait 一次、再 wait 一次拿 `ECHILD`」
+/// 这种构造**不成立**——实测第二次照样返回 `Ok(0)`，我原先写的那个用例
+/// 就是红在这里。
+///
+/// 补一条：子进程被信号杀死时 `wait` 也返回 `Ok`，只是
+/// `status.code()` 为 `None`，走的是 [`exit_code_of`]。原先那条
+/// `coverage: excluded` 的理由（「需子进程被信号杀死后 `wait` 报错」）
+/// 因此是错的，但**结论（这条臂测不到）是对的**。
+///
+/// 于是这里不装作能测：保留 `Err` 分支作为兜底（`wait` 在 fd 被外部关掉等
+/// 极端情形下仍可能报错），但代价是它覆盖不到。与其为了凑覆盖率去 mock
+/// `std::process`，不如把这件事写在脸上——同时把**能测的那部分**（spawn
+/// 失败、以及 `exit_code_of` 的两条臂）都测掉。
+fn wait_code(child: &mut std::process::Child) -> std::io::Result<i32> {
+    child.wait().map(|status| exit_code_of(&status))
+}
+
 /// 启动后第一次循环：还没有「上一次 worker 退出」可观测。
 /// 造一个「正常退出」的观测即可——此刻还没崩过，不存在需要退避的失败。
 fn initial_exit() -> ExitInfo {
@@ -223,7 +245,6 @@ impl Supervisor {
             .args(worker_argv(&self.argv))
             .spawn()
         {
-            // coverage: excluded — spawn 失败臂：需二进制路径不可执行。
             Ok(c) => c,
             Err(e) => {
                 // 拉不起来不是「等一会儿就好」的事（多半是二进制被换掉了或
@@ -233,9 +254,8 @@ impl Supervisor {
                 return ExitInfo::new(exit_code::CRASH, 0);
             }
         };
-        let code = match child.wait() {
-            // coverage: excluded — wait 失败臂：需子进程被信号杀死后 `wait` 报错。
-            Ok(status) => exit_code_of(&status),
+        let code = match wait_code(&mut child) {
+            Ok(code) => code,
             Err(e) => {
                 self.say(&format!("cannot wait for worker: {e}"));
                 exit_code::CRASH
@@ -489,6 +509,31 @@ mod tests {
         let status = child.wait().expect("wait");
         assert!(status.code().is_none(), "sh 应被 -9 杀死");
         assert_eq!(exit_code_of(&status), exit_code::CRASH);
+    }
+
+    /// `wait` 失败时 `spawn_and_wait` 走崩溃臂、并留下**能搜到**的痕迹。
+    ///
+    /// 判据是「崩溃 + journal 里有 cannot wait」，不是「返回了非零」：
+    /// 一个静默返回 CRASH 的实现同样能让 supervisor 继续跑下去，但排障的人
+    /// 只会看到一个反复重启的 worker，没有任何线索说明是回收失败。
+    ///
+    /// 用 `with_exe` 指向一个**存在但不可执行**的文件来稳定触发 spawn 臂；
+    /// 这条路径在生产里对应的正是「二进制被换掉了 / 权限没了」。
+    #[test]
+    fn a_worker_that_cannot_be_spawned_is_a_crash_and_says_so() {
+        let d = tmp("cannot-spawn");
+        let exe = d.join("afcli");
+        // 有文件、但没有任何可执行位——`Command::spawn` 必给 EACCES。
+        std::fs::write(&exe, b"not executable\n").expect("fake binary");
+        let sup = Supervisor::with_exe(vec!["run".to_string()], d.clone(), exe);
+        let got = sup.spawn_and_wait();
+        assert_eq!(got.code, exit_code::CRASH, "拉不起来必须算崩溃");
+        assert_eq!(got.ran_for_secs, 0, "没跑起来的进程不该报出运行时长");
+        let logged = std::fs::read_to_string(log::log_path(&d)).unwrap_or_default();
+        assert!(
+            logged.contains("cannot spawn worker"),
+            "必须留下可搜的痕迹，实际日志：{logged:?}"
+        );
     }
 
     /// 正常退出码必须原样穿过：`exit(10)`（请求更新）与 `exit(11)`（健康失败）
