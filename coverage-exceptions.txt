@@ -344,6 +344,28 @@ crates/node-connector/src/connector/terminal.rs:744: `pipe2` 失败需 fd 表耗
 crates/node-connector/src/connector/terminal.rs:745: `pipe2` 失败需 fd 表耗尽。
 crates/node-connector/src/connector/terminal.rs:746: `pipe2` 失败需 fd 表耗尽。
 crates/node-connector/src/connector/terminal.rs:747: `pipe2` 失败需 fd 表耗尽。
+crates/node-connector/src/pty/mod.rs:91: `fcntl(F_DUPFD_CLOEXEC)` 失败需 fd 表耗尽， 测试环境无可控构造手段（防御性兜底）。
+crates/node-connector/src/pty/mod.rs:133: `write(2)` 对一根活着的 PTY 只会返回正数或负 errno
+crates/node-connector/src/pty/mod.rs:140: `n == 0` 臂（`BrokenPipe` + "terminal is gone"）：`write(2)` 对一根活着的 PTY 只会返回正数或负 errno， 返回 0 需要「是终端却一个字节都不收」的稳定时序，测试环境造不出来。
+crates/node-connector/src/pty/mod.rs:141: `n == 0` 臂（`BrokenPipe` + "terminal is gone"）：`write(2)` 对一根活着的 PTY 只会返回正数或负 errno， 返回 0 需要「是终端却一个字节都不收」的稳定时序，测试环境造不出来。
+crates/node-connector/src/pty/mod.rs:142: `n == 0` 臂（`BrokenPipe` + "terminal is gone"）：`write(2)` 对一根活着的 PTY 只会返回正数或负 errno， 返回 0 需要「是终端却一个字节都不收」的稳定时序，测试环境造不出来。
+crates/node-connector/src/pty/mod.rs:143: `n == 0` 臂（`BrokenPipe` + "terminal is gone"）：`write(2)` 对一根活着的 PTY 只会返回正数或负 errno， 返回 0 需要「是终端却一个字节都不收」的稳定时序，测试环境造不出来。
+crates/node-connector/src/pty/mod.rs:279: 下面三个实参只在 `assert!` 失败（panic）时才求值， 而本仓库的测试全部通过，这条 panic 路径永远走不到。
+crates/node-connector/src/pty/mod.rs:280: 下面三个实参只在 `assert!` 失败（panic）时才求值， 而本仓库的测试全部通过，这条 panic 路径永远走不到。
+crates/node-connector/src/pty/mod.rs:281: 下面三个实参只在 `assert!` 失败（panic）时才求值， 而本仓库的测试全部通过，这条 panic 路径永远走不到。
+crates/node-connector/src/pty/unix.rs:113: 下面这一臂（含错误串的 `format!` 参数行）要求 `forkpty` 失败：`/dev/ptmx` 用尽或 fd 耗尽，测试环境无可控构造手段 （防御性兜底）。
+crates/node-connector/src/pty/unix.rs:114: 下面这一臂（含错误串的 `format!` 参数行）要求 `forkpty` 失败：`/dev/ptmx` 用尽或 fd 耗尽，测试环境无可控构造手段 （防御性兜底）。
+crates/node-connector/src/pty/unix.rs:115: 下面这一臂（含错误串的 `format!` 参数行）要求 `forkpty` 失败：`/dev/ptmx` 用尽或 fd 耗尽，测试环境无可控构造手段 （防御性兜底）。
+crates/node-connector/src/pty/unix.rs:116: 下面这一臂（含错误串的 `format!` 参数行）要求 `forkpty` 失败：`/dev/ptmx` 用尽或 fd 耗尽，测试环境无可控构造手段 （防御性兜底）。
+crates/node-connector/src/pty/unix.rs:135: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的 **子进程**，父进程那份 llvm-cov 插桩在 `execvpe` 成功之后就没了， 子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与 `execvpe` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
+crates/node-connector/src/pty/unix.rs:136: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的 **子进程**，父进程那份 llvm-cov 插桩在 `execvpe` 成功之后就没了， 子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与 `execvpe` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
+crates/node-connector/src/pty/unix.rs:137: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的 **子进程**，父进程那份 llvm-cov 插桩在 `execvpe` 成功之后就没了， 子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与 `execvpe` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
+crates/node-connector/src/pty/unix.rs:138: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的 **子进程**，父进程那份 llvm-cov 插桩在 `execvpe` 成功之后就没了， 子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与 `execvpe` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
+crates/node-connector/src/pty/unix.rs:139: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的 **子进程**，父进程那份 llvm-cov 插桩在 `execvpe` 成功之后就没了， 子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与 `execvpe` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
+crates/node-connector/src/pty/unix.rs:143: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的 **子进程**，父进程那份 llvm-cov 插桩在 `execvpe` 成功之后就没了， 子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与 `execvpe` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
+crates/node-connector/src/pty/unix.rs:144: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的 **子进程**，父进程那份 llvm-cov 插桩在 `execvpe` 成功之后就没了， 子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与 `execvpe` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
+crates/node-connector/src/pty/unix.rs:152: master < 0 在 forkpty 返回正 pid 时不可能 （内核要么同时给出两者，要么同时失败），属结构上不可达。
+crates/node-connector/src/pty/unix.rs:202: `ioctl` 失败需要一个「是终端却拒绝改尺寸」的 fd （普通管道 / 普通文件会返回 ENOTTY，但那不是 PTY 路径构造得出来的）， 属防御性兜底。
 crates/node-connector/src/connector/worktree.rs:282: 要走到这里必须有一个读不进去的子目录 （权限被撤 / 目录在遍历中途被删）。这是并发与权限故障， 测试里造不出稳定复现的一刻。
 crates/node-connector/src/connector/worktree.rs:326: `OpenReq::root()` 为 `None` 只在 Hub 没下发 固定目录时发生，而那样它压根不会派活到本连接器。
 crates/node-connector/src/connector/worktree.rs:327: `OpenReq::root()` 为 `None` 只在 Hub 没下发 固定目录时发生，而那样它压根不会派活到本连接器。
@@ -364,28 +386,6 @@ crates/node-connector/src/connector/worktree.rs:431: 同上。
 crates/node-connector/src/connector/worktree.rs:471: 删不掉的其它原因（权限 / 忙）。
 crates/node-connector/src/connector/worktree.rs:484: 删不掉的其它原因（权限 / 忙）。
 crates/node-connector/src/connector/worktree.rs:486: 读不进去（权限 / 忙）。
-crates/node-connector/src/pty.rs:148: 下面这一臂（含错误串的 `format!` 参数行）要求`forkpty` 失败：`/dev/ptmx` 用尽或 fd 耗尽，测试环境无可控构造手段（防御性兜底）。
-crates/node-connector/src/pty.rs:149: 下面这一臂（含错误串的 `format!` 参数行）要求`forkpty` 失败：`/dev/ptmx` 用尽或 fd 耗尽，测试环境无可控构造手段（防御性兜底）。
-crates/node-connector/src/pty.rs:150: 下面这一臂（含错误串的 `format!` 参数行）要求`forkpty` 失败：`/dev/ptmx` 用尽或 fd 耗尽，测试环境无可控构造手段（防御性兜底）。
-crates/node-connector/src/pty.rs:151: 下面这一臂（含错误串的 `format!` 参数行）要求`forkpty` 失败：`/dev/ptmx` 用尽或 fd 耗尽，测试环境无可控构造手段（防御性兜底）。
-crates/node-connector/src/pty.rs:170: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的**子进程**，父进程那份 llvm-cov 插桩在 `execvpe` 成功之后就没了，子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与`execvpe` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
-crates/node-connector/src/pty.rs:171: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的**子进程**，父进程那份 llvm-cov 插桩在 `execvpe` 成功之后就没了，子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与`execvpe` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
-crates/node-connector/src/pty.rs:172: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的**子进程**，父进程那份 llvm-cov 插桩在 `execvpe` 成功之后就没了，子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与`execvpe` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
-crates/node-connector/src/pty.rs:173: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的**子进程**，父进程那份 llvm-cov 插桩在 `execvpe` 成功之后就没了，子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与`execvpe` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
-crates/node-connector/src/pty.rs:174: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的**子进程**，父进程那份 llvm-cov 插桩在 `execvpe` 成功之后就没了，子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与`execvpe` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
-crates/node-connector/src/pty.rs:178: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的**子进程**，父进程那份 llvm-cov 插桩在 `execvpe` 成功之后就没了，子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与`execvpe` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
-crates/node-connector/src/pty.rs:179: 下面整个 `pid == 0` 分支：这是 `forkpty` 之后的**子进程**，父进程那份 llvm-cov 插桩在 `execvpe` 成功之后就没了，子进程里跑过的行永远统计不到；`chdir` 失败后的 `_exit(126)` 与`execvpe` 失败后的 `_exit(127)` 还要额外的系统调用失败才走得到。
-crates/node-connector/src/pty.rs:187: master < 0 在 forkpty 返回正 pid 时不可能（内核要么同时给出两者，要么同时失败），属结构上不可达。
-crates/node-connector/src/pty.rs:216: `fcntl(F_DUPFD_CLOEXEC)` 失败需 fd 表耗尽，测试环境无可控构造手段（防御性兜底）。
-crates/node-connector/src/pty.rs:258: `fcntl(F_DUPFD_CLOEXEC)` 失败需 fd 表耗尽，测试环境无可控构造手段（防御性兜底）。
-crates/node-connector/src/pty.rs:265: `n == 0` 臂（`BrokenPipe` + "terminal isgone"）：`write(2)` 对一根活着的 PTY 只会返回正数或负 errno，返回 0 需要「是终端却一个字节都不收」的稳定时序，测试环境造不出来。
-crates/node-connector/src/pty.rs:266: `n == 0` 臂（`BrokenPipe` + "terminal isgone"）：`write(2)` 对一根活着的 PTY 只会返回正数或负 errno，返回 0 需要「是终端却一个字节都不收」的稳定时序，测试环境造不出来。
-crates/node-connector/src/pty.rs:267: `n == 0` 臂（`BrokenPipe` + "terminal isgone"）：`write(2)` 对一根活着的 PTY 只会返回正数或负 errno，返回 0 需要「是终端却一个字节都不收」的稳定时序，测试环境造不出来。
-crates/node-connector/src/pty.rs:268: `n == 0` 臂（`BrokenPipe` + "terminal isgone"）：`write(2)` 对一根活着的 PTY 只会返回正数或负 errno，返回 0 需要「是终端却一个字节都不收」的稳定时序，测试环境造不出来。
-crates/node-connector/src/pty.rs:351: `ioctl` 失败需要一个「是终端却拒绝改尺寸」的 fd（普通管道 / 普通文件会返回 ENOTTY，但那不是 PTY 路径构造得出来的），属防御性兜底。
-crates/node-connector/src/pty.rs:819: 下面三个实参只在 `assert!` 失败（panic）时才求值，而本仓库的测试全部通过，这条 panic 路径永远走不到。
-crates/node-connector/src/pty.rs:820: 下面三个实参只在 `assert!` 失败（panic）时才求值，而本仓库的测试全部通过，这条 panic 路径永远走不到。
-crates/node-connector/src/pty.rs:821: 下面三个实参只在 `assert!` 失败（panic）时才求值，而本仓库的测试全部通过，这条 panic 路径永远走不到。
 crates/node-core/src/agent/acp.rs:226: 要构造「子进程无视 stdin 关闭还活过 5 s」的 agent；那需要一条真的不肯退出的进程，而单测里能起 的假 agent 都是读到 EOF 就退。这是防御性兜底，不是业务分支。
 crates/node-core/src/agent/acp.rs:254: 要构造「子进程无视 stdin 关闭还活过 5 s」的 agent；那需要一条真的不肯退出的进程，而单测里能起 的假 agent 都是读到 EOF 就退。这是防御性兜底，不是业务分支。
 crates/node-core/src/agent/acp.rs:255: 要构造「子进程无视 stdin 关闭还活过 5 s」的 agent；那需要一条真的不肯退出的进程，而单测里能起 的假 agent 都是读到 EOF 就退。这是防御性兜底，不是业务分支。
