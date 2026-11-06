@@ -596,8 +596,17 @@ mod tests {
     #[test]
     fn read_until_returns_when_the_read_itself_fails() {
         let mut fds = [-1 as RawFd; 2];
-        // coverage: excluded — `pipe2` 失败需 fd 表耗尽。
-        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        // **`pipe` + `fcntl(FD_CLOEXEC)`，不直调 `pipe2`**：`pipe2` 是 Linux
+        // 扩展，macOS 上没有这个符号，而本模块的 `#[cfg(all(test, unix))]`
+        // 在 macOS 上为真。
+        // coverage: excluded — `pipe` 失败需 fd 表耗尽。
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        for fd in fds {
+            assert_eq!(
+                unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                0
+            );
+        }
         let broken = Pty {
             inner: super::unix::UnixPty {
                 master: Some(unsafe { OwnedFd::from_raw_fd(fds[1]) }),

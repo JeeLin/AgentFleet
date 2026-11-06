@@ -850,8 +850,17 @@ mod tests {
     #[test]
     fn the_reader_thread_returns_immediately_when_stop_is_already_set() {
         let mut fds = [-1 as std::os::fd::RawFd; 2];
-        // coverage: excluded — `pipe2` 失败需 fd 表耗尽。
-        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        // **`pipe` + `fcntl(FD_CLOEXEC)`，不直调 `pipe2`**：`pipe2` 是 Linux
+        // 扩展，macOS 上没有这个符号。这条用例的 `#[cfg(unix)]` 在 macOS 上
+        // 为真，直调会让 macOS 的 `--all-targets` 编不过。
+        // coverage: excluded — `pipe` 失败需 fd 表耗尽。
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        for fd in fds {
+            assert_eq!(
+                unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                0
+            );
+        }
         let read_end =
             unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fds[0]) };
         // 写端留着不关：这样这一侧永远等不到 EOF，读线程若不是被 stop

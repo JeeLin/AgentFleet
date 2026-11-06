@@ -399,8 +399,15 @@ unsafe fn macos_aware_execvpe(
         let Some(eq) = bytes.iter().position(|b| *b == b'=') else {
             continue;
         };
-        let key = CString::new(&bytes[..eq]).unwrap_or_default();
-        let value = CString::new(&bytes[eq + 1..]).unwrap_or_default();
+        // 用 `get(..)` 而不是 `&bytes[..eq]`：`iter().position` 保证 `eq < len`，
+        // 所以切片本来不会 panic，但 workspace 的 `indexing_slicing` 是 deny
+        // （见根 `Cargo.toml` 的理由：索引越界 panic 一律改成 `get()` + 分支）。
+        // `unwrap_or_default()` 在这里是**不可达兜底**，不是"忽略错误"。
+        let (Some(key_part), Some(value_part)) = (bytes.get(..eq), bytes.get(eq + 1..)) else {
+            continue;
+        };
+        let key = CString::new(key_part).unwrap_or_default();
+        let value = CString::new(value_part).unwrap_or_default();
         libc::setenv(key.as_ptr(), value.as_ptr(), 1);
     }
     libc::execvp(program, argv);

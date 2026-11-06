@@ -1419,16 +1419,17 @@ mod tests {
     }
 
     /// 反过来：`EAGAIN` 那种「再来一轮就有」的失败不许摘管道。
-    // 靠 `pipe2(O_NONBLOCK)` 造 `EAGAIN`——Windows 的匿名管道没有非阻塞模式。
+    // 靠 `O_NONBLOCK` 的管道造 `EAGAIN`——Windows 的匿名管道没有非阻塞模式。
+    // **用 `pipe_nonblocking_cloexec` 而不是直调 `pipe2`**：`pipe2` 是 Linux
+    // 扩展，macOS 上没有这个符号（本里程碑子任务 3 首次真编 `aarch64-apple-darwin`
+    // 时报过 `cannot find function pipe2`）。而这条用例上的 `#[cfg(unix)]` 在
+    // macOS 上为真——直调就让 macOS 的 `--all-targets` 编不过。
     #[cfg(unix)]
     #[test]
     fn a_retryable_read_error_keeps_the_pipe() {
         let mut fds = [-1 as RawFd; 2];
-        // coverage: excluded — `pipe2` 失败需 fd 表耗尽。
-        assert_eq!(
-            unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) },
-            0
-        );
+        // coverage: excluded — `pipe` 失败需 fd 表耗尽。
+        assert_eq!(unsafe { pipe_nonblocking_cloexec(fds.as_mut_ptr()) }, 0);
         // **写端必须活着交出去**：留在本函数里被 `OwnedFd` 关掉的话，
         // 读端立刻 EOF（`n == 0`），量的就不是 `EAGAIN` 那条路了。
         let writer = unsafe { OwnedFd::from_raw_fd(fds[1]) };
