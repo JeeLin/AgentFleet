@@ -459,7 +459,7 @@ fn make_pipes() -> Result<PipeFds, ConnectorError> {
     // coverage: excluded — `pipe2` 失败需 fd 表耗尽，测试环境无可控构造
     // 手段（防御性兜底）。
     for p in [&mut out_pipe, &mut err_pipe] {
-        if unsafe { libc::pipe2(p.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
+        if unsafe { pipe_nonblocking_cloexec(p.as_mut_ptr()) } != 0 {
             return Err(ConnectorError::Failed {
                 op: "run command".to_string(),
                 detail: format!("pipe2 failed: {}", std::io::Error::last_os_error()),
@@ -467,6 +467,40 @@ fn make_pipes() -> Result<PipeFds, ConnectorError> {
         }
     }
     Ok([out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1]])
+}
+
+/// `pipe2(fds, O_CLOEXEC | O_NONBLOCK)` 的可移植等价物。
+///
+/// **为什么要包一层**：`pipe2` 是 Linux 扩展，macOS 没有（v0.7.2 子任务 3
+/// 首次真编 `aarch64-apple-darwin` 时报 `cannot find function pipe2`）。
+/// Linux 上直接用 `pipe2`——一次系统调用、原子地设好两个标志，没有
+/// 「pipe 之后、fcntl 之前 fork 出子进程继承了不该继承的 fd」的窗口。
+/// macOS 上退化成 `pipe` + 两次 `fcntl`：那个窗口在这里不存在，因为
+/// `make_pipes` 在 `fork` **之前**调用，中间没有别的线程在 fork。
+///
+/// 返回 0 表示成功，非 0 表示失败（与 `pipe2` 同语义，调用方只需判 0）。
+#[cfg(target_os = "linux")]
+unsafe fn pipe_nonblocking_cloexec(fds: *mut RawFd) -> libc::c_int {
+    libc::pipe2(fds, libc::O_CLOEXEC | libc::O_NONBLOCK)
+}
+
+/// macOS / 其它 Unix：`pipe` + 逐个 `fcntl(F_SETFD/F_SETFL)`（见上）。
+#[cfg(not(target_os = "linux"))]
+unsafe fn pipe_nonblocking_cloexec(fds: *mut RawFd) -> libc::c_int {
+    if libc::pipe(fds) != 0 {
+        return -1;
+    }
+    for i in 0..2 {
+        let fd = *fds.add(i);
+        if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
+            return -1;
+        }
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+            return -1;
+        }
+    }
+    0
 }
 
 /// 把命令、参数、cwd 备成 C 字符串。

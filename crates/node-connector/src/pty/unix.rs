@@ -98,14 +98,11 @@ impl Pty {
         let mut master: libc::c_int = -1;
         // 测试环境无可控构造手段（防御性兜底）。尺寸非法那类**可测**的
         // 失败在上层就挡住了，不会走到这里。
-        let pid = unsafe {
-            libc::forkpty(
-                &mut master,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                &winsize,
-            )
-        };
+        //
+        // `forkpty` 的签名两平台不同（v0.7.2 子任务 3 首次真编实测）：
+        // macOS 要 `*mut termios` / `*mut winsize`（可写指针），Linux 是
+        // `*const`。同一份调用代码编译不过，所以这里分平台写。
+        let pid = unsafe { platform_forkpty(&mut master, &winsize) };
         // coverage: excluded — 下面这一臂（含错误串的 `format!` 参数行）要求
         // `forkpty` 失败：`/dev/ptmx` 用尽或 fd 耗尽，测试环境无可控构造手段
         // （防御性兜底）。
@@ -140,7 +137,13 @@ impl Pty {
                 // 用 `execvpe` 直接把 `envp` 交下去，**不写 `libc::environ`**：
                 // 那个符号是 glibc 专有的，musl 上没有；而且环境已经在 `envp`
                 // 里算好了，再往 `environ` 塞一遍等于两条真相源。
-                libc::execvpe(program.as_ptr(), argv.as_ptr(), envp.as_ptr());
+                //
+                // **macOS 没有 `execvpe`**（glibc 专有，v0.7.2 子任务 3 实测
+                // `cannot find function execvpe`）。那里的替身是「逐项 setenv
+                // 后 `execvp`」：子进程此刻是 fork 出来的孤儿（单线程），
+                // `setenv` 会分配但不用担心别的线程持锁——这正是本文件开头
+                // 「fork 之前备好一切」那条纪律的例外，只在 macOS 分支成立。
+                macos_aware_execvpe(program.as_ptr(), argv.as_ptr(), envp.as_ptr(), &env_owned);
                 libc::_exit(127);
             }
         }
@@ -202,4 +205,74 @@ pub(crate) fn apply_winsize(fd: RawFd, size: Size) -> Result<(), PtyError> {
         return Err(PtyError::Io(std::io::Error::last_os_error()));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 平台差异的两个封装：`forkpty` 签名、`execvpe` 是否存在
+// ---------------------------------------------------------------------------
+//
+// 两处都是 v0.7.2 子任务 3 首次真编 `aarch64-apple-darwin` 实测出来的编译错误
+// （见里程碑文档「首次真编的实测结果」）。封装成函数而不是在调用点内联 `cfg`，
+// 是为了让 `spawn_in` 的主流程保持单一路径——「起 PTY」这件事两个 Unix 平台上
+// 是同一件事，差异只在两个系统调用怎么调。
+
+/// `forkpty`：macOS 要 `*mut`，Linux 是 `*const`。
+#[cfg(target_os = "linux")]
+unsafe fn platform_forkpty(master: &mut libc::c_int, winsize: &libc::winsize) -> libc::pid_t {
+    libc::forkpty(
+        master,
+        std::ptr::null_mut(),
+        std::ptr::null(),
+        winsize as *const libc::winsize,
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+unsafe fn platform_forkpty(master: &mut libc::c_int, winsize: &libc::winsize) -> libc::pid_t {
+    libc::forkpty(
+        master,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        winsize as *const libc::winsize as *mut libc::winsize,
+    )
+}
+
+/// `execvpe(program, argv, envp)`：Linux 有，macOS 没有。
+#[cfg(target_os = "linux")]
+unsafe fn macos_aware_execvpe(
+    program: *const libc::c_char,
+    argv: *const *const libc::c_char,
+    envp: *const *const libc::c_char,
+    _env: &[CString],
+) {
+    libc::execvpe(program, argv, envp);
+}
+
+/// macOS 的替身：逐项 `setenv` 后 `execvp`。
+///
+/// 为什么不用 `posix_spawn`：调用点已经在 `forkpty` 的子进程里，再用 spawn
+/// 会多起一层进程。子进程此刻是**单线程孤儿**（`forkpty` 之后、`exec` 之前），
+/// 所以 `setenv` 内部的分配不会踩到别的线程持有的锁——这正是本文件开头
+/// 「fork 之前备好一切」那条纪律唯一成立的例外。
+///
+/// `env` 里每项已经是 `KEY=VALUE` 形式的 `CString`（调用方在 fork 前算好），
+/// 这里按第一个 `=` 拆成两次 `setenv`。
+#[cfg(not(target_os = "linux"))]
+unsafe fn macos_aware_execvpe(
+    program: *const libc::c_char,
+    argv: *const *const libc::c_char,
+    _envp: *const *const libc::c_char,
+    env: &[CString],
+) {
+    for entry in env {
+        // `entry` 是 `KEY=VALUE` 形式的 `CString`（不含内部 NUL）。
+        let bytes = entry.as_bytes();
+        let Some(eq) = bytes.iter().position(|b| *b == b'=') else {
+            continue;
+        };
+        let key = CString::new(&bytes[..eq]).unwrap_or_default();
+        let value = CString::new(&bytes[eq + 1..]).unwrap_or_default();
+        libc::setenv(key.as_ptr(), value.as_ptr(), 1);
+    }
+    libc::execvp(program, argv);
 }
