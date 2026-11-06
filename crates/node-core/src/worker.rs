@@ -2041,7 +2041,8 @@ mod tests {
         // 不开通道：本条的判据只是「心跳到过对端一次」，而通道会让夹具
         // spawn 一条真 PTY 线程——它在 `abort()` 之后还活着，与同进程里
         // 其它心跳用例争 CPU。实测那让本用例在全量并发下偶发失败
-        // （`check-coverage` 连跑两次都挂在它这里，单独跑却 5 次全过）。
+        // （当时是 `check-coverage` 连跑两次都挂在它这里，单独跑却 5 次全过；
+        // 那个脚本在 v0.7.2 已删，改由 `mise run cov-gate` 跑全量插桩，现象同源）。
         // 需要「通道在场」的是 `a_busy_terminal_channel_does_not_starve_the_heartbeat`
         // 那两条，它们仍然用带通道的夹具。
         let (url, arrivals) = fake_hub_recording_heartbeats_no_channel(15_000);

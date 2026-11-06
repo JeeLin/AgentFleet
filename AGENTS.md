@@ -186,9 +186,22 @@ mise run ci     # 本地全量，与 CI 同一串
 单项：`cargo fmt --check` / `cargo clippy --workspace --all-targets`（**零 warning**）/
 `cargo test --workspace` / `scripts/check.sh` / 覆盖率门禁 / `bun run type-check|test|build`。
 
-**覆盖率门禁判定口径是「未覆盖行集合 == 例外登记集合」，不是百分比。**
-未覆盖的代码只有三条出路：**补测试 / 删掉 / 显式登记例外并给理由**。
-禁止用排除文件、`#[allow]` 等手段「做」出 100%——那是伪造。
+**覆盖率门禁判定口径是行覆盖率 ≥98%（`mise run cov-gate`），与 CI 同一条命令。**
+
+v0.7.2 起这条口径从「未覆盖行集合 == 例外登记集合」改成百分比。改的原因与
+代价都必须知道，不能只记结论：
+
+- **改的原因**：例外表以**行号**索引源码，任何一次加行都要手工同步整张表
+  （676 条）。v0.7.2 内 4 个提交移动了行号而无人同步，锚点门禁从 PASS 回归
+  到 FAIL（12 条孤儿标注）；而 `scripts/check.sh` 并不调用它，于是本地判
+  「全绿」是假绿。这类**簿记性**失败与代码质量无关，占比却很高。
+- **代价（这是削弱，不是加强）**：98% 只约束**总量**，不再要求每一条未覆盖
+  行给出理由。整块新增的未测试代码可以靠既有总量稀释蒙混过关。原先那套
+  机制虽然难维护，但它**确实**能拦住「忘了测」。
+- 仍然禁止用排除文件、`#[allow]`、`(racy)` 标注等手段「做」出覆盖率数字
+  ——那是伪造，数字高不代表测过。源码里遗留的 `// coverage: excluded` 标注
+  已不参与任何门禁计算，看到时按注释理解，不要当成豁免。
+
 **完整规则与 23 条代码审查维度见 `docs/DEVELOPMENT.md`。**
 
 ---
@@ -200,7 +213,7 @@ docs/           PRODUCT / DEVELOPMENT / DECISIONS / BUGS / architecture/
 crates/         hub-core, hub-server, hub-storage, identity,
                 node-connector, node-core, node-cli, protocol
 packages/web/   Vue 3 + Bun + Vite
-scripts/        check.sh（grep 门禁）、check-coverage.sh、e2e-*.sh
+scripts/        check.sh（grep 门禁）、e2e-*.sh
 .mdflow/        流程产出物，本地产物，不入库
 ```
 

@@ -11,7 +11,8 @@ linker = "aarch64-linux-gnu-gcc"
 # 看起来像 env 合并逻辑坏了，实际是对面根本没拿到 CPU 时间片读完。
 #
 # 曾经的做法是「记得手动加 `--test-threads=1`」，但 `mise run test`、
-# `scripts/check-coverage.sh` 与 CI 都直接跑 `cargo test --workspace`，
+# 覆盖率门禁（`cargo llvm-cov` 底层也是 `cargo test`）与 CI 都直接跑
+# `cargo test --workspace`，
 # 没人记得住——于是门禁在多核机上必红，而「必红的门禁」等于没有门禁。
 # 所以默认值写在这里（`RUST_TEST_THREADS` 是 libtest 认的环境变量原话）。
 #

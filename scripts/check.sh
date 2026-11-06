@@ -724,13 +724,15 @@ RELEASE_YML = '.github/workflows/release.yml'
 # 只需 rustc + rust-std（minimal profile 自带），不必列进来——多登记会让
 # 「装齐」变成「装一堆用不上的」，那不是准确性。
 #
-# **`cargo llvm-cov` 不在这里**，而且这是个教训：它由
+# **`cargo llvm-cov` 不在这里**，而且这是个教训：v0.7.2 之前它由
 # `scripts/check-coverage.sh` 内部调用，不出现在任何 workflow 的 `run:` 文本里，
 # 靠扫 `run:` 永远扫不到——C8 据此曾对 `llvm-tools-preview` 长期假绿
 # （删掉该组件也报红不了），直到拆分 gate 做变异验证才暴露。它的等价判据
 # 是下面的 `install-action` 配对：装 cargo-llvm-cov 的 job 必须同时声明
 # llvm-tools-preview 组件（脚本用「llvm-cov 可执行文件 + 工具链自带
 # llvm-tools」两者，缺任一都跑不起来）。
+# v0.7.2 起覆盖率步骤把 `cargo llvm-cov` 直接写在 `run:` 里（不再经脚本包一层），
+# 所以 1c) 的反向配对改成按**命令文本**断言，见那里。
 COMPONENT_OF = {
     'cargo fmt': 'rustfmt',
     'cargo clippy': 'clippy',
@@ -792,21 +794,20 @@ else:
                 declared.add(c)
 
     # 1c) 反向配对：反向断言的缺口（变异4 教训）。删掉 装 cargo-llvm-cov 安装步后，
-    # needed 里 llvm-tools 消失、断言空转 → 假绿。覆盖率门禁脚本
-    # （check-coverage.sh）内部调 cargo llvm-cov，看 run: 文本扫不到，所以
-    # 「谁跑 cov-gate，谁就必须有 cargo-llvm-cov 安装步」用脚本文件名断言。
-    # 两组配对合起来才是双向闭合：装 X → 必须装组件；跑 X 的门禁 → 必须装 X。
+    # needed 里 llvm-tools 消失、断言空转 → 假绿。v0.7.2 起覆盖率门禁是直接写
+    # `cargo llvm-cov …` 的步骤（不再经 `check-coverage.sh` 包一层），所以按
+    # **命令文本**断言：步骤里出现 `cargo llvm-cov` 就必须有对应的安装步。
+    # 按文本而不是按脚本文件名，才不会因为「换了实现载体」而静默失效
+    # ——旧写法只认 `check-coverage.sh`，那脚本删掉后这条断言会**恒假通过**。
     has_llvm_cov_step = any(
         str(s.get('uses') or '').startswith('taiki-e/install-action@cargo-llvm-cov')
         for s in steps
     )
-    has_cov_gate = any('cov-gate' in (s.get('name') or '') or
-                       'check-coverage.sh' in (s.get('run') or '')
-                       for s in steps)
+    has_cov_gate = any('cargo llvm-cov' in (s.get('run') or '') for s in steps)
     if has_cov_gate and not has_llvm_cov_step:
-        bad.append('gate job 们跑了覆盖率门禁（cov-gate / check-coverage.sh），'
+        bad.append('gate job 们跑了覆盖率门禁（`cargo llvm-cov`），'
                    '但没有 装 cargo-llvm-cov 的安装步（taiki-e/install-action@cargo-llvm-cov）'
-                   '——脚本内部调 cargo llvm-cov，工具不存在时门禁 FATAL')
+                   '——工具不存在时门禁 FATAL')
 
     if not needed:
         # 一个组件都不需要，说明门禁清单已经面目全非——不当成通过。

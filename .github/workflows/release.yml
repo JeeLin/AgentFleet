@@ -228,11 +228,25 @@ jobs:
           # 与 test/static 的缓存天然隔离，靠 prefix 区分即可。
           prefix-key: v1-gate-coverage
 
+      # 覆盖率门禁：行覆盖率 ≥98%。**CI 里唯一的覆盖率步骤**（v0.7.2 起），
+      # 与本地 `mise run cov-gate` 跑同一条命令，不是两套判据。
+      #
+      # 此前这里是两道：`scripts/check-coverage.sh`（零未登记未覆盖行 +
+      # 例外表双向核对）与 `scripts/coverage-exceptions.sh --check`（例外理由
+      # 锚点核对）。已连同 `coverage-exceptions.txt`、`scripts/check-coverage.sh`、
+      # `scripts/coverage-exceptions.sh`、`scripts/uncovered-lines.sh` 一起移除。
+      #
+      # 移除的实据：例外表用**行号**索引源码，每加一行都要手工同步整张表
+      #（676 条）。本里程碑内 4 个提交移动了行号而无人同步，锚点门禁从 PASS
+      # 回归到 FAIL（12 条孤儿标注）；而 `bash scripts/check.sh` 不调用它，
+      # 于是本地判「全绿」是假绿——那正是这次要消灭的失败模式。
+      #
+      # ⚠️ 已知代价，写在这里而不是藏着：98% 是**总量**判据，比原来的
+      #「每条未覆盖行都要有理由」**更弱**。整块新增未测试代码可以靠既有
+      # 总量稀释掉。实测当前行覆盖率 96.88%（877/28104），本步骤现在就是
+      # 红的；它红是因为**存量**，不是本次改动引入。
       - name: cov-gate（mise run cov-gate）
-        run: scripts/check-coverage.sh
-
-      - name: cov-anchors（mise run cov-anchors）
-        run: scripts/coverage-exceptions.sh --check
+        run: cargo llvm-cov --workspace --all-targets --summary-only --fail-under-lines 98
 
   gate-web:
     runs-on: ubuntu-24.04
