@@ -22,7 +22,7 @@ once on 2026-11-05.
 ### Added
 
 - **设备侧 `afcli` 新增 Windows 与 macOS 支持**，发布产物为 `afcli-windows-amd64.exe` 与 `afcli-macos-arm64`，Hub 镜像内嵌两者供设备下载。 / **The device-side `afcli` now runs on Windows and macOS**, shipping `afcli-windows-amd64.exe` and `afcli-macos-arm64` embedded in the Hub image.
-- **CI 新增 Windows / macOS 真机测试与桌面产物构建**。 / **CI gained native Windows/macOS test runners and desktop artifacts.**
+- **CI 新增 Windows / macOS 真机测试与桌面产物构建，发布流程复用已编译依赖，避免重复编译**。 / **CI gained native Windows/macOS test runners and desktop artifacts, reusing compiled dependencies to avoid repeated builds.**
 - **`docs/DEVELOPMENT.md` 新增「已知行为差异」一节**，记录三平台刻意保留的行为差异。 / **`docs/DEVELOPMENT.md` gained a known-behaviour-differences section for the three platforms.**
 
 ### Changed

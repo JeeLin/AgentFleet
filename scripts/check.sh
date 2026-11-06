@@ -974,4 +974,62 @@ PYEOF
   [[ $? -ne 0 ]] && { echo "  ❌ workflow 用了 gh CLI 不存在的 --json 字段"; fail=1; } || ok "workflow 的 gh --json 字段都真实存在"
 
 echo
+echo "== C10 release.yml 不得把前端 / Rust 编译重复铺开 =="
+# 前端 dist 曾在 gate-coverage / gate-web / build-frontend 各编一次；Rust 又在
+# 各 job 用独立 cache / debug profile 各编一套依赖图。C10 钉住这两处回归。
+python3 - <<'PYEOF'
+import sys
+from pathlib import Path
+try:
+    import yaml
+except ImportError:
+    print('      缺 PyYAML：无法核对 release.yml')
+    sys.exit(1)
+
+yml = Path('.github/workflows/release.yml').read_text(encoding='utf-8')
+code = [ln for ln in yml.splitlines() if not ln.lstrip().startswith('#')]
+jobs = (yaml.safe_load(yml) or {}).get('jobs') or {}
+bad = []
+
+if sum('bun run build' in ln for ln in code) != 1:
+    bad.append('可执行 `bun run build` 应只有 1 处')
+if sum('name: web-dist' in ln and any('actions/upload-artifact' in x for x in code[max(0, i-4):i])
+       for i, ln in enumerate(code)) != 1:
+    bad.append('`web-dist` 上传步应只有 1 处')
+# 注释里允许写旧 runner 作为反例，但可执行配置不许出现。
+if any('macos-14' in ln for ln in code):
+    bad.append('可执行配置里仍有 `macos-14`')
+
+def steps_text(name):
+    return '\n'.join(str(s.get('run') or '') + '\n' + str(s.get('with') or '')
+                     for s in (jobs.get(name) or {}).get('steps') or [])
+
+td = jobs.get('test-desktop') or {}
+td_steps = td.get('steps') or []
+td_text = steps_text('test-desktop')
+if not td:
+    bad.append('缺少 `test-desktop`：桌面真机验收不能省')
+else:
+    if 'cargo test --release -p node-connector --all-targets' not in td_text:
+        bad.append('`test-desktop` 未跑 --release，会再编一套 debug 依赖图')
+    if 'desktop-${{ matrix.target }}' not in td_text:
+        bad.append('`test-desktop` 未复用 `build-desktop` 的 shared-key')
+    cache = next((s for s in td_steps if str(s.get('uses') or '').startswith('Swatinem/rust-cache')), {})
+    if (cache.get('with') or {}).get('save-if') not in (False, 'false'):
+        bad.append('`test-desktop` 应 save-if: false，只读取缓存')
+    if 'build-desktop' not in str(td.get('needs') or []):
+        bad.append('`test-desktop` 应 needs build-desktop，保证缓存先写好')
+if 'gate-static' not in str((jobs.get('gate-test') or {}).get('needs') or []):
+    bad.append('`gate-test` 应 needs gate-static，保证普通 Rust 缓存先写好')
+for name in ('gate-static', 'gate-test', 'build-binaries', 'build-desktop'):
+    if 'shared-key' not in steps_text(name):
+        bad.append(f'`{name}` 未声明 shared-key，Rust 依赖图会各编一遍')
+
+for b in bad:
+    print(f'      {b}')
+sys.exit(1 if bad else 0)
+PYEOF
+  [[ $? -ne 0 ]] && { echo "  ❌ release.yml 又出现重复编译 / 旧 macOS runner"; fail=1; } || ok "前端单点构建、Rust 缓存复用、桌面测试与 macos-latest 保留"
+
+echo
 if [[ $fail -eq 0 ]]; then echo "门禁通过"; else echo "门禁未通过"; exit 1; fi

@@ -60,19 +60,21 @@ jobs:
   # 是「另一个 workflow 跑完了」，**拿不到原始 tag 的 `github.ref` /
   # `github.ref_name`**；而抽 `CHANGELOG` body、镜像 tag、`gh release
   # --verify-tag` 全都要 tag 名，得再从 API 反查并层层传递，多一层间接、多一个
-  # 失败面。代价是门禁跑两遍（覆盖率那步最贵），换的是坏产物发不出去。
+  # 失败面。代价是 tag 推上去后门禁才跑（覆盖率那步最贵），换的是坏产物发不出去。
   #
   # 为什么拆成 4 个 job 而不是一个串行 job：同一 job 内的步骤**永远串行**，
   # 无法并发。`test`（约 5.5m）与 `cov-gate`（全量插桩，约 10m+）用的是两套
   # 二进制（插桩产物不能复用普通产物），`web-ci` 与 Rust 侧零交集——这三条
-  # 之间没有任何依赖，串行只让 wall clock 相加。拆开后瓶颈是 coverage 一条，
-  # 总时长从「逐项相加」变成「最长那条」。
+  # 之间本来没有数据依赖；现在只为复用缓存 / dist 加两条轻量 `needs`
+  # （gate-test 等 gate-static、gate-coverage 等 gate-web），其余仍并行，
+  # wall clock 仍接近「最长那条」。
   #
-  # 依赖澄清（曾被人问「后端是不是要等前端」）：**不**。`build.rs` 在 dist 缺失
-  # 时降级为占位页 + `cargo:warning`（实测：删掉 dist 后 `cargo test` 照样绿），
-  # 所以所有 Rust 门禁都不需要前端产物。硬依赖 `build-frontend` 的只有
-  # `build-binaries`——`include_dir!` 编译期嵌入 dist，缺了会编出「能跑但页面
-  # 是占位页」的 Hub，那条校验拒绝的就是这件事（见下方 build-frontend 段）。
+  # Rust 重编译更贵：`gate-static` 写普通 debug 缓存，`gate-test` 等它并只读；
+  # Linux 发布矩阵与桌面 build/test 各按 target 共用稳定缓存（对齐 REX）。
+  # 桌面 `test-desktop` 仍在 release profile 真跑，只复用 `build-desktop` 的依赖图。
+  #
+  # 前端 dist 也只编一次：`gate-web` 产出 `web-dist` artifact，覆盖率与发布链下载复用。
+  # `build-frontend` 仍是硬前置，负责校验缺 dist 时 `include_dir!` 不会编出占位页 Hub。
   #
   # ---- 4 个 job 共用的环境脚手架（每个 job 重复一遍是 Actions 的形态税）----
   # 步骤名里的 `（mise run <task>）` 是 `check.sh` C7 的解析锚点：C7 扫描
@@ -117,10 +119,9 @@ jobs:
       - name: 装工具链版本缓存（cargo 编译产物按 Cargo.lock 键控）
         uses: Swatinem/rust-cache@v2
         with:
-          # 每条 job 编出来的东西用途不同（clippy 用 rlib、test 用测试二进制、
-          # coverage 是独立 target 目录），共用一份缓存会互相踩：
-          # `workspaces` 不指定 = 整仓一份 key，`prefix-key` 区分 job 用途。
-          prefix-key: v1-gate-static
+          # 普通 debug 依赖图由本 job 写；gate-test 等它并只读，避免各自从零编译。
+          shared-key: gate-linux
+          save-if: true
 
       - name: check（mise run check）
         run: scripts/check.sh
@@ -132,6 +133,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   gate-test:
+    needs: [gate-static]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -158,44 +160,33 @@ jobs:
       - name: 装工具链版本缓存（cargo 编译产物按 Cargo.lock 键控）
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-gate-test
+          shared-key: gate-linux
+          save-if: false
 
       - name: test（mise run test）
         run: cargo test --workspace
 
   gate-coverage:
+    needs: [gate-web]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v5
 
-      # 覆盖率门禁要与本地同态：本地检出通常有 `packages/web/dist`，测试能覆盖
-      # `asset()` 的成功路径；CI 没有 dist 时那条分支结构性不可达，会变成
-      # 「未覆盖的未登记行」，而例外表是双向核对，登记也没用（本地有 dist 就
-      # stale）。所以这里**自己构建 dist**，让插桩的二进制里嵌的是真实产物树。
-      # 不能改成「依赖 build-frontend」：C7 要求每个产线 job 等全部门禁，
-      # 而本 job 自己就是门禁之一——那就成环了。
-      - name: 读 Bun 版本（mise.toml [tools] 是唯一出处）
-        id: tools-bun
-        run: |
-          set -euo pipefail
-          bun=$(sed -nE 's/^bun = "([^"]+)".*/\1/p' mise.toml | head -1)
-          [ -n "$bun" ] || { echo "mise.toml 里读不到 bun 的版本" >&2; exit 1; }
-          echo "bun=$bun" >> "$GITHUB_OUTPUT"
-
-      - name: 装 Bun ${{ steps.tools-bun.outputs.bun }}
-        uses: oven-sh/setup-bun@v2
+      # 覆盖率门禁要与本地同态：本地检出通常有 `packages/web/dist`。这里下载
+      # `gate-web` 唯一一次构建的 dist，不再重复 `bun install` + `bun run build`。
+      - name: 取回前端产物
+        uses: actions/download-artifact@v6
         with:
-          bun-version: ${{ steps.tools-bun.outputs.bun }}
+          name: web-dist
+          path: packages/web/dist
 
-      - name: 构建前端（覆盖率与本地同态，见上）
-        working-directory: packages/web
+      - name: 校验 dist（覆盖率与本地同态）
         run: |
           set -euo pipefail
-          bun install --frozen-lockfile
-          bun run build
-          test -f dist/index.html || { echo "dist/index.html 不存在" >&2; exit 1; }
+          test -f packages/web/dist/index.html \
+            || { echo "packages/web/dist/index.html 不在位" >&2; exit 1; }
 
       - name: 读工具链版本（mise.toml [tools] 是唯一出处）
         id: tools
@@ -304,8 +295,24 @@ jobs:
           bun run test
           bun run build
 
+      # 全 run 唯一一次前端构建/上传：覆盖率、build-frontend、build-binaries 都复用。
+      - name: 校验 dist 非空
+        working-directory: packages/web
+        run: |
+          set -euo pipefail
+          test -f dist/index.html \
+            || { echo "dist/index.html 不存在，前端构建产物是空的" >&2; exit 1; }
+          ls -la dist | head -20
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: web-dist
+          path: packages/web/dist
+          if-no-files-found: error
+          retention-days: 7
+
   # ---------------------------------------------------------------------------
-  # 1. 前端先编，dist 作为 artifact 交给 matrix —— **硬前置，不是优化**
+  # 1. 前端产物校验 —— 发布链的**硬前置，不是优化**
   # ---------------------------------------------------------------------------
   # `include_dir!` 在编译期把 `packages/web/dist` 嵌进 `afhub`。dist 缺失时
   # `crates/hub-server/build.rs` **不会失败**：它造一个占位页、打一条
@@ -323,42 +330,19 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: 读工具链版本（mise.toml [tools] 是唯一出处）
-        id: tools
-        run: |
-          set -euo pipefail
-          v=$(sed -nE 's/^bun = "([^"]+)".*/\1/p' mise.toml | head -1)
-          [ -n "$v" ] || { echo "mise.toml 里读不到 bun 的版本" >&2; exit 1; }
-          echo "bun=$v" >> "$GITHUB_OUTPUT"
-
-      - name: 装 Bun ${{ steps.tools.outputs.bun }}
-        uses: oven-sh/setup-bun@v2
+      # dist 由 gate-web 编好；这里只取回并校验，绝不重复编译。
+      - name: 取回前端产物
+        uses: actions/download-artifact@v6
         with:
-          bun-version: ${{ steps.tools.outputs.bun }}
+          name: web-dist
+          path: packages/web/dist
 
-      - name: 前端依赖（--frozen-lockfile：lock 与 package.json 不一致就红）
-        working-directory: packages/web
-        run: bun install --frozen-lockfile
-
-      - name: 前端构建
-        working-directory: packages/web
-        run: bun run build
-
-      # dist 为空时 `vite build` 可能「成功」产出个空目录，上传 artifact
-      # 会静默变成一个空包。这里在源头就钉死。
       - name: 校验 dist 非空
         run: |
           set -euo pipefail
           test -f packages/web/dist/index.html \
             || { echo "packages/web/dist/index.html 不存在，构建产物是空的" >&2; exit 1; }
           ls -la packages/web/dist | head -20
-
-      - uses: actions/upload-artifact@v6
-        with:
-          name: web-dist
-          path: packages/web/dist
-          if-no-files-found: error
-          retention-days: 7
 
   # ---------------------------------------------------------------------------
   # 2. 4 平台**原生**编译（不用交叉编译）
@@ -444,9 +428,9 @@ jobs:
       - name: 装工具链版本缓存（cargo 编译产物按 Cargo.lock 键控）
         uses: Swatinem/rust-cache@v2
         with:
-          # 四条矩阵共用一个 job 定义；cache key 含 matrix.target（action 自动
-          # 把 job 与 matrix 维度揉进 key），musl 与 gnu 的产物不会互相污染。
-          prefix-key: v1-binaries
+          # 对齐 REX：按 target 一份稳定缓存，避免每个发布矩阵从零编译依赖图。
+          shared-key: build-${{ matrix.target }}
+          save-if: true
 
       # matrix 里 4 个目标里有 2 个是 musl：musl 目标的链接器 (`musl-gcc`)
       # 不在 runner 镜像里。按目标装，不要无脑全装（多装的东西会在别的 runner
@@ -595,11 +579,11 @@ jobs:
   # `windows-sys` 的 `CreatePseudoConsole` / `CreateProcessW` 那批导入在 gnu
   # 下的链接行为没有在 CI 上验过。MSVC 是 Windows 的默认生产工具链。
   #
-  # ## macOS 为什么是 `macos-14`（arm64）
+  # ## macOS 为什么是 `macos-latest`（arm64）
   #
-  # `macos-14` 及以后是 Apple Silicon。要 Intel 就得显式 `macos-13`（x86_64），
-  # 而 GitHub 已宣布 Intel runner 的退役时间表。所以这里先只发 arm64——**这是
-  # 一个要写进 CHANGELOG 的限制**，不是遗漏（见子任务 8）。
+  # 对齐 REX 的 CI：macOS 条目统一 `macos-latest`（Apple Silicon 原生 runner），
+  # `aarch64-apple-darwin` 直接原生编。固定 `macos-14` 曾触发 runner 配置被拒。
+  # Intel runner 在退役时间表上，**所以 macOS 目前只发 arm64**。
   build-desktop:
     # **不**等 `build-frontend`：前端 dist 是 `hub-server` 的编译期输入
     # （`include_dir!`），而这里只编 `node-cli`。多等一个 job 不只是慢——
@@ -614,7 +598,7 @@ jobs:
             suffix: windows-amd64
             ext: .exe
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-latest
             suffix: macos-arm64
             ext: ""
     runs-on: ${{ matrix.os }}
@@ -630,9 +614,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # 与 Linux 矩阵分开缓存：cache key 含 target，桌面产物不会被 musl 的
-          # `RUSTFLAGS` 污染（那条会改变整个依赖图的编译产物）。
-          key: desktop-${{ matrix.target }}
+          # 与 Linux 矩阵分开缓存；test-desktop 用同一 key 只读复用 release 依赖图。
+          shared-key: desktop-${{ matrix.target }}
+          save-if: true
 
       # **只编 `-p node-cli`**，不 `--workspace`：`afhub` 在非 Linux 上编不过，
       # 而那不是本里程碑要解决的问题。写成 `--workspace` 会让这条 job 永远红。
@@ -679,7 +663,7 @@ jobs:
   # `macos_aware_execvpe` / `platform_forkpty` 三处都是 macOS 特有分支，
   # 在 Linux 上走不到。
   test-desktop:
-    needs: [gate-static, gate-test, gate-coverage, gate-web]
+    needs: [build-desktop]
     strategy:
       fail-fast: false
       matrix:
@@ -687,7 +671,7 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-latest
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -701,7 +685,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: desktop-test-${{ matrix.target }}
+          # 等 build-desktop 写完缓存后只读；与产物构建共用 release 依赖图。
+          shared-key: desktop-${{ matrix.target }}
+          save-if: false
 
       # 跑 `node-connector` 的**全部**测试（含集成测试）。这是 PTY / exec /
       # files 三个模块的平台行为判据，`--all-targets` 把单测与集成测试一起带上。
@@ -709,7 +695,7 @@ jobs:
       # 不加 `--no-fail-fast`：第一次红就该停下来看，而不是让 200 条测试各自
       # 报一遍同样的错把人淹掉。
       - name: 跑 node-connector 测试
-        run: cargo test -p node-connector --all-targets --target ${{ matrix.target }}
+        run: cargo test --release -p node-connector --all-targets --target ${{ matrix.target }}
 
   # ---------------------------------------------------------------------------
   # 3a. Hub 镜像 —— 前端已在编译期嵌进去，镜像里**不放 dist**

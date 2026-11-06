@@ -89,14 +89,15 @@ check → fmt → lint → test → **cov-gate**（行覆盖率 ≥98%）→ web
 漏抄一条会红，多抄一条也会红；同一条门禁出现在两个 job 里但 `run` 文本不一致也红
 （复制步骤后只改了一份）。这条门禁存在的理由是「少跑的那一道不会红，它只是不存在」。
 
-**为什么门禁拆成 4 个并行 job（v0.7.1 收尾改造）**：同一个 job 内的步骤**永远串行**，
+**为什么门禁拆成 4 个 job（v0.7.1 收尾改造）**：同一个 job 内的步骤**永远串行**，
 而 `test`（普通二进制）与 `cov-gate`（全量插桩二进制）是两套互不复用的产物，
-`web-ci` 与 Rust 侧零交集——三者之间没有任何依赖，串行只让 wall clock 相加。
-拆开后 wall clock 从「逐项相加」变成「最长那条」：实测 **14m06s → 7m09s（省 49%）**。
-配套的 `Swatinem/rust-cache@v2` 按用途分 prefix-key（静态 / 测试 / 覆盖率 / 二进制矩阵），
-共用一份缓存会互相踩（clippy 用 rlib、测试用测试二进制、覆盖率是独立 target 目录）。
-**腾磁盘（62s）只在 `gate-coverage` 里做**——只有全量插桩 + 链接峰值需要 ≥6 GiB 空闲，
-`gate-test` 用普通二进制，不该为它等那 62 秒。
+`web-ci` 与 Rust 侧零交集——原本没有数据依赖，拆开后 wall clock 从「逐项相加」
+变成「最长那条」：实测 **14m06s → 7m09s（省 49%）**。v0.7.2 收尾只为复用缓存与
+dist 加了两条轻量 `needs`：`gate-test` 等 `gate-static`、`gate-coverage` 等 `gate-web`。
+`Swatinem/rust-cache@v2` 只把插桩覆盖率单独留一份；普通 debug 依赖图由
+`gate-static` 写、`gate-test` 只读 `shared-key: gate-linux`，发布矩阵按 target
+用 `build-<target>` / `desktop-<target>`（对齐 REX）。**腾磁盘（62s）只在
+`gate-coverage` 里做**——只有全量插桩 + 链接峰值需要 ≥6 GiB 空闲。
 
 **C8 盯另一件事：gate job 装的 rust 组件够不够跑那些门禁**（它看的是 4 个 job 的合集：
 命令在 `gate-test` 里跑、组件在 `gate-coverage` 里装是合法分工，反过来才是错）。`dtolnay/rust-toolchain` 带
@@ -123,15 +124,16 @@ C8 有**两个方向**：① 正向——门禁用到的命令 → 需要的组�
 
 ### 发布（**v0.7.1 落地**）
 
-打 tag（`vX.Y.Z`）触发 `.github/workflows/release.yml`，形态是**先过闸、前端再编、二进制一次、
-三个消费者**：
+打 tag（`vX.Y.Z`）触发 `.github/workflows/release.yml`，形态是**先过闸、前端只编一次、二进制按 target 缓存、三个消费者**：
 
 ```text
 gate（= mise.toml [tasks.ci] 的全部门禁，产线自己等它；红则下面全部不跑——**唯一例外是覆盖率，见下**）
+    ├─ gate-web：唯一一次 bun install + bun run build，上传 web-dist
+    └─ gate-coverage：下载 web-dist；Rust 插桩产物独立 cache
     ↓ needs
-build-frontend（bun install --frozen-lockfile → build，dist 作为 artifact 上传）
+build-frontend（只校验/承接 web-dist artifact）
     ↓ needs（硬前置，不是优化）
-build-binaries（4 平台矩阵，**原生编译**）
+build-binaries（4 平台矩阵，**原生编译**，按 target 复用 Rust cache）
     ├─→ docker-hub：Hub 镜像（afhub + afcli，前端已编译期嵌入，镜像里不另放 dist）
     ├─→ docker-node：afcli 镜像（linux/amd64 + linux/arm64，按 TARGETARCH 选二进制）
     └─→ release：GitHub Release + SHA256SUMS + CHANGELOG.md + 从 CHANGELOG.md 抽 body
@@ -166,10 +168,13 @@ C7 双向比对产线的步骤名——不再存在「两份清单互相漂移�
 > 是把「待补测试」和「不可发布」混为一谈。代价是**覆盖率可以长期红着没人管**，
 > 所以它必须保持可见（run 页面上标红），不许顺手删掉这一步「让页面干净」。
 
-**`build-frontend` 是硬前置**：`include_dir!` 在编译期嵌入 dist，而 dist 缺失时
-`crates/hub-server/build.rs` 不失败——它造一个占位页、打一条 `cargo:warning`，二进制照编。
-后果是「Hub 装起来打开是 Not built 占位页」能不红任何一步地走到用户手里。所以矩阵里
-**每个平台在编之前**都断言 `packages/web/dist/index.html` 存在，缺了就 fail。
+**`build-frontend` 是硬前置，不再重复构建**：dist 由 `gate-web` 的 `web-ci` 唯一一次产出并上传为
+`web-dist`；`gate-coverage`、`build-frontend`、`build-binaries` 都下载同一份 artifact。
+`include_dir!` 在编译期嵌入 dist，而 dist 缺失时 `crates/hub-server/build.rs` 不失败——它造一个
+占位页、打一条 `cargo:warning`，二进制照编。后果是「Hub 装起来打开是 Not built 占位页」能不红
+任何一步地走到用户手里。所以矩阵里**每个平台在编之前**都断言 `packages/web/dist/index.html`
+存在，缺了就 fail。`scripts/check.sh` 的 C10 钉死「全 workflow 仅一处 `bun run build` / 一处
+`web-dist` 上传 / 无 `macos-14`」。
 
 **GitHub Actions 的版本钉在「Node 24 起步的最低版本」**：GitHub 已弃用 Node.js 20
 运行时，CI 日志里每一步都会打 `Node.js 20 is deprecated ... forced to run on
@@ -254,8 +259,11 @@ GitHub）、**版本对齐**（Release 页上有多个版本，选错就连不�
   （只 `-p node-cli`）。**不要把桌面条目塞进 `build-binaries` 的矩阵**——那条
   job 的自包含断言用 `readelf` / `ldd` / `file`，桌面平台上都没有。
   桌面产物的目标：`x86_64-pc-windows-msvc`（`windows-latest` 自带 MSVC 工具链）
-  与 `aarch64-apple-darwin`（`macos-14` 是 Apple Silicon；Intel runner 在退役
-  时间表上，**所以 macOS 目前只发 arm64**）。
+  与 `aarch64-apple-darwin`（对齐 REX 用 `macos-latest`；固定 `macos-14` 曾让
+  runner 配置直接被拒，Intel runner 也在退役时间表上，**所以 macOS 目前只发 arm64**）。
+  `build-desktop` 先产出 release 依赖图与二进制，`test-desktop` 等它、
+  复用同 target 的 `shared-key: desktop-<target>` 且同跑 `--release`——
+  桌面真机测试保留，但不再另编一套 debug 依赖图。
 - **`test-desktop` 是本里程碑唯一的真实验收手段**：`cargo check --target
   x86_64-pc-windows-msvc` 只证明编得过，证明不了读得到输出。ConPTY /
   `CreateProcessW` / 句柄继承 / 读流时序只能在真 Windows 上跑；macOS 的
@@ -340,7 +348,7 @@ macOS 上 **POSIX 权限位照常生效**（`0o600` / `0o700` 与 Linux 同义�
 | v0.6.0 ✅ 已完成 | 任务基准（**重挂**，用户 2026-11-03 裁定「视为结束，从 v0.7.0 开始」） | 会话工作区的**起点 + 产出概览**：建会话时用 git connector 的第四个只读 op `rev` 记下 `base_commit`，面板上显示「提交几次 / 另有几个文件未提交」。**产品主轴改版后**：这套逻辑是对的，但它算的是 `base_commit..HEAD`——在项目主轴下这是 **Execution 的产出 diff**，最终该挂在 Execution 上，不是会话上。因此本里程碑**收口为「只修真 bug、不再扩展」**，其「起点」概念作为 v0.7.0 的输入移交 | Git 操作界面（起点部分） |
 | v0.7.0 ✅ 已完成 | **项目与绑定（+ 设备/agent 管理面扩展）** — **含「项目结构按新需求调整」** | **先做两件结构活**：①**crate 拆分**——`node-core` 拆出 `node-connector`（7 → 8 个 crate，纯搬家、单独一个提交，理由只此一条：v0.12.0 的按需加载必须靠 crate 边界）；②按项目主轴重排数据模型与模块分层——`schema` 增加 `project` / `task` / `execution` / `binding` 表与迁移脚本，`crates/` 与 `packages/web/src` 按新归属切分（会话挂到 Execution 下，不再是顶层）。**这是本里程碑的第一件事**，否则后面的项目实体只能挂在旧结构上，等于给会话再加一层壳。然后再做业务：项目实体三形态（中心式 / 隔离式 / 镜像式）；Hub 侧裸仓库（git CLI，藏在接口后）；Binding = `(project, device) → 固定目录`；设备侧 worktree 分任务 + 四层磁盘处置（`architecture/project-and-snapshot.md`）；前端新增 `projects` / `project` 路由，**项目页默认落在看板**。**v0.6.0 的 `base_commit` 概念在此落到 Task 上**：交接规则写死——`execution.base_commit` 是**唯一真相源**，会话上的 `base_rev` 降级为「会话第一段执行的起点快照」，只读、不再参与任何「相对它产出了什么」的计算（那套展示整体移到 Execution 上）。**不保留两份可写的起点**：同一个事实有两个写入口，迟早会出现「会话说基于 A、执行说基于 B」。**同时扩展设备页 / agent 页（不砍反扩）**：绑定关系（这台设备绑了哪些项目、绑在哪个固定目录）、磁盘配额与已用、失败归因（哪类失败集中在这台机器）、改配额与清理策略；agent 页加「该 agent 上跑过哪些任务 / 成功率」 | 项目实体、绑定与固定目录、设备管理、agent 管理 |
 | v0.7.1 ✅ 已完成 | **CI 镜像构建（发布通路）** | 从 v0.14.0 提前而来（用户 2026-11-05 裁定）。本地 `mise run ci` 全绿后打 tag `v0.7.1` 触发 CI，**CI 首验暴露出两个真缺陷**：门禁红时镜像照样发出去（两个 workflow 只共享触发、互不阻塞）、`windows-gnu` 条目编不出来（`node-connector` 的 `fork`/`exec`/PTY 模型是 Unix-only 实现，移植需先抽平台抽象层）。**前者最终以「删掉 `ci.yml`、门禁并入产线」处置**：`release.yml` 的 `gate` job 跑齐 `mise.toml [tasks.ci]` 的全部 7 项，所有产线 job 都 `needs: gate`，清单只剩一个真相源（C7 双向比对）；**后者按「本里程碑不做移植」移除目标**，排进 v0.7.2。4 个 Linux 目标均已真编通过（`aarch64-*` 由 CI 的 arm runner 原生真编，11 步全 success）。把 §2 的「发布」那一整段真正建起来：`gate` → `build-frontend`（bun `--frozen-lockfile` → build，dist 作为 artifact）**硬前置**于 `build-binaries`（4 目标**原生**矩阵：x86_64 / aarch64 × gnu / musl；windows-gnu 已移除，**v0.7.1 不做移植，不是永远不支持**——见同节「v0.7.1 不提供 Windows 目标」），再分发到三个消费者：`docker-hub`（`afhub` + `afcli`，前端**已在编译期嵌入**，镜像里不另放 dist）、`docker-node`（`afcli`，按 `TARGETARCH` 选二进制）、`release`（GitHub Release + `SHA256SUMS` + `CHANGELOG.md` + 从 CHANGELOG 抽 body，**附件只发 musl 干净名**且稳定版带 `--latest`）。镜像推 `ghcr.io/<owner>/agentfleet-hub` / `agentfleet-node`。**`build-frontend` 之所以是硬前置**：dist 缺失时 `build.rs` 只造占位页并打 warning，二进制照编——「Hub 打开是占位页」能不红任何一步地发出去，所以每个平台编之前都断言 `dist/index.html` 存在。**安全边界变更**：`afhub` 缺省仍只绑回环，新增 `AFHUB_ALLOW_NON_LOOPBACK=1` 供容器显式放开，**只认确切的 `1`**。设备侧安装多了从 Hub 自己下载 `afcli` 的入口（`GET /api/agent-binary` + 设备页按钮），内网/离线部署不必够 GitHub。版本号 `0.5.0` → `0.7.1`（tag 与二进制自报版本必须一致） | —（`DEVELOPMENT.md` §2.1 发布段） |
-| v0.7.2 ✅ 已完成 | **桌面平台支持（设备侧 afcli：Windows + macOS）** | **用户 2026-11-05 裁定**：插一个 v0.7.2 专做设备侧桌面平台移植（Windows + macOS，mac 为用户 2026-11-05 追加裁定），`v0.8.0` 骨架不动、顺延一位。**只做设备侧 `afcli`**，`afhub` 仍只发 Linux（自托管 Hub 一般跑在服务器/容器，Windows 不是主场景）。**改动面已核对**：`afcli` 的生产依赖链是 `node-cli` → `node-core` → `node-connector`，**不经过 `hub-storage`**；`libc` 附着点是 `node-connector` 的 `pty.rs`(27) / `exec.rs`(45) / `terminal.rs`(5) / `files.rs`(4) 与 `node-core/worker.rs`(5，疑为测试夹具)。**核心难点**：`exec.rs` 的「`fork` → 改 fd → `execvpe`」在 Windows 上没有对应物（**Windows 没有 `fork`**），要整体换成 `CreateProcess` + 句柄重定向；会话终端从 `forkpty`/`ioctl(TIOCSWINSZ)` 换成 ConPTY（`CreatePseudoConsole` / `ResizePseudoConsole`）。**不是「加个矩阵条目」的量级**——先抽平台无关的 PTY/进程后端，再写两个实现，且 Windows 分支在 Linux 上测不了，得要 Windows runner 真跑。CI 目标：`x86_64-pc-windows-msvc`（msvc 工具链）与 `aarch64-apple-darwin`（`macos-14`，Apple Silicon；**Intel runner 在退役时间表上，故 macOS 只发 arm64**）。macOS 是 Unix 系、移植量小，安排在 Windows 之前先做以验证抽象层。见 `.mdflow/milestones/v0.7.2-desktop-platforms.md`。**缺陷池 bug：2 个**（🟡 secret 加固、🟢 工作区同步兜底，planner 2026-11-05 原样搬入 Bugs 表；二者均为**未来补强项**、本期不做，已在 Bugs 表如实保留） | —（承接 v0.7.1 推迟的 `windows-gnu`） |
+| v0.7.2 ✅ 已完成 | **桌面平台支持（设备侧 afcli：Windows + macOS）** | **用户 2026-11-05 裁定**：插一个 v0.7.2 专做设备侧桌面平台移植（Windows + macOS，mac 为用户 2026-11-05 追加裁定），`v0.8.0` 骨架不动、顺延一位。**只做设备侧 `afcli`**，`afhub` 仍只发 Linux（自托管 Hub 一般跑在服务器/容器，Windows 不是主场景）。**改动面已核对**：`afcli` 的生产依赖链是 `node-cli` → `node-core` → `node-connector`，**不经过 `hub-storage`**；`libc` 附着点是 `node-connector` 的 `pty.rs`(27) / `exec.rs`(45) / `terminal.rs`(5) / `files.rs`(4) 与 `node-core/worker.rs`(5，疑为测试夹具)。**核心难点**：`exec.rs` 的「`fork` → 改 fd → `execvpe`」在 Windows 上没有对应物（**Windows 没有 `fork`**），要整体换成 `CreateProcess` + 句柄重定向；会话终端从 `forkpty`/`ioctl(TIOCSWINSZ)` 换成 ConPTY（`CreatePseudoConsole` / `ResizePseudoConsole`）。**不是「加个矩阵条目」的量级**——先抽平台无关的 PTY/进程后端，再写两个实现，且 Windows 分支在 Linux 上测不了，得要 Windows runner 真跑。CI 目标：`x86_64-pc-windows-msvc`（msvc 工具链）与 `aarch64-apple-darwin`（对齐 REX 用 `macos-latest`，Apple Silicon；**Intel runner 在退役时间表上，故 macOS 只发 arm64**）。macOS 是 Unix 系、移植量小，安排在 Windows 之前先做以验证抽象层。见 `.mdflow/milestones/v0.7.2-desktop-platforms.md`。**缺陷池 bug：2 个**（🟡 secret 加固、🟢 工作区同步兜底，planner 2026-11-05 原样搬入 Bugs 表；二者均为**未来补强项**、本期不做，已在 Bugs 表如实保留） | —（承接 v0.7.1 推迟的 `windows-gnu`） |
 | v0.7.3 ⬜ 规划中 | **会话导入（外部 agent 历史会话 → 设备侧 CLI 导入 → 可继续对话）** | **用户 2026-11-05 裁定立项**。方案已调研（2026-10-27 实测）：导入=**绑定非搬运**——Hub 建 session 预填 `acp_session_id`，设备走 `session/load` 让 agent 自己找回历史（实测跨进程记得）。L0+L1 只支持 opencode（唯一有 ACP 入口的 agent，`KNOWN_AGENTS` 表中唯一有 `acp_args`）；opencode 会话存于 `~/.local/share/opencode/opencode.db` 的 `session_v2` 表。改动面：1 个 Hub 端点 + 1 个 CLI 子命令 + 只读探测 DB；与 v0.7.2 无依赖。里程碑文档开工时再派生 | —（用户新需求） |
 | v0.8.0 🔄 当前 | **任务与看板** | Task 六态 + Task:Execution = 1:N；`done_when` = `criteria` 判定码 + `description`（`DECISIONS.md` D23）；任务级约束与固定过滤顺序（① allowed_* ② 隔离策略 ③ 能力/负载）；失败八形态与重试矩阵（含 `superseded` / `disk_exhausted`）；**执行中改需求的三种处置**；看板六列 + 任务详情页；**看板过滤 / 搜索 / 批量操作**；**项目摘要四行（含管家总结落点）**；**失败面板与验收面板（唯一处置入口）**；**执行复盘（只读轨迹回放）**；**执行监控（`projects/:id/executions`，慢变摘要 + 按行订阅，不编百分比）**；**收件箱（待决策 / 动态两区 + 决策请求 TTL/降级/留痕）**；`disk_exhausted` 时**询问清理并说明清理什么（预演）**；**时间与成本统计（排队与执行分开记，token 拿不到标 unknown）**；执行间接力（缓存复用）；时间线作为第二视图。见 `architecture/task-model.md` | 任务看板、任务与执行、项目时间线、执行监控、执行复盘、收件箱、失败与验收 |
 | v0.9.0 | **管家** | 跑在 Hub 上的项目级 agent：接意图 / 建派任务 / 督进度 / 写总结；**技能集（`project.status` / `task.create` / `task.clarify` / `memory.*`），不写死意图分类**（D22）；两处记忆（库 `project_memory` + 仓库 `.afleet/MEMORY.md`）；**建议派活草稿箱（点下发才进看板）**；与调度器的接口（只提交 task，不指定设备）；决策请求与收件箱的接入。调度器侧补三层过滤（`architecture/scheduling.md` 按此改写）。见 `architecture/butler.md` | 管家 |
