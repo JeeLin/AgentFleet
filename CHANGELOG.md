@@ -14,6 +14,99 @@ each milestone document's `里程碑起始 ref`. Entry text was not rewritten.
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-06
+
+### Added
+
+- **设备侧 `afcli` 现在能装在 Windows 与 macOS 上**（v0.7.2 的主题）。之前 `afcli`
+  只发 Linux：`node-connector` 的执行模型整个架在 Unix 语义上——会话终端是
+  `forkpty` + `ioctl(TIOCSWINSZ)`，一次性命令是 `fork` + `pipe2(O_CLOEXEC)` + `dup2` +
+  `execvpe` + `waitpid`，通道读超时是 `poll` / `fcntl(O_NONBLOCK)`。这些在 Windows 上
+  不是「没有对应物」，而是**模型不同**：没有 `fork`，进程要一次成型。所以这版先抽了一层
+  平台无关的 PTY/进程后端，再写两个实现，而不是给现有代码加 `cfg`。
+
+  - **Windows**：ConPTY（`CreatePseudoConsole` / `ResizePseudoConsole`）做终端面板，
+    `CreateProcessW` + 句柄继承做命令执行。命令行拼装（引号、环境块、UTF-16）提到
+    `connector/win_command.rs` 单独成文件、平台无关地编译——于是这部分在 Linux 上就能
+    跑单测，把「只能靠 CI 的 windows runner 验」的面积缩到几个系统调用本身。
+    引号规则对准 Rust `Quote::Auto`（与 `std::process::Command` 在 Windows 上逐字节
+    一致）：只有「含空格或制表符」或「空参数」才加外层引号，转义则永远执行。
+  - **macOS**：清掉三处只在 Apple 平台出现的编译雷——没有 `execvpe`（要 `execvp` +
+    手动拼 `PATH`）、没有 `pipe2(O_CLOEXEC)`（要 `pipe` + `fcntl`，且两步之间不能有
+    `fork`，否则 fd 有一瞬是可继承的）、`forkpty` 的声明位置不同。
+
+  发布产物新增 `afcli-windows-amd64.exe` 与 `afcli-macos-arm64`，并在 CI 上**真跑**
+  `cargo test -p node-connector --all-targets`（Windows / macOS 各一条 job）。
+  仅「编得过」证明不了读得到输出，ConPTY 的读流时序只有真 Windows 能验。
+  Hub 镜像里同时内嵌这两个桌面产物（`/opt/agentfleet/dist/`），供设备从 Hub 拉取。
+  **macOS 目前只发 arm64**：`macos-14` 及以后是 Apple Silicon，Intel runner 在退役
+  时间表上。 / **The device-side `afcli` now runs on Windows and macOS.** Previously
+  `afcli` shipped Linux-only because `node-connector`'s execution model was built on Unix
+  semantics throughout — `forkpty` + `ioctl(TIOCSWINSZ)` for the session terminal,
+  `fork` + `pipe2(O_CLOEXEC)` + `dup2` + `execvpe` + `waitpid` for one-shot commands,
+  `poll` / `fcntl(O_NONBLOCK)` for channel read timeouts. Windows does not lack counterparts
+  to these; it has a **different model**: there is no `fork`, so a process is created in one
+  step. This release therefore extracts a platform-neutral PTY/process backend first and
+  then supplies two implementations, rather than sprinkling `cfg` over the existing code.
+  Windows uses **ConPTY** for the terminal panel and `CreateProcessW` + handle inheritance for
+  command execution. Command-line assembly (quoting, environment block, UTF-16) lives in its
+  own platform-neutral module, `connector/win_command.rs`, so it can be unit-tested on Linux —
+  shrinking the "only the CI windows runner can verify this" surface down to a handful of
+  system calls. The quoting rules match Rust's `Quote::Auto` byte for byte: quote only when the
+  argument contains a space or tab, or is empty; escaping always happens. macOS clears three
+  Apple-only compile landmines — no `execvpe`, no `pipe2(O_CLOEXEC)`, and `forkpty` declared
+  elsewhere. Release artifacts gain `afcli-windows-amd64.exe` and `afcli-macos-arm64`, and CI
+  now **actually runs** `cargo test -p node-connector --all-targets` on both platforms:
+  compiling proves nothing about reading output, and ConPTY's read-stream timing can only be
+  verified on real Windows. The Hub image embeds both desktop artifacts under
+  `/opt/agentfleet/dist/` for devices to fetch. **macOS ships arm64 only** for now: `macos-14`
+  and later are Apple Silicon, and Intel runners are on a retirement schedule.
+
+- **`docs/DEVELOPMENT.md` 新增「已知行为差异」一节**，逐条记下三平台的**刻意**差异
+  （Windows 关面板发 `CTRL_CLOSE_EVENT` 而非 `SIGHUP`、`Ctrl-C` 是控制台事件而非 `SIGINT`、
+  **没有进程组**所以没有「杀整个作业树」、没有 `0o600` 对应物而走 ACL 继承；macOS 三处
+  编译雷的绕法与代价）。判据是「平台没有对应物」或「对应物语义对不上」——只是「还没做」
+  的不许写进那一节，要进 Bugs 表。 / **`docs/DEVELOPMENT.md` gains a "known behavioural
+  differences" section** recording the deliberate per-platform gaps (on Windows, closing a
+  panel delivers `CTRL_CLOSE_EVENT` rather than `SIGHUP`; `Ctrl-C` is a console event rather
+  than `SIGINT`; **there are no process groups**, hence no "kill the whole job tree"; and no
+  `0o600` equivalent, with ACL inheritance instead; on macOS, how each of the three compile
+  landmines is worked around and what it costs). The criterion for inclusion is "the platform
+  has no counterpart" or "the counterpart means something else" — anything merely not done yet
+  belongs in the bugs table instead.
+
+### Fixed
+
+- **`afcli` 在 macOS 上编不过**：`execvpe` / `pipe2` 在 macOS 上不存在，`forkpty` 的声明
+  位置也不同。三处都按平台分支，Linux 行为零变化。 / **`afcli` did not compile on macOS**:
+  `execvpe` and `pipe2` do not exist there, and `forkpty` is declared elsewhere. All three are
+  now platform-branched with no behaviour change on Linux.
+
+- **Windows 下空命令行参数会静默丢失**（写 Windows 后端时被测试逮住）：判据写成
+  `!arg.is_empty() && ...` 会让空参数走进「原样返回」分支，于是它在命令行里整段消失。
+  正确判据是「空参数**必须**加引号」。同一处还修了引号转义被错误地放进
+  「是否加外层引号」的分支里，导致 `a"b` 里的 `"` 没被转义、一个参数被拆成两段。
+  两条都用「往返」测试（拼出来再按 MSVC 规则解析回来必须一字不差）加微软官方示例表
+  守住。 / **Empty command-line arguments were silently dropped on Windows** (caught by
+  tests while writing the backend): the guard read `!arg.is_empty() && ...`, so an empty
+  argument took the "return as-is" path and vanished from the command line entirely. An empty
+  argument **must** be quoted. The same code also had quote escaping wrongly nested inside the
+  "wrap in outer quotes" branch, so the `"` in `a"b` went unescaped and one argument became
+  two. Both are now guarded by round-trip tests plus Microsoft's official example table.
+
+- **`supervisor` 的 spawn 失败分支在 CI 上覆盖不到**：原先挂 `coverage: excluded`，
+  理由是「需二进制路径不可执行」——其实用 `with_exe` 指向一个存在但无执行位的文件就能
+  稳定触发，而那正是生产里的「二进制被换掉 / 权限没了」。已补确定性单测（断言崩溃、
+  时长为 0、journal 里留痕）。`wait` 失败分支查证后确认**不可达**（`Child::wait` 会
+  缓存退出状态），理由已如实写进代码注释，没有用 racy 标注掩盖。
+  / **The supervisor's spawn-failure branch was unreachable by CI coverage**: it carried a
+  `coverage: excluded` marker justified as "requires an unexecutable binary path" — but
+  pointing `with_exe` at an existing file without the execute bit triggers it deterministically,
+  which is exactly the production case of "the binary was replaced / permissions were lost". A
+  deterministic unit test now covers it. The `wait` failure branch is provably **unreachable**
+  (`Child::wait` caches the exit status); that reasoning is recorded in the code rather than
+  papered over with a `(racy)` marker.
+
 ## [0.7.1] - 2026-11-05
 
 ### Added

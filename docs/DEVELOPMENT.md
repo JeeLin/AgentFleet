@@ -219,9 +219,20 @@ GitHub）、**版本对齐**（Release 页上有多个版本，选错就连不�
   纯 `std` 的客户端/协议/命令行工具，整个仓库**没有一处 `forkpty`/`openpty`/
   `TIOCSWINSZ`**，跑子进程只用跨平台的 `std::process::Command`——它从未面对 PTY 移植。
   所以 v0.7.1 的矩阵是 4 个 Linux 目标（x86_64 / aarch64 × gnu / musl）。
-  **这件事已经排进 v0.7.2**（设备侧 `afcli`，见里程碑表）：正确顺序是抽平台无关的
-  PTY/进程后端 → 实现 ConPTY 与 `CreateProcess` 后端 → Windows runner 上真跑通过 →
-  再把它加回矩阵。别只把矩阵条目加回去，那样每次发布必红一条，而报错看起来像缺链接器。
+- **v0.7.2 已把桌面平台做完**：平台抽象层（`pty/mod.rs` + `pty/unix.rs` +
+  `pty/windows.rs`）→ ConPTY 与 `CreateProcess` 后端 → Windows / macOS runner 上
+  真跑测试。发布矩阵仍是 **Linux 4 个目标 + 桌面 2 个目标分两条 job**：
+  `build-binaries`（`--workspace`，`afhub` 仍 Linux-only）与 `build-desktop`
+  （只 `-p node-cli`）。**不要把桌面条目塞进 `build-binaries` 的矩阵**——那条
+  job 的自包含断言用 `readelf` / `ldd` / `file`，桌面平台上都没有。
+  桌面产物的目标：`x86_64-pc-windows-msvc`（`windows-latest` 自带 MSVC 工具链）
+  与 `aarch64-apple-darwin`（`macos-14` 是 Apple Silicon；Intel runner 在退役
+  时间表上，**所以 macOS 目前只发 arm64**）。
+- **`test-desktop` 是本里程碑唯一的真实验收手段**：`cargo check --target
+  x86_64-pc-windows-msvc` 只证明编得过，证明不了读得到输出。ConPTY /
+  `CreateProcessW` / 句柄继承 / 读流时序只能在真 Windows 上跑；macOS 的
+  `pipe_nonblocking_cloexec` / `macos_aware_execvpe` / `platform_forkpty`
+  三处分支在 Linux 上走不到。
 - **「静态链 OpenSSL」在本仓不适用，但断言照抄**：`Cargo.toml` 的 `reqwest` 是
   `rustls-tls`（`default-features = false`），整棵树**不链系统 OpenSSL**。所以真正要
   静态的是 libc，用 **musl 目标**解决。REX 那条「产物不依赖 `libssl|libcrypto`」的
@@ -240,6 +251,47 @@ GitHub）、**版本对齐**（Release 页上有多个版本，选错就连不�
 
 ---
 
+## 2.2 已知行为差异（v0.7.2：设备侧 `afcli` 的三平台）
+
+> 这一节记的是**刻意的**差异，不是待修的缺陷。判据是「平台本身没有对应物」或
+> 「对应物的语义对不上」；任何一处若只是「还没做」，不许写在这里，要进 Bugs 表。
+
+#### macOS（Unix，但有三处与 Linux 不同）
+
+| 差异 | 为什么必须分开 | 代码位置 |
+|------|---------------|----------|
+| `execvpe` 不存在 | glibc 有 `execvpe`，macOS 只有 `execvp` + 手动拼 `PATH`。直接用 `execvpe` 链接期就找不到符号。 | `pty/unix.rs` 的 `macos_aware_execvpe` |
+| `pipe2(O_CLOEXEC)` 不存在 | macOS 没有 `pipe2`，要 `pipe` 之后 `fcntl(F_SETFD, FD_CLOEXEC)`。中间那一刻 fd 是**可继承**的，而 fork 就发生在旁边——所以两步之间不能有 fork。 | `pty/unix.rs` 的 `pipe_nonblocking_cloexec` |
+| `forkpty` 在 `util.h` 里，不在 `libutil` 的常规导出处 | Linux 直接链 `libutil` 就有；macOS 上要按它的声明方式取。 | `pty/unix.rs` 的 `platform_forkpty` |
+
+macOS 上 **POSIX 权限位照常生效**（`0o600` / `0o700` 与 Linux 同义），
+所以 `identity.rs` 的权限加固在 macOS 上不需要分支。
+
+#### Windows（不是 Unix，差异是结构性的）
+
+| 差异 | Unix 行为 | Windows 行为 | 影响与处置 |
+|------|-----------|--------------|-----------|
+| **进程模型** | `fork` + 子进程里改 fd + `exec` | **没有 `fork`**。`CreateProcessW` 一次成型，管道用 `SECURITY_ATTRIBUTES` 声明可继承 | `connector/exec_windows.rs`。`run()` 只有一条路径，平台细节在 `Backend` 里 |
+| **PTY** | `forkpty` + `ioctl(TIOCSWINSZ)` | ConPTY：`CreatePseudoConsole` / `ResizePseudoConsole` | `pty/windows.rs`。尺寸语义一致（都是「告诉终端多大」） |
+| **关面板 = 关 shell** | master 关掉 → 子进程收 `SIGHUP` | `ClosePseudoConsole` → 子进程收 **`CTRL_CLOSE_EVENT`** | 效果对齐（进程都会退出），但**信号不同**：依赖 `SIGHUP` 做清理的脚本在 Windows 上不会收到它 |
+| **`Ctrl-C`** | `SIGINT` | 控制台事件 **`CTRL_C_EVENT`**；若走 `GenerateConsoleCtrlEvent` 发给进程组则需要进程组 | 见下一行 |
+| **进程组** | `setsid` / `setpgid` / `kill(-pgid)` | **没有进程组**。只能按 PID 或按「同控制台」投递事件 | `Pty::pid()` 返回的仍是直接子进程 PID，语义与 `forkpty` 返回值相同；但「杀整个作业树」没有等价物。**这是能力缺失，不是 bug** |
+| **文件权限** | `0o600` / `0o700` | **没有 POSIX 权限位**，走 ACL 继承 | `identity.rs` 的 `IDENTITY_MODE` / `DATA_DIR_MODE` 按 `#[cfg(unix)]` 门禁。Windows 上靠 `%LOCALAPPDATA%` 的默认 ACL（只当前用户与 SYSTEM 可读）。**不提供等价的显式收紧**——这是已知差异，不要假装有 |
+| **argv 拼装** | 直接传数组 | 一条**字符串**命令行，由子进程按 MSVC 规则自行解析 | `connector/win_command.rs`，规则与 Rust `Quote::Auto` 逐字节一致 |
+| **符号链接** | `symlink` 任意可建 | 需开发者模式或管理员权限 | 生产代码跨平台（走 `symlink_metadata`），但相关**测试**限 Unix——造不出前提 |
+| **FIFO / Unix 域套接字** | 有 | 没有 FIFO；`AF_UNIX` 语义与 `stat`/`open` 的交互不同 | `files.rs` 对应测试限 Unix；生产代码不依赖这两种类型 |
+| **纪元前时间戳** | 可表示（负 `tv_sec`） | NTFS 用 1601 起的计数，**没有「纪元前」这个状态** | 该分支在 Windows 上结构上不可达 |
+
+**Windows 上目前不做的事**（都是能力缺失，不是缺陷）：
+
+1. **没有进程组**，所以没有「一次杀掉整个作业树」。设备侧只用它管自己拉起的
+   worker 与终端面板，按 PID 杀够用。
+2. **不提供 `0o600` 的等价物**：文件权限交给 Windows 的 ACL 继承。
+3. **`afhub` 仍 Linux-only**：v0.7.2 只移植设备侧 `afcli`。Hub 的部署形态是
+   Linux 容器，没有桌面需求。
+
+---
+
 ## 3. 里程碑总览 / Milestones
 
 状态词汇三态：`✅ 已完成` / `🔄 当前` / 无标记（未开始）。
@@ -254,7 +306,7 @@ GitHub）、**版本对齐**（Release 页上有多个版本，选错就连不�
 | v0.6.0 ✅ 已完成 | 任务基准（**重挂**，用户 2026-11-03 裁定「视为结束，从 v0.7.0 开始」） | 会话工作区的**起点 + 产出概览**：建会话时用 git connector 的第四个只读 op `rev` 记下 `base_commit`，面板上显示「提交几次 / 另有几个文件未提交」。**产品主轴改版后**：这套逻辑是对的，但它算的是 `base_commit..HEAD`——在项目主轴下这是 **Execution 的产出 diff**，最终该挂在 Execution 上，不是会话上。因此本里程碑**收口为「只修真 bug、不再扩展」**，其「起点」概念作为 v0.7.0 的输入移交 | Git 操作界面（起点部分） |
 | v0.7.0 ✅ 已完成 | **项目与绑定（+ 设备/agent 管理面扩展）** — **含「项目结构按新需求调整」** | **先做两件结构活**：①**crate 拆分**——`node-core` 拆出 `node-connector`（7 → 8 个 crate，纯搬家、单独一个提交，理由只此一条：v0.12.0 的按需加载必须靠 crate 边界）；②按项目主轴重排数据模型与模块分层——`schema` 增加 `project` / `task` / `execution` / `binding` 表与迁移脚本，`crates/` 与 `packages/web/src` 按新归属切分（会话挂到 Execution 下，不再是顶层）。**这是本里程碑的第一件事**，否则后面的项目实体只能挂在旧结构上，等于给会话再加一层壳。然后再做业务：项目实体三形态（中心式 / 隔离式 / 镜像式）；Hub 侧裸仓库（git CLI，藏在接口后）；Binding = `(project, device) → 固定目录`；设备侧 worktree 分任务 + 四层磁盘处置（`architecture/project-and-snapshot.md`）；前端新增 `projects` / `project` 路由，**项目页默认落在看板**。**v0.6.0 的 `base_commit` 概念在此落到 Task 上**：交接规则写死——`execution.base_commit` 是**唯一真相源**，会话上的 `base_rev` 降级为「会话第一段执行的起点快照」，只读、不再参与任何「相对它产出了什么」的计算（那套展示整体移到 Execution 上）。**不保留两份可写的起点**：同一个事实有两个写入口，迟早会出现「会话说基于 A、执行说基于 B」。**同时扩展设备页 / agent 页（不砍反扩）**：绑定关系（这台设备绑了哪些项目、绑在哪个固定目录）、磁盘配额与已用、失败归因（哪类失败集中在这台机器）、改配额与清理策略；agent 页加「该 agent 上跑过哪些任务 / 成功率」 | 项目实体、绑定与固定目录、设备管理、agent 管理 |
 | v0.7.1 ✅ 已完成 | **CI 镜像构建（发布通路）** | 从 v0.14.0 提前而来（用户 2026-11-05 裁定）。本地 `mise run ci` 全绿后打 tag `v0.7.1` 触发 CI，**CI 首验暴露出两个真缺陷**：门禁红时镜像照样发出去（两个 workflow 只共享触发、互不阻塞）、`windows-gnu` 条目编不出来（`node-connector` 的 `fork`/`exec`/PTY 模型是 Unix-only 实现，移植需先抽平台抽象层）。**前者最终以「删掉 `ci.yml`、门禁并入产线」处置**：`release.yml` 的 `gate` job 跑齐 `mise.toml [tasks.ci]` 的全部 7 项，所有产线 job 都 `needs: gate`，清单只剩一个真相源（C7 双向比对）；**后者按「本里程碑不做移植」移除目标**，排进 v0.7.2。4 个 Linux 目标均已真编通过（`aarch64-*` 由 CI 的 arm runner 原生真编，11 步全 success）。把 §2 的「发布」那一整段真正建起来：`gate` → `build-frontend`（bun `--frozen-lockfile` → build，dist 作为 artifact）**硬前置**于 `build-binaries`（4 目标**原生**矩阵：x86_64 / aarch64 × gnu / musl；windows-gnu 已移除，**v0.7.1 不做移植，不是永远不支持**——见同节「v0.7.1 不提供 Windows 目标」），再分发到三个消费者：`docker-hub`（`afhub` + `afcli`，前端**已在编译期嵌入**，镜像里不另放 dist）、`docker-node`（`afcli`，按 `TARGETARCH` 选二进制）、`release`（GitHub Release + `SHA256SUMS` + `CHANGELOG.md` + 从 CHANGELOG 抽 body，**附件只发 musl 干净名**且稳定版带 `--latest`）。镜像推 `ghcr.io/<owner>/agentfleet-hub` / `agentfleet-node`。**`build-frontend` 之所以是硬前置**：dist 缺失时 `build.rs` 只造占位页并打 warning，二进制照编——「Hub 打开是占位页」能不红任何一步地发出去，所以每个平台编之前都断言 `dist/index.html` 存在。**安全边界变更**：`afhub` 缺省仍只绑回环，新增 `AFHUB_ALLOW_NON_LOOPBACK=1` 供容器显式放开，**只认确切的 `1`**。设备侧安装多了从 Hub 自己下载 `afcli` 的入口（`GET /api/agent-binary` + 设备页按钮），内网/离线部署不必够 GitHub。版本号 `0.5.0` → `0.7.1`（tag 与二进制自报版本必须一致） | —（`DEVELOPMENT.md` §2.1 发布段） |
-| v0.7.2 🔄 当前 | **桌面平台支持（设备侧 afcli：Windows + macOS）** | **用户 2026-11-05 裁定**：插一个 v0.7.2 专做设备侧桌面平台移植（Windows + macOS，mac 为用户 2026-11-05 追加裁定），`v0.8.0` 骨架不动、顺延一位。**只做设备侧 `afcli`**，`afhub` 仍只发 Linux（自托管 Hub 一般跑在服务器/容器，Windows 不是主场景）。**改动面已核对**：`afcli` 的生产依赖链是 `node-cli` → `node-core` → `node-connector`，**不经过 `hub-storage`**；`libc` 附着点是 `node-connector` 的 `pty.rs`(27) / `exec.rs`(45) / `terminal.rs`(5) / `files.rs`(4) 与 `node-core/worker.rs`(5，疑为测试夹具)。**核心难点**：`exec.rs` 的「`fork` → 改 fd → `execvpe`」在 Windows 上没有对应物（**Windows 没有 `fork`**），要整体换成 `CreateProcess` + 句柄重定向；会话终端从 `forkpty`/`ioctl(TIOCSWINSZ)` 换成 ConPTY（`CreatePseudoConsole` / `ResizePseudoConsole`）。**不是「加个矩阵条目」的量级**——先抽平台无关的 PTY/进程后端，再写两个实现，且 Windows 分支在 Linux 上测不了，得要 Windows runner 真跑。CI 目标：`x86_64-pc-windows-msvc`（msvc 工具链）与 `aarch64-apple-darwin`（macos-latest）。macOS 是 Unix 系、移植量小，安排在 Windows 之前先做以验证抽象层。见 `.mdflow/milestones/v0.7.2-desktop-platforms.md`。**缺陷池 bug：2 个**（🟡 secret 加固、🟢 工作区同步兜底，planner 2026-11-05 原样搬入 Bugs 表） | —（承接 v0.7.1 推迟的 `windows-gnu`） |
+| v0.7.2 🔄 当前 | **桌面平台支持（设备侧 afcli：Windows + macOS）** | **用户 2026-11-05 裁定**：插一个 v0.7.2 专做设备侧桌面平台移植（Windows + macOS，mac 为用户 2026-11-05 追加裁定），`v0.8.0` 骨架不动、顺延一位。**只做设备侧 `afcli`**，`afhub` 仍只发 Linux（自托管 Hub 一般跑在服务器/容器，Windows 不是主场景）。**改动面已核对**：`afcli` 的生产依赖链是 `node-cli` → `node-core` → `node-connector`，**不经过 `hub-storage`**；`libc` 附着点是 `node-connector` 的 `pty.rs`(27) / `exec.rs`(45) / `terminal.rs`(5) / `files.rs`(4) 与 `node-core/worker.rs`(5，疑为测试夹具)。**核心难点**：`exec.rs` 的「`fork` → 改 fd → `execvpe`」在 Windows 上没有对应物（**Windows 没有 `fork`**），要整体换成 `CreateProcess` + 句柄重定向；会话终端从 `forkpty`/`ioctl(TIOCSWINSZ)` 换成 ConPTY（`CreatePseudoConsole` / `ResizePseudoConsole`）。**不是「加个矩阵条目」的量级**——先抽平台无关的 PTY/进程后端，再写两个实现，且 Windows 分支在 Linux 上测不了，得要 Windows runner 真跑。CI 目标：`x86_64-pc-windows-msvc`（msvc 工具链）与 `aarch64-apple-darwin`（`macos-14`，Apple Silicon；**Intel runner 在退役时间表上，故 macOS 只发 arm64**）。macOS 是 Unix 系、移植量小，安排在 Windows 之前先做以验证抽象层。见 `.mdflow/milestones/v0.7.2-desktop-platforms.md`。**缺陷池 bug：2 个**（🟡 secret 加固、🟢 工作区同步兜底，planner 2026-11-05 原样搬入 Bugs 表；二者均为**未来补强项**、本期不做，已在 Bugs 表如实保留） | —（承接 v0.7.1 推迟的 `windows-gnu`） |
 | v0.7.3 ⬜ 规划中 | **会话导入（外部 agent 历史会话 → 设备侧 CLI 导入 → 可继续对话）** | **用户 2026-11-05 裁定立项**。方案已调研（2026-10-27 实测）：导入=**绑定非搬运**——Hub 建 session 预填 `acp_session_id`，设备走 `session/load` 让 agent 自己找回历史（实测跨进程记得）。L0+L1 只支持 opencode（唯一有 ACP 入口的 agent，`KNOWN_AGENTS` 表中唯一有 `acp_args`）；opencode 会话存于 `~/.local/share/opencode/opencode.db` 的 `session_v2` 表。改动面：1 个 Hub 端点 + 1 个 CLI 子命令 + 只读探测 DB；与 v0.7.2 无依赖。里程碑文档开工时再派生 | —（用户新需求） |
 | v0.8.0 | **任务与看板** | Task 六态 + Task:Execution = 1:N；`done_when` = `criteria` 判定码 + `description`（`DECISIONS.md` D23）；任务级约束与固定过滤顺序（① allowed_* ② 隔离策略 ③ 能力/负载）；失败八形态与重试矩阵（含 `superseded` / `disk_exhausted`）；**执行中改需求的三种处置**；看板六列 + 任务详情页；**看板过滤 / 搜索 / 批量操作**；**项目摘要四行（含管家总结落点）**；**失败面板与验收面板（唯一处置入口）**；**执行复盘（只读轨迹回放）**；**执行监控（`projects/:id/executions`，慢变摘要 + 按行订阅，不编百分比）**；**收件箱（待决策 / 动态两区 + 决策请求 TTL/降级/留痕）**；`disk_exhausted` 时**询问清理并说明清理什么（预演）**；**时间与成本统计（排队与执行分开记，token 拿不到标 unknown）**；执行间接力（缓存复用）；时间线作为第二视图。见 `architecture/task-model.md` | 任务看板、任务与执行、项目时间线、执行监控、执行复盘、收件箱、失败与验收 |
 | v0.9.0 | **管家** | 跑在 Hub 上的项目级 agent：接意图 / 建派任务 / 督进度 / 写总结；**技能集（`project.status` / `task.create` / `task.clarify` / `memory.*`），不写死意图分类**（D22）；两处记忆（库 `project_memory` + 仓库 `.afleet/MEMORY.md`）；**建议派活草稿箱（点下发才进看板）**；与调度器的接口（只提交 task，不指定设备）；决策请求与收件箱的接入。调度器侧补三层过滤（`architecture/scheduling.md` 按此改写）。见 `architecture/butler.md` | 管家 |
