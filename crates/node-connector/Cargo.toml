@@ -16,6 +16,10 @@ base64ct.workspace = true
 libc.workspace = true
 tokio = { workspace = true, features = ["full"] }
 
+# 只在 Windows 上编（ConPTY / CreateProcess / SetFileTime），见 workspace 注释。
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [dev-dependencies]
 # connector 的沙箱测试要建临时工作区（exec / files / git 各自用）
 tempfile.workspace = true

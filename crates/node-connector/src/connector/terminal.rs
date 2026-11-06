@@ -22,7 +22,10 @@
 
 use std::collections::VecDeque;
 
-use std::os::fd::{AsRawFd, OwnedFd};
+// 「读端」两平台类型不同：Unix 是 fd，Windows 是句柄。读线程只认
+// `pty::ReadEnd` 这个别名，正文里不出现 `cfg`。
+#[allow(unused_imports)]
+use crate::pty::{read_handle, OwnedReadEnd, ReadEnd};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
 use std::sync::{mpsc, Arc};
 
@@ -358,7 +361,7 @@ impl Terminal {
         // 测试环境无可控构造手段。
         std::thread::Builder::new()
             .name("afcli-pty".to_string())
-            .spawn(move || read_loop(dup, tx, counter, flag))
+            .spawn(move || read_loop(raw_handle_of(&dup), tx, counter, flag))
             .map_err(|e| {
                 ConnectorError::internal(format!("cannot start the terminal reader: {e}"))
             })?;
@@ -420,16 +423,16 @@ fn wait_for_budget(queued: &QueueBytes, budget: usize) {
 /// 它存在的理由：谁在会话循环里替大家挡住这个阻塞，谁就得同时持有
 /// 整个通道表。
 fn read_loop(
-    master: OwnedFd,
+    master: ReadEnd,
     tx: SyncSender<Vec<u8>>,
     queued: QueueBytes,
     stop: Arc<std::sync::atomic::AtomicBool>,
 ) {
     use std::sync::atomic::Ordering::Relaxed;
-    // **只借 fd，不接管所有权**：另一次 `close()` 会关掉 `master`，而一个
-    // 也关它的 `File` 会造成同一 fd 两个所有者，进程在 IO safety 检查上
-    // 直接 abort。读这一侧只需要 `read(2)`，没必要引入带所有权的句柄。
-    let fd = master.as_raw_fd();
+    // **只借，不接管所有权**：另一次 `close()` 会关掉那一侧，而一个也关它
+    // 的 `File` / `OwnedHandle` 会造成同一内核对象两个所有者，进程在 IO
+    // safety 检查上直接 abort。读这一侧只需要一次读，不必带所有权。
+    let fd = master;
     let mut buf = [0u8; READ_CHUNK];
     loop {
         // **每次读之前先给「关掉面板」一个机会**。`read(2)` 在 PTY 空闲时
@@ -437,18 +440,18 @@ fn read_loop(
         if stop.load(std::sync::atomic::Ordering::SeqCst) {
             break;
         }
-        if !wait_readable(fd, READ_POLL_INTERVAL) {
+        if !crate::pty::wait_readable(fd, READ_POLL_INTERVAL) {
             // 超时 = 这一轮没有数据。回到循环头部查停标志。
             continue;
         }
         // `Ok(0)` 与 `Err` 都是「这一侧到此为止」：PTY 在子进程退出后
         // 报的是 `EIO` 而不是 EOF（`pty.rs` 把两者都归到这一类）。
-        let n = match crate::pty::read_fd(fd, &mut buf) {
+        let n = match read_handle(fd, &mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
         let Some(chunk) = buf.get(..n) else {
-            // coverage: excluded — `read_fd` 最多读 `buf.len()` 字节，
+            // coverage: excluded — `read_handle` 最多读 `buf.len()` 字节，
             // 所以 `buf.get(..n)` 恒为 Some（`n <= buf.len()`）。留着手写
             // 是因为裸切片会被 workspace lint 拒掉。
             break;
@@ -469,21 +472,21 @@ fn read_loop(
     drop(tx);
 }
 
-/// 等 fd 可读，最多 `budget`。**只等可读**。
-fn wait_readable(fd: std::os::fd::RawFd, budget: std::time::Duration) -> bool {
-    let ms = i64::try_from(budget.as_millis().min(i64::MAX as u128)).unwrap_or(i64::MAX);
-    let mut pfd = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // coverage: excluded — `poll` 失败需 fd 无效或 `nfds` 超范围，
-    // 这里传的都是内核刚给的 fd（防御性兜底）。
-    let rc = unsafe { libc::poll(&raw mut pfd, 1, ms as libc::c_int) };
-    // **POLLHUP / POLLERR 也要当「可读」**：PTY 的从端关闭时内核先报挂断，
-    // 那一瞬间未必同时带 POLLIN。只认 POLLIN 的话读循环会永远跳过
-    // `read`，于是永远看不到那个代表「子进程退了」的 0 字节。
-    rc > 0 && pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
+/// 从「拥有所有权的读端」借出一个裸值给读线程。
+///
+/// 读线程只借不拿：`dup` 仍由 `start_reader` 的栈持有到 `spawn` 之后……
+/// ——但 `spawn` 把它 move 进闭包了，所以闭包持有着它，`raw_handle_of`
+/// 在闭包里调，借出来的裸值在闭包存活期间一直有效。
+#[cfg(unix)]
+fn raw_handle_of(end: &OwnedReadEnd) -> ReadEnd {
+    use std::os::fd::AsRawFd;
+    end.as_raw_fd()
+}
+
+#[cfg(windows)]
+fn raw_handle_of(end: &OwnedReadEnd) -> ReadEnd {
+    use std::os::windows::io::AsRawHandle;
+    end.as_raw_handle()
 }
 
 /// 读线程的等待粒度。**它同时是「关掉面板」到线程真正退出之间的上界**：
@@ -818,6 +821,13 @@ mod tests {
     /// 为什么单独测这一条：面板被关掉时 `close` 只置标志，真正的 `break`
     /// 发生在读线程下一轮循环的顶部。断言「线程退出了」还不足以说明它
     /// 走的是 stop 这条路——它也可能是读到了 EOF 才退的。
+    ///
+    /// **限 Unix**：这个用例要造一根「永远不会 EOF 的读端」，靠的是
+    /// `pipe2` 之后**握着写端不关**。Windows 上的匿名管道同样有「写端没关
+    /// 就不 EOF」的语义，但 `read_loop` 在那边收的是 `HANDLE` 而不是
+    /// `RawFd`，且没有 `pipe2` 这种一步拿到非继承管道的调用——需要真
+    /// ConPTY 才能验，只能在 CI 的 windows runner 上跑。
+    #[cfg(unix)]
     #[test]
     fn the_reader_thread_returns_immediately_when_stop_is_already_set() {
         let mut fds = [-1 as std::os::fd::RawFd; 2];
@@ -834,7 +844,12 @@ mod tests {
         let queued: QueueBytes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
 
-        read_loop(read_end, tx, std::sync::Arc::clone(&queued), stop);
+        read_loop(
+            raw_handle_of(&read_end),
+            tx,
+            std::sync::Arc::clone(&queued),
+            stop,
+        );
 
         // 它退出了：发送端随之析构，接收端拿到 Disconnected。
         assert!(

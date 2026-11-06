@@ -19,9 +19,18 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 pub mod exec;
+// exec 的 Windows 后端（CreateProcessW + WaitForMultipleObjects）。
+// 与 `exec.rs` 里的 Unix 后端同签名，按 `cfg` 二选一。
+#[cfg(windows)]
+mod exec_windows;
+// Win32 命令行的纯逻辑（引号拼接、环境块、UTF-16）。**平台无关地编译**，
+// 所以它的单测在 Linux 上就能跑——这正是把「只能靠 CI 验」的面积从
+// 「整个 spawn 流程」缩到「三个系统调用本身」的做法。
 pub mod files;
 pub mod git;
 pub mod terminal;
+#[cfg(any(windows, test))]
+pub(crate) mod win_command;
 pub mod worktree;
 
 /// terminal connector 名。**注册表与心跳上报共用这批常量**（约束 14）。

@@ -71,6 +71,18 @@ dirs = "5"
 uuid = { version = "1", features = ["v4"] }
 # umask(077)（约束 13）：Rust 标准库没有 umask 绑定
 libc = "0.2"
+# Windows 侧系统调用（v0.7.2）：ConPTY 要 `CreatePseudoConsole` /
+# `ResizePseudoConsole`，命令执行要 `CreateProcessW` + 句柄继承，文件
+# connector 要 `SetFileTime`。全部只在 `cfg(windows)` 分支用到。
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+] }
 # terminal connector 的真 PTY（里程碑子任务 8）。
 # 只用 libc 自己那套 `openpty` / `forkpty` / `ioctl(TIOCSWINSZ)` 就够，
 # 不引 `portable-pty` / `nix`：`portable-pty` 会把 **spawn 与读循环一起**
@@ -88,6 +100,8 @@ include_dir = "0.7"
 
 # 仅测试用（放在这里而不是独立 section：`dep.workspace = true` 只从
 # `[workspace.dependencies]` 继承，Cargo 没有 `[workspace.dev-dependencies]`）
+# Windows 侧 ConPTY / 进程 / 文件 API（v0.7.2）。只在 `cfg(windows)` 下编译，
+# 所以 Linux/macOS 构建不会拉它进来。
 tempfile = "3"
 http-body-util = "0.1"
 

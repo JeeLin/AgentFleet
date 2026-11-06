@@ -27,16 +27,40 @@
 //! 里程碑「关键设计问题 1」的倾向：同签名、按 `cfg` 分实现，别让
 //! `connector/terminal.rs` 的调用点也进改动面。
 
+// 平台实现：`spawn` / `spawn_in` 与 `Pty` 的全部方法都在各自模块里，
+// 签名一致、按 `cfg` 二选一。`mod.rs` 只定义类型骨架。
 #[cfg(unix)]
 mod unix;
-// `spawn` / `spawn_in` 是 `Pty` 的**关联函数**（实现块在 `unix.rs` 里），
-// 不需要重导出；这里只把本文件用到的两个 Unix 侧自由函数拉进来。
-#[cfg(unix)]
-pub(crate) use unix::{apply_winsize, read_fd};
+#[cfg(windows)]
+mod windows;
 
-#[cfg(test)]
+// 自由函数按平台再导出到 `pty::`，让 `connector/terminal.rs` 只认一个名字：
+// 「读一次」「等可读」这两个动作在 Windows 上是 `ReadFile` /
+// `WaitForMultipleObjects`，在 Unix 上是 `read(2)` / `poll(2)`。
+#[cfg(unix)]
+pub(crate) use unix::{read_handle, wait_readable};
+#[cfg(windows)]
+pub(crate) use windows::{read_handle, wait_readable};
+
+/// 从任意「读端」读至多 `buf.len()` 字节。**返回 0 = 对端关了**。
+///
+/// `ReadEnd` 两平台类型不同（fd vs 句柄），所以这里用泛型参数名
+/// `ReadEnd` 在各自的 `read_handle` 里落地；调用方只写
+/// `crate::pty::read_handle(end, &mut buf)`，不出现任何 `cfg`。
+#[cfg(unix)]
+pub(crate) type ReadEnd = std::os::fd::RawFd;
+#[cfg(windows)]
+pub(crate) type ReadEnd = std::os::windows::io::RawHandle;
+
+/// `Pty::dup_master` 交出来的**拥有所有权**的读端。读线程持有它，
+/// 线程退出时随之关掉——「关掉面板 = 关掉那个 shell」靠的就是这一点。
+#[cfg(unix)]
+pub(crate) type OwnedReadEnd = std::os::fd::OwnedFd;
+#[cfg(windows)]
+pub(crate) type OwnedReadEnd = std::os::windows::io::OwnedHandle;
+
+#[cfg(all(test, unix))]
 use std::os::fd::RawFd;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 /// 终端尺寸。**下限 1×1**：0 会被内核当成「未设置」，而 `TIOCSWINSZ`
 /// 收下 0 之后 shell 的 `stty size` 就会报 `0 0`——那是内核的语义，
@@ -57,132 +81,23 @@ pub enum PtyError {
     #[error("terminal io failed: {0}")]
     Io(#[from] std::io::Error),
 }
-
 /// 已建好的 PTY 对。
 ///
-/// **不实现 `Clone`**：master fd 只有一个，拥有者是通道；而一个可以被随手
-/// 克隆的 PTY 句柄正是「写侧关不掉」的典型来源（`protocol.md` §6.1）。
+/// **不实现 `Clone`**：一个可以被随手克隆的终端句柄正是「写侧关不掉」的
+/// 典型来源（`protocol.md` §6.1）。
+///
+/// ## 平台布局（v0.7.2）
+///
+/// 字段按平台分：Unix 是一个 master fd（`unix::UnixPty`），Windows 是
+/// 输入写端 + 输出读端 + ConPTY 句柄 + 进程句柄（`windows::WindowsPty`）。
+/// 两者的公开方法签名**完全一致**，所以调用点（`connector/terminal.rs`）
+/// 不需要任何 `cfg`，也不需要 trait。
 #[derive(Debug)]
 pub struct Pty {
-    master: Option<OwnedFd>,
-    pid: libc::pid_t,
-    size: Size,
-}
-
-impl Pty {
-    pub fn pid(&self) -> libc::pid_t {
-        self.pid
-    }
-
-    /// 复制一份 master fd（写 / resize 用），**与 `self` 共享同一个 open
-    /// file description**。
-    ///
-    /// 布局是「读线程独占 master、调用方留一份 dup」：读线程退出时丢掉它
-    /// 那份 master，内核随之关掉最后一个，前台进程组收到 `SIGHUP`——
-    /// 「关掉终端面板 = 关掉那个 shell」因此成立。反过来（调用方独占
-    /// master、读线程拿 dup）的话，读线程会永远阻塞在一个没人关的 fd 上，
-    /// 每开关一次面板漏一个线程。
-    pub fn dup_master(&self) -> Result<OwnedFd, PtyError> {
-        let fd = self.master.as_ref().ok_or(PtyError::Closed)?;
-        // coverage: excluded — `fcntl(F_DUPFD_CLOEXEC)` 失败需 fd 表耗尽，
-        // 测试环境无可控构造手段（防御性兜底）。
-        let dup = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
-        if dup < 0 {
-            return Err(PtyError::Io(std::io::Error::last_os_error()));
-        }
-        Ok(unsafe { OwnedFd::from_raw_fd(dup) })
-    }
-
-    pub fn size(&self) -> Size {
-        self.size
-    }
-
-    /// 改终端尺寸（`ioctl(TIOCSWINSZ)`）。
-    ///
-    /// **内核会在这时给前台进程组发 `SIGWINCH`**——所以 `resize` 一生效，
-    /// 正在跑的程序立刻按新尺寸重画，不需要重新起一个 shell。
-    pub fn resize(&mut self, size: Size) -> Result<(), PtyError> {
-        let fd = self.master.as_ref().ok_or(PtyError::Closed)?;
-        apply_winsize(fd.as_raw_fd(), size)?;
-        self.size = size;
-        Ok(())
-    }
-
-    /// 往 PTY 写（等价于用户在终端里敲键）。
-    pub fn write(&self, bytes: &[u8]) -> Result<(), PtyError> {
-        let fd = self.master.as_ref().ok_or(PtyError::Closed)?;
-        let mut off = 0;
-        // **判据是 `off < len`，不是 `bytes.get(off..)` 是否为 `Some`**：
-        // `get(len..)` 返回的是**空切片**而不是 `None`，用 `while let
-        // Some` 收尾会把最后一次 `write(fd, .., 0)` 的返回值 0 当成
-        // 「PTY 被关掉了」——于是每一次成功写入都以「terminal is gone」
-        // 收场，终端面板表现为「敲什么都报错」。
-        while off < bytes.len() {
-            let rest = bytes.get(off..).ok_or(PtyError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "write offset ran past the buffer",
-            )))?;
-            let n = unsafe {
-                libc::write(
-                    fd.as_raw_fd(),
-                    rest.as_ptr().cast::<libc::c_void>(),
-                    rest.len(),
-                )
-            };
-            if n < 0 {
-                return Err(std::io::Error::last_os_error().into());
-            }
-            // coverage: excluded — `n == 0` 臂（`BrokenPipe` + "terminal is
-            // gone"）：`write(2)` 对一根活着的 PTY 只会返回正数或负 errno，
-            // 返回 0 需要「是终端却一个字节都不收」的稳定时序，测试环境造不出来。
-            if n == 0 {
-                // 写不进任何字节：PTY 被关掉了。说清楚而不是空转。
-                return Err(PtyError::Io(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "terminal is gone",
-                )));
-            }
-            off += n as usize;
-        }
-        Ok(())
-    }
-
-    /// 从 PTY 读**至多** `buf.len()` 字节。
-    ///
-    /// **不是** `read_exact` 也不是「读到 EOF」：PTY 是字节流，`EIO`
-    /// 才是「子进程退出了、这一侧以后再也读不到」的信号，而那个信号
-    /// 必须被转成「读完了」而不是一个错误——否则每敲一次 `exit` 都会
-    /// 冒出一句 `terminal io failed: Input/output error`。
-    pub fn read(&self, buf: &mut [u8]) -> Result<usize, PtyError> {
-        read_fd(
-            self.master.as_ref().ok_or(PtyError::Closed)?.as_raw_fd(),
-            buf,
-        )
-    }
-
-    /// 关掉 master fd。
-    ///
-    /// 关掉 master 会让前台进程组收到 `SIGHUP`——这正是「关掉终端面板 =
-    /// 关掉那个 shell」想要的语义，而不是让它继续在设备上跑着没人管。
-    /// `SIGHUP` 的处置由那个 shell 自己决定（bash 会退出）。
-    pub fn close(&mut self) {
-        drop(self.master.take());
-    }
-
-    pub fn is_open(&self) -> bool {
-        self.master.is_some()
-    }
-
-    /// 只需要「在旁边等一下」的调用方（测试的 poll 超时）才用得上这个裸 fd。
-    ///
-    /// **只借，不接管所有权**：拿到它的人关不关 fd 与本类型无关。
-    /// 需要能独立关掉的那一份走 [`Pty::dup_master`]。
-    #[cfg(test)]
-    pub(crate) fn raw_fd(&self) -> Result<RawFd, PtyError> {
-        self.master
-            .as_ref()
-            .map_or(Err(PtyError::Closed), |fd| Ok(fd.as_raw_fd()))
-    }
+    #[cfg(unix)]
+    inner: unix::UnixPty,
+    #[cfg(windows)]
+    inner: windows::WindowsPty,
 }
 
 /// 设备上的默认 shell。`$SHELL` 优先，其次 `/bin/sh`。
@@ -194,32 +109,36 @@ pub fn default_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
 
+/// 改本进程环境的用例必须互斥——**全 crate 只有这一把锁**。
+///
+/// `std::env::set_var` 动的是**整个进程**的环境表，不是某个模块的：`pty/mod.rs`
+/// 种探测键与 `connector/git.rs` 种 `GIT_DIR` 的用例并行跑时会互相踩。
+/// 各模块各写一份 `static LOCK` 时，两把锁互不互斥——改其中一份的类型，
+/// 两份都照样编译，而互斥早已失效。所以锁放在这里一处。
+///
+/// **平台无关，故意放在 [`testutil`] 外面**：锁本身只是个 `Mutex`，Windows
+/// 上的 `git.rs` 用例同样要改环境、同样要它与 PTY 用例互斥。放进 `testutil`
+/// （那个模块因为 `poll_wait` 走 `libc` 而限 Unix）会把 Windows 上这条
+/// 互斥悄悄取消掉——这正是「一个 cfg 顺手带走半个测试模块」的典型。
+#[cfg(test)]
+pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// 测试用的 PTY 读法。**独立于 `mod tests`**：接线与 pump 的测试写在
 /// `crates/node-core/tests/` 里，而集成测试只能看到 `pub` 符号。
-#[cfg(test)]
+///
+/// **限 Unix**：`poll_wait` 直接走 `libc::poll`，而 Windows 的等待是
+/// `WaitForSingleObject`、fd 也不是 `RawFd`。Windows 侧的 PTY 测试需要真
+/// ConPTY，只能在 CI 的 windows runner 上跑（见里程碑「无法本地验证」一条）。
+#[cfg(all(test, unix))]
 pub(crate) mod testutil {
     use super::Pty;
     use std::os::fd::RawFd;
 
-    /// 改本进程环境的用例必须互斥——**全 crate 只有这一把锁**。
-    ///
-    /// `std::env::set_var` 动的是**整个进程**的环境表，不是某个模块的：`pty.rs`
-    /// 种探测键与 `connector/git.rs` 种 `GIT_DIR` 的用例并行跑时会互相踩。
-    /// 各模块各写一份 `static LOCK` 时，两把锁互不互斥——改其中一份的类型，
-    /// 两份都照样编译，而互斥早已失效。所以锁放在这里一处。
-    pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// 一直读到 `needle` 出现，或超时。**到点一定会返回。**
-    ///
-    /// 超时必须落在 [`poll_wait`] 上而不是「循环里比时间」：PTY 的 `read`
-    /// 在没有数据时阻塞，而上面那个 deadline 只在 `read` **返回之后**才被
-    /// 检查——于是一个永远等不到的提示符会把测试挂死，而挂死的测试看起来
-    /// 像「测试慢」，不像「测试错」。
     /// 等 fd 可读，最多 `budget`。**只等可读，不等可写**——测试只读。
     fn poll_wait(fd: RawFd, budget: std::time::Duration) -> bool {
         let ms = i64::try_from(budget.as_millis().min(i64::MAX as u128)).unwrap_or(i64::MAX);
@@ -321,7 +240,9 @@ pub(crate) mod testutil {
     }
 }
 
-#[cfg(test)]
+// `mod.rs` 的测试直接构造 `UnixPty`、调 `libc::open` / `pipe2`，
+// 是 Unix 专属的；Windows 侧的 PTY 用例在 `windows.rs` 里另写（需要真 ConPTY）。
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -332,9 +253,11 @@ mod tests {
     /// 读到的是 B 种的值。症状是「单跑全绿、全量随机红」，而且红的是断言
     /// 里那句「新键要被追加进去」，看起来像 PTY 的 env 逻辑有问题。
     ///
-    /// 锁本体在 [`crate::pty::testutil::env_lock`]：`connector/git.rs` 也改进程
-    /// 环境（`GIT_DIR`），各持一份 `static` 时两把锁互不互斥。
-    use crate::pty::testutil::env_lock;
+    /// 锁本体在 [`crate::pty::env_lock`]：`connector/git.rs` 也改进程环境
+    /// （`GIT_DIR`），各持一份 `static` 时两把锁互不互斥。
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    use crate::pty::env_lock;
 
     /// 真实 PTY：`stty size` 是内核对尺寸协商的回答，别的都是自说自话。
     ///
@@ -409,7 +332,7 @@ mod tests {
         let owned = unsafe { OwnedFd::from_raw_fd(wfd) };
         let mut buf = [0u8; 8];
         let err =
-            read_fd(owned.as_raw_fd(), &mut buf).expect_err("只写 fd 上 read 必须报错，不是 0");
+            read_handle(owned.as_raw_fd(), &mut buf).expect_err("只写 fd 上 read 必须报错，不是 0");
         assert!(
             matches!(err, PtyError::Io(_)),
             "非 EIO 的读错误要原样报出来：{err:?}"
@@ -668,9 +591,11 @@ mod tests {
         // coverage: excluded — `pipe2` 失败需 fd 表耗尽。
         assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
         let broken = Pty {
-            master: Some(unsafe { OwnedFd::from_raw_fd(fds[1]) }),
-            pid: 0,
-            size: Size { cols: 8, rows: 8 },
+            inner: super::unix::UnixPty {
+                master: Some(unsafe { OwnedFd::from_raw_fd(fds[1]) }),
+                pid: 0,
+                size: Size { cols: 8, rows: 8 },
+            },
         };
         drop(unsafe { OwnedFd::from_raw_fd(fds[0]) });
         let got = crate::pty::testutil::read_until_within(

@@ -42,7 +42,9 @@
 //! 边界检查的两种入口，两份实现必然漂移一次，而漂移的那次就是「终端能
 //! 出去、文件出不去」。
 
+#[cfg(unix)]
 use std::ffi::CString;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -68,7 +70,7 @@ const DEFAULT_TIMEOUT_MS: u32 = 30_000;
 const MAX_OUTPUT_BYTES: usize = 512 * 1024;
 
 /// 单次读缓冲。管道是块设备，一次 `read` 可能只给几十字节。
-const READ_CHUNK: usize = 64 * 1024;
+pub(super) const READ_CHUNK: usize = 64 * 1024;
 
 /// 采集时用的 `poll` 粒度。它同时是「超时判定」的分辨率。
 const POLL_SLICE_MS: libc::c_int = 50;
@@ -93,13 +95,20 @@ struct ExecParams {
 }
 
 /// 校验过的参数。
-struct Plan {
-    command: String,
-    args: Vec<String>,
+pub(super) struct Plan {
+    pub(super) command: String,
+    pub(super) args: Vec<String>,
     /// 真实文件系统上的绝对工作目录（界内）。
-    cwd: Option<PathBuf>,
-    timeout: Duration,
-    max_output: usize,
+    pub(super) cwd: Option<PathBuf>,
+    pub(super) timeout: Duration,
+    pub(super) max_output: usize,
+    /// 追加到继承环境上的键值（`spawn_in` 语义：追加而非替换）。
+    ///
+    /// 一次性命令目前不带额外环境，所以 Unix 后端不读它；Windows 后端把
+    /// 它交给 `CreateProcessW` 的环境块（`environment_block`）。留着这个
+    /// 字段是为了让两个后端的 `Plan` 完全同形——否则 `run()` 又要分平台。
+    #[cfg_attr(unix, allow(dead_code))]
+    pub(super) env: Vec<(String, String)>,
 }
 
 impl ExecParams {
@@ -135,6 +144,8 @@ impl ExecParams {
                 .max_output_bytes
                 .map_or(MAX_OUTPUT_BYTES, |n| n as usize)
                 .min(MAX_OUTPUT_BYTES),
+            // 一次性命令不设额外环境：继承 worker 的即可（追加语义留给终端）。
+            env: Vec::new(),
         })
     }
 }
@@ -205,7 +216,11 @@ impl Connector for Exec {
         // 得让 `open_channel` 的应答当场说清楚（`channel_error{internal}`）。
         // 进了线程就只剩 `poll` 的 `Err`，而 `poll_all` 对 `Err` 是「跳过、
         // 下一轮再试」——错误会变成一条自己关掉的空通道。
-        let strings = c_strings(&plan)?;
+        // 平台前置校验：Unix 备 C 字符串（顺带拒 NUL / 非 UTF-8 的 cwd），
+        // Windows 备 UTF-16（`wide` 不做 NUL 检查，所以这里由 `Child::spawn`
+        // 在起进程时报错——但那会把错误推到 `poll` 里，所以仍然先在
+        // `Backend::prepare` 里挡一道）。
+        let prepared = Backend::prepare(&plan)?;
 
         self.close();
         self.root = Some(real);
@@ -219,7 +234,7 @@ impl Connector for Exec {
         std::thread::Builder::new()
             .name("afcli-exec".to_string())
             .spawn(move || {
-                if let Ok(result) = run(&plan, &strings) {
+                if let Ok(result) = run(&plan, &prepared) {
                     let _ = tx.send(result);
                 }
             })
@@ -327,9 +342,9 @@ fn result_payload(o: &Outcome) -> serde_json::Value {
 ///
 /// `strings` 由 [`Exec::open`] 备好并带进来：参数装不下 C 字符串要在
 /// `open` 那一侧报，不能等到进了线程才炸。
-fn run(plan: &Plan, strings: &ExecStrings) -> Result<Outcome, ConnectorError> {
+fn run(plan: &Plan, prepared: &Prepared) -> Result<Outcome, ConnectorError> {
     let started = std::time::Instant::now();
-    let mut child = Child::spawn(strings)?;
+    let mut child = Child::spawn(plan, prepared)?;
 
     let mut collected = Collector::new(plan.max_output);
     let mut timed_out = false;
@@ -355,9 +370,9 @@ fn run(plan: &Plan, strings: &ExecStrings) -> Result<Outcome, ConnectorError> {
             .map(|r| r.as_millis().min(i64::MAX as u128) as i32)
             .unwrap_or(POLL_SLICE_MS)
             .min(POLL_SLICE_MS);
-        if !wait_readable(child.fds(), budget) {
+        if !child.wait_readable(budget) {
             // 一片可读都没有：要么还在跑，要么已经结束而管道刚被填满。
-            // 区分靠下一轮的「两个 fd 都关了」。
+            // 区分靠下一轮的「两根管道都关了」。
             continue;
         }
         child.read_into(&mut collected);
@@ -386,11 +401,11 @@ fn run(plan: &Plan, strings: &ExecStrings) -> Result<Outcome, ConnectorError> {
 /// 输出采集。**上限是两条流合计**的，不分给 stdout / stderr 各一半——
 /// 分一半会让「输出都在 stderr 上」的那条命令永远看不到自己的全部输出，
 /// 而调用方给的 `max_output_bytes` 是一个**总量**预算。
-struct Collector {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+pub(super) struct Collector {
+    pub(super) stdout: Vec<u8>,
+    pub(super) stderr: Vec<u8>,
     max: usize,
-    truncated: bool,
+    pub(super) truncated: bool,
 }
 
 impl Collector {
@@ -403,7 +418,7 @@ impl Collector {
         }
     }
 
-    fn push(&mut self, stream: usize, bytes: &[u8]) {
+    pub(super) fn push(&mut self, stream: usize, bytes: &[u8]) {
         let room = self
             .max
             .saturating_sub(self.stdout.len() + self.stderr.len());
@@ -426,6 +441,7 @@ impl Collector {
 }
 
 /// 子进程 + 它的两根管道。
+#[cfg(unix)]
 struct Child {
     pid: libc::pid_t,
     /// `[Some(stdout 读端), Some(stderr 读端)]`。**读到 EOF 就置 `None`**——
@@ -438,6 +454,7 @@ struct Child {
 ///
 /// **必须在 fork 之前备齐**：fork 出来的子进程与父进程共享同一份堆，
 /// 此刻任何分配都可能带着别的线程正持有的锁出去。
+#[cfg(unix)]
 struct ExecStrings {
     program: CString,
     args: Vec<CString>,
@@ -445,6 +462,7 @@ struct ExecStrings {
 }
 
 /// 两根管道的四个 fd：`[stdout 读, stdout 写, stderr 读, stderr 写]`。
+#[cfg(unix)]
 type PipeFds = [RawFd; 4];
 
 /// 建两根管道。**`O_NONBLOCK` 是必须的，不是优化**：两根管道依次读，
@@ -453,6 +471,7 @@ type PipeFds = [RawFd; 4];
 /// 所以非阻塞读立刻返回 `EAGAIN` 就是正确回答。
 ///
 /// `O_CLOEXEC` 让 fork 出来的子进程不会额外继承不属于它的写端。
+#[cfg(unix)]
 fn make_pipes() -> Result<PipeFds, ConnectorError> {
     let mut out_pipe = [0 as RawFd; 2];
     let mut err_pipe = [0 as RawFd; 2];
@@ -479,13 +498,13 @@ fn make_pipes() -> Result<PipeFds, ConnectorError> {
 /// `make_pipes` 在 `fork` **之前**调用，中间没有别的线程在 fork。
 ///
 /// 返回 0 表示成功，非 0 表示失败（与 `pipe2` 同语义，调用方只需判 0）。
-#[cfg(target_os = "linux")]
+#[cfg(all(unix, target_os = "linux"))]
 unsafe fn pipe_nonblocking_cloexec(fds: *mut RawFd) -> libc::c_int {
     libc::pipe2(fds, libc::O_CLOEXEC | libc::O_NONBLOCK)
 }
 
 /// macOS / 其它 Unix：`pipe` + 逐个 `fcntl(F_SETFD/F_SETFL)`（见上）。
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 unsafe fn pipe_nonblocking_cloexec(fds: *mut RawFd) -> libc::c_int {
     if libc::pipe(fds) != 0 {
         return -1;
@@ -503,7 +522,37 @@ unsafe fn pipe_nonblocking_cloexec(fds: *mut RawFd) -> libc::c_int {
     0
 }
 
+/// 起进程之前备好的、平台相关的载荷。
+///
+/// 为什么要这层：Unix 必须在 `fork` **之前**把一切装进 C 字符串（子进程里
+/// 不能再分配），Windows 则要在 `CreateProcessW` 之前把一切编成 UTF-16。
+/// 两者的「备好了」长得不一样，但**都必须在 `open` 里同步完成**——那里的
+/// 错误能当场回给调用方，进了线程就只剩 `poll` 的 `Err`（见 `open` 里的注释）。
+#[cfg(unix)]
+type Prepared = ExecStrings;
+
+#[cfg(windows)]
+type Prepared = super::exec_windows::Prepared;
+
+/// 平台后端的准备钩子。`open` 同步调用它，把「参数装不装得下」当场问清楚。
+struct Backend;
+
+#[cfg(unix)]
+impl Backend {
+    fn prepare(plan: &Plan) -> Result<Prepared, ConnectorError> {
+        c_strings(plan)
+    }
+}
+
+#[cfg(windows)]
+impl Backend {
+    fn prepare(plan: &Plan) -> Result<Prepared, ConnectorError> {
+        super::exec_windows::prepare(plan)
+    }
+}
+
 /// 把命令、参数、cwd 备成 C 字符串。
+#[cfg(unix)]
 fn c_strings(plan: &Plan) -> Result<ExecStrings, ConnectorError> {
     let program = CString::new(plan.command.as_str()).map_err(|_| ConnectorError::Invalid {
         detail: "command name contains a NUL".to_string(),
@@ -545,6 +594,7 @@ fn c_strings(plan: &Plan) -> Result<ExecStrings, ConnectorError> {
 // 跑过的行永远统计不到；`chdir` / `open` / `dup2` / `fcntl` 失败后的
 // `_exit(126)` 与 `execvp` 失败后的 `_exit(127)` 还各自要求系统调用失败，
 // 正常测试环境构造不出来（防御性兜底）。
+#[cfg(unix)]
 fn child_exec(
     strings: &ExecStrings,
     argv: &[*const libc::c_char],
@@ -586,12 +636,15 @@ fn child_exec(
     }
 }
 
+#[cfg(unix)]
 impl Child {
     /// `pipe2` 两根管道 → `fork` → 子进程 `dup2` + `chdir` + `execvp`。
     ///
     /// **不建 PTY**：PTY 会把输出折成带回显的行，一个 `cat` 出来的二进制
     /// 文件会被改写，而一次性命令要的是**原样字节**。
-    fn spawn(strings: &ExecStrings) -> Result<Self, ConnectorError> {
+    fn spawn(_plan: &Plan, prepared: &Prepared) -> Result<Self, ConnectorError> {
+        // `Prepared` 在 unix 上就是 `ExecStrings` 本身（见其 typedef）。
+        let strings = prepared;
         let [out_r, out_w, err_r, err_w] = make_pipes()?;
 
         let mut argv: Vec<*const libc::c_char> = Vec::with_capacity(strings.args.len() + 2);
@@ -651,6 +704,12 @@ impl Child {
     /// 还有一个读端开着吗。**关掉就是 EOF**。
     fn any_open(&self) -> bool {
         self.pipes.iter().any(Option::is_some)
+    }
+
+    /// 等两根管道里至少一根可读。**方法形式**，好让 `run()` 对两个平台
+    /// 的后端用同一句话（Windows 那边是 `WaitForMultipleObjects`）。
+    fn wait_readable(&self, budget_ms: i32) -> bool {
+        wait_readable(self.fds(), budget_ms)
     }
 
     /// 从仍然开着的那些读端各读一次。**返回有没有真的读到字节**。
@@ -757,6 +816,7 @@ impl Child {
     }
 }
 
+#[cfg(unix)]
 /// 这次 `read` 失败值不值得再来一轮。
 ///
 /// **契约**：返回 `true` 必须是「同一个 fd 上下一次 read 就可能成功」。
@@ -764,6 +824,7 @@ impl Child {
 ///
 /// - `EAGAIN`：`poll` 说可读、但那一瞬被别人读走了（我们设了 `O_NONBLOCK`）。
 /// - `EINTR`：被信号打断，数据没丢。
+#[cfg(unix)]
 fn errno_is_retryable() -> bool {
     // **必须在别的操作覆盖 errno 之前读它**：中间插一句 IO 或日志就会读到
     // 别的值，于是把 `EBADF` 判成 `EAGAIN`——那个热循环正是本函数要挡的。
@@ -771,11 +832,13 @@ fn errno_is_retryable() -> bool {
     matches!(e, Some(libc::EAGAIN) | Some(libc::EINTR))
 }
 
+#[cfg(unix)]
 /// 等两根管道里**任何一根**可读，最多 `budget` 毫秒。
 ///
 /// **POLLHUP / POLLERR 也要算「可读」**：管道写端关上的那一瞬间内核先报
 /// 挂断，那正是 EOF 的信号——只认 `POLLIN` 的话读循环会永远跳过 `read`，
 /// 于是永远看不到那个代表「读完了」的 0 字节。
+#[cfg(unix)]
 fn wait_readable(fds: [RawFd; 2], budget_ms: i32) -> bool {
     let mut pollfds = [
         libc::pollfd {
@@ -805,6 +868,14 @@ fn wait_readable(fds: [RawFd; 2], budget_ms: i32) -> bool {
             .iter()
             .any(|p| p.fd >= 0 && p.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0)
 }
+
+// ---- Windows 后端 ----
+//
+// `Child` 的实现整块搬到 `exec_windows.rs`（`CreateProcessW` +
+// `WaitForMultipleObjects`），这里只把它接成同一个名字，让 `run()` 保持
+// 单一路径——「跑一条命令」这件事两个平台是同一件事。
+#[cfg(windows)]
+pub(super) use super::exec_windows::Child;
 
 /// 「能用的默认值」必须真的存在：注册表按名造 connector 时走的就是
 /// `Default`（`connector::create` → `Exec::new`）。
@@ -1196,6 +1267,10 @@ mod tests {
     /// 一律重来，主循环就变成热循环，命令只能等 `timeout_ms` 到点才结束
     /// ——那正是修复前的行为。这里用 `read_into` 而不是整条 `run`：
     /// 判据是「这根管道被摘掉了」，不是「命令返回了」。
+    // 用 `open("/dev/null", O_WRONLY)` 造「永久失败的 fd」——这是 Unix 的
+    // fd 语义（Windows 的句柄没有 `O_WRONLY` 这种只写标志，写错方向会
+    // 直接打不开）。生产逻辑（`read_into` 的摘管道判据）本身跨平台。
+    #[cfg(unix)]
     #[test]
     fn a_pipe_that_fails_permanently_is_dropped_not_retried() {
         // 一个**只写**的 fd：`read` 必给 `EBADF`（永久失败，不是「再来一轮
@@ -1217,6 +1292,8 @@ mod tests {
     }
 
     /// 反过来：`EAGAIN` 那种「再来一轮就有」的失败不许摘管道。
+    // 靠 `pipe2(O_NONBLOCK)` 造 `EAGAIN`——Windows 的匿名管道没有非阻塞模式。
+    #[cfg(unix)]
     #[test]
     fn a_retryable_read_error_keeps_the_pipe() {
         let mut fds = [-1 as RawFd; 2];
@@ -1330,6 +1407,10 @@ mod tests {
     ///
     /// 这两条只能在 `c_strings` 这一层验：`ExecParams.cwd` 是 `String`，
     /// 非 UTF-8 与 NUL 都从那一层进不来，只能直接构造 `Plan`。
+    // 造非 UTF-8 路径要用 `OsStringExt::from_vec`（Unix 特有），而 Windows
+    // 的路径本来就是 UTF-16，「非 UTF-8」在那里不存在。NUL 那条仍在
+    // `win_command::reject_nul` 的用例里覆盖。
+    #[cfg(unix)]
     #[test]
     fn a_cwd_that_cannot_be_a_c_string_is_refused_before_forking() {
         use std::os::unix::ffi::OsStringExt;
@@ -1340,6 +1421,7 @@ mod tests {
                 cwd: Some(cwd),
                 timeout: std::time::Duration::from_secs(1),
                 max_output: MAX_OUTPUT_BYTES,
+                env: Vec::new(),
             }
         }
         let weird = PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/\xff\xfe".to_vec()));

@@ -9,9 +9,17 @@
 //! 里按 `cfg(target_os = "macos")` 处理。
 
 use std::ffi::CString;
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 use super::{Pty, PtyError, Size};
+
+/// Unix 侧的 `Pty` 内部状态（`mod.rs` 的 `Pty` 在 `cfg(unix)` 下只持这个）。
+#[derive(Debug)]
+pub(super) struct UnixPty {
+    pub(super) master: Option<OwnedFd>,
+    pub(super) pid: libc::pid_t,
+    pub(super) size: Size,
+}
 
 impl Pty {
     /// 起一个 PTY 并在子进程里 exec `argv[0]`，不设 cwd、不改环境。
@@ -157,10 +165,131 @@ impl Pty {
         // 一个刚成功返回的 forkpty 调用。
         let master = unsafe { OwnedFd::from_raw_fd(master) };
         Ok(Self {
-            master: Some(master),
-            pid,
-            size,
+            inner: UnixPty {
+                master: Some(master),
+                pid,
+                size,
+            },
         })
+    }
+
+    pub fn pid(&self) -> libc::pid_t {
+        self.inner.pid
+    }
+
+    /// 复制一份 master fd（写 / resize 用），**与 `self` 共享同一个 open
+    /// file description**。
+    ///
+    /// 布局是「读线程独占 master、调用方留一份 dup」：读线程退出时丢掉它
+    /// 那份 master，内核随之关掉最后一个，前台进程组收到 `SIGHUP`——
+    /// 「关掉终端面板 = 关掉那个 shell」因此成立。反过来（调用方独占
+    /// master、读线程拿 dup）的话，读线程会永远阻塞在一个没人关的 fd 上，
+    /// 每开关一次面板漏一个线程。
+    pub fn dup_master(&self) -> Result<OwnedFd, PtyError> {
+        let fd = self.inner.master.as_ref().ok_or(PtyError::Closed)?;
+        // coverage: excluded — `fcntl(F_DUPFD_CLOEXEC)` 失败需 fd 表耗尽，
+        // 测试环境无可控构造手段（防御性兜底）。
+        let dup = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+        if dup < 0 {
+            return Err(PtyError::Io(std::io::Error::last_os_error()));
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(dup) })
+    }
+
+    pub fn size(&self) -> Size {
+        self.inner.size
+    }
+
+    /// 改终端尺寸（`ioctl(TIOCSWINSZ)`）。
+    ///
+    /// **内核会在这时给前台进程组发 `SIGWINCH`**——所以 `resize` 一生效，
+    /// 正在跑的程序立刻按新尺寸重画，不需要重新起一个 shell。
+    pub fn resize(&mut self, size: Size) -> Result<(), PtyError> {
+        let fd = self.inner.master.as_ref().ok_or(PtyError::Closed)?;
+        apply_winsize(fd.as_raw_fd(), size)?;
+        self.inner.size = size;
+        Ok(())
+    }
+
+    /// 往 PTY 写（等价于用户在终端里敲键）。
+    pub fn write(&self, bytes: &[u8]) -> Result<(), PtyError> {
+        let fd = self.inner.master.as_ref().ok_or(PtyError::Closed)?;
+        let mut off = 0;
+        // **判据是 `off < len`，不是 `bytes.get(off..)` 是否为 `Some`**：
+        // `get(len..)` 返回的是**空切片**而不是 `None`，用 `while let
+        // Some` 收尾会把最后一次 `write(fd, .., 0)` 的返回值 0 当成
+        // 「PTY 被关掉了」——于是每一次成功写入都以「terminal is gone」
+        // 收场，终端面板表现为「敲什么都报错」。
+        while off < bytes.len() {
+            let rest = bytes.get(off..).ok_or(PtyError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "write offset ran past the buffer",
+            )))?;
+            let n = unsafe {
+                libc::write(
+                    fd.as_raw_fd(),
+                    rest.as_ptr().cast::<libc::c_void>(),
+                    rest.len(),
+                )
+            };
+            if n < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            // coverage: excluded — `n == 0` 臂（`BrokenPipe` + "terminal is
+            // gone"）：`write(2)` 对一根活着的 PTY 只会返回正数或负 errno，
+            // 返回 0 需要「是终端却一个字节都不收」的稳定时序，测试环境造不出来。
+            if n == 0 {
+                // 写不进任何字节：PTY 被关掉了。说清楚而不是空转。
+                return Err(PtyError::Io(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "terminal is gone",
+                )));
+            }
+            off += n as usize;
+        }
+        Ok(())
+    }
+
+    /// 从 PTY 读**至多** `buf.len()` 字节。
+    ///
+    /// **不是** `read_exact` 也不是「读到 EOF」：PTY 是字节流，`EIO`
+    /// 才是「子进程退出了、这一侧以后再也读不到」的信号，而那个信号
+    /// 必须被转成「读完了」而不是一个错误——否则每敲一次 `exit` 都会
+    /// 冒出一句 `terminal io failed: Input/output error`。
+    pub fn read(&self, buf: &mut [u8]) -> Result<usize, PtyError> {
+        read_handle(
+            self.inner
+                .master
+                .as_ref()
+                .ok_or(PtyError::Closed)?
+                .as_raw_fd(),
+            buf,
+        )
+    }
+
+    /// 关掉 master fd。
+    ///
+    /// 关掉 master 会让前台进程组收到 `SIGHUP`——这正是「关掉终端面板 =
+    /// 关掉那个 shell」想要的语义，而不是让它继续在设备上跑着没人管。
+    /// `SIGHUP` 的处置由那个 shell 自己决定（bash 会退出）。
+    pub fn close(&mut self) {
+        drop(self.inner.master.take());
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.inner.master.is_some()
+    }
+
+    /// 只需要「在旁边等一下」的调用方（测试的 poll 超时）才用得上这个裸 fd。
+    ///
+    /// **只借，不接管所有权**：拿到它的人关不关 fd 与本类型无关。
+    /// 需要能独立关掉的那一份走 [`Pty::dup_master`]。
+    #[cfg(test)]
+    pub(crate) fn raw_fd(&self) -> Result<RawFd, PtyError> {
+        self.inner
+            .master
+            .as_ref()
+            .map_or(Err(PtyError::Closed), |fd| Ok(fd.as_raw_fd()))
     }
 }
 
@@ -170,7 +299,7 @@ impl Pty {
 /// 那个 fd（`Pty::dup_master`），它不是 `Pty`。两条路必须共用同一份
 /// 「`EIO` 算读完了」的判断——子进程退出后 Linux 报的是 `EIO` 而不是
 /// `EOF(0)`，认错一次就会让用户每敲一次 `exit` 都看到一句 IO 错误。
-pub fn read_fd(fd: RawFd, buf: &mut [u8]) -> Result<usize, PtyError> {
+pub(crate) fn read_handle(fd: RawFd, buf: &mut [u8]) -> Result<usize, PtyError> {
     let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
     if n < 0 {
         let err = std::io::Error::last_os_error();
@@ -275,4 +404,22 @@ unsafe fn macos_aware_execvpe(
         libc::setenv(key.as_ptr(), value.as_ptr(), 1);
     }
     libc::execvp(program, argv);
+}
+
+/// 等 fd 可读，最多 `budget`。**只等可读**。
+///
+/// **POLLHUP / POLLERR 也要当「可读」**：PTY 的从端关闭时内核先报挂断，
+/// 那一瞬间未必同时带 `POLLIN`。只认 `POLLIN` 的话读循环会永远跳过
+/// `read`，于是永远看不到那个代表「子进程退了」的 0 字节。
+pub(crate) fn wait_readable(fd: RawFd, budget: std::time::Duration) -> bool {
+    let ms = i64::try_from(budget.as_millis().min(i64::MAX as u128)).unwrap_or(i64::MAX);
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // coverage: excluded — `poll` 失败需 fd 无效或 `nfds` 超范围，
+    // 这里传的都是内核刚给的 fd（防御性兜底）。
+    let rc = unsafe { libc::poll(&raw mut pfd, 1, ms as libc::c_int) };
+    rc > 0 && pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
 }
