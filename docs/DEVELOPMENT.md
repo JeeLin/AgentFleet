@@ -70,6 +70,13 @@ check → fmt → lint → test → **cov-gate**（行覆盖率 ≥98%）→ web
 删死代码；**不许**用排除文件 / `#[allow]` / 标注伪造数字。源码里遗留的
 `// coverage: excluded` 与 `(racy)` 标注已不参与任何门禁计算，按注释读，别当豁免。
 
+**这一道在 CI 里非阻断，在本地是硬判据**：`cov-gate` 步骤带 `continue-on-error: true`，
+红了照旧在 run 页面标红，但不让 run 判失败、也不连带把下游 7 个 job 变成 skipped
+（`gate-coverage` job 本身仍判 success）。门槛没动——命令还是
+`--fail-under-lines 98`，`mise run cov-gate` / `mise run ci` 本地照样因它非零退出。
+撤销只需删掉那一行 `continue-on-error`；**不要**为了「让 CI 绿」去动命令文本或
+`needs`，那两处是 `scripts/check.sh` C7/C8 的解析锚点。
+
 **钉死与浮动的分档**：`rust` / `node` 钉死（覆盖率门禁是精确比对，换一次编译器整表漂移；
 `clippy -D warnings` 也会因新版 lint 凭空变红，而没有人改过代码）。`bun` 跟 `latest`——
 依赖由 `packages/web/bun.lock` 锁住（已入库），剩下的风险只有 bun 自己改了构建产物格式，
@@ -120,7 +127,7 @@ C8 有**两个方向**：① 正向——门禁用到的命令 → 需要的组�
 三个消费者**：
 
 ```text
-gate（= mise.toml [tasks.ci] 的全部门禁，产线自己等它；红则下面全部不跑）
+gate（= mise.toml [tasks.ci] 的全部门禁，产线自己等它；红则下面全部不跑——**唯一例外是覆盖率，见下**）
     ↓ needs
 build-frontend（bun install --frozen-lockfile → build，dist 作为 artifact 上传）
     ↓ needs（硬前置，不是优化）
@@ -152,6 +159,12 @@ glob 空转、建出一个没有二进制的空 Release。
 打 tag 与 `workflow_dispatch` 补发。所以门禁进产线：`release.yml` 的 `gate` job 跑
 `mise.toml [tasks.ci]` 的**全部**门禁，所有产线 job 都 `needs` 它。清单只有一处（`mise.toml`），
 C7 双向比对产线的步骤名——不再存在「两份清单互相漂移」这件事。
+
+> **一个例外，写明白**：`cov-gate` 那一步是 `continue-on-error`，所以它红了不会拦发布。
+> 这与上面流程图里那句「红则下面全部不跑」冲突，**以本行为准**。理由是量级不同：其它门禁红
+> 代表代码坏了，98% 覆盖率红代表**存量**测试量不够（基线 96.88%），拿它卡住整版产物
+> 是把「待补测试」和「不可发布」混为一谈。代价是**覆盖率可以长期红着没人管**，
+> 所以它必须保持可见（run 页面上标红），不许顺手删掉这一步「让页面干净」。
 
 **`build-frontend` 是硬前置**：`include_dir!` 在编译期嵌入 dist，而 dist 缺失时
 `crates/hub-server/build.rs` 不失败——它造一个占位页、打一条 `cargo:warning`，二进制照编。
