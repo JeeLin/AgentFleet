@@ -550,6 +550,85 @@ mod tests {
         );
     }
 
+    /// `wait_code` 是 `spawn_and_wait` 唯一用来读退出码的接缝：`Child::wait`
+    /// 成功时既要折算成协议码，也要把 `Ok` 原样交出去。直接在这里喂一条
+    /// `exit 10` 的子进程，覆盖的是 `supervise` 正常循环必走的那一行，
+    /// 不需要真的 spawn 一个 supervisor 出来。
+    #[test]
+    #[cfg(unix)] // 用 `sh -c 'kill -9 $$'` 造无退出码的子进程
+    fn wait_code_reads_a_live_childs_exit_status() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 10"])
+            .spawn()
+            .expect("spawn sh");
+        let code = wait_code(&mut child).expect("wait must succeed");
+        assert_eq!(code, exit_code::UPDATE_REQUEST);
+        // 信号杀死时 `status.code()` 是 `None`：折算成 CRASH，不是 panic。
+        let mut killed = std::process::Command::new("sh")
+            .args(["-c", "kill -9 $$"])
+            .spawn()
+            .expect("spawn sh");
+        assert_eq!(
+            wait_code(&mut killed).expect("wait must succeed"),
+            exit_code::CRASH
+        );
+    }
+
+    /// `spawn_and_wait` 的成功路径：被管理的二进制真的被拉起、真的被等回收，
+    /// 且退出码穿过 `wait_code` 原样进 `ExitInfo`。`supervise` 里除 Stop 之外
+    /// 的每条决策都会落到这一行，单测用临时脚本把它走完，不必起无限循环。
+    #[test]
+    #[cfg(unix)] // `#!/bin/sh` 假 worker 脚本 + chmod 0o755
+    fn spawn_and_wait_records_a_real_child_exit() {
+        let (d, mut s) = sup("wait-success");
+        // `sup()` 里的假二进制不是可执行脚本，这里换成一个真的 `exit 11`。
+        std::fs::write(&s.exe, "#!/bin/sh\nexit 11\n").expect("write script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&s.exe, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+        s.argv = vec![];
+        let got = s.spawn_and_wait();
+        assert_eq!(
+            got.code,
+            exit_code::HEALTH_FAILURE,
+            "exit(11) 必须原样穿过，supervisor 靠它判新版不健康"
+        );
+        assert!(
+            got.ran_for_secs < 5,
+            "秒退的脚本不该被记成跑满了窗口：{got:?}"
+        );
+        assert!(
+            s.exe.exists(),
+            "spawn_and_wait 不许动被管理的二进制：{:?}",
+            s.exe
+        );
+        let _ = d;
+    }
+
+    /// 生产构造函数用的就是「当前可执行文件」：不替换测试进程自身，
+    /// 只断言它把 argv / 数据目录原样记下来、exe 指向一个真实存在的路径。
+    /// `new` 在 `dispatch` 的 supervisor 分支里是唯一调用点。
+    #[test]
+    fn new_manages_the_current_executable_and_keeps_the_argv() {
+        let d = tmp("new");
+        let argv = vec!["run".to_string(), "--hub".to_string()];
+        let s = Supervisor::new(argv.clone(), d.clone());
+        assert_eq!(s.argv, argv);
+        assert_eq!(s.data_dir, d);
+        assert!(
+            s.exe.is_absolute() && s.exe.exists(),
+            "current_exe 必须是一个存在的绝对路径，实际 {:?}",
+            s.exe
+        );
+        assert!(
+            s.exe != d.join("afcli"),
+            "生产构造不许指向测试夹具里那个假二进制"
+        );
+    }
+
     /// 正常退出码必须原样穿过：`exit(10)`（请求更新）与 `exit(11)`（健康失败）
     /// 是 supervisor 决策的全部依据，压缩成「非零」就什么也判不出来。
     #[test]

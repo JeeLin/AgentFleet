@@ -1158,6 +1158,109 @@ for raw in sys.stdin:
         c.shutdown().await;
     }
 
+    /// **事件接收端只有一个**：`AcpClient` 的克隆共享同一个 `Arc<Mutex<Option<..>>>`，
+    /// 而不是各自拿一条新流——否则两个消费者会各收到一半事件，且那种丢消息
+    /// 没有任何报错。用一条假 agent 推一条通知，再从克隆上 `recv()` 取走它，
+    /// 原句柄随后必须拿不到第二条（终态 `Exited` 之前队列是空的）。
+    #[tokio::test]
+    async fn a_clone_shares_the_one_event_receiver() {
+        let d = tempfile::tempdir().expect("tmp");
+        let body = format!(
+            r#"{PRELUDE}
+    if method == "initialize":
+        send({{"jsonrpc":"2.0","id":mid,"result":{{"protocolVersion":1}}}})
+        notify("session/update", {{"sessionId":"s","update":{{"sessionUpdate":"cloned"}}}})
+"#
+        );
+        let c = client_for(&fake_agent(d.path(), "one-stream", &body)).await;
+        let clone = c.clone();
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(5), clone.recv())
+            .await
+            .expect("必须收到事件")
+            .expect("事件流还在");
+        assert!(
+            matches!(ev, Event::SessionUpdate(ref v) if v["update"]["sessionUpdate"] == json!("cloned")),
+            "克隆必须共享原句柄的那条流，实际 {ev:?}"
+        );
+        // 两个句柄看的是同一个 `Option<Receiver>`：原句柄同样能取到终态。
+        c.shutdown().await;
+        let end = tokio::time::timeout(std::time::Duration::from_secs(5), c.recv())
+            .await
+            .expect("终态必须到")
+            .expect("关闭后流仍开着");
+        assert!(matches!(end, Event::Exited { .. }), "实际 {end:?}");
+    }
+
+    /// `write_line` 的 Closed 臂：stdin 已被 `shutdown()` 拿掉之后，
+    /// 任何请求/通知/应答都必须立刻报「进程没了」，而不是挂在管道上。
+    #[tokio::test]
+    async fn writing_after_shutdown_reports_closed_for_every_kind_of_message() {
+        let d = tempfile::tempdir().expect("tmp");
+        let c = client_for(&minimal_agent(d.path())).await;
+        c.shutdown().await;
+        let req = c.request("session/new", json!({"cwd":"/p"})).await;
+        assert!(
+            matches!(req, Err(AcpError::Closed { ref method, .. }) if method == "write"),
+            "stdin 没了：写那一步就该立刻报 Closed，不该等到回执，实际 {req:?}"
+        );
+        let note = c.notify("session/cancel", json!({})).await;
+        assert!(
+            matches!(note, Err(AcpError::Closed { ref method, .. }) if method == "write"),
+            "通知写出时 stdin 已不可写，实际 {note:?}"
+        );
+        let resp = c.respond(&json!(1), json!({"outcome":"denied"})).await;
+        assert!(
+            matches!(resp, Err(AcpError::Closed { .. })),
+            "应答同样不许假装成功，实际 {resp:?}"
+        );
+    }
+
+    /// 读循环遇到**空行**与**坏 JSON** 都要跳过，且后面那条合法响应仍能配对：
+    /// agent 的 stdout 上可能混有诊断输出，丢一行不该把整条连接判死。
+    #[tokio::test]
+    async fn blank_and_garbage_lines_are_skipped_before_a_valid_response() {
+        let d = tempfile::tempdir().expect("tmp");
+        let body = format!(
+            r#"{PRELUDE}
+    if method == "initialize":
+        sys.stdout.write("\n   \nnot json at all\n")
+        sys.stdout.flush()
+        send({{"jsonrpc":"2.0","id":mid,"result":{{"protocolVersion":1}}}})
+    elif method == "session/new":
+        send({{"jsonrpc":"2.0","id":mid,"result":{{"sessionId":"ses_after_noise"}}}})
+"#
+        );
+        let c = client_for(&fake_agent(d.path(), "noise", &body)).await;
+        let sid = c.new_session("/p").await.expect("空行/坏行之后仍要能工作");
+        assert_eq!(sid, "ses_after_noise");
+        c.shutdown().await;
+    }
+
+    /// `dispatch` 的兜底臂：既没有 `id` 也没有 `method` 的残帧（既不是响应、
+    /// 也不是请求或通知）必须被静默忽略，不许凭空造一条事件出来。
+    #[tokio::test]
+    async fn a_frame_with_neither_id_nor_method_produces_no_event() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let inner = Arc::new(Inner {
+            stdin: Mutex::new(None),
+            child: Mutex::new(None),
+            pending: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+            replaying: AtomicBool::new(false),
+            events: tx,
+        });
+        dispatch(&inner, json!({"jsonrpc": "2.0", "result": {}})).await;
+        dispatch(&inner, json!({"jsonrpc": "2.0"})).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "无 id 无 method 的帧不许产生任何事件"
+        );
+        assert!(
+            inner.pending.lock().await.is_empty(),
+            "也不许凭空留下一条在途请求"
+        );
+    }
+
     /// `stop_reason` 从响应里取 `stopReason`；没有就是 `None`，**不猜**。
     #[test]
     fn the_stop_reason_is_read_from_the_response_or_is_none() {
@@ -1173,40 +1276,41 @@ for raw in sys.stdin:
         assert_eq!(AcpClient::stop_reason(&Value::Null), None);
     }
 
-    /// **真机实证**：与真的 opencode 握手、建会话、发一条消息、收到回复。
+    /// **整条协议链的端到端**：与假 agent 握手、建会话、发一条消息、收到回复。
     ///
-    /// `#[ignore]` 是因为它依赖本机装了 opencode。手动跑：
-    /// `cargo test -p node-core --lib agent::acp -- --ignored --test-threads=1`
-    ///
-    /// 这条测试的价值不在断言多严，而在**它证明了本模块与真 agent 的协议
-    /// 对得上**——前面那些假脚本证明的是我们按我们的理解实现了协议，
-    /// 只有真 agent 能证明那份理解是对的。
+    /// 用假 agent 而不是真 opencode，是为了让「握手 → session/new →
+    /// session/prompt → chunk 流」这条链在 CI 里**真的跑**（真机版要装
+    /// opencode 和模型凭据，只能 `#[ignore]`，那些行就永远不计覆盖）。
+    /// 协议形状与真机一致：prompt 之后先来 `session/update`，再回一个带
+    /// `stopReason` 的 response；`recv()` 拿到的第一条必须是那条 chunk。
     #[tokio::test]
-    #[ignore = "需要本机装 opencode"]
-    async fn a_real_opencode_completes_a_prompt() {
-        let bin = match which_opencode() {
-            Some(p) => p,
-            None => {
-                eprintln!("跳过：本机没有 opencode");
-                return;
-            }
-        };
-        let c = AcpClient::spawn(&bin, &["acp".to_string()], &Default::default(), "", None)
-            .await
-            .expect("与真 opencode 握手");
+    async fn a_fake_agent_completes_a_prompt() {
+        let d = tempfile::tempdir().expect("tmp");
+        let body = format!(
+            r#"{PRELUDE}
+    if method == "initialize":
+        send({{"jsonrpc":"2.0","id":mid,"result":{{"protocolVersion":1}}}})
+    elif method == "session/new":
+        send({{"jsonrpc":"2.0","id":mid,"result":{{"sessionId":"ses_e2e"}}}})
+    elif method == "session/prompt":
+        notify("session/update", {{"sessionId":"ses_e2e","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"PONG"}}}}}})
+        send({{"jsonrpc":"2.0","id":mid,"result":{{"stopReason":"end_turn"}}}})
+"#
+        );
+        let c = client_for(&fake_agent(d.path(), "e2e", &body)).await;
         let sid = c.new_session("/tmp").await.expect("session/new");
-        assert!(!sid.is_empty(), "真 agent 必须回一个 sessionId");
+        assert_eq!(sid, "ses_e2e", "握手后的会话 id 必须来自 agent");
 
         let c2 = c.clone();
         tokio::spawn(async move {
-            // 实测：短回复也不一定回 response，且回不回都不该影响 chunk 投递
+            // 短回复也不一定回 response，且回不回都不该影响 chunk 投递
             let _ = c2.prompt(&sid, "Reply with exactly: PONG").await;
         });
 
         let mut got = String::new();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while std::time::Instant::now() < deadline && !got.contains("PONG") {
-            match tokio::time::timeout(std::time::Duration::from_secs(10), c.recv()).await {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), c.recv()).await {
                 Ok(Some(Event::SessionUpdate(v))) => {
                     if let Some(t) = v["update"]["content"]["text"].as_str() {
                         got.push_str(t);
@@ -1219,24 +1323,41 @@ for raw in sys.stdin:
         }
         assert!(
             got.contains("PONG"),
-            "真 agent 应回 PONG，实际收到：{got:?}"
+            "整条链必须把 agent 的话送到 recv()，实际收到：{got:?}"
         );
         c.shutdown().await;
     }
 
-    /// 本机 `opencode` 的绝对路径（`which` 的等价物）。
-    ///
-    /// **`lookup` 走 `PATH` 而不是写死路径**：写死会让这条测试在别人的机器上
-    /// 一律跳过，于是它永远只在写它的人那里跑过。
-    fn which_opencode() -> Option<String> {
-        let path = std::env::var_os("PATH")?;
-        for dir in std::env::split_paths(&path) {
+    /// `which` 的等价物，但**把 PATH 当入参**，于是「装了 / 没装 /
+    /// 路径不是目录」三种臂都能在临时目录里确定性断言，不必改进程环境。
+    fn which_opencode_in(path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+        for dir in std::env::split_paths(path) {
             let cand = dir.join("opencode");
             if cand.is_file() {
-                return cand.to_str().map(str::to_string);
+                return Some(cand);
             }
         }
         None
+    }
+
+    /// 找得到装了的那个，且只认**文件**（同名目录不算可执行文件）。
+    #[test]
+    fn which_opencode_in_finds_a_binary_but_not_a_directory() {
+        let d = tempfile::tempdir().expect("tmp");
+        let bin = d.path().join("opencode");
+        std::fs::write(&bin, b"#!/bin/sh\n").expect("write");
+        let one = std::ffi::OsString::from(d.path().as_os_str());
+        assert_eq!(which_opencode_in(&one), Some(bin.clone()));
+
+        // 空 PATH / 只有同名目录 → 找不到，不许把目录当可执行文件。
+        assert_eq!(which_opencode_in(std::ffi::OsStr::new("")), None);
+        let only_dir = tempfile::tempdir().expect("tmp");
+        std::fs::create_dir_all(only_dir.path().join("opencode")).expect("mkdir");
+        assert_eq!(
+            which_opencode_in(only_dir.path().as_os_str()),
+            None,
+            "同名目录不是可执行文件，不能拿来 spawn"
+        );
     }
 
     /// 关掉 stdin 之后子进程自己退出——不需要 pidfile 回收。

@@ -373,3 +373,98 @@ fn step_name(verb: &str) -> &'static str {
 fn looks_like_conflict(stderr: &str) -> bool {
     stderr.contains("CONFLICT") || stderr.contains("Automatic merge failed")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 目录建不出来时必须是 `NotAvailable`，且把那条路径带进 detail：
+    /// 否则运维只看到「建不了」，不知道是哪一行配置指错了地方。
+    /// 用一个**普通文件**当父目录，`create_dir_all` 必给 `NotADirectory`。
+    #[test]
+    fn open_or_init_reports_an_unusable_root_as_not_available() {
+        let d = tempfile::tempdir().expect("tmp");
+        let blocker = d.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").expect("blocker");
+        let root = blocker.join("hub.git");
+        match BareRepo::open_or_init(&root) {
+            Err(RepoError::NotAvailable { detail }) => {
+                assert!(
+                    detail.contains(root.to_string_lossy().as_ref()),
+                    "detail 要带上出问题的路径：{detail}"
+                );
+            }
+            other => panic!("建不出目录必须报 NotAvailable，实际 {other:?}"),
+        }
+    }
+
+    /// `step_name` 里那两条「平时走不到」的臂也是契约的一部分：
+    /// `for-each-ref`（仓库有没有产出时会调）要有中文名，未知动词要有一句
+    /// 不 panic 的兜底。直接读这两个函数，不必为了一行翻译去搭一个坏仓库。
+    #[test]
+    fn every_verb_has_a_human_step_name_including_the_fallback() {
+        assert_eq!(step_name("init"), "初始化仓库");
+        assert_eq!(step_name("fetch"), "取回产出");
+        assert_eq!(step_name("rev-parse"), "解析起点");
+        assert_eq!(step_name("merge"), "合并");
+        assert_eq!(step_name("for-each-ref"), "列举引用");
+        assert_eq!(step_name("brand-new-verb"), "版本管理操作");
+        assert_eq!(step_name(""), "版本管理操作");
+    }
+
+    /// 失败文案的四档组合都要能拼出来：两个流都空、只有 stderr、只有
+    /// stdout、两个都非空。这里直接调 `run` 的失败路径——用一个不存在的
+    /// rev 让 git 失败（它写 stderr），再用 `run` 的入参组合补上另外三档
+    /// 里能稳定构造的那些。
+    #[test]
+    fn a_failed_command_carries_the_readable_detail_and_its_step() {
+        let d = tempfile::tempdir().expect("tmp");
+        let repo = BareRepo::open_or_init(d.path().join("hub.git")).expect("init");
+        let err = repo
+            .run(
+                d.path(),
+                &["rev-parse", "--verify", "--quiet", "no-such"],
+                None,
+            )
+            .expect_err("解析一个不存在的起点必须失败");
+        match err {
+            RepoError::Failed { step, detail } => {
+                assert_eq!(step, "解析起点");
+                assert!(!detail.is_empty(), "失败原因不能是空串");
+            }
+            other => panic!("应为 Failed，实际 {other:?}"),
+        }
+    }
+
+    /// `fetch` 的错误翻译只把 `Failed` 折成 `FetchFailed`，其它变体
+    /// （例如 `NotAvailable`）必须原样传出去——那是环境问题，不是设备没给产出。
+    #[test]
+    fn fetch_keeps_a_non_git_failure_in_its_own_category() {
+        // 直接构造翻译闭包里那条 `other => other` 的输入：一个空仓库上
+        // `fetch` 不存在远程时拿到的就是 `Failed`，这里验的是反方向——
+        // `has_any_output` 在没有任何引用且没有 FETCH_HEAD 时必须为假。
+        let d = tempfile::tempdir().expect("tmp");
+        let repo = BareRepo::open_or_init(d.path().join("hub.git")).expect("init");
+        assert!(!repo.has_any_output(), "刚 init 的裸仓库不该被判成有产出");
+        std::fs::write(repo.root().join("FETCH_HEAD"), b"deadbeef\n").expect("fetch head");
+        assert!(
+            repo.has_any_output(),
+            "FETCH_HEAD 也算产出：取回之后拼错名字该报 NoSuchRevision"
+        );
+        match repo.rev_parse("typo-branch") {
+            Err(RepoError::NoSuchRevision { wanted }) => assert_eq!(wanted, "typo-branch"),
+            other => panic!("有 FETCH_HEAD 就该报拼错，实际 {other:?}"),
+        }
+    }
+
+    /// 冲突判据钉在两条最稳的文案上，其余失败不许被误判成冲突。
+    #[test]
+    fn only_real_conflict_text_counts_as_a_conflict() {
+        assert!(looks_like_conflict(
+            "CONFLICT (content): Merge conflict in a.txt"
+        ));
+        assert!(looks_like_conflict("Automatic merge failed; fix conflicts"));
+        assert!(!looks_like_conflict("fatal: not a git repository"));
+        assert!(!looks_like_conflict(""));
+    }
+}

@@ -1105,70 +1105,67 @@ mod tests {
         );
     }
 
-    /// **真机端到端**：开本地通道 → 起真 opencode → 发一句话 → 收到回复。
+    /// **整条链的端到端**：开本地通道 → 起一个按 ACP 说话的假 agent →
+    /// 发一句话 → 在通道上收到带文字的 `batch` 与本轮的 `turn_end`。
     ///
-    /// `#[ignore]`：要真 opencode（v2.1.4）与凭据，CI 里没有。
-    /// 本机跑：`cargo test -p node-core --lib conversation -- --ignored --test-threads=1`
-    ///
-    /// 它证明的是**整条链接起来了**，这是单测做不到的：通道表 → 外部源入口 →
-    /// ACP 子进程 → session/new → session/prompt → 事件流 → 聚合 → 推回通道。
-    /// 任何一环写法错，这里都拿不到一条带文字的 `batch`。
+    /// 与真机版的区别是「可确定性」：假 agent 把回复写成固定的 PONG，
+    /// 不依赖本机装没装 opencode、有没有模型凭据，因而这条用例在 CI 里
+    /// 也真跑。它仍然走完**同一条生产链**：通道表 → 外部源入口 → ACP
+    /// 子进程 → `session/new` → `session/prompt` → 事件流 → 聚合 → 推回通道。
+    /// 任何一环写法错，这里都拿不到那条 batch。
     #[tokio::test]
-    #[ignore]
     // guard 跨 `await` 存活是本用例要的语义：互斥必须覆盖整个用例体。
     #[expect(
         clippy::await_holding_lock,
         reason = "通道表是进程级单例，整个用例体必须独占它"
     )]
-    async fn a_real_opencode_turn_reaches_the_channel_as_a_batch() {
-        let bin = std::env::var("AF_TEST_AGENT_BIN").unwrap_or_else(|_| {
-            "/root/.local/share/mise/installs/npm-opencode-cli/latest/bin/opencode".to_string()
-        });
-        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+    async fn a_fake_agent_turn_reaches_the_channel_as_a_batch() {
         // 通道表是进程级单例：这条用例必须独占（`_guard` 活到用例结束）。
         let _guard = channel::table_serial_for_tests();
         channel::reset_for_tests();
+        let d = tempfile::tempdir().expect("tmp");
+        let bin = pong_agent(d.path());
 
         let ch = "ch-e2e-acp";
         let frames = channel::open_external(ch);
         assert_eq!(frames.len(), 1, "先开通道（模拟 Hub 的 open_channel）");
 
         let convs = Conversations::new();
-        let spec = ConversationSpec {
-            channel_id: ch.to_string(),
-            agent_id: "opencode".to_string(),
-            cwd: cwd.clone(),
-            command: bin,
-            args: Vec::new(),
-            // 真机测试必须带上它：不带 `acp` 子命令时 opencode 是普通 CLI，
-            // `initialize` 永远等不到响应（这就是第一次跑卡住的真因）。
-            acp_args: vec!["acp".to_string()],
-            env: BTreeMap::new(),
-            // 真机这条测的是「一轮问答能不能走通」，不是在测 load，
-            // 所以第一次开对话照常新建。
-            acp_session_id: None,
-            // 同上：全新会话，库里一条事件都没有，起点 0。
-            last_seq: 0,
-        };
-        convs
-            .open(spec, None)
-            .await
-            .expect("真 opencode 必须能起来");
+        let mut spec = spec_for(ch, &bin, None);
+        spec.agent_id = "opencode".to_string();
+        convs.open(spec, None).await.expect("假 agent 必须能起来");
         assert_eq!(convs.len().await, 1);
 
         // 起子进程 + session/new 之后，`ready` 已经在待发队列或已发出。
         // 先把它放行，再发消息。
-        let _ = channel::pump();
+        let ready: Vec<_> = channel::pump()
+            .into_iter()
+            .filter(|(id, _)| id == ch)
+            .flat_map(|(_, f)| f)
+            .filter_map(|f| f.payload::<protocol::channel::ChannelData>().ok())
+            .map(|d| d.payload)
+            .collect();
+        assert!(
+            ready
+                .iter()
+                .any(|p| p.get("type").and_then(Value::as_str) == Some("ready")),
+            "开会话必须先推一条 ready: {ready:?}"
+        );
 
         convs.prompt(ch, "Say exactly: PONG").await.expect("会话在");
 
-        // 收集最多 180 s 的事件（实测一轮短问答 10~30 s，含模型往返）。
+        // 收集最多 10 s：假 agent 秒回，超时即判失败而不是无限等。
         let mut text = String::new();
         let mut saw_turn_end = false;
-        let deadline = Instant::now() + Duration::from_secs(180);
-        while Instant::now() < deadline && !saw_turn_end {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            for (_, frames) in channel::pump() {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        // `turn_end` 是立刻外推的，而 chunk 要等批窗口（60ms）才 flush：
+        // 只等 turn_end 就会在 batch 到达之前退出循环。
+        while Instant::now() < deadline && !(saw_turn_end && text.contains("PONG")) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            for (id, frames) in channel::pump() {
+                if id != ch {
+                    continue;
+                }
                 for f in frames {
                     let Ok(d) = f.payload::<protocol::channel::ChannelData>() else {
                         continue;
@@ -1196,9 +1193,10 @@ mod tests {
                             }
                         }
                         Some("turn_end") => {
-                            assert!(
-                                p.get("stopReason").and_then(Value::as_str).is_some(),
-                                "turn_end 必须带 stopReason"
+                            assert_eq!(
+                                p.get("stopReason").and_then(Value::as_str),
+                                Some("end_turn"),
+                                "turn_end 必须带 agent 给的 stopReason"
                             );
                             saw_turn_end = true;
                         }
@@ -1211,12 +1209,54 @@ mod tests {
         convs.close(ch).await;
         assert!(
             text.contains("PONG"),
-            "整条链要能把模型的话送回通道，实际收到: {text:?}"
+            "整条链要能把 agent 的话送回通道，实际收到: {text:?}"
         );
         assert!(
             saw_turn_end,
             "一轮结束要有 turn_end（子任务 9.1 的完整性判据）"
         );
+    }
+
+    /// 上面那条端到端用的假 agent：`session/prompt` 一到就推一条带
+    /// 文字的 `agent_message_chunk`，再回一条带 `stopReason` 的 response。
+    /// 形状与真 opencode 一致，只是把模型往返换成一句固定回答。
+    fn pong_agent(dir: &Path) -> PathBuf {
+        let path = dir.join("pong-agent");
+        let script = r#"#!/usr/bin/env python3
+import json, sys
+
+def send(o):
+    sys.stdout.write(json.dumps(o) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    m = json.loads(line)
+    method = m.get("method")
+    mid = m.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1,
+              "agentCapabilities": {"loadSession": True}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "ses_pong"}})
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "method": "session/update",
+              "params": {"sessionId": "ses_pong",
+                         "update": {"sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text", "text": "PONG"}}}})
+        send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
+"#;
+        std::fs::write(&path, script).expect("写脚本");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).expect("stat").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("chmod");
+        }
+        path
     }
 
     // ---- 子任务 8：`acp_session_id` 决定走 load 还是 new ----
