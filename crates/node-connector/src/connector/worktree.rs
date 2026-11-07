@@ -501,3 +501,440 @@ fn remove_products(dir: &Path) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+// 单测放在这里而不是 `tests/worktree_cleanup.rs`：下面几条要验的是**私有**
+// 的错误臂（`dir_size` / `remove_dir_all` / `remove_products` / `open` 的建目录
+// 与坏参数解析），集成测试看不见它们。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_at(root: &Path, params: serde_json::Value) -> Worktree {
+        let mut w = Worktree::new();
+        w.open(OpenReq::new(root.display().to_string(), params))
+            .expect("开通道");
+        w
+    }
+
+    /// 一次请求的载荷（`on_data` 恰好回一帧）。
+    fn op(w: &mut Worktree, data: serde_json::Value) -> serde_json::Value {
+        let mut out = w.on_data(&data).expect("on_data");
+        let frame = out.pop().expect("一帧结果");
+        assert!(out.is_empty(), "每次请求只该回一帧");
+        frame.payload
+    }
+
+    /// 没给固定目录：`open` 要报「这台设备上没有这个项目的固定目录」，
+    /// 而不是拿 `Path::new("")` 往下走。
+    ///
+    /// 空串在 `OpenReq::root()` 里就是 `None`，所以 `open` 必须在这一步停住：
+    /// 继续走下去会把空路径当根，`is_dir()` 为假，接着 `create_dir("")`
+    /// 会返回一句裸 `ENOENT` —— 用户读到的是一句系统话。
+    #[test]
+    fn opening_without_a_fixed_directory_says_so_in_a_sentence() {
+        let mut w = Worktree::new();
+        let err = w
+            .open(OpenReq::new("", serde_json::json!({})))
+            .expect_err("必须失败");
+        assert!(
+            matches!(err, ConnectorError::WorkspaceRoot { .. }),
+            "这是「根不可用」，不是「参数不合法」：{err}"
+        );
+        assert!(
+            err.to_string().contains("no fixed directory"),
+            "错误要说清缺的是固定目录：{err}"
+        );
+        assert!(w.root.is_none(), "开不起来就不该记下根");
+    }
+
+    /// 固定目录还没建（项目刚绑上、第一次派活）：`open` 把它建出来，
+    /// 并且记下的是**规范化之后**的路径。
+    ///
+    /// 记原路径会让后面每一次 `worktree_of` 拼出来的字符串都带着一个可能是
+    /// 相对路径的前缀，而那个路径是拿来删的。
+    #[test]
+    fn opening_creates_the_fixed_directory_and_remembers_the_real_path() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let root = base.path().join("not-yet-there");
+        let w = open_at(&root, serde_json::json!({}));
+        assert!(root.is_dir(), "固定目录该被建出来");
+        assert_eq!(
+            w.root.as_deref(),
+            Some(root.canonicalize().expect("canonicalize").as_path()),
+            "记下的必须是规范化之后的路径"
+        );
+    }
+
+    /// `cleanup_policy` 认得出三档，且**真的按它清**：`balanced` 留依赖，
+    /// `aggressive` 连依赖一起删。
+    ///
+    /// 只验「字段被记下来了」是不够的：那个字段唯一的消费者是 `remove`，
+    /// 记对了却不照着做，等于给用户一个不起作用的下拉框。
+    #[test]
+    fn the_cleanup_policy_from_the_open_params_decides_what_gets_removed() {
+        let base = tempfile::tempdir().expect("tempdir");
+
+        // 平衡档：依赖留下，产物删掉。
+        let mut balanced = open_at(
+            base.path(),
+            serde_json::json!({"cleanup_policy": "balanced"}),
+        );
+        assert_eq!(balanced.policy, Policy::Balanced, "参数要落到策略上");
+        op(
+            &mut balanced,
+            serde_json::json!({"op": "worktree.create", "task_id": "b1"}),
+        );
+        let dir = base.path().join("b1");
+        std::fs::create_dir(dir.join("node_modules")).expect("mkdir");
+        std::fs::write(dir.join("node_modules/dep.js"), b"dep").expect("write");
+        std::fs::write(dir.join("out.bin"), b"x").expect("write");
+        let out = op(
+            &mut balanced,
+            serde_json::json!({"op": "worktree.remove", "task_id": "b1"}),
+        );
+        assert_eq!(out["cache_kept"], serde_json::json!(true), "{out}");
+        assert!(dir.join("node_modules/dep.js").exists(), "平衡档要留依赖");
+        assert!(!dir.join("out.bin").exists(), "产物必清");
+
+        // 激进档：整个目录都不留。
+        let mut aggressive = open_at(
+            base.path(),
+            serde_json::json!({"cleanup_policy": "aggressive"}),
+        );
+        assert_eq!(aggressive.policy, Policy::Aggressive);
+        op(
+            &mut aggressive,
+            serde_json::json!({"op": "worktree.create", "task_id": "a1"}),
+        );
+        let dir = base.path().join("a1");
+        std::fs::create_dir(dir.join("node_modules")).expect("mkdir");
+        let out = op(
+            &mut aggressive,
+            serde_json::json!({"op": "worktree.remove", "task_id": "a1"}),
+        );
+        assert_eq!(out["cache_kept"], serde_json::json!(false), "{out}");
+        assert!(!dir.exists(), "激进档连缓存一起清");
+    }
+
+    /// `cleanup_policy` 写了个不认识的名字：报错，且说的是**坏在 worktree
+    /// 的参数上**，而不是「这台设备不支持」。
+    ///
+    /// 静默回落到默认档是最坏的一种「宽容」：Hub 以为设成激进档了，设备
+    /// 实际按平衡档清，用户从「怎么又要重装依赖」里慢慢发现。
+    #[test]
+    fn an_unknown_cleanup_policy_is_refused_before_anything_is_created() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let root = base.path().join("policy-root");
+        let mut w = Worktree::new();
+        let err = w
+            .open(OpenReq::new(
+                root.display().to_string(),
+                serde_json::json!({"cleanup_policy": "whenever"}),
+            ))
+            .expect_err("未知策略必须被拒");
+        let text = err.to_string();
+        assert!(
+            matches!(err, ConnectorError::Invalid { .. }),
+            "这是参数问题，不是根不可用：{text}"
+        );
+        assert!(text.contains("worktree"), "错误要带上是谁的参数：{text}");
+        assert!(w.root.is_none(), "参数没过关就不该算开好了");
+    }
+
+    /// 建工作区时**盘上建不出来**：错误归属到 `worktree.create` 这个操作。
+    ///
+    /// 造法是在任务路径上放一个**悬挂链接**：`dir.exists()` 跟随链接得到
+    /// false（所以绕开「已经存在」那条臂），而 `create_dir` 看到链接本身
+    /// 已占住名字，给 `EEXIST`。这条臂的职责是「别把 io 错误变成 panic
+    /// 或一句空话」——它一定带 `op`，因为页面上「哪个操作失败了」就从这里来。
+    #[cfg(unix)]
+    #[test]
+    fn a_create_that_cannot_touch_the_disk_names_the_operation() {
+        let base = tempfile::tempdir().expect("tempdir");
+        std::os::unix::fs::symlink(base.path().join("gone"), base.path().join("t1"))
+            .expect("symlink");
+        let mut w = open_at(base.path(), serde_json::json!({}));
+        assert!(
+            !base.path().join("t1").exists(),
+            "悬挂链接的 exists() 必须为假，否则测的是另一条臂"
+        );
+        let err = w
+            .on_data(&serde_json::json!({"op": "worktree.create", "task_id": "t1"}))
+            .expect_err("名字已被悬挂链接占住，建不出目录");
+        match err {
+            ConnectorError::Failed { op, detail } => {
+                assert_eq!(op, "worktree.create", "要指向建工作区这一步");
+                assert!(!detail.is_empty(), "要给出原因，而不是一句空话");
+            }
+            other => panic!("必须是 Failed 而不是别的变体：{other}"),
+        }
+    }
+
+    /// 平衡档下 `remove` 读不进工作区：错误同样归属到 `worktree.remove`。
+    ///
+    /// 造法：工作区路径上是一个**普通文件**，`remove_products` 的 `read_dir`
+    /// 给 `ENOTDIR`——它不是 `NotFound`，所以走错误臂而不是幂等臂。
+    /// 判据是「错误带上 op」，不是「errno 是几」。
+    #[test]
+    fn a_remove_that_cannot_read_the_worktree_names_the_operation() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let mut w = open_at(
+            base.path(),
+            serde_json::json!({"cleanup_policy": "balanced"}),
+        );
+        let file = base.path().join("file-task");
+        std::fs::write(&file, b"x").expect("write");
+        let err = w
+            .on_data(&serde_json::json!({"op": "worktree.remove", "task_id": "file-task"}))
+            .expect_err("工作区是个文件时必须报错");
+        match err {
+            ConnectorError::Failed { op, .. } => {
+                assert_eq!(op, "worktree.remove", "要指向清工作区这一步");
+            }
+            other => panic!("必须是 Failed 而不是别的变体：{other}"),
+        }
+        assert!(file.exists(), "失败路径不该顺手删东西");
+    }
+
+    /// `remove_dir_all` 把「已经不存在」当成功（`remove` 要能重复调用），
+    /// `remove_products` 也一样；但**其它**失败照实交出去，并且激进档下
+    /// 那条 `map_err` 要把 errno 翻成用户能看懂的 `Failed` 帧。
+    ///
+    /// 两条臂的判据截然不同：前者是幂等性（删两次不该报错），后者是
+    /// 「真的没删掉」——把它也当成功的话，磁盘会在用户完全不知情的情况下
+    /// 慢慢满起来。
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_missing_tree_is_noop_but_other_failures_are_reported() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let gone = base.path().join("never-existed");
+        // 不存在 → 成功（两条入口各走一遍幂等臂）。
+        remove_dir_all(&gone).expect("不存在算成功");
+        remove_products(&gone).expect("不存在算成功");
+
+        // 存在但不是目录：两个函数各自把错误交出来。
+        let file = base.path().join("plain");
+        std::fs::write(&file, b"x").expect("write");
+        let err = remove_dir_all(&file).expect_err("文件不是目录，删不掉要报错");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotADirectory, "{err}");
+        assert!(file.exists(), "失败路径不该把东西删掉");
+        let err = remove_products(&file).expect_err("文件不是目录，读不进去要报错");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotADirectory, "{err}");
+
+        // ③ 激进档：`remove_dir_all` 的错误经过 `remove` 的 `map_err` 后要
+        // 变成 `ConnectorError::Failed`，并带上「删不掉」这件事的原因。
+        let mut aggressive = open_at(
+            base.path(),
+            serde_json::json!({"cleanup_policy": "aggressive"}),
+        );
+        let err = aggressive
+            .on_data(&serde_json::json!({"op": "worktree.remove", "task_id": "plain"}))
+            .expect_err("文件不是目录，删不掉必须报错");
+        match err {
+            ConnectorError::Failed { op, detail } => {
+                assert_eq!(op, "worktree.remove");
+                assert!(!detail.is_empty(), "要带上 errno，而不是一句空话");
+            }
+            other => panic!("必须是 Failed 而不是别的变体：{other}"),
+        }
+
+        // ④ 平衡档：`remove_products` 的同一类错误也走 `remove` 的 `map_err`。
+        let mut balanced = open_at(
+            base.path(),
+            serde_json::json!({"cleanup_policy": "balanced"}),
+        );
+        let err = balanced
+            .on_data(&serde_json::json!({"op": "worktree.remove", "task_id": "plain"}))
+            .expect_err("文件不是目录，清产物必须报错");
+        match err {
+            ConnectorError::Failed { op, detail } => {
+                assert_eq!(op, "worktree.remove");
+                assert!(!detail.is_empty(), "要带上 errno，而不是一句空话");
+            }
+            other => panic!("必须是 Failed 而不是别的变体：{other}"),
+        }
+    }
+
+    /// `remove_products` 的三种形态各走一遍：**目录**走 `remove_dir_all`，
+    /// **普通文件**走 `remove_file`，**符号链接**也走 `remove_file`。
+    ///
+    /// 最后一条是关键：链接的 `file_type()` 让 `is_dir()` / `is_file()` 都为假，
+    /// 于是落进 `else`。若那里写成 `remove_dir_all`，删的是**链接目标**——
+    /// 一个指向界外的链接会让我们删掉工作区之外的东西。
+    #[cfg(unix)]
+    #[test]
+    fn remove_products_handles_directories_files_and_symlinks_differently() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let ws = base.path().join("ws");
+        std::fs::create_dir(&ws).expect("mkdir");
+        std::fs::create_dir(ws.join("sub")).expect("mkdir");
+        std::fs::write(ws.join("sub/deep.txt"), b"deep").expect("write");
+        std::fs::write(ws.join("plain.txt"), b"plain").expect("write");
+        std::fs::create_dir(ws.join("node_modules")).expect("mkdir");
+        std::fs::write(ws.join("node_modules/dep.js"), b"dep").expect("write");
+
+        // 一个连向**界外目录**的链接：正确做法是删链接本身。
+        let outside = base.path().join("outside");
+        std::fs::create_dir(&outside).expect("mkdir");
+        std::fs::write(outside.join("keep.txt"), b"keep").expect("write");
+        std::os::unix::fs::symlink(&outside, ws.join("escape")).expect("symlink");
+        // 一个普通的文件链接：同样只删链接。
+        std::os::unix::fs::symlink(outside.join("keep.txt"), ws.join("file-link"))
+            .expect("symlink");
+
+        remove_products(&ws).expect("清产物");
+
+        assert!(!ws.join("sub").exists(), "目录要整棵删掉");
+        assert!(!ws.join("plain.txt").exists(), "文件要删掉");
+        assert!(!ws.join("escape").exists(), "链接本身要被删掉");
+        assert!(!ws.join("file-link").exists(), "文件链接也要被删掉");
+        assert!(ws.join("node_modules/dep.js").exists(), "依赖目录要留下");
+        assert!(
+            outside.join("keep.txt").exists(),
+            "链接目标在界外，绝不能跟着它删进去"
+        );
+    }
+
+    /// `dir_size` 只数**普通文件**：目录本身、符号链接、FIFO 都不计入。
+    ///
+    /// 判据必须是**精确**的字节数——「差不多大」会让「链接不计入」这条验证
+    /// 失去意义（一个指向 `/usr` 的链接一旦被跟随，差值就是几个 GB，
+    /// 而「差得很多」在不同的机器上是不同的数）。
+    #[cfg(unix)]
+    #[test]
+    fn dir_size_counts_regular_files_only() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let root = base.path().join("root");
+        std::fs::create_dir(&root).expect("mkdir");
+        std::fs::create_dir(root.join("sub")).expect("mkdir");
+        std::fs::write(root.join("a.bin"), [0u8; 100]).expect("write");
+        std::fs::write(root.join("sub/b.bin"), [0u8; 40]).expect("write");
+        // 指向界外大目录的链接：不计入。
+        std::os::unix::fs::symlink("/usr", root.join("escape")).expect("symlink");
+        // 悬挂链接：`metadata()` 跟着走会失败，但这条分支靠 `file_type()` 判。
+        std::os::unix::fs::symlink(root.join("gone"), root.join("dangling")).expect("symlink");
+        // FIFO：不是普通文件，不计入。
+        let fifo = root.join("pipe");
+        let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).expect("cstr");
+        assert_eq!(
+            unsafe { libc::mkfifo(c.as_ptr(), 0o600) },
+            0,
+            "mkfifo: {}",
+            std::io::Error::last_os_error()
+        );
+
+        assert_eq!(dir_size(&root), 140, "只数普通文件：100 + 40");
+        // 不存在的目录是 0（`read_dir` 失败那一层被跳过），不是 panic。
+        assert_eq!(dir_size(&base.path().join("never-existed")), 0);
+    }
+
+    /// `disk_usage` / `usage` 在**通道关掉之后**报「没开」，而不是报一个 0。
+    ///
+    /// 报 0 会让配额判定说「这台机器空得很，尽管派活」——而工作区根本不存在，
+    /// 派过去的任务会全部失败在检出那一步。
+    #[test]
+    fn disk_usage_on_a_closed_channel_is_refused_instead_of_reporting_zero() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let mut w = open_at(base.path(), serde_json::json!({}));
+        w.close();
+        let err = w
+            .on_data(&serde_json::json!({"op": "worktree.disk_usage"}))
+            .expect_err("关掉之后不能报用量");
+        assert!(err.to_string().contains("not open"), "got {err}");
+        let err = w.disk_usage().expect_err("关掉之后没有用量");
+        assert!(err.to_string().contains("not open"), "got {err}");
+
+        // `usage()` 自己那条 `?` 同样走一遍（它是 `disk_usage` 的调用点）。
+        let err = Worktree::new().usage().expect_err("没开就没有用量");
+        assert!(err.to_string().contains("not open"), "got {err}");
+    }
+
+    /// `quota_from_open` 取的就是 `open` 时记下的那个值。
+    ///
+    /// 判据同时钉住「不限额 ≠ 配额 0」：`None` 报 `null` + `0%` + `true`，
+    /// 而 `Some(0)` 是一个真实的上限（一个字节都放不下），会拦掉一切。
+    #[test]
+    fn the_quota_recorded_at_open_time_is_what_usage_reports() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let mut w = open_at(base.path(), serde_json::json!({"disk_quota_bytes": 4096}));
+        assert_eq!(w.quota_from_open(), Some(4096));
+        let out = op(&mut w, serde_json::json!({"op": "worktree.disk_usage"}));
+        assert_eq!(out["op"], serde_json::json!("worktree.disk_usage"));
+        assert_eq!(out["quota_bytes"], serde_json::json!(4096), "{out}");
+        assert_eq!(out["used_bytes"], serde_json::json!(0), "空目录是 0 字节");
+        assert_eq!(out["accepts_new_work"], serde_json::json!(true));
+
+        // 不传 = 不限额：`null` 而不是 0。
+        let mut unlimited = open_at(base.path(), serde_json::json!({}));
+        assert_eq!(unlimited.quota_from_open(), None);
+        let out = op(
+            &mut unlimited,
+            serde_json::json!({"op": "worktree.disk_usage"}),
+        );
+        assert!(out["quota_bytes"].is_null(), "{out}");
+        assert_eq!(
+            out["percent"],
+            serde_json::json!(0),
+            "没配额 = 0%，不是 100%"
+        );
+        assert_eq!(out["accepts_new_work"], serde_json::json!(true));
+    }
+
+    /// `close` 之后 `on_data` 的**每一条** op 都先说「通道没开」——
+    /// 包括未知 op：真实原因常常是这条通道早关了，而用户要看的是后者。
+    #[test]
+    fn every_operation_on_a_closed_channel_says_the_channel_is_not_open() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let mut w = open_at(base.path(), serde_json::json!({}));
+        w.close();
+        assert!(w.root.is_none(), "关掉就该忘掉根");
+        for op_name in [
+            "worktree.create",
+            "worktree.remove",
+            "worktree.disk_usage",
+            "worktree.teleport",
+        ] {
+            let err = w
+                .on_data(&serde_json::json!({"op": op_name, "task_id": "t1"}))
+                .expect_err("关掉的通道不能干活");
+            assert!(err.to_string().contains("not open"), "{op_name}: {err}");
+        }
+    }
+
+    /// `worktree_of` 的四个拒因各自说得清是哪一个，且**都在碰盘之前**被拒。
+    ///
+    /// 这条走的是私有入口（`worktree_of` 本身），判据是 `Invalid` + 具体原因：
+    /// 错误文案会直接进 `channel_error.detail`，一句「路径不合法」不足以让
+    /// 写 Hub 的人知道该改哪个字段。
+    #[test]
+    fn worktree_of_names_the_reason_a_task_id_cannot_be_used() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let w = open_at(base.path(), serde_json::json!({}));
+        for (bad, why) in [
+            ("", "empty"),
+            ("a/b", "path separator"),
+            ("a\\b", "path separator"),
+            (".", "relative path component"),
+            ("..", "relative path component"),
+        ] {
+            let err = w.worktree_of(bad).expect_err("必须被拒");
+            let text = err.to_string();
+            assert!(
+                matches!(err, ConnectorError::Invalid { .. }),
+                "{bad:?} 该是参数问题：{text}"
+            );
+            assert!(text.contains(why), "{bad:?} 的原因要写清 {why}：{text}");
+        }
+        // 正样本：拼出来的就是 `<固定目录>/<任务 id>`。
+        assert_eq!(
+            w.worktree_of("t-1").expect("合法 id"),
+            base.path()
+                .canonicalize()
+                .expect("canonicalize")
+                .join("t-1")
+        );
+        // 没开通道时同样说「没开」，而不是拼出一个相对路径。
+        let err = Worktree::new().worktree_of("t").expect_err("没开就拼不出");
+        assert!(err.to_string().contains("not open"), "got {err}");
+    }
+}

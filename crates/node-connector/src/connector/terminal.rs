@@ -1066,4 +1066,267 @@ mod tests {
             .expect("open");
         assert!(t.is_open());
     }
+
+    /// `open` 的私有参数解不开：错误要带上 connector 名。
+    ///
+    /// 同一个 `params` 在不同 connector 下含义完全不同，而 serde 自己的
+    /// 错误信息里没有「这是给谁的」——`rows` 给了个字符串时，页面要能
+    /// 看出是 terminal 的参数不对，而不是「设备不支持终端」。
+    #[test]
+    fn bad_open_params_name_the_terminal_and_open_nothing() {
+        let mut t = Terminal::new();
+        let err = t
+            .open(req(serde_json::json!({ "rows": "tall" })))
+            .expect_err("尺寸给成字符串必须被拒");
+        let text = err.to_string();
+        assert!(
+            matches!(err, ConnectorError::Invalid { .. }),
+            "这是参数问题：{text}"
+        );
+        assert!(text.contains("terminal"), "错误要带上是谁的参数：{text}");
+        assert!(!t.is_open(), "参数没过关就不该起 PTY");
+    }
+
+    /// `cwd` 真的落到子进程身上：`pwd` 打出来的就是它。
+    ///
+    /// 这条验的是 `open` → `spawn_in` 那一段接线，而不是 `spawn_in` 自己
+    /// （后者在 `pty/unix.rs` 有单测）。少了这条，把 `cwd_ref` 传成 `None`
+    /// 也照样全绿，而用户的终端会停在 worker 自己的目录上——他敲 `ls`
+    /// 看到的是一个和自己工作区无关的目录。
+    #[test]
+    fn the_cwd_param_reaches_the_shell() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().canonicalize().expect("canonicalize");
+        let mut t = Terminal::new();
+        t.open(OpenReq::new(
+            "/tmp",
+            serde_json::json!({ "shell": "/bin/sh", "cwd": real.to_string_lossy() }),
+        ))
+        .expect("open");
+        t.on_data(&serde_json::json!({ "bytes": "pwd\nexit\n" }))
+            .expect("type the command");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut text = String::new();
+        let needle = real.to_string_lossy().into_owned();
+        while std::time::Instant::now() < deadline && !text.contains(&needle) {
+            for f in t.poll().expect("poll") {
+                if let Some(s) = f.payload.get("bytes").and_then(|b| b.as_str()) {
+                    text.push_str(s);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            text.contains(&needle),
+            "cwd 没落到 shell 上，收不到 {needle}：{text}"
+        );
+    }
+
+    /// `open` 的 `env` 追加到继承环境上，空串 `cwd` / 空串 `shell` 当「没给」。
+    ///
+    /// 三件事一起验是因为它们是同一个决定的三面：**缺省不是错误**。给了
+    /// 空串的 `cwd` 去 `chdir("")` 会让面板一条命令都跑不起来，而空串的
+    /// `shell` 是一个「页面上那个输入框是空的」的常态。
+    #[test]
+    fn an_empty_cwd_and_shell_fall_back_but_env_is_appended() {
+        let key = "AFLEET_TERMINAL_TEST_KEY";
+        let sentinel = format!("terminal-{}", std::process::id());
+        let mut t = Terminal::new();
+        t.open(req(serde_json::json!({
+            "shell": "/bin/sh",
+            "cwd": "",
+            "env": [[key, sentinel]],
+        })))
+        .expect("open");
+        t.on_data(&serde_json::json!({ "bytes": "env\nexit\n" }))
+            .expect("type the command");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut text = String::new();
+        let needle = format!("{key}={sentinel}");
+        while std::time::Instant::now() < deadline && !text.contains(&needle) {
+            for f in t.poll().expect("poll") {
+                if let Some(s) = f.payload.get("bytes").and_then(|b| b.as_str()) {
+                    text.push_str(s);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(text.contains(&needle), "env 没交给 shell：{text}");
+        assert!(
+            text.contains("PATH="),
+            "继承下来的环境必须还在（整体替换会让 TERM/PATH 一起消失）：{text}"
+        );
+        // 空串 `shell` 同样回落：`Shell` 字段给了空串，照样能起一个 shell。
+        let mut blank = Terminal::new();
+        blank
+            .open(req(serde_json::json!({ "shell": "   " })))
+            .expect("空串 shell 要回落到设备默认");
+        assert!(blank.is_open(), "空串不该让面板打不开");
+    }
+
+    /// `drain` 把读线程队列里的东西挪进 `pending`，并且**按字节**把账减掉。
+    ///
+    /// 账不减的后果是「这次连接之后，下一条通道一上来就在等一个不存在的额度」：
+    /// `wait_for_budget` 看着一个永远虚高的数，读线程再也不往下读——终端
+    /// 面板表现为「输出到某一段就不动了」。
+    ///
+    /// **`queued` 为 `Some` 与 `None` 两条路各走一遍**：`detach` 会把 `queued`
+    /// 摘成 `None`，而 `drain` 在那之后仍可能被调用一次（`poll` 与 `close`
+    /// 之间有窗口），那条路不该 panic。
+    #[test]
+    fn drain_moves_bytes_into_pending_and_keeps_the_byte_account_in_step() {
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(4);
+        let queued: QueueBytes = Arc::new(std::sync::atomic::AtomicUsize::new(11));
+        tx.send(b"hello".to_vec()).expect("send");
+        tx.send(b"world".to_vec()).expect("send");
+        drop(tx);
+
+        let mut t = Terminal::new();
+        t.rx = Some(rx);
+        t.queued = Some(Arc::clone(&queued));
+        t.drain();
+        assert_eq!(
+            t.pending.len(),
+            2,
+            "两条 chunk 都该进 `pending`：{:?}",
+            t.pending
+        );
+        assert_eq!(
+            queued.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "账要按收到的字节减：11 - 5 - 5"
+        );
+        assert!(t.done, "发送端析构 = 输出到此为止");
+
+        // `queued` 不在（`detach` 之后）时同样要把 chunk 收下，且不 panic。
+        let (tx2, rx2) = mpsc::sync_channel::<Vec<u8>>(4);
+        tx2.send(b"after-detach".to_vec()).expect("send");
+        drop(tx2);
+        let mut t2 = Terminal::new();
+        t2.rx = Some(rx2);
+        assert!(
+            t2.queued.is_none(),
+            "前提：这条用例要覆盖 `queued` 为 None 的那支"
+        );
+        t2.drain();
+        assert_eq!(t2.pending.len(), 1, "没有账本也要收 chunk");
+        assert!(t2.done);
+    }
+
+    /// 队列里还有字节时**不算跑完**：`done` 与 `pending` 缺一不可。
+    ///
+    /// 判「跑完」会让终端的最后几行永远发不出去——shell 退了，但它最后那句
+    /// 输出还在 `pending` 里时，通道层收到 `finished() == true` 就会发
+    /// `close_channel`，那一帧结果也就没有了。
+    #[test]
+    fn a_finished_shell_with_unsent_bytes_is_not_finished() {
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(4);
+        tx.send(b"last words".to_vec()).expect("send");
+        drop(tx);
+        let mut t = Terminal::new();
+        t.rx = Some(rx);
+        t.queued = Some(Arc::new(std::sync::atomic::AtomicUsize::new(10)));
+
+        // `drain` 之后：`done` 为真，但 `pending` 里还有一帧没发。
+        t.drain();
+        assert!(t.done, "发送端没了就是读完了");
+        assert!(!t.finished(), "还有字节没发出去时不许自称跑完");
+
+        // `poll` 真的把它泵出去，而且**一帧一条**（每个 credit 只值一帧）。
+        let frames = t.poll().expect("poll");
+        assert_eq!(frames.len(), 1, "一条 chunk 就是一帧：{frames:?}");
+        assert_eq!(
+            frames.first().and_then(|f| f.payload.get("bytes")),
+            Some(&serde_json::json!("last words")),
+            "载荷要原样交给页面"
+        );
+        assert!(t.finished(), "发完之后才算跑完");
+        assert!(t.poll().expect("poll again").is_empty(), "没有新字节了");
+    }
+
+    /// 攒着的一帧**超过协议上限**时 `poll` 要把 `OutFrame::bytes` 的错误
+    /// 原样交出去，而不是先发出半帧、或者干脆吞掉。
+    ///
+    /// 造法：直接把一条超大 chunk 塞进 `pending`（`OutFrame::bytes` 的判据是
+    /// 1 MiB，见 `connector/mod.rs`）。这条臂在生产上真会被撞到：credit 预算
+    /// 由 Hub 给，`credit_start` 可能大于 1 MiB，而 `READ_CHUNK` 是 16 KiB，
+    /// 多块攒在 `pending` 里就可能越线。
+    ///
+    /// 判据是**错误是 `Internal` 且点明超限**——这条路径若静默丢帧，
+    /// 用户看到的是「终端输出莫名少了一段」。
+    #[test]
+    fn poll_turns_an_oversized_chunk_into_a_visible_error() {
+        let mut t = Terminal::new();
+        let too_big = protocol::frame::MAX_FRAME_BYTES + 1;
+        t.pending.push_back(vec![b'x'; too_big]);
+        let err = t.poll().expect_err("单帧超限必须报错，而不是静默丢");
+        assert!(matches!(err, ConnectorError::Internal { .. }), "got {err}");
+        assert!(
+            err.to_string().contains("1 MiB"),
+            "错误要点明是帧上限，而不是一句空话：{err}"
+        );
+        assert!(
+            t.pending.is_empty(),
+            "越线的 chunk 已经被取走，不该留在队列里反复失败"
+        );
+
+        // 恰好等于上限是允许的：边界不能比协议更严，否则一块正常输出
+        // 会变成一次可见故障。
+        let mut ok = Terminal::new();
+        ok.pending
+            .push_back(vec![b'x'; protocol::frame::MAX_FRAME_BYTES]);
+        let frames = ok.poll().expect("恰好 1 MiB 要能发出去");
+        assert_eq!(frames.len(), 1, "一帧一条");
+    }
+
+    /// `start_reader` 在**没有 PTY** 时必须先说「没开」，而不是去 `dup_master`
+    /// 一个空值、或者起一个没有源头的读线程。
+    ///
+    /// 正常路径上它在 `open` 里紧接着 `self.pty = Some(pty)` 被调用，所以这条
+    /// 是「将来加一个新调用点（比如重连时只重起读线程）」的兜底：那里漏了
+    /// 前置检查，得到的必须是一句人话，而不是一个生产代码里的 panic。
+    #[test]
+    fn start_reader_refuses_to_run_without_a_pty() {
+        let mut t = Terminal::new();
+        let err = t.start_reader().expect_err("没有 PTY 就不该起读线程");
+        assert!(matches!(err, ConnectorError::Internal { .. }));
+        assert!(err.to_string().contains("not open"), "got {err}");
+        assert!(t.rx.is_none(), "没起来就不该留下接收端");
+        t.drain();
+        assert!(t.pending.is_empty(), "`rx` 为 None 时 `drain` 必须是空操作");
+    }
+
+    /// `start_reader` 在 **`pty` 有值、master 却已经关掉**时，要把 `dup_master`
+    /// 的失败翻成 `Failed { op: "attach to terminal" }`。
+    ///
+    /// 这条臂与上一条不同：`self.pty` 是 `Some`，所以前置检查放行，真正的失败
+    /// 来自 `dup_master`。生产上的意义是「重连时复用了一个已经被 `close` 的
+    /// `Pty`」——那时起读线程会 `dup` 一个不存在的 fd，而错误必须说清是
+    /// 「接不上终端」，不能是一句 errno，也不能落进 `Internal`（那会被当成
+    /// 设备内部故障，而不是这一条通道接不上）。
+    #[test]
+    fn start_reader_reports_a_dup_failure_as_an_attach_failure() {
+        let mut t = Terminal::new();
+        t.open(req(serde_json::json!({ "shell": "/bin/sh" })))
+            .expect("open");
+        // 摘掉 master，但把 `Pty` 留在 `pty` 里：`is_open()` 为真，`dup_master`
+        // 给 `Closed`。
+        if let Some(pty) = t.pty.as_mut() {
+            pty.close();
+        }
+        assert!(t.is_open(), "前提：`pty` 仍是 Some，前置检查会放行");
+
+        let err = t.start_reader().expect_err("master 没了就 dup 不出来");
+        match err {
+            ConnectorError::Failed { op, detail } => {
+                assert_eq!(op, "attach to terminal", "要指向「接上终端」这一步");
+                assert!(
+                    detail.contains("not open"),
+                    "要带上是「终端没开」：{detail}"
+                );
+            }
+            other => panic!("必须是 Failed 而不是别的变体：{other}"),
+        }
+        t.close();
+    }
 }

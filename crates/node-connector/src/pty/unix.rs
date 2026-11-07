@@ -430,3 +430,375 @@ pub(crate) fn wait_readable(fd: RawFd, budget: std::time::Duration) -> bool {
     let rc = unsafe { libc::poll(&raw mut pfd, 1, ms as libc::c_int) };
     rc > 0 && pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
 }
+
+// `unix.rs` 本身只在 `cfg(unix)` 下编译，所以这里写 `#[cfg(test)]` 即可：
+// `clippy.toml` 的 `allow-*-in-tests` 能覆盖模块内的 helper，无需新 allow。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 一根**两端都在**的管道：返回 `(读端, 写端)`。
+    ///
+    /// 不用 `pipe2`：它是 Linux 扩展，macOS 上没有这个符号。
+    ///
+    /// `CLOEXEC` 是必须的：本 crate 的测试**单线程**（`.cargo/config.toml`
+    /// 的 `RUST_TEST_THREADS=1`），但 fork 出来的子进程会继承所有非 CLOEXEC
+    /// 的 fd——留在里面的话管道永远等不到 EOF，后面的用例要靠超时才收场。
+    fn pipe_pair() -> (OwnedFd, OwnedFd) {
+        let mut fds = [-1 as RawFd; 2];
+        assert_eq!(
+            unsafe { libc::pipe(fds.as_mut_ptr()) },
+            0,
+            "pipe: {}",
+            std::io::Error::last_os_error()
+        );
+        for fd in fds {
+            assert_eq!(
+                unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                0,
+                "fcntl(FD_CLOEXEC): {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        (unsafe { OwnedFd::from_raw_fd(fds[0]) }, unsafe {
+            OwnedFd::from_raw_fd(fds[1])
+        })
+    }
+
+    /// master 已经关掉时，三条「要用 master」的方法必须各自报 `Closed`，
+    /// 而不是去 `fcntl` / `ioctl` / `write` 一个已经不在的 fd。
+    ///
+    /// 判据是**错误变体**（`PtyError::Closed`），不是错误文案：这枚举会经
+    /// `channel_error` 直接显示在页面上，而 `Io(EBADF)` 是一句用户读不懂的
+    /// 系统话——它还会让人以为是设备坏了，而不是「面板已经关掉了」。
+    #[test]
+    fn every_method_that_needs_the_master_says_closed_after_close() {
+        let mut pty = Pty::spawn("/bin/sh", &[], Size { cols: 80, rows: 24 }).expect("spawn");
+        assert!(pty.is_open(), "刚起好的 PTY 是开着的");
+        assert!(pty.pid() > 0, "子进程要有自己的 pid：{}", pty.pid());
+
+        pty.close();
+        assert!(!pty.is_open(), "关掉之后不该还开着");
+
+        assert!(
+            matches!(pty.dup_master(), Err(PtyError::Closed)),
+            "dup_master 在关闭后要说「没开」"
+        );
+        assert!(
+            matches!(
+                pty.resize(Size {
+                    cols: 100,
+                    rows: 40
+                }),
+                Err(PtyError::Closed)
+            ),
+            "resize 在关闭后要说「没开」"
+        );
+        assert!(
+            matches!(pty.write(b"x"), Err(PtyError::Closed)),
+            "write 在关闭后要说「没开」"
+        );
+        let mut buf = [0u8; 16];
+        assert!(
+            matches!(pty.read(&mut buf), Err(PtyError::Closed)),
+            "read 在关闭后要说「没开」"
+        );
+
+        // `close` 自己必须幂等：通道层可能叫两次。
+        pty.close();
+        assert!(!pty.is_open());
+    }
+
+    /// 一个**普通文件**的 fd 不是终端：`TIOCSWINSZ` 必须以 `ENOTTY` 失败，
+    /// 而不是静默成功。
+    ///
+    /// 这条臂的职责是「别把 ioctl 的失败吞掉」：静默成功的话，调用方会以为
+    /// 尺寸已经生效（`Pty::size()` 也能改掉），而内核那边一步没动——
+    /// 终端里的程序仍按旧尺寸重画，用户看到的是一个「改了没用」的下拉框。
+    #[test]
+    fn apply_winsize_refuses_a_fd_that_is_not_a_terminal() {
+        let file = tempfile::tempfile().expect("tempfile");
+        let err = apply_winsize(file.as_raw_fd(), Size { cols: 80, rows: 24 })
+            .expect_err("普通文件不是终端，TIOCSWINSZ 必须失败");
+        let PtyError::Io(e) = err else {
+            panic!("必须是 Io 而不是别的变体：{err}");
+        };
+        assert_eq!(
+            e.raw_os_error(),
+            Some(libc::ENOTTY),
+            "内核给的是 ENOTTY（不是终端），实际 {e}"
+        );
+    }
+
+    /// `wait_readable` 对三件事都要点头：**有数据**、**写端关了**
+    /// （`POLLHUP`）、**没有数据**（超时给 `false`）。
+    ///
+    /// 后两条混起来就会出事：只认 `POLLIN` 的版本在从端关闭时永远等不到
+    /// 「可读」，于是读循环看不到那个代表「子进程退了」的 0 字节——
+    /// 终端面板停在一块不再动、也不报错的黑板上。
+    #[test]
+    fn wait_readable_also_wakes_up_for_a_hangup_not_just_for_data() {
+        let budget = std::time::Duration::from_millis(200);
+
+        // ① 写端还开着、一个字节都没有：只能靠预算到点返回。
+        let (read_end, write_end) = pipe_pair();
+        let started = std::time::Instant::now();
+        assert!(
+            !wait_readable(read_end.as_raw_fd(), budget),
+            "没有数据、也没挂断时不该报「可读」"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "预算要给住，不能一直等"
+        );
+
+        // ② 真写一个字节：立刻可读。
+        let wrote = unsafe {
+            libc::write(
+                write_end.as_raw_fd(),
+                c"x".as_ptr().cast::<libc::c_void>(),
+                1,
+            )
+        };
+        assert_eq!(wrote, 1, "write: {}", std::io::Error::last_os_error());
+        assert!(
+            wait_readable(read_end.as_raw_fd(), budget),
+            "有数据就该报可读"
+        );
+
+        // ③ 写端关掉 = 挂断。**此时缓冲里可能还有那 1 个字节**，所以判据
+        // 只用「返回 true」这一件事，不看究竟是 POLLIN 还是 POLLHUP。
+        drop(write_end);
+        assert!(
+            wait_readable(read_end.as_raw_fd(), budget),
+            "写端关了（POLLHUP）必须算可读，否则读循环永远看不到 EOF"
+        );
+    }
+
+    /// 往**只读**的 fd 上写：`Pty::write` 必须把 `EBADF` 交出来。
+    ///
+    /// 这条与 `n == 0` 那条臂不同：`write(2)` 返回 **-1** 时不该被当成
+    /// 「写完了」继续循环——`off` 不会前进，于是调用方在一个死循环里烧 CPU，
+    /// 而终端面板表现为「敲什么都卡住」。
+    #[test]
+    fn writing_to_a_read_only_descriptor_reports_ebadf() {
+        let (read_end, write_end) = pipe_pair();
+        // 只借读端那一个 fd：`Pty` 只在这个用例的作用域里存在，`Drop` 会
+        // `close()` 它，而所有权仍在 `read_end` 手里，所以下面还要用
+        // `dup` 出来的一份——否则 `Pty::drop` 关掉的是一个别人的 fd。
+        let borrowed = unsafe { libc::fcntl(read_end.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+        assert!(borrowed >= 0, "dup: {}", std::io::Error::last_os_error());
+        let pty = Pty {
+            inner: UnixPty {
+                master: Some(unsafe { OwnedFd::from_raw_fd(borrowed) }),
+                pid: 0,
+                size: Size { cols: 80, rows: 24 },
+            },
+        };
+        let err = pty.write(b"nope").expect_err("只读 fd 上写必须失败");
+        let PtyError::Io(e) = err else {
+            panic!("必须是 Io 而不是别的变体：{err}");
+        };
+        assert_eq!(
+            e.raw_os_error(),
+            Some(libc::EBADF),
+            "内核给的是 EBADF（只有读权限），实际 {e}"
+        );
+        drop(pty);
+        drop(write_end);
+        // 读端仍然可用：`Pty` 关掉的是它自己 dup 出来的那一份。
+        assert!(
+            unsafe { libc::fcntl(read_end.as_raw_fd(), libc::F_GETFD) } >= 0,
+            "`Pty::drop` 关掉的是它自己那一份 fd，不是调用方的"
+        );
+    }
+
+    /// `spawn_in` 的 env 里**值**带 NUL：在 fork 之前就被拒，且错误里带上
+    /// 那条键值对。
+    ///
+    /// 不拒的话 `CString::new` 之外没有任何一道闸：拼好的 `KEY=VAL` 会被
+    /// `execvpe` 在 NUL 处截断，子进程拿到一个 `VAL` 之前的半截值——
+    /// 「环境变量传过去了，但值是错的」是最难查的一类。
+    #[test]
+    fn an_environment_entry_carrying_a_nul_is_refused_before_forking() {
+        let mut value = String::from("good");
+        value.push('\0');
+        value.push_str("tail");
+        let err = Pty::spawn_in(
+            "/bin/sh",
+            &[],
+            Size { cols: 80, rows: 24 },
+            None,
+            &[("AFLEET_PROBE".to_string(), value)],
+        )
+        .expect_err("带 NUL 的 env 值必须被拒");
+        let text = err.to_string();
+        assert!(
+            text.contains("AFLEET_PROBE=good") && text.contains("NUL"),
+            "错误要指名是哪一条、以及为什么：{text}"
+        );
+
+        // 键里带 NUL 同样必须被拒（拼出来的 `KEY=VAL` 一样会被截断）。
+        let mut key = String::from("AFLEET");
+        key.push('\0');
+        let err = Pty::spawn_in(
+            "/bin/sh",
+            &[],
+            Size { cols: 80, rows: 24 },
+            None,
+            &[(key, "v".to_string())],
+        )
+        .expect_err("带 NUL 的 env 键必须被拒");
+        assert!(err.to_string().contains("NUL"), "got {err}");
+    }
+
+    /// `spawn_in` 的 `env` 是**追加**而不是替换：父进程的环境还在，页面给的
+    /// 那几条覆盖同名项、新键被追加上去。
+    ///
+    /// 整体替换会让 `TERM` 消失，而没有 `TERM` 的终端既没有颜色也没有退格
+    /// 处理——用户看到的是「方向键打出一串 `^[[A`」这种莫名其妙的现象。
+    ///
+    /// 判据走的是**子进程自己说的话**（`/bin/sh -c env`），不是我们记下来的
+    /// 变量：外层合并逻辑对不对，只有对面才说了算。`PATH` 是确认「继承下来的
+    /// 那部分还在」的最稳探针——没有它 `/bin/sh` 连 `env` 都找不到。
+    #[test]
+    fn spawn_in_appends_to_the_inherited_environment_instead_of_replacing_it() {
+        let key = "AFLEET_PTY_TEST_KEY";
+        let sentinel = format!("sentinel-{}", std::process::id());
+        let pty = Pty::spawn_in(
+            "/bin/sh",
+            &["-c".to_string(), "env".to_string()],
+            Size { cols: 80, rows: 24 },
+            None,
+            &[(key.to_string(), sentinel.clone())],
+        )
+        .expect("spawn_in");
+        let seen = super::super::testutil::expect_needle(
+            &pty,
+            format!("{key}={sentinel}").as_bytes(),
+            "spawn_in 必须把新的键值对交给子进程",
+        );
+        let text = String::from_utf8_lossy(&seen).into_owned();
+        assert!(
+            text.contains("PATH="),
+            "继承下来的环境必须还在（否则 shell 连命令都找不到）：{text}"
+        );
+    }
+
+    /// `spawn_in` 的 `cwd` 真的落地：子进程的 `pwd` 是那个目录。
+    ///
+    /// 这条与「cwd 不合法的那些形状被拒」互补：那里验的是闸门，这里验的是
+    /// 闸门放行之后**真的 chdir 了**。没 chdir 的话，工作区里跑起来的 shell
+    /// 会停在 worker 自己的目录上，用户看到的路径与工作区对不上。
+    #[test]
+    fn spawn_in_really_chdirs_into_the_requested_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // `canonicalize`：macOS 的临时目录是 `/var` → `/private/var` 的链接，
+        // 不归一化的话 `pwd` 给出的字符串与这里拼的对不上。
+        let real = dir.path().canonicalize().expect("canonicalize");
+        let pty = Pty::spawn_in(
+            "/bin/sh",
+            &["-c".to_string(), "pwd".to_string()],
+            Size { cols: 80, rows: 24 },
+            Some(&real),
+            &[],
+        )
+        .expect("spawn_in");
+        let seen = super::super::testutil::expect_needle(
+            &pty,
+            real.to_string_lossy().as_bytes(),
+            "子进程的 pwd 必须是请求的那个目录",
+        );
+        let text = String::from_utf8_lossy(&seen).into_owned();
+        assert!(
+            text.contains(&*real.to_string_lossy()),
+            "cwd 没落地到内核：{text}"
+        );
+    }
+
+    /// `execvpe` 对着一个不存在的程序：返回，`errno = ENOENT`，**本进程还活着**。
+    ///
+    /// 这条只能直接打这个封装，不能整条走 `spawn_in`：走那条路时失败发生在
+    /// fork 出来的子进程里，而子进程里的计数从不上报给 llvm-cov。
+    ///
+    /// 它钉住的是「`execvpe` 的失败**不改 errno 之外的状态**」——`spawn_in`
+    /// 的子进程分支依赖同一件事：失败之后只能 `_exit(127)`，不能落回
+    /// Rust 运行时（那里的锁状态是 fork 时刻的快照）。
+    ///
+    /// **限 Linux**：这个封装只在 `target_os = "linux"` 下存在（macOS 的替身
+    /// 是逐项 `setenv` 后 `execvp`，语义不同、也拿不到 `ENOENT` 这条稳定的
+    /// 判据）。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn execvpe_reports_enoent_for_a_missing_program() {
+        let program = CString::new("/nonexistent/afleet-test-program").expect("cstr");
+        let argv: Vec<*const libc::c_char> = vec![program.as_ptr(), std::ptr::null()];
+        let env: Vec<CString> = vec![CString::new("PATH=/usr/bin:/bin").expect("cstr")];
+        let mut envp: Vec<*const libc::c_char> = env.iter().map(|e| e.as_ptr()).collect();
+        envp.push(std::ptr::null());
+        let before = unsafe { libc::getpid() };
+
+        unsafe { macos_aware_execvpe(program.as_ptr(), argv.as_ptr(), envp.as_ptr(), &env) };
+
+        // 走到这一行就说明 `execvpe` 返回了——即它失败了。
+        let err = std::io::Error::last_os_error();
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::ENOENT),
+            "不存在的程序必须给 ENOENT，实际 {err}"
+        );
+        // 进程完好：调用 `execvpe` 之前先记下 pid，失败后必须是同一个
+        // pid——真的 exec 成功了，这一行根本不会再回到测试进程里。
+        assert_eq!(
+            unsafe { libc::getpid() },
+            before,
+            "execvpe 失败后进程必须毫发无损"
+        );
+    }
+
+    /// master 还在、但 `TIOCSWINSZ` 失败时，`resize` 要把内核的 errno 传出去，
+    /// **并且不把 `self.size` 改成那个没生效的新尺寸**。
+    ///
+    /// 造法与 `write` 那条一样：给 `Pty` 一根管道的读端（`is_open()` 为真，
+    /// 但 `ioctl` 给 `ENOTTY`）。这样测的是 `resize` 自己的接线，而不是
+    /// 「关掉之后再 resize」那条 `Closed` 臂。
+    ///
+    /// 这条臂的职责是别让界面与内核各记一份尺寸：`self.size` 是面板显示的
+    /// 那份，内核的是 shell 真正拿来重画的那份，两者不一致时用户看到的是
+    /// 「拖了窗口但程序还是按旧宽度折行」。
+    #[test]
+    fn resize_reports_an_ioctl_error_and_keeps_the_old_size() {
+        let (read_end, write_end) = pipe_pair();
+        let borrowed = unsafe { libc::fcntl(read_end.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+        assert!(borrowed >= 0, "dup: {}", std::io::Error::last_os_error());
+        let old = Size { cols: 80, rows: 24 };
+        let mut pty = Pty {
+            inner: UnixPty {
+                master: Some(unsafe { OwnedFd::from_raw_fd(borrowed) }),
+                pid: 0,
+                size: old,
+            },
+        };
+        let new = Size {
+            cols: 100,
+            rows: 40,
+        };
+
+        let err = pty.resize(new).expect_err("管道不是终端，改尺寸必须失败");
+        let PtyError::Io(e) = err else {
+            panic!("必须是 Io 而不是别的变体：{err}");
+        };
+        assert_eq!(
+            e.raw_os_error(),
+            Some(libc::ENOTTY),
+            "内核给的是 ENOTTY（不是终端），实际 {e}"
+        );
+        assert_eq!(pty.size(), old, "没生效的尺寸不该被记下来");
+        drop(pty);
+        drop(write_end);
+        assert!(
+            unsafe { libc::fcntl(read_end.as_raw_fd(), libc::F_GETFD) } >= 0,
+            "`Pty::drop` 关掉的是它自己那一份 fd，不是调用方的"
+        );
+    }
+}

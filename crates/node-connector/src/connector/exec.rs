@@ -1597,6 +1597,110 @@ mod tests {
         );
     }
 
+    /// 结果通道的发送端**没了而结果没来**：`poll` 必须把它变成一句
+    /// `channel_error`，而不是静默。
+    ///
+    /// 这是「跑不起来」与「还在跑」的分界：`TryRecvError::Empty` 是后者，
+    /// 返回空没问题；`Disconnected` 是前者，静默的话页面上「跑一条命令」
+    /// 永远没有任何反应——它连一帧 `channel_error` 都收不到。
+    #[test]
+    fn a_disconnected_runner_turns_poll_into_a_visible_error() {
+        // 造一个 sender 立刻被扔掉的接收端：没有线程、没有命令，最快也最确定。
+        let (tx, rx) = mpsc::sync_channel::<Outcome>(1);
+        let mut e = Exec::new();
+        e.result = Some(rx);
+        e.spent = true;
+        drop(tx);
+
+        let err = e.poll().expect_err("发送端没了而结果没来，必须报错");
+        assert!(
+            matches!(err, ConnectorError::Internal { .. }),
+            "这是内部故障，不是参数错误：{err}"
+        );
+        assert!(
+            err.to_string().contains("could not be run"),
+            "错误要说「命令跑不起来」：{err}"
+        );
+        // 只报一次：撒手之后下一轮 `poll` 就是「没有结果通道」的空转。
+        assert!(e.result.is_none(), "报完就该把这条死通道扔掉");
+        assert!(e.poll().expect("poll after error").is_empty());
+    }
+
+    /// `poll` 拿到一个已经备好的 `Outcome` 时，只交出**一帧**，并把通道
+    /// 标成「跑完」；之后再 `poll` 不该重复交同一份结果。
+    ///
+    /// 这是 `open` 那条 runner 线程与 `poll` 之间的契约：`tx` 只发一次，
+    /// 收完就撒手。让它重复发的话，通道层会先发 `close_channel`，页面再
+    /// 收到第二帧结果——一个已经关掉的面板里冒出第二条命令输出。
+    #[test]
+    fn a_ready_outcome_is_turned_into_one_frame_and_then_the_channel_is_spent() {
+        let (tx, rx) = mpsc::sync_channel::<Outcome>(1);
+        tx.send(Outcome {
+            exit_code: 42,
+            stdout: b"out".to_vec(),
+            stderr: b"err".to_vec(),
+            truncated: false,
+            duration: Duration::from_millis(7),
+            timed_out: false,
+        })
+        .expect("send");
+        drop(tx);
+
+        let mut e = Exec::new();
+        e.spent = true;
+        e.result = Some(rx);
+        let mut frames = e.poll().expect("poll");
+        assert_eq!(frames.len(), 1, "一次结果就是一帧：{frames:?}");
+        let out = frames.pop().expect("one frame").payload;
+        assert_eq!(out["exit_code"], 42, "{out}");
+        assert_eq!(
+            Base64::decode_vec(out["stdout_b64"].as_str().expect("b64")).expect("b64"),
+            b"out"
+        );
+        assert!(e.finished(), "结果交出去之后这条一次性通道才算跑完：{out}");
+        assert!(e.poll().expect("poll after finish").is_empty());
+    }
+
+    /// `waitpid` 对一个**不是我们的子进程**的 pid 必须给 `-1`，而不是
+    /// 把 `status` 里的随机值当退出码。
+    ///
+    /// 造法：`pid` 填本进程自己的 pid。`waitpid(self_pid, ..)` 在没有子进程
+    /// 可收时返回 `ECHILD`，这正是「已被别人回收 / 不是我们的孩子」那条臂；
+    /// 它不需要等任何进程，稳定且快。
+    #[test]
+    fn wait_reports_minus_one_when_the_pid_is_not_our_child() {
+        let child = Child {
+            pid: std::process::id() as libc::pid_t,
+            pipes: Vec::new(),
+        };
+        assert_eq!(child.wait(), -1, "ECHILD 不该被当成一个退出码");
+    }
+
+    /// 被 **SIGTERM**（不是 SIGKILL）杀掉的子进程，退出码是 `128 + SIGTERM`。
+    ///
+    /// 超时那条用例钉住的是 `SIGKILL → EXIT_KILLED` 这个跨平台约定；这里让
+    /// 子进程自己给自己发 SIGTERM，验的是另一支 `128 + sig`。少了这一支，
+    /// 一个被别的东西终止的命令也会拿到 `137`，而排查的人会以为是我们把它
+    /// 超时杀了。
+    #[test]
+    fn a_non_kill_signal_uses_the_shells_128_plus_signal_code() {
+        let ws = workspace();
+        let out = run_plan(
+            ws.path(),
+            serde_json::json!({
+                "command": "/bin/sh",
+                "args": ["-c", "kill -TERM $$"],
+            }),
+        )
+        .expect("run");
+        assert_eq!(
+            out["exit_code"],
+            128 + libc::SIGTERM,
+            "信号死要给 128+signal，而不是 SIGKILL 那个约定值：{out}"
+        );
+        assert!(!out["timed_out"].as_bool().expect("timed_out"), "{out}");
+    }
+
     /// **跑过一次之后这条通道就是一次性的**：第二次 `on_data` 说的是
     /// 「重新开一条」，而不是悄悄再跑一遍。
     #[test]

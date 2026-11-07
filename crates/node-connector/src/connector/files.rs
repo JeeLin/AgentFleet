@@ -928,6 +928,37 @@ mod tests {
         assert_eq!(names, vec!["a.txt"], "界内链接要能进：{out}");
     }
 
+    /// **根自己也够不到**时 `resolve_within` 报「internal」，而不是把一条
+    /// 不存在的路径当成界内放行。
+    ///
+    /// 正常入口（`Files::open`）先 `canonicalize` 过根，所以这条只能直接打
+    /// 纯函数：传一个**相对且不存在**的根（`relative/missing`），
+    /// `deepest_existing` 一路往上走，连 `.` 都 `canonicalize` 不了，最终
+    /// `file_name()` 或 `parent()` 给 `None`。少了这个兜底，函数会拿一个
+    /// 未经解析的相对路径做 `starts_with`，于是「界内」变成了一句空话。
+    #[test]
+    fn an_unreachable_workspace_root_is_an_internal_error_not_a_false_allow() {
+        let root = Path::new("relative-root-that-does-not-exist");
+        assert!(!root.exists(), "前提是「这个根自己都不存在」");
+        let err = resolve_within(root, "sub/file.txt").expect_err("根都够不到，必须报错");
+        assert!(
+            matches!(err, ConnectorError::Internal { .. }),
+            "这是内部状态坏了，不是用户写错了路径：{err}"
+        );
+        assert!(
+            err.to_string().contains("workspace root is not reachable"),
+            "要指名是根够不到，而不是含糊地说路径不合法：{err}"
+        );
+        // 反过来：根是一个真目录时同样一段相对路径是合法的。
+        let base = sandbox();
+        let ws = workspace(&base);
+        let real = ws.canonicalize().expect("canonicalize");
+        assert_eq!(
+            resolve_within(&real, "sub/file.txt").expect("真根下可以解析还不存在的目标"),
+            real.join("sub/file.txt")
+        );
+    }
+
     /// 越界**对写也一样**：只堵读不堵写等于留了一个往工作区外写文件的洞。
     #[test]
     fn writing_through_an_escaping_path_is_refused() {
