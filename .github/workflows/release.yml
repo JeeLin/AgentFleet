@@ -664,6 +664,10 @@ jobs:
   # 在 Linux 上走不到。
   test-desktop:
     needs: [build-desktop]
+    # 挂死要**快速红**，不能等 GitHub 的 6 小时默认超时：v0.7.2 的 Windows
+    # job 曾卡 53m51s 才被取消，release 因此 0 秒跳过、产物没发出去。
+    # macOS 实测 1m38s，Windows 修好后同量级，20 分钟足够留余量。
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:

@@ -1019,6 +1019,11 @@ else:
         bad.append('`test-desktop` 应 save-if: false，只读取缓存')
     if 'build-desktop' not in str(td.get('needs') or []):
         bad.append('`test-desktop` 应 needs build-desktop，保证缓存先写好')
+    # v0.7.2 的 Windows job 挂了 53m51s 才被取消：没有 job 级超时时，
+    # 一条阻塞的 `ReadFile` 会一直等到 GitHub 的 6 小时默认上限。
+    timeout_minutes = td.get('timeout-minutes')
+    if not isinstance(timeout_minutes, int) or isinstance(timeout_minutes, bool) or timeout_minutes <= 0:
+        bad.append('`test-desktop` 缺 timeout-minutes（或不是正整数）：挂死要快速红')
 if 'gate-static' not in str((jobs.get('gate-test') or {}).get('needs') or []):
     bad.append('`gate-test` 应 needs gate-static，保证普通 Rust 缓存先写好')
 for name in ('gate-static', 'gate-test', 'build-binaries', 'build-desktop'):
