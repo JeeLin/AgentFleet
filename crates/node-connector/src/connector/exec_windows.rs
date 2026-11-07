@@ -311,8 +311,9 @@ impl Child {
 
     /// 从仍然开着的那些读端各读一次。**返回有没有真的读到字节**。
     ///
-    /// 与 Unix 侧同约定：读到 EOF（`ERROR_BROKEN_PIPE`）就把那根置 `None`，
-    /// 别的错误则摘掉——留着它会让主循环每轮立刻失败又立刻重试（热循环）。
+    /// 与 Unix 侧同约定：读到 EOF（`ERROR_BROKEN_PIPE` /
+    /// `ERROR_PIPE_NOT_CONNECTED`）就把那根置 `None`，别的错误也摘掉——
+    /// 留着它会让主循环每轮立刻失败又立刻重试（热循环）。
     pub(super) fn read_into(&mut self, out: &mut Collector) -> bool {
         let mut got_any = false;
         for stream in 0..self.pipes.len() {
@@ -358,17 +359,23 @@ impl Child {
             // 先看 `ok`，再看 errno。
             if ok == 0 {
                 let err = std::io::Error::last_os_error();
-                if err.raw_os_error() != Some(ERROR_BROKEN_PIPE as i32) {
-                    // 字节模式的匿名管道上，`BROKEN_PIPE` 之外基本都是
+                let eof = matches!(
+                    err.raw_os_error(),
+                    Some(code)
+                        if code == ERROR_BROKEN_PIPE as i32
+                            || code == ERROR_PIPE_NOT_CONNECTED as i32
+                );
+                if !eof {
+                    // 字节模式的匿名管道上，这两个 EOF 码之外基本都是
                     // 「这根管子坏了」。**摘掉而不重试**：Unix 侧的
                     // `errno_is_retryable`（EAGAIN/EINTR 继续）在这里没有
-                    // 对应物——`ReadFile` 在 `WaitForMultipleObjects` 说可读
+                    // 对应物——`ReadFile` 在 `PeekNamedPipe` 说可读
                     // 之后不会返回 EAGAIN，而 EINTR 也不是 Win32 的概念。
                     // 差别如实写在 `docs/DEVELOPMENT.md` 的行为差异一节。
                     tracing::warn!(stream, error = %err, "pipe read failed; dropping it");
                 }
             }
-            // 成功但 0 字节 = 对端关了；`BROKEN_PIPE` 也是。都算 EOF。
+            // 成功但 0 字节 = 对端关了；两个断管错误码也是。都算 EOF。
             if let Some(slot) = self.pipes.get_mut(stream) {
                 *slot = None;
             }
