@@ -1407,6 +1407,25 @@ mod tests {
         out
     }
 
+    /// `render` 的收尾出口：**流先结束**时读够 `want` 就 `break`，不会挂住。
+    ///
+    /// 上面那条已有的排除说明说的是「现有用例读的流握在 `Streams` 手里、
+    /// 从不结束」，所以那个 `break` 打不到——**不是**说它在结构上不可达。
+    /// 这里直接喂一条**已经结束**的空流：`body.frame().await` 立刻给 `None`，
+    /// 于是循环必须靠 `break` 收尾。夹具在这条路上不许 panic、不许死等。
+    #[tokio::test]
+    async fn render_stops_when_the_stream_ends_before_enough_events() {
+        let empty: futures_util::stream::BoxStream<
+            'static,
+            Result<Event, std::convert::Infallible>,
+        > = Box::pin(futures_util::stream::empty());
+        let out = render(empty, 3).await;
+        assert!(
+            out.is_empty(),
+            "一条事件都没有时线上字节必须是空的，而不是挂着等第三条：{out:?}"
+        );
+    }
+
     /// 一段 SSE 线上字节里**最后一条完整事件**的 `(id, event, data)`。
     ///
     /// 取最后一条而不是第一条：`subscribe(Some(last))` 的回放里前面几条
@@ -2407,6 +2426,49 @@ mod tests {
         assert_eq!(events[0].name, "channel.frame");
     }
 
+    /// `expire_unacked` 的「关帧发不出去」那一臂里 `code = %e.code()` 的字段行。
+    ///
+    /// 臂本身已由 `expiring_an_unacked_channel_survives_a_device_that_will_not_take_the_close`
+    /// 覆盖；缺的只是字段表达式的**求值**——没有 subscriber 时 dispatch 判否就
+    /// 短路。这里装一个作用域内的 subscriber 再走同一条路。
+    #[tokio::test]
+    async fn the_expire_unacked_send_failure_evaluates_its_error_code_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = bootstrap(dir.path());
+        state.bindings().bind("ch-1", binding("n_a", "admin"));
+        state.connections().insert(
+            "n_a".into(),
+            hub_core::connections::ConnHandle {
+                conn_id: "c1".into(),
+                gen: 1,
+            },
+        );
+        let (_control, _data) = state.outbound().register("c1");
+        for _ in 0..crate::conns::CONTROL_QUEUE {
+            state
+                .outbound()
+                .send("c1", Frame::push(types::CLOSE_CHANNEL, 0, json!({})))
+                .expect("入队");
+        }
+
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(std::io::sink)
+            .finish();
+        let _guard = tracing::subscriber::set_default(sub);
+        tracing::callsite::rebuild_interest_cache();
+
+        expire_unacked(&state, "n_a", "ch-1");
+
+        // 覆盖的是日志行，不是业务分支：超时本身照旧兑现（解绑 + 一条失败信号）。
+        assert!(state.bindings().get("ch-1").is_none(), "超时通道必须解绑");
+        assert_eq!(
+            state.streams().replay_since(Some(0)).len(),
+            1,
+            "关帧发不出去也不影响页面拿到那条超时失败信号"
+        );
+    }
+
     /// **不是你的通道 → 403，而不是「幂等地关掉」。**
     ///
     /// 「不存在」与「不是你的」必须分开：前者是幂等成功（面板早就关过），
@@ -2493,6 +2555,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// 夹具 `next_live_event_timeout` 的三种 `try_recv` 结局都要被走到。
+    ///
+    /// 这个夹具本身是断言基础设施：它若在「有空事件」与「超时」之间分不清，
+    /// 依赖它的那条「快照与实时流无缝」用例的断言就退化成恒真。所以三种
+    /// 结局各钉一次——**`Ok` 拿到事件、`Empty` 熬到超时给 `None`、`Empty`
+    /// 但还没超时会先 `yield` 再看一次**。
+    #[test]
+    fn the_live_event_helper_distinguishes_a_hit_from_a_timeout() {
+        let s = Streams::new();
+        let (_backlog, mut rx, _head) = s.subscribe_parts(None);
+
+        // ① 空队列 + 极短预算：`Empty` → 过了 deadline → `None`。
+        assert!(
+            next_live_event_timeout(&mut rx, std::time::Duration::from_millis(1)).is_none(),
+            "攒不到事件就必须给 None，不能一直等到天荒地老"
+        );
+
+        // ② 先发布一条再取：`Ok` 直接拿到它。
+        let id = s.publish("device.status", "{}");
+        let got = next_live_event_timeout(&mut rx, std::time::Duration::from_secs(1))
+            .expect("刚发布的事件必须取得到");
+        assert_eq!(got.id, id, "取到的必须是那一条，顺序不能乱");
+
+        // ③ 队列空、但预算还没用完：`Empty` 分支要先 `yield` 再看一次。
+        // 用一个**晚到的发布者**逼出这一轮：它会在本线程让出后被调度。
+        let s2 = Streams::new();
+        let (_b2, mut rx2, _h2) = s2.subscribe_parts(None);
+        let (tx, rx_ready) = std::sync::mpsc::channel();
+        let publisher = std::thread::spawn(move || {
+            rx_ready.recv().expect("等主线程就位");
+            s2.publish("device.status", "{}")
+        });
+        tx.send(()).expect("通知发布者");
+        let got = next_live_event_timeout(&mut rx2, std::time::Duration::from_secs(5))
+            .expect("让出一轮之后发布的那条要能取到");
+        assert!(got.id > 0);
+        publisher.join().expect("发布线程");
     }
 
     /// **订阅者被环形缓冲甩掉**：它必须被告知「你落下了」，而不是拿到
@@ -2770,5 +2871,94 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         publisher.join().expect("publisher");
         assert_eq!(rounds, 300, "每一轮都必须真的跑完");
+    }
+
+    /// 装一个作用域内的 subscriber，让 `tracing::info!` 里的
+    /// `subject = %auth.subject()` 字段行真的求值。
+    ///
+    /// 三处 `%方法调用()` 的字段行（SSE 订阅、开通道、建会话）在覆盖率里
+    /// 全部报 miss：没有 subscriber 时 dispatch 判否就短路，宏执行了但字段
+    /// 表达式没有。`set_default` 只改本线程局部默认，不碰全局；
+    /// `rebuild_interest_cache` 是必要的，因为这些 callsite 在之前的用例里
+    /// 已经缓存了 `never`。
+    #[tokio::test]
+    async fn a_scoped_subscriber_evaluates_the_subject_field_on_both_entry_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = bootstrap(dir.path());
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(std::io::sink)
+            .finish();
+        let _guard = tracing::subscriber::set_default(sub);
+        tracing::callsite::rebuild_interest_cache();
+
+        // ① SSE 订阅：`stream()` 只记一行日志并返回一个保活流。
+        let sse = stream(
+            State(state.clone()),
+            Extension(Authenticated::new("admin".into())),
+            axum::http::HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(
+            axum::response::IntoResponse::into_response(sse)
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/event-stream"),
+            "SSE 订阅必须仍返回事件流，而不是被日志改动"
+        );
+
+        // ② 开通道：一台在线、上报了 terminal 的设备，开通道成功。
+        // 前置与 `opening_a_channel_on_a_stalled_device_is_a_503_and_unbinds`
+        // 相同，只是控制面留着空位让 `open_channel` 帧发得出去。
+        let conn = state.pool().get().expect("拿一条连接");
+        conn.execute(
+            "INSERT INTO device (id, name, key_fingerprint, enrolled_at)
+             VALUES ('n_a', 'pi', 'fp-a', 'unix:0')",
+            [],
+        )
+        .expect("设备行要插得进去");
+        drop(conn);
+        let session = hub_storage::SessionRepo::new(state.pool().clone())
+            .create(
+                "n_a",
+                "/repo",
+                None,
+                "unix:1",
+                None,
+                hub_storage::BaseRevStatus::Unknown,
+            )
+            .expect("会话要建得起来");
+        state.connections().insert(
+            "n_a".into(),
+            hub_core::connections::ConnHandle {
+                conn_id: "c1".into(),
+                gen: 1,
+            },
+        );
+        report_caps(&state, "n_a", json!({"connectors": ["terminal"]}));
+        let (_control, _data) = state.outbound().register("c1");
+
+        let req = axum::extract::Request::builder()
+            .method("POST")
+            .uri("/api/channels")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&json!({
+                    "session_id": session.id,
+                    "connector": "terminal",
+                    "params": {},
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = open_channel(
+            State(state.clone()),
+            Extension(Authenticated::new("admin".into())),
+            req,
+        )
+        .await
+        .expect("开通道要成功");
+        assert_eq!(resp.status(), StatusCode::CREATED);
     }
 }

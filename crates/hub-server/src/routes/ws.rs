@@ -2318,4 +2318,303 @@ mod tests {
         .unwrap();
         (state, dir)
     }
+
+    // ---- 读侧限流、出站队列与落库失败 ----
+
+    /// 故障注入：表改名，让针对它的 SQL 当场报 `no such table`。
+    /// 与 `tests/common/mod.rs` 的 `break_device_lookup` 同一手法。
+    fn break_table(state: &AppState, table: &str) {
+        state
+            .pool()
+            .get()
+            .unwrap()
+            .execute_batch(&format!("ALTER TABLE {table} RENAME TO {table}_moved"))
+            .unwrap();
+    }
+
+    /// **单帧超硬上限**：立刻断连，并回 `err{code:"frame_too_large"}`。
+    ///
+    /// 这里直接调 `admit_read`（不必往真 socket 灌 1 MiB）：判据是
+    /// `ReadLimiter::try_consume` 的 `FrameTooLarge`，接线本身必须把「断开」
+    /// 与「回一帧」都做掉。
+    #[tokio::test]
+    async fn an_oversized_frame_is_dropped_with_its_own_error_code() {
+        let (state, _d) = stream_state();
+        let (_control, _data) = state.outbound().register("c1");
+        let mut limiter = hub_core::limits::ReadLimiter::new();
+        let mut over_since = None;
+        let bytes = protocol::frame::MAX_FRAME_BYTES + 1;
+
+        let reason = admit_read(&state, "c1", "n_a", &mut limiter, &mut over_since, bytes)
+            .await
+            .expect_err("超限必须断开，不能放行");
+        assert_eq!(reason, "frame over the hard limit");
+
+        // 应答走**控制面**，且 code 是 `frame_too_large`（不是 flood）。
+        // 不消费收端，帧会一直留在队列里等断言读到。
+        let mut control = state.outbound().register("c2").0;
+        assert!(control.try_recv().is_err(), "c1 的回帧不该跑到 c2");
+    }
+
+    /// 控制面的一帧应答真的进队列，且带正确的 `err{code}`。
+    ///
+    /// 与上面那条分开：那条钉「断开」，这条钉「应答帧的形状」——少了后者，
+    /// 一个只 `return Err` 而不回帧的实现也能让上一条绿。
+    #[tokio::test]
+    async fn an_oversized_frame_queues_a_control_frame_with_the_right_code() {
+        let (state, _d) = stream_state();
+        let (mut control, _data) = state.outbound().register("c1");
+        let mut limiter = hub_core::limits::ReadLimiter::new();
+        let mut over_since = None;
+
+        let _ = admit_read(
+            &state,
+            "c1",
+            "n_a",
+            &mut limiter,
+            &mut over_since,
+            protocol::frame::MAX_FRAME_BYTES + 1,
+        )
+        .await;
+        let f = control.recv().await.expect("控制面必须收到一帧");
+        assert_eq!(f.msg_type, types::ERR);
+        let payload: protocol::message::ErrPayload = f.payload().expect("parsable err payload");
+        assert_eq!(payload.code, protocol::message::ErrorCode::FrameTooLarge);
+    }
+
+    /// **持续超限 30s**：`over_since` 已过期时立刻断开，并回 `err{code:"flood"}`。
+    ///
+    /// 用注入的 `over_since`（`Instant::now() - 31s`）代替真等 30 秒：
+    /// 判据是「起始时刻距今是否超过 `FLOOD_SUSTAINED`」，与时钟本身无关。
+    #[tokio::test]
+    async fn a_sustained_flood_is_dropped_with_its_own_error_code() {
+        let (state, _d) = stream_state();
+        let (mut control, _data) = state.outbound().register("c1");
+        let mut limiter = hub_core::limits::ReadLimiter::new();
+        // 把桶抽干：每帧取满 1 MiB，4 帧之后 tokens = 0。
+        let chunk = protocol::frame::MAX_FRAME_BYTES;
+        for _ in 0..4 {
+            limiter.try_consume(chunk).expect("前置：填满突发额度");
+        }
+        let mut over_since =
+            Some(Instant::now() - hub_core::limits::FLOOD_SUSTAINED - Duration::from_secs(1));
+
+        let reason = admit_read(&state, "c1", "n_a", &mut limiter, &mut over_since, chunk)
+            .await
+            .expect_err("持续超限必须断开");
+        assert_eq!(reason, "sustained read limit exceeded");
+        let f = control.recv().await.expect("控制面必须收到一帧");
+        let payload: protocol::message::ErrPayload = f.payload().expect("parsable err payload");
+        assert_eq!(payload.code, protocol::message::ErrorCode::Flood);
+    }
+
+    /// **控制面打满**：`queue_control` 只留痕、不 panic，也不把帧挤进别的队列。
+    ///
+    /// 8 格是余量而不是通道；打满说明对端迟迟不消费，此时唯一正确的动作是
+    /// 丢这一帧并记下来——`gen` 兜底会接住那条半死不活的连接。
+    #[test]
+    fn a_full_control_queue_drops_the_frame_without_panicking() {
+        let (state, _d) = stream_state();
+        let (control, _data) = state.outbound().register("c1");
+        for _ in 0..crate::conns::CONTROL_QUEUE {
+            state
+                .outbound()
+                .send("c1", flood_frame(&hub_core::limits::LimitError::Flood))
+                .expect("前置：塞满 8 格");
+        }
+        queue_control(
+            &state,
+            "c1",
+            flood_frame(&hub_core::limits::LimitError::Flood),
+        );
+        // 队列里仍然是那 8 帧，第 9 帧被丢了（而不是覆盖掉一帧控制消息）。
+        let mut control = control;
+        let mut n = 0;
+        while control.try_recv().is_ok() {
+            n += 1;
+        }
+        assert_eq!(n, crate::conns::CONTROL_QUEUE);
+    }
+
+    /// **数据面打满**：丢帧并回一帧 `err{code:"flood"}` 到**控制面**。
+    ///
+    /// 这是「控制面与数据面分开」的唯一理由：数据面 256 帧打满时，告警帧
+    /// 不能被排在它们后面。断言控制面确实收到了那一帧，而不只是「没 panic」。
+    #[test]
+    fn a_full_data_queue_reports_flood_on_the_control_queue() {
+        let (state, _d) = stream_state();
+        let (mut control, data) = state.outbound().register("c1");
+        let payload = flood_frame(&hub_core::limits::LimitError::Flood);
+        for _ in 0..crate::conns::DATA_QUEUE {
+            state
+                .outbound()
+                .send_data("c1", payload.clone())
+                .expect("前置：塞满 256 格");
+        }
+        queue_data(
+            &state,
+            "c1",
+            payload.clone(),
+            flood_frame(&hub_core::limits::LimitError::Flood),
+        );
+
+        let f = control.try_recv().expect("控制面必须收到 flood 告警");
+        assert_eq!(f.msg_type, types::ERR);
+        let e: protocol::message::ErrPayload = f.payload().expect("parsable err payload");
+        assert_eq!(e.code, protocol::message::ErrorCode::Flood);
+        drop(data);
+    }
+
+    /// 正常路径：`queue_control` / `queue_data` 各投一帧到**各自的**队列。
+    /// 上面两条都在打满队列；这条钉的是「没满时帧真的到得了」。
+    #[test]
+    fn both_queues_deliver_their_own_frame_when_there_is_room() {
+        let (state, _d) = stream_state();
+        let (mut control, mut data) = state.outbound().register("c1");
+        let a = flood_frame(&hub_core::limits::LimitError::Flood);
+        let b = flood_frame(&hub_core::limits::LimitError::FrameTooLarge);
+        queue_control(&state, "c1", a.clone());
+        queue_data(&state, "c1", b.clone(), a.clone());
+
+        let got_control = control.try_recv().expect("控制面那一帧");
+        assert_eq!(got_control.c, a.c);
+        let got_data = data.try_recv().expect("数据面那一帧");
+        assert_eq!(got_data.c, b.c);
+        assert!(control.try_recv().is_err(), "没满时不该多发一帧");
+        assert!(data.try_recv().is_err(), "没满时不该多发一帧");
+    }
+
+    /// **心跳 agent 落库失败**：不影响路由（内存里的上报仍可读），只留痕。
+    ///
+    /// `persist_agents` 返回 `()`：把库打坏后它不许 panic，也不许把内存里
+    /// 刚记下的心跳清掉——那会让「库坏了」变成「这台设备掉线了」。
+    #[test]
+    fn a_broken_agent_runtime_does_not_stop_heartbeat_persistence() {
+        let (state, _d) = stream_state();
+        let hb = protocol::message::Heartbeat {
+            node_version: "0.1.0".into(),
+            capabilities: serde_json::json!({"agents": [{"id": "opencode", "available": true}]}),
+            resources: serde_json::json!({}),
+            workspace_roots: Vec::new(),
+        };
+        state.reports().record(
+            "n_a",
+            hub_core::report_from_heartbeat(&hb, std::time::Instant::now()),
+        );
+        break_table(&state, "agent_runtime");
+        persist_agents(&state, "n_a", &hb);
+        assert!(
+            state.reports().get("n_a").is_some(),
+            "库写不进去不该把内存里的心跳一并丢掉"
+        );
+    }
+
+    /// **轨迹落库失败**：三种帧（batch / turn_start / turn_end）都只留痕、
+    /// 不 panic、不把别的东西写坏。
+    ///
+    /// 一条轨迹丢了的后果比整条 WS 断连轻——这里显式写出三种形状，是因为
+    /// `persist_trajectory` 有三处独立的 `append`，少测一处就等于没锁住它。
+    #[test]
+    fn a_broken_trajectory_table_does_not_break_any_of_the_three_kinds_of_frames() {
+        let (state, _d) = stream_state();
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", true),
+        );
+        break_table(&state, "trajectory_event");
+
+        for payload in [
+            serde_json::json!({"type": "batch", "events": [{"seq": 1, "sessionUpdate": "x"}]}),
+            serde_json::json!({"type": "turn_start", "seq": 2}),
+            serde_json::json!({"type": "turn_end", "seq": 3, "stopReason": "end_turn"}),
+        ] {
+            persist_trajectory(&state, "n_a", "ch-1", &payload);
+        }
+        assert!(
+            state.trajectory().list("s_1", 0, 100).is_err(),
+            "前提：表确实坏了，三条 append 都该失败"
+        );
+    }
+
+    /// 一帧 `batch` 但**没有 `events` 数组**（或形状不对）时整帧跳过。
+    ///
+    /// 与「一批里某条事件缺 `seq`」不是一回事：那时其它条仍要落库，而这里
+    /// 连一条可解释的事件都没有。写 0 条也不许变成一次错误的 `append`。
+    #[test]
+    fn a_batch_without_an_events_array_is_ignored_in_full() {
+        let (state, _dir) = stream_state();
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", true),
+        );
+
+        for payload in [
+            serde_json::json!({"type": "batch"}),
+            serde_json::json!({"type": "batch", "events": null}),
+            serde_json::json!({"type": "batch", "events": {}}),
+            serde_json::json!({"type": "batch", "events": "not-an-array"}),
+        ] {
+            persist_trajectory(&state, "n_a", "ch-1", &payload);
+        }
+        let rows = state.trajectory().list("s_1", 0, 100).unwrap();
+        assert!(rows.is_empty(), "没有 events 就不该写出任何一行：{rows:?}");
+
+        // 前提：同一条通道上一帧**合法**的 batch 仍然写得进去——否则上面那条
+        // 断言对一个永远不落库的实现同样成立。
+        persist_trajectory(
+            &state,
+            "n_a",
+            "ch-1",
+            &serde_json::json!({"type": "batch", "events": [{"seq": 1, "sessionUpdate": "x"}]}),
+        );
+        assert_eq!(state.trajectory().list("s_1", 0, 100).unwrap().len(), 1);
+    }
+
+    /// `supersede` 的三种投递结局都要**留痕**，而不是静默或 panic。
+    ///
+    /// 顶替是「两台设备互抢」这条事故链的第一现场：帧丢了不该假装送达，
+    /// 表里没它也不该把旧连接当活人。`gen` 兜底会接住送达不了的那一档，
+    /// 但排查线索只有这三行日志。
+    #[test]
+    fn superseding_an_old_connection_logs_every_delivery_outcome() {
+        let (state, _d) = stream_state();
+        let old = hub_core::connections::ConnHandle {
+            conn_id: "c-old".into(),
+            gen: 1,
+        };
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(std::io::sink)
+            .finish();
+        let _guard = tracing::subscriber::set_default(sub);
+        tracing::callsite::rebuild_interest_cache();
+
+        // ① 表里没这条连接：`Ok(false)`。
+        supersede(&state, &old, 2, "c-new", "n_a");
+
+        // ② 登记了但控制面 8 格全满且不消费：`QueueFull`。
+        let (_control, _data) = state.outbound().register(&old.conn_id);
+        for _ in 0..crate::conns::CONTROL_QUEUE {
+            state
+                .outbound()
+                .send(
+                    &old.conn_id,
+                    flood_frame(&hub_core::limits::LimitError::Flood),
+                )
+                .expect("前置：塞满 8 格");
+        }
+        supersede(&state, &old, 3, "c-new-2", "n_a");
+
+        // ③ 正常投递：换一条空队列的连接，`Ok(true)`。
+        let fresh = hub_core::connections::ConnHandle {
+            conn_id: "c-fresh".into(),
+            gen: 1,
+        };
+        let (mut control, _data) = state.outbound().register(&fresh.conn_id);
+        supersede(&state, &fresh, 2, "c-new-3", "n_a");
+        let f = control.try_recv().expect("控制面必须收到顶替帧");
+        assert_eq!(f.msg_type, types::DISCONNECT);
+        assert_eq!(f.c["reason"], "superseded");
+        assert_eq!(f.c["gen"], 2);
+    }
 }

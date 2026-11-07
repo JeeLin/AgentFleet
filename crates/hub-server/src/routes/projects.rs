@@ -321,3 +321,141 @@ pub async fn unarchive_project(
     })?;
     Ok(Json(updated.into()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AuthParams, LoginRateLimiter};
+    use std::time::Duration;
+
+    fn state() -> (AppState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = hub_storage::db::open_in(dir.path()).unwrap().1;
+        let state = AppState::bootstrap_with(
+            pool,
+            dir.path(),
+            AuthParams {
+                m_cost: 8192,
+                t_cost: 1,
+                p_cost: 1,
+            },
+            Duration::from_millis(200),
+            LoginRateLimiter::new(10, 60),
+        )
+        .unwrap();
+        (state, dir)
+    }
+
+    /// 故障注入：表改名，让针对它的 SQL 当场报 `no such table`。
+    /// 与 `tests/common/mod.rs` 的 `break_device_lookup` 同一手法。
+    fn break_project_table(state: &AppState) {
+        state
+            .pool()
+            .get()
+            .unwrap()
+            .execute_batch("ALTER TABLE project RENAME TO project_moved")
+            .unwrap();
+    }
+
+    /// 形态升级时库坏了 → 500，**不是 404 也不是 400**。
+    ///
+    /// 404 会让运维去查「哪个项目没了」，400 会让用户以为是自己的参数错了；
+    /// 真相是 Hub 自己写不进去。
+    #[tokio::test]
+    async fn a_broken_shape_upgrade_is_a_500() {
+        let (state, _d) = state();
+        break_project_table(&state);
+
+        let e = change_shape(
+            State(state.clone()),
+            Path("p_1".into()),
+            Json(ShapeBody {
+                shape: "central".into(),
+            }),
+        )
+        .await
+        .expect_err("读不出项目就不该声称它已升级");
+        assert_eq!(e.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(e.code(), "internal_error");
+    }
+
+    /// 归档时库坏了 → 500。
+    #[tokio::test]
+    async fn a_broken_archive_is_a_500() {
+        let (state, _d) = state();
+        break_project_table(&state);
+
+        let e = archive_project(State(state.clone()), Path("p_1".into()))
+            .await
+            .expect_err("写不进去就要报错");
+        assert_eq!(e.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(e.code(), "internal_error");
+    }
+
+    /// 取消归档时库坏了 → 500。
+    #[tokio::test]
+    async fn a_broken_unarchive_is_a_500() {
+        let (state, _d) = state();
+        break_project_table(&state);
+
+        let e = unarchive_project(State(state.clone()), Path("p_1".into()))
+            .await
+            .expect_err("写不进去就要报错");
+        assert_eq!(e.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(e.code(), "internal_error");
+    }
+
+    /// 三条「正常」路径仍然成立：升级、归档、取消归档。
+    ///
+    /// 上面几条都在把库打坏；这条钉的是「打坏之前它本来就是对的」，否则一个
+    /// 永远回 500 的实现也能让那几条全绿。同时验证归档是幂等的（第二次
+    /// 保留第一次的时间），那是 `archive` 的对外契约。
+    #[tokio::test]
+    async fn the_happy_path_upgrades_archives_and_unarchives() {
+        let (state, _d) = state();
+        let id = repo(&state)
+            .create(
+                NewProject {
+                    name: "proj".into(),
+                    shape: ProjectShape::Isolated,
+                    theme_color: None,
+                },
+                &now(),
+            )
+            .expect("create")
+            .id;
+
+        let upgraded = change_shape(
+            State(state.clone()),
+            Path(id.clone()),
+            Json(ShapeBody {
+                shape: "central".into(),
+            }),
+        )
+        .await
+        .expect("isolated → central 是允许的方向")
+        .0;
+        assert_eq!(upgraded.shape, "central");
+
+        let archived = archive_project(State(state.clone()), Path(id.clone()))
+            .await
+            .expect("归档")
+            .0;
+        let first_at = archived.archived_at.clone().expect("归档时间");
+        let again = archive_project(State(state.clone()), Path(id.clone()))
+            .await
+            .expect("重复归档要幂等")
+            .0;
+        assert_eq!(
+            again.archived_at.as_deref(),
+            Some(first_at.as_str()),
+            "重复归档保留第一次的时间"
+        );
+
+        let back = unarchive_project(State(state.clone()), Path(id.clone()))
+            .await
+            .expect("取消归档")
+            .0;
+        assert_eq!(back.archived_at, None);
+    }
+}

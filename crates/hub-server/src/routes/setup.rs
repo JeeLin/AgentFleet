@@ -573,4 +573,44 @@ mod tests {
         std::fs::write(&f, "not a dir").unwrap();
         assert!(write_setup_token_file(&f.join("nested"), "tok").is_err());
     }
+
+    /// 闭锁的登录闸门：`acquire_owned` 立刻回 `AcquireError`，而不是等满
+    /// 排队超时。这条臂必须回 **500**，不能伪装成「现在忙」的 429——
+    /// 内部事故要用内部错误的口径报出来。
+    #[tokio::test]
+    async fn a_closed_login_gate_is_a_500_not_a_busy_429() {
+        let d = tempfile::tempdir().unwrap();
+        let pool = hub_storage::db::open_in(d.path()).unwrap().1;
+        let state = AppState::bootstrap_with(
+            pool,
+            d.path(),
+            hub_core::auth::AuthParams {
+                m_cost: 8192,
+                t_cost: 1,
+                p_cost: 1,
+            },
+            std::time::Duration::from_secs(30),
+            hub_core::auth::LoginRateLimiter::new(10, 60),
+        )
+        .unwrap();
+        state.login_gate().close();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/login")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(r#"{"password":"whatever"}"#))
+            .unwrap();
+        let resp = axum::response::IntoResponse::into_response(
+            post_login(State(state.clone()), req)
+                .await
+                .expect_err("闭锁的闸门不许放行登录"),
+        );
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            state.limiter().failures(&IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+            0,
+            "内部故障不许算到访客 IP 的失败次数上"
+        );
+    }
 }

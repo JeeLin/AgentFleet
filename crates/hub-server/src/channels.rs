@@ -293,4 +293,101 @@ mod tests {
             .unwrap()
             .code
     }
+
+    /// 一张**真**的 Hub 侧账本：开通道、置 Ready，然后把信用扣到只剩一格。
+    ///
+    /// 直接调 `on_credit` 造余额是另一种写法，但那样测不到 `on_data_received`
+    /// 自己的记账——而「收到数据 → 归零 → 补信用」这条链正是这里要锁的。
+    fn one_credit_left(state: &AppState, node_id: &str, channel_id: &str, start: u32) {
+        let mut channels = state.channels().write();
+        let reg = channels.registry(node_id);
+        reg.open(channel_id, "terminal", start, std::time::Instant::now())
+            .expect("open");
+        reg.mark_ready(channel_id).expect("mark_ready");
+        for _ in 1..start {
+            assert_eq!(
+                reg.on_data_received(channel_id).expect("consume credit"),
+                CreditStatus::Granted
+            );
+        }
+    }
+
+    /// **余额归零要补一轮信用**，且 Hub 自己的账本同步回填。
+    ///
+    /// 只发 `channel_credit` 而不记账，Hub 侧余额会恒为 0——下一帧又立刻
+    /// 归零，于是每帧都补一次，node 侧余额越滚越大（§6 每通道独立流控失效）。
+    #[test]
+    fn exhausting_the_credit_replies_with_one_delta_and_replenishes_the_ledger() {
+        let (state, _dir) = state();
+        one_credit_left(&state, "n_a", "ch-1", protocol::channel::CREDIT_DELTA);
+
+        let reply = on_channel_frame(
+            &state,
+            "n_a",
+            &frame(
+                types::CHANNEL_DATA,
+                serde_json::json!({"channel_id": "ch-1", "payload": {"op": "x"}}),
+            ),
+        );
+        let f = match reply {
+            Reply::Frame(f) => f,
+            Reply::Nothing => panic!("归零必须回一帧 channel_credit"),
+        };
+        assert_eq!(f.msg_type, types::CHANNEL_CREDIT);
+        assert_eq!(f.c["channel_id"], "ch-1");
+        assert_eq!(f.c["delta"], protocol::channel::CREDIT_DELTA);
+        assert_eq!(
+            state.channels().read().credit("n_a", "ch-1"),
+            Some(protocol::channel::CREDIT_DELTA),
+            "Hub 侧账本必须和发出去的那一帧一致"
+        );
+    }
+
+    /// 余额**没**归零时不必补信用：一张 `Granted` 只记账、不回帧。
+    ///
+    /// 与上面那条成对：只测「归零回帧」的话，一个每帧都回 credit 的实现
+    /// 也能绿。
+    #[test]
+    fn a_normal_data_frame_only_accounts_and_does_not_reply() {
+        let (state, _dir) = state();
+        one_credit_left(&state, "n_a", "ch-1", 3);
+        // 上面把 3 扣到 1；再收一帧归零之前，先补回 2 格让这帧是 Granted。
+        state
+            .channels()
+            .write()
+            .registry("n_a")
+            .on_credit("ch-1", 2)
+            .expect("top up");
+
+        assert!(is_nothing(on_channel_frame(
+            &state,
+            "n_a",
+            &frame(
+                types::CHANNEL_DATA,
+                serde_json::json!({"channel_id": "ch-1", "payload": {"op": "x"}}),
+            )
+        )));
+        assert_eq!(state.channels().read().credit("n_a", "ch-1"), Some(2));
+    }
+
+    /// 未知通道的数据帧要显式回 `channel_error`，而不是静默丢掉。
+    #[test]
+    fn data_for_an_unknown_channel_replies_with_an_error() {
+        let (state, _dir) = state();
+        let reply = on_channel_frame(
+            &state,
+            "n_a",
+            &frame(
+                types::CHANNEL_DATA,
+                serde_json::json!({"channel_id": "ch-nope", "payload": {"op": "x"}}),
+            ),
+        );
+        match reply {
+            Reply::Frame(f) => {
+                assert_eq!(f.msg_type, types::CHANNEL_ERROR);
+                assert_eq!(f.c["channel_id"], "ch-nope");
+            }
+            Reply::Nothing => panic!("未知通道必须回一帧错误"),
+        }
+    }
 }

@@ -193,6 +193,12 @@ mod tests {
         assert_eq!(content_type("favicon.ico"), "image/x-icon");
         assert_eq!(content_type("logo.svg"), "image/svg+xml");
         assert_eq!(content_type("app.woff2"), "font/woff2");
+        assert_eq!(content_type("data.json"), "application/json");
+        assert_eq!(content_type("app.js.map"), "application/json");
+        assert_eq!(content_type("logo.png"), "image/png");
+        // 根本没有 `.`（`rsplit_once` 给 None）：同样不能猜成 HTML。
+        assert_eq!(content_type(""), "application/octet-stream");
+        assert_eq!(content_type("README"), "application/octet-stream");
     }
 
     /// 未知（含无扩展名、大小写不同）一律二进制流：不让上传的文件被当 HTML 执行。

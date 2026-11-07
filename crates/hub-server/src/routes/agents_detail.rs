@@ -235,3 +235,189 @@ fn task_title(state: &AppState, task_id: &str) -> Option<String> {
         Err(_) => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AuthParams, LoginRateLimiter};
+    use std::time::Duration;
+
+    fn state() -> (AppState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = hub_storage::db::open_in(dir.path()).unwrap().1;
+        let state = AppState::bootstrap_with(
+            pool,
+            dir.path(),
+            AuthParams {
+                m_cost: 8192,
+                t_cost: 1,
+                p_cost: 1,
+            },
+            Duration::from_millis(200),
+            LoginRateLimiter::new(10, 60),
+        )
+        .unwrap();
+        (state, dir)
+    }
+
+    /// 故障注入：表改名，让针对它的 SQL 当场报 `no such table`。
+    /// 与 `tests/common/mod.rs` 的 `break_device_lookup` 同一手法。
+    fn break_table(state: &AppState, table: &str) {
+        state
+            .pool()
+            .get()
+            .unwrap()
+            .execute_batch(&format!("ALTER TABLE {table} RENAME TO {table}_moved"))
+            .unwrap();
+    }
+
+    /// 一张任务卡（`task_title` 要读它）。
+    fn insert_task(state: &AppState, title: &str) -> String {
+        hub_storage::task::TaskRepo::new(state.pool().clone())
+            .create(
+                hub_storage::task::NewTask {
+                    project_id: "p_1".into(),
+                    title: title.into(),
+                    done_when: hub_storage::task::DoneWhen {
+                        criteria: None,
+                        description: None,
+                    },
+                    created_by: None,
+                    base_commit: None,
+                },
+                "unix:1700000000",
+            )
+            .expect("create task")
+            .id
+    }
+
+    /// 一台装了这个 agent 的设备 + 它的绑定与一条执行。
+    ///
+    /// 用**真**设备行（`Registry::enroll`）而不是手工 INSERT：`get_agent`
+    /// 读的是 `devices().list()`，手工造的行必须与 schema 完全一致才不会在
+    /// 别的列上炸掉，那种噪声会让人看不出测试想证明什么。
+    fn device_with_one_execution(state: &AppState, agent: &str, task_id: &str) -> String {
+        let kp = identity::KeyPair::generate();
+        let outcome = state
+            .registry()
+            .enroll(
+                &kp.public_key_bytes(),
+                hub_storage::repo::NewDevice {
+                    id: String::new(),
+                    name: "dev".into(),
+                    key_fingerprint: String::new(),
+                    os: "linux".into(),
+                    arch: "aarch64".into(),
+                    hostname: "dev".into(),
+                    node_version: "0.1.0".into(),
+                },
+            )
+            .expect("enroll");
+        let node = outcome.node_id().to_string();
+
+        state
+            .agent_runtime()
+            .replace_detected(
+                &node,
+                &[(agent.to_string(), agent.to_string(), None, true, None)],
+                "unix:1700000000",
+            )
+            .expect("replace_detected");
+
+        let binding = BindingRepo::new(state.pool().clone())
+            .upsert(
+                "p_1",
+                &node,
+                hub_storage::binding::BindingSpec {
+                    fixed_dir: "~/code".into(),
+                    disk_quota_bytes: None,
+                    cleanup_policy: Default::default(),
+                },
+                "unix:1700000000",
+            )
+            .expect("upsert binding");
+
+        ExecutionRepo::new(state.pool().clone())
+            .create(
+                hub_storage::execution::NewExecution {
+                    task_id: task_id.to_string(),
+                    binding_id: binding.id,
+                    base_commit: None,
+                    worktree_path: None,
+                },
+                "unix:1700000000",
+            )
+            .expect("create execution");
+        node
+    }
+
+    /// **一台设备读不出来不许让整页 500**：其它设备上的事实仍然成立。
+    ///
+    /// `agent_runtime` 坏掉时 `get_agent` 要跳过那一台（`continue`），而不是
+    /// 把「库坏了」变成整页 500——那会让用户去查一台根本没动过的机器。
+    #[tokio::test]
+    async fn an_unreadable_agent_runtime_skips_that_device_instead_of_failing_the_page() {
+        let (state, _d) = state();
+        let task = insert_task(&state, "t");
+        device_with_one_execution(&state, "opencode", &task);
+
+        // 坏之前先确认「不坏的话它是看得出来装了一台」——否则下面那条
+        // 断言对一个永远返回空详情的实现同样成立。
+        let before = get_agent(State(state.clone()), Path("opencode".into()))
+            .await
+            .expect("详情")
+            .0;
+        assert_eq!(before.devices.len(), 1, "前提：坏之前有一台是能读的");
+
+        break_table(&state, "agent_runtime");
+
+        // 读不出来 ≠ 「没装过」：`agent_runtime` 坏掉时那一台被跳过，
+        // 于是「一台都没有」→ 404。**不是 500**，且上面那条 `warn!` 会留痕。
+        let e = get_agent(State(state.clone()), Path("opencode".into()))
+            .await
+            .expect_err("唯一一台设备读不出来时，没有证据说它装着");
+        assert_eq!(e.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    /// 任务表读不出来时，那一行标题退回 `None`，**不把整页 500**。
+    ///
+    /// 「读不出来」与「任务已删」在这里被压成同一个 `None` 是有意的取舍：
+    /// 为一行标题让其它行的数据全部消失更糟。
+    #[tokio::test]
+    async fn an_unreadable_task_table_leaves_the_title_empty_but_keeps_the_row() {
+        let (state, _d) = state();
+        let task = insert_task(&state, "修好它");
+        device_with_one_execution(&state, "opencode", &task);
+        break_table(&state, "task");
+
+        let detail = get_agent(State(state.clone()), Path("opencode".into()))
+            .await
+            .expect("一行标题读不出来不该让整页 500")
+            .0;
+        assert_eq!(detail.task_history.len(), 1, "执行记录本身还在");
+        assert_eq!(
+            detail.task_history[0].task_title, None,
+            "读不出来就是「不知道」，不能编一个标题"
+        );
+    }
+
+    /// 正常路径：任务标题读得出来，设备与执行都挂在详情上。
+    ///
+    /// 上面两条都在把库打坏；这条钉的是「打坏之前它本来就是对的」，否则一个
+    /// 永远走兜底的实现也能让那两条全绿。
+    #[tokio::test]
+    async fn a_readable_task_supplies_its_title() {
+        let (state, _d) = state();
+        let task = insert_task(&state, "修好它");
+        device_with_one_execution(&state, "opencode", &task);
+
+        let detail = get_agent(State(state.clone()), Path("opencode".into()))
+            .await
+            .expect("详情")
+            .0;
+        assert!(detail.available, "唯一一台设备上它是可用的");
+        assert_eq!(detail.devices.len(), 1);
+        assert_eq!(detail.devices[0].executions, 1);
+        assert_eq!(detail.task_history[0].task_title.as_deref(), Some("修好它"));
+    }
+}

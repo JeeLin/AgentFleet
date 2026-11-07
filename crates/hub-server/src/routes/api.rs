@@ -1267,4 +1267,197 @@ mod tests {
             "已经可用的记录不再追加原因"
         );
     }
+    // ---- 读库失败时的两处回退 ----
+
+    /// 故障注入：表改名，让针对它的 SQL 当场报 `no such table`。
+    /// 与 `tests/common/mod.rs` 的 `break_device_lookup` 同一手法。
+    fn break_table(st: &AppState, table: &str) {
+        st.pool()
+            .get()
+            .unwrap()
+            .execute_batch(&format!("ALTER TABLE {table} RENAME TO {table}_moved"))
+            .unwrap();
+    }
+
+    /// **设备摘要**：`agent_runtime` 读不出来时，名单退回心跳上报的
+    /// `capabilities.agents`，而不是空数组。
+    ///
+    /// 空数组会被页面读成「这台设备一个 agent 都没有」，而真相是「库读不出来」。
+    /// 两份名单（已装 / 可用）必须自洽：可用是已装的子集，旧形态（只给字符串）
+    /// 一律不算可用。
+    #[test]
+    fn device_summary_falls_back_to_the_heartbeat_when_agent_runtime_is_unreadable() {
+        let (st, _d) = state();
+        let n = insert_device(&st, "dev");
+        report_with(
+            &st,
+            &n,
+            json!({"agents": [
+                {"id": "opencode", "name": "opencode", "available": true},
+                {"id": "claude", "name": "claude", "available": false},
+                "legacy-only-a-name",
+            ]}),
+            json!({}),
+        );
+
+        // 前提：库好着的时候用的是库里的那份事实（心跳里那三个名字不该出现）。
+        detect(&st, &n, &[("from-db", true, None)]);
+        assert_eq!(summary_of_device(&st, &n).agents, vec!["from-db"]);
+
+        break_table(&st, "agent_runtime");
+        let s = summary_of_device(&st, &n);
+        assert_eq!(
+            s.agents,
+            vec!["claude", "legacy-only-a-name", "opencode"],
+            "读库失败要用心跳那份，不能给空数组"
+        );
+        assert_eq!(
+            s.usable_agents,
+            vec!["opencode"],
+            "旧形态（只给名字）不构成可用性证据"
+        );
+    }
+
+    /// **没有心跳可退**时两条名单都是空的，而且不许 panic。
+    ///
+    /// 与上面那条分开：那是「有备份可用」，这条是「连备份都没有」，走的是
+    /// `caps` 的 `None` 臂。空列表在这里是实情，不是把故障伪装成别的东西。
+    #[test]
+    fn device_summary_without_a_heartbeat_reports_two_empty_lists() {
+        let (st, _d) = state();
+        let n = insert_device(&st, "dev");
+        break_table(&st, "agent_runtime");
+
+        let s = summary_of_device(&st, &n);
+        assert!(s.agents.is_empty());
+        assert!(s.usable_agents.is_empty());
+    }
+
+    /// **Agent 目录**：一台设备读不出来时退回它的心跳上报，并照常按
+    /// 「可用取或、原因留着」并进目录。
+    #[tokio::test]
+    async fn agent_directory_falls_back_to_the_heartbeat_when_the_db_is_unreadable() {
+        let (st, _d) = state();
+        let a = insert_device(&st, "a");
+        let b = insert_device(&st, "b");
+        detect(&st, &a, &[("opencode", false, Some("退出码 3"))]);
+        report_with(
+            &st,
+            &b,
+            json!({"agents": [
+                {"id": "opencode", "name": "opencode", "available": true},
+                {"id": "claude", "name": "claude", "available": false},
+            ]}),
+            json!({}),
+        );
+
+        // 前提：库好着的时候目录只认库里的行——心跳里那些名字不出现，
+        // 于是 opencode 只有 a 的那条（不可用）。这正是「库优先」的口径。
+        let before = agent_dir(&st).await;
+        let before_row = before
+            .iter()
+            .find(|x| x.name == "opencode")
+            .expect("opencode");
+        assert!(!before_row.available, "前提：库好着时用的是 a 的不可用行");
+        assert_eq!(before_row.error.as_deref(), Some("退出码 3"));
+        assert!(
+            before.iter().all(|x| x.name != "claude"),
+            "前提：库好着时心跳里的 claude 不该混进目录"
+        );
+
+        break_table(&st, "agent_runtime");
+        let got = agent_dir(&st).await;
+        let opencode = got.iter().find(|x| x.name == "opencode").expect("opencode");
+        assert!(opencode.available, "心跳说 b 上可用，目录就该标可用");
+        let claude = got.iter().find(|x| x.name == "claude").expect("claude");
+        assert!(!claude.available, "心跳说 b 上不可用");
+        assert_eq!(
+            claude.error, None,
+            "心跳内存那份没有探测原因，如实留空而不是编一句"
+        );
+    }
+
+    /// **没有心跳可退**：那台设备就是没数据，目录不能因为库坏了编出 agent。
+    #[tokio::test]
+    async fn agent_directory_skips_a_silent_device_when_the_db_is_unreadable() {
+        let (st, _d) = state();
+        insert_device(&st, "silent");
+        break_table(&st, "agent_runtime");
+        assert!(
+            agent_dir(&st).await.is_empty(),
+            "没有库也没有心跳，等于一无所知；编一个 agent 出来等于把任务派给空机器"
+        );
+    }
+
+    /// `merge_agent` 的「重复原因不重复追加」：`Some(existing)` 那条。
+    ///
+    /// 追加前先查 `contains` 是有意的：同一台设备每次扫描都报同一条原因，
+    /// 不去重会让页面上的说明无限变长。
+    #[test]
+    fn a_repeated_probe_reason_is_not_appended_twice() {
+        let mut out = BTreeMap::new();
+        merge_agent(&mut out, "opencode", false, Some("退出码 3"));
+        merge_agent(&mut out, "opencode", false, Some("退出码 3"));
+        assert_eq!(
+            out.get("opencode").and_then(|e| e.error.as_deref()),
+            Some("退出码 3")
+        );
+    }
+
+    /// **建会话**：装一个作用域内的 subscriber，让 `tracing::info!` 里的
+    /// `subject = %auth.subject()` 字段行真的求值。
+    ///
+    /// 没有 subscriber 时 dispatch 判否就短路，那一行在覆盖率里就成了 miss
+    /// （宏本身执行过，字段表达式没有）。`set_default` 只改本线程局部默认，
+    /// 不碰全局；`rebuild_interest_cache` 是必要的，因为这个 callsite 在
+    /// 之前的用例里已经缓存了 `never`。
+    ///
+    /// 断言不只是「没 panic」：201 的响应体里必须带回会话 id、agent 与
+    /// 锁定后的工作区——那才是这条 handler 的契约。
+    #[tokio::test]
+    async fn creating_a_session_evaluates_its_tracing_fields_and_returns_201() {
+        let (st, _d) = state();
+        let node = insert_device(&st, "dev");
+        report_with(&st, &node, json!({}), json!({}));
+        detect(&st, &node, &[("opencode", true, None)]);
+
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(std::io::sink)
+            .finish();
+        let _guard = tracing::subscriber::set_default(sub);
+        tracing::callsite::rebuild_interest_cache();
+
+        let req = axum::extract::Request::from(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&json!({
+                        "node_id": node,
+                        "path": "~/src/app",
+                        "agent_id": "opencode",
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        );
+        let resp = create_session(
+            State(st.clone()),
+            axum::Extension(Authenticated::new("admin".into())),
+            req,
+        )
+        .await
+        .expect("会话要建成");
+        assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
+        assert_eq!(v["agent_id"], "opencode");
+        assert_eq!(v["workspace"]["path"], "~/src/app");
+        assert_eq!(v["workspace"]["path_locked"], true);
+        assert!(!v["id"].as_str().unwrap_or("").is_empty());
+    }
 }

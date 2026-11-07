@@ -782,4 +782,35 @@ mod probe_tests {
         assert_eq!(got, None);
         assert_eq!(status, BaseRevStatus::Unavailable);
     }
+
+    /// 探针的三条 `code = e.code()` 字段行：装一个**作用域内**的 subscriber，
+    /// 让 `tracing` 真正求值字段表达式（没有 subscriber 时 dispatch 判否就短路）。
+    ///
+    /// 只改本测试的**线程局部**默认，不碰全局：`set_default` 的 guard 在同一个
+    /// current-thread runtime 里跨 `.await` 一直有效。`rebuild_interest_cache`
+    /// 是必要的：这些宏的 callsite 在之前的用例里已经把 `never` 缓存下来了。
+    #[tokio::test]
+    async fn a_scoped_subscriber_runs_the_field_expressions() {
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(std::io::sink)
+            .finish();
+        let _guard = tracing::subscriber::set_default(sub);
+        tracing::callsite::rebuild_interest_cache();
+
+        // 队列满：第 1 步开通道成功、第 3 步下发 `rev` 失败、第 5 步关通道
+        // 也失败——三处 `code = e.code()` 的宏都会在这里执行。
+        let f = fixture(&["git"]);
+        let conn_id = format!("c-{}", f.node_id);
+        let filler = || protocol::frame::Frame::push("probe.filler", 0, serde_json::json!({}));
+        for _ in 0..7 {
+            f.state
+                .outbound()
+                .send(&conn_id, filler())
+                .expect("前 7 帧必须塞得进 8 格队列");
+        }
+        let (got, status) = probe_base_rev(&f.state, &auth(), &f.session_id, &f.node_id).await;
+        assert_eq!(got, None);
+        assert_eq!(status, BaseRevStatus::Unavailable);
+    }
 }

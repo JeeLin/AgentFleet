@@ -284,3 +284,171 @@ fn internal(step: &'static str) -> impl Fn(StorageError) -> ApiError {
     // coverage: excluded — 上面那个 `Fn` 的构造行：闭包体只在错误路径执行。
     move |e| ApiError::internal_with(step, e)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AuthParams, LoginRateLimiter};
+    use std::time::Duration;
+
+    fn state() -> (AppState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = hub_storage::db::open_in(dir.path()).unwrap().1;
+        let state = AppState::bootstrap_with(
+            pool,
+            dir.path(),
+            AuthParams {
+                m_cost: 8192,
+                t_cost: 1,
+                p_cost: 1,
+            },
+            Duration::from_millis(200),
+            LoginRateLimiter::new(10, 60),
+        )
+        .unwrap();
+        (state, dir)
+    }
+
+    fn new_project(state: &AppState, name: &str) -> String {
+        projects(state)
+            .create(
+                hub_storage::project::NewProject {
+                    name: name.to_string(),
+                    shape: hub_storage::project::ProjectShape::Isolated,
+                    theme_color: None,
+                },
+                &now(),
+            )
+            .expect("create project")
+            .id
+    }
+
+    fn body(dir: &str) -> PutBindingBody {
+        PutBindingBody {
+            fixed_dir: dir.to_string(),
+            disk_quota_bytes: None,
+            cleanup_policy: None,
+        }
+    }
+
+    /// 故障注入：把一张表改名，让针对它的 SQL 全部报 `no such table`。
+    ///
+    /// **改名而不是 `DROP TABLE`**：连接池里缓存的语句与表名绑定，改名同样
+    /// 让读写当场失败，而行为稳定可复现（同 `tests/common/mod.rs` 的
+    /// `break_device_lookup`）。
+    fn break_table(state: &AppState, table: &str) {
+        state
+            .pool()
+            .get()
+            .unwrap()
+            .execute_batch(&format!("ALTER TABLE {table} RENAME TO {table}_moved"))
+            .unwrap();
+    }
+
+    /// **读库失败不是 404**：`list_for_project` 里项目查不出来时必须回 500。
+    ///
+    /// 把它翻成 404 的后果是运维去查「哪个项目被删了」，而真相是库坏了。
+    /// 这条同时走 `not_found_or_internal` 的 `other` 臂与 `internal` 闭包体。
+    #[tokio::test]
+    async fn a_broken_project_read_is_a_500_not_a_404() {
+        let (state, _d) = state();
+        break_table(&state, "project");
+
+        let e = list_for_project(State(state.clone()), Path("p_1".into()))
+            .await
+            .expect_err("库坏了不许当成「项目不存在」");
+        assert_eq!(e.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(e.code(), "internal_error");
+    }
+
+    /// 同一个判据在 PUT 的第一道检查上（`put` 里那次 `projects().get`）。
+    #[tokio::test]
+    async fn a_broken_project_read_during_put_is_a_500_not_a_404() {
+        let (state, _d) = state();
+        break_table(&state, "project");
+
+        let e = put(state.clone(), "p_1".into(), "n_1".into(), body("~/code"))
+            .expect_err("库坏了不许当成「项目不存在」");
+        assert_eq!(e.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(e.code(), "internal_error");
+    }
+
+    /// **写库失败是 500**：`upsert` 的兜底臂（`cannot save binding`）。
+    ///
+    /// 库坏在写入这一步时，`fixed_dir` 与配额的错误口径都不适用——只能如实
+    /// 报内部错误，而不是假装「这个目录被锁了」或「项目不存在」。
+    #[tokio::test]
+    async fn a_broken_binding_write_is_a_500() {
+        let (state, _d) = state();
+        let p = new_project(&state, "proj");
+        break_table(&state, "binding");
+
+        let e = put(state.clone(), p.clone(), "n_1".into(), body("~/code"))
+            .expect_err("写不进去就要报错，不能静默成功");
+        assert_eq!(e.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(e.code(), "internal_error");
+    }
+
+    /// 读一行时库坏了（`get_one_inner` 的 `internal("cannot read binding")`）。
+    ///
+    /// 与「这一行不存在」（404）必须分开：前者是 Hub 的事故，后者是用户的
+    /// 事实。合成一个会让「库坏了」看起来像「还没绑过」。
+    #[tokio::test]
+    async fn a_broken_binding_read_is_a_500_not_a_404() {
+        let (state, _d) = state();
+        break_table(&state, "binding");
+
+        let e = get_one_from_project(State(state.clone()), Path(("p_1".into(), "n_1".into())))
+            .await
+            .expect_err("读不出来不许当成「没有这一行」");
+        assert_eq!(e.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        // 设备侧的入口指向同一行、同一个实现，参数顺序跟着地址走。
+        let e = get_one_from_device(State(state.clone()), Path(("n_1".into(), "p_1".into())))
+            .await
+            .expect_err("设备侧同一个判据");
+        assert_eq!(e.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// 列表读库失败同样是 500（`internal("cannot list bindings")` 的两处）。
+    #[tokio::test]
+    async fn a_broken_binding_list_is_a_500() {
+        let (state, _d) = state();
+        let p = new_project(&state, "proj");
+        break_table(&state, "binding");
+
+        let from_project = list_for_project(State(state.clone()), Path(p))
+            .await
+            .expect_err("项目侧列表读不出来要报错");
+        assert_eq!(from_project.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let from_device = list_for_device(State(state.clone()), Path("n_1".into()))
+            .await
+            .expect_err("设备侧列表读不出来要报错");
+        assert_eq!(from_device.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// 正常路径必须仍然成立：新建 201、重复 PUT 200 且只有一行。
+    ///
+    /// 上面几条都在把库打坏；这条钉的是「打坏之前它本来就是对的」，否则
+    /// 一个永远回 500 的实现也能让那几条全绿。
+    #[tokio::test]
+    async fn a_repeated_put_updates_the_same_row_and_flips_201_to_200() {
+        let (state, _d) = state();
+        let p = new_project(&state, "proj");
+
+        let (code, first) = put(state.clone(), p.clone(), "n_1".into(), body("~/code"))
+            .expect("第一次 PUT 应当成功");
+        assert_eq!(code, StatusCode::CREATED);
+
+        let (code, second) = put(state.clone(), p.clone(), "n_1".into(), body("~/code"))
+            .expect("第二次 PUT 应当成功");
+        assert_eq!(code, StatusCode::OK, "同一组合重复 PUT 是更新，不是新建");
+        assert_eq!(second.0.id, first.0.id, "更新的必须是同一行");
+
+        let rows = list_for_project(State(state.clone()), Path(p))
+            .await
+            .expect("列表")
+            .0;
+        assert_eq!(rows.len(), 1, "upsert 不许造出第二行");
+    }
+}
