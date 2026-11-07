@@ -111,10 +111,11 @@ impl PipePair {
 /// Windows 侧的 `Pty` 内部状态（`mod.rs` 的 `Pty` 在 `cfg(windows)` 下持这个）。
 #[derive(Debug)]
 pub(super) struct WindowsPty {
-    /// 喂给 ConPTY 的输入写端。写它 = 用户敲键盘。
-    pub(super) input: OwnedHandle,
-    /// 从 ConPTY 读输出的读端。读它 = 看屏幕。
-    pub(super) output: OwnedHandle,
+    /// 喂给 ConPTY 的输入写端。写它 = 用户敲键盘。关闭终端时先关掉它。
+    pub(super) input: Option<OwnedHandle>,
+    /// 从 ConPTY 读输出的读端。读它 = 看屏幕。关闭时先关它再 `ClosePseudoConsole`，
+    /// 否则旧版 Windows 上后者可能等这个管道被排空而无限阻塞。
+    pub(super) output: Option<OwnedHandle>,
     /// ConPTY 句柄（`isize` 不透明值，`NO_CONPTY` = 0 表示未建）。
     pub(super) conpty: HPCON,
     /// 直接子进程（shell）的 PID。
@@ -130,31 +131,19 @@ pub(super) struct WindowsPty {
 /// `CreatePseudoConsole` 失败时不会写它，成功时给一个非零的不透明值。
 const NO_CONPTY: HPCON = 0;
 
-/// 关 ConPTY 前最多花这么久排空输出（见 `close_conpty`）。
-const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
-
 impl WindowsPty {
     fn close_conpty(&mut self) {
         if self.conpty == NO_CONPTY {
             return;
         }
-        // **先排空输出，再 `ClosePseudoConsole`**。MSDN 对此有明确警告：输出
-        // 管道里还有没读走的字节时，conhost 的写端会阻塞，`ClosePseudoConsole`
-        // 跟着无限等下去——关一个终端面板就能把整个 node 带住。排空是**有上限**
-        // 的（`DRAIN_GRACE`），否则 `close` 会变成「读完整个输出流」。
-        let deadline = std::time::Instant::now() + DRAIN_GRACE;
-        let handle = self.output.as_raw_handle();
-        let mut buf = [0u8; 4096];
-        while std::time::Instant::now() < deadline {
-            if !wait_readable(handle, DRAIN_GRACE) {
-                break;
-            }
-            match read_handle(handle, &mut buf) {
-                // 0 = 对端关了（全部输出已读到）；错误同理，没有更多可排的。
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-        }
+        // **`ClosePseudoConsole` 之前先关自己的两根管道**。MSDN 的旧版 Windows
+        // 语义：关 ConPTY 会向子进程发 `CTRL_CLOSE_EVENT`，子进程仍可能继续
+        // 写最后一帧；若输出读端还开着而我们不再读，Win11 24H2 之前
+        // `ClosePseudoConsole` 会无限等它。先 `take()` 掉 output（以及 input）
+        // 把宿主这侧的通道关掉，是这个等待不发生的充分条件；顺带也把
+        // `read`/`write` 之后的「已关闭」状态做实，而不只是归零一个整数。
+        self.input.take();
+        self.output.take();
         unsafe { ClosePseudoConsole(self.conpty) };
         self.conpty = NO_CONPTY;
     }
@@ -299,8 +288,8 @@ pub(super) fn spawn(
     }
 
     Ok(WindowsPty {
-        input: input.write,
-        output: output.read,
+        input: Some(input.write),
+        output: Some(output.read),
         conpty,
         pid: pi.dwProcessId,
         size: Size { cols, rows },
@@ -337,12 +326,11 @@ pub(super) fn resize(pty: &mut WindowsPty, size: Size) -> Result<(), PtyError> {
 
 /// 已关闭的 PTY 不许再用。与 Unix 的 `master_side()?` 同一个判据。
 ///
-/// 为什么需要它：`close_conpty` 只把 `conpty` 归零，`input`/`output` 两根管道
-/// 句柄仍在结构体里——`read`/`write` 不查这一下，就会在 `ClosePseudoConsole`
-/// 之后继续对那两根管道读写。此时 `Terminal::is_open()` 若只看「`pty` 是
-/// 不是 `Some`」还会返回 `true`，于是上层以为终端还活着。
+/// `close_conpty` 会把 `conpty` 归零并 `take()` 掉两根 `OwnedHandle`；
+/// `read`/`write` 再进来时既没有 ConPTY、也没有可传的句柄，必须一律
+/// `Closed`，不许拿已经关掉的裸值去调内核。
 fn check_open(pty: &WindowsPty) -> Result<(), PtyError> {
-    if pty.conpty == NO_CONPTY {
+    if pty.conpty == NO_CONPTY || pty.output.is_none() || pty.input.is_none() {
         return Err(PtyError::Closed);
     }
     Ok(())
@@ -353,9 +341,12 @@ fn check_open(pty: &WindowsPty) -> Result<(), PtyError> {
 pub(super) fn dup_output(pty: &WindowsPty) -> Result<OwnedHandle, PtyError> {
     use windows_sys::Win32::Storage::FileSystem::ReOpenFile;
     use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ as READ;
+    let Some(output) = pty.output.as_ref() else {
+        return Err(PtyError::Closed);
+    };
     let handle = unsafe {
         ReOpenFile(
-            pty.output.as_raw_handle() as HANDLE,
+            output.as_raw_handle() as HANDLE,
             READ,
             FILE_SHARE_NONE,
             // 这个参数**必须为 0**（MSDN 原文 "This parameter must be zero"）：
@@ -377,7 +368,10 @@ pub(super) fn write(pty: &WindowsPty, bytes: &[u8]) -> Result<(), PtyError> {
     // 返回 `TRUE` + 一个小于请求长度的 `written`）。只看 `ok` 就返回 `Ok(())`
     // 会把剩下的字节静默丢掉——用户看到的是「粘贴一长段东西只进去一半」。
     // Unix 侧的 `write` 有同样的 `while off < len` 循环。
-    let handle = pty.input.as_raw_handle() as HANDLE;
+    let Some(input) = pty.input.as_ref() else {
+        return Err(PtyError::Closed);
+    };
+    let handle = input.as_raw_handle() as HANDLE;
     let mut off = 0usize;
     while off < bytes.len() {
         let rest = bytes.get(off..).unwrap_or(&[]);
@@ -411,7 +405,10 @@ pub(super) fn write(pty: &WindowsPty, bytes: &[u8]) -> Result<(), PtyError> {
 /// Unix 侧的 `read()` 同样只是 `read_handle(self.master_side()?, buf)`。
 pub(super) fn read(pty: &WindowsPty, buf: &mut [u8]) -> Result<usize, PtyError> {
     check_open(pty)?;
-    read_handle(pty.output.as_raw_handle(), buf)
+    let Some(output) = pty.output.as_ref() else {
+        return Err(PtyError::Closed);
+    };
+    read_handle(output.as_raw_handle(), buf)
 }
 
 // ---------------------------------------------------------------------------
@@ -617,7 +614,10 @@ mod tests {
         let mut seen = String::new();
         let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
-            if !wait_readable(pty.inner.output.as_raw_handle(), Duration::from_millis(100)) {
+            let Some(output) = pty.inner.output.as_ref() else {
+                break;
+            };
+            if !wait_readable(output.as_raw_handle(), Duration::from_millis(100)) {
                 continue;
             }
             let mut buf = [0u8; 4096];

@@ -36,8 +36,8 @@ mod unix;
 mod windows;
 
 // 自由函数按平台再导出到 `pty::`，让 `connector/terminal.rs` 只认一个名字：
-// 「读一次」「等可读」这两个动作在 Windows 上是 `ReadFile` /
-// `WaitForMultipleObjects`，在 Unix 上是 `read(2)` / `poll(2)`。
+// 「读一次」「等可读」这两个动作在 Windows 上是 `ReadFile` / `PeekNamedPipe`
+// 探测，在 Unix 上是 `read(2)` / `poll(2)`。
 #[cfg(unix)]
 pub(crate) use unix::{read_handle, wait_readable};
 #[cfg(windows)]

@@ -143,8 +143,9 @@ impl Git {
         }
     }
 
-    /// 换超时。**仅测试用**：生产用 [`DEFAULT_TIMEOUT`]。
-    #[cfg(test)]
+    /// 换超时。**仅测试用**：生产用 [`DEFAULT_TIMEOUT`]，Windows 真机测试
+    /// 不跑那几条 Unix shell 脚本用例，所以 helper 也按目标平台收口。
+    #[cfg(all(test, unix))]
     fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
