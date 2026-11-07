@@ -2504,4 +2504,439 @@ for line in sys.stdin:
         drop(_guard);
         let _ = std::fs::remove_dir_all(&d);
     }
+
+    // ---- 连接收尾、入站分派与 ACP 开会话的补测 ----
+
+    /// 断连收尾要**说清释放了几条通道、留了几条孤儿会话**。
+    ///
+    /// `run_established` 在 `session()` 返回之后才做这两件事；前面的用例只用
+    /// 空表跑过「released == 0 / orphaned == 0」那两条静默臂。这里挂一条真
+    /// 通道 + 一条真会话，让两个计数都大于 0，判据落在日志里的两句话上：
+    /// 那是排障时唯一能看出「连接断了以后设备上还留着什么」的地方。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    #[tokio::test]
+    async fn run_established_reports_released_channels_and_orphaned_conversations() {
+        let (d, mut w) = worker("established-cleanup");
+        let url = fake_hub(HubTail::Close);
+        w.hub_url = url;
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        let est = conn::connect_once(&w.hub_url, id.key(), None, None, device_info())
+            .await
+            .expect("handshake");
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+        let _ = channel::open_external("ch-cleanup");
+        let (bin, _log) = method_logging_agent(&d);
+        w.conversations
+            .open(spec_for_worker("ch-cleanup", &bin), None)
+            .await
+            .expect("记录 agent 必须能起来");
+
+        // session() 会读到假 Hub 的 Close 并立刻返回 PeerClosed，随后是收尾。
+        let end = w
+            .run_established(&mut id, est)
+            .await
+            .expect("收尾不该因日志失败而停下");
+        assert!(matches!(end, SessionEnd::PeerClosed), "got {end:?}");
+
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
+        assert!(
+            log.contains("released 1 channel(s) together with the connection"),
+            "要说出释放掉的通道数，实际日志：{log}"
+        );
+        assert!(
+            log.contains("1 acp conversation(s) left orphaned"),
+            "要说出留下的孤儿会话数，实际日志：{log}"
+        );
+
+        w.conversations.close("ch-cleanup").await;
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 一条 `cancel` 入站消息走的是 `cancel_turn`，**不是 `prompt`**。
+    ///
+    /// 反例是把 `cancel` 当成普通文本送进 agent：那样 `session/prompt` 会出现
+    /// 在 agent 的方法日志里，页面上的「停止」反而又开了一轮话。判据落在
+    /// 真 agent 实收的方法名上，不看本进程的日志（两种写法都只留一句话）。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    #[tokio::test]
+    async fn an_inbound_cancel_goes_to_cancel_turn_not_to_prompt() {
+        let (d, w) = worker("inbound-cancel");
+        let (mut est, _recorded) = established_recording_frames(&d).await;
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+
+        let (bin, log) = method_logging_agent(&d);
+        let _ = channel::open_external("ch-cancel");
+        w.conversations
+            .open(spec_for_worker("ch-cancel", &bin), None)
+            .await
+            .expect("记录 agent 必须能起来");
+        let baseline = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(baseline.contains("initialize"), "握手应先发生：{baseline}");
+
+        push_inbound("ch-cancel", serde_json::json!({"cancel": true}));
+        w.drain_inbound(&mut est).await;
+        // 闲着的会话上 cancel 走 NothingInFlight：agent 那边不该多出任何方法。
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        let now = std::fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(
+            now, baseline,
+            "cancel 只能走取消路径，不该给 agent 追加任何方法：{now}"
+        );
+
+        w.conversations.close("ch-cancel").await;
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ACP 会话已经没了时，一句入站 `text` 的 `prompt` 会失败：
+    /// 必须关掉通道并把 `channel_error` **发到 Hub**，页面才不会一直等回复。
+    ///
+    /// 判据在网络对端：只断掉会话表、保留通道表，正是生产里「子进程退了、
+    /// 页面还开着」的形状；`fail_channel` 不发帧的话这里收不到任何东西。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    #[tokio::test]
+    async fn a_failed_prompt_closes_the_channel_and_tells_the_hub() {
+        let (d, w) = worker("prompt-failed");
+        let (mut est, recorded) = established_recording_frames(&d).await;
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+
+        let (bin, _log) = method_logging_agent(&d);
+        let _ = channel::open_external("ch-gone");
+        w.conversations
+            .open(spec_for_worker("ch-gone", &bin), None)
+            .await
+            .expect("记录 agent 必须能起来");
+        w.conversations.close("ch-gone").await; // 会话没了，通道还在
+
+        push_inbound("ch-gone", serde_json::json!({"text": "还有人吗"}));
+        w.drain_inbound(&mut est).await;
+
+        let mut got = Vec::new();
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if got.iter().any(|f| f.msg_type == "channel_error") {
+                break;
+            }
+        }
+        let err = got
+            .iter()
+            .find(|f| f.msg_type == "channel_error")
+            .unwrap_or_else(|| panic!("prompt 失败必须让 Hub 收到 channel_error，实收：{got:?}"));
+        assert_eq!(
+            err.c.get("channel_id").and_then(|v| v.as_str()),
+            Some("ch-gone"),
+            "错误要指着那条再也不会回话的通道"
+        );
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
+        assert!(log.contains("prompt failed on ch-gone"), "{log}");
+
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `cancel_turn` 三种结果各说各的话，不互相混成一句泛泛的「失败」。
+    ///
+    /// - 没有活会话：要说 `cancel failed`，并回一帧 `channel_error`；
+    /// - 会话在但闲着：要说 `cancel ignored`，通道原样留着（不能回错误帧）；
+    /// - 一轮真的在飞：`cancel()` 返回 `Ok(())`，什么都不说。
+    ///
+    /// 第三种用一个「只答握手、不答 `session/prompt`」的 holding agent 构造：
+    /// `prompt` 发出去后 `inflight` 一直非零，于是 `cancel` 走 `Ok(())` 那条臂。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    #[tokio::test]
+    async fn cancel_turn_names_each_kind_of_failure_without_conflating_them() {
+        let (d, w) = worker("cancel-kinds");
+        let (mut est, recorded) = established_recording_frames(&d).await;
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+
+        // 1. 没会话：回帧 + 说 failed。
+        w.cancel_turn(&mut est, "ch-never").await;
+        // 2. 有会话但闲着：只说 ignored，不关通道、不回 channel_error。
+        let (bin, _log) = method_logging_agent(&d);
+        let _ = channel::open_external("ch-idle");
+        w.conversations
+            .open(spec_for_worker("ch-idle", &bin), None)
+            .await
+            .expect("记录 agent 必须能起来");
+        w.cancel_turn(&mut est, "ch-idle").await;
+        // 3. 一轮在飞：holding agent 不回 session/prompt，inflight 保持非零。
+        let (holding, _hlog) = holding_agent(&d);
+        let _ = channel::open_external("ch-busy");
+        let mut spec = spec_for_worker("ch-busy", &holding);
+        spec.command = holding.to_string_lossy().into_owned();
+        w.conversations
+            .open(spec, None)
+            .await
+            .expect("holding agent");
+        push_inbound("ch-busy", serde_json::json!({"text": "别回答"}));
+        w.drain_inbound(&mut est).await;
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if w.conversations.turn_in_flight("ch-busy").await == Some(true) {
+                break;
+            }
+        }
+        assert_eq!(
+            w.conversations.turn_in_flight("ch-busy").await,
+            Some(true),
+            "holding agent 必须让这一轮停在飞状态"
+        );
+        w.cancel_turn(&mut est, "ch-busy").await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
+        assert!(log.contains("cancel failed on ch-never"), "{log}");
+        assert!(log.contains("cancel ignored on ch-idle"), "{log}");
+        assert!(
+            !log.contains("cancel ignored on ch-busy") && !log.contains("cancel failed on ch-busy"),
+            "一轮在飞的成功取消不该被说成失败或忽略：{log}"
+        );
+        let got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let errs: Vec<_> = got
+            .iter()
+            .filter(|f| f.msg_type == "channel_error")
+            .collect();
+        assert_eq!(errs.len(), 1, "只有没会话那次要回错误帧：{got:?}");
+        assert_eq!(
+            errs[0].c.get("channel_id").and_then(|v| v.as_str()),
+            Some("ch-never")
+        );
+
+        w.conversations.close("ch-idle").await;
+        w.conversations.close("ch-busy").await;
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 只答 `initialize` / `session/new`，**永不答 `session/prompt`**：
+    /// 让一轮话停在「在飞」状态，上面那条用例据此走 `cancel()==Ok(())`。
+    fn holding_agent(dir: &Path) -> (PathBuf, PathBuf) {
+        let log = dir.join("holding-methods.log");
+        let path = dir.join("worker-holding-agent");
+        let script = format!(
+            r#"#!/usr/bin/env python3
+import json, sys
+LOG = {log:?}
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    m = json.loads(line)
+    method = m.get("method", "")
+    mid = m.get("id")
+    with open(LOG, "a") as f:
+        f.write(method + "\n")
+    if method == "initialize":
+        sys.stdout.write(json.dumps({{"jsonrpc":"2.0","id":mid,"result":{{"protocolVersion":1}}}}) + "\n")
+        sys.stdout.flush()
+    elif method == "session/new":
+        sys.stdout.write(json.dumps({{"jsonrpc":"2.0","id":mid,"result":{{"sessionId":"ses_hold"}}}}) + "\n")
+        sys.stdout.flush()
+    # session/prompt / session/cancel 都故意不回
+"#,
+            log = log.to_string_lossy()
+        );
+        std::fs::write(&path, script).expect("写脚本");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).expect("stat").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("chmod");
+        }
+        (path, log)
+    }
+
+    /// 通道帧发不出去时只留痕、不断连：判据是日志点名了帧类型，
+    /// 且 `on_channel_message` 仍返回 `None`（连接继续用）。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    #[tokio::test]
+    async fn a_channel_error_that_cannot_be_sent_only_leaves_a_trace() {
+        let (d, w) = worker("channel-send-fail");
+        let mut est = established_after_peer_close(&d).await;
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+
+        // 一条没有工作区根的 files 通道 → `Action::Send([channel_error])`。
+        let f = frame_of(
+            "open_channel",
+            serde_json::json!({
+                "channel_id": "ch-send-fail",
+                "connector": "files",
+                "params": {},
+                "credit_start": 4,
+            }),
+        );
+        let ended = w.on_channel_message(&mut est, &f).await;
+        assert!(ended.is_none(), "发不出去不该结束会话：{ended:?}");
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
+        assert!(
+            log.contains("channel frame send failed (channel_error"),
+            "要说出是哪一帧没发走，实际：{log}"
+        );
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `open_channel{acp}` 走 `Action::OpenAcp`：`channel_ready` **先到 Hub**，
+    /// 然后才起子进程。顺序错了会让慢 agent 被 Hub 判成「不支持对话」。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    #[tokio::test]
+    async fn on_channel_message_opens_an_acp_conversation_and_sends_ready_first() {
+        let (d, w) = worker("acp-open-ok");
+        let (mut est, recorded) = established_recording_frames(&d).await;
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+
+        let (bin, _log) = method_logging_agent(&d);
+        let spec = spec_for_worker("ch-acp-ok", &bin);
+        let f = frame_of(
+            "open_channel",
+            serde_json::json!({
+                "channel_id": "ch-acp-ok",
+                "connector": "acp",
+                "params": {
+                    "agent_id": spec.agent_id,
+                    "cwd": spec.cwd,
+                    "command": spec.command,
+                    "args": spec.args,
+                },
+                "credit_start": 4,
+            }),
+        );
+        let ended = w.on_channel_message(&mut est, &f).await;
+        assert!(ended.is_none(), "开会话不该结束连接：{ended:?}");
+
+        let mut got = Vec::new();
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if !got.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(got.len(), 1, "成功开会话只回 channel_ready：{got:?}");
+        assert_eq!(got[0].msg_type, "channel_ready");
+        assert_eq!(
+            got[0].c.get("channel_id").and_then(|v| v.as_str()),
+            Some("ch-acp-ok")
+        );
+        assert_eq!(
+            w.conversations.turn_in_flight("ch-acp-ok").await,
+            Some(false),
+            "会话要真的挂进会话表，而不只是回了一帧 ready"
+        );
+
+        w.conversations.close("ch-acp-ok").await;
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ACP 子进程起不来时，`channel_ready` 之后必须再回一帧 `channel_error`
+    /// 并收掉通道：不回的话页面永远显示「正在回复」。
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "通道表是进程级单例，整个用例体必须独占它"
+    )]
+    #[tokio::test]
+    async fn on_channel_message_reports_a_failed_acp_open_to_the_hub() {
+        let (d, w) = worker("acp-open-fail");
+        let (mut est, recorded) = established_recording_frames(&d).await;
+        let _guard = channel::table_serial_for_tests();
+        channel::reset_for_tests();
+
+        let missing = d.join("no-such-agent-binary");
+        let f = frame_of(
+            "open_channel",
+            serde_json::json!({
+                "channel_id": "ch-acp-fail",
+                "connector": "acp",
+                "params": {
+                    "agent_id": "opencode",
+                    "cwd": d.to_string_lossy(),
+                    "command": missing.to_string_lossy(),
+                },
+                "credit_start": 4,
+            }),
+        );
+        let ended = w.on_channel_message(&mut est, &f).await;
+        assert!(ended.is_none(), "起不来进程不该结束整条连接：{ended:?}");
+
+        let mut got = Vec::new();
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if got.len() >= 2 {
+                break;
+            }
+        }
+        assert_eq!(got.len(), 2, "ready 之后还要一帧错误：{got:?}");
+        assert_eq!(got[0].msg_type, "channel_ready", "ready 必须先发");
+        assert_eq!(got[1].msg_type, "channel_error");
+        assert_eq!(
+            got[1].c.get("channel_id").and_then(|v| v.as_str()),
+            Some("ch-acp-fail")
+        );
+        assert!(
+            !channel::external_ids().contains(&"ch-acp-fail".to_string()),
+            "开不起来的通道必须被收掉，否则页面会一直等"
+        );
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `send_heartbeat` 的成功臂要**真的把心跳帧送到 Hub**。
+    ///
+    /// 只断言 `Ok(())` 是恒真的：tungstenite 会在对端已关时把帧写进自己的
+    /// 缓冲里照样返回 Ok。所以走 `fake_hub_recording_heartbeats_no_channel`，
+    /// 判据是对端 arrivals 里多了一次心跳。
+    #[tokio::test]
+    async fn send_heartbeat_on_a_live_connection_sends_a_heartbeat_frame() {
+        let (d, w) = worker("heartbeat-arrives");
+        let (url, arrivals) = fake_hub_recording_heartbeats_no_channel(60_000);
+        let id = Identity::load_or_create(&d).expect("identity");
+        let mut est = conn::connect_once(&url, id.key(), None, None, device_info())
+            .await
+            .expect("handshake");
+        let before = arrivals.lock().unwrap_or_else(|e| e.into_inner()).len();
+        w.send_heartbeat(&mut est).await.expect("心跳应当发出去");
+        let mut after = before;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            after = arrivals.lock().unwrap_or_else(|e| e.into_inner()).len();
+            if after > before {
+                break;
+            }
+        }
+        assert_eq!(
+            after,
+            before + 1,
+            "成功的心跳必须在对端留下一次到达，而不是只在本进程返回 Ok"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

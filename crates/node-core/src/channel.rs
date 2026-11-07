@@ -2056,4 +2056,160 @@ mod tests {
             "溢出的通道必须从活通道表里摘掉，否则它会一直占着槽位"
         );
     }
+
+    /// `poll_all` 里 connector 的产出**越过待发上限**时，那句 `channel_error`
+    /// 必须真的发出去，而不是被吞掉。
+    ///
+    /// 与 `queue_frames` 那条用例的区别正是这条用例存在的理由：那里断的是
+    /// 「越限会报错」，这里断的是「报的这句话由 `poll_all` 一路带出到帧列表」。
+    /// 吞掉它的话，页面只会看到终端不声不响地停住——而「对端永远不读」恰恰
+    /// 是最需要说出口的故障。
+    ///
+    /// 字节账先被顶到上限：`pump` 里 `poll` 只要再产出哪怕一帧就必然越限，
+    /// 于是这条用例与「真 PTY 到底产出了多少字节」解耦开。
+    #[test]
+    fn poll_all_reports_a_connector_that_overflows_its_backlog() {
+        let _guard = table_lock();
+        reset();
+
+        // 信用给 0：待发队列不会被放行，越限判定与「这一轮发了几帧」解耦开。
+        let spec = OpenChannel {
+            channel_id: "ch-overflow".to_string(),
+            connector: connector::names::FILES.to_string(),
+            params: serde_json::json!({ "workspace_root": "/tmp" }),
+            credit_start: 0,
+        };
+        let f = Frame::push(types::OPEN_CHANNEL, 1, serde_json::to_value(&spec).unwrap());
+        assert!(matches!(on_channel_frame(&f), Action::Send(_)));
+
+        // 直接把字节账顶到上限，再塞一个「poll 一定产出一帧」的 connector：
+        // `queue_frames` 在 `poll_all` 内部就会越限。
+        {
+            let mut t = lock();
+            let entry = t.channels.get_mut("ch-overflow").expect("通道刚开");
+            entry.backlog_bytes = MAX_BACKLOG_BYTES;
+            entry.resource = Some(Box::new(OneFramePoll));
+        }
+
+        let produced = pump();
+        assert_eq!(produced.len(), 1, "只该有一条通道有话要说：{produced:?}");
+        let (id, frames) = &produced[0];
+        assert_eq!(id, "ch-overflow");
+        assert_eq!(frames.len(), 1, "越限只回一帧，不是一帧数据一帧错");
+        assert_eq!(
+            frames[0].msg_type,
+            types::CHANNEL_ERROR,
+            "越限要让 Hub 知道这条通道死了，而不是静默停住"
+        );
+        let report: protocol::channel::ChannelErrorPayload =
+            frames[0].payload().expect("channel_error 载荷");
+        assert!(
+            report.reason.contains("ch-overflow"),
+            "理由里要点名是哪条通道：{}",
+            report.reason
+        );
+        assert_eq!(
+            live_count(),
+            0,
+            "越限的通道必须不再是活通道：资源要被 close，积压也要清掉"
+        );
+        assert_eq!(
+            backlog_bytes_of("ch-overflow"),
+            0,
+            "release 必须把字节账清干净，否则重开同名通道会继承旧账"
+        );
+    }
+
+    /// 一个 `poll` 只产出一帧的 connector，专供上一条越限用例。
+    ///
+    /// `finished()` 返回 `false`：这条用例要的是「产出在判溢出之前」，而不是
+    /// 「跑完了就地收尾」那条路径。别的两条方法也做成什么都不产出，以免
+    /// 同一轮里冒出额外的帧把断言搅乱。
+    struct OneFramePoll;
+
+    impl connector::Connector for OneFramePoll {
+        fn open(
+            &mut self,
+            _req: connector::OpenReq,
+        ) -> Result<Vec<connector::OutFrame>, connector::ConnectorError> {
+            Ok(Vec::new())
+        }
+
+        fn on_data(
+            &mut self,
+            _data: &serde_json::Value,
+        ) -> Result<Vec<connector::OutFrame>, connector::ConnectorError> {
+            Ok(Vec::new())
+        }
+
+        fn poll(&mut self) -> Result<Vec<connector::OutFrame>, connector::ConnectorError> {
+            Ok(vec![connector::OutFrame::new(serde_json::json!({
+                "text": "the straw that breaks the backlog"
+            }))])
+        }
+
+        fn close(&mut self) {}
+    }
+
+    /// `params` **根本不是对象**时，`req_of` 回落成「整份 params 私传」，
+    /// 于是「没有工作区根」这句人话由 connector 自己说出口。
+    ///
+    /// 这是一条刻意的降级而不是校验：`req_of` 解不开就把 `params` 原样交给
+    /// connector，让 files / exec 用它自己那句「no workspace root was given
+    /// for this channel」回答用户。若这里改成在通道层报「params 格式错」，
+    /// 用户拿到的将是一条指向 JSON 形状的错误，而真正缺的是工作区。
+    #[test]
+    fn a_non_object_params_degrades_to_a_named_connector_error() {
+        let _guard = table_lock();
+        reset();
+
+        let spec = OpenChannel {
+            channel_id: "ch-badparams".to_string(),
+            connector: connector::names::FILES.to_string(),
+            // 数字不是 `OpenReq` 的形状：`from_value` 必然失败，走回落臂。
+            params: serde_json::json!(5),
+            credit_start: 4,
+        };
+        let f = Frame::push(types::OPEN_CHANNEL, 1, serde_json::to_value(&spec).unwrap());
+        let frames = match on_channel_frame(&f) {
+            Action::Send(frames) => frames,
+            other => panic!("解不开 params 不该断会话，应当回错误帧，实际 {other:?}"),
+        };
+        assert_eq!(frames.len(), 1, "出错只回一帧：{frames:?}");
+        assert_eq!(frames[0].msg_type, types::CHANNEL_ERROR);
+        let report: protocol::channel::ChannelErrorPayload =
+            frames[0].payload().expect("channel_error 载荷");
+        assert!(
+            report.reason.contains("workspace root"),
+            "理由要说缺的是工作区根，而不是甩一句 JSON 形状错误：{}",
+            report.reason
+        );
+        assert!(!has_channel("ch-badparams"), "开不起来的通道不能留在表里");
+    }
+
+    /// `FailingPoll` 是 `Connector` 的完整实现，四个方法都要**真的能跑**：
+    /// 只被 `poll_all` 直接调用到 `poll` 的那条用例之外，另外三个方法也各
+    /// 自返回定义好的值。这个用例把 trait 对象拉出来逐个调一遍，断的是
+    /// 「夹具不是靠未实现方法凑数」，也让 `close` 那类空实现不再是无主行。
+    #[test]
+    fn a_failing_connector_still_answers_every_trait_method() {
+        let mut c: Box<dyn connector::Connector> = Box::new(FailingPoll);
+        let opened = c
+            .open(connector::OpenReq::new("/tmp", serde_json::json!({})))
+            .expect("夹具的 open 是成功的空实现");
+        assert!(opened.is_empty(), "open 不该凭空产帧");
+        let answered = c
+            .on_data(&serde_json::json!({ "anything": 1 }))
+            .expect("夹具的 on_data 是成功的空实现");
+        assert!(answered.is_empty(), "on_data 不该凭空产帧");
+        assert!(
+            c.poll().is_err(),
+            "这个夹具的契约就是 poll 必错：poll_all 测的正是那条跳过分支"
+        );
+        c.close();
+        assert!(
+            !c.finished(),
+            "默认 finished 必须是 false，否则上面的跳过分支会被别的臂抢走"
+        );
+    }
 }

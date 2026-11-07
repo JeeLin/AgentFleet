@@ -320,4 +320,130 @@ mod tests {
         std::fs::create_dir(&p).unwrap();
         assert!(tail(&p, 10).is_err(), "读不了必须报错，不能返回空假装没事");
     }
+
+    /// 造一个「体积超了但没真写 8 MiB」的日志：`set_len` 只改元数据，
+    /// 稀疏文件读起来是 NUL，而 `rotate_if_needed` 只看 `metadata().len()`。
+    /// 用它把「轮转」这件事与「往盘上灌 8 MiB」解耦开。
+    #[cfg(unix)]
+    fn oversized_sparse_log(p: &Path) {
+        std::fs::File::create(p)
+            .unwrap()
+            .set_len(MAX_LOG_BYTES + 1)
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(p).unwrap().len(),
+            MAX_LOG_BYTES + 1,
+            "稀疏文件也要被 stat 认成超限，否则下面测的不是轮转"
+        );
+    }
+
+    /// 某一代历史文件挪不动时，报错要**点名是哪一代**，而不是甩一句裸 errno。
+    ///
+    /// 构造法：`.2` 是一个非空目录，`.3` 是一个**悬空符号链接**——
+    /// `Path::exists()` 顺着链接看是 false，于是「删掉最旧一代」那步被跳过；
+    /// 紧接着 `rename(.2 → .3)` 撞上「目录不能改名成符号链接」(ENOTDIR)。
+    /// 而错误信息里的 `rotate 2` 正是排障时要找的那一代。
+    #[cfg(unix)]
+    #[test]
+    fn rotation_reports_which_generation_failed_to_shift() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let p = log_path(d.path());
+        append_line(&p, "").unwrap(); // 建好 logs/ 目录
+        oversized_sparse_log(&p);
+
+        let from = rotated_path(&p, 2);
+        let to = rotated_path(&p, 3);
+        std::fs::create_dir(&from).unwrap();
+        std::fs::write(from.join("keeps-it-nonempty"), b"x").unwrap();
+        symlink("no-such-target", &to).unwrap();
+        assert!(!to.exists(), "悬空链接必须被 exists() 当成不存在");
+
+        let err = rotate_if_needed(&p).unwrap_err();
+        assert!(
+            err.contains("rotate 2"),
+            "要说清是哪一代挪不动，实际：{err}"
+        );
+        assert!(
+            p.exists(),
+            "任何一代失败都不能把当前日志提前改名：那会丢掉正在写的那份"
+        );
+    }
+
+    /// 当前日志挪不动时，报错要说是「当前日志」而不是某代历史。
+    ///
+    /// `/proc/kcore` 的 `stat` 报告约 140 TiB（远超 8 MiB），但它既不能改名、
+    /// 也不能被删；`rotate_if_needed` 会走到最后那句 `rotate current log`。
+    /// 用它而不是真的造一个 8 MiB 文件，是因为那既慢又依赖盘上剩余空间。
+    #[cfg(unix)]
+    #[test]
+    fn rotation_reports_failure_to_move_the_current_log() {
+        if !Path::new("/proc/kcore").exists() {
+            return;
+        }
+        let err = rotate_if_needed(Path::new("/proc/kcore")).unwrap_err();
+        assert!(
+            err.contains("rotate current log"),
+            "当前日志挪不动要说清是它，实际：{err}"
+        );
+    }
+
+    /// 日志目录**权限收紧失败**时，`append_line` 要把这句错误交回调用方，
+    /// 而不是继续用一个可能 0755 的目录写日志。
+    ///
+    /// 构造法：`logs` 位置放一个指向 `/proc/self/fd` 的符号链接——
+    /// `create_dir_all` 见到已存在的目录就成功，而紧接着的
+    /// `set_permissions` 在 procfs 上拿到 EPERM。
+    #[cfg(unix)]
+    #[test]
+    fn append_reports_failure_to_tighten_log_dir_permissions() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let p = log_path(d.path());
+        let logs = p.parent().unwrap();
+        symlink("/proc/self/fd", logs).unwrap();
+
+        let err = append_line(&p, "secret").unwrap_err();
+        assert!(
+            err.contains("chmod log dir"),
+            "目录权限没收紧要说出来，实际：{err}"
+        );
+    }
+
+    /// 打开日志文件失败时（这里让目录顶替文件 → EISDIR），`append_line`
+    /// 报的是 `open log`，且不留下半行内容。
+    #[cfg(unix)]
+    #[test]
+    fn append_reports_failure_to_open_the_log_file() {
+        let d = tempfile::tempdir().unwrap();
+        let p = log_path(d.path());
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::create_dir(&p).unwrap();
+        let err = append_line(&p, "x").unwrap_err();
+        assert!(
+            err.contains("open log"),
+            "打不开日志要说清是在打开阶段，实际：{err}"
+        );
+    }
+
+    /// 写失败（磁盘满）**只返回 Err，不 panic**：日志系统故障不能把设备带下线。
+    ///
+    /// `/dev/full` 接受写入并稳定返回 ENOSPC，比把分区写满可控得多；
+    /// 这里用符号链接把它放到日志文件的位置，`OpenOptions::append(true)`
+    /// 打开后 `write_all` 就会撞上这个错。
+    #[cfg(unix)]
+    #[test]
+    fn append_reports_write_failure_without_panicking() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let p = log_path(d.path());
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        symlink("/dev/full", &p).unwrap();
+
+        let err = append_line(&p, "a line that cannot land").unwrap_err();
+        assert!(
+            err.contains("write log"),
+            "写失败要说清是在写阶段，实际：{err}"
+        );
+    }
 }

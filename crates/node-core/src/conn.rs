@@ -568,6 +568,94 @@ mod tests {
         );
     }
 
+    /// 重连形态带着 `last_seen_gen` 时，`auth` 帧必须**真的带上这个键**，
+    /// 且值就是调用方见过的那一代。
+    ///
+    /// 这条判据不是「代码里拼过 json」：假 Hub 在 TCP 上收下整帧，断言的是
+    /// 网络对端解出来的载荷。漏掉这个键，Hub 就只能靠 `disconnect` 帧是否
+    /// 送达来判顶替——帧一丢就是两台设备互抢，正是 §7.1 要兜住的情形。
+    /// `None` 不应退化成 0：0 小于任何 gen，会让老节点被永久判成顶替。
+    #[tokio::test]
+    async fn a_reconnect_carries_the_last_seen_gen_on_the_wire() {
+        use futures_util::{SinkExt, StreamExt};
+
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        std_listener.set_nonblocking(true).unwrap();
+        let addr = std_listener.local_addr().unwrap();
+        let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let sink = captured.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let _ = ws.next().await; // hello
+                ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::json!({"v":1,"seq":1,"t":"challenge","c":{"nonce":"n"}})
+                        .to_string(),
+                ))
+                .await
+                .unwrap();
+                // 第二帧才是 auth：整帧存下来，判据在载荷上。
+                let Some(Ok(msg)) = ws.next().await else {
+                    return;
+                };
+                if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+                    if let Ok(frame) = serde_json::from_str::<serde_json::Value>(&text) {
+                        sink.lock().unwrap().push(frame);
+                    }
+                }
+                ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::json!({"v":1,"seq":2,"t":"auth_ok","c":{
+                        "node_id":"n_x","protocol_version":1,"gen":7,
+                        "heartbeat_interval_ms":15000
+                    }})
+                    .to_string(),
+                ))
+                .await
+                .unwrap();
+                let _ = ws.next().await;
+            });
+        });
+
+        let kp = KeyPair::generate();
+        let out = connect_once(
+            &format!("ws://{addr}/ws"),
+            &kp,
+            Some("n_x"),
+            Some(6),
+            DeviceInfo {
+                name: "pi".into(),
+                os: "linux".into(),
+                arch: "aarch64".into(),
+                hostname: "pi".into(),
+                node_version: "0.1.0".into(),
+            },
+        )
+        .await;
+        assert!(out.is_ok(), "握手应当走完：{out:?}");
+
+        let frames = captured.lock().unwrap().clone();
+        assert_eq!(frames.len(), 1, "假 Hub 必须收到一帧 auth：{frames:?}");
+        assert_eq!(
+            frames[0]["t"], "auth",
+            "收的要是 auth 而不是别的：{frames:?}"
+        );
+        assert_eq!(frames[0]["c"]["node_id"], "n_x");
+        assert_eq!(
+            frames[0]["c"]["last_seen_gen"], 6,
+            "重连必须把见过的代次原样带上，实际：{frames:?}"
+        );
+        assert!(
+            frames[0]["c"].get("public_key").is_none(),
+            "重连形态不该把公钥再传一次：{frames:?}"
+        );
+    }
+
     #[tokio::test]
     async fn connect_once_against_a_refusing_port_is_transport_not_panic() {
         // 借一个端口再立刻关掉：连上去必被拒。
