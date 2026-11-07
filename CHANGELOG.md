@@ -32,7 +32,7 @@ once on 2026-11-05.
 
 ### Changed
 
-- **覆盖率门禁改为行覆盖率 ≥98%**（`cov-gate`），逐行例外登记机制移除；该门禁在 CI 中只告警、不阻断发布。 / **The coverage gate is now ≥98% line coverage**, replacing per-line exception bookkeeping; in CI it warns without blocking a release.
+- **覆盖率门禁改为行覆盖率 ≥98%**（`cov-gate`），逐行例外登记机制移除。 / **The coverage gate is now ≥98% line coverage**, replacing per-line exception bookkeeping.
 
 ### Fixed
 

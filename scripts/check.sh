@@ -1035,6 +1035,14 @@ if 'gate-static' not in str((jobs.get('gate-test') or {}).get('needs') or []):
 for name in ('gate-static', 'gate-test', 'build-binaries', 'build-desktop'):
     if 'shared-key' not in steps_text(name):
         bad.append(f'`{name}` 未声明 shared-key，Rust 依赖图会各编一遍')
+# v0.7.3：覆盖率补到 98% 后恢复硬门禁。注释里也不许留旧措辞，否则下次
+# 有人会照注释把 step 级 `continue-on-error` 加回来，把 gate 变成假绿。
+if 'continue-on-error' in yml:
+    bad.append('`release.yml` 不得出现 continue-on-error：cov-gate 必须硬阻断')
+coverage = jobs.get('gate-coverage') or {}
+coverage_run = '\n'.join(str(s.get('run') or '') for s in (coverage.get('steps') or []))
+if '--fail-under-lines 98' not in coverage_run:
+    bad.append('`gate-coverage` 的 cov-gate 仍须带 --fail-under-lines 98')
 
 for b in bad:
     print(f'      {b}')

@@ -201,9 +201,9 @@ v0.7.2 起这条口径从「未覆盖行集合 == 例外登记集合」改成百
 - 仍然禁止用排除文件、`#[allow]`、`(racy)` 标注等手段「做」出覆盖率数字
   ——那是伪造，数字高不代表测过。源码里遗留的 `// coverage: excluded` 标注
   已不参与任何门禁计算，看到时按注释理解，不要当成豁免。
-- **CI 里非阻断**：`cov-gate` 步骤是 `continue-on-error`，红了只标红、不拦发布
-  （理由见 `docs/DEVELOPMENT.md` §2.1）。**本地不跟着放宽**：`mise run cov-gate`
-  与 `mise run ci` 仍按 98% 硬判、红了就是不通过。
+- **CI 与本地同一条硬判据**：`mise run cov-gate` / CI 的 `cov-gate` 都是
+  `cargo llvm-cov --workspace --all-targets --summary-only --fail-under-lines 98`；
+  红了即 `gate` job failure，下游产物 / 镜像 / Release 全部 skipped。
 
 **完整规则与 23 条代码审查维度见 `docs/DEVELOPMENT.md`。**
 

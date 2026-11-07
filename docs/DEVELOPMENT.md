@@ -65,20 +65,17 @@ check → fmt → lint → test → **cov-gate**（行覆盖率 ≥98%）→ web
 
 ⚠️ **这是削弱不是加强**：98% 只约束总量，不再要求每条未覆盖行给出理由，整块新增的
 未测试代码可以靠既有总量稀释。原先那套虽然难维护，但确实能拦住「忘了测」。
-实测基线（v0.7.2 收尾）：行覆盖率 **96.88%**（877 / 28104 未覆盖），所以这道门禁
-**当前是红的**——红是因为存量，不是某次改动引入。要让它转绿只有两条真路：补测试或
-删死代码；**不许**用排除文件 / `#[allow]` / 标注伪造数字。源码里遗留的
-`// coverage: excluded` 与 `(racy)` 标注已不参与任何门禁计算，按注释读，别当豁免。
-**这条“转绿只有两条真路”就是 v0.7.3 的第一项交付**：补测试把总量推过 98%，见下。
+v0.7.3 已按「补测试或删死代码」这两条真路把覆盖率推过门槛：**实跑 `TOTAL ... 98.02%`、
+641 / 32348 行未覆盖，`--fail-under-lines 98` 退出码 0**；不许用排除文件 /
+`#[allow]` / 标注伪造数字。源码里遗留的 `// coverage: excluded` 与 `(racy)` 标注
+已不参与任何门禁计算，按注释读，别当豁免。覆盖率随每次改动变动，仍以
+`cargo llvm-cov` 实跑为准，不把这里的数字当永久判据。
 
-**v0.7.2 收尾时这一道在 CI 里曾是非阻断的，v0.7.3 把它改回硬门禁**：v0.7.2 期间
-`cov-gate` 步骤带 `continue-on-error: true`，红了只标红、不连带把下游 7 个 job 变成
-skipped——那是为了让发布链路先通，不是降门槛。**v0.7.3 的目标正是撤掉它**：补测试把
-总量做到 ≥98%，再删掉那一行 `continue-on-error`，覆盖率失败重新**阻断**发布。
-删除时机是「补完测试之后」而不是之前——先删会把发布链路重新打成红的。
-命令文本 `--fail-under-lines 98` 与下游 `needs` 一律不动，那两处是 `scripts/check.sh`
-C7/C8 的解析锚点；**不要**为了「让 CI 绿」去动它们。
-覆盖率随每次加测试变动，以 `cargo llvm-cov` 实跑为准，不把上一段的数字当判据。
+**CI 与本地现在是同一条硬判据**：v0.7.2 收尾时 `cov-gate` 曾带 step 级临时豁免，
+v0.7.3 补完测试后已删除；覆盖率失败即 `gate` job failure，下游产物 / 镜像 /
+Release 全部 skipped。命令文本 `--fail-under-lines 98` 与下游 `needs` 一律不动，
+那两处是 `scripts/check.sh` C7/C8 的解析锚点；`scripts/check.sh` 另断言
+`release.yml` 不再出现该豁免字段，防止非阻断逻辑回流。
 
 **钉死与浮动的分档**：`rust` / `node` 钉死（覆盖率门禁是精确比对，换一次编译器整表漂移；
 `clippy -D warnings` 也会因新版 lint 凭空变红，而没有人改过代码）。`bun` 跟 `latest`——
@@ -168,11 +165,9 @@ build-binaries（2 平台 musl 矩阵，**原生编译**，按 target 复用 Rus
 `mise.toml [tasks.ci]` 的**全部**门禁，所有产线 job 都 `needs` 它。清单只有一处（`mise.toml`），
 C7 双向比对产线的步骤名——不再存在「两份清单互相漂移」这件事。
 
-> **一个例外，写明白**：`cov-gate` 那一步是 `continue-on-error`，所以它红了不会拦发布。
-> 这与上面流程图里那句「红则下面全部不跑」冲突，**以本行为准**。理由是量级不同：其它门禁红
-> 代表代码坏了，98% 覆盖率红代表**存量**测试量不够（基线 96.88%），拿它卡住整版产物
-> 是把「待补测试」和「不可发布」混为一谈。代价是**覆盖率可以长期红着没人管**，
-> 所以它必须保持可见（run 页面上标红），不许顺手删掉这一步「让页面干净」。
+> **没有例外**：`cov-gate` 与其余门禁一样硬阻断。v0.7.3 删除了旧 step 级临时
+> 豁免，补测试到实跑 98.02%；覆盖率红时 `gate` job 判 failure，下面全部不跑。
+> `scripts/check.sh` 的 C11 护栏同时禁止该豁免字段回流。
 
 **`build-frontend` 是硬前置，不再重复构建**：dist 由 `gate-web` 的 `web-ci` 唯一一次产出并上传为
 `web-dist`；`gate-coverage`、`build-frontend`、`build-binaries` 都下载同一份 artifact。
@@ -356,7 +351,7 @@ macOS 上 **POSIX 权限位照常生效**（`0o600` / `0o700` 与 Linux 同义�
 | v0.7.0 ✅ 已完成 | **项目与绑定（+ 设备/agent 管理面扩展）** — **含「项目结构按新需求调整」** | **先做两件结构活**：①**crate 拆分**——`node-core` 拆出 `node-connector`（7 → 8 个 crate，纯搬家、单独一个提交，理由只此一条：v0.12.0 的按需加载必须靠 crate 边界）；②按项目主轴重排数据模型与模块分层——`schema` 增加 `project` / `task` / `execution` / `binding` 表与迁移脚本，`crates/` 与 `packages/web/src` 按新归属切分（会话挂到 Execution 下，不再是顶层）。**这是本里程碑的第一件事**，否则后面的项目实体只能挂在旧结构上，等于给会话再加一层壳。然后再做业务：项目实体三形态（中心式 / 隔离式 / 镜像式）；Hub 侧裸仓库（git CLI，藏在接口后）；Binding = `(project, device) → 固定目录`；设备侧 worktree 分任务 + 四层磁盘处置（`architecture/project-and-snapshot.md`）；前端新增 `projects` / `project` 路由，**项目页默认落在看板**。**v0.6.0 的 `base_commit` 概念在此落到 Task 上**：交接规则写死——`execution.base_commit` 是**唯一真相源**，会话上的 `base_rev` 降级为「会话第一段执行的起点快照」，只读、不再参与任何「相对它产出了什么」的计算（那套展示整体移到 Execution 上）。**不保留两份可写的起点**：同一个事实有两个写入口，迟早会出现「会话说基于 A、执行说基于 B」。**同时扩展设备页 / agent 页（不砍反扩）**：绑定关系（这台设备绑了哪些项目、绑在哪个固定目录）、磁盘配额与已用、失败归因（哪类失败集中在这台机器）、改配额与清理策略；agent 页加「该 agent 上跑过哪些任务 / 成功率」 | 项目实体、绑定与固定目录、设备管理、agent 管理 |
 | v0.7.1 ✅ 已完成 | **CI 镜像构建（发布通路）** | 从 v0.14.0 提前而来（用户 2026-11-05 裁定）。本地 `mise run ci` 全绿后打 tag `v0.7.1` 触发 CI，**CI 首验暴露出两个真缺陷**：门禁红时镜像照样发出去（两个 workflow 只共享触发、互不阻塞）、`windows-gnu` 条目编不出来（`node-connector` 的 `fork`/`exec`/PTY 模型是 Unix-only 实现，移植需先抽平台抽象层）。**前者最终以「删掉 `ci.yml`、门禁并入产线」处置**：`release.yml` 的 `gate` job 跑齐 `mise.toml [tasks.ci]` 的全部 7 项，所有产线 job 都 `needs: gate`，清单只剩一个真相源（C7 双向比对）；**后者按「本里程碑不做移植」移除目标**，排进 v0.7.2。4 个 Linux 目标均已真编通过（`aarch64-*` 由 CI 的 arm runner 原生真编，11 步全 success）。把 §2 的「发布」那一整段真正建起来：`gate` → `build-frontend`（bun `--frozen-lockfile` → build，dist 作为 artifact）**硬前置**于 `build-binaries`（4 目标**原生**矩阵：x86_64 / aarch64 × gnu / musl；windows-gnu 已移除，**v0.7.1 不做移植，不是永远不支持**——见同节「v0.7.1 不提供 Windows 目标」），再分发到三个消费者：`docker-hub`（`afhub` + `afcli`，前端**已在编译期嵌入**，镜像里不另放 dist）、`docker-node`（`afcli`，按 `TARGETARCH` 选二进制）、`release`（GitHub Release + `SHA256SUMS` + `CHANGELOG.md` + 从 CHANGELOG 抽 body，**附件只发 musl 干净名**且稳定版带 `--latest`）。镜像推 `ghcr.io/<owner>/agentfleet-hub` / `agentfleet-node`。**`build-frontend` 之所以是硬前置**：dist 缺失时 `build.rs` 只造占位页并打 warning，二进制照编——「Hub 打开是占位页」能不红任何一步地发出去，所以每个平台编之前都断言 `dist/index.html` 存在。**安全边界变更**：`afhub` 缺省仍只绑回环，新增 `AFHUB_ALLOW_NON_LOOPBACK=1` 供容器显式放开，**只认确切的 `1`**。设备侧安装多了从 Hub 自己下载 `afcli` 的入口（`GET /api/agent-binary` + 设备页按钮），内网/离线部署不必够 GitHub。版本号 `0.5.0` → `0.7.1`（tag 与二进制自报版本必须一致） | —（`DEVELOPMENT.md` §2.1 发布段） |
 | v0.7.2 ✅ 已完成 | **桌面平台支持（设备侧 afcli：Windows + macOS）** | **用户 2026-11-05 裁定**：插一个 v0.7.2 专做设备侧桌面平台移植（Windows + macOS，mac 为用户 2026-11-05 追加裁定），`v0.8.0` 骨架不动、顺延一位。**只做设备侧 `afcli`**，`afhub` 仍只发 Linux（自托管 Hub 一般跑在服务器/容器，Windows 不是主场景）。**改动面已核对**：`afcli` 的生产依赖链是 `node-cli` → `node-core` → `node-connector`，**不经过 `hub-storage`**；`libc` 附着点是 `node-connector` 的 `pty.rs`(27) / `exec.rs`(45) / `terminal.rs`(5) / `files.rs`(4) 与 `node-core/worker.rs`(5，疑为测试夹具)。**核心难点**：`exec.rs` 的「`fork` → 改 fd → `execvpe`」在 Windows 上没有对应物（**Windows 没有 `fork`**），要整体换成 `CreateProcess` + 句柄重定向；会话终端从 `forkpty`/`ioctl(TIOCSWINSZ)` 换成 ConPTY（`CreatePseudoConsole` / `ResizePseudoConsole`）。**不是「加个矩阵条目」的量级**——先抽平台无关的 PTY/进程后端，再写两个实现，且 Windows 分支在 Linux 上测不了，得要 Windows runner 真跑。CI 目标：`x86_64-pc-windows-msvc`（msvc 工具链）与 `aarch64-apple-darwin`（对齐 REX 用 `macos-latest`，Apple Silicon；**Intel runner 在退役时间表上，故 macOS 只发 arm64**）。macOS 是 Unix 系、移植量小，安排在 Windows 之前先做以验证抽象层。见 `.mdflow/milestones/v0.7.2-desktop-platforms.md`。**缺陷池 bug：2 个**（🟡 secret 加固、🟢 工作区同步兜底，planner 2026-11-05 原样搬入 Bugs 表；二者均为**未来补强项**、本期不做，已在 Bugs 表如实保留） | —（承接 v0.7.1 推迟的 `windows-gnu`） |
-| v0.7.3 🔄 当前 | **覆盖率补强 + 恢复覆盖率硬门禁（+ 修 Windows 真机测试挂死）** | **版本类型 `patch`**：不加功能，把 v0.7.2 留下的两笔债还掉。**用户 2026-11-06 裁定**：①**补测试到 98%**——实测行覆盖率 **96.89%**（875/28104 未覆盖），离 `cov-gate` 门槛差约 **+312 行**，盲区排序（未覆盖行）：`node-core/src/worker.rs` 114 行/92.09%、`node-core/src/agent/conversation.rs` 116 行/92.47%、`node-core/src/agent/acp.rs` 78 行/89.03%、`channel.rs` 32 行/96.91%、`connector/terminal.rs` 29 行/94.79%、`pty/unix.rs` 28 行/86.85%，`hub-server/src/routes/*` 各 5–26 行；②**删掉 CI 里覆盖率不足的非阻断逻辑**（`release.yml` 的 `cov-gate` 步骤级 `continue-on-error: true`，连同 `AGENTS.md:204`、`DEVELOPMENT.md` §「覆盖率口径」的非阻断措辞与 `CHANGELOG` 对应条目一并清除），98% 重新成为**真阻断**——门槛、命令文本、下游 `needs` 一律不动；③**修 Windows 真机测试挂死**：run `42235943792` 的 `test-desktop (x86_64-pc-windows-msvc)` 挂 **53m51s** 被取消，导致 `release` job 0 秒跳过、**v0.7.2 产物未发出**。日志证据（job `127959206324`，`running 132 tests` 之后）：`connector::exec_windows::tests` 6 条 **FAILED**（`a_command_produces_its_stdout` / `a_timeout_kills_the_child_and_reports_137` / `arguments_with_spaces_survive_the_command_line` / `stderr_stays_on_its_own_pipe` / `stdin_is_empty_so_reading_commands_do_not_hang` / `the_exit_code_comes_through`，唯一通过的是 `a_missing_program_reports_file_not_found_not_a_stale_error`），随后 `pty::windows::tests::a_conpty_runs_a_command_and_we_read_its_output` 打出 `CONPTY-MARKER`（`pty/windows.rs:568` / `:586`）**之后一行也没有**，直到 `##[error]The operation was canceled.`——**挂死点是这条 ConPTY 用例**，而 `exec_windows` 那 6 条是**并行批量 FAILED**（连一条成功用例都没打断读流），与「句柄继承 / 父进程退出」这一共同根因吻合，需一并定位。**子任务预估 5–6 个**：定位并修 Windows 测试挂死（`exec_windows` 6 红 + ConPTY 挂死，同一根因优先）、补 `node-core` 三处主盲区测试（`worker.rs` / `agent/conversation.rs` / `agent/acp.rs`）、补残余盲区（`channel.rs` / `terminal.rs` / `pty/unix.rs` / hub routes）、删除 `continue-on-error` 并同步 docs/`AGENTS.md`（含 `scripts/check.sh` 加一条护栏断言 CI 里不再出现该行）、给 `test-desktop` 加 `timeout-minutes` 兜底（挂死要**快速红**，不能靠 6 小时默认超时）。**发布方式**：v0.7.3 修完后重打 tag `v0.7.2` 或直接发 `v0.7.3`，开工时裁决；期间 v0.7.2 的 Release 为空、镜像已推但无 Release 附件 | —（工程补强，无新增 `PRODUCT.md` §6.1 能力项） |
+| v0.7.3 🔄 当前 | **覆盖率补强 + 恢复覆盖率硬门禁（+ 修 Windows 真机测试挂死）** | **版本类型 `patch`**：不加功能，把 v0.7.2 留下的两笔债还掉。①**补测试到 98%**：全量 `cov-gate` 实跑 `TOTAL ... 98.02%`（641 / 32348 行未覆盖），退出码 0；②**恢复硬门禁**：删除 `release.yml` 的 `cov-gate` step 级临时豁免并同步 `AGENTS.md` / `DEVELOPMENT.md` / `CHANGELOG.md`，`scripts/check.sh` 加 C11 护栏禁止该豁免字段回流；门槛、命令文本、下游 `needs` 一律不动；③**修 Windows 真机测试挂死**：`exec_windows` / `pty/windows` 改用 `PeekNamedPipe` 判匿名管道可读性，ConPTY 子进程保持标准句柄接法，给 `test-desktop` 加 `timeout-minutes` 兜底并收口 4 条 Unix-only 假 git 用例；最终判据仍是远端 `test-desktop (x86_64-pc-windows-msvc)` 的 `a_conpty_runs_a_command_and_we_read_its_output` 为 `ok`。**发布方式**：用户 2026-11-07 裁定发 `v0.7.3`，不 force-update 已发布的 `v0.7.2` tag；期间 v0.7.2 的 Release 为空、镜像已推但无 Release 附件 | —（工程补强，无新增 `PRODUCT.md` §6.1 能力项） |
 | v0.7.4 | **会话导入（外部 agent 历史会话 → 设备侧 CLI 导入 → 可继续对话）** | **用户 2026-11-05 裁定立项，2026-11-06 顺延**（原 `v0.7.3`，因插入覆盖率补强里程碑而后移一位）。方案已调研（2026-10-27 实测）：导入=**绑定非搬运**——Hub 建 session 预填 `acp_session_id`，设备走 `session/load` 让 agent 自己找回历史（实测跨进程记得）。L0+L1 只支持 opencode（唯一有 ACP 入口的 agent，`KNOWN_AGENTS` 表中唯一有 `acp_args`）；opencode 会话存于 `~/.local/share/opencode/opencode.db` 的 `session_v2` 表。改动面：1 个 Hub 端点 + 1 个 CLI 子命令 + 只读探测 DB；与 v0.7.2 无依赖。里程碑文档开工时再派生 | —（用户新需求） |
 | v0.8.0 | **任务与看板** | Task 六态 + Task:Execution = 1:N；`done_when` = `criteria` 判定码 + `description`（`DECISIONS.md` D23）；任务级约束与固定过滤顺序（① allowed_* ② 隔离策略 ③ 能力/负载）；失败八形态与重试矩阵（含 `superseded` / `disk_exhausted`）；**执行中改需求的三种处置**；看板六列 + 任务详情页；**看板过滤 / 搜索 / 批量操作**；**项目摘要四行（含管家总结落点）**；**失败面板与验收面板（唯一处置入口）**；**执行复盘（只读轨迹回放）**；**执行监控（`projects/:id/executions`，慢变摘要 + 按行订阅，不编百分比）**；**收件箱（待决策 / 动态两区 + 决策请求 TTL/降级/留痕）**；`disk_exhausted` 时**询问清理并说明清理什么（预演）**；**时间与成本统计（排队与执行分开记，token 拿不到标 unknown）**；执行间接力（缓存复用）；时间线作为第二视图。见 `architecture/task-model.md` | 任务看板、任务与执行、项目时间线、执行监控、执行复盘、收件箱、失败与验收 |
 | v0.9.0 | **管家** | 跑在 Hub 上的项目级 agent：接意图 / 建派任务 / 督进度 / 写总结；**技能集（`project.status` / `task.create` / `task.clarify` / `memory.*`），不写死意图分类**（D22）；两处记忆（库 `project_memory` + 仓库 `.afleet/MEMORY.md`）；**建议派活草稿箱（点下发才进看板）**；与调度器的接口（只提交 task，不指定设备）；决策请求与收件箱的接入。调度器侧补三层过滤（`architecture/scheduling.md` 按此改写）。见 `architecture/butler.md` | 管家 |

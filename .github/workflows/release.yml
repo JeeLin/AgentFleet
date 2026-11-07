@@ -8,8 +8,8 @@
 #
 # 代价如实记录：门禁红时不再有独立的 `CI` run 告诉你哪条挂了——只能看 `gate`
 # job 的步骤名（`cov-gate（mise run cov-gate）` 之类）。信息没丢，只是换了位置。
-# 唯一例外：`cov-gate` 那一步是 step 级 `continue-on-error`，失败只标红、不拦发布；
-# 本地 `mise run cov-gate` 仍是 ≥98% 硬判据，别把 CI 的「不拦」读成「门槛降了」。
+# `cov-gate` 与本地 `mise run cov-gate` 是同一条 ≥98% 硬判据：失败会让 gate job
+# 判 failure，下游产物 / 镜像 / Release 全部 skipped，没有例外。
 #
 # 工具链版本仍然只从 `mise.toml [tools]` 读：覆盖率数值跨工具链不可比，
 # 版本写两处迟早只改一处。
@@ -236,14 +236,9 @@ jobs:
       #
       # ⚠️ 已知代价，写在这里而不是藏着：98% 是**总量**判据，比原来的
       #「每条未覆盖行都要有理由」**更弱**。整块新增未测试代码可以靠既有
-      # 总量稀释掉。实测当前行覆盖率 96.88%（877/28104），本步骤现在就是
-      # 红的；它红是因为**存量**，不是本次改动引入。
-      #
-      # 失败不阻断发布：step 级 `continue-on-error`（不是 job 级——job 不判
-      # success 时下游纯 `needs` 照样全 skipped）。命令与 `needs` 都不动，
-      # 98% 判定照旧、run 页面照旧标红；要恢复硬阻塞删这一行即可。
+      # 总量稀释掉。v0.7.3 已补测试到实跑 98.02%，并撤掉 step 级临时豁免：
+      # 命令与 `needs` 都不动，覆盖率失败即阻断发布。
       - name: cov-gate（mise run cov-gate）
-        continue-on-error: true
         run: cargo llvm-cov --workspace --all-targets --summary-only --fail-under-lines 98
 
   gate-web:
