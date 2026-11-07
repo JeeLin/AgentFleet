@@ -37,8 +37,8 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, SetHandleInformation, ERROR_BROKEN_PIPE, HANDLE, HANDLE_FLAG_INHERIT,
-    WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, GetLastError, SetHandleInformation, ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED,
+    HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Storage::FileSystem::ReadFile;
 use windows_sys::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
@@ -100,10 +100,11 @@ fn raw(h: &OwnedHandle) -> HANDLE {
 /// `WaitForSingleObject` 会返回 `WAIT_FAILED`，于是「可读」永远判不出来
 /// （v0.7.2 的 6 条 exec 测试就是这么一起红的）。
 ///
-/// `PeekNamedPipe` 返回 FALSE 时按「暂不可读」处理：要么暂时没字节，要么
-/// 写端已关（后者由 `read_into` 的 `ReadFile` → `ERROR_BROKEN_PIPE` 判 EOF）。
-/// 两种情形都不该在这里猜，让调用方按既有路径收场。`timeout_ms` 参数保留
-/// 是为了不改调用点签名（探测本身零阻塞，等待由 `run()` 的轮询切片负责）。
+/// `PeekNamedPipe` 返回 FALSE 不等于「暂不可读」：匿名管道所有写端关闭时它
+/// 也会失败（`ERROR_BROKEN_PIPE` / `ERROR_PIPE_NOT_CONNECTED`）。这两类必须
+/// 判成可读，让 `read_into` 里的 `ReadFile` 拿到同一个错误码并摘掉读端；
+/// 否则 `any_open()` 永远为真，`run()` 会一路轮询到超时。`timeout_ms` 参数
+/// 保留是为了不改调用点签名（探测本身零阻塞，等待由 `run()` 负责）。
 fn wait_handle_readable(handle: HANDLE, _timeout_ms: u32) -> bool {
     let mut available: u32 = 0;
     let ok = unsafe {
@@ -116,7 +117,13 @@ fn wait_handle_readable(handle: HANDLE, _timeout_ms: u32) -> bool {
             ptr::null_mut(),
         )
     };
-    ok != 0 && available > 0
+    if ok != 0 {
+        return available > 0;
+    }
+    matches!(
+        unsafe { GetLastError() },
+        ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED
+    )
 }
 
 /// 建一根管道，**只有写端可继承**，返回 `(读端, 写端)`。

@@ -51,7 +51,9 @@
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::ptr;
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, S_OK};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED, HANDLE, S_OK,
+};
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_NONE;
 use windows_sys::Win32::System::Console::{
     ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
@@ -61,7 +63,7 @@ use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
     UpdateProcThreadAttribute, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
     LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-    STARTUPINFOEXW, STARTUPINFOW,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
 };
 
 use super::{Pty, PtyError, Size};
@@ -128,12 +130,33 @@ pub(super) struct WindowsPty {
 /// `CreatePseudoConsole` 失败时不会写它，成功时给一个非零的不透明值。
 const NO_CONPTY: HPCON = 0;
 
+/// 关 ConPTY 前最多花这么久排空输出（见 `close_conpty`）。
+const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+
 impl WindowsPty {
     fn close_conpty(&mut self) {
-        if self.conpty != NO_CONPTY {
-            unsafe { ClosePseudoConsole(self.conpty) };
-            self.conpty = NO_CONPTY;
+        if self.conpty == NO_CONPTY {
+            return;
         }
+        // **先排空输出，再 `ClosePseudoConsole`**。MSDN 对此有明确警告：输出
+        // 管道里还有没读走的字节时，conhost 的写端会阻塞，`ClosePseudoConsole`
+        // 跟着无限等下去——关一个终端面板就能把整个 node 带住。排空是**有上限**
+        // 的（`DRAIN_GRACE`），否则 `close` 会变成「读完整个输出流」。
+        let deadline = std::time::Instant::now() + DRAIN_GRACE;
+        let handle = self.output.as_raw_handle();
+        let mut buf = [0u8; 4096];
+        while std::time::Instant::now() < deadline {
+            if !wait_readable(handle, DRAIN_GRACE) {
+                break;
+            }
+            match read_handle(handle, &mut buf) {
+                // 0 = 对端关了（全部输出已读到）；错误同理，没有更多可排的。
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        unsafe { ClosePseudoConsole(self.conpty) };
+        self.conpty = NO_CONPTY;
     }
 }
 
@@ -226,6 +249,13 @@ pub(super) fn spawn(
 
     let mut si: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
     si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+    // `STARTF_USESTDHANDLES` + 三个 `hStd*` 留 NULL 是 **ConPTY 的硬要求**，
+    // 不是可选项：不带这个标志时 `CreateProcessW` 会把我们的 stdout/stderr
+    // 复制给子进程，于是 `cmd /c echo` 的输出直接进了 runner 的日志
+    // （v0.7.2 的 `CONPTY-MARKER` 就出现在 libtest 输出行尾），ConPTY 的
+    // `output.read` 永远读不到东西，用例挂到超时。带上标志且三端为 NULL，
+    // 子进程的标准句柄才会落到属性表挂上的伪终端。
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     si.lpAttributeList = attrs;
 
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
@@ -520,9 +550,13 @@ pub(crate) fn read_handle(handle: RawHandle, buf: &mut [u8]) -> Result<usize, Pt
 /// 的 20s deadline），语义与 Unix 侧「`poll` 说可读 → 读 → 0 字节即 EOF」
 /// 一致。
 ///
-/// `PeekNamedPipe` 返回 FALSE 时也返回 false：那可能是「暂时没字节」，也可能
-/// 是写端已关。后者由 `read_handle` 的 `ERROR_BROKEN_PIPE` /
-/// `ERROR_PIPE_NOT_CONNECTED` → `Ok(0)` 判 EOF，不在这里猜。
+/// `PeekNamedPipe` 返回 FALSE 时要分清两种情形：
+///
+/// - `ERROR_BROKEN_PIPE` / `ERROR_PIPE_NOT_CONNECTED`：**所有写端已关**。
+///   此时必须返回 true，让调用方去 `read_handle` 拿同一条错误并收敛成
+///   `Ok(0)`。若一律按「暂时没字节」处理，读线程会永远轮询下去——
+///   `any_open()` 不收敛、`Terminal` 的 `done` 永远不置位。
+/// - 其它：才是「暂时没字节」，按调用方的轮询节奏睡到下一个切片。
 pub(crate) fn wait_readable(handle: RawHandle, _budget: std::time::Duration) -> bool {
     let mut available: u32 = 0;
     let ok = unsafe {
@@ -535,7 +569,13 @@ pub(crate) fn wait_readable(handle: RawHandle, _budget: std::time::Duration) -> 
             ptr::null_mut(),
         )
     };
-    ok != 0 && available > 0
+    if ok != 0 {
+        return available > 0;
+    }
+    matches!(
+        unsafe { GetLastError() },
+        ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED
+    )
 }
 
 // ---------------------------------------------------------------------------
