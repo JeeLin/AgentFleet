@@ -83,8 +83,20 @@ mise run cli-log -- -n 50       # 看设备日志（一次性命令，不经 wat
 mise run build && mise run start
 
 # 设备接入（在设备上跑，不是 Hub 上）
-afcli run            # 前台阻塞；想脱离终端请用 systemd（见下）或 tmux
+afcli run            # 前台阻塞；supervisor 与 worker 的日志同时回显到控制台
+afcli run --foreground   # 同上：--foreground 只是把「前台」写明白的无操作别名
 ```
+
+`afcli run` **永远在前台**，不会 daemon 化：`--background` / `--daemon` 会直接报错并
+给出用法。要脱离终端请用 systemd（见下）、Docker 或 tmux。前台启动时 supervisor
+的日志行走 stdout、worker 的走 stderr，两者照常写进同一份日志文件（列首是 UTC
+`YYYY-MM-DD HH:MM:SS`），事后仍可用 `afcli log` 查。
+
+Hub 地址用环境变量 `AFCLI_HUB_URL` 给 `host:port` 即可，例如
+`AFCLI_HUB_URL=117.72.123.218:9002`；`afcli` 自动补成 `ws://117.72.123.218:9002/ws`。
+IPv6 写方括号（`[2001:db8::1]:9002`），需要自定义路径 / TLS 时仍可直接给完整
+`ws://` / `wss://` URL（旧配置继续可用）。空值或纯空白走本机缺省
+`ws://127.0.0.1:8080/ws`。
 
 ### 一键安装 `afcli`
 
@@ -105,7 +117,9 @@ Install `afcli` on Linux/macOS with the checksum-verified Release binary:
 
 `afcli run` 是**前台阻塞**的：supervisor 是一个无限 loop，进程自己不会 daemon 化
 （仓库里没有 setsid / nohup 路径，这是刻意的——见 `docs/DECISIONS.md` D1）。
-所以「开机自启 + 崩了自动拉起」交给 systemd，用仓库里的 unit 模板：
+敲 `--foreground` 是同一个前台路径（文档化的无操作别名），而 `--background` /
+`--daemon` 不受支持：它们会在 stderr 给出用法并失败退出，绝不会静默忽略后
+让设备随 SSH 断开。所以「开机自启 + 崩了自动拉起」交给 systemd，用仓库里的 unit 模板：
 
 ```bash
 sudo useradd --system --home /var/lib/agentfleet --create-home agentfleet
@@ -123,9 +137,18 @@ systemctl status afcli          # 崩了看 journalctl -u afcli -f
 或被打死），supervisor 内部的 `CrashStats` / `decide` 管的是**worker 生命周期**（worker 崩了
 怎么退避、什么时候判它是坏版本）。少任何一层都会留一个没人管的窗口。
 
-`AFCLI_HUB_URL` **必须显式给**：缺省是 `ws://127.0.0.1:8080/ws`，一台真设备给它等于
+`AFCLI_HUB_URL` **必须显式给**：写 Hub 的 `host:port`（如
+`AFCLI_HUB_URL=hub.example.com:9002`，自动补成 `ws://host:port/ws`）或完整
+`wss://` URL；缺省是 `ws://127.0.0.1:8080/ws`，一台真设备给它等于
 永远注册不上。同理 `AFCLI_DATA_DIR` 一旦定了就**不要改**——换了就等于换了一台设备
 （新 `node_id`、要重新 enroll）。
+
+> 换 Hub / Hub 重置数据库后，本地存的旧 `node_id` 可能被拒（`identity mismatch`）。
+> 此时 `afcli` 会在**同一个进程里**只丢掉这条过期的 Hub 绑定（`node_id` 与
+> `last_seen_gen`）、保留设备密钥对，退避后以同一把密钥重新 enroll 一次；
+> Hub 按指纹认出同一台设备并复用原 `node_id`，无需手工删 `identity.json`。
+> 其它拒绝理由不会触发自动 enroll。日志行首是 UTC 的
+> `YYYY-MM-DD HH:MM:SS`，`afcli log` 与前台控制台读到的都是同一份记录。
 
 首次启动 Hub 会在 stderr 打一行 setup token（同时写进 `<data>/setup-token.txt`，0600）。
 打开页面 → 用 token 完成首次 setup → 设密码 → 登录。**没有默认密码**。
@@ -136,7 +159,11 @@ systemctl status afcli          # 崩了看 journalctl -u afcli -f
 # Device: `mise run cli` starts afcli; its data dir is `data/node` (not the platform default)
 
 # Device as a service: `afcli run` blocks in the foreground and never daemonises,
-# so use the systemd unit in `deploy/afcli.service` (`Type=simple`, `Restart=always`)
+# so use the systemd unit in `deploy/afcli.service` (`Type=simple`, `Restart=always`).
+# `afcli run --foreground` is the same path (a documented no-op alias);
+# `--background` / `--daemon` are rejected on stderr with usage.
+# `AFCLI_HUB_URL=host:port` is enough (`ws://host:port/ws` is inferred);
+# full ws:// or wss:// URLs keep working unchanged.
 # See README above / the Chinese section for the install commands.
 ```
 

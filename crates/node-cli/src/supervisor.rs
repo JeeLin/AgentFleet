@@ -6,11 +6,12 @@
 //! 拆开的理由与 D2 一致：把 spawn / rename / 写状态内联进阻塞循环，
 //! 要覆盖它就只能真的删掉正在运行的二进制。
 
+use std::io::{Sink, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use node_core::entry::{self, ROLE_SUPERVISOR};
+use node_core::entry::{self, ConsoleEcho, ROLE_SUPERVISOR};
 use node_core::supervisor::{
     self, exit_code, CrashStats, Decision, ExitInfo, Inputs, EXIT_STORM_WINDOW_SECS,
 };
@@ -51,24 +52,19 @@ pub fn exit_code_of(status: &std::process::ExitStatus) -> i32 {
 
 /// 等子进程退出并折算成退出码。**`Err` 留给调用方决定怎么留痕**。
 ///
-/// ## 那条 `Err` 分支实际上不可达，这是**查过**的结论
+/// ## 那条 `Err` 分支怎么走得到
 ///
 /// `std::process::Child::wait` 的文档（`process.rs`，`Child::wait`）原文是
 /// 「This function will continue to have the same return value after it has
 /// been called at least once」——即**调用过一次之后，后续调用返回同一个值**，
-/// 而不是报错。所以「先 wait 一次、再 wait 一次拿 `ECHILD`」这种构造**不成立**：
-/// 实测第二次照样返回 `Ok`（一个正常 `exit 3` 的子进程，两次都是
-/// `Ok(code == 3)`），我原先写的那个用例就是红在这里。
+/// 而不是报错。所以「先 wait 一次、再 wait 一次拿 `ECHILD`」构造不出来；
+/// 子进程被信号杀死时也返回 `Ok`，只是 `status.code()` 为 `None`，走的是
+/// [`exit_code_of`]。
 ///
-/// 补一条：子进程被信号杀死时 `wait` 也返回 `Ok`，只是
-/// `status.code()` 为 `None`，走的是 [`exit_code_of`]。原先那条
-/// `coverage: excluded` 的理由（「需子进程被信号杀死后 `wait` 报错」）
-/// 因此是错的，但**结论（这条臂测不到）是对的**。
-///
-/// 于是这里不装作能测：保留 `Err` 分支作为兜底（`wait` 在 fd 被外部关掉等
-/// 极端情形下仍可能报错），但代价是它覆盖不到。与其为了凑覆盖率去 mock
-/// `std::process`，不如把这件事写在脸上——同时把**能测的那部分**（spawn
-/// 失败、以及 `exit_code_of` 的两条臂）都测掉。
+/// 能稳定走到的是另一种生产形态：父进程继承 `SIGCHLD=SIG_IGN` 时内核
+/// 自动回收子进程，`wait` 拿不到可回收的 pid，返回 `ECHILD`。改信号处置
+/// 是进程级的，所以下面 `a_wait_failure_counts_as_a_crash_and_says_so`
+/// 在专用子进程里做；那条用例覆盖 `Err` 分支和它留下的那行日志。
 fn wait_code(child: &mut std::process::Child) -> std::io::Result<i32> {
     child.wait().map(|status| exit_code_of(&status))
 }
@@ -119,36 +115,79 @@ pub fn record_exit(stats: &mut CrashStats, exit: &ExitInfo, since_prev: Option<D
 }
 
 /// supervisor 需要的全部东西。
-pub struct Supervisor {
+///
+/// `C` / `E` 是**用户正盯着的那块屏幕**（stdout / stderr）。前台启动时
+/// supervisor 的每一行日志都要同时回显到它们上面，否则 `afcli run` 看起来
+/// 就是「启动了却什么都不说」（用户反馈原话）。用 [`ConsoleEcho`] 包一层，
+/// 是因为 `write_console` 按值收 writer，而 `say` 在整个 `supervise` 循环里
+/// 会被反复调用——克隆出来的句柄都指向同一个 fd / 同一块缓冲。
+pub struct Supervisor<C: std::io::Write, E: std::io::Write> {
     /// 父进程 argv（不含程序名），原样传给 worker。
     argv: Vec<String>,
     data_dir: PathBuf,
     /// 被管理的二进制 = supervisor 自己（D2：supervisor 懒生效，
     /// 被换掉的文件下次被拉起时才生效）。
     exe: PathBuf,
+    console: ConsoleEcho<C>,
+    err: ConsoleEcho<E>,
 }
 
-impl Supervisor {
+impl<C: std::io::Write, E: std::io::Write> Supervisor<C, E> {
     /// 生产构造：被管理的二进制就是当前这个可执行文件。
     // 单元、覆盖率不计；单测入口是 `with_exe`。
-    pub fn new(argv: Vec<String>, data_dir: PathBuf) -> Self {
+    pub fn new(
+        argv: Vec<String>,
+        data_dir: PathBuf,
+        console: ConsoleEcho<C>,
+        err: ConsoleEcho<E>,
+    ) -> Self {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from(crate::BIN_NAME));
-        Self::with_exe(argv, data_dir, exe)
+        Self::with_exe_and_console(argv, data_dir, exe, console, err)
     }
 
-    /// 显式指定被管理的二进制。单测要对着临时目录里的假二进制做替换/回滚，
-    /// 不能拿测试进程自己当目标。
-    pub fn with_exe(argv: Vec<String>, data_dir: PathBuf, exe: PathBuf) -> Self {
+    /// 显式指定二进制**和**两块控制台。前台启动与「控制台要能看到日志」
+    /// 的用例走这里；`C` / `E` 允许是非 `'static` 的借用（`&mut Vec<u8>`），
+    /// 因为 supervisor 不跨线程持有它们。
+    pub fn with_exe_and_console(
+        argv: Vec<String>,
+        data_dir: PathBuf,
+        exe: PathBuf,
+        console: ConsoleEcho<C>,
+        err: ConsoleEcho<E>,
+    ) -> Self {
         Self {
             argv,
             data_dir,
             exe,
+            console,
+            err,
         }
     }
+}
 
+/// 单测入口：控制台输出丢进 `sink()`。
+///
+/// 单独一个 `impl Supervisor<Sink, Sink>` 而不是放在泛型 impl 里：
+/// `with_exe` 返回的是具体类型，泛型参数无从推断，测试里 `let sup = ...`
+/// 也就不需要写类型标注。
+impl Supervisor<Sink, Sink> {
+    /// 显式指定被管理的二进制。单测要对着临时目录里的假二进制做替换/回滚，
+    /// 不能拿测试进程自己当目标。
+    pub fn with_exe(argv: Vec<String>, data_dir: PathBuf, exe: PathBuf) -> Self {
+        Self::with_exe_and_console(
+            argv,
+            data_dir,
+            exe,
+            ConsoleEcho::new(std::io::sink()),
+            ConsoleEcho::new(std::io::sink()),
+        )
+    }
+}
+
+impl<C: std::io::Write, E: std::io::Write> Supervisor<C, E> {
     /// 阻塞循环：拉起 worker → 阻塞等它退出 → `decide` → 执行决策 → 再拉起。
     /// 返回进程退出码。
-    pub fn supervise<W: std::io::Write>(&self, mut out: W) -> std::process::ExitCode {
+    pub fn supervise(&self) -> std::process::ExitCode {
         self.rotate_log();
         self.say(&format!(
             "supervisor starting, argv: {}",
@@ -189,13 +228,11 @@ impl Supervisor {
                 } => {
                     self.say(&format!("{reason}; backing off {backoff_secs}s"));
                     std::thread::sleep(Duration::from_secs(backoff_secs));
-                    // coverage: excluded — 替换臂：`replace` 会真的 rename 运行中的二进制，
-                    // 破坏测试进程自身（同 :109）。
                 }
                 Decision::ReplaceAndSpawn { version, reason } => {
                     self.say(&format!("{reason}: target version {version}"));
-                    // coverage: excluded — 替换臂：`replace` 会真的 rename 运行中的
-                    // 二进制，破坏测试进程自身（同 :109）。
+                    // 失败臂用不可写的备份路径覆盖；成功臂会让循环继续
+                    // spawn 真二进制，因此由 `replace` 的直接单测钉住。
                     if let Err(e) = self.replace(state_ref, &version) {
                         // D2-④：替换失败即**放弃本次更新**，绝不带着半换好的
                         // 二进制继续 spawn——那正是「说一套做一套」的现场。
@@ -204,7 +241,8 @@ impl Supervisor {
                         return stopped();
                     }
                 }
-                // coverage: excluded — 回滚臂：`rollback` 同样要动二进制文件本身。
+                // 失败臂由 `a_failed_rollback_stops_the_supervisor` 覆盖；
+                // 成功臂会让循环继续 spawn，由 `rollback` 的直接单测钉住。
                 Decision::Rollback { reason } => {
                     self.say(&reason);
                     if let Err(e) = self.rollback(state_ref) {
@@ -222,7 +260,7 @@ impl Supervisor {
                     // 只见到进程平静地退出（码 20），不知道该动哪边。
                     // stdout 在 systemd 下进 journal，这条才是运维的第一落点。
                     drop(writeln!(
-                        out,
+                        self.console.clone(),
                         "afcli: stopping, human intervention required: {reason}\n\
                          afcli: the device will stay unreachable until it is fixed; \
                          see {}",
@@ -408,10 +446,21 @@ impl Supervisor {
         entry::rotate_at_startup(&self.data_dir, ROLE_SUPERVISOR);
     }
 
-    /// 一行日志。级别固定 `info`——决策与故障都值得进同一份文件，
-    /// 而 supervisor 的日志量本来就小（每次 worker 退出才一行）。
+    /// 一行日志：落**同一份文件**，同时回显到前台控制台。
+    ///
+    /// 级别固定 `info`——决策与故障都值得进同一份文件，而 supervisor 的
+    /// 日志量本来就小（每次 worker 退出才一行）。回显走 stdout：它是用户
+    /// 敲下 `afcli run` 时正盯着的那块屏幕，systemd 下会进 journal。
+    /// 文件里绝不出现两份（见 [`entry::write_console`]）。
     fn say(&self, msg: &str) {
-        entry::write(&self.data_dir, ROLE_SUPERVISOR, "info", msg);
+        entry::write_console(
+            &self.data_dir,
+            ROLE_SUPERVISOR,
+            "info",
+            msg,
+            self.console.clone(),
+            self.err.clone(),
+        );
     }
 }
 
@@ -444,7 +493,7 @@ mod tests {
         std::fs::write(d, b"not a dir").expect("blocker");
     }
 
-    fn sup(name: &str) -> (PathBuf, Supervisor) {
+    fn sup(name: &str) -> (PathBuf, Supervisor<Sink, Sink>) {
         let d = tmp(name);
         let exe = d.join("afcli");
         std::fs::write(&exe, b"#!/bin/true\n").expect("fake binary");
@@ -610,12 +659,17 @@ mod tests {
 
     /// 生产构造函数用的就是「当前可执行文件」：不替换测试进程自身，
     /// 只断言它把 argv / 数据目录原样记下来、exe 指向一个真实存在的路径。
-    /// `new` 在 `dispatch` 的 supervisor 分支里是唯一调用点。
+    /// `dispatch` 的生产路径（无测试注入的 exe）走的就是 `new`。
     #[test]
     fn new_manages_the_current_executable_and_keeps_the_argv() {
         let d = tmp("new");
         let argv = vec!["run".to_string(), "--hub".to_string()];
-        let s = Supervisor::new(argv.clone(), d.clone());
+        let s = Supervisor::new(
+            argv.clone(),
+            d.clone(),
+            ConsoleEcho::new(std::io::sink()),
+            ConsoleEcho::new(std::io::sink()),
+        );
         assert_eq!(s.argv, argv);
         assert_eq!(s.data_dir, d);
         assert!(
@@ -991,20 +1045,233 @@ mod tests {
         std::fs::write(d.join("afcli.bak"), b"old").expect("bak");
         s.persist_state(&st);
 
-        let mut out = Vec::new();
-        let code = s.supervise(&mut out);
+        let console = ConsoleEcho::new(Vec::<u8>::new());
+        let err = ConsoleEcho::new(Vec::<u8>::new());
+        // 换掉 `sup()` 给的 sink 句柄，把这块控制台接进来。
+        let s = Supervisor::with_exe_and_console(
+            s.argv.clone(),
+            d.clone(),
+            s.exe.clone(),
+            console.clone(),
+            err,
+        );
+        let code = s.supervise();
         assert_eq!(code, std::process::ExitCode::from(SUPERVISOR_STOPPED));
 
         // 停下来这件事**必须同时进 stdout**：只看终端的人见到的就是进程
         // 平静地退出（码 20），日志文件是第二落点而不是第一落点。
-        let stdout = String::from_utf8(out).expect("utf8");
+        let stdout = String::from_utf8(console.lock().clone()).expect("utf8");
         assert!(stdout.contains("human intervention required"), "{stdout}");
         assert!(stdout.contains("unreachable"), "{stdout}");
+        // `say` 的每一行也在这块 stdout 上——「前台不打日志」正是要修的事。
+        assert!(stdout.contains("[supervisor] info"), "{stdout}");
+        assert!(stdout.contains("stopping, human intervention"), "{stdout}");
 
         let log = std::fs::read_to_string(log::log_path(&d)).expect("log");
         assert!(log.contains("human intervention required"), "{log}");
         assert!(log.contains("unreachable"), "{log}");
         let (after, _) = update::read_state(&s.state_path());
         assert_eq!(after.expect("state").phase, UpdatePhase::Failed);
+    }
+
+    /// 把假的「被管理二进制」换成一个真的可执行脚本。
+    ///
+    /// `sup()` 给的是 `#!/bin/true` 但没有可执行位（spawn 必失败），
+    /// 要驱动 `supervise` 走完一轮循环就得让它真的跑起来再退出。
+    #[cfg(unix)]
+    fn install_script(exe: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(exe, body).expect("write script");
+        std::fs::set_permissions(exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    /// `Decision::Spawn` 不是「立刻拉起」：它先睡够退避再 spawn，然后把观测
+    /// 交给**下一轮**循环的 `pending` 分支（`record_exit` + 清空对账）。
+    ///
+    /// 一条用例同时钉住这两件事：第一轮的 `spawn` 臂、以及第二轮
+    /// `pending.take()` 拿到 `Some` 之后的记账。第二轮的退出码是 `exit(11)`
+    /// （这一版不健康）且没有任何备份可退，于是 `decide` 判 `Stop`——
+    /// `supervise` 自己停下来，不需要 kill，也不会挂住。
+    #[test]
+    #[cfg(unix)] // 用 `#!/bin/sh` 假 worker 驱动真循环
+    fn a_spawn_decision_sleeps_then_observes_the_worker_exit() {
+        let (d, s) = sup("spawn-loop");
+        install_script(&s.exe, "#!/bin/sh\nexit 11\n");
+
+        let console = ConsoleEcho::new(Vec::<u8>::new());
+        let s = Supervisor::with_exe_and_console(
+            s.argv.clone(),
+            d.clone(),
+            s.exe.clone(),
+            console.clone(),
+            ConsoleEcho::new(std::io::sink()),
+        );
+        let code = s.supervise();
+        assert_eq!(
+            code,
+            std::process::ExitCode::from(SUPERVISOR_STOPPED),
+            "exit(11) 且没有旧版可退时必须停下来等人"
+        );
+
+        // 停下来这句话必须进 stdout：终端上看到的就是它，日志是第二落点。
+        let stdout = String::from_utf8(console.lock().clone()).expect("utf8");
+        assert!(stdout.contains("human intervention required"), "{stdout}");
+
+        let logged = std::fs::read_to_string(log::log_path(&d)).expect("log");
+        assert!(
+            logged.contains("backing off 1s"),
+            "首轮 Spawn 必须说出退避多久，否则运维以为它立刻重启了：{logged}"
+        );
+        assert!(
+            logged.contains("worker exited with code 11"),
+            "第二轮的 Stop 理由要带上观测到的退出码：{logged}"
+        );
+    }
+
+    /// 替换失败即**放弃本次更新**（D2-④）：不许带着半换好的二进制继续 spawn。
+    ///
+    /// 造法：状态在途 + staged 在盘上 → `decide` 返回 `ReplaceAndSpawn`；
+    /// 但把备份路径指到一个普通文件下面，`replace` 的 `fs::copy` 必失败。
+    /// 断言的是「停下 + 账本记 `Failed` + 没有 spawn 过 worker」三件事——
+    /// 只断言退出码的话，一个「失败后照样 spawn」的实现也能骗过去。
+    #[test]
+    fn a_failed_replacement_stops_instead_of_spawning_a_worker() {
+        let (d, s) = sup("replace-loop");
+        let mut st = state_at(&d);
+        std::fs::write(d.join("afcli.new"), b"new").expect("staged");
+        // 备份写不进去：用一个普通文件当父目录。
+        st.backup_path = d.join("not-a-dir").join("afcli.bak").display().to_string();
+        std::fs::write(d.join("not-a-dir"), b"blocker").expect("blocker");
+        s.persist_state(&st);
+
+        let code = s.supervise();
+        assert_eq!(code, std::process::ExitCode::from(SUPERVISOR_STOPPED));
+
+        let logged = std::fs::read_to_string(log::log_path(&d)).expect("log");
+        assert!(
+            logged.contains("target version 9.9.9"),
+            "替换前要说清换到哪一版：{logged}"
+        );
+        assert!(
+            logged.contains("replacement to 9.9.9 failed"),
+            "替换失败必须留痕：{logged}"
+        );
+        assert!(
+            logged.contains("backup to"),
+            "要指出是备份那一步失败的：{logged}"
+        );
+        assert!(
+            !logged.contains("backing off"),
+            "替换失败后不许继续 spawn worker：{logged}"
+        );
+
+        let (after, _) = update::read_state(&s.state_path());
+        assert_eq!(
+            after.expect("state").phase,
+            UpdatePhase::Failed,
+            "放弃的更新必须在账本上留下 Failed"
+        );
+    }
+
+    /// 回滚本身失败 → 停下等人（**不能**假装回滚成功继续跑）。
+    ///
+    /// 造法：`Committed` 阶段 + 备份文件真的在盘上（所以「有 old 可退」成立），
+    /// 但把 `exe` 换成一个**目录**：`spawn` 必失败（记为崩溃），
+    /// 而 `rename(bak → 目录)` 也必失败——于是第二轮 `decide` 判 `Rollback`、
+    /// `rollback` 返回 `Err`，走到「回滚失败」那条臂。
+    #[test]
+    fn a_failed_rollback_stops_the_supervisor() {
+        let (d, s) = sup("rollback-loop");
+        let mut st = state_at(&d);
+        st.phase = UpdatePhase::Committed;
+        std::fs::write(d.join("afcli.bak"), b"old").expect("bak");
+        s.persist_state(&st);
+        // exe 变成目录：spawn 失败、rename 到它上面也失败。
+        std::fs::remove_file(&s.exe).expect("drop the fake binary");
+        std::fs::create_dir(&s.exe).expect("exe as a directory");
+
+        let code = s.supervise();
+        assert_eq!(code, std::process::ExitCode::from(SUPERVISOR_STOPPED));
+
+        let logged = std::fs::read_to_string(log::log_path(&d)).expect("log");
+        assert!(
+            logged.contains("cannot spawn worker"),
+            "拉不起来要留痕，否则看不出是崩溃还是回收失败：{logged}"
+        );
+        assert!(
+            logged.contains("rolling back"),
+            "有 old 可退时必须先尝试回滚：{logged}"
+        );
+        assert!(
+            logged.contains("rollback failed"),
+            "回滚失败必须留痕，否则设备会静默停在坏版本上：{logged}"
+        );
+    }
+
+    /// `wait_code` 的 `Err` 臂：`Child::wait` 报错时不能把 supervisor 带崩，
+    /// 而是按**崩溃**记账并留一行可搜的日志。
+    ///
+    /// 文档里说这条「实际上不可达」，理由是 `Child::wait` 二次调用返回同一个
+    /// `Ok`、被信号杀死也返回 `Ok`。那两条都对，但漏了第三种：**SIGCHLD 被
+    /// 设成 `SIG_IGN`** 时内核会自动回收子进程，`wait` 拿不到可回收的 pid，
+    /// 于是返回 `ECHILD`。这正是生产里「父进程继承了别人的 SIGCHLD 处置」的
+    /// 形态，所以它不是纯理论分支。
+    ///
+    /// 改信号处置是**进程级**的，本用例在子进程里做：父进程只 spawn 一次
+    /// 测试二进制并断言它退出 0，自己那条 `SIGCHLD` 处置一点不动。
+    #[test]
+    #[cfg(unix)] // 用 SIGCHLD=SIG_IGN 让内核抢走子进程的回收
+    fn a_wait_failure_counts_as_a_crash_and_says_so() {
+        let out = std::process::Command::new(std::env::current_exe().expect("test exe"))
+            .args([
+                "--exact",
+                "supervisor::tests::a_wait_failure_counts_as_a_crash_child",
+            ])
+            .env("AF_WAIT_ERR", "1")
+            .output()
+            .expect("spawn the child test process");
+        // 先解码再断言：`assert!` 的消息只在失败时求值，把两段解码放在
+        // 消息里会让它们在一条通过的测试里永远覆盖不到。
+        let child_stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let child_stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            out.status.success(),
+            "子进程必须绿，stdout：{child_stdout}，stderr：{child_stderr}"
+        );
+        // `--exact` 拼错名字时 libtest 会「跑了 0 条」并以 0 退出，
+        // 只看退出码会把一个什么都没测的子进程当成绿。
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("1 passed"),
+            "子进程必须真的跑完那条用例，实际 stdout：{stdout}"
+        );
+    }
+
+    /// 上一条的子进程本体。没有 `AF_WAIT_ERR` 时什么都不做（no-op，不是跳过）。
+    #[test]
+    #[cfg(unix)]
+    fn a_wait_failure_counts_as_a_crash_child() {
+        if std::env::var_os("AF_WAIT_ERR").is_none() {
+            return;
+        }
+        let (d, mut s) = sup("wait-err");
+        install_script(&s.exe, "#!/bin/sh\nexit 0\n");
+        s.argv = vec![];
+        // SAFETY: `signal` 只是把本进程对 SIGCHLD 的处置换成「忽略」，
+        // 不涉及任何内存或别名；本进程是这条用例专用的子进程，改完就退出。
+        let previous = unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
+        assert_ne!(
+            previous,
+            libc::SIG_ERR,
+            "装不上 SIGCHLD 处置，这条用例的前置条件就不成立"
+        );
+
+        let got = s.spawn_and_wait();
+        assert_eq!(got.code, exit_code::CRASH, "等不到退出码必须按崩溃处理");
+        let logged = std::fs::read_to_string(log::log_path(&d)).unwrap_or_default();
+        assert!(
+            logged.contains("cannot wait for worker"),
+            "必须留下可搜的痕迹，实际日志：{logged:?}"
+        );
     }
 }

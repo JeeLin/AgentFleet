@@ -20,9 +20,16 @@
 # 所以这里没有任何 `ports:`。绑在同一个 compose 文件里会把「Hub 与设备
 # 同机」变成看起来必需的前提，而它恰恰是产品要否掉的那个部署形态。
 #
-# 如果确实在同一台机器上做演示，`AFCLI_HUB_URL` 可以指向
-# `ws://host.docker.internal:8080/ws`（Linux 上需要
-# `extra_hosts: ["host.docker.internal:host-gateway"]`）。
+# 如果确实在同一台机器上做演示，`AFCLI_HUB_URL` 可以写成
+# `host.docker.internal:8080`（即 `ws://host.docker.internal:8080/ws`；
+# Linux 上需要 `extra_hosts: ["host.docker.internal:host-gateway"]`）。
+#
+# ## 前台 / 后台
+#
+# `afcli run` 永远前台阻塞、不 daemon 化；容器自己是「后台」，由
+# `restart: unless-stopped` 和 Docker 管进程存活。`--foreground` 是这个前台
+# 路径的无操作别名，`--background` / `--daemon` 会在 stderr 报用法后失败退出。
+# supervisor 的日志行回显到 stdout、worker 的到 stderr，docker logs 两边都能看到。
 services:
   node:
     image: ghcr.io/jeelin/agentfleet-node:latest
@@ -31,9 +38,13 @@ services:
     # 「进程没了要拉起来」这件事由 Docker 承担。
     restart: unless-stopped
     environment:
-      # **必填**。afcli 自己的缺省是 ws://127.0.0.1:8080/ws，在容器里
-      # 等于连自己、永远注册不上。改成你 Hub 的真实地址（有 TLS 就用 wss://）。
-      AFCLI_HUB_URL: "${AFCLI_HUB_URL:?必须给出 Hub 的 WebSocket 地址}"
+      # **必填**。只写 Hub 的 host:port 即可（自动补成 ws://host:port/ws）；
+      # 有 TLS 终止 / 自定义路径就给完整 URL，例如 wss://hub.example.com/ws。
+      # afcli 自己的缺省是 ws://127.0.0.1:8080/ws，在容器里等于连自己、
+      # 永远注册不上。裸 IPv6 要方括号：[2001:db8::1]:9002。
+      # 换 Hub 后本地旧 node_id 被拒（identity mismatch）时，afcli 会保留
+      # 密钥对、丢掉旧绑定并用同一把密钥自动重新 enroll，不用删卷。
+      AFCLI_HUB_URL: "${AFCLI_HUB_URL:?必须给出 Hub 的 host:port 或完整 WebSocket 地址}"
     volumes:
       # **不要删这个卷**：里面是设备私钥。删了 = 换一台设备，
       # 旧设备的会话全部挂在「已移除的设备」上，且无法恢复身份。

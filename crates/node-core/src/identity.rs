@@ -17,7 +17,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 #[cfg(unix)]
-#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -259,6 +258,38 @@ impl Identity {
     pub fn mark_superseded(&mut self, at: &str) -> Result<(), IdentityError> {
         self.update(|id| {
             id.superseded_at = Some(at.to_string());
+            true
+        })
+    }
+
+    /// 丢掉**这台 Hub 的绑定**，但**留住密钥对**。
+    ///
+    /// 用于 `identity mismatch` 的自愈（BUGS：连接远端 Hub 报 identity mismatch
+    /// 后设备不可达）：Hub 对「不认识的 node_id / 指纹对不上 / 签名不对」一律回
+    /// `identity mismatch`，而设备侧原来的反应是把它当终态停下——于是设备永久
+    /// 不可达，只能人工删 `identity.json`（那会连密钥一起丢掉，等于换一台设备）。
+    ///
+    /// 清掉的是**绑定**，不是身份：
+    /// - `node_id` → `None`：下次连接走 enroll 形态，Hub 按指纹认出同一台设备，
+    ///   `AlreadyRegistered` 时复用原来的 `node_id`（`hub-server/src/routes/ws.rs`
+    ///   的 `finish_enroll`）；
+    /// - `last_seen_gen` → `None`：那个数只对**旧 node_id 的那条连接**有意义，
+    ///   留着它去 enroll 一个新 node_id 只会让 Hub 的顶替兜底拿一个无关的数判据。
+    ///
+    /// **故意不动**的字段：
+    /// - 密钥对（`public_key` / `private_key_pkcs8_b64`）——换了就是换设备，
+    ///   Hub 侧会多出一行，旧设备的会话全部挂在已消失的设备上；
+    /// - `superseded_at`——那是**另一条**终态（同 node_id 有活连接），
+    ///   与 identity mismatch 是两件事，在这里顺手清掉等于绕过 §7.1 的裁决。
+    pub fn clear_hub_binding(&mut self) -> Result<(), IdentityError> {
+        self.update(|id| {
+            // 两样都已经是空的时候不写盘：SD 卡上的设备不该为一次「没什么可清」
+            // 白挨一次原子写（`record_gen` 的同一取向）。
+            if id.node_id.is_none() && id.last_seen_gen.is_none() {
+                return false;
+            }
+            id.node_id = None;
+            id.last_seen_gen = None;
             true
         })
     }
@@ -793,5 +824,79 @@ mod tests {
         assert_ne!(after_first, after_second);
         // 两次都是完整 JSON
         serde_json::from_str::<serde_json::Value>(&after_second).unwrap();
+    }
+
+    /// `identity mismatch` 的自愈只丢掉**Hub 绑定**（`node_id` + `last_seen_gen`），
+    /// 密钥对必须逐字节保留——换了密钥就是换一台设备，Hub 侧会多出一行，
+    /// 旧设备的会话全部挂在已消失的设备上。
+    #[test]
+    fn clearing_the_hub_binding_keeps_the_key_pair() {
+        let d = tmpdir();
+        let mut id = Identity::load_or_create(d.path()).unwrap();
+        id.set_node_id("n_stale").unwrap();
+        id.record_gen(42).unwrap();
+        let before = id.public_key_b64();
+        let pkcs8 = identity::base64url(&id.key().to_pkcs8_der());
+
+        id.clear_hub_binding().unwrap();
+
+        assert_eq!(id.node_id(), None, "清完之后要能重新 enroll");
+        assert_eq!(id.last_seen_gen(), None, "gen 只对旧的 node_id 有意义");
+        // 密钥对不变：这一条是「不是换设备」的全部含义。
+        assert_eq!(id.public_key_b64(), before, "公钥必须原样保留");
+        let reread = Identity::load(id.path()).unwrap();
+        assert_eq!(reread.public_key_b64(), before, "落盘的公钥也要原样");
+        assert_eq!(identity::base64url(&reread.key().to_pkcs8_der()), pkcs8);
+        // enroll 会复用它，所以必须仍在盘上、且能过 `load` 的公私钥一致性校验。
+        assert_eq!(reread.node_id(), None);
+    }
+
+    /// 清绑定**不碰** `superseded_at`：那是另一条终态（同 node_id 有活连接），
+    /// 顺手清掉等于绕过 §7.1 的裁决，设备会去和活连接互抢。
+    #[test]
+    fn clearing_the_hub_binding_leaves_the_superseded_mark_alone() {
+        let d = tmpdir();
+        let mut id = Identity::load_or_create(d.path()).unwrap();
+        id.set_node_id("n_stale").unwrap();
+        id.mark_superseded("1700000000").unwrap();
+
+        id.clear_hub_binding().unwrap();
+
+        assert_eq!(id.node_id(), None);
+        assert!(
+            id.is_superseded(),
+            "被顶替是另一件事，清绑定不许把它一起清掉"
+        );
+    }
+
+    /// 没什么可清时不写盘：SD 卡上的设备不该为一次空操作白挨一次原子写。
+    #[test]
+    fn clearing_an_already_clear_binding_does_not_touch_the_file() {
+        let d = tmpdir();
+        let mut id = Identity::load_or_create(d.path()).unwrap();
+        let before = std::fs::read(id.path()).unwrap();
+        let before_mtime = std::fs::metadata(id.path()).unwrap().modified().unwrap();
+
+        id.clear_hub_binding().unwrap();
+
+        assert_eq!(std::fs::read(id.path()).unwrap(), before, "内容不该变");
+        assert_eq!(
+            std::fs::metadata(id.path()).unwrap().modified().unwrap(),
+            before_mtime,
+            "连 mtime 都不该动"
+        );
+    }
+
+    /// 读坏的身份文件必须**报错**而不是当空身份写回去——那等于把设备改成
+    /// 「没注册过」并把密钥一起抹掉。四个写入口共用同一条契约。
+    #[test]
+    fn clearing_a_binding_on_a_corrupt_file_is_an_error() {
+        let d = tmpdir();
+        let mut id = Identity::load_or_create(d.path()).unwrap();
+        std::fs::write(id.path(), "{ not json").unwrap();
+        let e = id.clear_hub_binding().unwrap_err();
+        assert!(matches!(e, IdentityError::Corrupt { .. }), "got {e:?}");
+        // 坏文件原样留着，没有被打扮成一份「干净的」身份。
+        assert_eq!(std::fs::read_to_string(id.path()).unwrap(), "{ not json");
     }
 }

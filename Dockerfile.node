@@ -17,7 +17,9 @@
 # systemd 管进程存活）。容器部署把这两件事交给 Docker：`afcli run` 仍是前台
 # 无限 loop，容器的 1 号进程就是它，`docker stop` 的 SIGTERM 直接到达——
 # 语义一致，不需要额外改写。`--restart unless-stopped` 对应 unit 里的
-# `Restart=always`。
+# `Restart=always`。`CMD ["run", "--foreground"]` 与 `CMD ["run"]` 完全等价
+# （无操作别名）；`--background` / `--daemon` 会在 stderr 报用法后失败退出。
+# 前台日志同时回显：supervisor 走 stdout、worker 走 stderr，`docker logs` 都能看到。
 ARG VERSION=dev
 
 FROM scratch
@@ -39,7 +41,11 @@ ENV AFCLI_DATA_DIR=/data
 # Hub 地址**故意不给缺省值**：`afcli` 自己的缺省是 `ws://127.0.0.1:8080/ws`，
 # 在容器里那等于连自己、永远注册不上。给一个看起来像配好了的缺省值比不给更糟，
 # 所以这里留空，由 `docker run -e` / compose 显式给。
-# ENV AFCLI_HUB_URL=wss://hub.example.com/ws
+# 只写 host:port 即可（`afcli` 补 `ws://` 与 `/ws`）：
+#   docker run -e AFCLI_HUB_URL=hub.example.com:9002 ...
+# 完整 URL 继续照原样用（TLS 终止 / 自定义路径）：
+#   docker run -e AFCLI_HUB_URL=wss://hub.example.com/ws ...
+# ENV AFCLI_HUB_URL=hub.example.com:9002
 
 # 数字 uid：scratch 里没有 /etc/passwd。
 USER 65532:65532

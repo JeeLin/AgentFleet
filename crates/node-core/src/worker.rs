@@ -100,8 +100,34 @@ pub struct Worker {
 const PUMP_INTERVAL: Duration = Duration::from_millis(30);
 
 impl Worker {
+    /// 生产构造（不含控制台回显）：测试与嵌入方用这个，日志只进文件。
     pub fn new(data_dir: PathBuf, hub_url: String) -> Self {
         let log = log_to(&data_dir);
+        Self {
+            data_dir: data_dir.clone(),
+            hub_url,
+            log: Box::new(log),
+            detected: crate::agent::Detected::new(),
+            conversations: std::sync::Arc::new(crate::agent::Conversations::new()),
+        }
+    }
+
+    /// **前台启动用的构造**：日志除了落盘，还逐行回显到 `err`（进程 stderr）。
+    ///
+    /// 用户反馈的原话是「前台启动时控制台不打日志」——supervisor 与 worker
+    /// 两边都只写文件，于是敲下 `afcli run` 的人盯着一块空白终端。
+    /// worker 是 supervisor 拉起的子进程，stdout/stderr 被继承，所以这里
+    /// 回显到 stderr 后，前台那块屏幕上能看到 supervisor 与 worker 的全部
+    /// 记录；`afcli run | tee run.log` 也只拿到 stdout 的 supervisor 层，
+    /// 不把逐帧的 worker 诊断混进管道。
+    ///
+    /// `ConsoleEcho` 是 `Send + Sync`：日志钩子是 `Box<dyn Fn(&str) + Send + Sync>`，
+    /// 要跨 Tokio 的多线程 runtime 调用。
+    pub fn with_console_err<E>(data_dir: PathBuf, hub_url: String, err: E) -> Self
+    where
+        E: std::io::Write + Send + Sync + 'static,
+    {
+        let log = log_to_console(&data_dir, err);
         Self {
             data_dir: data_dir.clone(),
             hub_url,
@@ -195,6 +221,18 @@ impl Worker {
         // 「Hub 还没设密码」的指引**一个进程只说一次**：它是同一件事，
         // 反复刷屏只会把真正要看的那一行淹掉。
         let mut setup_notice_shown = false;
+        // 一个进程只丢一次 Hub 绑定（BUGS：identity mismatch 后设备不可达）。
+        //
+        // **必须是一次性的**：清完之后 `node_id` 已是 `None`，enroll 若仍被拒，
+        // 说明密钥本身不被接受——那时再清什么也没用，只能停下来等人
+        // （否则就是无限 enroll 撞墙、把 SD 卡刷满日志）。
+        // 这个标志是第三条防线：即便调用方把 `node_id` 传了进来、判定函数
+        // 也说了「该清」，同一个进程里也只清一次。
+        let mut stale_binding_cleared = false;
+        // 当前的连接形态。`identity` 才是权威来源，但 `connect_loop` 的入口参数
+        // 是调用方给的快照；清绑定之后**必须在同一个进程里**接着用 `None`
+        // 重试，否则「清完就退出、等 supervisor 重拉」的观感与原来一样。
+        let mut enrolled_node_id: Option<String> = node_id.map(str::to_string);
         loop {
             // 带上本节点见过的最大 gen。它是 §7.1 兜底路径的输入：
             // Hub 见它落后就回 `auth_fail{superseded}` 而不接管，
@@ -202,7 +240,7 @@ impl Worker {
             let outcome = conn::connect_once(
                 &self.hub_url,
                 identity.key(),
-                node_id,
+                enrolled_node_id.as_deref(),
                 identity.last_seen_gen(),
                 device_info(),
             )
@@ -214,6 +252,12 @@ impl Worker {
                     // 认证成功过 = Hub 那边已经初始化过了：指引重新变成
                     // 「有可能再遇到」，于是下一次再说一遍。
                     setup_notice_shown = false;
+                    // enroll 成功（`est.enrolled`）时 `run_established` 会把新
+                    // `node_id` 回填进身份文件，这里同步一下重连形态，
+                    // 否则下一条连接会继续以 enroll 形态上去（每次都重新 enroll）。
+                    if est.enrolled {
+                        enrolled_node_id = Some(est.auth_ok.node_id.clone());
+                    }
                     match self.run_established(identity, est).await {
                         Ok(end) => end,
                         // 本进程要走了（CRASH）：它起的 ACP 子进程没人接手就是孤儿，
@@ -229,6 +273,52 @@ impl Worker {
                     if !setup_notice_shown && is_hub_not_initialized(&outcome) {
                         setup_notice_shown = true;
                         drop(writeln!(out, "{SETUP_GUIDANCE}"));
+                    }
+                    // **自愈：本地存的 `node_id` 对面不认了。**
+                    //
+                    // 排在 `retry_after` 之前是刻意的：`retry_after` 把
+                    // `Rejected` 判成终态（Hub 的明确裁决，重试一万次结果一样），
+                    // 而这一条恰恰是「重试可以不一样」的那个例外——把过期的
+                    // `node_id` 丢掉、以**同一对密钥**重新 enroll，Hub 按指纹
+                    // 认出同一台设备（`finish_enroll` 的 `AlreadyRegistered`
+                    // 复用原 `node_id`），于是设备不需要人工删身份文件就能回到线上。
+                    //
+                    // 不改 `reconnect::retry_after` 的语义：它的「终态」判断对
+                    // 「同一形态再试」仍然成立，自愈是**换了形态**再试一次。
+                    if can_retry_as_enroll(&outcome, enrolled_node_id.as_deref())
+                        && !stale_binding_cleared
+                    {
+                        stale_binding_cleared = true;
+                        match identity.clear_hub_binding() {
+                            Ok(()) => {
+                                self.say(
+                                    "hub does not know this node_id any more; dropped the stale \
+                                     hub binding (the device key pair is kept) and retrying as a \
+                                     fresh enrollment with the same device key",
+                                );
+                                enrolled_node_id = None;
+                                attempt = attempt.saturating_add(1);
+                                let d =
+                                    reconnect::backoff_with_jitter(attempt, reconnect::jitter());
+                                self.say(&format!(
+                                    "re-enrolling with the same device key in {}s (attempt {attempt})",
+                                    d.as_secs()
+                                ));
+                                tokio::time::sleep(d).await;
+                                continue;
+                            }
+                            // 清不掉（身份文件坏了 / 盘满了）：**不能**假装清成功。
+                            // 以旧 `node_id` 继续重试只会重复同一条拒绝，所以按
+                            // 终态处理，并说清是「哪一步没做成」。
+                            Err(e) => {
+                                self.say(&format!("error: cannot drop the stale hub binding: {e}"));
+                                self.say(&format!(
+                                    "disconnected ({}); stopping for a human",
+                                    outcome_phrase(&outcome)
+                                ));
+                                return 0;
+                            }
+                        }
                     }
                     match reconnect::retry_after(&outcome, attempt, reconnect::jitter()) {
                         Some(d) => {
@@ -757,6 +847,31 @@ fn log_to(data_dir: &Path) -> impl Fn(&str) + Send + Sync + 'static {
     move |msg: &str| entry::write(&d, entry::ROLE_WORKER, "info", msg)
 }
 
+/// 前台启动的日志落点：**同一个文件 + stderr 回显**（见
+/// [`Worker::with_console_err`]）。
+///
+/// `write_console` 按角色分落点：worker 走 `err`，所以 `console` 传一个
+/// `sink()` 即可；文件里仍然只有一份，格式与 `log_to` 完全一致。
+/// `ConsoleEcho` 每次克隆都指向同一个 writer，于是多行日志不会各自开一个
+/// stderr 句柄、也不会互相截断。
+fn log_to_console<E>(data_dir: &Path, err: E) -> impl Fn(&str) + Send + Sync + 'static
+where
+    E: std::io::Write + Send + Sync + 'static,
+{
+    let d = data_dir.to_path_buf();
+    let echo = entry::ConsoleEcho::new(err);
+    move |msg: &str| {
+        entry::write_console(
+            &d,
+            entry::ROLE_WORKER,
+            "info",
+            msg,
+            std::io::sink(),
+            echo.clone(),
+        )
+    }
+}
+
 /// enroll 成功后把 Hub 签发的 `node_id` 回填进身份文件。
 ///
 /// **只写盘、不改内存**：`Identity::node_id()` 的来源本来就是磁盘，同步一次
@@ -816,6 +931,36 @@ fn is_hub_not_initialized(outcome: &ConnOutcome) -> bool {
         outcome,
         ConnOutcome::Rejected { reason } if reason == protocol::message::reason::HUB_NOT_INITIALIZED
     )
+}
+
+/// 这次失败是不是「Hub 说这个身份对不上」——纯判据，不含任何状态。
+///
+/// **单独一个函数而不是内联比较**：`connect_loop` 要拿它决定「该不该丢掉
+/// 本地存的 Hub 绑定、以同一对密钥重新 enroll」，而这个判据在别处（测试、
+/// 排障文档）也要能被单独引用。它只看 `ConnOutcome`：调用方还要自己确认
+/// **本地确实存着 `node_id`**（见 [`can_retry_as_enroll`]）。
+///
+/// 只认 `auth_fail{identity mismatch}` 这一个固定短语（`protocol::message::reason`）：
+/// `Superseded` 是另一条终态（§7.1），`hub not initialized` 有专门的退避重试，
+/// 其它 `Rejected`（指纹冲突 / 并发竞争）指向的都不是「node_id 过期」。
+/// 让这些理由也触发 enroll 只会把一件本来能自愈的事变成一次多余的注册。
+pub fn should_clear_stale_hub_binding(outcome: &ConnOutcome) -> bool {
+    matches!(
+        outcome,
+        ConnOutcome::Rejected { reason } if reason == protocol::message::reason::IDENTITY_MISMATCH
+    )
+}
+
+/// 「还能不能靠重新 enroll 自愈」＝ Hub 说身份对不上 **且** 本地确实存着绑定。
+///
+/// `node_id` 为 `None` 时本来就是 enroll 形态，Hub 却仍回 identity mismatch
+/// ——那说明**密钥本身**不被接受（签名 / 载荷畸形）。这时清「已经空着的
+/// 绑定」什么也没解决，只会变成无限 enroll 撞墙。所以 `node_id.is_some()`
+/// 是必要条件，把「清理之后再失败」挡在门外。
+///
+/// 纯函数：不读盘、不连网，判定本身可以被单测钉死。
+fn can_retry_as_enroll(outcome: &ConnOutcome, node_id: Option<&str>) -> bool {
+    node_id.is_some() && should_clear_stale_hub_binding(outcome)
 }
 
 /// enroll 时上传的设备描述。
@@ -1195,6 +1340,60 @@ mod tests {
         }})
     }
 
+    /// **identity mismatch 自愈的假 Hub**：第一条连接（带旧 `node_id` 的重连
+    /// 形态）拒掉，第二条连接（清了绑定之后的 enroll 形态）放行。
+    ///
+    /// 判据不只「第二条连上了」：还要记下**第一条的 auth 帧里有没有
+    /// `node_id`、第二条有没有**，否则「两条都走 enroll」的实现也会看起来
+    /// 连上了，而那不是「丢掉旧绑定」而是「从来没用旧绑定」。
+    /// 记录 `device_info`（enroll 形态独有）与 `signature`（两种都有）。
+    fn fake_hub_reject_then_reenroll() -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        std_listener.set_nonblocking(true).expect("nonblocking");
+        let addr = std_listener.local_addr().expect("addr");
+        let listener = tokio::net::TcpListener::from_std(std_listener).expect("listener");
+        let authes: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let authes_bg = Arc::clone(&authes);
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            rt.block_on(async move {
+                for i in 0..2 {
+                    let Ok((stream, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                        return;
+                    };
+                    let _ = ws.next().await; // hello
+                    let _ = send(&mut ws, challenge()).await;
+                    let Some(Ok(msg)) = ws.next().await else {
+                        return;
+                    };
+                    let text = msg.into_text().unwrap_or_default();
+                    if let Ok(frame) = serde_json::from_str::<serde_json::Value>(&text) {
+                        authes_bg
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(frame["c"].clone());
+                    }
+                    if i == 0 {
+                        let _ = send(&mut ws, auth_fail()).await;
+                        let _ = ws.next().await;
+                    } else {
+                        let _ = send(&mut ws, auth_ok()).await;
+                        // 保持连接，否则 worker 立刻进重连循环，日志里会多出
+                        // 一串与本用例无关的 "reconnecting"。
+                        futures_util::future::pending::<()>().await;
+                    }
+                }
+            });
+        });
+        (format!("ws://{addr}/ws"), authes)
+    }
+
     fn superseded() -> serde_json::Value {
         serde_json::json!({"v":1,"seq":3,"t":"disconnect","c":{"reason":"superseded","gen":2}})
     }
@@ -1311,6 +1510,93 @@ mod tests {
         assert_eq!(code, 0, "被拒绝是终态，但退出码是「正常退出」");
         let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
         assert!(log.contains("hub refused"), "{log}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **identity mismatch 的自愈**（BUGS：连接远端 Hub 报 identity mismatch
+    /// 后设备不可达）：本地带着一个对面不认的 `node_id` 去连，Hub 回
+    /// `identity mismatch`；设备必须**在同一个 worker 进程里**丢掉旧绑定、
+    /// 保留密钥对、退避后以 enroll 形态重试一次，而不是退出 0 让 supervisor
+    /// 反复重拉直至「退出风暴」停下来等人。
+    ///
+    /// 判据分四层，缺一层都会放过一种假的「修好了」：
+    /// ① 第一条 auth 帧带旧 `node_id`（重连形态），第二条不带（enroll 形态）；
+    /// ② 第二条带 `device_info`，即真走了 enroll 而不是又换了个 node_id；
+    /// ③ 密钥对逐字节未变（不是换了一台设备）；
+    /// ④ 日志明确写了「清掉了旧绑定、以同一把设备密钥重新 enroll」，
+    ///    且没有「停下来等人」那句。
+    #[tokio::test]
+    async fn a_stale_node_id_is_dropped_and_retried_as_enroll_in_the_same_process() {
+        let (d, _w) = worker("reenroll");
+        let (url, authes) = fake_hub_reject_then_reenroll();
+        let mut w = Worker::new(d.clone(), url);
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        id.set_node_id("n_stale_from_another_hub").expect("node id");
+        id.record_gen(7).expect("gen");
+        let pub_before = id.public_key_b64();
+        let pkcs8_before = identity::base64url(&id.key().to_pkcs8_der());
+
+        let mut out: Vec<u8> = Vec::new();
+        // 第二条连接被夹具**挂着不关**，所以 connect_loop 不会自己返回；
+        // 超时到点就是「重试成功并停在会话里」，而 `code` 为 Ok(0) 则是
+        // 旧行为（identity mismatch → 终态退出）的直接证据。
+        let code = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            w.connect_loop(&mut id, Some("n_stale_from_another_hub"), &mut out),
+        )
+        .await;
+        assert!(
+            code.is_err(),
+            "清掉旧绑定后必须在同一进程里继续跑，而不是退出 0 等 supervisor 重拉"
+        );
+
+        let seen = authes.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(seen.len(), 2, "应当正好两次握手：{seen:?}");
+        assert_eq!(
+            seen[0]["node_id"],
+            serde_json::json!("n_stale_from_another_hub"),
+            "第一条得用本地存着的旧 node_id 去连，否则「stale」这件事没发生：{seen:?}"
+        );
+        assert!(
+            seen[0]["device_info"].is_null(),
+            "重连形态不该上传 device_info：{seen:?}"
+        );
+        assert!(
+            seen[1]["node_id"].is_null(),
+            "第二条必须是 enroll 形态（没有 node_id）：{seen:?}"
+        );
+        assert!(
+            !seen[1]["device_info"].is_null(),
+            "第二条必须真的上传 enroll 载荷：{seen:?}"
+        );
+
+        // 密钥对没换：这是「同一台设备、只是清了 Hub 绑定」的全部含义。
+        assert_eq!(id.public_key_b64(), pub_before);
+        assert_eq!(
+            identity::base64url(&id.key().to_pkcs8_der()),
+            pkcs8_before,
+            "不许为一次重连换密钥"
+        );
+        let reread = Identity::load_or_create(&d).expect("reread");
+        assert_eq!(reread.public_key_b64(), pub_before, "落盘的公钥也要原样");
+        // `record_gen` 是「只前进不回退」：新连接是 gen=1，而清绑定之前
+        // 存的是 7。若清绑定漏掉了 `last_seen_gen`，这里会仍是 Some(7)
+        // ——所以断言 Some(1) 同时钉住了「旧 gen 被丢掉」和「新 gen 已记账」。
+        assert_eq!(reread.last_seen_gen(), Some(1), "{reread:?}");
+        assert_eq!(
+            reread.node_id().as_deref(),
+            Some("n_x"),
+            "enroll 成功后必须把 Hub 签发的 node_id 回填"
+        );
+
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
+        assert!(log.contains("dropped the stale hub binding"), "{log}");
+        assert!(log.contains("same device key"), "{log}");
+        assert!(log.contains("re-enrolling"), "{log}");
+        assert!(
+            !log.contains("stopping for a human"),
+            "不该再按终态停下：{log}"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1996,6 +2282,100 @@ mod tests {
         assert!(!is_hub_not_initialized(&ConnOutcome::Transport {
             detail: protocol::message::reason::HUB_NOT_INITIALIZED.into(),
         }));
+    }
+
+    /// 前台 worker 的日志必须**同时**落在控制台（stderr）与日志文件里。
+    ///
+    /// 判据是「同一行、两处都有」：只写控制台等于把 `afcli log` 弄丢，
+    /// 只写文件等于用户反馈的那块空白终端。文件里还必须只有一份。
+    #[test]
+    fn a_console_worker_logger_tees_the_line_to_stderr_and_the_file() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let err = entry::ConsoleEcho::new(Vec::<u8>::new());
+        let log = log_to_console(d.path(), err.clone());
+        log("worker says hello");
+
+        let console = String::from_utf8(err.lock().clone()).expect("utf8");
+        assert!(
+            console.contains("[worker] info worker says hello"),
+            "{console}"
+        );
+        let text = std::fs::read_to_string(crate::log::log_path(d.path())).expect("log");
+        assert_eq!(text.lines().count(), 1, "文件里不能出现两份：{text:?}");
+        assert_eq!(console.trim_end(), text.trim_end());
+    }
+
+    /// 自愈判据的正例：`auth_fail{identity mismatch}` 且本地存着 `node_id`
+    /// ——这时丢掉旧绑定、以同一对密钥重新 enroll 是有意义的（Hub 会按指纹
+    /// 认出同一台设备，`finish_enroll` 的 `AlreadyRegistered` 复用原 `node_id`）。
+    #[test]
+    fn an_identity_mismatch_on_a_stored_node_id_clears_the_binding() {
+        let mismatch = ConnOutcome::Rejected {
+            reason: protocol::message::reason::IDENTITY_MISMATCH.into(),
+        };
+        assert!(should_clear_stale_hub_binding(&mismatch));
+        assert!(can_retry_as_enroll(&mismatch, Some("n_stale")));
+    }
+
+    /// **只在 `identity mismatch` 上自愈**（BUGS：不许在 bad signature /
+    /// 其它拒绝上自动 enroll）。
+    ///
+    /// 反例分三组，每组都对应一种「清了反而更糟」的情形：
+    /// - 已经是 enroll 形态（`node_id=None`）还被拒：密钥本身不被接受，
+    ///   清一个已经空着的绑定什么也解决不了，只会变成无限 enroll 撞墙；
+    /// - `Superseded`：另一条终态（同 node_id 有活连接），清绑定等于绕过 §7.1；
+    /// - 其它 `Rejected` / `Transport` / `Authed`：各自有既定处置，不归这里管。
+    #[test]
+    fn only_an_identity_mismatch_with_a_stored_node_id_is_self_healed() {
+        let mismatch = ConnOutcome::Rejected {
+            reason: protocol::message::reason::IDENTITY_MISMATCH.into(),
+        };
+        assert!(
+            !can_retry_as_enroll(&mismatch, None),
+            "enroll 形态还被拒时不能再清一次：那会变成无限 enroll"
+        );
+        for other in [
+            protocol::message::reason::HUB_NOT_INITIALIZED,
+            protocol::message::reason::FINGERPRINT_ALREADY_REGISTERED,
+            protocol::message::reason::FINGERPRINT_RACE_RETRY,
+            protocol::message::reason::SUPERSEDED,
+            "Identity Mismatch",
+            "",
+        ] {
+            let rej = ConnOutcome::Rejected {
+                reason: other.into(),
+            };
+            assert!(
+                !should_clear_stale_hub_binding(&rej),
+                "{other} 不该触发清绑定"
+            );
+            assert!(
+                !can_retry_as_enroll(&rej, Some("n_stale")),
+                "{other} 不该触发清绑定"
+            );
+        }
+        for outcome in [
+            ConnOutcome::Superseded { gen: 9 },
+            ConnOutcome::Transport {
+                detail: protocol::message::reason::IDENTITY_MISMATCH.into(),
+            },
+            ConnOutcome::Authed {
+                node_id: "n_x".into(),
+                protocol_version: 1,
+                gen: 1,
+                heartbeat_interval_ms: 15_000,
+                enrolled: true,
+            },
+        ] {
+            assert!(
+                !should_clear_stale_hub_binding(&outcome),
+                "{outcome:?} 不该触发清绑定"
+            );
+            assert!(
+                !can_retry_as_enroll(&outcome, Some("n_stale")),
+                "{outcome:?} 不该触发清绑定"
+            );
+        }
     }
 
     /// `after_session` 的三种归类：只有 `Superseded` 是终态，且**必须落盘**。

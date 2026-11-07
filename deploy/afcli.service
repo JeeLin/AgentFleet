@@ -50,8 +50,9 @@ NoNewPrivileges=true
 # 绑定低端口也不需要改系统时间。
 CapabilityBoundingSet=
 
-# supervisor 的日志走 stderr（`afcli log` 读的是数据目录里的日志文件），
-# journald 只兜住「进程为什么没了」那一层。
+# 前台启动的两类日志都进 journal：supervisor 走 stdout、worker 走 stderr，
+# 两者也写进数据目录里同一份日志文件，供 `afcli log` 事后按 UTC
+# `YYYY-MM-DD HH:MM:SS` 的时间戳读回。journald 另兜住「进程为什么没了」。
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=afcli
