@@ -56,7 +56,7 @@ use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_NONE;
 use windows_sys::Win32::System::Console::{
     ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
 };
-use windows_sys::Win32::System::Pipes::CreatePipe;
+use windows_sys::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
     UpdateProcThreadAttribute, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
@@ -508,29 +508,34 @@ pub(crate) fn read_handle(handle: RawHandle, buf: &mut [u8]) -> Result<usize, Pt
 
 /// 等**输出读端**可读，最多 `budget`。返回 `true` = 可以让调用方去读一次。
 ///
-/// **只等这一根管道句柄**，不包含进程句柄（`WindowsPty` 根本不持有它：
-/// `spawn` 里 `CloseHandle(pi.hProcess)` 之后就只剩 PID）。所以这里等不到
-/// 「进程退出」这个事件，只能等到「有数据可读」或「写端关闭导致 EOF」。
+/// **匿名管道句柄不能交给 `WaitForSingleObject`**：Windows 的可等待对象清单
+/// 里没有匿名管道，传进去返回 `WAIT_FAILED`。v0.7.2 这里写的是
+/// `rc != WAIT_TIMEOUT`，于是 `WAIT_FAILED` 被当成「可读」→ 无数据也去
+/// `ReadFile` → 永久阻塞（`test-desktop (windows)` 挂了 53m51s 的真因）。
 ///
-/// 那 shell 退出了但输出管道还没 EOF 的情况靠什么收场？靠调用方的轮询
-/// 节奏：`terminal.rs` 的读线程传的是 `READ_POLL_INTERVAL`（100 ms），每
-/// 一个预算用尽就回到循环头检查 `stop` 标志与 `Terminal::close()`；而
-/// `Terminal::close()` 会先置 `stop` 再关 PTY，所以这条路径一定能退出。
-/// 与 Unix 侧「`poll` 说可读 → 读 → 0 字节即 EOF」的机制不同，但收场条件
-/// 一致，差异记在 `docs/DEVELOPMENT.md` 的「已知行为差异」一节。
-pub(crate) fn wait_readable(handle: RawHandle, budget: std::time::Duration) -> bool {
-    use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
-    use windows_sys::Win32::System::Threading::WaitForSingleObject;
-    // `u32::MAX` 就是 `INFINITE`：预算超过约 49.7 天时按「一直等」处理。
-    let ms = u32::try_from(budget.as_millis().min(u32::MAX as u128)).unwrap_or(u32::MAX);
-    let rc = unsafe { WaitForSingleObject(handle as HANDLE, ms) };
-    // 只有 `WAIT_TIMEOUT` 表示「这段时间里没得读」；其余（`WAIT_OBJECT_0`、
-    // 以及等待本身失败的 `WAIT_FAILED`）都让调用方去读一次再判——读失败会
-    // 得到 `BROKEN_PIPE`（归到读完了）或别的 errno（归到 `PtyError::Io`），
-    // 两条都比在这里猜「句柄坏了吗」准确。用常量而不写字面量 `258`：同
-    // crate 的 `exec_windows.rs` 用的是 `WAIT_TIMEOUT`，两边写法不同只会让
-    // 下一个人去查「258 是什么」。
-    rc != WAIT_TIMEOUT
+/// 现在用 `PeekNamedPipe` 查可读字节数：有字节才返回 true；暂时没有就按
+/// 调用方的轮询节奏（`terminal.rs` 的 `READ_POLL_INTERVAL` 100ms / 测试用例
+/// 的 100ms）睡到下一个切片。`budget` 不再用于内核等待——探测本身零阻塞，
+/// 由调用方在循环头用 `Instant` 控制总截止时间（`a_conpty_runs_a_command...`
+/// 的 20s deadline），语义与 Unix 侧「`poll` 说可读 → 读 → 0 字节即 EOF」
+/// 一致。
+///
+/// `PeekNamedPipe` 返回 FALSE 时也返回 false：那可能是「暂时没字节」，也可能
+/// 是写端已关。后者由 `read_handle` 的 `ERROR_BROKEN_PIPE` /
+/// `ERROR_PIPE_NOT_CONNECTED` → `Ok(0)` 判 EOF，不在这里猜。
+pub(crate) fn wait_readable(handle: RawHandle, _budget: std::time::Duration) -> bool {
+    let mut available: u32 = 0;
+    let ok = unsafe {
+        PeekNamedPipe(
+            handle as HANDLE,
+            ptr::null_mut(),
+            0,
+            ptr::null_mut(),
+            &mut available,
+            ptr::null_mut(),
+        )
+    };
+    ok != 0 && available > 0
 }
 
 // ---------------------------------------------------------------------------

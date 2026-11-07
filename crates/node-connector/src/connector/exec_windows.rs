@@ -8,19 +8,23 @@
 //! | `fork` | `CreateProcessW` |
 //! | 子进程 `dup2` 0/1/2 | `STARTUPINFO` 的 `hStdOutput` / `hStdError` |
 //! | `execvp`（查 `PATH`） | `CreateProcessW` 的 `lpApplicationName = NULL` + 命令行 |
-//! | `poll(2)` | `WaitForMultipleObjects` |
+//! | `poll(2)` | `PeekNamedPipe`（查可读字节数） |
 //! | `kill(pid, SIGKILL)` | `TerminateProcess` |
 //! | `waitpid` + `WEXITSTATUS` | `WaitForSingleObject` + `GetExitCodeProcess` |
 //!
-//! ## 一个必须说清的差别：没有非阻塞读
+//! ## 一个必须说清的差别：匿名管道不是「可等待对象」
 //!
-//! Windows 的匿名管道没有 `O_NONBLOCK`。我们用 `WaitForMultipleObjects`
-//! 等「至少一根管道可读」，再对**那一根**做阻塞 `ReadFile`——因为它已被
-//! 内核标记为可读，阻塞读会立刻返回。这与 Unix 侧「`poll` 说可读 → 非阻塞
-//! 读」是同一个时序假设，只是把「非阻塞」换成了「内核已保证可读」。
+//! Windows 的匿名管道没有 `O_NONBLOCK`，而且**管道句柄不能交给
+//! `WaitForSingleObject` / `WaitForMultipleObjects`**（Windows 的可等待对象
+//! 清单里没有匿名管道；传进去返回 `WAIT_FAILED`）。v0.7.2 曾据此判「可读」，
+//! 结果是：本文件里 `WAIT_OBJECT_0` 永远等不到 → stdout/stderr 全空、6 条
+//! exec 测试一起 FAILED；`pty/windows.rs` 里 `!= WAIT_TIMEOUT` 恒真 →
+//! 无数据也去 `ReadFile`，把 `test-desktop` 挂了 53 分钟。
 //!
-//! 唯一的例外是 **EOF**：`ReadFile` 在写端全关时立刻返回
-//! `ERROR_BROKEN_PIPE`，所以「关掉了」这个信号照样不会挂住循环。
+//! 现在的时序是：**只等进程句柄**唤醒（`run()` 的 50ms 轮询切片也保证不会
+//! 睡过头），再用 `PeekNamedPipe` 查每根管道有多少字节可读，有字节才
+//! `ReadFile`。写端全关时 `ReadFile` 立刻返回 `ERROR_BROKEN_PIPE`（归到 EOF），
+//! 所以「关掉了」这个信号照样不会挂住循环。
 //!
 //! ## 退出码同样做「被信号杀死」的映射
 //!
@@ -37,10 +41,10 @@ use windows_sys::Win32::Foundation::{
     WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Storage::FileSystem::ReadFile;
-use windows_sys::Win32::System::Pipes::CreatePipe;
+use windows_sys::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, GetExitCodeProcess, TerminateProcess, WaitForMultipleObjects,
-    WaitForSingleObject, CREATE_NO_WINDOW, PROCESS_INFORMATION, STARTUPINFOW,
+    CreateProcessW, GetExitCodeProcess, TerminateProcess, WaitForSingleObject, CREATE_NO_WINDOW,
+    PROCESS_INFORMATION, STARTUPINFOW,
 };
 
 // `OP_RUN` / `EXIT_KILLED` / `INFINITE` 都定义在 `exec.rs`：它们是**跨平台的
@@ -92,15 +96,27 @@ fn raw(h: &OwnedHandle) -> HANDLE {
 ///
 /// Windows 的匿名管道**没有非阻塞模式**：`ReadFile` 在没数据时会阻塞到有数据
 /// 或写端关闭。而 Unix 侧读端带 `O_NONBLOCK`，`read` 立刻返回 `EAGAIN`。
-/// 这个函数就是那个 `O_NONBLOCK` 的等价物：`WaitForSingleObject(handle, 0)`
-/// 返回 `WAIT_OBJECT_0` 才说明「现在读一定不会阻塞」。
+/// 这个等价物只能是 `PeekNamedPipe`：管道句柄**不是**可等待对象，把它交给
+/// `WaitForSingleObject` 会返回 `WAIT_FAILED`，于是「可读」永远判不出来
+/// （v0.7.2 的 6 条 exec 测试就是这么一起红的）。
 ///
-/// `WAIT_TIMEOUT` = 现在没数据。`WAIT_FAILED`（句柄坏了）也返回 `false`：
-/// 让调用方跳过它，下一轮 `any_open()` 会发现这根管子还在，再由真正需要
-/// 报错的地方处理——不在这里猜。
-fn wait_handle_readable(handle: HANDLE, timeout_ms: u32) -> bool {
-    let rc = unsafe { WaitForSingleObject(handle, timeout_ms) };
-    rc == WAIT_OBJECT_0
+/// `PeekNamedPipe` 返回 FALSE 时按「暂不可读」处理：要么暂时没字节，要么
+/// 写端已关（后者由 `read_into` 的 `ReadFile` → `ERROR_BROKEN_PIPE` 判 EOF）。
+/// 两种情形都不该在这里猜，让调用方按既有路径收场。`timeout_ms` 参数保留
+/// 是为了不改调用点签名（探测本身零阻塞，等待由 `run()` 的轮询切片负责）。
+fn wait_handle_readable(handle: HANDLE, _timeout_ms: u32) -> bool {
+    let mut available: u32 = 0;
+    let ok = unsafe {
+        PeekNamedPipe(
+            handle,
+            ptr::null_mut(),
+            0,
+            ptr::null_mut(),
+            &mut available,
+            ptr::null_mut(),
+        )
+    };
+    ok != 0 && available > 0
 }
 
 /// 建一根管道，**只有写端可继承**，返回 `(读端, 写端)`。
@@ -263,40 +279,27 @@ impl Child {
         self.pipes.iter().any(Option::is_some)
     }
 
-    /// 等两根管道里至少一根可读，最多 `budget_ms` 毫秒。**返回能不能读**。
+    /// 等「有数据可读」或「进程已退出」，最多 `budget_ms` 毫秒。
+    /// **返回能不能去 `read_into` 试一次**。
     ///
-    /// `WAIT_TIMEOUT` = 都没有；`WAIT_FAILED`（负数）也返回 `false`——
-    /// 下一轮会重新等，而真错了会由 `read_into` 的读失败路径摘掉管道。
+    /// 只等**进程句柄**：匿名管道句柄不是可等待对象，混进
+    /// `WaitForMultipleObjects` 会让整次等待立刻以 `WAIT_FAILED` 收场
+    /// （v0.7.2 挂死的另一半）。管道里有没有字节，交给 `read_into` 里的
+    /// `PeekNamedPipe` 判——那是零阻塞探测，不需要在这里等。
+    ///
+    /// `WAIT_TIMEOUT` = 预算内没新事件，返回 false 让 `run()` 重新算 deadline；
+    /// 进程退出（或等待失败）都返回 true，由 `read_into` 把管道里剩的字节
+    /// 与 `ERROR_BROKEN_PIPE` 的 EOF 一起收干净。
     pub(super) fn wait_readable(&self, budget_ms: i32) -> bool {
-        // `handles` 的第一个永远是进程句柄：进程退出也该唤醒这里的等待，
-        // 否则「命令跑完但没输出」会一路等到超时。
-        let mut handles: Vec<HANDLE> = vec![self.process.as_raw_handle() as HANDLE];
-        // 只等还开着的那几根；已 EOF 的不再等（`pipes` 里被置 `None`）。
-        handles.extend(
-            self.pipes
-                .iter()
-                .flatten()
-                .map(|h| h.as_raw_handle() as HANDLE),
-        );
         let rc = unsafe {
-            WaitForMultipleObjects(
-                handles.len() as u32,
-                handles.as_ptr(),
-                0,
+            WaitForSingleObject(
+                self.process.as_raw_handle() as HANDLE,
                 // `budget_ms` 来自 `exec.rs` 的 `remaining.as_millis() as i32`，
-                // 恒非负；这里的 `0` 是不可达兜底，`0` 在 `WaitForMultipleObjects`
-                // 里是「立刻返回」而不是「永远等」——写成 `u32::MAX` 会把一个
-                // 不该发生的溢出变成一次 49 天的挂起。
+                // 恒非负；`0` 是不可达兜底（「立刻返回」而非「永远等」）。
                 u32::try_from(budget_ms).unwrap_or(0),
             )
         };
-        if rc == WAIT_TIMEOUT {
-            return false;
-        }
-        // 任何一根可读（或进程退出、或等待失败）都让调用方去 `read_into`：
-        // 进程退出后管道写端随之关闭，`ReadFile` 会立刻给 `BROKEN_PIPE`，
-        // 把「读完了」这个信息带回来。
-        true
+        rc != WAIT_TIMEOUT
     }
 
     /// 从仍然开着的那些读端各读一次。**返回有没有真的读到字节**。
