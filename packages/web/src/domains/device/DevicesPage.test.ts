@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import DevicesPage from '@/domains/device/DevicesPage.vue'
+import { detectDownloadPlatform, downloadAgentBinary } from '@/domains/device/api'
 import { device, mountIn } from '@/test/mount'
 import { settle, stubFetch } from '@/test/http'
 import { matchRoute, route } from '@/router'
@@ -384,6 +385,65 @@ describe('DevicesPage：设备 / Agent 目录分段', () => {
   })
 })
 
+/**
+ * 平台推断与 URL 拼装是**纯逻辑**，不该靠渲染整页去验：拼错了的症状是
+ * 「Windows 用户拿到 Linux 二进制」，而组件用例看不出 URL 上的 query。
+ */
+describe('afcli 下载：浏览器平台推断', () => {
+  it('常见 UA / platform 推断出后端认识的 os/arch', () => {
+    expect(
+      detectDownloadPlatform(
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36',
+        'Win32',
+      ),
+    ).toEqual({ os: 'windows', arch: 'amd64' })
+    // Apple Silicon 的 Safari/Chrome 出于兼容仍报 `Intel Mac OS X` / `MacIntel`；
+    // 镜像里只有 `afcli-macos-arm64`，所以这种 UA 必须归 arm64，否则点下载就 404。
+    expect(
+      detectDownloadPlatform(
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 Version/17.5 Safari/605.1.15',
+        'MacIntel',
+      ),
+    ).toEqual({ os: 'mac', arch: 'arm64' })
+    expect(
+      detectDownloadPlatform('Mozilla/5.0 (Macintosh; ARM64 Mac OS X 15_0)', 'MacARM64'),
+    ).toEqual({ os: 'mac', arch: 'arm64' })
+    // 只有明确写了 x86_64 架构字样的才报 amd64（Hub 没有该产物，如实 404）。
+    expect(
+      detectDownloadPlatform('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15)', 'MacIntel x86_64'),
+    ).toEqual({ os: 'mac', arch: 'amd64' })
+    expect(
+      detectDownloadPlatform('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36', 'Linux x86_64'),
+    ).toEqual({ os: 'linux', arch: 'amd64' })
+    expect(
+      detectDownloadPlatform('Mozilla/5.0 (X11; Linux aarch64)', 'Linux aarch64'),
+    ).toEqual({ os: 'linux', arch: 'arm64' })
+  })
+
+  it('UA 认不出来时按 Linux/amd64 兜底，而不是抛错', () => {
+    expect(detectDownloadPlatform('', '')).toEqual({ os: 'linux', arch: 'amd64' })
+  })
+
+  it('downloadAgentBinary 发出的 URL 带 os/arch query', async () => {
+    const seen: string[] = []
+    const fn = vi.fn(async (input: RequestInfo | URL) => {
+      seen.push(String(input))
+      return new Response(new Blob(['\x7fELF-fake']), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fn)
+
+    const got = await downloadAgentBinary({ os: 'windows', arch: 'amd64' })
+
+    expect(seen).toHaveLength(1)
+    const url = new URL(seen[0], 'http://hub.local')
+    expect(url.pathname).toBe('/api/agent-binary')
+    expect(url.searchParams.get('os')).toBe('windows')
+    expect(url.searchParams.get('arch')).toBe('amd64')
+    // 附件名从响应头读的契约不变：没给头就回落 afcli。
+    expect(got.filename).toBe('afcli')
+  })
+})
+
 describe('DevicesPage：空态里的 afcli 下载', () => {
   /**
    * **必须显式把路由摆回设备分段。** `route` 是模块级 `ref`，同一个文件里
@@ -409,6 +469,8 @@ describe('DevicesPage：空态里的 afcli 下载', () => {
   function stubBlobFetch(onRequest: (path: string) => Response): {
     revoked: string[]
     clicked: string[]
+    /** 每次 fetch 的完整 URL（含 query），供「平台参数真的带上了」断言用。 */
+    seen: string[]
   } {
     // **只 `spyOn` 那两个方法，绝不 `vi.stubGlobal('URL', {...URL})`**：
     // 把 `URL` 换成普通对象会让页面里 `new URL(...)` 一类的构造直接不可用
@@ -430,23 +492,31 @@ describe('DevicesPage：空态里的 afcli 下载', () => {
     ) {
       clicked.push(this.download)
     })
+    const seen: string[] = []
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+        seen.push(raw)
         return onRequest(new URL(raw, 'http://hub.local').pathname)
       }),
     )
-    return { revoked, clicked }
+    return { revoked, clicked, seen }
   }
 
-  it('空态给出下载入口，点了就从这一台 Hub 取二进制', async () => {
-    const { revoked, clicked } = stubBlobFetch((path) =>
+  it('空态给出下载入口，点了就按浏览器平台从这一台 Hub 取二进制', async () => {
+    // 把浏览器伪装成 Windows：Linux Hub 上缺省回落 `std::env::consts::OS`，
+    // 这一条正是「Windows 用户点下载拿到 Linux 文件」那条 bug 的回归断言。
+    vi.stubGlobal('navigator', {
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      platform: 'Win32',
+    })
+    const { revoked, clicked, seen } = stubBlobFetch((path) =>
       path === '/api/agent-binary'
         ? new Response(new Blob(['\x7fELF-fake']), {
             status: 200,
             headers: {
-              'Content-Disposition': 'attachment; filename="afcli-linux-aarch64"',
+              'Content-Disposition': 'attachment; filename="afcli-windows-amd64.exe"',
             },
           })
         : new Response(JSON.stringify([]), {
@@ -466,7 +536,14 @@ describe('DevicesPage：空态里的 afcli 下载', () => {
 
     // 下载真的被触发，且**用的是响应头里的文件名**（带平台）。
     // 前端若写死 `afcli`，同时有 amd64 与 arm64 两台机器时两个文件同名，分不清。
-    expect(clicked).toEqual(['afcli-linux-aarch64'])
+    expect(clicked).toEqual(['afcli-windows-amd64.exe'])
+    // 不带 query 时后端会回落到 Hub 自己的 Linux 平台——这条断言会红。
+    const binaryUrl = seen
+      .map((s) => new URL(s, 'http://hub.local'))
+      .find((u) => u.pathname === '/api/agent-binary')
+    expect(binaryUrl, '必须真的请求了 /api/agent-binary').toBeTruthy()
+    expect(binaryUrl?.searchParams.get('os')).toBe('windows')
+    expect(binaryUrl?.searchParams.get('arch')).toBe('amd64')
     // revoke 必须发生：不释放的话页面存活期间一直占着这份 blob。
     expect(revoked).toEqual(['blob:fake-1'])
   })

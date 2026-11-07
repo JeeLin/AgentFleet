@@ -27,7 +27,12 @@ import AgentCatalog from '@/domains/agent/AgentCatalog.vue'
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
 import DeviceTable from '@/domains/device/DeviceTable.vue'
 import type { DeviceSummary } from '@/domains/device/api'
-import { deleteDevice, downloadAgentBinary, listDevices } from '@/domains/device/api'
+import {
+  deleteDevice,
+  detectDownloadPlatform,
+  downloadAgentBinary,
+  listDevices,
+} from '@/domains/device/api'
 import { describeReadFailure } from '@/shared/http'
 import { percent, relativeTime } from '@/shared/format'
 import { navigate, route } from '@/router'
@@ -109,7 +114,12 @@ async function downloadCli(): Promise<void> {
   downloadState.value = 'busy'
   downloadError.value = null
   try {
-    const { blob, filename } = await downloadAgentBinary()
+    // 把**浏览器这台机器**的平台交给 Hub：不传时后端按 `std::env::consts::OS`
+    // 回落，而 Hub 跑在 Linux 上，Windows/macOS 用户就会拿到 Linux 二进制。
+    // 推断在 `api.ts` 里是纯函数，页面只读 `navigator` 这两个现成字段。
+    const { blob, filename } = await downloadAgentBinary({
+      ...detectDownloadPlatform(navigator.userAgent, navigator.platform),
+    })
     // `URL.createObjectURL` + 一个隐藏 `<a>`：这是唯一在主流浏览器上都能
     // 触发下载、且不必让用户先存到别处的做法。用完立刻 revoke——不释放会在
     // 页面存活期间一直占着这份 blob。

@@ -55,6 +55,53 @@ export function listDevices(options?: RequestOptions): Promise<DeviceSummary[]> 
   return getJson<DeviceSummary[]>('/api/devices', options)
 }
 
+/** 浏览器平台推断结果。名字必须与 Hub 产物名一致：`mac`（不是 `macos`）、`amd64`/`arm64`。 */
+export interface DownloadPlatform {
+  os: 'windows' | 'mac' | 'linux'
+  arch: 'amd64' | 'arm64'
+}
+
+/**
+ * 从 UA / `navigator.platform` 推断**浏览器这台机器**的平台。
+ *
+ * Hub 缺省用 `std::env::consts::OS`（Linux Hub 上恒为 `linux`），不把平台传出去
+ * 就会让 Windows/macOS 用户拿到一个跑不起来的 Linux 二进制。这里只做推断、
+ * 不碰 DOM/网络，所以可以是纯函数、可以逐条 UA 单测。
+ *
+ * 判据的顺序是 Windows → Mac → Linux：Windows 的 UA 里也可能带 `Linux`
+ * （WSL/兼容层字符串），先判 Windows 才不会把它归错。`x86_64`/`amd64`/`WOW64`
+ * 归 `amd64`，`aarch64`/`arm64`/`Apple Silicon` 归 `arm64`。
+ *
+ * **macOS 认不出架构时按 `arm64` 兜底**：`Dockerfile.hub` 里只有
+ * `afcli-macos-arm64`（CI 只在 Apple Silicon runner 上编桌面产物），而
+ * Apple Silicon 上的 Chrome/Safari 为了兼容老网页，UA 仍写
+ * `Intel Mac OS X`、`navigator.platform` 仍是 `MacIntel`——按「看不出就是
+ * amd64」会让绝大多数 Mac 用户点下载直接 404。只有明确写了 `x86_64` 等
+ * 架构字样的才归 amd64，那时 Hub 如实回报没有该产物。
+ */
+export function detectDownloadPlatform(userAgent: string, platform = ''): DownloadPlatform {
+  const ua = `${userAgent} ${platform}`
+  const lower = ua.toLowerCase()
+  const isArm = /aarch64|arm64|apple\s*(?:silicon|m[1-9])/.test(lower)
+  // 不能把 UA 里的 `Intel` 当成 x86 判据：Apple Silicon 上的 Safari/Chrome
+  // 照样写 `Intel Mac OS X`、`navigator.platform` 照样是 `MacIntel`。只认
+  // 明确的架构字样；认不出就是 arm64（镜像里唯一的 macOS 产物）。
+  const isIntel = /x86_64|x86-64|amd64|wow64|win64/.test(lower)
+
+  if (/win(?:dows|32|64|nt)|\bwindows\b/.test(lower)) {
+    return { os: 'windows', arch: 'amd64' }
+  }
+  if (/macintosh|\bmac\s*os\b|\bmacos\b|\bmac\b|darwin/.test(lower)) {
+    return { os: 'mac', arch: isArm || !isIntel ? 'arm64' : 'amd64' }
+  }
+  if (/linux|x11|ubuntu|fedora|debian|\bbsd\b/.test(lower)) {
+    return { os: 'linux', arch: isArm ? 'arm64' : 'amd64' }
+  }
+  // `navigator.platform` 单独给 `MacIntel`/`Win32`/`Linux x86_64` 时上面已覆盖；
+  // 完全认不出来时退回 Linux/amd64（CI 与 happy-dom 的默认值都是它）。
+  return { os: 'linux', arch: 'amd64' }
+}
+
 /**
  * 移除一台设备。
  *
@@ -219,11 +266,20 @@ export function describeCleanupPolicy(policy: DeviceBinding['cleanup_policy']): 
  * **Hub 上没有可下发的 afcli 时抛 `ApiError`，`code` 是
  * `agent_binary_unavailable`**：裸机跑 `afhub`（不经镜像）就是这个状态，
  * 属正常部署形态而非故障，所以页面要按「没配」而不是「坏了」来提示。
+ *
+ * `os` / `arch` 必须显式带上：省略时后端回落到 `std::env::consts::OS`，
+ * 而 Hub 跑在 Linux 上——于是 Windows/macOS 用户会拿到一个跑不起来的
+ * Linux 文件。名字用后端产物名的那一套（`mac` 而不是 `macos`）。
  */
 export function downloadAgentBinary(
-  options?: RequestOptions,
+  options?: RequestOptions & { os?: DownloadPlatform['os']; arch?: DownloadPlatform['arch'] },
 ): Promise<{ blob: Blob; filename: string }> {
-  return request('/api/agent-binary', { ...options, method: 'GET' }).then(async (r) => {
+  const { os, arch, ...rest } = options ?? {}
+  return request('/api/agent-binary', {
+    ...rest,
+    method: 'GET',
+    query: { ...rest.query, os, arch },
+  }).then(async (r) => {
     // 文件名**从响应头读**，不在前端另写一个。
     //
     // 服务端下发的文件名带着平台（`afcli-linux-aarch64`），前端写死的 `??
