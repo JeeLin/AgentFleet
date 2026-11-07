@@ -14,6 +14,11 @@ once on 2026-11-05.
 
 ## [Unreleased]
 
+### Added
+
+- **新增 `afcli` 安装脚本**，从 Release 校验并下载可直接执行的静态二进制。 / **Added an `afcli` installer** that checksums and installs the directly executable static binary from Releases.
+- **CI 只构建 musl 二进制**，不再重复编译无消费方的 gnu 产物。 / **CI now builds only musl binaries**, dropping unused gnu builds that duplicated release work.
+
 ## [0.7.2] - 2026-11-06
 
 > 里程碑：设备侧 `afcli` 移植到 Windows 与 macOS（`afhub` 仍 Linux-only）。

@@ -1024,6 +1024,12 @@ else:
     timeout_minutes = td.get('timeout-minutes')
     if not isinstance(timeout_minutes, int) or isinstance(timeout_minutes, bool) or timeout_minutes <= 0:
         bad.append('`test-desktop` 缺 timeout-minutes（或不是正整数）：挂死要快速红')
+# 用户 2026-11-07 裁定「CI 不需要 gnu 和 musl 两种吧？浪费资源」：gnu 产物
+# 既不进 Release 也不进 `FROM scratch` 镜像，多编两套依赖图纯属白烧 runner。
+bb = jobs.get('build-binaries') or {}
+bb_targets = [str(x.get('target') or '') for x in ((bb.get('strategy') or {}).get('matrix') or {}).get('include') or []]
+if not bb_targets or any(not t.endswith('-musl') for t in bb_targets):
+    bad.append('`build-binaries` 应只编 musl 目标，gnu 已无消费方')
 if 'gate-static' not in str((jobs.get('gate-test') or {}).get('needs') or []):
     bad.append('`gate-test` 应 needs gate-static，保证普通 Rust 缓存先写好')
 for name in ('gate-static', 'gate-test', 'build-binaries', 'build-desktop'):

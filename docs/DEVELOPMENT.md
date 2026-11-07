@@ -136,27 +136,30 @@ gate（= mise.toml [tasks.ci] 的全部门禁，产线自己等它；红则下�
     ↓ needs
 build-frontend（只校验/承接 web-dist artifact）
     ↓ needs（硬前置，不是优化）
-build-binaries（4 平台矩阵，**原生编译**，按 target 复用 Rust cache）
+build-binaries（2 平台 musl 矩阵，**原生编译**，按 target 复用 Rust cache）
     ├─→ docker-hub：Hub 镜像（afhub + afcli，前端已编译期嵌入，镜像里不另放 dist）
     ├─→ docker-node：afcli 镜像（linux/amd64 + linux/arm64，按 TARGETARCH 选二进制）
-    └─→ release：GitHub Release + SHA256SUMS + CHANGELOG.md + 从 CHANGELOG.md 抽 body
+    └─→ release：GitHub Release + SHA256SUMS + install.sh + 从 CHANGELOG.md 抽 body
 ```
 
 **Release 附件只发 musl 静态产物，且用不带后缀的干净名**（`afhub-linux-amd64` 而非
-`afhub-linux-amd64-musl`）。两条理由：
+`afhub-linux-amd64-musl`）。三条理由：
 
 1. **与容器取同一份**。`Dockerfile.hub` / `Dockerfile.node` 都是 `FROM scratch`，里面没有
    glibc，三个 `COPY` 全指向 `*-musl`。用户下载物与容器原料是同一个文件，才不会出现
    「镜像能跑、下载的跑不了」这种两份真相源。
-2. **避免制造错误选择**。gnu 产物在 scratch 里起不来（缺 `ld-linux` / `libc.so.6` /
-   `libm.so.6` / `libgcc_s.so.1`），把它摆在附件列表里只会让人选错。去掉 `-musl` 后缀
-   是为了让人不必先懂 glibc 与 musl 的区别就能选对。
+2. **下载即可直接执行**。musl 目标静态链 libc，装在裸 Linux / macOS 设备上不缺
+   `ld-linux` / `libc.so.6`；`install.sh` 按 `os/arch` 选文件、校验 `SHA256SUMS`、
+   `chmod +x` 后真跑一次 `afcli --version`，把「可执行文件」当场验掉。
+3. **避免制造错误选择**。gnu 产物在 scratch 里起不来；去掉 `-musl` 后缀是不让人
+   先懂 glibc 与 musl 的区别才能选对。
 
-gnu 产物**仍由矩阵编出来**（CI 里验它能编、能查到无 OpenSSL 依赖），只是不进 Release——
-它没有任何消费方。附件固定 6 个：`afhub-linux-{amd64,arm64}` / `afcli-linux-{amd64,arm64}`
-+ `CHANGELOG.md` + `SHA256SUMS`，且 `CHANGELOG.md` 也在 SUMS 里（同样是被下载的东西）。
-`release` job 有一步断言「二进制恰为 4 个且名字不含 musl」，防止产物命名将来变化时
-glob 空转、建出一个没有二进制的空 Release。
+**v0.7.3 起 `build-binaries` 只编 musl 两条目标**：先前 gnu 产物既不进 Release、
+也不进镜像，零消费方却每次发布多编两套完整依赖图（用户 2026-11-07 裁定「浪费资源」）。
+`scripts/check.sh` C10 断言矩阵里不再出现 `*-gnu`。附件固定 8 个：
+`afhub-linux-{amd64,arm64}` / `afcli-linux-{amd64,arm64}` + 2 个桌面产物 +
+`install.sh` + `SHA256SUMS`；`release` job 写死白名单并断言「Linux 二进制恰为 4 个且名字不含 musl」，
+防止产物命名将来变化时 glob 空转、建出一个没有二进制的空 Release。
 
 **`gate` 为什么会存在**：`release.yml` 曾经与门禁只共享触发、互不阻塞，门禁红时
 镜像照样推上 GHCR、Release 照样建，`latest` 一旦被污染所有 `docker pull :latest` 的用户
@@ -275,9 +278,9 @@ GitHub）、**版本对齐**（Release 页上有多个版本，选错就连不�
 - **「静态链 OpenSSL」在本仓不适用，但断言照抄**：`Cargo.toml` 的 `reqwest` 是
   `rustls-tls`（`default-features = false`），整棵树**不链系统 OpenSSL**。所以真正要
   静态的是 libc，用 **musl 目标**解决。REX 那条「产物不依赖 `libssl|libcrypto`」的
-  自包含断言仍然照抄，只是判据按平台分开：musl 用 `ldd` 判「not a dynamic executable」
+  自包含断言仍然照抄，判据按平台分开：musl 用 `ldd` 判「not a dynamic executable」
   且**查 `readelf` 无 `interpreter`、`file` 不报 `pie executable`**（PIE 产物 `ldd` 也
-  报静态，却运行即段错误），gnu 用 `ldd` 判不含 `libssl|libcrypto`。
+  报静态，却运行即段错误）；v0.7.3 起矩阵只有 musl 两条，非 musl 目标在断言里直接 fail。
   **断言在 workflow 里，不在文档里**。
 - **节点只从 Hub 拉二进制，不直连 GitHub**（REX 有 GitHub 回退，我们刻意不做，
   见 `architecture/security-and-lifecycle.md` §7.1.4）。

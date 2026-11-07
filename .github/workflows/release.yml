@@ -345,17 +345,19 @@ jobs:
           ls -la packages/web/dist | head -20
 
   # ---------------------------------------------------------------------------
-  # 2. 4 平台**原生**编译（不用交叉编译）
+  # 2. 2 平台**原生**编译（不用交叉编译）
   # ---------------------------------------------------------------------------
   # 原生优先是 REX 的教训：交叉编 OpenSSL/zlib 会架构错配，而错配的症状是
   # 「二进制在目标机上跑不起来」，本地永远复现不了。GitHub 有 `ubuntu-24.04-arm`
   # runner，aarch64 直接原生编，所以矩阵里**每个条目都是原生**。
   #
-  # 为什么用 musl 而不是 gnu：`docs/DEVELOPMENT.md` §2 要求自包含二进制。
-  # 本仓的 `reqwest` 已经是 `rustls-tls`（不依赖系统 OpenSSL），所以没有
-  # 「静态链 OpenSSL」这件事要做；真正剩下的是 libc。musl 目标静态链 libc，
-  # `ldd` 会输出 "not a dynamic executable"，这就是「自包含」的可执行判据。
-  # gnu 目标仍编（覆盖 glibc 环境，容器里也用它），但发布页面主推 musl。
+  # **只编 musl（v0.7.3 用户裁定）**：`docs/DEVELOPMENT.md` §2 要求自包含二进制；
+  # 本仓 `reqwest` 是 `rustls-tls`，不链系统 OpenSSL，剩下的 libc 由 musl 静态链
+  # 解决（`ldd` 报 "not a dynamic executable"）。先前矩阵还编两份 gnu，但
+  # Release 只发 musl 干净名、两个 `FROM scratch` 镜像也只 `COPY *-musl`——
+  # gnu 产物**零消费方**，每次发布白编两套完整依赖图。用户原话「CI 不需要
+  # gnu 和 musl 两种吧？浪费资源」，故删掉 gnu 两条，`scripts/check.sh` C10
+  # 加断言钉死「矩阵里不许再出现 *-gnu」。
   #
   # ## 为什么没有 Windows（v0.7.1 不提供，不是「永远不支持」）
   #
@@ -392,15 +394,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-24.04
-            suffix: linux-amd64
           - target: x86_64-unknown-linux-musl
             os: ubuntu-24.04
             suffix: linux-amd64-musl
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
-            suffix: linux-arm64
           - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
             suffix: linux-arm64-musl
@@ -432,7 +428,7 @@ jobs:
           shared-key: build-${{ matrix.target }}
           save-if: true
 
-      # matrix 里 4 个目标里有 2 个是 musl：musl 目标的链接器 (`musl-gcc`)
+      # matrix 里两条目标都是 musl：musl 目标的链接器 (`musl-gcc`)
       # 不在 runner 镜像里。按目标装，不要无脑全装（多装的东西会在别的 runner
       # 上装不上，把「矩阵某一条红」变成「所有条目红」）。
       - name: 装目标链接器
@@ -477,12 +473,10 @@ jobs:
         run: cargo build --release --workspace --target ${{ matrix.target }}
 
       # 自包含断言（REX 的教训：产出一个动态链接的二进制，到了目标机上
-      # 找不到 libssl 才炸）。本仓不链 OpenSSL，真正要判的是：
-      #   - musl：**静态且非 PIE**——`ldd` 说静态只是必要条件，PIE 产物
-      #     `ldd` 同样报 "statically linked"，却带 `interpreter` 会在运行时
-      #     段错误；所以还要查 `readelf -l` 无 `interpreter`、`file` 不报
-      #     `pie executable`（见下面 musl 臂的完整判据）；
-      #   - gnu：允许动态（glibc），但**不许**依赖 libssl / libcrypto。
+      # 找不到 libssl 才炸）。本仓只编 musl，判据是：**静态且非 PIE**——
+      # `ldd` 说静态只是必要条件，PIE 产物 `ldd` 同样报 "statically linked"，
+      # 却带 `interpreter` 会在运行时段错误；所以还要查 `readelf -l` 无
+      # `interpreter`、`file` 不报 `pie executable`（见下面完整判据）。
       - name: 断言二进制自包含 / 不依赖 OpenSSL
         run: |
           set -euo pipefail
@@ -535,12 +529,9 @@ jobs:
                 fi
                 echo "OK $f: 静态且非 PIE"
                 ;;
-              *-linux-gnu)
-                if ldd "$f" | grep -Eq 'libssl|libcrypto'; then
-                  echo "FAIL $f: 不许依赖 OpenSSL" >&2
-                  exit 1
-                fi
-                echo "OK $f: 无 OpenSSL 依赖"
+              *)
+                echo "FAIL 矩阵里出现了非 musl 目标：${{ matrix.target }}" >&2
+                exit 1
                 ;;
             esac
           done
@@ -907,11 +898,11 @@ jobs:
           #    的那份。用户下载物与容器原料取同一份，才不会出现「镜像能跑、下载的跑不了」
           #    这种两份真相源。
           # 2. 干净名（`afhub-linux-amd64`）去掉 `-musl` 后缀，是为了让人不必先懂
-          #    glibc 与 musl 的区别就能选对——gnu 版在 scratch 里起不来，把它摆在
-          #    附件列表里只会制造错误选择。
+          #    glibc 与 musl 的区别就能选对；而且 v0.7.3 起 CI 只编 musl 这一份，
+          #    附件里不会再出现「两种 libc 选哪个」的问题。
           #
-          # gnu 产物仍由 `build-binaries` 编出来（CI 里验它能编、能查到无 OpenSSL 依赖），
-          # 只是**不进 Release**。它没有消费方：三个 `COPY` 全指向 musl。
+          # `build-binaries` 的矩阵只有 musl 两条，gnu 产物不再被编出来：先前那
+          # 两套 gnu 既不进 Release、也不进镜像，是每次发布白烧的编译资源。
           #
           # 桌面产物（`afcli-windows-amd64.exe` / `afcli-macos-arm64`）**原样
           # 保留**：它们没有 musl/gnu 之分，也没有 scratch 镜像要迁就，名字本身
@@ -935,6 +926,9 @@ jobs:
           # 不一致的副本——用户下载到的 CHANGELOG 可能不是这个 tag 对应的那份
           # （tag 之后仓库里又改了 CHANGELOG，附件却还是旧的）。
           # Release body 里给仓库链接即可（见下）。
+          # 安装脚本是例外：与本次产物同 tag 发布，供设备直接下载执行。
+          cp ../install.sh ./install.sh
+          chmod 0755 ./install.sh
           ls -la
           # 排序：`sha256sum *` 的顺序依赖文件系统，不同 runner 上不稳定，
           # 会让同一 tag 两次生成的 SUMS 内容不同（虽然都正确）。
@@ -967,12 +961,12 @@ jobs:
           # 附件清单是**写死**的：多一个或少一个都要红。
           # CHANGELOG.md 曾是附件之一，但它在仓库里已有一份（用户 2026-11-05 裁定
           # 不再上传），附件里那份可能是与仓库不一致的旧副本。
-          extra=$(ls | grep -vE '^(afhub-linux-(amd64|arm64)|afcli-linux-(amd64|arm64)|afcli-windows-amd64\.exe|afcli-macos-arm64|SHA256SUMS)$' || true)
+          extra=$(ls | grep -vE '^(afhub-linux-(amd64|arm64)|afcli-linux-(amd64|arm64)|afcli-windows-amd64\.exe|afcli-macos-arm64|SHA256SUMS|install\.sh)$' || true)
           if [ -n "$extra" ]; then
             echo "FAIL 附件里有预期之外的文件：$extra" >&2
             exit 1
           fi
-          echo "OK 附件 = 4 个 Linux 干净名 + 2 个桌面产物 + SHA256SUMS"
+          echo "OK 附件 = 4 个 Linux 干净名 + 2 个桌面产物 + install.sh + SHA256SUMS"
 
       # 前端 `dist/` **不进** Release，这是有意的：
       # 前端是 `include_dir!` 在编译期嵌进 `afhub` 的（`Dockerfile.hub` 也刻意

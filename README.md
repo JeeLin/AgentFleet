@@ -86,6 +86,21 @@ mise run build && mise run start
 afcli run            # 前台阻塞；想脱离终端请用 systemd（见下）或 tmux
 ```
 
+### 一键安装 `afcli`
+
+Linux / macOS 设备可直接下载 Release 里的静态二进制并校验 `SHA256SUMS`：
+
+```bash
+curl -fsSL https://github.com/JeeLin/AgentFleet/releases/latest/download/install.sh | sh
+```
+
+脚本会按 `os/arch` 选 `afcli-linux-{amd64,arm64}` 或 `afcli-macos-arm64`，
+校验摘要后装到 `/usr/local/bin/afcli`，并真跑一次 `afcli --version` 确认可直接执行。
+内网部署可用 `AFCLI_BASE_URL` 指向镜像；Windows 请下载 `afcli-windows-amd64.exe`。
+
+Install `afcli` on Linux/macOS with the checksum-verified Release binary:
+`curl -fsSL https://github.com/JeeLin/AgentFleet/releases/latest/download/install.sh | sh`.
+
 ### 设备上跑成服务（systemd）
 
 `afcli run` 是**前台阻塞**的：supervisor 是一个无限 loop，进程自己不会 daemon 化
@@ -171,6 +186,7 @@ a **re-hang**, not a rewrite.
 | 已知缺陷 | `docs/BUGS.md` |
 | 项目约束与协作约定 | `AGENTS.md` |
 | 变更日志 | `CHANGELOG.md` |
+| 一键安装 `afcli` | `install.sh` |
 
 ---
 
