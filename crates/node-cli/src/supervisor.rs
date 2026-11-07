@@ -231,8 +231,8 @@ impl<C: std::io::Write, E: std::io::Write> Supervisor<C, E> {
                 }
                 Decision::ReplaceAndSpawn { version, reason } => {
                     self.say(&format!("{reason}: target version {version}"));
-                    // 失败臂用不可写的备份路径覆盖；成功臂会让循环继续
-                    // spawn 真二进制，因此由 `replace` 的直接单测钉住。
+                    // 失败臂用不可写的备份路径覆盖；成功臂由下面的
+                    // successful_replace_then_rollback_reaches_the_stop_decision 驱动下一轮决策。
                     if let Err(e) = self.replace(state_ref, &version) {
                         // D2-④：替换失败即**放弃本次更新**，绝不带着半换好的
                         // 二进制继续 spawn——那正是「说一套做一套」的现场。
@@ -242,7 +242,7 @@ impl<C: std::io::Write, E: std::io::Write> Supervisor<C, E> {
                     }
                 }
                 // 失败臂由 `a_failed_rollback_stops_the_supervisor` 覆盖；
-                // 成功臂会让循环继续 spawn，由 `rollback` 的直接单测钉住。
+                // 成功臂由下面的 successful_replace_then_rollback_reaches_the_stop_decision 覆盖。
                 Decision::Rollback { reason } => {
                     self.say(&reason);
                     if let Err(e) = self.rollback(state_ref) {
@@ -1205,6 +1205,54 @@ mod tests {
         assert!(
             logged.contains("rollback failed"),
             "回滚失败必须留痕，否则设备会静默停在坏版本上：{logged}"
+        );
+    }
+
+    /// 两条**成功**臂都要走到，却不能在成功后进入无限 spawn：
+    /// `Request + staged 在盘上` 驱动 `ReplaceAndSpawn` 成功；新二进制
+    /// `exit 11` 驱动下一轮 `Rollback` 成功；回滚把没有可执行位的旧文件
+    /// 换回原位，于是第三次拉起失败，而 `rollback_count == 1` 且备份已被
+    /// 消耗，`decide` 只能判 `Stop`。整条链不睡、不 kill、不碰进程级环境。
+    #[test]
+    #[cfg(unix)] // 用 `#!/bin/sh` 假 worker 驱动真循环
+    fn successful_replace_then_rollback_reaches_the_stop_decision() {
+        let (d, s) = sup("replace-rollback-success");
+        let staged = d.join("afcli.new");
+        let backup = d.join("afcli.bak");
+        install_script(&staged, "#!/bin/sh\nexit 11\n");
+        s.persist_state(&state_at(&d));
+
+        let code = s.supervise();
+        assert_eq!(code, std::process::ExitCode::from(SUPERVISOR_STOPPED));
+
+        let logged = std::fs::read_to_string(log::log_path(&d)).expect("log");
+        assert!(
+            logged.contains("replaced ") && logged.contains("backup kept at"),
+            "替换成功必须留痕，实际日志：{logged}"
+        );
+        assert!(
+            logged.contains("rolled back to the previous binary"),
+            "回滚成功必须留痕，实际日志：{logged}"
+        );
+        assert!(
+            logged.contains("human intervention required"),
+            "回滚后仍拉不起来必须停下等人，实际日志：{logged}"
+        );
+        assert!(
+            logged.contains("cannot spawn worker"),
+            "第三轮观测应来自回滚后的旧二进制不可执行：{logged}"
+        );
+        assert!(
+            !staged.exists() && !backup.exists(),
+            "staged 与备份分别应被替换、回滚消耗掉"
+        );
+
+        let (after, _) = update::read_state(&s.state_path());
+        let after = after.expect("state");
+        assert_eq!(after.phase, UpdatePhase::Failed, "最终必须停在 Failed");
+        assert_eq!(
+            after.rollback_count, 1,
+            "成功回滚一次后不许再回滚：{after:?}"
         );
     }
 

@@ -280,6 +280,7 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::io::BufRead;
+    use std::time::Duration;
 
     fn run_capture(args: &[&str]) -> (std::process::ExitCode, String, String) {
         let a: Vec<String> = args.iter().map(|s| s.to_string()).collect();
@@ -987,6 +988,102 @@ mod tests {
             }
         }
         got
+    }
+
+    /// `collect_lines` 的三条收尾臂都要能停住：管道关闭（Disconnected）、
+    /// 一直不关闭但到点（deadline）、以及正常收满 `want` 行。这里用
+    /// `Vec<u8>` 当 `Read`，没有进程、没有等待，三条都是确定性的。
+    #[test]
+    #[cfg(unix)]
+    fn collect_lines_stops_on_eof_on_timeout_and_on_enough_lines() {
+        let empty = collect_lines(
+            std::io::Cursor::new(Vec::<u8>::new()),
+            3,
+            Duration::from_secs(1),
+        );
+        assert!(empty.is_empty(), "EOF 后不该凭空造出行：{empty:?}");
+
+        // 一根不会自己关闭的管道：写端留在 `keep` 里，读端交给读线程。
+        // 预算给 0，立刻走 `left.is_zero()` 那条 break。
+        let (tx, rx) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        let keep = tx.try_clone().expect("clone writer");
+        let no_lines = collect_lines(rx, 1, Duration::ZERO);
+        assert!(no_lines.is_empty(), "预算耗尽后必须返回：{no_lines:?}");
+        drop(keep);
+        drop(tx);
+
+        let two = collect_lines(
+            std::io::Cursor::new(b"first\nsecond\n".to_vec()),
+            2,
+            Duration::from_secs(1),
+        );
+        assert_eq!(two, ["first\n", "second\n"], "收满 want 行就返回：{two:?}");
+    }
+
+    /// `dispatch` 的生产臂（`test_exe == None`）用当前可执行文件当被管理的
+    /// 二进制。这里在**子进程**里把它走完：状态写成 Inconsistent，
+    /// `supervise` 立即判 Stop，不会 spawn 出无限循环；子进程正常退出，
+    /// 覆盖率数据也能落盘（被 kill 的进程不会 flush）。
+    #[test]
+    fn dispatch_with_the_production_executable_stops_on_an_inconsistent_state() {
+        let exe = std::env::current_exe().expect("test exe");
+        let out = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "tests::dispatch_with_the_production_executable_stops_on_an_inconsistent_state_child",
+            ])
+            .env("AF_PROD_DISPATCH", "1")
+            .output()
+            .expect("spawn the child test process");
+        let child_stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let child_stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            out.status.success(),
+            "子进程必须绿，stdout：{child_stdout}，stderr：{child_stderr}"
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("1 passed"),
+            "子进程必须真的跑完那条用例，实际 stdout：{stdout}"
+        );
+    }
+
+    /// 上一条的子进程本体。没有哨兵变量时什么都不做（no-op，不是跳过）。
+    #[test]
+    fn dispatch_with_the_production_executable_stops_on_an_inconsistent_state_child() {
+        if std::env::var_os("AF_PROD_DISPATCH").is_none() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tmp");
+        let exe = std::env::current_exe().expect("test exe");
+        let state = node_core::update::state_path_for(&exe);
+        let backup = node_core::update::backup_path_for(&exe);
+        std::fs::write(&backup, b"old").expect("backup");
+        let mut st = node_core::update::UpdateState::requested("9.9.9", &exe, &backup, 1);
+        st.phase = node_core::update::UpdatePhase::StartingNew;
+        st.staged_path = dir.path().join("missing.new").display().to_string();
+        node_core::update::write_state(&state, &st).expect("state");
+        let cleanup = RemoveOnDrop(vec![state, backup]);
+
+        let mut out = Vec::new();
+        let code = dispatch(
+            &[],
+            dir.path().join("data"),
+            "host:9002".to_string(),
+            &mut out,
+            Vec::<u8>::new(),
+        );
+        assert_eq!(
+            code,
+            std::process::ExitCode::from(supervisor::SUPERVISOR_STOPPED),
+            "Inconsistent 状态必须让生产构造的 supervisor 停下"
+        );
+        let shown = String::from_utf8(out).expect("utf8");
+        assert!(
+            shown.starts_with("afcli run: data dir "),
+            "生产臂也要先打入口行：{shown}"
+        );
+        drop(cleanup);
     }
 
     /// 回收 supervisor **和它拉起的 worker**：负 pid 发给整个进程组。
