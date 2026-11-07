@@ -321,8 +321,8 @@ impl Child {
             // && child.read_into(…)`）在没有数据可读时会直接卡在这句 `ReadFile`
             // 上，而它外面那个 `DRAIN_GRACE` 判据**根本没机会执行**。症状是
             // 「超时之后面板永久转圈」，而 `run()` 占着 `afcli-exec` 线程。
-            // 零超时 `WaitForSingleObject` 顺带把事情做对了：返回
-            // 「不可读」时就跳过，让上层去判 `any_open()`。
+            // `PeekNamedPipe` 零阻塞探到「现在有字节」才往下读；没字节就
+            // 跳过，让上层去判 `any_open()` 与下一轮轮询。
             if !wait_handle_readable(raw(handle), 0) {
                 continue;
             }
