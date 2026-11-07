@@ -1930,6 +1930,7 @@ mod tests {
     /// 所以这条用挂住的假 git + 长超时（30s）来区分：不等取消的话，那个
     /// `sleep 3600` 会活到 30s 超时，而这里 1 秒内就该消失。
     #[test]
+    #[cfg(unix)] // 依赖 `#!/bin/sh` 假 git 脚本 + chmod 0o755，Windows 上没有 /bin/sh
     fn closing_the_channel_cancels_an_in_flight_git() {
         let (_base, ws) = sandbox();
         let bin = _base.path().join("fake-git");
@@ -1992,6 +1993,7 @@ mod tests {
     /// 超时没生效时这条测试会挂住整个进程而不是失败，所以断言里必须带**余量上限**，
     /// 真挂住时至少能靠测试超时看出问题。
     #[test]
+    #[cfg(unix)] // 依赖 `#!/bin/sh` 假 git 脚本 + chmod 0o755，Windows 上没有 /bin/sh
     fn a_hanging_git_cannot_block_past_the_timeout() {
         let (_base, ws) = sandbox();
         let bin = _base.path().join("fake-git");
@@ -2036,6 +2038,7 @@ mod tests {
     /// 构造：假 git 把 `status` 原样转给真 git（让 `parse_status` 拿到正常数据），
     /// 而 `rev-parse` 一律 `exit 128` 并说一句**不是**空仓库措辞的话。
     #[test]
+    #[cfg(unix)] // 依赖 `#!/bin/sh` 假 git 脚本 + chmod 0o755，Windows 上没有 /bin/sh
     fn a_real_rev_parse_failure_is_not_reported_as_a_repo_without_head() {
         let (_base, ws) = sandbox();
         repo_with_commit(&ws);
@@ -2360,6 +2363,7 @@ mod tests {
     /// **脚本必须按 `$2` 分支**——一个对任何参数都回同一值的假 git 会让
     /// `short` 与「第二次调用的输出」恰好相等，于是用例恒绿（同义复述）。
     #[test]
+    #[cfg(unix)] // 依赖 `#!/bin/sh` 假 git 脚本 + chmod 0o755，Windows 上没有 /bin/sh
     fn short_is_derived_from_the_same_hash_not_a_second_call() {
         let (_base, ws) = sandbox();
         // 两个前 7 位不同的 40 位十六进制串。
