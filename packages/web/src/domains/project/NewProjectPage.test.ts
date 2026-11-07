@@ -22,6 +22,7 @@ const CREATED = {
   name: '内部指标台',
   shape: 'isolated',
   theme_color: null,
+  upstream_url: null,
   archived_at: null,
   created_at: 'unix:1700000000',
 }
@@ -50,6 +51,13 @@ function mountAtNew(): ReturnType<typeof mountIn<typeof NewProjectPage>> {
 async function submitWith(w: ReturnType<typeof mountIn>, name: string): Promise<void> {
   await w.find('input[type="text"]').setValue(name)
   await w.find('form').trigger('submit')
+  await flush(w)
+}
+
+/** 选中一张形态卡（与用户点卡片同一条 `v-model` 路径）。 */
+async function pickShape(w: ReturnType<typeof mountIn>, key: string): Promise<void> {
+  const radio = w.find(`input[type="radio"][value="${key}"]`)
+  await radio.setValue()
   await flush(w)
 }
 
@@ -147,6 +155,44 @@ describe('NewProjectPage：两种失败措辞分开', () => {
     expect(w.element.textContent).toContain('Hub 连不上')
     // 两种措辞必须**不同**：都写成「建项目失败」的话，用户会以为是自己填错了。
     expect(w.element.textContent).not.toContain('建项目失败（')
+  })
+})
+
+describe('NewProjectPage：镜像式上游 URL', () => {
+  it('选镜像式不填 URL 不发请求并给中文提示', async () => {
+    const fetchMock = stubFetch({})
+    const w = mountAtNew()
+    await flush(w)
+
+    await pickShape(w, 'mirror')
+    await submitWith(w, '内部指标台')
+
+    expect(w.element.textContent).toContain('镜像式项目要填一个上游 git 仓库地址')
+    // 真正要守的是「没打后端」：一个没有上游的镜像式项目建出来之后，
+    // 第一版没有任何界面能删它。
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(route.value.name).not.toBe('board')
+  })
+
+  it('填了 URL 时请求体带 upstream_url', async () => {
+    const fetchMock = stubFetch({
+      '/api/projects': { body: { ...CREATED, shape: 'mirror' } },
+    })
+    const w = mountAtNew()
+    await flush(w)
+
+    await pickShape(w, 'mirror')
+    const url = 'https://github.com/you/metrics.git'
+    expect(w.findAll('input[type="text"]')).toHaveLength(2)
+    await w.find('input[type="text"]').setValue('内部指标台')
+    await w.find('input[placeholder^="比如：https://"]').setValue(`  ${url}  `)
+    await w.find('form').trigger('submit')
+    await flush(w)
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined
+    const body = JSON.parse(String(init?.body))
+    expect(body.shape).toBe('mirror')
+    expect(body.upstream_url).toBe(url)
   })
 })
 

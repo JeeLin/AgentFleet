@@ -9,7 +9,7 @@ use tracing::info;
 use crate::error::{Result, StorageError};
 
 /// 当前 schema 版本。新增表/列时 +1 并在此处追加迁移。
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// 一个迁移：版本号 + 在该事务内执行的 SQL。
 struct Migration {
@@ -64,6 +64,12 @@ const MIGRATIONS: &[Migration] = &[
         version: 5,
         sql: include_str!("schema_v5.sql"),
         // 四张 CREATE TABLE + session 的 ADD COLUMN，全是新增，不重建任何表。
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 6,
+        sql: include_str!("schema_v6.sql"),
+        // 一条 ADD COLUMN，不重建表。和 v4 一样必须为 false。
         rebuilds_tables: false,
     },
 ];
@@ -895,5 +901,135 @@ mod tests {
             e.to_string().contains("UNIQUE"),
             "第二条同 (project, device) 的绑定必须撞唯一约束，实际: {e}"
         );
+    }
+
+    // ---- v6：project.upstream_url（镜像式项目必须指一个上游）----
+
+    /// v6 真的给 `project` 加上 `upstream_url` 列，且列可写可读。
+    ///
+    /// 只断言「迁移没报错」不够：`ALTER TABLE` 写错表名会失败，但把列名
+    /// 写错（例如 `upstream`）也会在真正 INSERT 时才炸。这里直接往新列写
+    /// 一个值再读回来。
+    #[test]
+    fn migration_v6_adds_upstream_url_to_project() {
+        let mut c = memory();
+        run(&mut c).unwrap();
+        assert_eq!(
+            c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        let n: i64 = c
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('project') WHERE name='upstream_url'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "project.upstream_url 必须存在且只有一列");
+
+        c.execute_batch(
+            "INSERT INTO project (id, name, shape, created_at, upstream_url)
+                 VALUES ('p_new', 'app', 'mirror', 'unix:0',
+                         'https://github.com/you/app.git');",
+        )
+        .unwrap();
+        let got: Option<String> = c
+            .query_row(
+                "SELECT upstream_url FROM project WHERE id='p_new'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(got.as_deref(), Some("https://github.com/you/app.git"));
+    }
+
+    /// **v5 时代的存量项目升到 v6 后，`upstream_url` 必须是 NULL**，其余字段
+    /// 一个字都不能动。
+    ///
+    /// 判据不是「列在不在」：给 `ADD COLUMN` 写个 DEFAULT 会把占位串填给全部
+    /// 老行，于是老项目会凭空声称自己有一个上游仓库，而那个地址根本不存在。
+    #[test]
+    fn migration_v6_leaves_old_projects_with_null_upstream_url() {
+        let mut c = memory();
+        // 只跑到 v5：模拟一个已经有项目、但还没有这一列的库。
+        apply(&mut c, MIGRATIONS, 5).unwrap();
+        c.execute_batch(
+            "INSERT INTO project (id, name, shape, theme_color, archived_at, created_at)
+                 VALUES ('p_old', 'legacy', 'mirror', 'blue', NULL, 'unix:0');",
+        )
+        .unwrap();
+        assert_eq!(
+            c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            5,
+            "precondition: a v5 database"
+        );
+
+        run(&mut c).unwrap();
+        assert_eq!(
+            c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+
+        let row: (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+        ) = c
+            .query_row(
+                "SELECT name, shape, theme_color, archived_at, created_at, upstream_url
+                   FROM project WHERE id = 'p_old'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .expect("老项目在迁移后必须仍然读得出来");
+        let (name, shape, theme, archived, created, upstream) = row;
+        assert_eq!(name, "legacy");
+        assert_eq!(shape, "mirror");
+        assert_eq!(theme.as_deref(), Some("blue"));
+        assert_eq!(archived, None);
+        assert_eq!(created, "unix:0");
+        assert_eq!(
+            upstream, None,
+            "存量行的 upstream_url 必须是 NULL，不是空串"
+        );
+    }
+
+    /// v6 幂等：`user_version` 闸门生效，连跑三次不报
+    /// `duplicate column name: upstream_url`（`ADD COLUMN` 没有
+    /// `IF NOT EXISTS` 形式，重复执行会直接报错）。
+    #[test]
+    fn migration_v6_is_idempotent() {
+        let mut c = memory();
+        run(&mut c).unwrap();
+        run(&mut c).unwrap();
+        run(&mut c).unwrap();
+        assert_eq!(
+            c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        let n: i64 = c
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('project') WHERE name='upstream_url'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "project.upstream_url 只能有一列，不能重复加");
     }
 }

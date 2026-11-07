@@ -1,0 +1,15 @@
+-- AgentFleet Hub 存储 schema v6：镜像式项目的上游 git 远端
+--
+-- `PRODUCT.md` §6.4 的建项目流程写死「镜像式填一个上游 URL」，v5 的 project
+-- 表却没地方存。本迁移只补这一列，**不做 clone / fetch**：校验在
+-- `routes/projects.rs::create_project`，落地在 `project.rs::ProjectRepo::create`。
+--
+-- 为什么可空、且不给 DEFAULT：v5 时代的存量项目（包括当时就已经建出来的
+-- 镜像式）没有上游记录，也无法反推。给 DEFAULT 会把占位串填给**全部存量行**
+-- （`ALTER TABLE ADD COLUMN` 的语义），等于凭空给老项目造一个上游仓库。
+-- NULL 才是「我不知道」，也让老行原样可读。
+--
+-- 幂等要求与 v2/v4/v5 一致：`ALTER TABLE ADD COLUMN` **没有** `IF NOT EXISTS`
+-- 形式，只靠 `migrate.rs` 的 `PRAGMA user_version` 闸门保证整条迁移跑一次；
+-- 闸门说谎时撞上的正是 `duplicate column name`，整条 v6 在事务里回滚。
+ALTER TABLE project ADD COLUMN upstream_url TEXT;

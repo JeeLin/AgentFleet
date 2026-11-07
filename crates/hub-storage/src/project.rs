@@ -132,6 +132,9 @@ pub struct Project {
     /// 存 `Option` 而不是「缺省就 gray」：gray 是一个**用户选过的**颜色，
     /// 与「没选」在页面上应该长得不一样（前者显示色点，后者不显示）。
     pub theme_color: Option<ThemeColor>,
+    /// 镜像式项目的上游 git 远端。非镜像式为 `None`；v6 之前的存量项目
+    /// 也没有这一列的值，读出来同样是 `None`（不回填、不编一个上游）。
+    pub upstream_url: Option<String>,
     /// 非空即已归档。归档的项目不出现在列表与看板首页，任务停止派发。
     pub archived_at: Option<String>,
     pub created_at: String,
@@ -152,6 +155,10 @@ pub struct NewProject {
     pub name: String,
     pub shape: ProjectShape,
     pub theme_color: Option<ThemeColor>,
+    /// 镜像式要带一个上游 URL；其余形态传 `None`。**这一层不校验**：
+    /// 「看起来是不是 git 远端」是 HTTP 请求体的口径，归 `hub-server` 的
+    /// `create_project`；存储层只负责把给它的值原样落库。
+    pub upstream_url: Option<String>,
 }
 
 /// 项目仓储。
@@ -173,20 +180,21 @@ impl ProjectRepo {
         let conn = self.pool.get()?;
         let id = crate::workspace::new_id();
         conn.execute(
-            "INSERT INTO project (id, name, shape, theme_color, archived_at, created_at)
-             VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+            "INSERT INTO project (id, name, shape, theme_color, upstream_url, archived_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
             params![
                 id,
                 new.name,
                 new.shape.as_str(),
                 new.theme_color.map(ThemeColor::as_str),
+                new.upstream_url,
                 now
             ],
         )?;
         // 在**同一条连接**上读回：刚写的行与其余行走同一套映射，`shape` 的
         // 取值与解析器口径不一致时不会静默放过。
         let raw = conn.query_row(
-            "SELECT id, name, shape, theme_color, archived_at, created_at
+            "SELECT id, name, shape, theme_color, upstream_url, archived_at, created_at
              FROM project WHERE id = ?1",
             params![id],
             row_to_raw,
@@ -200,7 +208,7 @@ impl ProjectRepo {
         let conn = self.pool.get()?;
         let raw = conn
             .query_row(
-                "SELECT id, name, shape, theme_color, archived_at, created_at
+                "SELECT id, name, shape, theme_color, upstream_url, archived_at, created_at
                  FROM project WHERE id = ?1",
                 params![id],
                 row_to_raw,
@@ -216,10 +224,10 @@ impl ProjectRepo {
     pub fn list(&self, include_archived: bool) -> Result<Vec<Project>> {
         let conn = self.pool.get()?;
         let sql = if include_archived {
-            "SELECT id, name, shape, theme_color, archived_at, created_at
+            "SELECT id, name, shape, theme_color, upstream_url, archived_at, created_at
              FROM project ORDER BY created_at DESC, id DESC"
         } else {
-            "SELECT id, name, shape, theme_color, archived_at, created_at
+            "SELECT id, name, shape, theme_color, upstream_url, archived_at, created_at
              FROM project WHERE archived_at IS NULL ORDER BY created_at DESC, id DESC"
         };
         let mut stmt = conn.prepare(sql)?;
@@ -325,6 +333,7 @@ struct RawProject {
     name: String,
     shape: String,
     theme_color: Option<String>,
+    upstream_url: Option<String>,
     archived_at: Option<String>,
     created_at: String,
 }
@@ -340,6 +349,7 @@ impl RawProject {
                 .as_deref()
                 .map(ThemeColor::from_str)
                 .transpose()?,
+            upstream_url: self.upstream_url,
             archived_at: self.archived_at,
             created_at: self.created_at,
         })
@@ -352,8 +362,9 @@ fn row_to_raw(r: &Row<'_>) -> std::result::Result<RawProject, r2d2_sqlite::rusql
         name: r.get(1)?,
         shape: r.get(2)?,
         theme_color: r.get(3)?,
-        archived_at: r.get(4)?,
-        created_at: r.get(5)?,
+        upstream_url: r.get(4)?,
+        archived_at: r.get(5)?,
+        created_at: r.get(6)?,
     })
 }
 
@@ -375,6 +386,7 @@ mod tests {
             name: "app".into(),
             shape,
             theme_color: Some(ThemeColor::Blue),
+            upstream_url: None,
         }
     }
 
@@ -385,6 +397,7 @@ mod tests {
         assert_eq!(p.name, "app");
         assert_eq!(p.shape, ProjectShape::Central);
         assert_eq!(p.theme_color, Some(ThemeColor::Blue));
+        assert_eq!(p.upstream_url, None);
         assert_eq!(p.archived_at, None);
         assert!(!p.is_archived());
         assert_eq!(p.created_at, TS);
@@ -392,6 +405,37 @@ mod tests {
         let f = pr.get(&p.id).unwrap().unwrap();
         assert_eq!(f.id, p.id);
         assert_eq!(f.shape, ProjectShape::Central);
+    }
+
+    /// 镜像式的上游 URL 必须**落库**且 `get` / `list` 都读得回来。
+    ///
+    /// 只测「create 返回值带得回来」不够：如果 `INSERT` 漏了这一列而 SELECT
+    /// 里写了个常量，create 的读回也可能碰巧对，而重开库取项目就丢了。
+    #[test]
+    fn a_mirror_projects_upstream_url_round_trips() {
+        let (_d, pr) = setup();
+        let url = "git@github.com:you/app.git".to_string();
+        let p = pr
+            .create(
+                NewProject {
+                    name: "app".into(),
+                    shape: ProjectShape::Mirror,
+                    theme_color: None,
+                    upstream_url: Some(url.clone()),
+                },
+                TS,
+            )
+            .unwrap();
+        assert_eq!(p.upstream_url.as_deref(), Some(url.as_str()));
+        assert_eq!(
+            pr.get(&p.id).unwrap().unwrap().upstream_url,
+            Some(url.clone())
+        );
+        assert_eq!(
+            pr.list(false).unwrap()[0].upstream_url,
+            Some(url),
+            "列表也必须带着上游 URL"
+        );
     }
 
     /// 没选主题色就是 `None`，**不编一个默认色**：gray 是一个用户选过的颜色，
@@ -405,6 +449,7 @@ mod tests {
                     name: "app".into(),
                     shape: ProjectShape::Isolated,
                     theme_color: None,
+                    upstream_url: None,
                 },
                 TS,
             )

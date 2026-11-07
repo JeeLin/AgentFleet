@@ -39,6 +39,8 @@ pub struct ProjectView {
     pub shape: &'static str,
     /// 没选主题色时为 `null`（页面用中性灰，不编一个默认色）。
     pub theme_color: Option<&'static str>,
+    /// 镜像式项目的上游 git 远端；其余形态 / v6 之前的存量项目为 `null`。
+    pub upstream_url: Option<String>,
     /// 非空即已归档。**用 `Option` 而不是布尔**：页面要显示「什么时候归档的」，
     /// 而布尔会把这个时间点丢掉，逼前端再问一次。
     pub archived_at: Option<String>,
@@ -52,6 +54,7 @@ impl From<Project> for ProjectView {
             name: p.name,
             shape: p.shape.as_str(),
             theme_color: p.theme_color.map(|c| c.as_str()),
+            upstream_url: p.upstream_url,
             archived_at: p.archived_at,
             created_at: p.created_at,
         }
@@ -71,6 +74,10 @@ pub struct CreateProjectBody {
     pub shape: Option<String>,
     #[serde(default)]
     pub theme_color: Option<String>,
+    /// 镜像式必填的上游 git 远端。非镜像式传了也**忽略**（见
+    /// [`normalize_upstream_url`]），避免老前端多带一个字段就 400。
+    #[serde(default)]
+    pub upstream_url: Option<String>,
 }
 
 /// `PATCH /api/projects/{id}` 的请求体。
@@ -139,6 +146,43 @@ fn parse_theme(s: &str) -> Result<ThemeColor, ApiError> {
         .map_err(|_| ApiError::bad_request(err::INVALID_THEME_COLOR))
 }
 
+/// 镜像式项目的上游 URL：**校验 + 持久化**，不做 clone / fetch。
+///
+/// 窄口径（与 `NewProjectPage.vue` 里的前端校验同一套）：trim 后非空，且
+/// 至少是 `http(s)://`、`ssh://`、`git@host:path` 三者之一。刻意不做网络探测、
+/// 不解析 URL：Hub 也不是 git 客户端，这一层只需要挡住「空字符串 / 随便
+/// 一句话」把项目建出来；真正的可达性由后续同步环节负责。
+///
+/// 非镜像式传了 `upstream_url` 一律**忽略**（不报错也不落库）：上游只对镜像式
+/// 有意义，中心式 / 隔离式带着一个地址反而会让读的人以为代码会从那儿来。
+///
+/// 两个错误码与 `parse_shape` 同一个 400 口径：
+/// - `upstream_url_required`：键缺失、`null`、trim 后为空；
+/// - `upstream_url_invalid`：非空但不像 git 远端。
+fn normalize_upstream_url(
+    shape: ProjectShape,
+    raw: Option<String>,
+) -> Result<Option<String>, ApiError> {
+    if shape != ProjectShape::Mirror {
+        return Ok(None);
+    }
+    let url = raw
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ApiError::bad_request("upstream_url_required"))?;
+    let looks_like_git_remote = url.starts_with("http://")
+        || url.starts_with("https://")
+        || url.starts_with("ssh://")
+        || url.strip_prefix("git@").is_some_and(|rest| {
+            rest.split_once(':')
+                .is_some_and(|(host, path)| !host.is_empty() && !path.is_empty())
+        });
+    if !looks_like_git_remote {
+        return Err(ApiError::bad_request("upstream_url_invalid"));
+    }
+    Ok(Some(url))
+}
+
 /// `GET /api/projects?include_archived=1`：项目列表。
 ///
 /// 默认**不含**已归档的项目：归档的语义就是「不出现在列表与看板首页」。
@@ -192,6 +236,9 @@ pub async fn create_project(
         Some(s) => Some(parse_theme(s)?),
         None => None,
     };
+    // 必须在写库**之前**校验：缺 URL 的镜像式项目一旦落库就再也补不回来
+    // （PATCH 不收这个字段，第一版也不提供删除）。
+    let upstream_url = normalize_upstream_url(shape, body.upstream_url)?;
 
     let at = now();
     let project = repo(&state)
@@ -200,6 +247,7 @@ pub async fn create_project(
                 name: name.to_string(),
                 shape,
                 theme_color,
+                upstream_url,
             },
             &at,
         )
@@ -419,6 +467,7 @@ mod tests {
                     name: "proj".into(),
                     shape: ProjectShape::Isolated,
                     theme_color: None,
+                    upstream_url: None,
                 },
                 &now(),
             )
@@ -457,5 +506,128 @@ mod tests {
             .expect("取消归档")
             .0;
         assert_eq!(back.archived_at, None);
+    }
+
+    // ---- 镜像式项目的上游 URL（只做校验 + 持久化，不 clone / fetch）----
+
+    /// 直接打 handler 建一个项目；返回 (状态码 / 视图) 或带码的 400。
+    ///
+    /// 不绕真路由是为了让这几条用例只盯住 `create_project` 的入参校验与
+    /// `ProjectView` 的回显；路由装配 / CSRF / 认证由
+    /// `tests/project_shape.rs` 那一层覆盖。`TempDir` 随 `state` 一起返回，
+    /// 用例要把两者一起留到断言「落库」做完之后。
+    async fn create(
+        body: CreateProjectBody,
+    ) -> (
+        (AppState, tempfile::TempDir),
+        Result<(StatusCode, Json<ProjectView>), ApiError>,
+    ) {
+        let (state, dir) = state();
+        let result = create_project(State(state.clone()), Json(body)).await;
+        ((state, dir), result)
+    }
+
+    /// 镜像式缺 URL（键缺失 / `null` / 只有空格）→ 400，且**什么都没建**。
+    ///
+    /// 空串那一档尤其要挡：它不是「用户没填」这么简单，落库之后会是一个
+    /// 声称有上游、实际哪儿也去不了的镜像式项目，而第一版不提供删除。
+    #[tokio::test]
+    async fn a_mirror_project_without_an_upstream_url_is_400() {
+        for raw in [None, Some("".into()), Some("   \t".into())] {
+            let ((state, _d), result) = create(CreateProjectBody {
+                name: "镜像".into(),
+                shape: Some("mirror".into()),
+                theme_color: None,
+                upstream_url: raw,
+            })
+            .await;
+            let e = result.expect_err("镜像式没有上游 URL 必须被拒");
+            assert_eq!(e.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(e.code(), "upstream_url_required");
+            assert!(
+                repo(&state).list(true).unwrap().is_empty(),
+                "被拒的请求不得落库（第一版没有删除入口）"
+            );
+        }
+    }
+
+    /// 非空但根本不像 git 远端 → 另一个 400 码，用户能分清「没填」和「填错」。
+    #[tokio::test]
+    async fn a_mirror_project_with_a_non_git_upstream_url_is_400() {
+        for raw in ["随便写一句", "ftp://example.com/repo.git", "git@github.com"] {
+            let ((_state, _d), result) = create(CreateProjectBody {
+                name: "镜像".into(),
+                shape: Some("mirror".into()),
+                theme_color: None,
+                upstream_url: Some(raw.into()),
+            })
+            .await;
+            let e = result.expect_err("不像 git 远端的值必须被拒");
+            assert_eq!(e.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(e.code(), "upstream_url_invalid", "raw={raw}");
+        }
+    }
+
+    /// 三种合法的 git 远端形态都要**落库并回显**，且去空格后存的是 URL 本身。
+    /// 落库的判据走 `ProjectRepo::get` 重新读一行，不是只看 handler 的返回值。
+    #[tokio::test]
+    async fn a_mirror_project_persists_and_echoes_its_upstream_url() {
+        for raw in [
+            "https://github.com/you/app.git",
+            "http://git.internal/app.git",
+            "ssh://git@example.com/you/app.git",
+            "git@github.com:you/app.git",
+        ] {
+            let ((state, _d), result) = create(CreateProjectBody {
+                name: "镜像".into(),
+                shape: Some("mirror".into()),
+                theme_color: None,
+                upstream_url: Some(format!("  {raw}  ")),
+            })
+            .await;
+            let (status, Json(view)) = result.expect("合法上游 URL 必须建得出来");
+            assert_eq!(status, StatusCode::CREATED);
+            assert_eq!(view.shape, "mirror");
+            assert_eq!(view.upstream_url.as_deref(), Some(raw), "响应体回显上游");
+            let stored = repo(&state).get(&view.id).unwrap().expect("项目必须落库");
+            assert_eq!(stored.upstream_url.as_deref(), Some(raw), "库里也要有上游");
+        }
+    }
+
+    /// 中心式 / 隔离式**不受影响**：不带 URL 照常建出来，回显 `null`；
+    /// 带了 URL 也照常建成且被忽略（上面 `normalize_upstream_url` 选的是
+    /// 「忽略」而不是「拒绝」，这条用例把选型锁住）。
+    #[tokio::test]
+    async fn non_mirror_shapes_are_unaffected_by_upstream_url() {
+        for shape in ["central", "isolated"] {
+            let ((_state, _d), result) = create(CreateProjectBody {
+                name: "普通项目".into(),
+                shape: Some(shape.into()),
+                theme_color: None,
+                upstream_url: None,
+            })
+            .await;
+            let (status, Json(view)) = result.expect("非镜像式不需要上游 URL");
+            assert_eq!(status, StatusCode::CREATED);
+            assert_eq!(view.shape, shape);
+            assert_eq!(view.upstream_url, None);
+        }
+
+        let ((state, _d), result) = create(CreateProjectBody {
+            name: "普通项目".into(),
+            shape: Some("isolated".into()),
+            theme_color: None,
+            upstream_url: Some("https://github.com/you/app.git".into()),
+        })
+        .await;
+        let (status, Json(view)) = result.expect("非镜像式多带一个上游字段不该 400");
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(view.shape, "isolated");
+        assert_eq!(view.upstream_url, None, "非镜像式的上游字段被忽略");
+        assert_eq!(
+            repo(&state).get(&view.id).unwrap().unwrap().upstream_url,
+            None,
+            "忽略必须是真的没落库，不是只藏了响应字段"
+        );
     }
 }

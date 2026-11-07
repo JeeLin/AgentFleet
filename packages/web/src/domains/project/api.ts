@@ -16,7 +16,11 @@
 
 import { del, getJson, patchJson, postJson, putJson, type RequestOptions } from '@/shared/http'
 
-/** `GET /api/projects` 的一项。与 `routes/projects.rs` 的 `ProjectView` 逐字一致。 */
+/**
+ * `GET /api/projects` 的一项。字段与 `routes/projects.rs` 的 `ProjectView`
+ * 对齐；`upstream_url` 标成可选是为了兼容 v5 及更早的响应（那时没有这个键），
+ * 后端 v6 起总会带上它（`null` 或字符串）。
+ */
 export interface Project {
   id: string
   name: string
@@ -24,6 +28,8 @@ export interface Project {
   shape: string
   /** 没选主题色时为 `null`（不要当成 `'gray'`）。 */
   theme_color: string | null
+  /** 镜像式项目的上游 git 远端；其余形态 / 老项目为 `null`。 */
+  upstream_url?: string | null
   /** 非空即已归档，值是 `unix:<秒>`；页面要显示「什么时候归档的」。 */
   archived_at: string | null
   created_at: string
@@ -44,9 +50,15 @@ export function getProject(id: string, options?: RequestOptions): Promise<Projec
   return getJson<Project>(`/api/projects/${encodeURIComponent(id)}`, options)
 }
 
-/** 建项目。`shape` 缺省由后端定成 `isolated`（能反悔的那一侧）。 */
+/**
+ * 建项目。`shape` 缺省由后端定成 `isolated`（能反悔的那一侧）。
+ *
+ * `upstream_url` 只在 `shape === 'mirror'` 时有意义：那时后端要求非空且像
+ * git 远端（`http(s)://` / `ssh://` / `git@host:path`），缺了回 400。
+ * 前端 `NewProjectPage.vue` 先做同一套校验，挡住「没填就发请求」。
+ */
 export function createProject(
-  body: { name: string; shape?: string; theme_color?: string },
+  body: { name: string; shape?: string; theme_color?: string; upstream_url?: string },
   options?: RequestOptions,
 ): Promise<Project> {
   return postJson<Project>('/api/projects', body, options)

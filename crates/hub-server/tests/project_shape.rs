@@ -449,7 +449,13 @@ async fn central_cannot_go_back_to_isolated_or_to_mirror() {
 #[tokio::test]
 async fn mirror_cannot_transition_to_anything() {
     let h = Harness::new().await;
-    let created = h.create(json!({"name": "镜像式", "shape": "mirror"})).await;
+    let created = h
+        .create(json!({
+            "name": "镜像式",
+            "shape": "mirror",
+            "upstream_url": "https://github.com/you/app.git"
+        }))
+        .await;
     let id = created.json()["id"].as_str().unwrap().to_string();
 
     for to in ["central", "isolated"] {

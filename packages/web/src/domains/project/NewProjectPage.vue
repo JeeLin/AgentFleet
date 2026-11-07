@@ -46,8 +46,23 @@ const SHAPES = [
 
 const name = ref('')
 const shape = ref<string>('isolated')
+const upstreamUrl = ref('')
 const submitting = ref(false)
 const failure = ref('')
+
+/**
+ * 与后端 `routes/projects.rs::normalize_upstream_url` 同一套窄口径：
+ * trim 后非空，且至少是 `http(s)://` / `ssh://` / `git@host:path` 之一。
+ * 不做网络探测——页面也不该在建项目时等一次 DNS / TLS 握手。
+ */
+function looksLikeGitRemote(url: string): boolean {
+  if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('ssh://')) {
+    return true
+  }
+  const sep = url.indexOf(':')
+  const scp = url.startsWith('git@') && sep > 4 ? [url.slice(4, sep), url.slice(sep + 1)] : []
+  return scp.length === 2 && scp[0] !== '' && scp[1] !== ''
+}
 
 async function submit(): Promise<void> {
   const trimmed = name.value.trim()
@@ -55,10 +70,23 @@ async function submit(): Promise<void> {
     failure.value = '给项目起个名字。'
     return
   }
+  const url = upstreamUrl.value.trim()
+  let upstream_url: string | undefined
+  if (shape.value === 'mirror') {
+    if (!url) {
+      failure.value = '镜像式项目要填一个上游 git 仓库地址。'
+      return
+    }
+    if (!looksLikeGitRemote(url)) {
+      failure.value = '上游地址要像 git 远端：http(s)://、ssh:// 或 git@主机:路径。'
+      return
+    }
+    upstream_url = url
+  }
   submitting.value = true
   failure.value = ''
   try {
-    const p = await createProject({ name: trimmed, shape: shape.value })
+    const p = await createProject({ name: trimmed, shape: shape.value, upstream_url })
     // `replace`：用户按「后退」不该回到一张已经提交过的表单。
     navigate(`/project/${encodeURIComponent(p.id)}/board`, { replace: true })
   } catch (e) {
@@ -104,6 +132,18 @@ async function submit(): Promise<void> {
           </label>
         </div>
       </fieldset>
+
+      <label v-if="shape === 'mirror'" class="af-field">
+        <span class="af-field__label">上游 git 仓库地址</span>
+        <input
+          v-model="upstreamUrl"
+          class="af-input"
+          type="text"
+          placeholder="比如：https://github.com/you/metrics.git"
+          autocomplete="off"
+        />
+        <span class="af-field__hint">镜像式项目要指一个上游；http(s)://、ssh:// 或 git@主机:路径。</span>
+      </label>
 
       <p v-if="failure" class="af-form__error" role="alert">{{ failure }}</p>
 

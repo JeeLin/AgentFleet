@@ -316,6 +316,7 @@ mod tests {
                     name: name.to_string(),
                     shape: hub_storage::project::ProjectShape::Isolated,
                     theme_color: None,
+                    upstream_url: None,
                 },
                 &now(),
             )
