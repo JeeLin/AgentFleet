@@ -2715,9 +2715,14 @@ async fn agent_binary_empty_file_is_refused() {
     let path = dir.path().join("empty-afcli");
     std::fs::write(&path, b"").unwrap();
 
-    std::env::set_var("AFCLI_BINARY_PATH", &path);
-    let r = h.get("/api/agent-binary").await;
-    std::env::remove_var("AFCLI_BINARY_PATH");
+    let r = {
+        let guard = ENV_LOCK.lock().await;
+        std::env::set_var("AFCLI_BINARY_PATH", &path);
+        let r = h.get("/api/agent-binary").await;
+        std::env::remove_var("AFCLI_BINARY_PATH");
+        drop(guard);
+        r
+    };
 
     assert_eq!(r.status, StatusCode::NOT_FOUND);
     r.assert_error_code("agent_binary_unavailable");
