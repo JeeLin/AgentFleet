@@ -2734,22 +2734,22 @@ mod agent_binary_candidates {
     fn explicit_configuration_wins_and_is_the_only_candidate() {
         // 运维写明了路径还去猜别的，等于悄悄忽略配置——所以显式配置时
         // 候选表**恰好一项**，不是「第一项优先」。
-        let got = candidate_paths(Some("/opt/afcli"), "linux", "x86_64");
+        let got = candidate_paths(Some("/opt/afcli"), "linux", "x86_64").expect("合法平台组合");
         assert_eq!(got.len(), 1, "显式配置时不该再试探其它路径");
         assert_eq!(got[0], std::path::PathBuf::from("/opt/afcli"));
     }
 
     #[test]
     fn unconfigured_lists_arch_subdirs_before_the_flat_path() {
-        let got = candidate_paths(None, "linux", "x86_64");
+        let got = candidate_paths(None, "linux", "x86_64").expect("合法平台组合");
         let strs: Vec<String> = got.iter().map(|p| p.display().to_string()).collect();
 
         // 分架构目录必须排在平铺路径之前：分架构那份是**为这个平台准备的**，
         // 而平铺那份只是「这台 Hub 自己那份」，可能不是调用方要的架构。
         let arch_idx = strs
             .iter()
-            .position(|s| s == "/usr/local/bin/linux/x86_64/afcli")
-            .expect("应有 os/arch 子目录候选");
+            .position(|s| s == "/usr/local/bin/linux/amd64/afcli")
+            .expect("应有归一化 os/arch 子目录候选");
         let flat_idx = strs
             .iter()
             .position(|s| s == "/usr/local/bin/afcli")
@@ -2762,7 +2762,7 @@ mod agent_binary_candidates {
         // 两种分隔符都要有：`os/arch` 是 REX 的目录习惯，`os-arch` 是 CI artifact
         // 的命名习惯，只写一种会让另一种部署形态静默 404。
         assert!(
-            strs.iter().any(|s| s.contains("linux-x86_64")),
+            strs.iter().any(|s| s.contains("linux-amd64")),
             "缺 `os-arch` 形式的候选：{strs:?}"
         );
     }
@@ -2771,15 +2771,36 @@ mod agent_binary_candidates {
     fn mac_naming_variants_resolve_to_the_same_candidates() {
         // `std::env::consts::OS` 在 macOS 上是 `macos`，而文档/产物名用 `mac`。
         // 两者必须指向同一组路径，否则「按文档写 mac 就 404」。
-        let a = candidate_paths(None, "mac", "aarch64");
-        let b = candidate_paths(None, "macos", "aarch64");
-        let c = candidate_paths(None, "darwin", "aarch64");
+        let a = candidate_paths(None, "mac", "aarch64").expect("合法平台组合");
+        let b = candidate_paths(None, "macos", "aarch64").expect("合法平台组合");
+        let c = candidate_paths(None, "darwin", "aarch64").expect("合法平台组合");
         assert_eq!(a, b, "`mac` 与 `macos` 必须等价");
         assert_eq!(a, c, "`mac` 与 `darwin` 必须等价");
     }
+
+    #[test]
+    fn traversal_and_invalid_platform_queries_are_rejected() {
+        // `?arch=amd64/../../…` 曾会被拼进候选路径，让 `tokio::fs::read`
+        // 读到部署目录外的文件。闭集之外的值必须在碰磁盘之前被拒。
+        let arch = "amd64/../../../../data/setup-token.txt";
+        assert!(candidate_paths(None, "linux", arch).is_none());
+        assert!(candidate_paths(Some("/opt/afcli"), "linux", arch).is_none());
+        for bad in ["", "..", "arm64\\..\\x", "AMD64", " amd64", "x86"] {
+            assert!(
+                candidate_paths(None, "linux", bad).is_none(),
+                "非法 arch 必须被拒：{bad:?}"
+            );
+        }
+        for bad in ["", "..", "linux/../../etc", "WINDOWS", "win32"] {
+            assert!(
+                candidate_paths(None, bad, "amd64").is_none(),
+                "非法 os 必须被拒：{bad:?}"
+            );
+        }
+    }
 }
 
-/// 平台参数化：`?os=&arch=` 真的能定位到分架构目录里那一份。
+/// 平台参数化：`?os=&arch=` 先归一化成闭集，再只用于定位与命名。
 ///
 /// 用 `AFCLI_BINARY_PATH` 指向一个**临时目录**，再加 `/usr/local/bin` 那套候选
 /// ——不行：显式配置会独占候选表（见 `explicit_configuration_wins_...`），
@@ -2788,9 +2809,9 @@ mod agent_binary_candidates {
 ///
 /// 于是这里验的是更本质的一条：**文件名要带上请求的平台**。平台参数化若
 /// 只影响查找、不影响下发文件名，用户存下来之后无法分辨拿到的是哪个架构
-/// ——而多架构 Hub 下发的正是不同架构的文件。
+/// ——而多架构 Hub 下发的正是不同架构的文件。别名 `aarch64` 归一成 `arm64`。
 #[tokio::test]
-async fn agent_binary_filename_carries_the_requested_platform() {
+async fn agent_binary_filename_carries_the_canonical_platform() {
     let h = Harness::new().await;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("afcli");
@@ -2812,9 +2833,68 @@ async fn agent_binary_filename_carries_the_requested_platform() {
         .and_then(|v| v.to_str().ok());
     let disp = disp.expect("成功下发必须有 Content-Disposition");
     assert!(
-        disp.contains("afcli-linux-aarch64"),
-        "文件名必须带请求的平台（否则用户无法分辨架构），实际: {disp}"
+        disp.contains("afcli-linux-arm64"),
+        "文件名必须带归一化后的平台（否则用户无法分辨架构），实际: {disp}"
     );
+    assert!(
+        !disp.contains('/') && !disp.contains(".."),
+        "Content-Disposition 不许夹带路径片段：{disp}"
+    );
+}
+
+/// 复核里的越界 payload：显式配置指向一个**真存在**的文件，也要在
+/// 碰磁盘之前回 400，而不是把那个文件下发出来。少了归一化，这条会 200。
+#[tokio::test]
+async fn traversal_in_platform_query_is_rejected_before_any_file_read() {
+    let h = Harness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("afcli");
+    let payload = b"\x7fELF-fake-setup-token-marker";
+    std::fs::write(&path, payload).unwrap();
+
+    let r = {
+        let guard = ENV_LOCK.lock().await;
+        std::env::set_var("AFCLI_BINARY_PATH", &path);
+        let r = h
+            .get("/api/agent-binary?os=linux&arch=amd64/../../../../data/setup-token.txt")
+            .await;
+        std::env::remove_var("AFCLI_BINARY_PATH");
+        drop(guard);
+        r
+    };
+
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "越界 arch 必须 400");
+    r.assert_error_code("invalid_request_body");
+    assert!(
+        !r.body.as_bytes().contains(&b'\x7f'),
+        "越界请求绝不能下发任何文件字节：{}",
+        r.body
+    );
+}
+
+#[tokio::test]
+async fn invalid_platform_query_values_are_rejected() {
+    let h = Harness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("afcli");
+    std::fs::write(&path, b"\x7fELF-fake").unwrap();
+
+    let guard = ENV_LOCK.lock().await;
+    std::env::set_var("AFCLI_BINARY_PATH", &path);
+    for query in [
+        "/api/agent-binary?os=&arch=amd64",
+        "/api/agent-binary?os=win32&arch=amd64",
+        "/api/agent-binary?os=linux&arch=",
+        "/api/agent-binary?os=linux&arch=..",
+        "/api/agent-binary?os=linux&arch=amd64%2F..%2F..%2Fdata",
+        "/api/agent-binary?os=linux&arch=AMD64",
+    ] {
+        let r = h.get(query).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{query} 必须 400");
+        r.assert_error_code("invalid_request_body");
+    }
+    std::env::remove_var("AFCLI_BINARY_PATH");
+    drop(guard);
 }
 
 /// 空串的 `AFCLI_BINARY_PATH` 按「没配」处理，而不是当成一个空路径。
