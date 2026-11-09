@@ -538,12 +538,14 @@ pub(crate) fn read_handle(handle: RawHandle, buf: &mut [u8]) -> Result<usize, Pt
 /// `rc != WAIT_TIMEOUT`，于是 `WAIT_FAILED` 被当成「可读」→ 无数据也去
 /// `ReadFile` → 永久阻塞（`test-desktop (windows)` 挂了 53m51s 的真因）。
 ///
-/// 现在用 `PeekNamedPipe` 查可读字节数：有字节才返回 true；暂时没有就按
-/// 调用方的轮询节奏（`terminal.rs` 的 `READ_POLL_INTERVAL` 100ms / 测试用例
-/// 的 100ms）睡到下一个切片。`budget` 不再用于内核等待——探测本身零阻塞，
-/// 由调用方在循环头用 `Instant` 控制总截止时间（`a_conpty_runs_a_command...`
-/// 的 20s deadline），语义与 Unix 侧「`poll` 说可读 → 读 → 0 字节即 EOF」
-/// 一致。
+/// 判据仍由 `PeekNamedPipe` 给（见 `crate::win_pipe`），但**「最多等 `budget`」
+/// 必须由这里自己兑现**：Windows 没有可等待的管道句柄，不能像 Unix 侧
+/// `poll(fd, budget)` 那样让内核阻塞。所以先探一次，暂时没数据就按固定切片
+/// `sleep` 再探，直到有字节 / 所有写端已关 / 预算耗尽才返回。这样空闲的
+/// Windows 终端读线程不会零阻塞空转占满一个核，`budget`（`terminal.rs` 的
+/// `READ_POLL_INTERVAL` = 100ms）同时也是 `read_loop` 回到循环头检查 `stop`
+/// 标志的上界——文档里写的 100ms 节奏在这里有真实的等待语句。`sleep` 只用来
+/// 兑现等待预算，**不代替** `PeekNamedPipe` 的「可否 `ReadFile`」判据。
 ///
 /// `PeekNamedPipe` 返回 FALSE 时要分清两种情形：
 ///
@@ -551,12 +553,23 @@ pub(crate) fn read_handle(handle: RawHandle, buf: &mut [u8]) -> Result<usize, Pt
 ///   此时必须返回 true，让调用方去 `read_handle` 拿同一条错误并收敛成
 ///   `Ok(0)`。若一律按「暂时没字节」处理，读线程会永远轮询下去——
 ///   `any_open()` 不收敛、`Terminal` 的 `done` 永远不置位。
-/// - 其它：才是「暂时没字节」，按调用方的轮询节奏睡到下一个切片。
+/// - 其它：才是「暂时没字节」，睡到下一个切片再探。
 ///
 /// 判据本身收敛在 `crate::win_pipe`，与 exec 侧共用同一份 `PeekNamedPipe`
 /// 探测与断管错误码，避免一侧改了另一侧漂移回 `ReadFile` 永久阻塞。
-pub(crate) fn wait_readable(handle: RawHandle, _budget: std::time::Duration) -> bool {
-    crate::win_pipe::pipe_is_readable(handle as HANDLE)
+pub(crate) fn wait_readable(handle: RawHandle, budget: std::time::Duration) -> bool {
+    const WAIT_SLICE: std::time::Duration = std::time::Duration::from_millis(10);
+    let start = std::time::Instant::now();
+    loop {
+        if crate::win_pipe::pipe_is_readable(handle as HANDLE) {
+            return true;
+        }
+        let remaining = budget.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            return false;
+        }
+        std::thread::sleep(WAIT_SLICE.min(remaining));
+    }
 }
 
 // ---------------------------------------------------------------------------

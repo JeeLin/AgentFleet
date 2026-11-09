@@ -490,6 +490,9 @@ fn raw_handle_of(end: &OwnedReadEnd) -> ReadEnd {
 
 /// 读线程的等待粒度。**它同时是「关掉面板」到线程真正退出之间的上界**：
 /// 太大则关掉的终端还占着 master 与一个线程几秒，太小则空转烧电。
+/// 两平台都由 `wait_readable` 兑现这个上界：Unix 用 `poll(fd, budget)`，
+/// Windows 由 `pty/windows.rs` 在预算内分片 `sleep` + `PeekNamedPipe` 重探；
+/// 调用方不要再在 false 分支加第二份 sleep，否则上界会被翻倍。
 const READ_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// 「能用的默认值」必须真的存在：注册表按名造 connector 时走的就是

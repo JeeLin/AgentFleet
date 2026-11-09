@@ -20,7 +20,8 @@ use windows_sys::Win32::System::Pipes::PeekNamedPipe;
 /// `PeekNamedPipe` 查到有字节才算可读；它返回 FALSE 时只有
 /// `ERROR_BROKEN_PIPE` / `ERROR_PIPE_NOT_CONNECTED`（所有写端已关）也算可读，
 /// 让调用方随后的 `ReadFile` 拿到同一条错误码并摘掉读端。其余失败按
-/// 「暂时没字节」处理，由调用方的轮询节奏决定下一次探测。
+/// 「暂时没字节」处理：`pty/windows.rs` 的 `wait_readable` 会按预算等待后再探，
+/// exec 侧 `read_into` 则仍由上层 `run()` 的 deadline 控制下一次探测。
 pub(crate) fn pipe_is_readable(handle: HANDLE) -> bool {
     let mut available: u32 = 0;
     let ok = unsafe {
