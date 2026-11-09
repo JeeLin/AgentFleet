@@ -373,37 +373,7 @@ pub async fn unarchive_project(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AuthParams, LoginRateLimiter};
-    use std::time::Duration;
-
-    fn state() -> (AppState, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let pool = hub_storage::db::open_in(dir.path()).unwrap().1;
-        let state = AppState::bootstrap_with(
-            pool,
-            dir.path(),
-            AuthParams {
-                m_cost: 8192,
-                t_cost: 1,
-                p_cost: 1,
-            },
-            Duration::from_millis(200),
-            LoginRateLimiter::new(10, 60),
-        )
-        .unwrap();
-        (state, dir)
-    }
-
-    /// 故障注入：表改名，让针对它的 SQL 当场报 `no such table`。
-    /// 与 `tests/common/mod.rs` 的 `break_device_lookup` 同一手法。
-    fn break_project_table(state: &AppState) {
-        state
-            .pool()
-            .get()
-            .unwrap()
-            .execute_batch("ALTER TABLE project RENAME TO project_moved")
-            .unwrap();
-    }
+    use crate::test_support::{break_table, state};
 
     /// 形态升级时库坏了 → 500，**不是 404 也不是 400**。
     ///
@@ -412,7 +382,7 @@ mod tests {
     #[tokio::test]
     async fn a_broken_shape_upgrade_is_a_500() {
         let (state, _d) = state();
-        break_project_table(&state);
+        break_table(&state, "project");
 
         let e = change_shape(
             State(state.clone()),
@@ -431,7 +401,7 @@ mod tests {
     #[tokio::test]
     async fn a_broken_archive_is_a_500() {
         let (state, _d) = state();
-        break_project_table(&state);
+        break_table(&state, "project");
 
         let e = archive_project(State(state.clone()), Path("p_1".into()))
             .await
@@ -444,7 +414,7 @@ mod tests {
     #[tokio::test]
     async fn a_broken_unarchive_is_a_500() {
         let (state, _d) = state();
-        break_project_table(&state);
+        break_table(&state, "project");
 
         let e = unarchive_project(State(state.clone()), Path("p_1".into()))
             .await

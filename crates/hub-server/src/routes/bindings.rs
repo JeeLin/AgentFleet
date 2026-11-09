@@ -288,26 +288,7 @@ fn internal(step: &'static str) -> impl Fn(StorageError) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AuthParams, LoginRateLimiter};
-    use std::time::Duration;
-
-    fn state() -> (AppState, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let pool = hub_storage::db::open_in(dir.path()).unwrap().1;
-        let state = AppState::bootstrap_with(
-            pool,
-            dir.path(),
-            AuthParams {
-                m_cost: 8192,
-                t_cost: 1,
-                p_cost: 1,
-            },
-            Duration::from_millis(200),
-            LoginRateLimiter::new(10, 60),
-        )
-        .unwrap();
-        (state, dir)
-    }
+    use crate::test_support::{break_table, state};
 
     fn new_project(state: &AppState, name: &str) -> String {
         projects(state)
@@ -330,20 +311,6 @@ mod tests {
             disk_quota_bytes: None,
             cleanup_policy: None,
         }
-    }
-
-    /// 故障注入：把一张表改名，让针对它的 SQL 全部报 `no such table`。
-    ///
-    /// **改名而不是 `DROP TABLE`**：连接池里缓存的语句与表名绑定，改名同样
-    /// 让读写当场失败，而行为稳定可复现（同 `tests/common/mod.rs` 的
-    /// `break_device_lookup`）。
-    fn break_table(state: &AppState, table: &str) {
-        state
-            .pool()
-            .get()
-            .unwrap()
-            .execute_batch(&format!("ALTER TABLE {table} RENAME TO {table}_moved"))
-            .unwrap();
     }
 
     /// **读库失败不是 404**：`list_for_project` 里项目查不出来时必须回 500。

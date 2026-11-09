@@ -239,37 +239,7 @@ fn task_title(state: &AppState, task_id: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AuthParams, LoginRateLimiter};
-    use std::time::Duration;
-
-    fn state() -> (AppState, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let pool = hub_storage::db::open_in(dir.path()).unwrap().1;
-        let state = AppState::bootstrap_with(
-            pool,
-            dir.path(),
-            AuthParams {
-                m_cost: 8192,
-                t_cost: 1,
-                p_cost: 1,
-            },
-            Duration::from_millis(200),
-            LoginRateLimiter::new(10, 60),
-        )
-        .unwrap();
-        (state, dir)
-    }
-
-    /// 故障注入：表改名，让针对它的 SQL 当场报 `no such table`。
-    /// 与 `tests/common/mod.rs` 的 `break_device_lookup` 同一手法。
-    fn break_table(state: &AppState, table: &str) {
-        state
-            .pool()
-            .get()
-            .unwrap()
-            .execute_batch(&format!("ALTER TABLE {table} RENAME TO {table}_moved"))
-            .unwrap();
-    }
+    use crate::test_support::{break_table, state};
 
     /// 一张任务卡（`task_title` 要读它）。
     fn insert_task(state: &AppState, title: &str) -> String {

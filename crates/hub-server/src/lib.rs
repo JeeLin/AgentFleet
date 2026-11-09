@@ -14,6 +14,8 @@ pub mod conns;
 pub mod middleware_auth;
 pub mod presence;
 pub mod routes;
+#[cfg(test)]
+mod test_support;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

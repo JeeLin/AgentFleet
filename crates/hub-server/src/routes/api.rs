@@ -788,6 +788,7 @@ pub struct AgentSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::break_table;
     use hub_core::auth::{AuthParams, LoginRateLimiter};
     use std::time::Duration;
 
@@ -1268,16 +1269,6 @@ mod tests {
         );
     }
     // ---- 读库失败时的两处回退 ----
-
-    /// 故障注入：表改名，让针对它的 SQL 当场报 `no such table`。
-    /// 与 `tests/common/mod.rs` 的 `break_device_lookup` 同一手法。
-    fn break_table(st: &AppState, table: &str) {
-        st.pool()
-            .get()
-            .unwrap()
-            .execute_batch(&format!("ALTER TABLE {table} RENAME TO {table}_moved"))
-            .unwrap();
-    }
 
     /// **设备摘要**：`agent_runtime` 读不出来时，名单退回心跳上报的
     /// `capabilities.agents`，而不是空数组。

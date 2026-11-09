@@ -1424,6 +1424,7 @@ fn auth_fail_reason(e: HandshakeError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::break_table;
     use axum::http::HeaderValue;
     use protocol::handshake::HandshakeState;
     use std::path::Path;
@@ -2320,17 +2321,6 @@ mod tests {
     }
 
     // ---- 读侧限流、出站队列与落库失败 ----
-
-    /// 故障注入：表改名，让针对它的 SQL 当场报 `no such table`。
-    /// 与 `tests/common/mod.rs` 的 `break_device_lookup` 同一手法。
-    fn break_table(state: &AppState, table: &str) {
-        state
-            .pool()
-            .get()
-            .unwrap()
-            .execute_batch(&format!("ALTER TABLE {table} RENAME TO {table}_moved"))
-            .unwrap();
-    }
 
     /// **单帧超硬上限**：立刻断连，并回 `err{code:"frame_too_large"}`。
     ///
