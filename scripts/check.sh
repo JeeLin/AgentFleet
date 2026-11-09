@@ -1035,20 +1035,40 @@ if 'gate-static' not in str((jobs.get('gate-test') or {}).get('needs') or []):
 for name in ('gate-static', 'gate-test', 'build-binaries', 'build-desktop'):
     if 'shared-key' not in steps_text(name):
         bad.append(f'`{name}` 未声明 shared-key，Rust 依赖图会各编一遍')
-# v0.7.3：覆盖率补到 98% 后恢复硬门禁。注释里也不许留旧措辞，否则下次
-# 有人会照注释把 step 级 `continue-on-error` 加回来，把 gate 变成假绿。
-if 'continue-on-error' in yml:
-    bad.append('`release.yml` 不得出现 continue-on-error：cov-gate 必须硬阻断')
-coverage = jobs.get('gate-coverage') or {}
-coverage_run = '\n'.join(str(s.get('run') or '') for s in (coverage.get('steps') or []))
-if '--fail-under-lines 98' not in coverage_run:
-    bad.append('`gate-coverage` 的 cov-gate 仍须带 --fail-under-lines 98')
-
 for b in bad:
     print(f'      {b}')
 sys.exit(1 if bad else 0)
 PYEOF
   [[ $? -ne 0 ]] && { echo "  ❌ release.yml 又出现重复编译 / 旧 macOS runner"; fail=1; } || ok "前端单点构建、Rust 缓存复用、桌面测试与 macos-latest 保留"
+
+echo
+echo "== C11 release.yml 不得出现 continue-on-error（含注释），cov-gate 必须硬阻断 =="
+python3 - <<'PYEOF'
+import sys
+from pathlib import Path
+try:
+    import yaml
+except ImportError:
+    print('      缺 PyYAML：无法核对 release.yml')
+    sys.exit(1)
+
+yml = Path('.github/workflows/release.yml').read_text(encoding='utf-8')
+jobs = (yaml.safe_load(yml) or {}).get('jobs') or {}
+bad = []
+
+# 注释里也不许留旧措辞，否则下次有人会照注释把 step 级豁免加回来。
+if 'continue-on-error' in yml:
+    bad.append('`release.yml` 不得出现 continue-on-error（含注释）：cov-gate 必须硬阻断')
+coverage = jobs.get('gate-coverage') or {}
+coverage_run = '\n'.join(str(s.get('run') or '') for s in (coverage.get('steps') or []))
+if 'cargo llvm-cov --workspace --all-targets --summary-only --fail-under-lines 98' not in coverage_run:
+    bad.append('`gate-coverage` 的 cov-gate 命令必须保持 --fail-under-lines 98')
+
+for b in bad:
+    print(f'      {b}')
+sys.exit(1 if bad else 0)
+PYEOF
+  [[ $? -ne 0 ]] && { echo "  ❌ continue-on-error 回流或 cov-gate 命令被改"; fail=1; } || ok "release.yml 无 continue-on-error，cov-gate 仍以 98% 硬阻断"
 
 echo
 if [[ $fail -eq 0 ]]; then echo "门禁通过"; else echo "门禁未通过"; exit 1; fi
