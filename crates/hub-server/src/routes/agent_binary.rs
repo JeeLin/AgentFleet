@@ -360,7 +360,8 @@ mod tests {
     }
 
     /// Windows 载荷在镜像里叫 `afcli-windows-amd64.exe`；候选路径不带 `.exe`
-    /// 就永远读不到它。`normalize_os` 的其它写法（win32 等）不在契约内。
+    /// 就永远读不到它。`normalize_query_platform` 的 `CanonicalOs` /
+    /// `CanonicalArch` / `Platform` 闭集只认契约写法，`win32` 等别名不在集合内。
     #[test]
     fn windows_dist_candidate_has_exe_suffix() {
         let got = candidate_paths(None, "windows", "amd64").expect("合法平台组合");
