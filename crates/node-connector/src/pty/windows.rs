@@ -51,14 +51,12 @@
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::ptr;
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED, HANDLE, S_OK,
-};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, S_OK};
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_NONE;
 use windows_sys::Win32::System::Console::{
     ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
 };
-use windows_sys::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
+use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
     UpdateProcThreadAttribute, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
@@ -554,25 +552,11 @@ pub(crate) fn read_handle(handle: RawHandle, buf: &mut [u8]) -> Result<usize, Pt
 ///   `Ok(0)`。若一律按「暂时没字节」处理，读线程会永远轮询下去——
 ///   `any_open()` 不收敛、`Terminal` 的 `done` 永远不置位。
 /// - 其它：才是「暂时没字节」，按调用方的轮询节奏睡到下一个切片。
+///
+/// 判据本身收敛在 `crate::win_pipe`，与 exec 侧共用同一份 `PeekNamedPipe`
+/// 探测与断管错误码，避免一侧改了另一侧漂移回 `ReadFile` 永久阻塞。
 pub(crate) fn wait_readable(handle: RawHandle, _budget: std::time::Duration) -> bool {
-    let mut available: u32 = 0;
-    let ok = unsafe {
-        PeekNamedPipe(
-            handle as HANDLE,
-            ptr::null_mut(),
-            0,
-            ptr::null_mut(),
-            &mut available,
-            ptr::null_mut(),
-        )
-    };
-    if ok != 0 {
-        return available > 0;
-    }
-    matches!(
-        unsafe { GetLastError() },
-        ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED
-    )
+    crate::win_pipe::pipe_is_readable(handle as HANDLE)
 }
 
 // ---------------------------------------------------------------------------

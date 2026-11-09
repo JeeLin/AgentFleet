@@ -37,11 +37,11 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, SetHandleInformation, ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED,
-    HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, SetHandleInformation, ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED, HANDLE,
+    HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Storage::FileSystem::ReadFile;
-use windows_sys::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
+use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, GetExitCodeProcess, TerminateProcess, WaitForSingleObject, CREATE_NO_WINDOW,
     PROCESS_INFORMATION, STARTUPINFOW,
@@ -105,25 +105,11 @@ fn raw(h: &OwnedHandle) -> HANDLE {
 /// 判成可读，让 `read_into` 里的 `ReadFile` 拿到同一个错误码并摘掉读端；
 /// 否则 `any_open()` 永远为真，`run()` 会一路轮询到超时。`timeout_ms` 参数
 /// 保留是为了不改调用点签名（探测本身零阻塞，等待由 `run()` 负责）。
+///
+/// 判据本身收敛在 `crate::win_pipe`：pty 侧用同一份 `PeekNamedPipe` + 同一组
+/// 断管错误码，避免一侧改了另一侧漂移回挂死。
 fn wait_handle_readable(handle: HANDLE, _timeout_ms: u32) -> bool {
-    let mut available: u32 = 0;
-    let ok = unsafe {
-        PeekNamedPipe(
-            handle,
-            ptr::null_mut(),
-            0,
-            ptr::null_mut(),
-            &mut available,
-            ptr::null_mut(),
-        )
-    };
-    if ok != 0 {
-        return available > 0;
-    }
-    matches!(
-        unsafe { GetLastError() },
-        ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED
-    )
+    crate::win_pipe::pipe_is_readable(handle)
 }
 
 /// 建一根管道，**只有写端可继承**，返回 `(读端, 写端)`。

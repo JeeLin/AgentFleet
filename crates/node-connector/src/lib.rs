@@ -32,6 +32,14 @@ pub mod pty;
 #[cfg(any(windows, test))]
 pub(crate) mod win_command;
 
+/// Windows 匿名管道可读性探测（`PeekNamedPipe`）的唯一实现。
+///
+/// `exec_windows` 与 `pty/windows` 两侧共用；整块只在 Windows 编译，因为它是
+/// 真 FFI + `unsafe`，与 `win_command` 那段「平台无关、零 unsafe、Linux 上跑
+/// 单测」的纯逻辑不同，不能并到同一个模块里。
+#[cfg(windows)]
+pub(crate) mod win_pipe;
+
 pub use connector::{
     create, registered_count, registered_names, supports, BoxedConnector, Connector,
     ConnectorError, OpenReq, OutFrame,
