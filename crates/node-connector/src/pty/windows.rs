@@ -540,7 +540,7 @@ pub(crate) fn read_handle(handle: RawHandle, buf: &mut [u8]) -> Result<usize, Pt
 ///
 /// 判据仍由 `PeekNamedPipe` 给（见 `crate::win_pipe`），但**「最多等 `budget`」
 /// 必须由这里自己兑现**：Windows 没有可等待的管道句柄，不能像 Unix 侧
-/// `poll(fd, budget)` 那样让内核阻塞。所以先探一次，暂时没数据就按固定切片
+/// `wait_readable` 内部调 `libc::poll(…, ms)` 那样让内核阻塞。所以先探一次，暂时没数据就按固定切片
 /// `sleep` 再探，直到有字节 / 所有写端已关 / 预算耗尽才返回。这样空闲的
 /// Windows 终端读线程不会零阻塞空转占满一个核，`budget`（`terminal.rs` 的
 /// `READ_POLL_INTERVAL` = 100ms）同时也是 `read_loop` 回到循环头检查 `stop`
