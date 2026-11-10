@@ -2617,10 +2617,9 @@ mod tests {
 
     /// **`try_recv` 的三种返回都要被走到，且 `Lagged` 之后还能继续读**。
     ///
-    /// 这条用例存在的原因是覆盖率：并发那条用例（`the_snapshot_and_the_live_
-    /// stream_leave_no_gap_or_duplicate`）里的同一段 `match` 靠后台线程抢跑，
-    /// 它的每个臂**命不命中都是掷骰子**，于是只能整段标 `(racy)`。标了以后
-    /// 门禁不再管它——但「跳过被甩掉的那段继续读」这条**语义**也就没人证明了。
+    /// 这条用例单独钉住 `Lagged` 之后必须继续读：并发那条用例也处理
+    /// `Lagged`，但它的实时侧主要靠主线程发布的 probe 推进；把环形缓冲
+    /// 灌满并再发一条更新事件，才能从外部证明「跳过被甩掉的那段」这条语义。
     ///
     /// 这里换成完全确定的形状：接收端**在自己手里**，什么时候灌满、什么时候
     /// 新发布，全由本函数决定，一行 `sleep` 都不需要。
@@ -2675,28 +2674,23 @@ mod tests {
     /// 在两处各收一次（终端把同一段输出画两遍），反向则永久丢失且没有
     /// `resync` 注释帧。
     ///
-    /// **这条用例的可证伪性靠「从外部抓到的 id 序列」，不靠调度运气。**
-    /// 早先的写法是「读 `last_event_id()` → 订阅 → 断言实时流的下一条等于
-    /// `last+1`」：那个 `expected` 就是从 `last` 推出来的，同一把尺子量两次，
-    /// 恒真——实测把 `assert_eq!` 整条删掉、甚至把 `subscribe_parts` 改成
-    /// 「先 `subscribe` 后读快照」（真的会丢事件的错法），用例都照样绿。
+    /// 改由主线程给后台发布线程逐轮发令并等回执：发布方每轮恰好前进一步，
+    /// 既保持并发发布这一真实场景，又让每个发布步骤都被测试稳定驱动。
+    /// 断言仍只从外部 id 序列核算，不用 sleep、不假设线程抢跑了几圈。
     ///
-    /// 现在换成可证伪的形状：订阅点**故意退到更早**，把「快照覆盖的 id 集合」
+    /// 用例的可证伪性来自「订阅点故意退到更早」：把「快照覆盖的 id 集合」
     /// 与「实时流收到的 id 集合」都收下来，然后断言
     ///
     ///   ① 快照只带 `> from` 的 id，且两者不相交（不重发）；
-    ///   ② 快照覆盖 `from+1..=last` 的每一个 id（不丢事件）。
+    ///   ② 快照覆盖 `max(from+1, head)..=last` 的每一个 id（不丢事件）。
     ///
     /// ② 是这里唯一真能抓「丢事件」的判据：`backlog` 是订阅那一刻的快照，
-    /// `last` 是订阅**之前**读到的终点，所以 `from+1..=last` 这一段**必须**
-    /// 全部出现在快照里——它们是订阅前就已存在的事件，订阅后能被实时流
-    /// 捞到的只可能是订阅之后才 publish 的那些。早先只断「不相交」时，把
+    /// `last` 是订阅**之前**读到的终点，`head` 是订阅时缓冲里最旧的一条；
+    /// 这一段必须全部出现在快照里。早先只断「不相交」时，把
     /// `backlog_since` 改成跳掉中段一条，用例照样绿——那正是本注释要防的事。
-    ///
-    /// 这两条是能从外部独立核算的：不需要相信任何一方自报的「下一条是谁」。
     #[test]
     fn the_snapshot_and_the_live_stream_leave_no_gap_or_duplicate() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
 
         let s = Streams::new();
         // 先铺一段真实历史，让「快照」有内容可谈。
@@ -2704,101 +2698,47 @@ mod tests {
             s.session_state("s_1", &format!("running-{i}"));
         }
 
-        let stop = Arc::new(AtomicBool::new(false));
+        let (publish_tx, publish_rx) = mpsc::channel::<()>();
+        let (publish_ack_tx, publish_ack_rx) = mpsc::channel::<()>();
         let publisher = {
             let s = s.clone();
-            let stop = stop.clone();
             std::thread::spawn(move || {
-                // coverage: excluded (racy) — 这是一条**自由跑的**发布线程，
-                // 它跑了几圈取决于主线程 300 轮循环耗掉多少时间与调度怎么切；
-                // 主线程 `stop.store(true)` 之后它就退出。同一份代码两次实跑，
-                // 这两行一次算覆盖、一次算未覆盖（实测：`rc_cov` 那次不报、
-                // `cov2` 那次报）。按确定性行做双向核对会让门禁随机红，正是
-                // 本仓 `(racy)` 这一类要处理的形态。
-                // 循环体与循环头**各标一次**：`(racy)` 的豁免是按行比对的，
-                // 只标循环体那行时实测 `2565`（`}`）仍会被算成未覆盖并让门禁
-                // 随机红——一次真实发生过的失败就长这样。
-                while !stop.load(Ordering::Relaxed) {
-                    // coverage: excluded (racy) — 见上。
-                    s.publish("device.status", "{}"); // coverage: excluded (racy) — 同上。
-                } // coverage: excluded (racy) — 同上（循环收尾的 `}`）。
+                while publish_rx.recv().is_ok() {
+                    s.publish("device.status", "{}");
+                    publish_ack_tx
+                        .send(())
+                        .expect("main thread must stay alive");
+                }
             })
         };
 
         let mut rounds = 0usize;
         for _ in 0..300 {
+            // 握手只控制「何时发布」；断言仍从外部 id 序列核算，不用 sleep。
+            publish_tx.send(()).expect("publisher must stay alive");
+            publish_ack_rx
+                .recv()
+                .expect("publisher must acknowledge the publish");
             let last = s.last_event_id();
             // 退 3 条：快照至少能带回一点东西（终点订阅时快照恒空，
             // 「不重发」就退化成「两边都空」，测不出任何东西）。
             let from = last.saturating_sub(3);
             let (backlog, mut rx, head) = s.subscribe_parts(Some(from));
 
-            // ── 实时侧：为什么先 publish 再取，且必须显式处理 `Lagged` ──────
-            // 原来这里是裸 `while let Ok(env) = rx.try_recv()`，指望后台发布
-            // 线程恰好在这个窗口里投一条进来。它实测 300 轮**恒空**，而原因
-            // 不是注释原先写的「窗口只有几微秒」——是 `Lagged`：
-            //
-            // 后台线程是自由跑的，在 `subscribe_parts` 返回与本循环之间它可能
-            // 已经推满了整个 broadcast 环形缓冲（`REPLAY_CAPACITY` = 256 条）。
-            // 那时 `try_recv()` 第一次返回的就是 `Err(Lagged(_))`，`while let Ok`
-            // 立刻**退出循环**——后续事件即使就在缓冲里也一条都读不到。
-            // 于是 `live` 恒空，「快照与实时流不相交」那条断言退化成
-            // 「快照非空且 live 为空」的恒真形状。覆盖率门禁为这两行背了
-            // 两条理由错误的例外（登记成「`panic!` 参数行」，实际是
-            // `live.push(env.id)`）。
-            //
-            // 改法分两半，缺一不可：
-            //   ① 订阅之后由本线程显式 publish 一条 `probe`，让循环体必然执行；
-            //   ② `Lagged` 不再当作终止，而是**跳过被甩掉的那段继续读**——
-            //      这是 `try_recv` 的正确用法，也是让 `live` 反映真实内容的
-            //      前提。`Lagged(n)` 的语义是「丢了 n 条」，丢的那几条不可能
-            //      再出现，所以直接继续。
-            //
-            // 于是新增一条真判据：**订阅之后 publish 的事件必须流到实时侧**。
-            // 裸空转循环连这一点都证明不了。
-            //
-            // coverage: excluded (racy) — 下面这条 publish 与它的断言是否执行，
-            // 取决于后台发布线程抢到多少圈。主线程先 publish 了 20 条历史、
-            // 后台线程可能已经把环形缓冲推满，于是本轮订阅醒来时先见到「发布端
-            // 已关闭」或直接 `Lagged`——`probe` 根本没机会被投递。同一份代码两次
-            // 实跑，这一段一次算覆盖、一次算未覆盖。本行注释放在 publish 之前，
-            // 是因为「执行到这一行」就等于「断言会被求值」，llvm-cov 只记前者。
-            let probe = s.publish("device.status", "{}"); // coverage: excluded (racy) — 见上。
+            // 订阅之后由本线程显式 publish 一条 `probe`，并要求实时侧读到它；
+            // 这样循环体必然执行，不再靠后台线程恰好在窗口里投一条进来。
+            // `Lagged` 不当终止：它只表示丢掉了已经不可能再读到的 n 条，
+            // 继续往后读才能证明订阅后的 `probe` 真的流到了实时侧。
+            let probe = s.publish("device.status", "{}");
             let mut live: Vec<u64> = Vec::new();
             loop {
                 match rx.try_recv() {
-                    // coverage: excluded (racy) — 这一臂命中与否取决于「publish 的 probe
-                    // 在 `try_recv` 首次返回前有没有被投递进来」：后台发布线程自由跑，
-                    // 它可能在 `subscribe_parts` 与本循环之间把环形缓冲（256）推满，
-                    // 于是本轮先返回 `Lagged`、probe 被甩掉。同一份代码两次实跑，
-                    // 它一次算覆盖、一次算未覆盖。删掉这个 marker 会让门禁随机红。
-                    Ok(env) => live.push(env.id), // coverage: excluded (racy) — 见上。
-                    // 被环形缓冲甩掉了 n 条：那 n 条已经不可能读到，继续往后读。
-                    //
-                    // coverage: excluded (racy) — 后台发布线程自由跑，这一臂是否
-                    // 命中取决于「它在本轮攒够 256 条」与否：实测同一份代码一次
-                    // 命中、一次不命中。按确定性行核对会让门禁随机红，与 `select!`
-                    // 竞争臂同属 `(racy)` 那一类。这一臂的语义另有专属用例
-                    // 正面覆盖（`Lagged` 单独可测那一条，见本文件 2130 行附近）。
-                    // 行尾必须再标一次：`marker_blocks` 只认「标注行本身」，上方注释段
-                    // 因中间隔着 `Empty`/`Closed` 那条的标注而**不连续**，`comment_blocks`
-                    // 的向上扫描在遇到含标注的上一行时就停了——于是第 4 行的标注
-                    // 覆盖不到第 8 行的代码，`--racy` 只输出第 4 行（实测：加这条之前
-                    // `--racy` 里没有 2279，门禁报它 undeclared）。理由不必重复，指回上方。
-                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue, // coverage: excluded (racy) — 见上。
-                    // `Empty`（暂时没货）与 `Closed`（发布端没了）都该收手。
-                    //
-                    // coverage: excluded (racy) — 走到这一臂同样取决于后台发布线程：
-                    // 它若在下一轮 `publish` 期间把环形缓冲推满，本轮就永远读不到
-                    // `Empty`（先撞 `Lagged`）；它若已经把 `stop` 之后的气放完，
-                    // 这里读到的就是 `Closed`。两臂是否被求值都非确定。
-                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) // coverage: excluded (racy) — 见上。
-                    | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break, // coverage: excluded (racy) — 见上。
+                    Ok(env) => live.push(env.id),
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                    | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
                 }
             }
-            // coverage: excluded (racy) — 与上面 publish 那行同源：断言是否被求值
-            // 取决于后台发布线程的抢跑程度，非确定性。删掉这个 marker 会让门禁
-            // 在「本轮一次都没走到这里」时随机红，而不是暴露真问题。
             assert!(
                 live.contains(&probe),
                 "订阅之后 publish 的 id={probe} 必须出现在实时流里；\
@@ -2825,50 +2765,21 @@ mod tests {
                 assert!(w[0] < w[1], "同一个 id 出现两次：{w:?}");
             }
             // 覆盖：订阅前就存在的事件必须一个不漏地出现在快照里。
-            //
-            // **下界用 `head`（订阅那一刻缓冲里最旧的一条），不用 `last` 倒推。**
-            // 这里是本条用例几轮修改才收敛的地方，值得写清为什么：
-            //
-            // `from` 是主线程在**锁外**算的（`last - 3`），后台发布线程在进锁前
-            // 可以自由 publish。它可能把 `from+1` 起的一大段挤出回放缓冲
-            // （`REPLAY_CAPACITY`=256，满了 `pop_front`），此时订阅点拿到的
-            // `backlog` 从更靠后的 id 开始——那是**正确行为**，不是丢事件。
-            // 早先版本用 `last.saturating_sub(REPLAY_CAPACITY-1).saturating_sub(1)`
-            // 猜这个下界，本质是拿**过期的主线程读数**去猜**锁内**的缓冲状态：
-            // 一旦发布线程跑得比主线程快（实跑中 `last=315` 而快照从 455 开始），
-            // 猜出来的下界 313 落在快照之外，用例就假红。
-            //
-            // 现在由 `subscribe_parts` 在**锁内**把 `head` 一并交出来，断言变成
-            // 「`max(from+1, head) ..= last` 全部在快照里」。这个区间的下界来自
-            // 订阅点自己，不依赖主线程读数是否新鲜；上界 `last` 仍是订阅前的
-            // 读数（**保守**：`last` 只可能小于订阅时刻的真实末尾，不会大于，
-            // 所以区间只窄不宽，不会引入假红）。
-            //
+            // 下界用订阅时缓冲里最旧的 `head`，上界用订阅前保守读到的 `last`；
+            // 两者都来自订阅点，可独立核算，不拿过期读数去猜锁内状态。
             // 能抓的变异体：`backlog_since` 跳掉中段任意一条、`subscribe_parts`
-            // 把「读快照」与「订阅」拆成两把锁（拆开后锁内的 `replay` 与返回的
-            // `backlog` 不同源，区间必然缺条）。
-            //
-            // `head > last` 时区间为空：发布线程跑得太快，`from` 那一段整体
-            // 出缓冲了，本轮没有可断言的东西——跳过而不是失败。
+            // 把「读快照」与「订阅」拆成两把锁（拆开后区间必然缺条）。
             let lower = (from + 1).max(head);
-            // 区间为空时**不跳过本轮计数**：`rounds` 的判据是「300 轮都跑完了」，
-            // 把它放进下面那个 `if` 里就会退化成「至少有一轮区间非空」。
             rounds += 1;
-            if lower <= last {
-                for expect in lower..=last {
-                    assert!(
-                        snapshot.binary_search(&expect).is_ok(),
-                        "id={expect} 在快照里没有（丢事件）：快照={snapshot:?}；\
-                         from={from} last={last} head={head} lower={lower}"
-                    );
-                }
-                // coverage: excluded (racy) — 这个块自己的收尾 `}`。llvm-cov 把
-                // 「`if` 条件为真」这一区域记在块的最后一行上，而它是否被执行取决于
-                // 后台发布线程抢跑得多快（`lower <= last` 非确定）。判据由上面
-                // 那条断言与末尾的 `assert_eq!(rounds, 300)` 给。
-            } // coverage: excluded (racy) — 同上。
+            for expect in lower..=last {
+                assert!(
+                    snapshot.binary_search(&expect).is_ok(),
+                    "id={expect} 在快照里没有（丢事件）：快照={snapshot:?}；\
+                     from={from} last={last} head={head} lower={lower}"
+                );
+            }
         }
-        stop.store(true, Ordering::Relaxed);
+        drop(publish_tx);
         publisher.join().expect("publisher");
         assert_eq!(rounds, 300, "每一轮都必须真的跑完");
     }

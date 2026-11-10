@@ -236,7 +236,7 @@ jobs:
       #
       # ⚠️ 已知代价，写在这里而不是藏着：98% 是**总量**判据，比原来的
       #「每条未覆盖行都要有理由」**更弱**。整块新增未测试代码可以靠既有
-      # 总量稀释掉。v0.7.3 已补测试到实跑 98.01%，并撤掉 step 级临时豁免：
+      # 总量稀释掉。v0.7.3 已补测试到实跑 98.00%，并撤掉 step 级临时豁免：
       # 命令与 `needs` 都不动，覆盖率失败即阻断发布。
       - name: cov-gate（mise run cov-gate）
         run: cargo llvm-cov --workspace --all-targets --summary-only --fail-under-lines 98

@@ -14,10 +14,25 @@ once on 2026-11-05.
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-11-10
+
+> 里程碑：补测试、恢复覆盖率硬门禁并修复 Windows 真机测试挂死。
+> Milestone: stronger tests, a blocking coverage gate and Windows runner fixes.
+
 ### Added
 
 - **新增 `afcli` 安装脚本**，从 Release 校验并下载可直接执行的静态二进制。 / **Added an `afcli` installer** that checksums and installs the directly executable static binary from Releases.
 - **CI 只构建 musl 二进制**，不再重复编译无消费方的 gnu 产物。 / **CI now builds only musl binaries**, dropping unused gnu builds that duplicated release work.
+
+### Changed
+
+- **覆盖率门禁恢复为硬阻断**，测试补齐到行覆盖率 98% 后不再跳过发布链路。 / **The coverage gate blocks releases again**, with test coverage brought back to 98% lines.
+
+### Fixed
+
+- **修复 Windows 真机测试挂死**，匿名管道改用 `PeekNamedPipe` 判可读并给 `test-desktop` 加超时兜底。 / **Fixed Windows runner hangs** by probing anonymous pipes with `PeekNamedPipe` and adding a `test-desktop` timeout.
+- **修复 `/api/agent-binary` 下载按钮只发 Linux 文件**，按归一化平台闭集下发对应桌面二进制。 / **Fixed the `/api/agent-binary` download** so the device page serves the platform-matched desktop binary.
+- **修复镜像式项目可不配置上游 git 仓库即新建**，以及 CLI 连接、前后台日志与远端地址配置的四类问题。 / **Fixed image-backed projects accepting an empty git remote**, plus CLI connection, foreground logging and remote URL configuration issues.
 
 ## [0.7.2] - 2026-11-06
 
