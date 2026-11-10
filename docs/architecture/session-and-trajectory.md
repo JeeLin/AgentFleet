@@ -43,6 +43,36 @@
 > 见 `DEVELOPMENT.md` 的里程碑重排）。因此「ACP 会话作为面板呈现」这句话在 M1
 > **没有实施对象**，也不该被读成「M1 不许建 `/sessions/:id`」。
 
+### 2.1 外部历史会话导入：绑定，不是搬运（v0.7.4）
+
+用户已经在某台设备上用某个 agent 软件聊过一轮，希望「接着那段历史继续」。
+导入只做**绑定**：设备侧 `afcli import` 从本机 agent 的历史库列出会话
+（`import list`），把选中的一条交给 Hub（`import bind`）；Hub 建一条会话并
+**预填 `acp_session_id`**，之后照本节既有通路走 `session/load`，让 agent 自己
+把上下文找回来。
+
+因此：
+
+- **Hub 不搬历史消息**，也不把旧轨迹写进 `trajectory`（§3）；只有导入之后新产生
+  的事件才追加。这是「导入 = 绑定」与「同步内容、不同步文件夹」（`AGENTS.md`
+  约束 10）在会话层的同一取向。
+- `acp_session_id` 由设备侧**原样**给出（opencode 的 `ses_*` 就是 ACP 认的 id），
+  Hub 不改写、不加前缀。它是 `set_acp_session_id` 的第二个合法来源；
+  普通 `POST /api/sessions` 仍写 `NULL`。
+- **支持范围由可插拔 provider 决定**：provider 按 `agent_id` 注册。只有既出现在
+  本机 `KNOWN_AGENTS` 里、又有 ACP 入口（`acp_args` 非空）的软件才可导入——
+  「库文件存在」不是判据。首版只注册 `opencode`；其余 8 个 `acp_args: &[]` 的
+  软件（`claude` / `gemini` / `codex` / `cursor-agent` / `aider` / `crush` /
+  `goose` / `qwen`）**明确标注导入 / 对话不支持**，不适配、不验证。
+- 历史库**只读**打开（`SQLITE_OPEN_READ_ONLY` + `PRAGMA query_only`），不建表、
+  不迁移、不写库：那是用户正在用的 agent 的库，写一次就可能让它下次启动撞上
+  迁移或锁。
+- **已知限制**：Hub 的工作区路径口径只接受 `/` 或 `~` 开头
+  （`crates/hub-storage/src/workspace.rs` 的 `validate_path`）。Windows 设备上
+  opencode 的会话目录是盘符路径（`C:\...`），因此该平台的历史会话**当前不能
+  导入**——设备侧会先返回 `InvalidWorkspacePath`，不把不可用的路径发给 Hub。
+  扩展 Windows 路径语义不在 v0.7.4 范围。
+
 ---
 
 ## 3. 轨迹（Trajectory）：append-only 事件流

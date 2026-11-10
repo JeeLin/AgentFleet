@@ -9,6 +9,7 @@ pub mod conn;
 pub mod entry;
 pub mod heartbeat;
 pub mod identity;
+pub mod import;
 pub mod log;
 pub mod reconnect;
 pub mod supervisor;

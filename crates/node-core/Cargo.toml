@@ -16,6 +16,9 @@ ed25519-dalek.workspace = true
 base64ct.workspace = true
 sha2.workspace = true
 dirs.workspace = true
+# `import` 模块只读打开 opencode 的会话库（`~/.local/share/opencode/opencode.db`）。
+# 用 workspace 的 `bundled`：设备侧可能一台机器都没有系统 libsqlite3。
+rusqlite.workspace = true
 # connector 与 PTY 搬到了 node-connector（v0.12.0 按需加载要靠 crate 边界）。
 # 本 crate 只经注册表接口使用它们，不直接实现任何 connector。
 node-connector.workspace = true
