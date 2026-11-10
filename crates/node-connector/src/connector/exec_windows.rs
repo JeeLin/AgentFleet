@@ -44,7 +44,7 @@ use windows_sys::Win32::Storage::FileSystem::ReadFile;
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, GetExitCodeProcess, TerminateProcess, WaitForSingleObject, CREATE_NO_WINDOW,
-    PROCESS_INFORMATION, STARTUPINFOW,
+    CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTUPINFOW,
 };
 
 // `OP_RUN` / `EXIT_KILLED` / `INFINITE` 都定义在 `exec.rs`：它们是**跨平台的
@@ -112,25 +112,11 @@ fn wait_handle_readable(handle: HANDLE, _timeout_ms: u32) -> bool {
     crate::win_pipe::pipe_is_readable(handle)
 }
 
-/// 建一根管道，**只有写端可继承**，返回 `(读端, 写端)`。
+/// 建一根匿名管道，返回 `(读端, 写端)`。
 ///
-/// ## 为什么写端可继承、读端不可继承
-///
-/// 这套模型与微软官方「Creating a Child Process with Redirected Input and
-/// Output」示例一致：`SECURITY_ATTRIBUTES.bInheritHandle = TRUE` 建出两端都
-/// 可继承的句柄，然后用 `SetHandleInformation(读端, HANDLE_FLAG_INHERIT, 0)`
-/// 把读端改回不可继承。两步都不能省：
-///
-/// - **写端必须可继承**，否则子进程拿不到它，`hStdOutput` 指向一个自己
-///   继承不到的句柄——子进程的输出无处可去。
-/// - **读端必须不可继承**，否则子进程手里也握着一根读端。「读端 EOF 取决于
-///   所有写端都关上」这条判据因此永远不成立：我们这边 `drop(out_w)` 之后
-///   子进程仍持有读端，而读端不写数据，EOF 等不来——`run()` 会一路挂到超时。
-///
-/// 早先这里两端都留在 `bInheritHandle = TRUE`，靠 `bInheritHandles = FALSE`
-/// 兜住——那是**两处都错、且互相掩盖**：`FALSE` 让子进程连写端都拿不到
-/// （输出恒为空），而两端可继承的写法让人以为机制是对的。微软示例里
-/// `bInheritHandles` 传的是 `TRUE`。
+/// `make_out_pipe()` 把读端改成不可继承；stdin 的读端要交给子进程，必须保留
+/// 继承标志（见 `make_in_pipe()`）。`CreatePipe` 的 `SECURITY_ATTRIBUTES` 让
+/// 两端都可继承，因为写端最终总要进 `STARTUPINFOW`。
 fn make_pipe() -> Result<(OwnedHandle, OwnedHandle), ConnectorError> {
     let sa = windows_sys::Win32::Security::SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<windows_sys::Win32::Security::SECURITY_ATTRIBUTES>() as u32,
@@ -145,25 +131,42 @@ fn make_pipe() -> Result<(OwnedHandle, OwnedHandle), ConnectorError> {
     if ok == 0 {
         return Err(pipe_error("CreatePipe"));
     }
-    // 读端留在父进程：改回不可继承，理由见上面文档。
-    if unsafe { SetHandleInformation(read, HANDLE_FLAG_INHERIT, 0) } == 0 {
-        let err = std::io::Error::last_os_error();
-        // 两个句柄已经建出来了，出错时得自己关，否则泄漏。
-        unsafe {
-            CloseHandle(read);
-            CloseHandle(write);
-        }
-        return Err(ConnectorError::Failed {
-            op: OP_RUN.to_string(),
-            detail: format!("SetHandleInformation failed: {err}"),
-        });
-    }
     Ok(unsafe {
         (
             OwnedHandle::from_raw_handle(read as RawHandle),
             OwnedHandle::from_raw_handle(write as RawHandle),
         )
     })
+}
+
+/// stdout / stderr：读端留父进程，改成不可继承；写端由子进程继承。
+///
+/// 这是微软官方「Creating a Child Process with Redirected Input and Output」
+/// 示例的接法。读端若也被子进程继承，它会握着一根不会写数据的读端，
+/// 「所有写端关闭才 EOF」的判据就不成立，`run()` 会一路轮询到超时。
+fn make_out_pipe() -> Result<(OwnedHandle, OwnedHandle), ConnectorError> {
+    let (read, write) = make_pipe()?;
+    if unsafe { SetHandleInformation(raw(&read), HANDLE_FLAG_INHERIT, 0) } == 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(ConnectorError::Failed {
+            op: OP_RUN.to_string(),
+            detail: format!("SetHandleInformation failed: {err}"),
+        });
+    }
+    Ok((read, write))
+}
+
+/// stdin：读端是 `hStdInput`，它**必须可继承**。
+///
+/// `STARTF_USESTDHANDLES` 配 `bInheritHandles = TRUE` 时，三个 `hStd*` 都是
+/// 子进程要拿到的句柄；其中任意一个不可继承，`CreateProcessW` 会直接返回
+/// `ERROR_INVALID_PARAMETER (87)`。stdin 的写端先在这里关掉，子进程第一次
+/// 读就拿到 EOF。这根管道只有读端会进 `STARTUPINFOW`，所以不会像 stdout
+/// 那样造成子进程握着多余读端、EOF 永远不来。
+fn make_in_pipe() -> Result<OwnedHandle, ConnectorError> {
+    let (read, write) = make_pipe()?;
+    drop(write);
+    Ok(read)
 }
 
 fn pipe_error(what: &str) -> ConnectorError {
@@ -185,14 +188,13 @@ impl Child {
     /// 路径（`read_into` 把管道摘掉并 `warn!`），因为那已经是「命令跑起来了，
     /// 但输出读不下去」——两件事对用户的意义完全不同，不该合并成同一个错误。
     pub(super) fn spawn(_plan: &Plan, prepared: &Prepared) -> Result<Self, ConnectorError> {
-        let (out_r, out_w) = make_pipe()?;
-        let (err_r, err_w) = make_pipe()?;
+        let (out_r, out_w) = make_out_pipe()?;
+        let (err_r, err_w) = make_out_pipe()?;
         // stdin：**真的**建一根空管道，然后立刻在我们这边关掉写端。
         // 只在那根写端是唯一写端时关掉，子进程的第一次读就能拿到 EOF——
         // 于是 `cat` 之类的命令立刻返回，而不是继承我们的控制台把面板挂住。
         // （Unix 侧对应 `open("/dev/null")` + `dup2(null, 0)`。）
-        let (in_r, in_w) = make_pipe()?;
-        drop(in_w);
+        let in_r = make_in_pipe()?;
 
         let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
@@ -221,9 +223,15 @@ impl Child {
                 ptr::null_mut(),
                 // **必须 TRUE**：子进程靠句柄继承拿到 `si` 里的三个标准句柄。
                 // 传 FALSE 那些字段会被忽略，子进程输出无处可去（读端立刻 EOF）。
-                // 可继承的范围只有 `make_pipe` 留下的写端——读端已改回不可继承。
+                // 三个 `hStd*` 必须**都是可继承句柄**，否则 `CreateProcessW` 直接
+                // 返回 `ERROR_INVALID_PARAMETER (87)`：写端由 `make_pipe` 建出即可
+                // 继承，stdin 读端由 `make_in_pipe` 保留继承标志；只有 stdout /
+                // stderr 的读端被 `make_out_pipe` 改回不可继承（防子进程握着读端
+                // 导致 EOF 永远不来）。
                 1,
-                CREATE_NO_WINDOW,
+                // `environment_block()` 产出 UTF-16，不告诉 Win32 就会被当作
+                // ANSI 环境块解析；ConPTY spawn 也显式带同一个 flag。
+                CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
                 env_block_w.as_ptr() as *const core::ffi::c_void,
                 dir_w.map_or(ptr::null(), |w| w.as_ptr()),
                 &si,
