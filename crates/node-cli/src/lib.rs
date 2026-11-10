@@ -117,7 +117,30 @@ enum ParseResult {
 ///
 /// 把「副作用」交给调用方传入的 `out` / `err`（单测里换成内存缓冲），
 /// `main.rs` 传 `stdout` / `stderr`。
-pub fn run<I, W1, W2>(args: I, mut out: W1, mut err: W2) -> std::process::ExitCode
+pub fn run<I, W1, W2>(args: I, out: W1, err: W2) -> std::process::ExitCode
+where
+    I: IntoIterator<Item = String>,
+    W1: std::io::Write,
+    W2: std::io::Write,
+{
+    run_with(args, out, err, &runargs::data_dir)
+}
+
+/// [`run`] 的实现，把「数据目录从哪来」做成参数。
+///
+/// 这个接缝只为一件事：让 `data_dir()` 的失败臂能被**无特权**地测到。
+/// `dirs::data_dir()` 返回 `None` 需要「`HOME` / `XDG_DATA_HOME` 都没有，
+/// 且 `getpwuid_r` 也查不到家目录」；后者只有切一个 passwd 里不存在的 uid
+/// 才造得出来，而 `setresuid` 要 `CAP_SETUID`——GitHub 的 Linux runner 以
+/// 普通用户运行，直接 `Operation not permitted`。靠切 uid 的那版用例在本地
+/// root 下一直是绿的，直到 v0.7.3 的 tag CI 才第一次红：那是**假绿**，
+/// 不是环境抖动。注入解析器就没有这个特权依赖。
+fn run_with<I, W1, W2>(
+    args: I,
+    mut out: W1,
+    mut err: W2,
+    data_dir: &dyn Fn() -> Result<PathBuf, String>,
+) -> std::process::ExitCode
 where
     I: IntoIterator<Item = String>,
     W1: std::io::Write,
@@ -135,11 +158,10 @@ where
         ParseResult::Log(rest) => {
             // 数据目录取不到时不能静默打印空日志——那会让用户以为「设备没出过事」，
             // 而真相是「根本没找到日志目录」。当成失败退出并说明。
-            match node_core::data_dir() {
+            match data_dir() {
                 Ok(d) => log_cmd::run(&rest, &d, out, err),
                 // `dirs::data_dir()` 在 `HOME` 与 `XDG_DATA_HOME` 都没有时会返回 `None`；
-                // 那不是「不可达」，只是要在一个没有家目录的进程里跑（见下面
-                // `data_dir_can_fail_for_both_entry_points` 的子进程夹具）。
+                // 那不是「不可达」，失败臂由 `run_with` 注入的解析器覆盖。
                 Err(e) => {
                     drop(writeln!(err, "afcli log: 无法定位数据目录：{e}"));
                     std::process::ExitCode::FAILURE
@@ -150,7 +172,7 @@ where
             drop(writeln!(err, "{USAGE}"));
             std::process::ExitCode::FAILURE
         }
-        ParseResult::Run(rest) => run_node(&rest, out, err),
+        ParseResult::Run(rest) => run_node(&rest, out, err, data_dir),
     }
 }
 
@@ -175,7 +197,12 @@ fn has_foreground_flag(args: &[String]) -> bool {
 ///
 /// **它不做角色判定**：角色只看 argv，而那件事只有 [`role_of`] 一处。
 // `dispatch`（可测接缝）。单元测试从 `dispatch` 进入。
-fn run_node<W1, W2>(args: &[String], out: W1, mut err: W2) -> std::process::ExitCode
+fn run_node<W1, W2>(
+    args: &[String],
+    out: W1,
+    mut err: W2,
+    data_dir: &dyn Fn() -> Result<PathBuf, String>,
+) -> std::process::ExitCode
 where
     W1: std::io::Write,
     W2: std::io::Write,
@@ -194,10 +221,10 @@ where
     // 无操作别名：不改写 args（worker 的 argv 要原样继承），也不新开分支。
     let _ = has_foreground_flag(args);
 
-    let data_dir = match runargs::data_dir() {
+    let data_dir = match data_dir() {
         Ok(d) => d,
         // 与 `log` 那条同源：没有家目录的进程里 `dirs::data_dir()` 返回 `None`。
-        // 覆盖方式见 `data_dir_can_fail_for_both_entry_points`。
+        // 失败臂由 `run_with` 注入的解析器覆盖，不需要真去切 uid。
         Err(e) => {
             drop(writeln!(err, "afcli run: 无法定位数据目录：{e}"));
             return std::process::ExitCode::FAILURE;
@@ -779,74 +806,33 @@ mod tests {
     /// 空跑 supervisor。这在 `HOME` 和 `XDG_DATA_HOME` 都没有、且 passwd 里
     /// 也查不到家目录的进程里是**可达**的（原先那两条注释说它不可达，是错的）。
     ///
-    /// 造法：用 `libc::setresuid` 切到一个 passwd 里不存在的 uid，再去掉
-    /// `HOME` / `XDG_DATA_HOME` / `AFCLI_DATA_DIR`。此时 `dirs::data_dir()`
-    /// 的 `getpwuid_r` 兜底也失败，返回 `None`。改 uid 与去掉环境变量都是
-    /// **进程级**的，所以放在子进程里做：父进程只 spawn 一次带哨兵变量的
-    /// 同一测试二进制，自己那条环境一点不动。
+    /// 造法：直接给 `run_with` 注入一个返回 `Err` 的解析器。**不用切 uid**：
+    /// 靠 `libc::setresuid` 让 `dirs::data_dir()` 返回 `None` 需要 `CAP_SETUID`，
+    /// GNU/Linux 的 CI runner 以普通用户运行，`setresuid` 会直接
+    /// `Operation not permitted`；本地 root 跑则一直是绿的。那条用例是**假绿**，
+    /// 由 v0.7.3 的 tag CI 第一次暴露——注入解析器在任何权限下都成立。
     #[test]
-    #[cfg(unix)] // 用 setresuid + 无 HOME 的进程构造 data_dir() 的 Err
     fn data_dir_can_fail_for_both_entry_points() {
-        let out = std::process::Command::new(std::env::current_exe().expect("test exe"))
-            .args([
-                "--exact",
-                "tests::data_dir_can_fail_for_both_entry_points_child",
-            ])
-            .env("AF_NO_DATA_DIR", "1")
-            .env_remove("HOME")
-            .env("XDG_DATA_HOME", "")
-            .env("AFCLI_DATA_DIR", "")
-            .env("AFCLI_HUB_URL", "")
-            .stdin(std::process::Stdio::null())
-            .output()
-            .expect("spawn the child test process");
-        // 先解码再断言：`assert!` 的消息只在失败时求值，把两段解码放在
-        // 消息里会让它们在一条通过的测试里永远覆盖不到。
-        let child_stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        let child_stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        assert!(
-            out.status.success(),
-            "子进程必须绿，stdout：{child_stdout}，stderr：{child_stderr}"
-        );
-        // `--exact` 拼错名字时 libtest 会「跑了 0 条」并以 0 退出，
-        // 只看退出码会把一个什么都没测的子进程当成绿。
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            stdout.contains("1 passed"),
-            "子进程必须真的跑完那条用例，实际 stdout：{stdout}"
-        );
-    }
-
-    /// 上一条的子进程本体。没有 `AF_NO_DATA_DIR` 时什么都不做（no-op，不是跳过）。
-    #[test]
-    #[cfg(unix)]
-    fn data_dir_can_fail_for_both_entry_points_child() {
-        if std::env::var_os("AF_NO_DATA_DIR").is_none() {
-            return;
-        }
-        // SAFETY: `setresuid` 只改本子进程的三个 uid，不涉及内存或别名；
-        // 这个进程是这条用例专用的，改完就退出，不会影响别的测试。
-        let rc = unsafe { libc::setresuid(60_000, 60_000, 60_000) };
-        // 先取 errno 再断言：放在 `assert_eq!` 消息里的表达式只在失败时求值，
-        // 一条通过的子进程用例覆盖不到那一行。
-        let setresuid_errno = std::io::Error::last_os_error();
-        assert_eq!(rc, 0, "切到不存在的 uid 失败：{setresuid_errno}");
-        let err = runargs::data_dir().expect_err("没有家目录时必须取不到数据目录");
-        assert!(!err.is_empty(), "错误信息不能是空串");
-
+        // 用真实错误值而不是手写字面量：消息改了这里会跟着变，不会悄悄漂开。
+        let reason = node_core::IdentityError::NoDataDir.to_string();
+        let no_dir = || Err(reason.clone());
         for (args, prefix) in [
             (vec!["log".to_string()], "afcli log: 无法定位数据目录"),
             (vec!["run".to_string()], "afcli run: 无法定位数据目录"),
         ] {
             let mut out = Vec::new();
             let mut err_out = Vec::new();
-            let code = run(args.clone(), &mut out, &mut err_out);
+            let code = run_with(args.clone(), &mut out, &mut err_out, &no_dir);
             assert_eq!(code, std::process::ExitCode::FAILURE, "{args:?}");
             assert!(out.is_empty(), "{args:?} 不该往 stdout 打任何东西");
             let text = String::from_utf8(err_out).expect("utf8");
             assert!(
                 text.starts_with(prefix),
                 "{args:?} 的失败原因要说清是哪个命令、哪一步：{text}"
+            );
+            assert!(
+                text.contains(&reason),
+                "{args:?} 要把底层原因带出来：{text}"
             );
         }
     }

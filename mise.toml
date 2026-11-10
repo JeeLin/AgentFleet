@@ -42,9 +42,14 @@ run = "cargo fmt --check"
 description = "clippy，零 warning"
 run = "cargo clippy --workspace --all-targets -- -D warnings"
 
-[tasks.test]
-description = "全部测试"
-run = "cargo test --workspace"
+# `cargo llvm-cov --workspace --all-targets`（见下面的 `cov-gate`）本身就是
+# 插桩版的 `cargo test --workspace`，所以「全部测试」不再单列一个 `test` 任务
+# ——v0.7.3 收尾把它并掉了，本地与 CI 都不再重跑一遍同样的 Rust 测试。
+# 唯一漏网的是 **doc test**：`cargo llvm-cov` 默认不跑它（要 nightly `--doctests`），
+# 这里显式补一条，免得哪天有人写了 doc test 却谁也不跑。
+[tasks.test-doc]
+description = "doc test（cargo test 的 Rust 单测已由 cov-gate 覆盖）"
+run = "cargo test --workspace --doc"
 
 # 覆盖率门禁：行覆盖率 ≥98%。
 #
@@ -69,8 +74,8 @@ description = "覆盖率门禁：行覆盖率 ≥98%"
 run = "cargo llvm-cov --workspace --all-targets --summary-only --fail-under-lines 98"
 
 [tasks.ci]
-description = "本地全量门禁 = check + fmt + lint + test + cov-gate + web-ci"
-depends = ["check", "fmt", "lint", "test", "cov-gate", "web-ci"]
+description = "本地全量门禁 = check + fmt + lint + test-doc + cov-gate + web-ci"
+depends = ["check", "fmt", "lint", "test-doc", "cov-gate", "web-ci"]
 
 # ---- 开发环境 ---------------------------------------------------------------
 

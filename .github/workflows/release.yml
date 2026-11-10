@@ -62,23 +62,28 @@ jobs:
   # --verify-tag` 全都要 tag 名，得再从 API 反查并层层传递，多一层间接、多一个
   # 失败面。代价是 tag 推上去后门禁才跑（覆盖率那步最贵），换的是坏产物发不出去。
   #
-  # 为什么拆成 4 个 job 而不是一个串行 job：同一 job 内的步骤**永远串行**，
-  # 无法并发。`test`（约 5.5m）与 `cov-gate`（全量插桩，约 10m+）用的是两套
-  # 二进制（插桩产物不能复用普通产物），`web-ci` 与 Rust 侧零交集——这三条
-  # 之间本来没有数据依赖；现在只为复用缓存 / dist 加两条轻量 `needs`
-  # （gate-test 等 gate-static、gate-coverage 等 gate-web），其余仍并行，
-  # wall clock 仍接近「最长那条」。
+  # 为什么拆成 3 个 job 而不是一个串行 job：同一 job 内的步骤**永远串行**，
+  # 无法并发。`cov-gate`（全量插桩，约 10m+）与 `web-ci` 与 Rust 侧零交集，
+  # 本来没有数据依赖；现在只为复用 dist 加一条轻量 `needs`
+  # （gate-coverage 等 gate-web），其余仍并行，wall clock 仍接近「最长那条」。
   #
-  # Rust 重编译更贵：`gate-static` 写普通 debug 缓存，`gate-test` 等它并只读；
+  # v0.7.3 收尾把原 `gate-test` 并进了 `gate-coverage`：`cargo llvm-cov
+  # --workspace --all-targets` **本来就跑整套 Rust 测试**（插桩版），
+  # `cargo test --workspace` 是纯重复。它唯一不可替代的产物是 **doc test**
+  #（`cargo llvm-cov` 默认不跑，要 nightly `--doctests`），那条挪到
+  # `gate-static`（刚写完普通 debug 缓存，不必另起 job）。省下一个 job 的
+  # 全量编译与 runner 时间，门禁覆盖面不减。
+  #
+  # Rust 重编译更贵：`gate-static` 写普通 debug 缓存；
   # Linux 发布矩阵与桌面 build/test 各按 target 共用稳定缓存（对齐 REX）。
   # 桌面 `test-desktop` 仍在 release profile 真跑，只复用 `build-desktop` 的依赖图。
   #
   # 前端 dist 也只编一次：`gate-web` 产出 `web-dist` artifact，覆盖率与发布链下载复用。
   # `build-frontend` 仍是硬前置，负责校验缺 dist 时 `include_dir!` 不会编出占位页 Hub。
   #
-  # ---- 4 个 job 共用的环境脚手架（每个 job 重复一遍是 Actions 的形态税）----
+  # ---- 3 个 job 共用的环境脚手架（每个 job 重复一遍是 Actions 的形态税）----
   # 步骤名里的 `（mise run <task>）` 是 `check.sh` C7 的解析锚点：C7 扫描
-  # gate-static / gate-test / gate-coverage / gate-web 四个 job 的步骤**合集**
+  # gate-static / gate-coverage / gate-web 三个 job 的步骤**合集**
   # 与 `[tasks.ci].depends` 双向比对，改名会红，漏一条也会红。
 
   gate-static:
@@ -119,7 +124,7 @@ jobs:
       - name: 装工具链版本缓存（cargo 编译产物按 Cargo.lock 键控）
         uses: Swatinem/rust-cache@v2
         with:
-          # 普通 debug 依赖图由本 job 写；gate-test 等它并只读，避免各自从零编译。
+          # 普通 debug 依赖图由本 job 写：doc-test 与发布矩阵都读它，避免各自从零编译。
           shared-key: gate-linux
           save-if: true
 
@@ -132,39 +137,14 @@ jobs:
       - name: lint（mise run lint）
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-  gate-test:
-    needs: [gate-static]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: 读工具链版本（mise.toml [tools] 是唯一出处）
-        id: tools
-        run: |
-          set -euo pipefail
-          v=$(sed -nE 's/^rust = "([^"]+)".*/\1/p' mise.toml | head -1)
-          [ -n "$v" ] || { echo "mise.toml 里读不到 rust 的版本" >&2; exit 1; }
-          echo "rust=$v" >> "$GITHUB_OUTPUT"
-
-      - name: 装 Rust ${{ steps.tools.outputs.rust }}
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.tools.outputs.rust }}
-          # `cargo test` 只需 rustc + rust-std（minimal 自带），但 test 目录里有
-          # 编译期断言用到 `rustfmt` 的内容曾属误判——这里如实只装必需的；
-          # 真缺组件时门禁红得明明白白（C8 会先拦住 gate-static 那种遗漏）。
-          components: rustfmt
-
-      - name: 装工具链版本缓存（cargo 编译产物按 Cargo.lock 键控）
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: gate-linux
-          save-if: false
-
-      - name: test（mise run test）
-        run: cargo test --workspace
+      # 这一条是 `gate-test` 被合并后唯一不可替代的产物。
+      # `gate-coverage` 的 `cargo llvm-cov --workspace --all-targets` 本身就跑了
+      # 整套 Rust 测试（插桩版），所以 `cargo test --workspace` 是纯重复；但
+      # `cargo llvm-cov` **默认不跑 doc test**（那要 nightly `--doctests`），
+      # 于是 doc test 只能单独跑。放在本 job 是因为它刚写完普通 debug 缓存，
+      # 再起一个 job 只为跑 0 条 doc test 不值当。
+      - name: test-doc（mise run test-doc）
+        run: cargo test --workspace --doc
 
   gate-coverage:
     needs: [gate-web]
@@ -236,7 +216,7 @@ jobs:
       #
       # ⚠️ 已知代价，写在这里而不是藏着：98% 是**总量**判据，比原来的
       #「每条未覆盖行都要有理由」**更弱**。整块新增未测试代码可以靠既有
-      # 总量稀释掉。v0.7.3 已补测试到实跑 98.00%，并撤掉 step 级临时豁免：
+      # 总量稀释掉。v0.7.3 已补测试到实跑 98.08%，并撤掉 step 级临时豁免：
       # 命令与 `needs` 都不动，覆盖率失败即阻断发布。
       - name: cov-gate（mise run cov-gate）
         run: cargo llvm-cov --workspace --all-targets --summary-only --fail-under-lines 98
@@ -316,7 +296,7 @@ jobs:
   #   - build-binaries 必须 needs 本 job 并下载 artifact；
   #   - 下载后再断言 `packages/web/dist/index.html` 存在（见下面的「校验 dist」）。
   build-frontend:
-    needs: [gate-static, gate-test, gate-coverage, gate-web]
+    needs: [gate-static, gate-coverage, gate-web]
     runs-on: ubuntu-24.04
     # 只读（同上）：编前端不上传任何发布物，artifact 走 Actions 内部存储，
     # 不需要仓库或包的写权限。
@@ -384,7 +364,7 @@ jobs:
   # 只会让每条发布都红，而报错看起来像「缺链接器」，人会去改 mingw 安装步骤，
   # 查错方向完全错。
   build-binaries:
-    needs: [gate-static, gate-test, gate-coverage, gate-web, build-frontend]
+    needs: [gate-static, gate-coverage, gate-web, build-frontend]
     strategy:
       fail-fast: false
       matrix:
@@ -574,7 +554,7 @@ jobs:
     # **不**等 `build-frontend`：前端 dist 是 `hub-server` 的编译期输入
     # （`include_dir!`），而这里只编 `node-cli`。多等一个 job 不只是慢——
     # 它会让「前端挂了」看上去像「桌面构建有问题」，排错方向直接错。
-    needs: [gate-static, gate-test, gate-coverage, gate-web]
+    needs: [gate-static, gate-coverage, gate-web]
     strategy:
       fail-fast: false
       matrix:
@@ -698,7 +678,7 @@ jobs:
   # 因此镜像同时是 amd64 与 arm64 多架构清单的底座——arm64 那份用
   # `--platform` 拉对应的 arm64-musl 产物（buildx 的 TARGETARCH 分支见下）。
   docker-hub:
-    needs: [gate-static, gate-test, gate-coverage, gate-web, build-binaries, build-desktop]
+    needs: [gate-static, gate-coverage, gate-web, build-binaries, build-desktop]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -792,7 +772,7 @@ jobs:
   # 3b. afcli 镜像 —— 按 TARGETARCH 选二进制
   # ---------------------------------------------------------------------------
   docker-node:
-    needs: [gate-static, gate-test, gate-coverage, gate-web, build-binaries]
+    needs: [gate-static, gate-coverage, gate-web, build-binaries]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -857,7 +837,6 @@ jobs:
   release:
     needs:
       - gate-static
-      - gate-test
       - gate-coverage
       - gate-web
       - build-frontend

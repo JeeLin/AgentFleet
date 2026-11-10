@@ -657,7 +657,7 @@ def gate_tasks(path, job_names):
     return out
 
 want = read_mise_ci_tasks()
-GATE_JOBS = ['gate-static', 'gate-test', 'gate-coverage', 'gate-web']
+GATE_JOBS = ['gate-static', 'gate-coverage', 'gate-web']
 got = gate_tasks(RELEASE_YML, GATE_JOBS)
 
 if want is not None:
@@ -742,7 +742,7 @@ REQUIRES_COMPONENT_WITH_USES = {
     'taiki-e/install-action@cargo-llvm-cov': 'llvm-tools-preview',
 }
 
-GATE_JOBS = ['gate-static', 'gate-test', 'gate-coverage', 'gate-web']
+GATE_JOBS = ['gate-static', 'gate-coverage', 'gate-web']
 
 bad = []
 try:
@@ -755,8 +755,8 @@ except OSError as e:
     bad.append(f'{RELEASE_YML} 读取失败：{e}')
     jobs = {}
 
-# 门禁拆成 4 个 job 后，「装了哪些组件」与「跑了哪些命令」都必须看**合集**：
-# 命令在 gate-test 里跑、组件在 gate-coverage 里装，是合法的分工（每个 job 只装
+# 门禁拆成 3 个 job 后，「装了哪些组件」与「跑了哪些命令」都必须看**合集**：
+# 命令在 gate-static 里跑、组件在 gate-coverage 里装，是合法的分工（每个 job 只装
 # 自己要的）；反过来命令所在的 job 没装它需要的组件才是错。
 steps = []
 for jn in GATE_JOBS:
@@ -1030,9 +1030,7 @@ bb = jobs.get('build-binaries') or {}
 bb_targets = [str(x.get('target') or '') for x in ((bb.get('strategy') or {}).get('matrix') or {}).get('include') or []]
 if not bb_targets or any(not t.endswith('-musl') for t in bb_targets):
     bad.append('`build-binaries` 应只编 musl 目标，gnu 已无消费方')
-if 'gate-static' not in str((jobs.get('gate-test') or {}).get('needs') or []):
-    bad.append('`gate-test` 应 needs gate-static，保证普通 Rust 缓存先写好')
-for name in ('gate-static', 'gate-test', 'build-binaries', 'build-desktop'):
+for name in ('gate-static', 'build-binaries', 'build-desktop'):
     if 'shared-key' not in steps_text(name):
         bad.append(f'`{name}` 未声明 shared-key，Rust 依赖图会各编一遍')
 for b in bad:

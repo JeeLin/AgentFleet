@@ -184,7 +184,8 @@ mise run ci     # 本地全量，与 CI 同一串
 ```
 
 单项：`cargo fmt --check` / `cargo clippy --workspace --all-targets`（**零 warning**）/
-`cargo test --workspace` / `scripts/check.sh` / 覆盖率门禁 / `bun run type-check|test|build`。
+`cargo test --workspace --doc`（Rust 单测与集成测试由 `cov-gate` 一起跑）/ `scripts/check.sh` /
+覆盖率门禁 / `bun run type-check|test|build`。
 
 **覆盖率门禁判定口径是行覆盖率 ≥98%（`mise run cov-gate`），与 CI 同一条命令。**
 
