@@ -29,7 +29,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::routes::api::{create_session_guarded, DeviceImportAuth, NewSession};
 use crate::{err, ApiError, AppState};
@@ -43,28 +43,9 @@ use crate::{err, ApiError, AppState};
 /// 边界**，与设备侧注册表必须同时更新。
 const IMPORT_PROVIDERS: &[&str] = &["opencode"];
 
-/// 请求体。**字段顺序参与 canonical body 的字节**（摘要按这个顺序序列化），
-/// 与 `node-cli::import_http::ImportRequest` 逐字同序：
-/// `node_id, provider, external_session_id, acp_session_id, cwd, title, v, t,
-/// nonce, signature, body_sha256`。
-///
-/// 不许换成 `serde_json::Value`：`Map` 会按键排序，摘要立刻与设备侧不同。
-/// `tests/session_import.rs` 的 `the_hub_dto_field_order_matches_the_cli_canonical_body`
-/// 锁住这条。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImportRequest {
-    pub node_id: String,
-    pub provider: String,
-    pub external_session_id: String,
-    pub acp_session_id: String,
-    pub cwd: String,
-    pub title: String,
-    pub v: u32,
-    pub t: u64,
-    pub nonce: String,
-    pub signature: String,
-    pub body_sha256: String,
-}
+// 请求体是 `identity::import_protocol::ImportRequest`：CLI 与 Hub 序列化
+// 的是**同一个类型**，字段顺序漂移不再只是注释里的约定。
+pub use identity::import_protocol::ImportRequest;
 
 /// 认证 layer 解析好的请求体。handler 消费它，**不重新解析**。
 #[derive(Debug, Clone)]

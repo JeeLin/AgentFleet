@@ -26,6 +26,11 @@ use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+use identity::import_protocol::{
+    BODY_SHA256_HEADER, IMPORT_METHOD, IMPORT_PATH, IMPORT_VERSION, NODE_ID_HEADER, NONCE_HEADER,
+    SIGNATURE_HEADER,
+};
+
 /// 二进制路径由 Cargo 注入，与 `[[bin]] name = "afcli"` 对应。
 const EXE: &str = env!("CARGO_BIN_EXE_afcli");
 
@@ -505,13 +510,13 @@ fn import_bind_posts_a_signed_request_to_a_bare_authority() {
     assert!(out.contains("打开既有会话继续对话"), "got: {out}");
 
     let request = captured(rx);
-    assert_eq!(request.method, "POST");
-    assert_eq!(request.path, "/device-api/session-imports");
+    assert_eq!(request.method, IMPORT_METHOD);
+    assert_eq!(request.path, IMPORT_PATH);
     for header in [
-        "X-AF-Node-Id",
-        "X-AF-Nonce",
-        "X-AF-Signature",
-        "X-AF-Body-SHA256",
+        NODE_ID_HEADER,
+        NONCE_HEADER,
+        SIGNATURE_HEADER,
+        BODY_SHA256_HEADER,
     ] {
         assert!(request.header(header).is_some(), "missing header {header}");
     }
@@ -522,14 +527,14 @@ fn import_bind_posts_a_signed_request_to_a_bare_authority() {
     assert_eq!(body["acp_session_id"], "ses_test");
     assert_eq!(body["cwd"], "/tmp/demo");
     assert_eq!(body["title"], "demo session");
-    assert_eq!(body["v"], 1);
+    assert_eq!(body["v"], IMPORT_VERSION);
 
     // 签名覆盖 method / path / body 摘要 / nonce / t，可用本机公钥验证。
     let message = identity::import_signing_message(
         body["v"].as_u64().unwrap() as u32,
         "n_import_test",
-        "POST",
-        "/device-api/session-imports",
+        IMPORT_METHOD,
+        IMPORT_PATH,
         body["body_sha256"].as_str().unwrap(),
         body["nonce"].as_str().unwrap(),
         body["t"].as_u64().unwrap(),
@@ -586,7 +591,7 @@ fn import_bind_derives_the_origin_from_a_full_ws_url_and_from_the_env_var() {
     let out = drain(out);
     let err = drain(err);
     assert!(status.success(), "{out}\n{err}");
-    assert_eq!(captured(rx).path, "/device-api/session-imports");
+    assert_eq!(captured(rx).path, IMPORT_PATH);
 
     let (port, rx) = start_stub(
         "201 Created",
@@ -609,7 +614,7 @@ fn import_bind_derives_the_origin_from_a_full_ws_url_and_from_the_env_var() {
     let out = drain(out);
     let err = drain(err);
     assert!(status.success(), "{out}\n{err}");
-    assert_eq!(captured(rx).path, "/device-api/session-imports");
+    assert_eq!(captured(rx).path, IMPORT_PATH);
 }
 
 /// 成功状态码但不是约定 JSON 形状 → `bad_response`，且不把原始响应打到终端。

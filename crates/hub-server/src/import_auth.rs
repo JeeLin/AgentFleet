@@ -51,27 +51,21 @@ use axum::extract::{Request, State};
 use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use identity::import_protocol::ImportRequest;
+// Hub 集成测试按 `hub_server::import_auth::IMPORT_*` 取常量：这里**重导出**
+// 共享定义而不是另立一份。头名同理，`HeaderMap::get` 大小写不敏感。
+pub use identity::import_protocol::{
+    BODY_SHA256_HEADER, IMPORT_METHOD, IMPORT_PATH, IMPORT_VERSION, NODE_ID_HEADER, NONCE_HEADER,
+    SIGNATURE_HEADER,
+};
 use sha2::{Digest, Sha256};
 
 use crate::routes::api::{Authenticated, DeviceImportAuth};
-use crate::routes::session_import::{ImportRequest, ImportedBody};
+use crate::routes::session_import::ImportedBody;
 use crate::{err, ApiError, AppState};
 
-/// 签名 / body 的协议版本。不兼容变更才 +1（与 `node-cli` 的 `IMPORT_VERSION` 同值）。
-pub const IMPORT_VERSION: u32 = 1;
-
-/// 签名覆盖的 HTTP method。与 `node-cli::import_http::IMPORT_METHOD` 同值。
-pub const IMPORT_METHOD: &str = "POST";
-
-/// 导入端点的路径。签名规范串里也有它——**改路径必须同时改签名两侧**。
-pub const IMPORT_PATH: &str = "/device-api/session-imports";
-
-/// 请求头（`HeaderMap` 的键是小写）。与 `node-cli::import_http` 的常量逐字一致。
-pub const NODE_ID_HEADER: &str = "x-af-node-id";
-pub const NONCE_HEADER: &str = "x-af-nonce";
-pub const SIGNATURE_HEADER: &str = "x-af-signature";
-pub const BODY_SHA256_HEADER: &str = "x-af-body-sha256";
-
+// 路径 / method / 版本 / 头名 / DTO 全部来自 `identity::import_protocol`：
+// CLI 与 Hub 只准读同一份定义，改一侧就是改协议本身。
 /// 时间窗：`|now - t| <= 300 s`。同时是 nonce 表的 TTL。
 pub const TIME_WINDOW_SECS: u64 = 300;
 

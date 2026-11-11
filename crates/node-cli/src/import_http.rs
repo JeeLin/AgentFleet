@@ -18,44 +18,17 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use identity::import_protocol::{
+    ImportRequest, BODY_SHA256_HEADER, IMPORT_METHOD, IMPORT_PATH, IMPORT_VERSION, NODE_ID_HEADER,
+    NONCE_HEADER, SIGNATURE_HEADER,
+};
 use identity::{base64url, import_signing_message, KeyPair};
 use node_core::import::ImportCandidate;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
-
-/// 导入端点的固定路径。**不在 `/api/*` 下**：那是浏览器 session 认证的地盘。
-pub const IMPORT_PATH: &str = "/device-api/session-imports";
-
-/// 签名覆盖的 HTTP method。
-pub const IMPORT_METHOD: &str = "POST";
-
-/// 签名 / body 的协议版本。不兼容变更才 +1。
-pub const IMPORT_VERSION: u32 = 1;
-
-pub const NODE_ID_HEADER: &str = "X-AF-Node-Id";
-pub const NONCE_HEADER: &str = "X-AF-Nonce";
-pub const SIGNATURE_HEADER: &str = "X-AF-Signature";
-pub const BODY_SHA256_HEADER: &str = "X-AF-Body-SHA256";
 
 /// 一次性请求不该等太久：Hub 不在就尽快失败，用户还能看见原因。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// 请求体。字段顺序参与 canonical body 的字节，改动顺序会改变摘要——
-/// Hub 侧的 DTO 必须保持同一顺序。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImportRequest {
-    pub node_id: String,
-    pub provider: String,
-    pub external_session_id: String,
-    pub acp_session_id: String,
-    pub cwd: String,
-    pub title: String,
-    pub v: u32,
-    pub t: u64,
-    pub nonce: String,
-    pub signature: String,
-    pub body_sha256: String,
-}
 
 /// 已签名的请求：最终 body 字节与要放进 header 的元数据。
 #[derive(Debug, Clone)]

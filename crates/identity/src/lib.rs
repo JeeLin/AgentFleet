@@ -19,6 +19,48 @@ use sha2::{Digest, Sha256};
 pub mod error;
 pub use error::IdentityError;
 
+/// 设备签名 HTTP 会话导入的**共享协议**（v0.7.4）。
+///
+/// `identity` 同时是 `node-cli` 与 `hub-server` 的生产依赖：把路径 / method /
+/// 版本 / 四个头名和请求 DTO 放在这里，任何一侧只改自己的副本都变成编译期
+/// 可见的变化（另一侧跟着同一个类型 / 常量走）。
+///
+/// `ImportRequest` 的字段顺序参与 canonical body 的 SHA-256 字节，**不许重排**：
+/// 摘要按这个顺序序列化，改顺序会让签名两侧失配。
+pub mod import_protocol {
+    use serde::{Deserialize, Serialize};
+
+    /// 导入端点的固定路径（不在 `/api/*` 下）。
+    pub const IMPORT_PATH: &str = "/device-api/session-imports";
+    /// 签名覆盖的 HTTP method。
+    pub const IMPORT_METHOD: &str = "POST";
+    /// 签名 / body 的协议版本。不兼容变更才 +1。
+    pub const IMPORT_VERSION: u32 = 1;
+
+    /// 四个签名头的名字。**用规范大小写**：`HeaderMap` 的键大小写不敏感，
+    /// 而 CLI 侧要按 HTTP 惯例发出可读的头名。
+    pub const NODE_ID_HEADER: &str = "X-AF-Node-Id";
+    pub const NONCE_HEADER: &str = "X-AF-Nonce";
+    pub const SIGNATURE_HEADER: &str = "X-AF-Signature";
+    pub const BODY_SHA256_HEADER: &str = "X-AF-Body-SHA256";
+
+    /// 一次性请求体。字段顺序是协议的一部分（见模块注释）。
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ImportRequest {
+        pub node_id: String,
+        pub provider: String,
+        pub external_session_id: String,
+        pub acp_session_id: String,
+        pub cwd: String,
+        pub title: String,
+        pub v: u32,
+        pub t: u64,
+        pub nonce: String,
+        pub signature: String,
+        pub body_sha256: String,
+    }
+}
+
 /// 一对 Ed25519 密钥。
 ///
 /// `Debug` 实现**不含私钥**（约束 13：私钥永不进日志/回显/轨迹）。
