@@ -175,6 +175,36 @@ pub fn signature_message(v: u32, node_id: &str, seq: u64, msg_type: &str, nonce:
     m
 }
 
+/// 设备签名 HTTP 导入请求覆盖的规范字节。
+///
+/// 与 [`signature_message`] 的编码风格一致（`v` 大端 + 各字符串字段
+/// `len(u32 BE) + bytes`），但**字段不同**：HTTP 请求没有 `seq`，多了
+/// `method` / `path` / body 摘要，时间戳 `t` 放在末尾。
+///
+/// **不复用 [`signature_message`]**：它没有 method / path / digest 槽位，
+/// 硬塞进去会改掉既有 WS 认证的签名字节。CLI 与 Hub 只准调用这一份实现。
+///
+/// 字段顺序固定为 `v, node_id, method, path, body_sha256_hex, nonce, t`；
+/// 长度前缀保证 `("ab","c")` 与 `("a","bc")` 不会撞成同一串。
+pub fn import_signing_message(
+    v: u32,
+    node_id: &str,
+    method: &str,
+    path: &str,
+    body_sha256_hex: &str,
+    nonce: &str,
+    t: u64,
+) -> Vec<u8> {
+    let mut m = Vec::with_capacity(128);
+    m.extend_from_slice(&v.to_be_bytes());
+    for field in [node_id, method, path, body_sha256_hex, nonce] {
+        m.extend_from_slice(&(field.len() as u32).to_be_bytes());
+        m.extend_from_slice(field.as_bytes());
+    }
+    m.extend_from_slice(&t.to_be_bytes());
+    m
+}
+
 /// 32 字节 CSPRNG nonce，base64url。每连接一次（§3）。
 pub fn issue_nonce() -> String {
     let mut b = [0u8; 32];
@@ -456,5 +486,74 @@ mod tests {
     #[test]
     fn bad_pkcs8_is_rejected() {
         assert!(KeyPair::from_pkcs8_der(&[0u8; 4]).is_err());
+    }
+
+    /// 导入规范串必须覆盖**每一个**字段：改动任意一个都得到不同的字节。
+    /// 少覆盖一个字段，Hub 就收不到那一项的变化，签名会为「换了 body 但
+    /// 签名不变」开口子。
+    #[test]
+    fn import_signing_message_covers_every_field() {
+        let base = import_signing_message(1, "n", "POST", "/p", "digest", "nonce", 7);
+        assert_eq!(
+            base,
+            import_signing_message(1, "n", "POST", "/p", "digest", "nonce", 7),
+            "同一组输入必须稳定"
+        );
+        for changed in [
+            import_signing_message(2, "n", "POST", "/p", "digest", "nonce", 7),
+            import_signing_message(1, "n2", "POST", "/p", "digest", "nonce", 7),
+            import_signing_message(1, "n", "PUT", "/p", "digest", "nonce", 7),
+            import_signing_message(1, "n", "POST", "/q", "digest", "nonce", 7),
+            import_signing_message(1, "n", "POST", "/p", "digest2", "nonce", 7),
+            import_signing_message(1, "n", "POST", "/p", "digest", "nonce2", 7),
+            import_signing_message(1, "n", "POST", "/p", "digest", "nonce", 8),
+        ] {
+            assert_ne!(base, changed, "每个字段都必须进入规范串");
+        }
+    }
+
+    /// 字段之间必须有长度前缀，且顺序固定：把字节从相邻字段挪过去
+    /// （`("ab","c")` vs `("a","bc")`）不得产生同一串。
+    #[test]
+    fn import_signing_message_is_length_prefixed_and_ordered() {
+        let a = import_signing_message(1, "ab", "c", "/p", "d", "n", 1);
+        let b = import_signing_message(1, "a", "bc", "/p", "d", "n", 1);
+        assert_ne!(a, b, "相邻字段之间必须有长度前缀");
+
+        let x = import_signing_message(1, "a", "b", "p", "d", "n", 1);
+        let y = import_signing_message(1, "ab", "", "p", "d", "n", 1);
+        assert_ne!(x, y, "长度前缀必须让空字段与拼接歧义分开");
+
+        // v 在头部（u32 BE），t 在尾部（u64 BE）。
+        let m = import_signing_message(0x0102_0304, "", "", "", "", "", 0x0102_0304_0506_0708);
+        assert_eq!(&m[..4], &[1, 2, 3, 4]);
+        assert_eq!(&m[m.len() - 8..], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    /// 同一组输入签出的导入消息必须能被对应公钥验过；改一个字节就失败。
+    #[test]
+    fn import_signing_message_roundtrips_through_sign_and_verify() {
+        let kp = KeyPair::generate();
+        let m = import_signing_message(
+            1,
+            "n",
+            "POST",
+            "/device-api/session-imports",
+            "abc",
+            "nonce",
+            9,
+        );
+        let sig = kp.sign(&m);
+        assert!(KeyPair::verify(&kp.public_key_bytes(), &m, &sig));
+        let tampered = import_signing_message(
+            1,
+            "n",
+            "POST",
+            "/device-api/session-imports",
+            "abd",
+            "nonce",
+            9,
+        );
+        assert!(!KeyPair::verify(&kp.public_key_bytes(), &tampered, &sig));
     }
 }

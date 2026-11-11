@@ -15,15 +15,23 @@ path = "src/main.rs"
 [dependencies]
 node-core.workspace = true
 protocol.workspace = true
+# `afcli import` 读设备身份（只读）并用同一份 `import_signing_message` 签名。
+identity.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 rand.workspace = true
+# 导入是一次性设备签名 HTTP POST（不走 WS）。rustls-tls 与 node 自更新同源。
+reqwest.workspace = true
+# body 摘要：与 Hub 共用 sha2，不引第二套哈希。
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# 集成测试要造一个只读的 opencode 会话库夹具（`session_v2`）。
+rusqlite.workspace = true
 # 集成测试要当 WS 对端验「worker 握手后怎么读帧」，用现成的服务端脚手架。
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
@@ -35,7 +43,6 @@ hub-server.workspace = true
 hub-core.workspace = true
 hub-storage.workspace = true
 axum.workspace = true
-identity.workspace = true
 
 [lints]
 workspace = true

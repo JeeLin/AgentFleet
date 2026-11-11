@@ -24,6 +24,27 @@
 **A 类没有选择余地**：若 Hub 生成设备私钥，Hub 就等于持有全部设备的私钥，
 密钥对的意义归零。**必须是 node 首次运行时本地生成，私钥永不上传。**
 
+### 1.1 设备签名 HTTP：与浏览器 session / CSRF 并列的第二条认证边界
+
+会话导入（v0.7.4）让设备主动发一次 `POST /device-api/session-imports`。
+它**不套浏览器 `af_session` / `af_csrf`**：请求不是浏览器发的，没有 cookie
+可用，认证完全走 **A 类设备密钥对**：
+
+- 请求头带 `X-AF-Node-Id` / `X-AF-Nonce` / `X-AF-Signature` / `X-AF-Body-SHA256`；
+- Hub 只信库内公钥（`DeviceRepo::find_by_id` → `Device::public_key_bytes` →
+  `KeyPair::verify`），**绝不接受请求里带来的公钥**（§1 A 类规则）；
+- 签名规范串由 `identity::import_signing_message` 唯一实现，覆盖
+  `v / node_id / method / path / body 摘要 / nonce / t`；Hub 另校验
+  body 摘要、±300 s 时间窗与 nonce 一次性（重启后进程内 nonce 集合清空，
+  签名仍绑定 body 摘要 / node_id / 时间窗）；
+- 设备端点仍受 Hub **已初始化门禁**约束，并走专用认证 layer；
+  `AUTH_EXEMPT_PATHS` / `CSRF_EXEMPT_PATHS` / `INIT_MODE_PATHS` 均不因此改动。
+
+这条边界与浏览器 session / CSRF **并列**，不是替代：`/api/*` 的状态变更端点
+继续只认浏览器认证。请求体**不含公钥或任何私钥材料**，错误体只回固定 code，
+不回显 DB 路径 / SQL / 私钥 / cookie。设备私钥只留在本机 `identity.json`，
+永不上传（§1 A 类规则）。
+
 ---
 
 ## 2. 明文存储：取舍与必须配套的防护

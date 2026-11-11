@@ -11,6 +11,8 @@
 //! supervisor 在 [`supervisor`]，worker 在 [`node_core::worker`]：连接能力属于
 //! `node-core`（connector 只能被已认证连接使用），本 crate 只决定「起哪个角色」。
 
+pub mod import_cmd;
+pub mod import_http;
 pub mod log_cmd;
 pub mod runargs;
 pub mod supervisor;
@@ -39,12 +41,22 @@ afcli — AgentFleet node 命令
   afcli --help        打印本帮助并退出 0
   afcli run [--foreground]   启动 supervisor（默认角色，前台阻塞）
   afcli log [-n N]           打印最近 N 行日志（默认 200）
+  afcli import list --provider opencode [--data-dir DIR]
+                             列出本机可导入的历史会话
+  afcli import bind --provider opencode --session ID [--hub URL] [--data-dir DIR]
+                             把一条历史会话绑定成 Hub 会话（一次性设备签名 HTTP）
 
 `run` 永远在前台运行、不会 daemon 化（DECISIONS D1）；要脱离终端请用
 systemd / Docker，不要加 --background 或 --daemon（会报错并给出用法）。
 `--foreground` 是文档化的无操作别名：`run` 本来就是前台，加上它只让
 脚本里的意图更明显。前台启动时 supervisor 与 worker 的日志行会同时回显
 到控制台（stdout / stderr），并照常写进日志文件供 `afcli log` 读取。
+
+`import` 只读本机 `identity.json` 与历史会话库，向 Hub 发一次短请求：
+不建立 WS 连接、不启动 worker、不新增协议消息。Hub 地址取 `--hub`，
+缺省 `AFCLI_HUB_URL`，再缺省 `ws://127.0.0.1:8080/ws`；host:port /
+ws:// / wss:// 会推导成同源 http(s)。`--data-dir` 与 `AFCLI_DATA_DIR`
+同义（平台数据基目录），缺省用平台标准目录。
 
 `run --worker` 是 supervisor 拉起 worker 用的内部形态（DECISIONS D1），
 不需要手工敲；手敲了也只会跑成 worker，不会变成 supervisor。
@@ -71,6 +83,10 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> ParseResult {
         "log" => {
             let rest: Vec<String> = it.cloned().collect();
             ParseResult::Log(rest)
+        }
+        "import" => {
+            let rest: Vec<String> = it.cloned().collect();
+            ParseResult::Import(rest)
         }
         "run" => {
             let rest: Vec<String> = it.cloned().collect();
@@ -107,6 +123,8 @@ enum ParseResult {
     Help,
     /// 命中 `log`：把余下参数交给 `log_cmd` 处理。
     Log(Vec<String>),
+    /// 命中 `import`：把余下参数交给 `import_cmd` 处理。
+    Import(Vec<String>),
     /// 命中 `run`：把余下参数交给 supervisor / worker 分派。
     Run(Vec<String>),
     /// 无参数或未知参数：打印用法（失败退出）。
@@ -168,6 +186,16 @@ where
                 }
             }
         }
+        ParseResult::Import(rest) => {
+            // 与 `log` 同一接缝：数据目录取不到就显式失败，不静默跳过。
+            match data_dir() {
+                Ok(d) => import_cmd::run(&rest, &d, out, err),
+                Err(e) => {
+                    drop(writeln!(err, "afcli import: 无法定位数据目录：{e}"));
+                    std::process::ExitCode::FAILURE
+                }
+            }
+        }
         ParseResult::Usage => {
             drop(writeln!(err, "{USAGE}"));
             std::process::ExitCode::FAILURE
@@ -189,6 +217,11 @@ fn disallowed_background_flag(args: &[String]) -> Option<&'static str> {
 }
 
 /// `run` 的参数里有没有 `--foreground`（无操作别名）。
+///
+/// **只在测试里存在**：生产代码没有分支需要读它——`--foreground` 既不改变
+/// 角色，也不是后台 flag，唯一的用途是把「别把它误并进后台 flag 表」这条
+/// 区分钉死。留一个生产侧调用点只会是 `let _ =` 那种假使用。
+#[cfg(test)]
 fn has_foreground_flag(args: &[String]) -> bool {
     args.iter().any(|a| a == FOREGROUND_FLAG)
 }
@@ -219,7 +252,8 @@ where
         return std::process::ExitCode::FAILURE;
     }
     // 无操作别名：不改写 args（worker 的 argv 要原样继承），也不新开分支。
-    let _ = has_foreground_flag(args);
+    // `--foreground` 因此**不需要**任何生产代码处理——它既不是后台 flag，
+    // 也不改变角色；唯一的判据函数只在测试里用来钉住这条区分。
 
     let data_dir = match data_dir() {
         Ok(d) => d,
@@ -373,6 +407,42 @@ mod tests {
     fn log_without_extra_args_dispatches_empty() {
         let a: Vec<String> = vec!["log".to_string()];
         assert!(matches!(parse_args(a), ParseResult::Log(r) if r.is_empty()));
+    }
+
+    #[test]
+    fn parse_result_has_an_import_branch() {
+        let a: Vec<String> = ["import", "list", "--provider", "opencode"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(
+            matches!(parse_args(a), ParseResult::Import(ref r) if r == &["list", "--provider", "opencode"])
+        );
+        let a: Vec<String> = vec!["import".to_string()];
+        assert!(matches!(parse_args(a), ParseResult::Import(r) if r.is_empty()));
+    }
+
+    /// 用法文本必须同时给出两个子命令的形状，否则用户只看得到 `import` 这个词。
+    #[test]
+    fn usage_mentions_import_list_and_bind() {
+        for phrase in [
+            "afcli import list --provider opencode",
+            "afcli import bind --provider opencode --session ID",
+            "--hub",
+            "--data-dir",
+        ] {
+            assert!(USAGE.contains(phrase), "用法里少了 {phrase:?}：{USAGE}");
+        }
+    }
+
+    /// `import` 的失败参数走自己的用法，且绝不落到网络层。
+    #[test]
+    fn import_with_bad_args_reports_the_import_usage() {
+        let (code, out, err) = run_capture(&["import", "bind"]);
+        assert!(code != std::process::ExitCode::SUCCESS);
+        assert!(out.is_empty());
+        assert!(err.contains("afcli import"), "{err}");
+        assert!(err.contains("afcli import bind --provider <id>"), "{err}");
     }
 
     /// `afcli log` 的参数错误必须失败退出并给出 `log` 自己的用法，
@@ -835,6 +905,27 @@ mod tests {
                 "{args:?} 要把底层原因带出来：{text}"
             );
         }
+    }
+
+    /// `import` 与 `log` / `run` 共用 `run_with` 的数据目录接缝，失败臂同样
+    /// 必须留痕——不能让 `afcli import` 在找不到数据目录时静默退出。
+    #[test]
+    fn data_dir_can_fail_for_import_too() {
+        let reason = node_core::IdentityError::NoDataDir.to_string();
+        let no_dir = || Err(reason.clone());
+        let mut out = Vec::new();
+        let mut err_out = Vec::new();
+        let code = run_with(
+            vec!["import".to_string(), "list".to_string()],
+            &mut out,
+            &mut err_out,
+            &no_dir,
+        );
+        assert_eq!(code, std::process::ExitCode::FAILURE);
+        assert!(out.is_empty(), "失败时不该往 stdout 打东西");
+        let text = String::from_utf8(err_out).expect("utf8");
+        assert!(text.starts_with("afcli import: 无法定位数据目录"), "{text}");
+        assert!(text.contains(&reason), "要把底层原因带出来：{text}");
     }
 
     /// `assert!` 的消息只在断言失败时才求值——所以那个 `from_utf8_lossy`

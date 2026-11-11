@@ -207,6 +207,12 @@ M2 往这一层加的东西只有一个：**心跳的 `agents` 字段**（设备
 「M2 加了 ACP 对话」直觉上应该带来协议改动，而实际上**一行协议都没改**——
 ACP 走的是 worker 自己的子进程 stdio，不经过 WS。
 
+> **会话导入（v0.7.4）也不改消息数**：`afcli import bind` 是设备主动发起的
+> **一次性 HTTP POST**（`POST /device-api/session-imports`），与浏览器 `/api/*`
+> 和 WS 帧都不是同一条通路。它不新增 `MessageType`、不走 `heartbeat` /
+> `channel_data`，因此协议仍是 17 个变体。设备签名只覆盖这一次请求的
+> method / path / body 摘要 / nonce / 时间戳，不参与 WS 握手。
+
 **ACP 是另一层协议，不归本文档管**。它是 JSON-RPC 2.0 over stdio、一行一条 JSON，
 由 `crates/node-core/src/agent/acp.rs` 实现。设备与 Hub 之间的 WS 只知道 M1 那套帧。
 对话内容要送到页面时，**复用 M1 的通道机制**（`open_channel` + 信用流控），
