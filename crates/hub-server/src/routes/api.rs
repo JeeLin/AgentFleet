@@ -65,7 +65,7 @@ impl Authenticated {
     /// subject 带 `device:` 前缀，好让日志与通道归属一眼看出这条通道不是浏览器
     /// 开的。**它只活在一次请求里**——导入 handler 用它调 `probe_base_rev`，
     /// 通道在同请求内关闭（见 `base_rev.rs`）。
-    pub fn for_device_import(node_id: &str) -> Self {
+    pub(crate) fn for_device_import(node_id: &str) -> Self {
         Self {
             subject: format!("device:{node_id}"),
         }
