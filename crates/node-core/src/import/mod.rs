@@ -14,8 +14,8 @@
 //!    这条 ACP 入口的参数形态与本仓 `agent/acp.rs` 的假设一致。
 //! 2. 确认历史会话的**来源**（哪个库、哪张表、哪个列是 ACP 会话 id），并
 //!    只读验证一遍：读得出来，且读完那个库一个字节都没变。
-//! 3. 补一条 `#[ignore]` 真机测试留档（模板见 `agent/conversation.rs` 的
-//!    `a_real_opencode_turn_reaches_the_channel_as_a_batch`）。
+//! 3. 补一条 `#[ignore]` 真机测试留档（模板见 `import/tests.rs` 的
+//!    `a_real_opencode_database_lists_and_resolves_a_session`）。
 //!
 //! 三步没走完就注册的后果与 detect.rs 描述的完全一样：单测全绿、页面正常，
 //! 用户选中一条历史会话后永远等不到回话。**支持的唯一判据不是「库文件存在」**
