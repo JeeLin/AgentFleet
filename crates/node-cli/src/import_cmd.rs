@@ -85,24 +85,52 @@ fn parse(rest: &[String]) -> Result<Command, String> {
     }
 }
 
+/// 两个子命令共有的 flag：`--provider` / `--data-dir` 与未知参数。
+///
+/// 返回 `CommonFlags::Skip(2)` 表示本 parser 不必再处理这个 flag；
+/// 其余分支由各 parser 自己处理。错误字符串与拆分前逐字相同。
+enum CommonFlags {
+    Skip(usize),
+    NotCommon,
+}
+
+fn parse_common_flag(
+    args: &[String],
+    i: usize,
+    arg: &str,
+    provider: &mut Option<String>,
+    data_dir: &mut Option<PathBuf>,
+) -> Result<CommonFlags, String> {
+    match arg {
+        "--provider" => {
+            *provider = Some(take_value(args, i, "--provider")?.to_string());
+            Ok(CommonFlags::Skip(2))
+        }
+        "--data-dir" => {
+            *data_dir = Some(PathBuf::from(take_value(args, i, "--data-dir")?));
+            Ok(CommonFlags::Skip(2))
+        }
+        _ => Ok(CommonFlags::NotCommon),
+    }
+}
+
+fn missing_provider() -> String {
+    "缺少 --provider".to_string()
+}
+
 fn parse_list(args: &[String]) -> Result<ListArgs, String> {
     let mut provider = None;
     let mut data_dir = None;
     let mut i = 0;
     while let Some(arg) = args.get(i) {
-        match arg.as_str() {
-            "--provider" => {
-                provider = Some(take_value(args, i, "--provider")?.to_string());
-                i += 2;
-            }
-            "--data-dir" => {
-                data_dir = Some(PathBuf::from(take_value(args, i, "--data-dir")?));
-                i += 2;
-            }
-            other => return Err(format!("未知参数 `{other}`")),
+        let common = parse_common_flag(args, i, arg.as_str(), &mut provider, &mut data_dir)?;
+        if let CommonFlags::Skip(step) = common {
+            i += step;
+            continue;
         }
+        return Err(format!("未知参数 `{arg}`"));
     }
-    let provider = provider.ok_or_else(|| "缺少 --provider".to_string())?;
+    let provider = provider.ok_or_else(missing_provider)?;
     Ok(ListArgs { provider, data_dir })
 }
 
@@ -113,11 +141,12 @@ fn parse_bind(args: &[String]) -> Result<BindArgs, String> {
     let mut data_dir = None;
     let mut i = 0;
     while let Some(arg) = args.get(i) {
+        let common = parse_common_flag(args, i, arg.as_str(), &mut provider, &mut data_dir)?;
+        if let CommonFlags::Skip(step) = common {
+            i += step;
+            continue;
+        }
         match arg.as_str() {
-            "--provider" => {
-                provider = Some(take_value(args, i, "--provider")?.to_string());
-                i += 2;
-            }
             "--session" => {
                 session = Some(take_value(args, i, "--session")?.to_string());
                 i += 2;
@@ -126,14 +155,10 @@ fn parse_bind(args: &[String]) -> Result<BindArgs, String> {
                 hub = Some(take_value(args, i, "--hub")?.to_string());
                 i += 2;
             }
-            "--data-dir" => {
-                data_dir = Some(PathBuf::from(take_value(args, i, "--data-dir")?));
-                i += 2;
-            }
             other => return Err(format!("未知参数 `{other}`")),
         }
     }
-    let provider = provider.ok_or_else(|| "缺少 --provider".to_string())?;
+    let provider = provider.ok_or_else(missing_provider)?;
     let session =
         session.ok_or_else(|| "缺少 --session（先运行 `afcli import list`）".to_string())?;
     if session.trim().is_empty() {
