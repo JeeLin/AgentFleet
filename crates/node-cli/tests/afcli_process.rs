@@ -307,6 +307,115 @@ fn start_stub(
     (port, rx)
 }
 
+/// 与 [`start_stub`] 相同，另外把「第二个 TCP 连接」计数报到 `extra`。
+///
+/// 第一个连接照常回一次 HTTP 响应；之后监听 socket 仍保持，在短窗口内继续
+/// accept 并给每个多余连接 +1。`cli_never_calls_connect_once_or_spawns_worker`
+/// 用它把「POST 之后没有第二条 WS/HTTP 连接」从注释变成可执行断言。
+fn start_stub_with_connection_count(
+    status: &'static str,
+    response_body: &'static str,
+    extra: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) -> (
+    u16,
+    std::sync::mpsc::Receiver<Captured>,
+    std::sync::mpsc::Receiver<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener
+        .set_nonblocking(true)
+        .expect("stub must poll, not block forever");
+    let port = listener.local_addr().unwrap().port();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut stream, _) = accept_with_deadline(&listener, Duration::from_secs(10))
+            .expect("stub never received the import request");
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut headers = Vec::new();
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap() == 0 {
+                break;
+            }
+            if line == "\r\n" || line == "\n" {
+                break;
+            }
+            if let Some((key, value)) = line.split_once(':') {
+                headers.push((key.trim().to_string(), value.trim().to_string()));
+            }
+        }
+        let length = headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let mut body = vec![0u8; length];
+        reader.read_exact(&mut body).unwrap();
+        let (method, path) = request_line
+            .split_once(' ')
+            .map(|(method, rest)| {
+                (
+                    method.to_string(),
+                    rest.split_whitespace().next().unwrap_or("").to_string(),
+                )
+            })
+            .unwrap_or_default();
+        tx.send(Captured {
+            method,
+            path,
+            headers,
+            body,
+        })
+        .unwrap();
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+            response_body.len()
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        stream.flush().unwrap();
+
+        // 子进程拿到响应后若再发起 connect_once / worker 连接，这里会看见。
+        // 不做无限 accept：短窗口足够覆盖同进程退出前的第二条连接。
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut extra_stream, _)) => {
+                    extra.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _ = extra_stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n");
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = done_tx.send(());
+    });
+    (port, rx, done_rx)
+}
+
+fn accept_with_deadline(
+    listener: &TcpListener,
+    timeout: Duration,
+) -> std::io::Result<(std::net::TcpStream, std::net::SocketAddr)> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match listener.accept() {
+            Ok(pair) => return Ok(pair),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err(e);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 fn captured(rx: std::sync::mpsc::Receiver<Captured>) -> Captured {
     rx.recv_timeout(Duration::from_secs(10))
         .expect("stub never received the import request")
@@ -578,6 +687,65 @@ fn import_bind_posts_a_signed_request_to_a_bare_authority() {
             "leaked private key: {haystack}"
         );
     }
+}
+
+/// `import bind` 是**一次性 HTTP**：不接第二条 WS，也不启动 worker / supervisor。
+///
+/// 两层证据缺一不可：① 生产源码里没有 `connect_once` / `Command::new` / `spawn`；
+/// ② 真进程拿到 201 后，stub 在短观察窗口内没有收到第二条 TCP 连接。只做 ①
+/// 是注释式断言，只做 ② 又可能被「第二条连接失败也照样绿」骗过。
+#[test]
+fn cli_never_calls_connect_once_or_spawns_worker() {
+    let import_cmd = include_str!("../src/import_cmd.rs");
+    let import_http = include_str!("../src/import_http.rs");
+    for forbidden in ["connect_once(", "Command::new", ".spawn(", "spawn("] {
+        assert!(
+            !import_cmd.contains(forbidden),
+            "import_cmd.rs must not contain `{forbidden}`"
+        );
+        assert!(
+            !import_http.contains(forbidden),
+            "import_http.rs must not contain `{forbidden}`"
+        );
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    identity_fixture(dir.path());
+    opencode_fixture(dir.path(), "ses_once", "/tmp/demo");
+    let extra = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (port, rx, done_rx) = start_stub_with_connection_count(
+        "201 Created",
+        r#"{"session_id":"hub_sess_once","acp_session_id":"ses_once"}"#,
+        extra.clone(),
+    );
+    let hub = format!("127.0.0.1:{port}");
+    let (mut child, out, err) = spawn_env(
+        &[
+            "import",
+            "bind",
+            "--provider",
+            "opencode",
+            "--session",
+            "ses_once",
+            "--hub",
+            &hub,
+        ],
+        dir.path(),
+        &[],
+    );
+    let status = child.wait_with_timeout();
+    let out = drain(out);
+    let err = drain(err);
+    assert!(status.success(), "{out}\n{err}");
+    assert_eq!(captured(rx).method, IMPORT_METHOD);
+    done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("stub did not finish observing connections");
+    assert_eq!(
+        extra.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "import bind opened a second TCP/WS connection"
+    );
 }
 
 /// 完整 `ws://` URL 与 `AFCLI_HUB_URL` 裸地址都要推导出同源 HTTP 基址。
