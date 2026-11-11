@@ -478,6 +478,9 @@ fn import_bind_explains_the_windows_drive_path_limitation() {
 
 /// 裸 authority：`127.0.0.1:port` 推导成 `http://127.0.0.1:port`，
 /// POST 到固定路径，body 带齐字段且签名可验。
+///
+/// 顺带锁住桩响应**恰好两个键**：以前这里是三字段（多一个 `agent_id`），
+/// CLI 照常成功，于是「Hub 只返回两个字段」这条契约没有任何可执行约束。
 #[test]
 fn import_bind_posts_a_signed_request_to_a_bare_authority() {
     let dir = tempfile::tempdir().unwrap();
@@ -485,7 +488,8 @@ fn import_bind_posts_a_signed_request_to_a_bare_authority() {
     opencode_fixture(dir.path(), "ses_test", "/tmp/demo");
     let (port, rx) = start_stub(
         "201 Created",
-        r#"{"session_id":"hub_sess_1","agent_id":"opencode","acp_session_id":"ses_test"}"#,
+        // 与 Hub `ImportResponse` 完全同形：恰好两个键，不带 `agent_id`。
+        r#"{"session_id":"hub_sess_1","acp_session_id":"ses_test"}"#,
     );
     let hub = format!("127.0.0.1:{port}");
     let (mut child, out, err) = spawn_env(
@@ -508,6 +512,21 @@ fn import_bind_posts_a_signed_request_to_a_bare_authority() {
     assert!(status.success(), "{out}\n{err}");
     assert!(out.contains("hub_sess_1"), "got: {out}");
     assert!(out.contains("打开既有会话继续对话"), "got: {out}");
+
+    let stub_response: serde_json::Value =
+        serde_json::from_str(r#"{"session_id":"hub_sess_1","acp_session_id":"ses_test"}"#).unwrap();
+    let mut keys: Vec<&str> = stub_response
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["acp_session_id", "session_id"],
+        "stub 必须是两字段响应"
+    );
 
     let request = captured(rx);
     assert_eq!(request.method, IMPORT_METHOD);

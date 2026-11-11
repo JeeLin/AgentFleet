@@ -45,6 +45,10 @@ fn err_code(body: &str) -> String {
 }
 
 /// 一个标准的成功导入：设备在线、上报 `opencode` + `git`、探测回 ok。
+///
+/// 201 体**恰好两个键**：`session_id` / `acp_session_id`。断言放在这里而不是
+/// 某个用例里，是因为所有成功路径都经过它——给 `ImportResponse` 加第三个
+/// 字段时，这条会立刻变红，而不会像以前那样 14 个用例全绿。
 async fn import_ok(hub: &common::Hub, stub: &common::DeviceStub, acp: &str, nonce: &str) -> Value {
     let signed = signed_import(
         &stub.kp,
@@ -59,7 +63,32 @@ async fn import_ok(hub: &common::Hub, stub: &common::DeviceStub, acp: &str, nonc
     let app = hub_server::build_app(hub.state.clone());
     let (status, body) = send(&app, signed.request()).await;
     assert_eq!(status, StatusCode::CREATED, "body: {body}");
-    serde_json::from_str(&body).expect("json")
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    assert_exactly_two_response_keys(&parsed, "import_ok");
+    parsed
+}
+
+/// 201 响应体必须是**对象**且键集**恰好**是那两个，不是「至少包含」。
+///
+/// 多一个键都是契约变化：CLI 的 `parse_response` 只读 `session_id`，多出来的
+/// 字段会静默漂移；少一个键则说明回显契约没了。两边都得红。
+fn assert_exactly_two_response_keys(body: &Value, label: &str) {
+    let obj = body
+        .as_object()
+        .unwrap_or_else(|| panic!("{label}: 201 body 不是对象：{body}"));
+    let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["acp_session_id", "session_id"],
+        "{label}: 201 体必须恰好两个键"
+    );
+    for key in ["session_id", "acp_session_id"] {
+        assert!(
+            obj[key].as_str().is_some_and(|v| !v.is_empty()),
+            "{label}: {key} 必须是非空字符串：{body}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +164,7 @@ async fn the_signature_binds_body_version_and_an_unknown_version_does_not_burn_t
     );
     let (status, body) = send(&app, current.request()).await;
     assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    assert_exactly_two_response_keys(&serde_json::from_str(&body).expect("json"), "version retry");
     assert_eq!(session_count(&hub), 1);
 }
 
@@ -237,6 +267,10 @@ async fn nonce_cannot_be_replayed() {
     );
     let (status, body) = send(&app, signed.request()).await;
     assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    assert_exactly_two_response_keys(
+        &serde_json::from_str(&body).expect("json"),
+        "replayed import",
+    );
 
     let (status, body) = send(&app, signed.request()).await;
     assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
@@ -354,7 +388,13 @@ async fn concurrent_imports_of_one_acp_session_create_exactly_one_row() {
     let mut conflict = 0;
     for (status, body) in [&r1, &r2] {
         match *status {
-            StatusCode::CREATED => created += 1,
+            StatusCode::CREATED => {
+                assert_exactly_two_response_keys(
+                    &serde_json::from_str(body).expect("json"),
+                    "concurrent import",
+                );
+                created += 1;
+            }
             StatusCode::CONFLICT => {
                 assert_eq!(err_code(body), "import_already_exists", "body: {body}");
                 conflict += 1;
@@ -691,6 +731,10 @@ async fn device_import_route_is_not_under_the_browser_auth_layer() {
         status,
         StatusCode::CREATED,
         "无 cookie 也必须能导入：{body}"
+    );
+    assert_exactly_two_response_keys(
+        &serde_json::from_str(&body).expect("json"),
+        "no-cookie route",
     );
 
     let (session, csrf) = login(&hub).await;
