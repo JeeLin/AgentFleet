@@ -87,19 +87,14 @@ pub async fn import_session(
         return Err(ApiError::bad_request(err::BAD_BODY));
     }
 
-    // 3. 去重。同一台设备上同一个 agent 的同一条历史会话只能有一个 Hub 会话。
+    // 3. 去重。**检查与 INSERT 合成一条原子 SQL**（`ImportedIfAbsent`）：
+    //    两个不同 nonce 的并发请求通过签名层后，`INSERT ... WHERE NOT EXISTS`
+    //    只会插入一行，另一个拿到 409。先 `find_imported` 再 `create_imported`
+    //    的窗口（中间隔着 probe_base_rev）能让两者都回 201，所以不再分两步。
     //
     //    `provider` 就是 `agent_id`：v1 两者 1:1（`opencode` 同名），`session`
     //    表没有 provider 列，不为此加列（见 `SessionRepo::find_imported`）。
-    //    去重放在门禁**之前**：已经导入过的请求不该再触发设备探测，也不该因为
-    //    设备此刻离线而报一个误导的 `device_offline`。
     let repo = hub_storage::SessionRepo::new(state.pool().clone());
-    let existing = repo
-        .find_imported(&identity.node_id, &req.provider, &req.acp_session_id)
-        .map_err(|e| ApiError::internal_with("cannot look up the imported session", e))?;
-    if existing.is_some() {
-        return Err(ApiError::conflict(err::IMPORT_ALREADY_EXISTS));
-    }
 
     // 4. 复用 `POST /api/sessions` 的同一串门禁（路径 / 设备 / agent / INSERT）。
     let auth = identity.auth;
@@ -109,7 +104,7 @@ pub async fn import_session(
         &identity.node_id,
         &req.cwd,
         &req.provider,
-        NewSession::Imported(&req.acp_session_id),
+        NewSession::ImportedIfAbsent(&req.acp_session_id),
     )
     .await?;
 

@@ -501,15 +501,21 @@ impl SessionRepo {
     /// 而 v1 的 provider → `agent_id` 是 1:1（`opencode` 的 provider id 与
     /// agent id 同名），所以用 `agent_id`，不为此加列。
     ///
-    /// # 为什么不加唯一索引
+    /// # 为什么用原子 INSERT 而不是全表唯一索引
     ///
-    /// 普通会话的 `acp_session_id` 恒为 `NULL`（唯一索引对 NULL 不去重，加了
-    /// 也不拦重复导入）；而同一个 `ses_*` 理论上可以属于**两台设备各自**的
-    /// opencode 库——那种情况必须是两条不同的会话行。判据里带 `node_id`
-    /// 就是为了这个，索引方案反而会把两条合法行判成冲突。
+    /// 普通会话的 `acp_session_id` 恒为 `NULL`（普通唯一索引对 NULL 不去重，
+    /// 加了也拦不住重复导入）；同一个 `ses_*` 理论上可以属于**两台设备各自**
+    /// 的 opencode 库，那种情况必须是两条不同的会话行——判据里带 `node_id`
+    /// 就是为了这个。因此不建覆盖全表的唯一索引，改由
+    /// [`Self::create_imported_if_absent`] 在**一条** `INSERT ... SELECT ...
+    /// WHERE NOT EXISTS` 里把「检查」与「插入」合成单个原子语句：两个并发
+    /// 请求带不同 nonce、同一 `(node_id, agent_id, acp_session_id)` 时最多
+    /// 一个能插进一行，另一个拿 `None` → 409 `import_already_exists`。
     ///
     /// `node_id` 取自 `workspace`（`session` 表没有这一列），所以这也是一次
     /// join；`workspace.node_id` 在设备被删后是 `NULL`，`= ?1` 自然不命中。
+    /// 若将来真的加索引，必须是 `WHERE acp_session_id IS NOT NULL` 的 **partial
+    /// unique index**，否则会把所有 `NULL` 的普通会话当成同一条。
     pub fn find_imported(
         &self,
         node_id: &str,
@@ -529,6 +535,66 @@ impl SessionRepo {
         .optional()?
         .map(RawSession::into_session)
         .transpose()
+    }
+
+    /// 原子地建一条导入会话：**检查与 INSERT 在同一条 SQL 语句里**。
+    ///
+    /// 与 [`Self::create_imported`] 的列 / 事务口径一致（工作区 upsert 也在
+    /// 同一事务），只在 `INSERT` 上加一个 `WHERE NOT EXISTS` 子查询：当前
+    /// `(node_id, agent_id, acp_session_id)` 已有行时不插、返回 `None`。
+    /// 调用方据此回 409 `import_already_exists`，不会建成两行。
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_imported_if_absent(
+        &self,
+        node_id: &str,
+        path: &str,
+        agent_id: &str,
+        now: &str,
+        base_rev: Option<&str>,
+        base_rev_status: BaseRevStatus,
+        acp_session_id: &str,
+    ) -> Result<Option<Session>> {
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+        let ws = self.workspaces.upsert_in(&tx, node_id, path, now)?;
+        let id = crate::workspace::new_id();
+        let inserted = tx.execute(
+            "INSERT INTO session
+                 (id, workspace_id, agent_id, acp_session_id, state, created_at,
+                  base_rev, base_rev_status)
+             SELECT ?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM session s JOIN workspace w ON w.id = s.workspace_id
+                 WHERE w.node_id = ?8 AND s.agent_id = ?3 AND s.acp_session_id = ?4
+             )",
+            params![
+                id,
+                ws.id,
+                agent_id,
+                acp_session_id,
+                now,
+                base_rev,
+                base_rev_status.as_str(),
+                node_id
+            ],
+        )?;
+        if inserted == 0 {
+            // 没有新行：工作区 upsert 可能动过 `created_at`，但那不是会话行，
+            // 回滚掉让「重复导入」保持纯读语义。
+            tx.rollback()?;
+            return Ok(None);
+        }
+        let row = tx
+            .query_row(
+                "SELECT id, workspace_id, agent_id, acp_session_id, state, created_at, ended_at,
+                        base_rev, base_rev_status, execution_id
+                 FROM session WHERE id = ?1",
+                params![id],
+                raw_session,
+            )?
+            .into_session()?;
+        tx.commit()?;
+        Ok(Some(row))
     }
 
     /// 记下 agent 给的 ACP 会话 id。

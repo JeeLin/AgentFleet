@@ -316,6 +316,63 @@ async fn a_second_import_of_the_same_acp_session_is_conflict() {
     );
 }
 
+/// 两个**不同 nonce** 的并发请求带同一 `(node_id, agent, acp_session_id)`：
+/// 去重是单条原子 INSERT，最多一个 201、另一个 409，库里只能有一行。
+///
+/// 旧实现先 `find_imported` 再 `create_imported`，中间隔着 `probe_base_rev`；
+/// 两个请求都查到 `None` 时会各插一行、都回 201。这里用 `join!` 把两串
+/// 完整 handler 真正跑在同一个 runtime 上（不是只并发调仓储方法），锁住
+/// 端点级别的接线。
+#[tokio::test]
+async fn concurrent_imports_of_one_acp_session_create_exactly_one_row() {
+    let (hub, stub, app) = common::boot_online_import_fixture().await;
+    let t = now_secs();
+    let first = signed_import(
+        &stub.kp,
+        &stub.node_id,
+        AGENT,
+        "ses_race",
+        CWD,
+        "race-1",
+        t,
+        "nonce-race-1",
+    );
+    let second = signed_import(
+        &stub.kp,
+        &stub.node_id,
+        AGENT,
+        "ses_race",
+        CWD,
+        "race-2",
+        t,
+        "nonce-race-2",
+    );
+    let app2 = app.clone();
+
+    let (r1, r2) = tokio::join!(send(&app, first.request()), send(&app2, second.request()));
+    let mut created = 0;
+    let mut conflict = 0;
+    for (status, body) in [&r1, &r2] {
+        match *status {
+            StatusCode::CREATED => created += 1,
+            StatusCode::CONFLICT => {
+                assert_eq!(err_code(body), "import_already_exists", "body: {body}");
+                conflict += 1;
+            }
+            other => panic!("unexpected {other}: {body}"),
+        }
+    }
+    assert_eq!(
+        created, 1,
+        "exactly one import may create a session: {r1:?} {r2:?}"
+    );
+    assert_eq!(
+        conflict, 1,
+        "the loser must be a dedup conflict: {r1:?} {r2:?}"
+    );
+    assert_eq!(session_count(&hub), 1, "no duplicate session row");
+}
+
 /// 同一个 `ses_*` 属于两台设备各自的 opencode 库：两条都成功。
 #[tokio::test]
 async fn the_same_acp_id_on_another_device_is_not_a_duplicate() {

@@ -677,7 +677,12 @@ pub async fn create_session(
 /// 「普通路径恒 `NULL`」这条契约在类型上有一个唯一落点。
 pub(crate) enum NewSession<'a> {
     Ordinary,
-    Imported(&'a str),
+    /// 设备签名导入专用：检查与 INSERT 合成一条原子 SQL，重复时返回 `None`。
+    ///
+    /// 单独一个变体而不是给 `Ordinary` 加参数：普通建会话的 `acp_session_id`
+    /// 恒为 `NULL`，没有「可能重复」这种状态，让它也走一遍去重语句只会多一次
+    /// 无意义的子查询。
+    ImportedIfAbsent(&'a str),
 }
 
 /// 建会话的门禁 + 落行，**两条路径共用**（`POST /api/sessions` 与设备签名导入）。
@@ -741,15 +746,17 @@ pub(crate) async fn create_session_guarded(
     // 起点由调用方的 `probe_base_rev` 回填。初值用 `Unknown` 而不是随便一个态
     // ——它是「我还不知道」。
     let session = match new_session {
-        NewSession::Ordinary => repo.create(
-            node_id,
-            path,
-            Some(agent_id),
-            &now,
-            None,
-            hub_storage::BaseRevStatus::Unknown,
-        ),
-        NewSession::Imported(acp_session_id) => repo.create_imported(
+        NewSession::Ordinary => repo
+            .create(
+                node_id,
+                path,
+                Some(agent_id),
+                &now,
+                None,
+                hub_storage::BaseRevStatus::Unknown,
+            )
+            .map(Some),
+        NewSession::ImportedIfAbsent(acp_session_id) => repo.create_imported_if_absent(
             node_id,
             path,
             agent_id,
@@ -760,6 +767,9 @@ pub(crate) async fn create_session_guarded(
         ),
     }
     .map_err(|e| ApiError::internal_with("cannot create the session", e))?;
+    let Some(session) = session else {
+        return Err(ApiError::conflict(err::IMPORT_ALREADY_EXISTS));
+    };
     // coverage: excluded — 多行宏的参数行被 llvm-cov 记为 miss（已知现象），
     // 宏本身在上面的用例里执行过。
     tracing::info!(
