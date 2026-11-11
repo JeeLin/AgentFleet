@@ -415,8 +415,6 @@ fn map_import_error(error: ImportError) -> ImportFailure {
         ImportError::DbMissing | ImportError::SchemaMismatch | ImportError::Decode => {
             ImportFailure::ProviderUnavailable
         }
-        // 走到这里说明注册表与清单脱节；按「不可用」处理，不把内部 reason 拼进 code。
-        ImportError::UnknownProvider => ImportFailure::ProviderUnavailable,
     }
 }
 

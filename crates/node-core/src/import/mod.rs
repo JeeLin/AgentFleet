@@ -104,8 +104,6 @@ pub enum ImportError {
     InvalidWorkspacePath,
     #[error("the session id is blank")]
     BlankSessionId,
-    #[error("no history provider is registered for this agent")]
-    UnknownProvider,
 }
 
 /// 一个历史会话提供方。
