@@ -5,7 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
-use super::opencode::{query_by_external_id, Opencode, LIST_LIMIT};
+use super::opencode::{
+    classify_sql_error, list_with_schema_hook, query_by_external_id, Opencode, LIST_LIMIT,
+};
 use super::{lookup, HistoryProvider, ImportError, ProviderLookup};
 use crate::agent::detect::KNOWN_AGENTS;
 
@@ -198,6 +200,62 @@ fn opencode_list_reads_session_v2_without_writing_the_database() {
         conn.execute("CREATE TABLE should_not_exist (x)", [])
             .is_err(),
         "query_only 连接不得执行 DDL"
+    );
+}
+
+/// `Columns::read` 之后、`prepare` 之前 schema 变化时，读事务必须给出
+/// **稳定且分类正确**的结果，而不是 `Decode`。
+///
+/// 旧实现两次读之间没有事务：opencode 在这窗口里把 `session_v2` 改名，
+/// `prepare` 会 `no such table` 而旧代码一律映射成「一行会话读不出来」。
+/// 现在 `BEGIN DEFERRED` 在第一次读时拿住快照：另一条连接的 DDL 被挡住
+/// （`database is locked`），我们的 `list()` 仍读到原来的那一行。
+/// 另外用 `classify_sql_error` 锁住「真遇到 `no such table` 时归类为
+/// `SchemaMismatch`」，让错误文案不再指错方向。
+#[test]
+fn a_schema_change_between_column_read_and_prepare_is_not_called_decode() {
+    let d = data_dir();
+    fixture(
+        d.path(),
+        &[
+            REAL_SHAPE,
+            "INSERT INTO session_v2 (id, project_id, directory, title, time_created, time_updated)
+             VALUES ('ses_x', 'p', '/root/x', 't', 1, 2)",
+        ],
+    );
+
+    // hook 在 `Columns::read` 返回后、`prepare` 执行前用另一条连接尝试改名。
+    // 快照事务应当把这次 DDL 挡在门外，而不是让它改掉我们脚下的 schema。
+    let blocked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&blocked);
+    let got = list_with_schema_hook(d.path(), &move |dir| {
+        let conn = rusqlite::Connection::open(dir.join("opencode").join("opencode.db"))
+            .expect("打开夹具库以模拟迁移");
+        flag.store(
+            conn.execute("ALTER TABLE session_v2 RENAME TO session_v3", [])
+                .is_err(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    });
+    assert!(
+        blocked.load(std::sync::atomic::Ordering::SeqCst),
+        "读事务必须挡住并发 DDL，否则 Columns::read 与 prepare 看到两份 schema"
+    );
+    let got = got.expect("读事务内仍按快照读到原来的表");
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].external_session_id, "ses_x");
+
+    // 分类函数本身也要能证伪：`no such table` → SchemaMismatch，
+    // 普通的行解码失败 → Decode。
+    let conn = rusqlite::Connection::open(d.path().join("opencode").join("opencode.db"))
+        .expect("打开夹具库");
+    let missing = conn
+        .prepare("SELECT * FROM table_that_does_not_exist")
+        .unwrap_err();
+    assert_eq!(classify_sql_error(missing), ImportError::SchemaMismatch);
+    assert_eq!(
+        classify_sql_error(rusqlite::Error::InvalidColumnName("nope".to_string())),
+        ImportError::Decode
     );
 }
 

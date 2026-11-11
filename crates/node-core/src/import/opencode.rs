@@ -19,7 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OpenFlags, Row};
+use rusqlite::{Connection, OpenFlags, Row, TransactionBehavior};
 
 use super::{HistoricalSession, ImportCandidate, ImportError};
 
@@ -69,39 +69,7 @@ impl super::HistoryProvider for Opencode {
     }
 
     fn list(&self, data_dir: &Path) -> Result<Vec<HistoricalSession>, ImportError> {
-        let conn = open_read_only(data_dir)?;
-        let cols = Columns::read(&conn)?;
-
-        let mut sql = select_prefix(&cols);
-        sql.push_str(" ORDER BY \"");
-        sql.push_str(cols.order_by());
-        sql.push_str("\" DESC");
-        // 同一时间戳的多条会话按 id 定序，否则两次调用可能换顺序。
-        // `DESC` 要逐列写：`ORDER BY a, b DESC` 只把 `b` 降序，`a` 仍是升序。
-        if cols.order_by() != ID_COL {
-            sql.push_str(", \"");
-            sql.push_str(ID_COL);
-            sql.push_str("\" DESC");
-        }
-        sql.push_str(" LIMIT ");
-        sql.push_str(LIST_LIMIT);
-
-        let mut stmt = conn.prepare(&sql).map_err(|_| ImportError::Decode)?;
-        let rows = stmt
-            .query_map([], |row| cols.to_session(row))
-            .map_err(|_| ImportError::Decode)?;
-
-        let mut out = Vec::new();
-        for row in rows {
-            let session = row.map_err(|_| ImportError::Decode)?;
-            // 空 id 的行无法被选中（`resolve` 按 id 查），也点不出任何结果，
-            // 所以跳过——但**不因为一行坏数据就让其余 1000 条消失**。
-            if session.external_session_id.is_empty() {
-                continue;
-            }
-            out.push(session);
-        }
-        Ok(out)
+        list_rows(data_dir, None)
     }
 
     fn resolve(
@@ -139,6 +107,113 @@ impl super::HistoryProvider for Opencode {
     }
 }
 
+/// `list()` 与 `query_by_external_id()` 共用的读取事务。
+///
+/// # 为什么 `Columns::read` 与 `prepare` 必须在同一个 deferred 事务里
+///
+/// 两次调用之间若 opencode 正在迁移表结构（把 `session_v2` 改名 / 改列），
+/// 第二次 `prepare` 会在**已经变了**的 schema 上执行：旧实现把它一律映射为
+/// `Decode`，用户看到「a session row could not be read」，与真实原因无关。
+/// `BEGIN DEFERRED` 在第一次读（`PRAGMA table_info`）时拿共享快照，后面的
+/// `prepare` 看到的是同一份 schema；别的连接仍能读，写方要等我们这几次读结束。
+/// 事务是**只读连接上的读事务**，不写、不建表、不迁移，符合里程碑边界。
+///
+/// 如果事务已经开始但 schema 还是不匹配（例如另一进程已经提交了迁移，我们才
+/// 打开），`prepare` 失败要回 `SchemaMismatch` 而不是 `Decode`：那是「库形状
+/// 变了」，不是「一行数据读不出来」。
+///
+/// `on_columns` 是测试接缝：让用例能在 `Columns::read` 返回后、`prepare` 前
+/// 模拟一次迁移，验证上面的映射；生产调用一律传 `None`。
+fn with_read_snapshot<T>(
+    data_dir: &Path,
+    on_columns: Option<&dyn Fn(&Path)>,
+    build: impl FnOnce(&Connection, &Columns) -> Result<T, ImportError>,
+) -> Result<T, ImportError> {
+    let mut conn = open_read_only(data_dir)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Deferred)
+        .map_err(classify_sql_error)?;
+    let cols = Columns::read(&tx)?;
+    if let Some(hook) = on_columns {
+        hook(data_dir);
+    }
+    let out = build(&tx, &cols)?;
+    // 读事务：显式 rollback，绝不 `commit()`——连接本身是 READ_ONLY，但把
+    // 「不写」写成结构上也成立更清楚，也让事务立刻释放读快照。
+    tx.rollback().map_err(classify_sql_error)?;
+    Ok(out)
+}
+
+/// 把 SQLite 的 prepare / 查询错误归类。
+///
+/// SQL 里的标识符全部来自本文件常量，唯一的动态因素是**库里的 schema**：
+/// `no such table` / `no such column` / `has no column named` 都是「对方库正在
+/// 迁移或漂了」→ `SchemaMismatch`；其余（真正的行解码失败、磁盘读错等）才是
+/// `Decode`。不把 SQL / 原始 DB 字符串带到错误里（约束 13）。
+pub(super) fn classify_sql_error(e: rusqlite::Error) -> ImportError {
+    let text = e.to_string().to_ascii_lowercase();
+    if text.contains("no such table")
+        || text.contains("no such column")
+        || text.contains("has no column named")
+        || text.contains("no such column:")
+    {
+        ImportError::SchemaMismatch
+    } else {
+        ImportError::Decode
+    }
+}
+
+/// `list()` 的实现。`on_columns` 只在测试里用来模拟「读完 schema 后表被改名」。
+fn list_rows(
+    data_dir: &Path,
+    on_columns: Option<&dyn Fn(&Path)>,
+) -> Result<Vec<HistoricalSession>, ImportError> {
+    with_read_snapshot(data_dir, on_columns, |conn, cols| {
+        let mut sql = select_prefix(cols);
+        sql.push_str(" ORDER BY \"");
+        sql.push_str(cols.order_by());
+        sql.push_str("\" DESC");
+        // 同一时间戳的多条会话按 id 定序，否则两次调用可能换顺序。
+        // `DESC` 要逐列写：`ORDER BY a, b DESC` 只把 `b` 降序，`a` 仍是升序。
+        if cols.order_by() != ID_COL {
+            sql.push_str(", \"");
+            sql.push_str(ID_COL);
+            sql.push_str("\" DESC");
+        }
+        sql.push_str(" LIMIT ");
+        sql.push_str(LIST_LIMIT);
+
+        let mut stmt = conn.prepare(&sql).map_err(classify_sql_error)?;
+        let rows = stmt
+            .query_map([], |row| cols.to_session(row))
+            .map_err(classify_sql_error)?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let session = row.map_err(classify_sql_error)?;
+            // 空 id 的行无法被选中（`resolve` 按 id 查），也点不出任何结果，
+            // 所以跳过——但**不因为一行坏数据就让其余 1000 条消失**。
+            if session.external_session_id.is_empty() {
+                continue;
+            }
+            out.push(session);
+        }
+        Ok(out)
+    })
+}
+
+/// 测试接缝：在 `Columns::read` 与 `prepare` 之间跑一次 `on_columns`。
+///
+/// 生产路径不会调用它；它的存在是为了让「schema 正在变更」这条竞态有可执行
+/// 断言，而不是只写在注释里。
+#[cfg(test)]
+pub(super) fn list_with_schema_hook(
+    data_dir: &Path,
+    hook: &dyn Fn(&Path),
+) -> Result<Vec<HistoricalSession>, ImportError> {
+    list_rows(data_dir, Some(hook))
+}
+
 /// 按外部 id 查原始会话行（最多一行），只读、不写库。
 ///
 /// 这是 `resolve` 与参数化测试共用的 crate 内 helper：把「0 行」保留成
@@ -149,23 +224,22 @@ pub(super) fn query_by_external_id(
     data_dir: &Path,
     external_session_id: &str,
 ) -> Result<Vec<HistoricalSession>, ImportError> {
-    let conn = open_read_only(data_dir)?;
-    let cols = Columns::read(&conn)?;
+    with_read_snapshot(data_dir, None, |conn, cols| {
+        let mut sql = select_prefix(cols);
+        sql.push_str(" WHERE \"");
+        sql.push_str(ID_COL);
+        sql.push_str("\" = ?1 LIMIT 1");
 
-    let mut sql = select_prefix(&cols);
-    sql.push_str(" WHERE \"");
-    sql.push_str(ID_COL);
-    sql.push_str("\" = ?1 LIMIT 1");
-
-    let mut stmt = conn.prepare(&sql).map_err(|_| ImportError::Decode)?;
-    let rows = stmt
-        .query_map([external_session_id], |row| cols.to_session(row))
-        .map_err(|_| ImportError::Decode)?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row.map_err(|_| ImportError::Decode)?);
-    }
-    Ok(out)
+        let mut stmt = conn.prepare(&sql).map_err(classify_sql_error)?;
+        let rows = stmt
+            .query_map([external_session_id], |row| cols.to_session(row))
+            .map_err(classify_sql_error)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(classify_sql_error)?);
+        }
+        Ok(out)
+    })
 }
 
 /// 只读打开会话库。
