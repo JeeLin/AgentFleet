@@ -536,11 +536,9 @@ mod tests {
     #[test]
     fn import_signing_message_covers_every_field() {
         let base = import_signing_message(1, "n", "POST", "/p", "digest", "nonce", 7);
-        assert_eq!(
-            base,
-            import_signing_message(1, "n", "POST", "/p", "digest", "nonce", 7),
-            "同一组输入必须稳定"
-        );
+        // 只保留可证伪的 `assert_ne!` 组。这里曾经有一条
+        // `assert_eq!(base, import_signing_message(<同样字面量>))`——
+        // 同一个纯函数的两次调用，结构上不可能变红，删掉不损失任何覆盖。
         for changed in [
             import_signing_message(2, "n", "POST", "/p", "digest", "nonce", 7),
             import_signing_message(1, "n2", "POST", "/p", "digest", "nonce", 7),
