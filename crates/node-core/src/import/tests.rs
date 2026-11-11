@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::opencode::{query_by_external_id, Opencode};
+use super::opencode::{query_by_external_id, Opencode, LIST_LIMIT};
 use super::{lookup, HistoryProvider, ImportError, ProviderLookup};
 use crate::agent::detect::KNOWN_AGENTS;
 
@@ -255,6 +255,41 @@ fn a_table_with_only_an_id_still_lists_sessions() {
     assert_eq!(got[0].title, "", "没有标题列就是空串，不编造占位");
     assert_eq!(got[0].cwd, "");
     assert_eq!(got[0].updated_at, None);
+}
+
+/// 列表必须有行数上限：库里塞进 `LIST_LIMIT + 1` 行时，`list()` 只能读回
+/// `LIST_LIMIT` 行，且仍是时间倒序的前 N 条。没有 `LIMIT` 时这条会拿到全部
+/// 行，O(库总行数) 的峰值内存就没有可执行约束。
+#[test]
+fn a_huge_session_table_is_capped_by_the_list_limit() {
+    let limit: usize = LIST_LIMIT.parse().expect("numeric limit");
+    let d = data_dir();
+    let db = fixture(
+        d.path(),
+        &["CREATE TABLE session_v2 (id TEXT PRIMARY KEY, time_updated INTEGER)"],
+    );
+    let conn = rusqlite::Connection::open(&db).expect("重开库");
+    let tx = conn.unchecked_transaction().expect("tx");
+    {
+        let mut stmt = tx
+            .prepare("INSERT INTO session_v2 (id, time_updated) VALUES (?1, ?2)")
+            .expect("prepare");
+        for i in 0..=limit {
+            stmt.execute(rusqlite::params![format!("ses_{i:04}"), i as i64])
+                .expect("insert");
+        }
+    }
+    tx.commit().expect("commit");
+    drop(conn);
+
+    let got = Opencode.list(d.path()).expect("列会话");
+    assert_eq!(got.len(), limit, "绝不能把整张表收进 Vec");
+    assert_eq!(
+        got.first().expect("first").external_session_id,
+        format!("ses_{limit:04}"),
+        "上限截的是最前面的 N 条（时间倒序），不是随便 N 条"
+    );
+    assert_eq!(got.last().expect("last").external_session_id, "ses_0001");
 }
 
 /// 列名与文档里的不同（`cwd` 而不是 `directory`、`updated_at` 而不是

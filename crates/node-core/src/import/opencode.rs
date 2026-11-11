@@ -43,6 +43,16 @@ const UPDATED_COL: &str = "updated";
 const CREATED_AT_COL: &str = "created_at";
 const TIME_CREATED_COL: &str = "time_created";
 const TIME_UPDATED_COL: &str = "time_updated";
+/// 列表一次最多读多少行。
+///
+/// `afcli import list` 是给人挑一条会话用的，屏幕上放不下无限行；而
+/// `query_map` 会把整张 `session_v2` 连同 `title` / `directory` 文本收进
+/// `Vec`，行数到百万级就是 O(行数) 的峰值内存。上限把用户可见列表长度与
+/// 库里历史总量解耦。写成 `&str` 是因为它只作为 SQL 字面量拼进语句
+/// （`LIMIT` 不接受绑定参数那种写法之外的形式也可以，但字面量编译期可见、
+/// 测试也直接读这个常量）。
+pub(super) const LIST_LIMIT: &str = "500";
+
 /// provider id，与 `KNOWN_AGENTS` 里 opencode 的 `id` 同源。
 const PROVIDER_ID: &str = "opencode";
 
@@ -73,6 +83,8 @@ impl super::HistoryProvider for Opencode {
             sql.push_str(ID_COL);
             sql.push_str("\" DESC");
         }
+        sql.push_str(" LIMIT ");
+        sql.push_str(LIST_LIMIT);
 
         let mut stmt = conn.prepare(&sql).map_err(|_| ImportError::Decode)?;
         let rows = stmt
