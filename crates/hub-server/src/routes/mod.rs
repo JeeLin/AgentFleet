@@ -151,6 +151,7 @@ pub mod bindings;
 pub mod conversation;
 pub mod devices;
 pub mod projects;
+pub mod session_import;
 pub mod setup;
 pub mod stream;
 pub mod ws;

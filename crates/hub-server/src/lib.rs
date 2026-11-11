@@ -3,14 +3,15 @@
 //! 与 `main.rs` 分开是为了能**不起真端口**就测路由：`build_app` 返回
 //! `axum::Router`，测试用 `tower::ServiceExt::oneshot` 直接打请求。
 //!
-//! 约束 1：**Hub 零入站端口**——只监听页面侧的 `127.0.0.1:8080`，
-//! 设备一律**主动外联** `/ws`。这里没有任何设备入站路由。
+//! 约束 1：**Hub 无入站端口**；设备主动外联 WS，另有一个设备主动发起的一次性签名 HTTP 请求
+//! （`POST /device-api/session-imports`）。它走专用设备认证 layer，不经过浏览器 session / CSRF。
 //!
 //! 认证闭环在 [`middleware_auth`]：豁免表之外一律要 session cookie
 //! （§2.4.3），`/setup` 与 `/login` 在 [`routes::setup`]。
 
 pub mod channels;
 pub mod conns;
+pub mod import_auth;
 pub mod middleware_auth;
 pub mod presence;
 pub mod routes;
@@ -128,6 +129,26 @@ pub mod err {
     /// 错误体额外带 `executions`（条数），**不是笼统 500**：用户得知道要先
     /// 归档还是转移项目，而那句提示的依据正是这个数字。
     pub const DEVICE_HAS_EXECUTIONS: &str = "device_has_executions";
+    /// 设备签名 HTTP 导入（v0.7.4）：签名 / body 摘要 / 时间窗 / 库内公钥任一不过。
+    ///
+    /// **401 而不是 403**：请求没能证明自己是谁，与「有身份但无权」是两回事。
+    /// 未知 node、设备还没登记公钥、摘要不符、超时间窗都归这一个 code——
+    /// 对未认证的请求区分它们，等于白送一张设备 id 字典。
+    pub const DEVICE_SIGNATURE_INVALID: &str = "device_signature_invalid";
+    /// 导入的 provider 不在首版 allowlist（只有 `opencode`）。
+    ///
+    /// 409 而不是 400：请求形状是对的，是这个 Hub 现在不支持这个软件——
+    /// 与「agent 不可用」同属「条件不满足」，用户改不了请求本身。
+    pub const UNSUPPORTED_IMPORT_PROVIDER: &str = "unsupported_import_provider";
+    /// 同一 nonce 在 ±300 s 时间窗内第二次出现。
+    ///
+    /// 一次合法请求只会被 `afcli` 发一次；重放一条已成功的签名不该再建一个会话。
+    pub const IMPORT_REPLAYED: &str = "import_replayed";
+    /// 同一设备上同一 agent 的同一条历史会话已经导入过。
+    ///
+    /// 不建第二行：去重键是 `(node_id, agent_id, acp_session_id)`，
+    /// 见 `hub_storage::SessionRepo::find_imported`。
+    pub const IMPORT_ALREADY_EXISTS: &str = "import_already_exists";
 }
 
 /// 启动期错误：数据目录写不了 / 数据库读不了，Hub 起不来。
@@ -339,6 +360,9 @@ struct Inner {
     /// `drop_node` 会顺手把页面归属也清掉，而归属是用来判 403 的——
     /// 清错了会让「越权访问」看起来像「通道不存在」。
     bindings: routes::stream::Bindings,
+    /// 设备签名导入的 nonce 一次性集合（v0.7.4）。**进程内存**，
+    /// 重启即清空——边界见 `security-and-lifecycle.md` §1.1。
+    import_nonces: import_auth::ImportNonces,
 }
 
 impl AppState {
@@ -431,6 +455,7 @@ impl AppState {
             )),
             streams: routes::stream::Streams::new(),
             bindings: routes::stream::Bindings::new(),
+            import_nonces: import_auth::ImportNonces::new(),
         }));
 
         if state.is_initialized()? {
@@ -575,6 +600,11 @@ impl AppState {
     /// `channel_id → 页面归属`（子任务 5a），用来判 403 与 404。
     pub fn bindings(&self) -> &routes::stream::Bindings {
         &self.0.bindings
+    }
+
+    /// 设备签名导入的 nonce 一次性集合（v0.7.4，进程内存）。
+    pub fn import_nonces(&self) -> &import_auth::ImportNonces {
+        &self.0.import_nonces
     }
 
     /// 数据目录（测试用：读 schema / 直接查库）。
@@ -804,6 +834,29 @@ pub fn build_app(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware_auth::require_auth,
+        ))
+        // ---- 设备签名 HTTP（v0.7.4）：**不在 `require_auth` 之下** ----
+        //
+        // 注册在上面那条 `.layer(...)` **之后**，并自带专用认证 layer：
+        // 设备没有 cookie，浏览器 session / CSRF 对它不适用。三张豁免表
+        // （`AUTH_EXEMPT_PATHS` / `CSRF_EXEMPT_PATHS` / `INIT_MODE_PATHS`）
+        // **一行都没改**——这条路由根本不经过它们。
+        //
+        // 为什么单独 `merge` 一个 `Router` 而不是 `.route(...)`：`.layer` 只覆盖
+        // 它之前添加的路由，而这个端点要的恰好相反；`MethodRouter::route_layer`
+        // 只包 `post`，所以 `GET /device-api/session-imports` 仍是 405（不是
+        // 401、也不是 SPA 的 200 HTML）。
+        //
+        // 路径**不在 `/api/*` 下**：否则会被 `/api/{*rest}` 的认证后 404 兜底
+        // 或 SPA fallback 吞掉。
+        .merge(Router::new().route(
+            import_auth::IMPORT_PATH,
+            post(routes::session_import::import_session).route_layer(
+                axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    import_auth::require_device_signature,
+                ),
+            ),
         ))
         // ---- 以下免认证（静态资产）----
         // `GET /login` 是登录**页面**，与 `/` 同样公开：登录页自己得能在

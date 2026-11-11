@@ -34,11 +34,17 @@
 - Hub 只信库内公钥（`DeviceRepo::find_by_id` → `Device::public_key_bytes` →
   `KeyPair::verify`），**绝不接受请求里带来的公钥**（§1 A 类规则）；
 - 签名规范串由 `identity::import_signing_message` 唯一实现，覆盖
-  `v / node_id / method / path / body 摘要 / nonce / t`；Hub 另校验
-  body 摘要、±300 s 时间窗与 nonce 一次性（重启后进程内 nonce 集合清空，
-  签名仍绑定 body 摘要 / node_id / 时间窗）；
+  `v / node_id / method / path / body 摘要 / nonce / t`；第一参数取**请求体的
+  `v`**，验签通过后才要求它等于 Hub 当前支持的 `IMPORT_VERSION`，未知版本回
+  400 `invalid_request_body` 且不消费 nonce；Hub 另校验 body 摘要、±300 s
+  时间窗与 nonce 一次性；
 - 设备端点仍受 Hub **已初始化门禁**约束，并走专用认证 layer；
   `AUTH_EXEMPT_PATHS` / `CSRF_EXEMPT_PATHS` / `INIT_MODE_PATHS` 均不因此改动。
+
+nonce 只在签名 / 摘要 / 时间窗都验过之后消费，业务失败也照样烧掉；集合是
+**进程内、有 TTL 的**，**Hub 重启即清空**。重启后能重放的只剩时间窗内、签名
+与摘要仍有效的原请求，其效果仅是建一个会话，不暴露 secret；未初始化回 403
+`hub_not_initialized`，认证失败一律 401 `device_signature_invalid`。
 
 这条边界与浏览器 session / CSRF **并列**，不是替代：`/api/*` 的状态变更端点
 继续只认浏览器认证。请求体**不含公钥或任何私钥材料**，错误体只回固定 code，

@@ -325,3 +325,336 @@ pub async fn wait_until(budget: Duration, mut cond: impl FnMut() -> bool) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
+
+// ---------------------------------------------------------------------------
+// v0.7.4 设备签名导入的夹具
+// ---------------------------------------------------------------------------
+
+/// 设备侧收到的一条 `open_channel`（connector + params 原样留下）。
+#[derive(Debug, Clone)]
+pub struct OpenChannelCall {
+    pub connector: String,
+    pub params: serde_json::Value,
+}
+
+/// 一台**在线**的桩设备：保持 WS 连接（`device_summary` 才会给 `online`），
+/// 记录 `open_channel`，并对 `git` 的 `rev` 探测回一个可配置的结果。
+///
+/// `Established` 被 move 进任务里：`DeviceStub` 一 drop，任务 abort，连接断开。
+/// 用例因此不必手动保活，也不会出现「Hub 已 drop 但设备还连着」的跨用例串扰。
+pub struct DeviceStub {
+    pub node_id: String,
+    pub kp: KeyPair,
+    pub open_calls: std::sync::Arc<std::sync::Mutex<Vec<OpenChannelCall>>>,
+    pub rev_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for DeviceStub {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// enroll 一台设备、上报能力、心跳，并起一个应答 `open_channel` / `rev` 的桩。
+///
+/// `rev_reply` 是 `git` 的 `rev` 结果帧（`None` = 不回，模拟设备卡住）。
+pub async fn enroll_device(
+    hub: &Hub,
+    connectors: &[&str],
+    agents: &[&str],
+    rev_reply: Option<serde_json::Value>,
+) -> DeviceStub {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::{Arc, Mutex};
+
+    let (mut est, node_id, kp) = connect_enrolled(hub).await;
+    let agent_reports: Vec<serde_json::Value> = agents
+        .iter()
+        .map(|a| serde_json::json!({"id": a, "name": a, "version": "0.0.1", "available": true}))
+        .collect();
+    est.send(&Frame::push(
+        types::HEARTBEAT,
+        0,
+        serde_json::json!({
+            "node_version": "0.1.0",
+            "capabilities": {"connectors": connectors, "agents": agent_reports},
+            "resources": null,
+            "workspace_roots": [],
+        }),
+    ))
+    .await
+    .expect("heartbeat must send");
+    wait_until(Duration::from_secs(2), || {
+        hub.state.reports().get(&node_id).is_some()
+    })
+    .await;
+
+    let open_calls = Arc::new(Mutex::new(Vec::new()));
+    let rev_count = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&open_calls);
+    let revs = Arc::clone(&rev_count);
+    let task = tokio::spawn(async move {
+        let mut est = est;
+        while let Some(text) = est.next_text().await.unwrap_or_default() {
+            let Ok(f) = serde_json::from_str::<Frame>(&text) else {
+                continue;
+            };
+            match f.msg_type.as_str() {
+                types::OPEN_CHANNEL => {
+                    let Ok(open) = f.payload::<protocol::channel::OpenChannel>() else {
+                        continue;
+                    };
+                    calls.lock().unwrap().push(OpenChannelCall {
+                        connector: open.connector.clone(),
+                        params: open.params.clone(),
+                    });
+                    est.send(&Frame::push(
+                        types::CHANNEL_READY,
+                        0,
+                        serde_json::json!({"channel_id": open.channel_id}),
+                    ))
+                    .await
+                    .ok();
+                }
+                types::CHANNEL_DATA => {
+                    let Ok(data) = f.payload::<protocol::channel::ChannelData>() else {
+                        continue;
+                    };
+                    if data.payload.get("op").and_then(serde_json::Value::as_str) != Some("rev") {
+                        continue;
+                    }
+                    revs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if let Some(reply) = rev_reply.clone() {
+                        est.send(&Frame::push(
+                            types::CHANNEL_DATA,
+                            0,
+                            serde_json::json!({
+                                "channel_id": data.channel_id,
+                                "payload": reply,
+                            }),
+                        ))
+                        .await
+                        .ok();
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    DeviceStub {
+        node_id,
+        kp,
+        open_calls,
+        rev_count,
+        task,
+    }
+}
+
+/// 一次已签名的导入请求：`body` 是最终字节，`request()` 把它装成带头的请求。
+///
+/// 签名算法与 `node-cli::import_http` 相同（canonical body = 两个签名字段置空
+/// 后的 DTO 序列化；`identity::import_signing_message` 唯一实现）。
+pub struct SignedImport {
+    pub parsed: hub_server::routes::session_import::ImportRequest,
+    pub body: Vec<u8>,
+}
+
+impl SignedImport {
+    pub fn request(&self) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri(hub_server::import_auth::IMPORT_PATH)
+            .header("content-type", "application/json")
+            .header("X-AF-Node-Id", &self.parsed.node_id)
+            .header("X-AF-Nonce", &self.parsed.nonce)
+            .header("X-AF-Signature", &self.parsed.signature)
+            .header("X-AF-Body-SHA256", &self.parsed.body_sha256)
+            .body(axum::body::Body::from(self.body.clone()))
+            .expect("build request")
+    }
+}
+
+/// 构造并签名一条当前协议版本的导入请求。
+///
+/// `t` / `nonce` 由调用方给（重放 / 越窗用例要控）。
+#[allow(clippy::too_many_arguments)]
+pub fn signed_import(
+    kp: &KeyPair,
+    node_id: &str,
+    provider: &str,
+    acp_session_id: &str,
+    cwd: &str,
+    title: &str,
+    t: u64,
+    nonce: &str,
+) -> SignedImport {
+    signed_import_with_version(
+        kp,
+        node_id,
+        provider,
+        acp_session_id,
+        cwd,
+        title,
+        t,
+        nonce,
+        hub_server::import_auth::IMPORT_VERSION,
+    )
+}
+
+/// 构造并签名一条**指定 `v`** 的导入请求。
+///
+/// 只有版本契约用例应该改 `v`：签名规范串与 body 摘要都用调用方给的值，
+/// 以便断言 Hub 真的把 body 的版本绑进验签，而不是拿自己的常量顶替。
+#[allow(clippy::too_many_arguments)]
+pub fn signed_import_with_version(
+    kp: &KeyPair,
+    node_id: &str,
+    provider: &str,
+    acp_session_id: &str,
+    cwd: &str,
+    title: &str,
+    t: u64,
+    nonce: &str,
+    v: u32,
+) -> SignedImport {
+    use sha2::{Digest, Sha256};
+
+    let mut parsed = hub_server::routes::session_import::ImportRequest {
+        node_id: node_id.to_string(),
+        provider: provider.to_string(),
+        external_session_id: acp_session_id.to_string(),
+        acp_session_id: acp_session_id.to_string(),
+        cwd: cwd.to_string(),
+        title: title.to_string(),
+        v,
+        t,
+        nonce: nonce.to_string(),
+        signature: String::new(),
+        body_sha256: String::new(),
+    };
+    let canonical = serde_json::to_vec(&parsed).expect("canonical body");
+    let body_sha256 = identity::hex_encode(Sha256::digest(&canonical).as_ref());
+    let message = identity::import_signing_message(
+        parsed.v,
+        &parsed.node_id,
+        hub_server::import_auth::IMPORT_METHOD,
+        hub_server::import_auth::IMPORT_PATH,
+        &body_sha256,
+        &parsed.nonce,
+        parsed.t,
+    );
+    parsed.signature = identity::base64url(&kp.sign(&message));
+    parsed.body_sha256 = body_sha256;
+    let body = serde_json::to_vec(&parsed).expect("signed body");
+    SignedImport { parsed, body }
+}
+
+/// 当前 Unix 秒（用例构造 `t` 用；Hub 只接受 ±300 s）。
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 打一次 `oneshot`，返回状态码与 body 文本。
+pub async fn send(
+    app: &axum::Router,
+    req: axum::http::Request<axum::body::Body>,
+) -> (axum::http::StatusCode, String) {
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _;
+    let resp = app.clone().oneshot(req).await.expect("app responds");
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// `session` 表当前行数（去重 / 半截会话用例的判据）。
+pub fn session_count(hub: &Hub) -> i64 {
+    hub.pool()
+        .get()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM session", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// 一条会话的 `(agent_id, acp_session_id, base_rev_status)`。
+pub fn session_row(hub: &Hub, id: &str) -> (Option<String>, Option<String>, String) {
+    hub.pool()
+        .get()
+        .unwrap()
+        .query_row(
+            "SELECT agent_id, acp_session_id, base_rev_status FROM session WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+}
+
+/// 登录拿 `(af_session, af_csrf)` 两条 cookie 值。
+pub async fn login(hub: &Hub) -> (String, String) {
+    use tower::ServiceExt as _;
+    let app = hub_server::build_app(hub.state.clone());
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({"password": "correct horse battery"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("login responds");
+    assert_eq!(resp.status(), axum::http::StatusCode::OK, "登录必须成功");
+    let mut session = None;
+    let mut csrf = None;
+    for v in resp.headers().get_all("set-cookie") {
+        let raw = v.to_str().unwrap();
+        let Some((k, rest)) = raw.split_once('=') else {
+            continue;
+        };
+        let val = rest.split(';').next().unwrap_or_default().to_string();
+        if k == hub_server::SESSION_COOKIE {
+            session = Some(val);
+        } else if k == hub_server::CSRF_COOKIE {
+            csrf = Some(val);
+        }
+    }
+    (session.expect("af_session"), csrf.expect("af_csrf"))
+}
+
+/// 一个带浏览器 cookie 的请求（CSRF 头按需加）。
+pub fn browser_request(
+    method: &str,
+    uri: &str,
+    session: &str,
+    csrf: &str,
+    with_csrf: bool,
+    body: Option<serde_json::Value>,
+) -> axum::http::Request<axum::body::Body> {
+    let mut b = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(
+            "cookie",
+            format!(
+                "{}={}; {}={}",
+                hub_server::SESSION_COOKIE,
+                session,
+                hub_server::CSRF_COOKIE,
+                csrf
+            ),
+        );
+    if with_csrf {
+        b = b.header(hub_server::CSRF_HEADER, csrf);
+    }
+    let payload = body.map_or_else(String::new, |v| v.to_string());
+    b.body(axum::body::Body::from(payload))
+        .expect("build request")
+}

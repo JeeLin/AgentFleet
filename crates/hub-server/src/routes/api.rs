@@ -27,14 +27,23 @@ use serde_json::json;
 
 use crate::{err, ApiError, AppState};
 
-/// 会话当前归属的登录身份（单用户；subject 恒为 `admin`）。
+/// 会话当前归属的登录身份（单用户；浏览器 session 的 subject 恒为 `admin`）。
 ///
 /// 这不是多用户设施：第一版是自托管单用户（约束 13）。它存在是为了让
 /// 「这个操作是谁发起的」有一个落点——将来要加第二个人时，「不属于你 → 403」
 /// 才有地方判断，而不必那时再回头翻每个 handler。
 ///
-/// **验证已经做完了**：只有认证中间件验签通过后才会构造它
-/// （`middleware_auth` 里紧跟着验签的那次 `insert`）。
+/// # 只有两个合法构造点
+///
+/// 1. **浏览器 session**：认证中间件验签通过后构造
+///    （[`crate::middleware_auth`] 里紧跟着验签的那次 `insert`）。
+/// 2. **设备签名导入**：专用 layer 验签通过后构造
+///    （[`Authenticated::for_device_import`]，见 [`crate::import_auth`]）。
+///
+/// **不许在别处凭空构造**：`Authenticated` 的含义是「这个请求的身份已经验过」，
+/// 多一个构造点就多一条绕过验签的路。设备签名导入的 subject 是
+/// `device:<node_id>`，只用于**本次请求内**开一条探 `base_rev` 的通道并在同
+/// 请求内关闭，不跨请求复用、不落库、不代表浏览器登录态。
 #[derive(Debug, Clone)]
 pub struct Authenticated {
     subject: String,
@@ -46,10 +55,33 @@ impl Authenticated {
         &self.subject
     }
 
-    /// 由认证中间件在验签通过后构造。
-    pub fn new(subject: String) -> Self {
+    /// 由认证中间件在验签通过后构造。`pub(crate)`：外部 crate 不该有身份。
+    pub(crate) fn new(subject: String) -> Self {
         Self { subject }
     }
+
+    /// 由设备签名导入 layer 在验签通过后构造。
+    ///
+    /// subject 带 `device:` 前缀，好让日志与通道归属一眼看出这条通道不是浏览器
+    /// 开的。**它只活在一次请求里**——导入 handler 用它调 `probe_base_rev`，
+    /// 通道在同请求内关闭（见 `base_rev.rs`）。
+    pub fn for_device_import(node_id: &str) -> Self {
+        Self {
+            subject: format!("device:{node_id}"),
+        }
+    }
+}
+
+/// 设备签名导入 layer 认证通过后放进请求扩展的身份。
+///
+/// handler 拿到它就意味着「签名、body 摘要、时间窗、nonce 都验过了」
+/// （见 [`crate::import_auth::require_device_signature`]）。
+#[derive(Debug, Clone)]
+pub struct DeviceImportAuth {
+    /// 请求头 `X-AF-Node-Id` 里的设备 id，也是库内公钥的查找键。
+    pub node_id: String,
+    /// 本次请求专用的身份，供 `probe_base_rev` 开通道用。
+    pub auth: Authenticated,
 }
 
 /// 设备状态。**这三态是页面契约**（设计规范 §6.1）：
@@ -579,61 +611,19 @@ pub async fn create_session(
         _ => return Err(ApiError::bad_request(err::AGENT_REQUIRED)),
     };
     let agent_id = agent_id.as_str();
-    hub_storage::WorkspaceRepo::validate_path(&body.path)
-        .map_err(|_| ApiError::bad_request(err::INVALID_WORKSPACE_PATH))?;
 
-    let device = state
-        .devices()
-        .find_by_id(&body.node_id)
-        .map_err(|e| ApiError::internal_with("cannot read the device", e))?;
-    // 设备不存在 → 404：与「会话不存在」同一个 code（见模块注释的口径表）
-    let Some(device) = device else {
-        return Err(ApiError::not_found());
-    };
-
-    let status = device_summary(&state, &device).status;
-    if !status.accepts_new_session() {
-        return Err(ApiError::conflict_with(
-            err::OFFLINE,
-            || json!({"status": status}),
-        ));
-    }
-
-    // agent 可用门禁（要求 3）。**读 `agent_runtime` 表，不读内存 `Reports`**：
-    // `Reports` 是「缺省即保留」且没有 `forget`，一次不带 `capabilities` 的心跳
-    // 会把旧清单永久粘在那里，于是设备卸载 agent 之后 Hub 仍然放行。
-    //
-    // **对「从没上报过」必须拒**——这与 M1 的 connector 门禁（`stream.rs` 的
-    // `unreported_connector`）正好相反，两处不一样是对的：connector 是可选能力，
-    // 没上报过不代表不支持；agent 是会话的**必要**前提，放行的后果是用户拿到
-    // 一个 201 的会话，等到开 ACP 时才发现二进制不存在——一个永远无法对话的
-    // 死会话，而它看起来像「建成功了」。
-    //
-    // `agent_id` 走到这里必然非空（上面已经 400 挡掉了缺失与空串），所以这道门禁
-    // 无条件执行——不再有「不选 agent 就跳过」的分支。
-    let usable = state
-        .agent_runtime()
-        .usable_for_session(&body.node_id, agent_id)
-        .map_err(|e| ApiError::internal_with("cannot read agent_runtime", e))?;
-    if usable.is_none() {
-        return Err(ApiError::conflict_with(
-            err::AGENT_UNAVAILABLE,
-            || json!({"agent_id": agent_id}),
-        ));
-    }
-
-    let session = hub_storage::SessionRepo::new(state.devices().pool().clone())
-        .create(
-            &body.node_id,
-            &body.path,
-            Some(agent_id),
-            &hub_core::registry::now_stamp(),
-            // 起点由紧随其后的探测回填（见下面的 `probe_base_rev`）。
-            // 初值用 `Unknown` 而不是随便一个态——它是「我还不知道」。
-            None,
-            hub_storage::BaseRevStatus::Unknown,
-        )
-        .map_err(|e| ApiError::internal_with("cannot create the session", e))?;
+    // 门禁与落行抽进共享 helper：导入端点走**同一串**校验，不复制任何一条。
+    // 普通建会话传 `Ordinary`，导入传 `Imported`（唯一差别是初值里带不带
+    // `acp_session_id`，见 `hub-storage::SessionRepo::create_imported`）。
+    let session = create_session_guarded(
+        &state,
+        &auth,
+        &body.node_id,
+        &body.path,
+        agent_id,
+        NewSession::Ordinary,
+    )
+    .await?;
 
     // **先落行、再探测、再回填。** 顺序不能反：探测要走 `open_device_channel`，
     // 而它第一件事就是 `SessionRepo::detail(session_id)` 并查
@@ -669,23 +659,117 @@ pub async fn create_session(
         execution_id: None,
         // 刚建出来的会话，设备必然存在（上面刚验过 `device.id`），
         // 所以这里 node_id 一定有值、removed 一定为 None。
-        workspace: WorkspaceRef::new(&Some(device.id.clone()), &None, &body.path),
+        workspace: WorkspaceRef::new(&Some(body.node_id.clone()), &None, &body.path),
     };
-    // coverage: excluded — 多行宏的参数行被 llvm-cov 记为 miss（已知现象），
-    // 宏本身在上面的用例里执行过。
-    tracing::info!(
-        session_id = %session.id,
-        node_id = %body.node_id,
-        subject = %auth.subject(),
-        created = true,
-        "session created"
-    );
     // 页面侧（子任务 5a）：会话建成的瞬间推给所有订阅者，好让另一个标签页
     // 的工作台 tab 条上立刻多出这一条，而不必等它下次轮询。
     state
         .streams()
         .session_state(&session.id, session.state.as_str());
     Ok((StatusCode::CREATED, Json(detail)).into_response())
+}
+
+/// 新建会话时 `acp_session_id` 的初值来源。
+///
+/// 两个变体只有一处差别：普通建会话写 `NULL`（设备第一次开会话时 `session/new`
+/// 现取），导入的会话写用户显式选中的那个 id（设备走 `session/load`）。
+/// 用一个枚举而不是 `Option<&str>` 参数，是为了让调用点自解释、也让
+/// 「普通路径恒 `NULL`」这条契约在类型上有一个唯一落点。
+pub(crate) enum NewSession<'a> {
+    Ordinary,
+    Imported(&'a str),
+}
+
+/// 建会话的门禁 + 落行，**两条路径共用**（`POST /api/sessions` 与设备签名导入）。
+///
+/// 顺序是产品约束，不可换：`validate_path` → 设备存在（404）→ 设备状态（409）
+/// → agent 可用（409）→ INSERT。导入端点若复制一遍这段，任何一次口径调整都会
+/// 只改一侧——而「页面建得了、CLI 导不了」或反过来的症状都不会有编译错误。
+///
+/// `auth` 只用于日志里的 subject；开通道的探测在调用方（两条路径的响应形状
+/// 不同，见各自的 handler）。
+pub(crate) async fn create_session_guarded(
+    state: &AppState,
+    auth: &Authenticated,
+    node_id: &str,
+    path: &str,
+    agent_id: &str,
+    new_session: NewSession<'_>,
+) -> Result<hub_storage::Session, ApiError> {
+    hub_storage::WorkspaceRepo::validate_path(path)
+        .map_err(|_| ApiError::bad_request(err::INVALID_WORKSPACE_PATH))?;
+
+    let device = state
+        .devices()
+        .find_by_id(node_id)
+        .map_err(|e| ApiError::internal_with("cannot read the device", e))?;
+    // 设备不存在 → 404：与「会话不存在」同一个 code（见模块注释的口径表）
+    let Some(device) = device else {
+        return Err(ApiError::not_found());
+    };
+
+    let status = device_summary(state, &device).status;
+    if !status.accepts_new_session() {
+        return Err(ApiError::conflict_with(
+            err::OFFLINE,
+            || json!({"status": status}),
+        ));
+    }
+
+    // agent 可用门禁（要求 3）。**读 `agent_runtime` 表，不读内存 `Reports`**：
+    // `Reports` 是「缺省即保留」且没有 `forget`，一次不带 `capabilities` 的心跳
+    // 会把旧清单永久粘在那里，于是设备卸载 agent 之后 Hub 仍然放行。
+    //
+    // **对「从没上报过」必须拒**——这与 M1 的 connector 门禁（`stream.rs` 的
+    // `unreported_connector`）正好相反，两处不一样是对的：connector 是可选能力，
+    // 没上报过不代表不支持；agent 是会话的**必要**前提，放行的后果是用户拿到
+    // 一个 201 的会话，等到开 ACP 时才发现二进制不存在——一个永远无法对话的
+    // 死会话，而它看起来像「建成功了」。
+    let usable = state
+        .agent_runtime()
+        .usable_for_session(node_id, agent_id)
+        .map_err(|e| ApiError::internal_with("cannot read agent_runtime", e))?;
+    if usable.is_none() {
+        return Err(ApiError::conflict_with(
+            err::AGENT_UNAVAILABLE,
+            || json!({"agent_id": agent_id}),
+        ));
+    }
+
+    let repo = hub_storage::SessionRepo::new(state.devices().pool().clone());
+    let now = hub_core::registry::now_stamp();
+    // 起点由调用方的 `probe_base_rev` 回填。初值用 `Unknown` 而不是随便一个态
+    // ——它是「我还不知道」。
+    let session = match new_session {
+        NewSession::Ordinary => repo.create(
+            node_id,
+            path,
+            Some(agent_id),
+            &now,
+            None,
+            hub_storage::BaseRevStatus::Unknown,
+        ),
+        NewSession::Imported(acp_session_id) => repo.create_imported(
+            node_id,
+            path,
+            agent_id,
+            &now,
+            None,
+            hub_storage::BaseRevStatus::Unknown,
+            acp_session_id,
+        ),
+    }
+    .map_err(|e| ApiError::internal_with("cannot create the session", e))?;
+    // coverage: excluded — 多行宏的参数行被 llvm-cov 记为 miss（已知现象），
+    // 宏本身在上面的用例里执行过。
+    tracing::info!(
+        session_id = %session.id,
+        node_id = %node_id,
+        subject = %auth.subject(),
+        created = true,
+        "session created"
+    );
+    Ok(session)
 }
 
 /// `GET /api/agents`：Agent 目录（只读聚合，设计规范 §7.6）。

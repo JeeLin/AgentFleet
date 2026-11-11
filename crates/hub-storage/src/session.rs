@@ -284,6 +284,69 @@ impl SessionRepo {
         base_rev: Option<&str>,
         base_rev_status: BaseRevStatus,
     ) -> Result<Session> {
+        self.create_inner(
+            node_id,
+            path,
+            agent_id,
+            now,
+            base_rev,
+            base_rev_status,
+            None,
+        )
+    }
+
+    /// 建一个**导入来的**会话：与 [`Self::create`] 完全相同，只是把用户显式
+    /// 导入的 `acp_session_id` 一起写进同一行。
+    ///
+    /// 存在的理由：v0.7.4 的导入端点要在会话诞生那一刻就带上 ACP id，
+    /// 否则设备会先按 `session/new` 建一条新历史，等 `ready` 帧回来才换成
+    /// 用户要的那条——而那时 agent 已经新建过会话了。
+    ///
+    /// # 为什么不是给 `create` 加一个 `Option<&str>`
+    ///
+    /// 里程碑原文写的是「给 `create` 增加 `Option<&str>` 参数」，实现时改成
+    /// 私有 `create_inner` + 两个命名入口，理由有三条：
+    /// 1. **同一事务、同一条 INSERT**：`acp_session_id` 与其余列一起写，
+    ///    绝不「先建会话再 UPDATE」——那会留下一个窗口，窗口里设备看到的
+    ///    还是 `NULL`，于是走 `session/new`。
+    /// 2. **28 个调用点零改动**：`create` 的签名不变，普通建会话不会因为
+    ///    多了一个永远传 `None` 的参数而被迫改一遍。
+    /// 3. **不制造两个相邻的同型 `Option<&str>`**：`agent_id` 已经是
+    ///    `Option<&str>`，再加一个同型参数，传反了编译器不会说话，
+    ///    而症状是「会话的 agent 变成了 ACP id」。
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_imported(
+        &self,
+        node_id: &str,
+        path: &str,
+        agent_id: &str,
+        now: &str,
+        base_rev: Option<&str>,
+        base_rev_status: BaseRevStatus,
+        acp_session_id: &str,
+    ) -> Result<Session> {
+        self.create_inner(
+            node_id,
+            path,
+            Some(agent_id),
+            now,
+            base_rev,
+            base_rev_status,
+            Some(acp_session_id),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_inner(
+        &self,
+        node_id: &str,
+        path: &str,
+        agent_id: Option<&str>,
+        now: &str,
+        base_rev: Option<&str>,
+        base_rev_status: BaseRevStatus,
+        acp_session_id: Option<&str>,
+    ) -> Result<Session> {
         let mut conn = self.pool.get()?;
         // `transaction()` 而非 `unchecked_transaction()`：见
         // `DeviceRepo::set_public_key` 的同名注释——库开着 `foreign_keys=ON`，
@@ -294,9 +357,18 @@ impl SessionRepo {
         let id = crate::workspace::new_id();
         tx.execute(
             "INSERT INTO session
-                 (id, workspace_id, agent_id, state, created_at, base_rev, base_rev_status)
-             VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6)",
-            params![id, ws.id, agent_id, now, base_rev, base_rev_status.as_str()],
+                 (id, workspace_id, agent_id, acp_session_id, state, created_at,
+                  base_rev, base_rev_status)
+             VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7)",
+            params![
+                id,
+                ws.id,
+                agent_id,
+                acp_session_id,
+                now,
+                base_rev,
+                base_rev_status.as_str()
+            ],
         )?;
         // 从事务里读回：刚写的行与其余行走同一套映射，`state` 的 CHECK 与
         // 解析器口径不一致时不会静默放过。
@@ -422,6 +494,43 @@ impl SessionRepo {
         .transpose()
     }
 
+    /// 找一条**导入来的**会话：同一台设备上、同一个 agent、同一个 ACP 会话 id。
+    ///
+    /// 去重键是 `(node_id, agent_id, acp_session_id)`。里程碑原文写的是
+    /// `(node_id, provider, acp_session_id)`——`session` 表里没有 `provider` 列，
+    /// 而 v1 的 provider → `agent_id` 是 1:1（`opencode` 的 provider id 与
+    /// agent id 同名），所以用 `agent_id`，不为此加列。
+    ///
+    /// # 为什么不加唯一索引
+    ///
+    /// 普通会话的 `acp_session_id` 恒为 `NULL`（唯一索引对 NULL 不去重，加了
+    /// 也不拦重复导入）；而同一个 `ses_*` 理论上可以属于**两台设备各自**的
+    /// opencode 库——那种情况必须是两条不同的会话行。判据里带 `node_id`
+    /// 就是为了这个，索引方案反而会把两条合法行判成冲突。
+    ///
+    /// `node_id` 取自 `workspace`（`session` 表没有这一列），所以这也是一次
+    /// join；`workspace.node_id` 在设备被删后是 `NULL`，`= ?1` 自然不命中。
+    pub fn find_imported(
+        &self,
+        node_id: &str,
+        agent_id: &str,
+        acp_session_id: &str,
+    ) -> Result<Option<Session>> {
+        let conn = self.pool.get()?;
+        conn.query_row(
+            "SELECT s.id, s.workspace_id, s.agent_id, s.acp_session_id, s.state,
+                    s.created_at, s.ended_at, s.base_rev, s.base_rev_status, s.execution_id
+             FROM session s JOIN workspace w ON w.id = s.workspace_id
+             WHERE w.node_id = ?1 AND s.agent_id = ?2 AND s.acp_session_id = ?3
+             LIMIT 1",
+            params![node_id, agent_id, acp_session_id],
+            raw_session,
+        )
+        .optional()?
+        .map(RawSession::into_session)
+        .transpose()
+    }
+
     /// 记下 agent 给的 ACP 会话 id。
     ///
     /// 只在设备回过 `channel_ready` 之后调用：那时 `session/new` 或
@@ -434,6 +543,11 @@ impl SessionRepo {
     /// `acp_session_id` 是 `NULL`，含义是「还没开过对话」，设备侧据此走
     /// `session/new`。**不要**给它填一个 Hub 自己编的占位值：那会让第二次开对话
     /// 去 load 一个 agent 从来不认识的 id。
+    ///
+    /// **第二个合法来源**（v0.7.4）：用户从设备侧显式导入并签名的历史 id。
+    /// 那条路径走 [`Self::create_imported`]，在**同一条 INSERT** 里写初值；
+    /// 之后 `ready` 帧回来会用本方法再写一次同一个 id（`session/load` 复用原
+    /// id），是幂等重写，不改变「不要填占位值」这条约束。
     ///
     /// # 幂等
     ///
@@ -759,6 +873,88 @@ mod tests {
             sr.find(&s.id).unwrap().unwrap().acp_session_id.as_deref(),
             Some("ses_abc")
         );
+    }
+
+    /// 导入建的会话在**同一条 INSERT** 里带上 ACP id：读回来立刻可见，
+    /// 不需要第二次 UPDATE（窗口内设备会误走 `session/new`）。
+    #[test]
+    fn create_imported_writes_the_acp_session_id_it_was_given() {
+        let (_d, sr) = setup();
+        let s = sr
+            .create_imported(
+                "n_a",
+                "/srv/app",
+                "opencode",
+                TS,
+                None,
+                BaseRevStatus::Unknown,
+                "ses_imported",
+            )
+            .unwrap();
+        assert_eq!(s.acp_session_id.as_deref(), Some("ses_imported"));
+        assert_eq!(
+            sr.find(&s.id).unwrap().unwrap().acp_session_id.as_deref(),
+            Some("ses_imported")
+        );
+    }
+
+    /// 普通建会话必须写 `NULL`：导入的初值不能泄漏到页面路径，否则第一次
+    /// 开对话就会去 `session/load` 一个 agent 不认识的 id。
+    #[test]
+    fn create_leaves_acp_session_id_null() {
+        let (_d, sr) = setup();
+        let s = sr
+            .create(
+                "n_a",
+                "/srv/app",
+                Some("opencode"),
+                TS,
+                None,
+                BaseRevStatus::Unknown,
+            )
+            .unwrap();
+        assert_eq!(s.acp_session_id, None);
+        assert_eq!(sr.find(&s.id).unwrap().unwrap().acp_session_id, None);
+    }
+
+    /// 去重键是 `(node_id, agent_id, acp_session_id)`：同一台设备重复命中，
+    /// 换一台设备或换一个 agent 都不算重复。
+    #[test]
+    fn find_imported_matches_only_the_same_node_and_agent() {
+        let (_d, sr) = setup();
+        let conn = sr.workspaces.pool().get().unwrap();
+        conn.execute(
+            "INSERT INTO device (id, name, key_fingerprint, enrolled_at)
+             VALUES ('n_b', 'pi2', 'fp_b', 'unix:0')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let s = sr
+            .create_imported(
+                "n_a",
+                "/srv/app",
+                "opencode",
+                TS,
+                None,
+                BaseRevStatus::Unknown,
+                "ses_shared",
+            )
+            .unwrap();
+        let hit = sr.find_imported("n_a", "opencode", "ses_shared").unwrap();
+        assert_eq!(hit.map(|s| s.id), Some(s.id));
+        assert!(sr
+            .find_imported("n_b", "opencode", "ses_shared")
+            .unwrap()
+            .is_none());
+        assert!(sr
+            .find_imported("n_a", "claude", "ses_shared")
+            .unwrap()
+            .is_none());
+        assert!(sr
+            .find_imported("n_a", "opencode", "ses_other")
+            .unwrap()
+            .is_none());
     }
 
     /// 回填给一条不存在的会话要报错，不能静默成功。

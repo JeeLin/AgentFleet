@@ -19,6 +19,9 @@ protocol.workspace = true
 identity.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# 设备签名导入端点要重算 canonical body 的 SHA-256（v0.7.4）。
+# 只加这一个依赖：Hub 仍不依赖 node-core / node-cli（约束 22 / 依赖方向）。
+sha2.workspace = true
 tokio.workspace = true
 axum.workspace = true
 tower.workspace = true
