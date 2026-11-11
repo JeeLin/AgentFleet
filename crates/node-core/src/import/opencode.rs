@@ -115,6 +115,16 @@ impl super::HistoryProvider for Opencode {
             cwd: row.cwd,
         })
     }
+
+    fn session_meta(
+        &self,
+        data_dir: &Path,
+        id: &str,
+    ) -> Result<Option<HistoricalSession>, ImportError> {
+        // 与 `resolve` 共用同一条单行参数化查询：`bind` 只要这一行的 cwd/title，
+        // 不需要把整张 `session_v2` 读进内存。
+        Ok(query_by_external_id(data_dir, id)?.into_iter().next())
+    }
 }
 
 /// 按外部 id 查原始会话行（最多一行），只读、不写库。

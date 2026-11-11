@@ -123,6 +123,19 @@ pub trait HistoryProvider {
         data_dir: &Path,
         external_session_id: &str,
     ) -> Result<ImportCandidate, ImportError>;
+
+    /// 按 provider 自己的会话 id 精确读取一条完整元数据（cwd / title）。
+    ///
+    /// 默认 `Ok(None)`：不支持该优化的 provider（例如测试用的 `Fake`）不必实现，
+    /// 调用方按「没有元数据」降级即可。支持的 provider 必须走**单行参数化
+    /// 查询**，不能退化成 `list()` 全表扫描。
+    fn session_meta(
+        &self,
+        _data_dir: &Path,
+        _id: &str,
+    ) -> Result<Option<HistoricalSession>, ImportError> {
+        Ok(None)
+    }
 }
 
 /// 注册表的查询结果。

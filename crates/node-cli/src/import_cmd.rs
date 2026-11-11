@@ -225,36 +225,23 @@ fn run_bind<W: Write, E: Write>(
     };
 
     let session = args.session.trim();
+    // `resolve` 不带 cwd/title（它只服务于绑定所需字段）。这两个展示字段从
+    // **同一行**的精确查询里取一次：`session_meta` 是单行参数化查询，`bind`
+    // 因此不做任何全表 `list()`。Windows 盘符提示与 title 共用这一行。
+    let meta = provider.session_meta(&base, session).ok().flatten();
     let candidate = match provider.resolve(&base, session) {
         Ok(candidate) => candidate,
         Err(ImportError::InvalidWorkspacePath) => {
-            // `resolve` 只回错误、不回 cwd；要给出「Windows 盘符」这句可读原因，
-            // 得回头从同一张表里读那一行的 cwd。只读、失败就退回通用错误。
-            let windows = provider
-                .list(&base)
-                .ok()
-                .and_then(|rows| {
-                    rows.into_iter()
-                        .find(|row| row.external_session_id == session)
-                        .map(|row| is_windows_drive_path(&row.cwd))
-                })
-                .unwrap_or(false);
+            let windows = meta
+                .as_ref()
+                .is_some_and(|row| is_windows_drive_path(&row.cwd));
             return report(err, ImportFailure::InvalidPath { windows });
         }
         Err(error) => return report(err, map_import_error(error)),
     };
 
-    // `resolve` 不带 title（它只服务于绑定所需字段），从同一份列表里取。
     // 取不到就用空串：Hub 侧 title 只是展示字段，不该因此阻断导入。
-    let title = provider
-        .list(&base)
-        .ok()
-        .and_then(|rows| {
-            rows.into_iter()
-                .find(|row| row.external_session_id == session)
-                .map(|row| row.title)
-        })
-        .unwrap_or_default();
+    let title = meta.map(|row| row.title).unwrap_or_default();
 
     let signed = match import_http::build_signed_body(
         identity.key(),
