@@ -51,6 +51,29 @@ pub use identity::import_protocol::ImportRequest;
 #[derive(Debug, Clone)]
 pub struct ImportedBody(pub ImportRequest);
 
+/// 日志里一条 `title` 最多保留的字符数。
+///
+/// 历史标题是人给对话起的名字，正常只有几十个字。上限存在的唯一理由是
+/// `title` 只受 1 MiB body 上限约束——没有上限时单条日志行就能有同一个量级。
+const LOG_TITLE_MAX_CHARS: usize = 120;
+
+/// 把设备库来的 `title` 净化成**单行、有界**的日志字段。
+///
+/// 不是审美问题，两条都可执行地成立：
+/// 1. `tracing` 的 `%` 走 `Display`，**不转义**换行。标题里塞
+///    `"\n2026-11-11T00:00:00Z ERROR hub_server: ..."` 就会在 stderr 里伪造出
+///    一条与真实 `ERROR` 无法区分的记录。标题来自用户本机的外部 agent 库，
+///    不是可信输入。
+/// 2. 换行换成空格、其余控制字符（含 ESC，防终端转义注入）同样换成空格，
+///    可打印字符原样保留：中文 / 引号 / emoji 都还在，排障时标题仍可读。
+fn log_safe_title(title: &str) -> String {
+    title
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(LOG_TITLE_MAX_CHARS)
+        .collect()
+}
+
 /// 成功响应。**恰好两个字段**：CLI 打印 `session_id`，`acp_session_id` 是
 /// 回显给调用方做「绑定的是哪条历史」的确认。
 #[derive(Debug, Clone, Serialize)]
@@ -122,11 +145,12 @@ pub async fn import_session(
 
     // 标题只进日志，不进库：`session` 表没有 title 列，历史标题归 agent 自己管。
     // 不落库也不丢弃——它是排障时唯一能把日志行对回用户所选历史会话的线索。
+    // 进日志前必须 [`log_safe_title`]：它来自设备侧的外部 agent 库，不是可信输入。
     tracing::info!(
         session_id = %session.id,
         node_id = %identity.node_id,
         provider = %req.provider,
-        title = %req.title,
+        title = %log_safe_title(&req.title),
         imported = true,
         "session imported"
     );
@@ -139,4 +163,46 @@ pub async fn import_session(
         }),
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 伪造日志行与超长标题都必须被压成**单行、有界**；正常标题原样保留。
+    ///
+    /// 断言不是「净化过」，而是三件可观测的事：
+    /// 1. 换行 / CR / ESC 全变成空格 —— 日志行数不会因为标题而变多，终端也不会
+    ///    执行注入序列。
+    /// 2. 字符数被 `LOG_TITLE_MAX_CHARS` 截断 —— 900 KB 的标题不会变成 900 KB
+    ///    的日志行。
+    /// 3. 中文与普通标点原样保留 —— 净化不是把可读信息一起删掉。
+    #[test]
+    fn a_hostile_title_is_folded_into_one_bounded_log_field() {
+        let forged = "\n2026-11-11T00:00:00Z ERROR hub_server: fake critical line";
+        let safe = log_safe_title(forged);
+        assert!(!safe.contains('\n'), "no line breaks: {safe:?}");
+        assert!(
+            safe.starts_with(' '),
+            "the leading newline becomes a space: {safe:?}"
+        );
+
+        let with_escape = "a\u{1b}[2J b\r\nc";
+        let safe = log_safe_title(with_escape);
+        assert!(
+            !safe.chars().any(char::is_control),
+            "no control chars: {safe:?}"
+        );
+
+        let long = "标".repeat(900 * 1024);
+        let safe = log_safe_title(&long);
+        assert_eq!(safe.chars().count(), LOG_TITLE_MAX_CHARS);
+        assert!(
+            safe.chars().all(|c| c == '标'),
+            "truncation keeps whole chars"
+        );
+
+        let normal = "固定 session_v2 的迁移窗口 — ok";
+        assert_eq!(log_safe_title(normal), normal);
+    }
 }
