@@ -21,6 +21,7 @@ use common::{
     enroll_device, login, now_secs, send, session_count, session_row, signed_import,
     signed_import_with_version,
 };
+use hub_server::import_auth::canonical_digest_for_test;
 use serde_json::{json, Value};
 
 const AGENT: &str = "opencode";
@@ -782,17 +783,16 @@ async fn ordinary_create_session_still_writes_null_acp_session_id() {
 // 10. DTO 字段顺序（与 CLI 的 canonical body 对齐）
 // ---------------------------------------------------------------------------
 
-/// Hub 的 `ImportRequest` 序列化字节必须与 `node-cli` 的 DTO 逐字相同。
+/// Hub 与 CLI 的 canonical body 必须逐字相同。
 ///
-/// 常量是用 `crates/node-cli/src/import_http.rs` 的字段顺序算出来的：
-/// `node_id, provider, external_session_id, acp_session_id, cwd, title, v, t,
-/// nonce, signature, body_sha256`。改 Hub DTO 的字段顺序 → 字符串与摘要都变，
-/// 这条立刻红。
+/// 旧版只拿 Hub 的 DTO 跟硬编码字面量比、名字却写「matches the CLI」：
+/// CLI 侧把 `cwd` / `title` 顺序对调，这条仍全绿，真实请求却以 401 收场。
+/// 现在两侧都调 [`ImportRequest::body_digest_hex`]（`identity` 里唯一一份实现），
+/// 且把 CLI 的字段顺序做成同一 DTO 的序列化串与摘要常量一起锁住：
+/// 顺序、字段名、摘要三者任一漂移都会红，且不再有「另一侧没读」这个名字漏洞。
 #[test]
-fn the_hub_dto_field_order_matches_the_cli_canonical_body() {
-    use sha2::{Digest, Sha256};
-
-    let mut req = hub_server::routes::session_import::ImportRequest {
+fn the_cli_and_hub_share_one_canonical_body_digest() {
+    let req = hub_server::routes::session_import::ImportRequest {
         node_id: "n_test".to_string(),
         provider: "opencode".to_string(),
         external_session_id: "ses_abc".to_string(),
@@ -805,18 +805,60 @@ fn the_hub_dto_field_order_matches_the_cli_canonical_body() {
         signature: String::new(),
         body_sha256: String::new(),
     };
-    req.signature.clear();
-    req.body_sha256.clear();
 
-    let canonical = serde_json::to_vec(&req).expect("canonical");
+    // `canonical_body` 是 CLI `build_signed_body` 与 Hub `canonical_digest`
+    // 共用的那一份字节。改 DTO 字段顺序 → 字符串与摘要同时变。
+    let canonical = req.canonical_body().expect("canonical");
     assert_eq!(
-        String::from_utf8(canonical.clone()).unwrap(),
+        String::from_utf8(canonical).unwrap(),
         "{\"node_id\":\"n_test\",\"provider\":\"opencode\",\"external_session_id\":\"ses_abc\",\"acp_session_id\":\"ses_abc\",\"cwd\":\"/tmp/work\",\"title\":\"demo\",\"v\":1,\"t\":1700000000,\"nonce\":\"nonce_test\",\"signature\":\"\",\"body_sha256\":\"\"}"
     );
     assert_eq!(
-        identity::hex_encode(Sha256::digest(&canonical).as_ref()),
+        req.body_digest_hex().expect("digest"),
         "3c9f205898433f9306adba7bf95aaa299b8d5796555bd1f16783e492db9d0fc5"
     );
+
+    // 真的走一遍 CLI 的 `build_signed_body`：它构造同一个 `ImportRequest`，
+    // 摘要必须与 Hub 用同一函数重算的值相等（不是只比一串手抄常量）。
+    let kp = identity::KeyPair::generate();
+    let candidate = node_core::import::ImportCandidate {
+        provider: "opencode",
+        acp_session_id: "ses_abc".to_string(),
+        cwd: "/tmp/work".to_string(),
+    };
+    let signed =
+        node_cli::import_http::build_signed_body(&kp, "n_test", "opencode", &candidate, "demo")
+            .expect("sign");
+    let cli: hub_server::routes::session_import::ImportRequest =
+        serde_json::from_slice(&signed.body).expect("cli body");
+    assert_eq!(
+        cli.body_digest_hex().expect("cli digest"),
+        signed.body_sha256
+    );
+    // Hub 侧重算的必须是同一个值：`canonical_digest` 是验签 layer 真正调的
+    // 那个函数（经 `canonical_digest_for_test` 暴露），不是测试另抄的一份。
+    assert_eq!(
+        canonical_digest_for_test(&cli).as_deref(),
+        Some(signed.body_sha256.as_str()),
+        "Hub 验签重算的摘要必须与 CLI 签名时的摘要一致"
+    );
+    assert_eq!(signed.body_sha256.len(), 64, "hex sha256");
+    // 字段顺序而不是「键都存在」：两侧序列化的是同一个类型，逐字比键序。
+    let cli_value: Value = serde_json::from_slice(&signed.body).expect("json");
+    let hub_value: Value = serde_json::to_value(&req).expect("json");
+    let cli_keys: Vec<&str> = cli_value
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let hub_keys: Vec<&str> = hub_value
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(cli_keys, hub_keys, "CLI 与 Hub 的字段顺序必须一致");
 }
 
 // ---------------------------------------------------------------------------

@@ -25,7 +25,6 @@ use identity::import_protocol::{
 use identity::{base64url, import_signing_message, KeyPair};
 use node_core::import::ImportCandidate;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 /// 一次性请求不该等太久：Hub 不在就尽快失败，用户还能看见原因。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -115,10 +114,9 @@ pub fn build_signed_body(
         body_sha256: String::new(),
     };
 
-    let canonical = serde_json::to_vec(&request)
+    let body_sha256 = request
+        .body_digest_hex()
         .map_err(|e| ImportHttpError::Local(format!("cannot encode request body: {e}")))?;
-    let digest = Sha256::digest(&canonical);
-    let body_sha256 = identity::hex_encode(digest.as_ref());
 
     let message = import_signing_message(
         IMPORT_VERSION,
@@ -238,13 +236,10 @@ mod tests {
         let kp = KeyPair::generate();
         let signed =
             build_signed_body(&kp, "n_test", "opencode", &candidate(), "demo").expect("sign");
-        let mut parsed: ImportRequest = serde_json::from_slice(&signed.body).expect("request json");
+        let parsed: ImportRequest = serde_json::from_slice(&signed.body).expect("request json");
         assert_eq!(parsed.body_sha256, signed.body_sha256);
         assert_eq!(parsed.signature, signed.signature);
-        parsed.body_sha256.clear();
-        parsed.signature.clear();
-        let canonical = serde_json::to_vec(&parsed).expect("canonical");
-        let expected = identity::hex_encode(Sha256::digest(&canonical).as_ref());
+        let expected = parsed.body_digest_hex().expect("digest");
         assert_eq!(
             signed.body_sha256, expected,
             "digest must be over the payload with auth fields blanked"

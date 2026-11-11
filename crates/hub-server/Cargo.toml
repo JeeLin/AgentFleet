@@ -50,6 +50,9 @@ libc.workspace = true
 # 子任务 3 的 WS 集成测试：用产品自己的 node 侧客户端连 Hub，
 # 而不是裸手搓一个——那样漏掉「两端字段对不上」这类问题。
 node-core.workspace = true
+# Bug 22：端点测试要真的构造一次 CLI 的签名 body，逐字比字段顺序与摘要。
+# 只在 dev-dependencies：Hub 生产依赖仍不含 node-cli / node-core。
+node-cli = { path = "../node-cli" }
 identity.workspace = true
 protocol.workspace = true
 tokio-tungstenite.workspace = true

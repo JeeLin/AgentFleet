@@ -58,7 +58,12 @@ pub use identity::import_protocol::{
     BODY_SHA256_HEADER, IMPORT_METHOD, IMPORT_PATH, IMPORT_VERSION, NODE_ID_HEADER, NONCE_HEADER,
     SIGNATURE_HEADER,
 };
-use sha2::{Digest, Sha256};
+
+/// 测试接缝：Hub 验签用的就是这个函数，把它暴露出来让端点测试直接比字节，
+/// 不另抄一份摘要算法（抄一份又成了「两侧各写一遍」）。
+pub fn canonical_digest_for_test(parsed: &ImportRequest) -> Option<String> {
+    canonical_digest(parsed)
+}
 
 use crate::routes::api::{Authenticated, DeviceImportAuth};
 use crate::routes::session_import::ImportedBody;
@@ -232,14 +237,11 @@ pub async fn require_device_signature(
 
 /// 重算 canonical body 的 SHA-256（小写 hex）。
 ///
-/// canonical body = DTO 把 `signature` / `body_sha256` 置空后的序列化字节。
-/// 返回 `None` 表示重新序列化失败（结构上不可能，`String` 字段总能序列化）。
+/// canonical body 的字节由 [`ImportRequest::canonical_body`] 唯一定义——CLI 侧
+/// `build_signed_body` 算摘要时调的是同一个函数。这里只保留一层 `Option`
+/// 包装，好让「序列化失败」在调用点仍是一次 400 而不是 panic。
 fn canonical_digest(parsed: &ImportRequest) -> Option<String> {
-    let mut canonical = parsed.clone();
-    canonical.signature.clear();
-    canonical.body_sha256.clear();
-    let bytes = serde_json::to_vec(&canonical).ok()?;
-    Some(identity::hex_encode(Sha256::digest(&bytes).as_ref()))
+    parsed.body_digest_hex().ok()
 }
 
 /// 头的本地快照。一次取出、一次校验，后面不再回头读 `HeaderMap`。

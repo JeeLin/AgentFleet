@@ -29,6 +29,7 @@ pub use error::IdentityError;
 /// 摘要按这个顺序序列化，改顺序会让签名两侧失配。
 pub mod import_protocol {
     use serde::{Deserialize, Serialize};
+    use sha2::Digest;
 
     /// 导入端点的固定路径（不在 `/api/*` 下）。
     pub const IMPORT_PATH: &str = "/device-api/session-imports";
@@ -58,6 +59,27 @@ pub mod import_protocol {
         pub nonce: String,
         pub signature: String,
         pub body_sha256: String,
+    }
+
+    impl ImportRequest {
+        /// canonical body：把两个签名字段置空后的序列化字节。
+        ///
+        /// 为什么必须是**函数**而不是两侧各写一句 `serde_json::to_vec`：
+        /// body 摘要参与签名，而摘要算的就是这段字节。CLI 与 Hub 各写一次时，
+        /// 字段顺序（`cwd` / `title` 谁在前）是**两处独立的事实**——改一处仍能
+        /// 编译，运行时以 401 收场。收成一处后，顺序只有 DTO 定义这一个来源。
+        pub fn canonical_body(&self) -> Result<Vec<u8>, serde_json::Error> {
+            let mut canonical = self.clone();
+            canonical.signature.clear();
+            canonical.body_sha256.clear();
+            serde_json::to_vec(&canonical)
+        }
+
+        /// canonical body 的 SHA-256（小写 hex），签名的 `body_sha256` 槽位。
+        pub fn body_digest_hex(&self) -> Result<String, serde_json::Error> {
+            let bytes = self.canonical_body()?;
+            Ok(crate::hex_encode(sha2::Sha256::digest(&bytes).as_ref()))
+        }
     }
 }
 
