@@ -563,7 +563,10 @@ fn import_bind_derives_the_origin_from_a_full_ws_url_and_from_the_env_var() {
     identity_fixture(dir.path());
     opencode_fixture(dir.path(), "ses_test", "/tmp/demo");
 
-    let (port, rx) = start_stub("201 Created", r#"{"session_id":"from_ws"}"#);
+    let (port, rx) = start_stub(
+        "201 Created",
+        r#"{"session_id":"from_ws","acp_session_id":"ses_test"}"#,
+    );
     let hub = format!("ws://127.0.0.1:{port}/ws");
     let (mut child, out, err) = spawn_env(
         &[
@@ -585,7 +588,10 @@ fn import_bind_derives_the_origin_from_a_full_ws_url_and_from_the_env_var() {
     assert!(status.success(), "{out}\n{err}");
     assert_eq!(captured(rx).path, "/device-api/session-imports");
 
-    let (port, rx) = start_stub("201 Created", r#"{"session_id":"from_env"}"#);
+    let (port, rx) = start_stub(
+        "201 Created",
+        r#"{"session_id":"from_env","acp_session_id":"ses_test"}"#,
+    );
     let env_hub = format!("127.0.0.1:{port}");
     let (mut child, out, err) = spawn_env(
         &[

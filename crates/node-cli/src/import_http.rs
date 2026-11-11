@@ -67,10 +67,25 @@ pub struct SignedImport {
     pub body_sha256: String,
 }
 
-/// Hub 的成功响应。只取 CLI 要打印的字段，其余忽略。
+/// Hub 的成功响应：**两个字段都是契约**。`acp_session_id` 是 Hub 的回显
+/// 确认（绑定的是哪条历史），CLI 必须校验它非空——Hub 单方面少回一个字段
+/// 不能被静默忽略。
 #[derive(Debug, Deserialize)]
-struct ImportResponse {
-    session_id: String,
+pub struct ImportResponse {
+    pub session_id: String,
+    pub acp_session_id: String,
+}
+
+/// 解析并校验成功响应体；形状不对或任一字段为空都是 `BadResponse`。
+fn parse_response(bytes: &[u8]) -> Result<ImportOutcome, ImportHttpError> {
+    let parsed: ImportResponse =
+        serde_json::from_slice(bytes).map_err(|_| ImportHttpError::BadResponse)?;
+    if parsed.session_id.trim().is_empty() || parsed.acp_session_id.trim().is_empty() {
+        return Err(ImportHttpError::BadResponse);
+    }
+    Ok(ImportOutcome {
+        session_id: parsed.session_id,
+    })
 }
 
 /// Hub 的固定错误体：`{"error":"<code>"}`。
@@ -84,7 +99,7 @@ struct ImportErrorBody {
 pub enum ImportHttpError {
     /// 连接 / 发送 / 读响应失败。detail 是 reqwest 的错误描述（不含请求体）。
     Network(String),
-    /// 响应不是约定的 JSON 形状，或缺少 `session_id`。
+    /// 响应不是约定的 JSON 形状，或缺少 `session_id` / `acp_session_id`。
     BadResponse,
     /// Hub 回了固定 code 的错误体。
     Server { code: String },
@@ -192,14 +207,7 @@ pub fn post(origin: &str, signed: &SignedImport) -> Result<ImportOutcome, Import
             .map_err(|e| ImportHttpError::Network(e.to_string()))?;
 
         if status.is_success() {
-            let parsed: ImportResponse =
-                serde_json::from_slice(&bytes).map_err(|_| ImportHttpError::BadResponse)?;
-            if parsed.session_id.trim().is_empty() {
-                return Err(ImportHttpError::BadResponse);
-            }
-            return Ok(ImportOutcome {
-                session_id: parsed.session_id,
-            });
+            return parse_response(&bytes);
         }
 
         let parsed: ImportErrorBody =
@@ -343,5 +351,25 @@ mod tests {
         assert_eq!(v["cwd"], "/tmp/work");
         assert_eq!(v["title"], "demo");
         assert_eq!(v["v"], IMPORT_VERSION);
+    }
+
+    /// Hub 的 201 体少回 / 空回 `acp_session_id` 都必须是 `BadResponse`：
+    /// 两字段回显契约在 CLI 侧有一条可执行约束。
+    #[test]
+    fn a_success_response_without_a_valid_acp_session_id_is_rejected() {
+        for body in [
+            br#"{"session_id":"s1"}"#.as_slice(),
+            br#"{"session_id":"s1","acp_session_id":""}"#.as_slice(),
+            br#"{"session_id":"s1","acp_session_id":"   "}"#.as_slice(),
+            br#"{"session_id":"","acp_session_id":"ses_1"}"#.as_slice(),
+        ] {
+            assert!(matches!(
+                parse_response(body),
+                Err(ImportHttpError::BadResponse)
+            ));
+        }
+        let ok = parse_response(br#"{"session_id":"s1","acp_session_id":"ses_1"}"#)
+            .expect("two-field response");
+        assert_eq!(ok.session_id, "s1");
     }
 }
