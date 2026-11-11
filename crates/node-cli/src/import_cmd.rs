@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use node_core::identity::{Identity, APP_DIR, IDENTITY_FILE};
-use node_core::import::{self, ImportError, ProviderLookup};
+use node_core::import::{self, HistoricalSession, ImportError, ProviderLookup};
 
 use crate::import_http::{self, ImportHttpError};
 use crate::runargs;
@@ -250,23 +250,27 @@ fn run_bind<W: Write, E: Write>(
     };
 
     let session = args.session.trim();
+    let resolved = provider.resolve(&base, session);
     // `resolve` 不带 cwd/title（它只服务于绑定所需字段）。这两个展示字段从
     // **同一行**的精确查询里取一次：`session_meta` 是单行参数化查询，`bind`
     // 因此不做任何全表 `list()`。Windows 盘符提示与 title 共用这一行。
-    let meta = provider.session_meta(&base, session).ok().flatten();
-    let candidate = match provider.resolve(&base, session) {
+    //
+    // 读失败**绝不**用 `.ok()` 吞掉：那会把 DbMissing / SchemaMismatch /
+    // Decode 静默改判成 `invalid_path`，与 `run_list` 的口径分叉。
+    let meta = bind_metadata(provider, &base, session);
+    let candidate = match resolved {
         Ok(candidate) => candidate,
         Err(ImportError::InvalidWorkspacePath) => {
-            let windows = meta
-                .as_ref()
-                .is_some_and(|row| is_windows_drive_path(&row.cwd));
-            return report(err, ImportFailure::InvalidPath { windows });
+            return report(err, invalid_path_failure(meta));
         }
         Err(error) => return report(err, map_import_error(error)),
     };
 
     // 取不到就用空串：Hub 侧 title 只是展示字段，不该因此阻断导入。
-    let title = meta.map(|row| row.title).unwrap_or_default();
+    let title = match meta {
+        Ok(row) => row.map(|row| row.title).unwrap_or_default(),
+        Err(failure) => return report(err, failure),
+    };
 
     let signed = match import_http::build_signed_body(
         identity.key(),
@@ -290,6 +294,32 @@ fn run_bind<W: Write, E: Write>(
     ));
     drop(writeln!(out, "打开既有会话继续对话"));
     ExitCode::SUCCESS
+}
+
+/// 绑定时取那一条会话的完整元数据（cwd / title）。
+///
+/// provider 的读错误按 [`map_import_error`] 归到 `provider_unavailable` 等
+/// 稳定 code，**绝不**静默降级成「没有元数据」。
+fn bind_metadata(
+    provider: &dyn import::HistoryProvider,
+    base: &Path,
+    session: &str,
+) -> Result<Option<HistoricalSession>, ImportFailure> {
+    provider
+        .session_meta(base, session)
+        .map_err(map_import_error)
+}
+
+/// `resolve` 报路径不合法时的最终失败分类：元数据读失败优先于路径结论，
+/// 行可读时才保留「Windows 盘符」这句可读原因。
+fn invalid_path_failure(meta: Result<Option<HistoricalSession>, ImportFailure>) -> ImportFailure {
+    match meta {
+        Ok(Some(row)) => ImportFailure::InvalidPath {
+            windows: is_windows_drive_path(&row.cwd),
+        },
+        Ok(None) => ImportFailure::InvalidPath { windows: false },
+        Err(failure) => failure,
+    }
 }
 
 fn provider_for(id: &str) -> Result<&'static dyn import::HistoryProvider, ImportFailure> {
@@ -724,5 +754,36 @@ mod tests {
         let mapped = map_import_error(ImportError::InvalidWorkspacePath);
         assert_eq!(mapped.code(), "invalid_path");
         assert!(!mapped.message().contains("C:"));
+    }
+
+    /// `resolve` 判了非法路径、但同一行的精确读取同时失败时，失败原因必须是
+    /// `provider_unavailable`——不是把读错误 `.ok()` 吞掉后误报 `invalid_path`。
+    #[test]
+    fn a_provider_read_error_is_provider_unavailable_not_invalid_path() {
+        struct BrokenMeta;
+        impl import::HistoryProvider for BrokenMeta {
+            fn id(&self) -> &'static str {
+                "opencode"
+            }
+            fn list(&self, _: &Path) -> Result<Vec<HistoricalSession>, ImportError> {
+                Err(ImportError::DbMissing)
+            }
+            fn resolve(&self, _: &Path, _: &str) -> Result<import::ImportCandidate, ImportError> {
+                Err(ImportError::InvalidWorkspacePath)
+            }
+            fn session_meta(
+                &self,
+                _: &Path,
+                _: &str,
+            ) -> Result<Option<HistoricalSession>, ImportError> {
+                // 模拟「resolve 之后 DB 被删 / 库结构漂移」：读错误不得被吞。
+                Err(ImportError::SchemaMismatch)
+            }
+        }
+
+        let meta = bind_metadata(&BrokenMeta, Path::new("/tmp/xdg"), "ses_x");
+        let failure = invalid_path_failure(meta);
+        assert_eq!(failure.code(), "provider_unavailable");
+        assert_ne!(failure.code(), "invalid_path");
     }
 }
