@@ -163,6 +163,25 @@ pub(super) fn classify_sql_error(e: rusqlite::Error) -> ImportError {
     }
 }
 
+/// 把 `PRAGMA table_info` 的错误归类。
+///
+/// 坏 SQLite 文件在**打开连接时不会立刻失败**：`Connection::open_with_flags`
+/// 是惰性的，第一次读（这里就是 `PRAGMA table_info`）才报 `file is not a
+/// database` / `database disk image is malformed`。那属于「这个库读不出来」
+/// → `Decode`，不是「表形状不认识」→ `SchemaMismatch`；把两者混成同一个
+/// 文案，正是里程碑点名「只读打开失败」要区分的那件事。
+fn classify_schema_read_error(e: rusqlite::Error) -> ImportError {
+    let text = e.to_string().to_ascii_lowercase();
+    if text.contains("not a database")
+        || text.contains("malformed")
+        || text.contains("database corruption")
+    {
+        ImportError::Decode
+    } else {
+        classify_sql_error(e)
+    }
+}
+
 /// `list()` 的实现。`on_columns` 只在测试里用来模拟「读完 schema 后表被改名」。
 fn list_rows(
     data_dir: &Path,
@@ -300,15 +319,13 @@ impl Columns {
     /// `SchemaMismatch`；不另查 `sqlite_master`，少一条口径。
     fn read(conn: &Connection) -> Result<Self, ImportError> {
         let sql = format!("PRAGMA table_info(\"{TABLE}\")");
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|_| ImportError::SchemaMismatch)?;
+        let mut stmt = conn.prepare(&sql).map_err(classify_schema_read_error)?;
         let mut names: Vec<String> = Vec::new();
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(1))
-            .map_err(|_| ImportError::SchemaMismatch)?;
+            .map_err(classify_schema_read_error)?;
         for name in rows {
-            names.push(name.map_err(|_| ImportError::SchemaMismatch)?);
+            names.push(name.map_err(classify_schema_read_error)?);
         }
         let has = |c: &str| names.iter().any(|n| n == c);
         if !has(ID_COL) {

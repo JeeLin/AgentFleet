@@ -259,6 +259,28 @@ fn a_schema_change_between_column_read_and_prepare_is_not_called_decode() {
     );
 }
 
+/// 坏 SQLite 文件（只读打开失败）必须归到 `Decode` 且不 panic。
+///
+/// 里程碑产品边界点名「只读打开失败」；此前只有「打开后 DDL 被拒」的用例，
+/// 把 `open_read_only` 的 open 错误改映射为 `SchemaMismatch` 也不会有任何
+/// 用例变红。`list` 与 `resolve` 共用同一个 `open_read_only`，各断言一次。
+#[test]
+fn a_corrupt_sqlite_file_is_reported_as_decode_without_panicking() {
+    let d = data_dir();
+    let sub = d.path().join("opencode");
+    std::fs::create_dir_all(&sub).expect("建 opencode 子目录");
+    std::fs::write(sub.join("opencode.db"), b"this is not a sqlite database").expect("写坏文件");
+
+    assert_eq!(Opencode.list(d.path()), Err(ImportError::Decode));
+    assert_eq!(
+        Opencode.resolve(d.path(), "ses_x"),
+        Err(ImportError::Decode)
+    );
+    // 坏文件不是「没装」也不是「schema 漂移」：两个相邻变体不得混进来。
+    assert_ne!(ImportError::Decode, ImportError::DbMissing);
+    assert_ne!(ImportError::Decode, ImportError::SchemaMismatch);
+}
+
 /// 空库 / 缺表 / 缺 `id` 列三类夹具各归到具体错误，**不合并成一个
 /// 「读不了」**：没装 opencode 与 schema 漂移对用户是两件事。
 #[test]
