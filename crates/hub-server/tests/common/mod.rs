@@ -452,6 +452,34 @@ pub async fn enroll_device(
     }
 }
 
+/// 一条「已初始化 Hub + 在线 opencode 设备 + 可用路由」的导入夹具。
+///
+/// 14 个端点用例都从这串序列起步（`Hub::boot` → `enroll_device` →
+/// `build_app`）；把它收在一处，新增错误码用例就不必再抄一遍。返回
+/// `(Hub, DeviceStub, Router)`：`Hub` 与 `DeviceStub` 必须活到请求打完，
+/// 否则临时库 / WS 连接会提前消失。
+pub async fn boot_online_import_fixture() -> (Hub, DeviceStub, axum::Router) {
+    use serde_json::json;
+
+    let hub = Hub::boot().await;
+    let stub = enroll_device(
+        &hub,
+        &["git"],
+        &["opencode"],
+        Some(json!({
+            "op": "rev",
+            "not_a_repo": false,
+            "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "short": "aaaaaaa",
+            "branch": "main",
+            "detached": false,
+        })),
+    )
+    .await;
+    let app = hub_server::build_app(hub.state.clone());
+    (hub, stub, app)
+}
+
 /// 一次已签名的导入请求：`body` 是最终字节，`request()` 把它装成带头的请求。
 ///
 /// 签名算法与 `node-cli::import_http` 相同（canonical body = 两个签名字段置空

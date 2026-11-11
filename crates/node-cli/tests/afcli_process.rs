@@ -617,13 +617,24 @@ fn import_bind_derives_the_origin_from_a_full_ws_url_and_from_the_env_var() {
     assert_eq!(captured(rx).path, IMPORT_PATH);
 }
 
-/// 成功状态码但不是约定 JSON 形状 → `bad_response`，且不把原始响应打到终端。
-#[test]
-fn import_bind_reports_bad_response_without_echoing_the_raw_body() {
+/// 五个 bind 响应用例共有的夹具：临时数据目录 + 身份 + opencode 库 + stub。
+///
+/// `tempdir` 必须活到子进程退出，所以和 `(port, receiver)` 一起返回。
+/// 新增一个 4xx code 用例只需给 `status` / `body` 两个参数 + 末尾断言，
+/// 不再复制七元 argv 与三份 fixture 调用。
+fn bind_fixture(
+    status: &'static str,
+    response_body: &'static str,
+) -> (tempfile::TempDir, u16, std::sync::mpsc::Receiver<Captured>) {
     let dir = tempfile::tempdir().unwrap();
     identity_fixture(dir.path());
     opencode_fixture(dir.path(), "ses_test", "/tmp/demo");
-    let (port, _rx) = start_stub("201 Created", "not json at all");
+    let (port, rx) = start_stub(status, response_body);
+    (dir, port, rx)
+}
+
+/// 用夹具跑一遍 `import bind`，返回 `(退出码, stdout, stderr)`。
+fn run_bind_fixture(port: u16, dir: &Path) -> (ExitStatus, String, String) {
     let hub = format!("127.0.0.1:{port}");
     let (mut child, out, err) = spawn_env(
         &[
@@ -636,12 +647,18 @@ fn import_bind_reports_bad_response_without_echoing_the_raw_body() {
             "--hub",
             &hub,
         ],
-        dir.path(),
+        dir,
         &[],
     );
     let status = child.wait_with_timeout();
-    let out = drain(out);
-    let err = drain(err);
+    (status, drain(out), drain(err))
+}
+
+/// 成功状态码但不是约定 JSON 形状 → `bad_response`，且不把原始响应打到终端。
+#[test]
+fn import_bind_reports_bad_response_without_echoing_the_raw_body() {
+    let (dir, port, _rx) = bind_fixture("201 Created", "not json at all");
+    let (status, out, err) = run_bind_fixture(port, dir.path());
     assert!(!status.success());
     assert!(out.is_empty());
     assert!(err.contains("bad_response"), "got: {err}");
@@ -652,31 +669,11 @@ fn import_bind_reports_bad_response_without_echoing_the_raw_body() {
 /// 原文一个字都不回显——代理错误页经常带内部主机名与路径。
 #[test]
 fn import_bind_never_echoes_an_html_error_page() {
-    let dir = tempfile::tempdir().unwrap();
-    identity_fixture(dir.path());
-    opencode_fixture(dir.path(), "ses_test", "/tmp/demo");
-    let (port, _rx) = start_stub(
+    let (dir, port, _rx) = bind_fixture(
         "502 Bad Gateway",
         "<html><body>nginx 502 at internal-hub.local:8080</body></html>",
     );
-    let hub = format!("127.0.0.1:{port}");
-    let (mut child, out, err) = spawn_env(
-        &[
-            "import",
-            "bind",
-            "--provider",
-            "opencode",
-            "--session",
-            "ses_test",
-            "--hub",
-            &hub,
-        ],
-        dir.path(),
-        &[],
-    );
-    let status = child.wait_with_timeout();
-    let out = drain(out);
-    let err = drain(err);
+    let (status, out, err) = run_bind_fixture(port, dir.path());
     assert!(!status.success());
     assert!(out.is_empty());
     assert!(err.contains("bad_response"), "got: {err}");
@@ -688,31 +685,11 @@ fn import_bind_never_echoes_an_html_error_page() {
 /// 失败响应只输出稳定 code：不打印服务器 HTML / 原始错误体。
 #[test]
 fn import_bind_reports_a_stable_code_and_never_the_server_html() {
-    let dir = tempfile::tempdir().unwrap();
-    identity_fixture(dir.path());
-    opencode_fixture(dir.path(), "ses_test", "/tmp/demo");
-    let (port, _rx) = start_stub(
+    let (dir, port, _rx) = bind_fixture(
         "401 Unauthorized",
         r#"{"error":"DEVICE_SIGNATURE_INVALID"}"#,
     );
-    let hub = format!("127.0.0.1:{port}");
-    let (mut child, out, err) = spawn_env(
-        &[
-            "import",
-            "bind",
-            "--provider",
-            "opencode",
-            "--session",
-            "ses_test",
-            "--hub",
-            &hub,
-        ],
-        dir.path(),
-        &[],
-    );
-    let status = child.wait_with_timeout();
-    let out = drain(out);
-    let err = drain(err);
+    let (status, out, err) = run_bind_fixture(port, dir.path());
     assert!(!status.success());
     assert!(out.is_empty());
     assert!(err.contains("bad_signature"), "got: {err}");

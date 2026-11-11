@@ -100,15 +100,7 @@ async fn uninitialized_hub_rejects_device_import_with_the_same_forbidden_shape()
 /// 成功。三件事合起来才证明「版本绑定了签名、未知版本被拒、拒绝不烧 nonce」。
 #[tokio::test]
 async fn the_signature_binds_body_version_and_an_unknown_version_does_not_burn_the_nonce() {
-    let hub = common::Hub::boot().await;
-    let stub = enroll_device(
-        &hub,
-        &["git"],
-        &[AGENT],
-        Some(ok_rev("9999999999999999999999999999999999999999")),
-    )
-    .await;
-    let app = hub_server::build_app(hub.state.clone());
+    let (hub, stub, app) = common::boot_online_import_fixture().await;
     let nonce = "nonce-version";
     let t = now_secs();
 
@@ -149,15 +141,7 @@ async fn the_signature_binds_body_version_and_an_unknown_version_does_not_burn_t
 /// 任何一条认证判据不过都 401 `device_signature_invalid`，且库里没有新会话。
 #[tokio::test]
 async fn missing_or_invalid_signature_is_unauthorized_and_no_session_row_is_written() {
-    let hub = common::Hub::boot().await;
-    let stub = enroll_device(
-        &hub,
-        &["git"],
-        &[AGENT],
-        Some(ok_rev("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")),
-    )
-    .await;
-    let app = hub_server::build_app(hub.state.clone());
+    let (hub, stub, app) = common::boot_online_import_fixture().await;
 
     // 2a. 签名本身是垃圾（body/摘要都自洽，只有 signature 被换掉）。
     let mut bad = signed_import(
@@ -239,15 +223,7 @@ async fn missing_or_invalid_signature_is_unauthorized_and_no_session_row_is_writ
 /// 同一请求原样重发：第二次 409 `import_replayed`，会话仍只有一条。
 #[tokio::test]
 async fn nonce_cannot_be_replayed() {
-    let hub = common::Hub::boot().await;
-    let stub = enroll_device(
-        &hub,
-        &["git"],
-        &[AGENT],
-        Some(ok_rev("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")),
-    )
-    .await;
-    let app = hub_server::build_app(hub.state.clone());
+    let (hub, stub, app) = common::boot_online_import_fixture().await;
 
     let signed = signed_import(
         &stub.kp,
@@ -272,15 +248,7 @@ async fn nonce_cannot_be_replayed() {
 /// `import_replayed`。这条锁住「nonce 在 handler 之前消费」。
 #[tokio::test]
 async fn a_business_failure_still_burns_the_nonce() {
-    let hub = common::Hub::boot().await;
-    let stub = enroll_device(
-        &hub,
-        &["git"],
-        &[AGENT],
-        Some(ok_rev("cccccccccccccccccccccccccccccccccccccccc")),
-    )
-    .await;
-    let app = hub_server::build_app(hub.state.clone());
+    let (hub, stub, app) = common::boot_online_import_fixture().await;
 
     // 第一次：provider 不在 allowlist → 409，但 nonce 已被消费。
     let unsupported = signed_import(
@@ -321,15 +289,7 @@ async fn a_business_failure_still_burns_the_nonce() {
 /// 同一 `(node_id, agent, acp_session_id)` 第二次导入 409，且**不再探测**。
 #[tokio::test]
 async fn a_second_import_of_the_same_acp_session_is_conflict() {
-    let hub = common::Hub::boot().await;
-    let stub = enroll_device(
-        &hub,
-        &["git"],
-        &[AGENT],
-        Some(ok_rev("dddddddddddddddddddddddddddddddddddddddd")),
-    )
-    .await;
-    let app = hub_server::build_app(hub.state.clone());
+    let (hub, stub, app) = common::boot_online_import_fixture().await;
 
     let first = import_ok(&hub, &stub, "ses_dup", "nonce-dup-1").await;
     assert_eq!(first["acp_session_id"], "ses_dup");
@@ -359,14 +319,7 @@ async fn a_second_import_of_the_same_acp_session_is_conflict() {
 /// 同一个 `ses_*` 属于两台设备各自的 opencode 库：两条都成功。
 #[tokio::test]
 async fn the_same_acp_id_on_another_device_is_not_a_duplicate() {
-    let hub = common::Hub::boot().await;
-    let a = enroll_device(
-        &hub,
-        &["git"],
-        &[AGENT],
-        Some(ok_rev("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")),
-    )
-    .await;
+    let (hub, a, _app) = common::boot_online_import_fixture().await;
     let b = enroll_device(
         &hub,
         &["git"],
@@ -388,15 +341,7 @@ async fn the_same_acp_id_on_another_device_is_not_a_duplicate() {
 /// 8 个已知无 ACP 入口的 agent + 1 个未知 id 全部 409，且没有会话行。
 #[tokio::test]
 async fn unsupported_provider_is_conflict_before_any_db_or_session_write() {
-    let hub = common::Hub::boot().await;
-    let stub = enroll_device(
-        &hub,
-        &["git"],
-        &[AGENT],
-        Some(ok_rev("1111111111111111111111111111111111111111")),
-    )
-    .await;
-    let app = hub_server::build_app(hub.state.clone());
+    let (hub, stub, app) = common::boot_online_import_fixture().await;
 
     let unsupported = [
         "claude",
@@ -434,9 +379,7 @@ async fn unsupported_provider_is_conflict_before_any_db_or_session_write() {
 /// 导入的会话带 `acp_session_id`，起点探测照常完成；开对话时该 id 非空下发。
 #[tokio::test]
 async fn imported_session_prefills_acp_session_id_and_conversation_open_downlinks_it() {
-    const HEAD: &str = "2222222222222222222222222222222222222222";
-    let hub = common::Hub::boot().await;
-    let stub = enroll_device(&hub, &["git"], &[AGENT], Some(ok_rev(HEAD))).await;
+    let (hub, stub, _app) = common::boot_online_import_fixture().await;
 
     let body = import_ok(&hub, &stub, "ses_imported", "nonce-prefill").await;
     let session_id = body["session_id"].as_str().expect("session_id").to_string();
@@ -488,16 +431,8 @@ async fn imported_session_prefills_acp_session_id_and_conversation_open_downlink
 /// `missing_session`，而是设备签名的 401。
 #[tokio::test]
 async fn browser_session_and_csrf_rules_are_unchanged() {
-    let hub = common::Hub::boot().await;
-    let stub = enroll_device(
-        &hub,
-        &["git"],
-        &[AGENT],
-        Some(ok_rev("3333333333333333333333333333333333333333")),
-    )
-    .await;
+    let (hub, stub, app) = common::boot_online_import_fixture().await;
     let (session, csrf) = login(&hub).await;
-    let app = hub_server::build_app(hub.state.clone());
 
     // 无 cookie 的 /api/* 仍是 401 missing_session。
     let req = Request::builder()
@@ -615,16 +550,8 @@ fn exempt_tables_and_message_type_count_are_unchanged() {
 /// 页面路径建的会话 `acp_session_id` 必须是 `NULL`（导入初值不泄漏过去）。
 #[tokio::test]
 async fn ordinary_create_session_still_writes_null_acp_session_id() {
-    let hub = common::Hub::boot().await;
-    let _stub = enroll_device(
-        &hub,
-        &["git"],
-        &[AGENT],
-        Some(ok_rev("4444444444444444444444444444444444444444")),
-    )
-    .await;
+    let (hub, _stub, app) = common::boot_online_import_fixture().await;
     let (session, csrf) = login(&hub).await;
-    let app = hub_server::build_app(hub.state.clone());
 
     let req = common::browser_request(
         "POST",
@@ -690,15 +617,7 @@ fn the_hub_dto_field_order_matches_the_cli_canonical_body() {
 /// `device_signature_invalid`；`GET` → 405（不是 401、不是 SPA 的 200）。
 #[tokio::test]
 async fn device_import_route_is_not_under_the_browser_auth_layer() {
-    let hub = common::Hub::boot().await;
-    let stub = enroll_device(
-        &hub,
-        &["git"],
-        &[AGENT],
-        Some(ok_rev("5555555555555555555555555555555555555555")),
-    )
-    .await;
-    let app = hub_server::build_app(hub.state.clone());
+    let (hub, stub, app) = common::boot_online_import_fixture().await;
 
     let signed = signed_import(
         &stub.kp,
