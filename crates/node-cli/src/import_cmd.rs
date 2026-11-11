@@ -167,7 +167,7 @@ fn run_list<W: Write, E: Write>(
         Ok(provider) => provider,
         Err(failure) => return report(err, failure),
     };
-    let base = resolve_base(args.data_dir.as_deref(), data_dir);
+    let base = data_base(args.data_dir.as_deref(), data_dir);
     let sessions = match provider.list(&base) {
         Ok(sessions) => sessions,
         Err(error) => return report(err, map_import_error(error)),
@@ -212,7 +212,7 @@ fn run_bind<W: Write, E: Write>(
         Ok(provider) => provider,
         Err(failure) => return report(err, failure),
     };
-    let base = resolve_base(args.data_dir.as_deref(), data_dir);
+    let base = data_base(args.data_dir.as_deref(), data_dir);
 
     // 身份**只读**加载。没有 node_id 就停下——绝不临时 enroll，也绝不发请求。
     let identity = match Identity::load(&identity_file(&base)) {
@@ -276,9 +276,12 @@ fn provider_for(id: &str) -> Result<&'static dyn import::HistoryProvider, Import
     }
 }
 
-/// `run_with` 注入的是 `<平台数据目录>/agentfleet`；provider 与身份文件
-/// 都按平台数据目录定位（`opencode/opencode.db`、`agentfleet/identity.json`）。
-fn resolve_base(flag: Option<&Path>, injected: &Path) -> PathBuf {
+/// 求平台数据基目录：`--data-dir` 覆盖优先，缺省只取注入的
+/// `<base>/agentfleet` 的父目录（无父目录时原样返回）。
+///
+/// **不解析、不校验、不规范化路径**：这里只做「覆盖或取父目录」这一步，
+/// 路径语义归 provider / 身份文件各自处理。
+fn data_base(flag: Option<&Path>, injected: &Path) -> PathBuf {
     match flag {
         Some(dir) => dir.to_path_buf(),
         None => injected
@@ -525,20 +528,17 @@ mod tests {
     #[test]
     fn the_base_dir_is_the_parent_of_the_injected_agentfleet_dir() {
         let injected = Path::new("/home/u/.local/share/agentfleet");
+        assert_eq!(data_base(None, injected), Path::new("/home/u/.local/share"));
         assert_eq!(
-            resolve_base(None, injected),
-            Path::new("/home/u/.local/share")
-        );
-        assert_eq!(
-            identity_file(&resolve_base(None, injected)),
+            identity_file(&data_base(None, injected)),
             Path::new("/home/u/.local/share/agentfleet/identity.json")
         );
         assert_eq!(
-            resolve_base(Some(Path::new("/tmp/xdg")), injected),
+            data_base(Some(Path::new("/tmp/xdg")), injected),
             Path::new("/tmp/xdg")
         );
         assert_eq!(
-            identity_file(&resolve_base(Some(Path::new("/tmp/xdg")), injected)),
+            identity_file(&data_base(Some(Path::new("/tmp/xdg")), injected)),
             Path::new("/tmp/xdg/agentfleet/identity.json")
         );
     }
