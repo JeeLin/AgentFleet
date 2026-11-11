@@ -223,7 +223,6 @@ mod tests {
     fn candidate() -> ImportCandidate {
         ImportCandidate {
             provider: "opencode",
-            agent_id: "opencode".to_string(),
             acp_session_id: "ses_abc".to_string(),
             cwd: "/tmp/work".to_string(),
         }

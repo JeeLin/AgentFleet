@@ -75,12 +75,13 @@ pub struct HistoricalSession {
 /// `acp_session_id` 直接取 provider 的会话 id（opencode 的 `ses_*`），
 /// **不转换、不加前缀**：Hub 打开对话时把它下发给设备走 `session/load`，
 /// 换一个 id 就等于换了一个会话。
+///
+/// `provider` 同时就是 Hub 侧的 `agent_id`（v1 两者 1:1 同源），不再另设
+/// 一个恒等的字段：CLI 发签名请求时直接取它。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportCandidate {
-    /// 提供方 id。
+    /// 提供方 id；同时作为 Hub 的 `agent_id`。
     pub provider: &'static str,
-    /// Hub 侧的 `agent_runtime.agent_id`（与 provider id 同源）。
-    pub agent_id: String,
     /// 恢复这条会话要用的 ACP 会话 id。
     pub acp_session_id: String,
     /// 会话的工作目录。

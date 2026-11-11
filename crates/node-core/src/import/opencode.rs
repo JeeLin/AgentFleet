@@ -109,7 +109,6 @@ impl super::HistoryProvider for Opencode {
         validate_workspace_path(&row.cwd)?;
         Ok(ImportCandidate {
             provider: self.id(),
-            agent_id: self.id().to_string(),
             // **原样**交出去：opencode 的 `ses_*` 就是 ACP `session/load` 认的 id。
             acp_session_id: row.external_session_id,
             cwd: row.cwd,

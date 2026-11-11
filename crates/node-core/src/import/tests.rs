@@ -341,7 +341,6 @@ fn resolve_returns_the_raw_acp_session_id() {
 
     let got = Opencode.resolve(d.path(), "ses_abc").expect("解析会话");
     assert_eq!(got.acp_session_id, "ses_abc", "不得改写 id");
-    assert_eq!(got.agent_id, "opencode");
     assert_eq!(got.provider, "opencode");
     assert_eq!(got.cwd, "/root/ws");
     assert_eq!(
