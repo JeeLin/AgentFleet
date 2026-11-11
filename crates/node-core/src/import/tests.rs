@@ -447,25 +447,65 @@ fn sql_is_parameterized() {
 /// **对真实安装的 opencode 走一遍**（真数据目录、真库）。
 ///
 /// CI 上通常没装 opencode，所以标 `#[ignore]`：`cargo test -p node-core --
-/// --ignored` 在有 opencode 的机器上跑。装与没装都算通过，两种情形各断言一次
-/// ——`if installed { ... }` 之后什么都不做等于没测。
+/// --ignored` 在有 opencode 的机器上跑。**两种情形都各有断言**：
+/// - 没装 / 没跑过 → `DbMissing`，同时断言本机数据目录里确实没有那个库文件，
+///   而不是「随便一个错误也算过」；
+/// - 装了 → 断言 `session_v2` 的列数 / `time_updated` / `id` 形状 / `resolve`
+///   往返，这才是对真货成立的那条证明。
 ///
-/// 这条证明的是**对真货也成立**：真库有 37 列、时间列叫 `time_updated`，
-/// 与夹具的最小形状不同；列名假设若有错，只有这条会红。
+/// 旧版在 `DbMissing` 分支直接 `return`、cwd 不合法时整段跳过，于是
+/// 任意恒返 `DbMissing` 的实现都能让它变绿；`#[ignore]` 又让默认 CI 看不到。
 #[test]
 #[ignore = "需要本机装有 opencode 并跑过至少一次会话"]
 fn a_real_opencode_database_lists_and_resolves_a_session() {
     let Some(base) = dirs::data_dir() else {
         panic!("本平台没有数据目录，无从探测");
     };
+    let db = base.join("opencode").join("opencode.db");
     let sessions = match Opencode.list(&base) {
-        Ok(s) => s,
+        Ok(s) => {
+            assert!(db.is_file(), "读成功了却找不到真库文件：{}", db.display());
+            s
+        }
         Err(ImportError::DbMissing) => {
-            // 没装 / 没跑过：这与 `detect.rs` 的 `NotInstalled` 同一口径。
+            // 没装 / 没跑过：与 `detect.rs` 的 `NotInstalled` 同一口径。
+            // 这条分支也必须**证伪**：库文件不该存在，且 resolve 同因失败。
+            assert!(!db.is_file(), "库文件在却报 DbMissing：{}", db.display());
+            assert_eq!(
+                Opencode.resolve(&base, "ses_x"),
+                Err(ImportError::DbMissing),
+                "同一份缺失必须让 resolve 也报 DbMissing"
+            );
             return;
         }
         Err(e) => panic!("真库读失败：{e}"),
     };
+
+    // 真库有 37 列、时间列叫 `time_updated`，与夹具的最小形状不同。
+    // 用只读连接核对 schema，列名假设若有错只有这一条会红。
+    let conn = super::opencode::open_read_only(&base).expect("真库必须能只读打开");
+    let mut pragma = conn
+        .prepare("PRAGMA table_info(\"session_v2\")")
+        .expect("PRAGMA");
+    let names: Vec<String> = pragma
+        .query_map([], |r| r.get::<_, String>(1))
+        .expect("列名")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("列名");
+    assert_eq!(names.len(), 37, "真库 session_v2 应有 37 列：{names:?}");
+    assert!(
+        names.iter().any(|n| n == "time_updated"),
+        "真库列名：{names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "time_created"),
+        "真库列名：{names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "directory"),
+        "真库列名：{names:?}"
+    );
+
     assert!(!sessions.is_empty(), "真库不该是空的");
     let first = sessions.first().expect("已断言非空");
     assert!(
@@ -474,12 +514,22 @@ fn a_real_opencode_database_lists_and_resolves_a_session() {
         first.external_session_id
     );
 
-    // 目录合法的会话必须能解析回来，且 id 不变。
+    // 目录合法的会话必须能解析回来，且 id 不变。cwd 不合法（Windows 盘符，
+    // 本里程碑明确不支持）也要断言，不能整段跳过：resolve 必须报
+    // `InvalidWorkspacePath`，而不是悄悄返回一条不可用的候选。
     if first.cwd.starts_with('/') || first.cwd.starts_with('~') {
         let got = Opencode
             .resolve(&base, &first.external_session_id)
             .expect("解析真会话");
         assert_eq!(got.acp_session_id, first.external_session_id);
         assert_eq!(got.cwd, first.cwd);
+        assert_eq!(got.provider, "opencode");
+    } else {
+        assert_eq!(
+            Opencode.resolve(&base, &first.external_session_id),
+            Err(ImportError::InvalidWorkspacePath),
+            "不支持的 cwd 必须被拒：{:?}",
+            first.cwd
+        );
     }
 }
