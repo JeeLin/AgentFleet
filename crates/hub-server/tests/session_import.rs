@@ -470,6 +470,119 @@ async fn unsupported_provider_is_conflict_before_any_db_or_session_write() {
 }
 
 // ---------------------------------------------------------------------------
+// 5b. 导入端点自己的门禁接线（不靠 `api.rs` 的存量单测兜底）
+// ---------------------------------------------------------------------------
+
+/// 三个门禁必须**从导入端点这一侧**各断言一次：
+/// `validate_path` / `device_offline` / `agent_unavailable`。
+///
+/// 以前 12 次 `enroll_device` 全传可用的 `opencode`，13 次请求全传
+/// `/srv/app`，设备全程在线——把共享 helper 里的门禁删掉，本文件仍全绿，
+/// 只有 `api.rs` 的单测会红，而「导入端点有没有接上」没有任何断言。
+/// 每条都顺带断言**不落会话行**和**不触发起点探测**（门禁在 INSERT 之前）。
+fn signed_import_for_gate(
+    stub: &common::DeviceStub,
+    cwd: &str,
+    acp: &str,
+    nonce: &str,
+) -> common::SignedImport {
+    signed_import(
+        &stub.kp,
+        &stub.node_id,
+        AGENT,
+        acp,
+        cwd,
+        "gate",
+        now_secs(),
+        nonce,
+    )
+}
+
+async fn assert_gate_conflict(
+    hub: &common::Hub,
+    stub: &common::DeviceStub,
+    app: &axum::Router,
+    signed: &common::SignedImport,
+    expected: &str,
+) {
+    let (status, body) = send(app, signed.request()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    assert_eq!(err_code(&body), expected, "body: {body}");
+    assert_eq!(session_count(hub), 0, "门禁失败不得落会话行");
+    assert_eq!(
+        stub.rev_count.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "门禁失败不得触发 base_rev 探测"
+    );
+}
+
+/// Hub 侧非法路径：盘符 / 相对路径都不是 `/` 或 `~` 开头，400。
+///
+/// 注意这个 code 是 **400** `invalid_workspace_path`，与另外两条 409 分开：
+/// 请求形状本身错了，重试一百次也不会变对。
+#[tokio::test]
+async fn import_endpoint_rejects_a_hub_invalid_workspace_path() {
+    let (hub, stub, app) = common::boot_online_import_fixture().await;
+    for (i, cwd) in ["C:\\Users\\x", "relative/path"].iter().enumerate() {
+        let signed = signed_import_for_gate(&stub, cwd, "ses_bad_path", &format!("nonce-path-{i}"));
+        let (status, body) = send(&app, signed.request()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "cwd {cwd}: {body}");
+        assert_eq!(
+            err_code(&body),
+            "invalid_workspace_path",
+            "cwd {cwd}: {body}"
+        );
+        assert_eq!(session_count(&hub), 0);
+    }
+    assert_eq!(stub.rev_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// agent 不可用（`agent_runtime` 里 `available = 0`）→ 409 `agent_unavailable`。
+/// 走 `replace_detected` 而不是改心跳内存：门禁读的是**库**，这正是它不读
+/// `Reports` 的那条约束。
+#[tokio::test]
+async fn import_endpoint_rejects_an_unavailable_agent() {
+    let (hub, stub, app) = common::boot_online_import_fixture().await;
+    hub.state
+        .agent_runtime()
+        .replace_detected(
+            &stub.node_id,
+            &[(
+                AGENT.to_string(),
+                AGENT.to_string(),
+                Some("0.0.1".to_string()),
+                false,
+                Some("binary not found".to_string()),
+            )],
+            "unix:1700000000",
+        )
+        .expect("replace_detected");
+    let signed = signed_import_for_gate(&stub, CWD, "ses_no_agent", "nonce-no-agent");
+    assert_gate_conflict(&hub, &stub, &app, &signed, "agent_unavailable").await;
+}
+
+/// 设备离线（心跳已过 `OFFLINE_AFTER`）→ 409 `device_offline`。
+///
+/// 直接往 `Reports` 里写一份过期上报：判离线只认心跳年龄，不看 WS 是否还连着，
+/// 所以 WS 桩照样活着也不影响这条门禁；也不需要真的 sleep 45 秒。
+#[tokio::test]
+async fn import_endpoint_rejects_an_offline_device() {
+    let (hub, stub, app) = common::boot_online_import_fixture().await;
+    let stale = hub_core::reports::Report {
+        node_version: "0.1.0".to_string(),
+        capabilities: serde_json::json!({"connectors": ["git"], "agents": []}),
+        resources: serde_json::Value::Null,
+        workspace_roots: Vec::new(),
+        at: std::time::Instant::now()
+            - hub_core::reports::OFFLINE_AFTER
+            - std::time::Duration::from_secs(1),
+    };
+    hub.state.reports().record(&stub.node_id, stale);
+    let signed = signed_import_for_gate(&stub, CWD, "ses_offline", "nonce-offline");
+    assert_gate_conflict(&hub, &stub, &app, &signed, "device_offline").await;
+}
+
+// ---------------------------------------------------------------------------
 // 6. 预填 + 对话下发
 // ---------------------------------------------------------------------------
 
