@@ -131,7 +131,7 @@ pub async fn require_device_signature(
     // 两个 layer 里说法不同，运维会以为它们是两件事。
     match state.is_initialized() {
         Ok(true) => {}
-        Ok(false) => return ApiError::forbidden("hub_not_initialized").into_response(),
+        Ok(false) => return ApiError::forbidden(err::HUB_NOT_INITIALIZED).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "cannot read hub init state");
             return ApiError::internal().into_response();

@@ -25,7 +25,7 @@ use axum::response::{IntoResponse, Response};
 use hub_core::session::SessionStore;
 
 use crate::routes::{api, is_auth_exempt, is_csrf_exempt, is_init_mode_path};
-use crate::{ApiError, AppState, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};
+use crate::{err, ApiError, AppState, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};
 
 /// 会改变服务端状态的 HTTP 方法（CSRF 双重提交适用范围）。
 pub const STATE_CHANGING_METHODS: &[&str] = &["POST", "PUT", "PATCH", "DELETE"];
@@ -38,7 +38,7 @@ pub async fn require_auth(State(state): State<AppState>, mut req: Request, next:
     if !is_init_mode_path(&path) {
         match state.is_initialized() {
             Ok(true) => {}
-            Ok(false) => return ApiError::forbidden("hub_not_initialized").into_response(),
+            Ok(false) => return ApiError::forbidden(err::HUB_NOT_INITIALIZED).into_response(),
             Err(e) => {
                 // 不把 AuthError 的内容回显给客户端：它是 storage 层的错误串，
                 // 万一将来带上路径/连接串就会从响应里漏出去。

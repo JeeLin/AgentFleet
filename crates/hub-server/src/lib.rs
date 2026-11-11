@@ -63,6 +63,8 @@ pub const WS_MAX_MESSAGE_BYTES: usize = protocol::MAX_FRAME_BYTES;
 /// 静默落进默认分支，显示一句「没成功」而不说清哪里不对。`read_body` 的两个
 /// 调用点（`/send`、`/open`）各写一份时，症状正是这样。
 pub mod err {
+    /// Hub 尚未初始化（两个认证 layer 逐句同措辞的 403 code）。
+    pub const HUB_NOT_INITIALIZED: &str = "hub_not_initialized";
     /// JSON body 缺失 / 形状不对 / 超过上限。
     pub const BAD_BODY: &str = "invalid_request_body";
     /// 工作区路径不合法（既非绝对路径也不以 `~` 开头）。
