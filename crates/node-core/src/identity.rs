@@ -44,8 +44,9 @@ const IDENTITY_MODE: u32 = 0o600;
 #[cfg(unix)]
 const DATA_DIR_MODE: u32 = 0o700;
 
-/// 基目录下的子目录名。
-const APP_DIR: &str = "agentfleet";
+/// 基目录下的子目录名。**导入链路只读拼路径时也必须引用这一份**（不能
+/// 走 `data_dir_in()`——那个入口会创建目录，而 `afcli import` 是只读的）。
+pub const APP_DIR: &str = "agentfleet";
 
 /// node 数据目录环境变量名。与 Hub 的 `AFHUB_DATA_DIR` 同一取向。
 const ENV_DATA_DIR: &str = "AFCLI_DATA_DIR";

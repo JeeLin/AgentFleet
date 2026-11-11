@@ -15,7 +15,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use node_core::identity::{Identity, IDENTITY_FILE};
+use node_core::identity::{Identity, APP_DIR, IDENTITY_FILE};
 use node_core::import::{self, ImportError, ProviderLookup};
 
 use crate::import_http::{self, ImportHttpError};
@@ -289,7 +289,9 @@ fn resolve_base(flag: Option<&Path>, injected: &Path) -> PathBuf {
 }
 
 fn identity_file(base: &Path) -> PathBuf {
-    base.join("agentfleet").join(IDENTITY_FILE)
+    // 用 `node_core::identity::APP_DIR` 而不是手抄子目录名；**不**调用
+    // `data_dir_in()`：那个入口会创建目录，导入只读、不得写文件系统。
+    base.join(APP_DIR).join(IDENTITY_FILE)
 }
 
 /// `--hub` 优先，其次 `AFCLI_HUB_URL`，最后本机缺省 WS 地址。
