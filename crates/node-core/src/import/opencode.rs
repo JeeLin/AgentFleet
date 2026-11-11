@@ -11,7 +11,8 @@
 //! `time_updated`）。写死 `SELECT id, title, directory, updated_at` 在它改一列
 //! 名字之后**整条 provider 直接报错**，而用户会以为是我们坏了。所以先读
 //! `PRAGMA table_info(session_v2)`，按**列名**映射；只有 `id` 是必需的，
-//! 其余按存在性降级（`title` 缺失 → 空串，时间列缺失 → 不排序、`None`）。
+//! 其余按存在性降级（`title` 缺失 → 空串，时间列缺失 → falls back to id DESC，
+//! `updated_at` is None）。见 [`Columns::order_by`] 与 `list()` 的 `ORDER BY`。
 //!
 //! 拼进 SQL 的列名**只来自本文件的常量**：`table_info` 读回来的名字只用于
 //! 「这个常量在不在表里」的比对，绝不把库里的字符串拼进语句。
