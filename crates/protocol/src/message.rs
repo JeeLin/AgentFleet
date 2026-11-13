@@ -87,8 +87,17 @@ pub struct AuthFail {
 }
 
 /// `auth_fail.reason` 的合法取值（`protocol.md` §4 表格逐字一致）。
+///
+/// **这是 WS 帧里的 reason 域**：取值是给**设备**读的短句（带空格、可展示）。
+/// 别与 `hub_server::err::*` 混用——那是**浏览器 / 设备 HTTP 的 `code` 域**，
+/// 取值是 `snake_case` 机器码。两域各有一个 `HUB_NOT_INITIALIZED`，
+/// **值不同**（`"hub not initialized"` vs `"hub_not_initialized"`）：
+/// 跨域复用即协议不匹配（WS 帧回一个 HTTP code，设备端匹配不上；
+/// 反之页面按 code 分支会落进默认臂）。按名字全局搜索会同时命中两个，别照抄。
 pub mod reason {
     /// Hub 未初始化：`secret` 表无 `hub.password`（§3.1）。
+    /// WS 帧的 `auth_fail.reason`；对应 HTTP 侧是
+    /// `hub_server::err::HUB_NOT_INITIALIZED`（`"hub_not_initialized"`）。
     pub const HUB_NOT_INITIALIZED: &str = "hub not initialized";
     /// 指纹已被另一 node_id 注册——这才是「另一台机器」。
     pub const FINGERPRINT_ALREADY_REGISTERED: &str = "fingerprint already registered";
