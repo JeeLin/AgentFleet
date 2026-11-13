@@ -370,6 +370,20 @@ struct Inner {
     /// 设备签名导入的 nonce 一次性集合（v0.7.4）。**进程内存**，
     /// 重启即清空——边界见 `security-and-lifecycle.md` §1.1。
     import_nonces: import_auth::ImportNonces,
+    /// 任务仓储。
+    ///
+    /// **存在共享状态里，而不是让每个任务路由各建一个**：`TaskRepo::new` 只是
+    /// 存一个连接池句柄（零成本），所以这里省下的不是性能；省下的是
+    /// 「谁在写这张表」这个问题的答案。五个路由各自
+    /// `TaskRepo::new(state.pool().clone())` 之后，grep 一个仓储类型名
+    /// 会得到五处构造点，却看不出哪一处是权威写入方。
+    tasks: hub_storage::task::TaskRepo,
+    /// 执行仓储。与 [`Self::tasks`] 同一条理由（详情页要按任务列执行记录）。
+    ///
+    /// 已有的 `routes::agents_detail` / `routes::devices` 仍在自建
+    /// `ExecutionRepo`——那是本里程碑之前就有的调用点，改它们属于另一个子任务
+    /// 的范围，这里不顺手改（改了会让同一份 diff 混进两种改动）。
+    executions: hub_storage::execution::ExecutionRepo,
 }
 
 impl AppState {
@@ -440,6 +454,11 @@ impl AppState {
         let agent_runtime = hub_storage::agent::AgentRuntimeRepo::new(pool.clone());
         let agent_config = hub_storage::AgentConfigRepo::new(pool.clone());
         let trajectory = hub_storage::TrajectoryRepo::new(pool.clone());
+        // 任务 / 执行仓储在这里建一次存进 `Inner`：`TaskRepo::new` 只存句柄
+        // （零成本构造），所以不需要 `OnceCell`；但**必须只有一个**，
+        // 否则「谁在写这张表」要靠读五个路由才能回答。
+        let tasks = hub_storage::task::TaskRepo::new(pool.clone());
+        let executions = hub_storage::execution::ExecutionRepo::new(pool.clone());
         let state = Self(Arc::new(Inner {
             auth,
             setup: Mutex::new(None),
@@ -463,6 +482,8 @@ impl AppState {
             streams: routes::stream::Streams::new(),
             bindings: routes::stream::Bindings::new(),
             import_nonces: import_auth::ImportNonces::new(),
+            tasks,
+            executions,
         }));
 
         if state.is_initialized()? {
@@ -558,6 +579,19 @@ impl AppState {
     /// 对话轨迹仓储。写侧在 WS 读循环，读侧在 [`routes::conversation::trajectory`]。
     pub fn trajectory(&self) -> &hub_storage::TrajectoryRepo {
         &self.0.trajectory
+    }
+
+    /// 任务仓储（`/api/projects/{id}/tasks`、`/api/tasks/*` 的唯一入口）。
+    ///
+    /// 路由层**不要**再 `TaskRepo::new(state.pool().clone())`：那会让
+    /// 「谁在写 `task` 表」变成一次跨文件的 grep。
+    pub fn tasks(&self) -> &hub_storage::task::TaskRepo {
+        &self.0.tasks
+    }
+
+    /// 执行仓储（任务详情页按任务列执行记录）。
+    pub fn executions(&self) -> &hub_storage::execution::ExecutionRepo {
+        &self.0.executions
     }
 
     /// 连接池句柄（`/api/*` 里的会话仓储用它）。
@@ -920,6 +954,60 @@ mod tests {
 
     fn tempdir() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
+    }
+
+    /// `AppState::tasks()` / `AppState::executions()` 指向**同一个库**，
+    /// 且与路由层自建仓储看到的是同一份数据。
+    ///
+    /// 为什么要这条：这两个访问器的全部价值就是「只有一个构造点」。
+    /// 若它们在 `bootstrap` 里拿错了 pool（比如各开一个库文件），
+    /// 路由层写进 `state.tasks()` 的任务在别处永远查不到，而那种错
+    /// 不会在编译期暴露。
+    ///
+    /// 判红方式：把 `Inner.tasks` 改成另开一个 pool（或干脆换成
+    /// `TaskRepo::new(Db::open(...))`），这条立刻红。
+    #[tokio::test]
+    async fn the_task_and_execution_repos_share_the_hub_database() {
+        use hub_storage::task::{DoneWhen, NewTask};
+
+        let d = tempdir();
+        let (_app, st) = app_at(d.path());
+        let conn = st.pool().get().unwrap();
+        conn.execute_batch(
+            "INSERT INTO project (id, name, shape, created_at)
+                 VALUES ('p_a', 'app', 'central', 'unix:0');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let t = st
+            .tasks()
+            .create(
+                NewTask {
+                    project_id: "p_a".into(),
+                    title: "任务".into(),
+                    done_when: DoneWhen {
+                        criteria: Some("all_tests_pass".into()),
+                        description: None,
+                    },
+                    created_by: Some("user".into()),
+                    base_commit: None,
+                },
+                "unix:10",
+            )
+            .unwrap();
+
+        // 从「别的仓储实例」读得回来 → 两边指向同一个库。
+        let via_pool = hub_storage::task::TaskRepo::new(st.pool().clone())
+            .get(&t.id)
+            .unwrap()
+            .expect("state.tasks() 写进去的任务必须能被同一个 pool 读到");
+        assert_eq!(via_pool.id, t.id);
+
+        // `executions()` 同理：它至少得是个能回答「没有这条执行」的仓储，
+        // 而不是 panic 或指向另一份库。
+        let e = st.executions().get("nope").unwrap();
+        assert!(e.is_none());
     }
 
     #[tokio::test]

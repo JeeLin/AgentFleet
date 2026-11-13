@@ -153,6 +153,27 @@ pub enum StorageError {
     #[error("no such execution: {id:?}")]
     ExecutionNotFound { id: String },
 
+    /// `failure_kind` 不在八形态里（`crate::execution::FailureKind`）。
+    ///
+    /// 与 [`StorageError::InvalidTaskState`] 同一条口径：**不回落**成最接近的
+    /// 那一种。回落会把「上游送了个我们不认识的名字」伪装成一个具体的失败
+    /// 形态，缺陷归因统计里凭空多出一批错账。
+    ///
+    /// 只带那串值、不带允许集合：允许集合是 `FailureKind` 的唯一定义处。
+    #[error(
+        "invalid failure_kind {0:?}: must be one of baseline_mismatch / env_broken / \
+         disk_exhausted / agent_error / task_failed / interrupted / rejected / superseded"
+    )]
+    InvalidFailureKind(String),
+
+    /// 想写一条**没有原因串**的失败。
+    ///
+    /// `task-model.md:75`：「没有原因串的失败等于没发生」。拒绝而不是写个
+    /// 空串，是因为写了空串之后「失败留痕」那一格看上去有值、实际什么都没说，
+    /// 而没人会再去补它。
+    #[error("a failure must carry a reason: refusal to record one without it")]
+    FailureReasonRequired,
+
     /// 会话已经挂到别的一次执行下。
     ///
     /// 归属只写一次：中途改会让执行的历史归属对不上。

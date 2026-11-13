@@ -22,13 +22,13 @@ pub use agent::{AgentConfig, AgentConfigRepo, AgentRuntime, AgentRuntimeRepo};
 pub use binding::{Binding, BindingRepo, BindingSpec, CleanupPolicy};
 pub use db::{data_dir, open, open_in, set_umask_077, Db};
 pub use error::StorageError;
-pub use execution::{Execution, ExecutionRepo, ExecutionState, NewExecution};
+pub use execution::{Execution, ExecutionRepo, ExecutionState, FailureKind, NewExecution};
 pub use project::{NewProject, Project, ProjectRepo, ProjectShape, ThemeColor};
 pub use repo::{
     base64url_decode, base64url_of, Device, DeviceRepo, DeviceStatus, NewDevice, SecretRepo,
 };
 pub use session::{BaseRevStatus, Session, SessionDetail, SessionRepo, SessionState};
-pub use task::{DoneWhen, NewTask, Task, TaskRepo, TaskState};
+pub use task::{DoneWhen, NewTask, Task, TaskPatch, TaskRepo, TaskState};
 pub use task_state::{can_transition, check_transition, legal_edges};
 pub use trajectory::{Gap, NewEvent, TrajectoryEvent, TrajectoryRepo, TurnBounds, TURN_END_KIND};
 pub use workspace::{

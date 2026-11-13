@@ -187,6 +187,50 @@ pub struct NewTask {
     pub base_commit: Option<String>,
 }
 
+/// 改任务的补丁：**全字段可选，`None` = 保持原值**。
+///
+/// # 为什么约束列是双层 `Option`
+///
+/// 单层 `Option<String>` 里 `None` 只能表达一件事，而这里有两件：
+/// 「这次不改这个字段」与「把这个字段清空成不限」。把两者压成同一个值，
+/// 就会出现「只想改标题，结果把所有约束清空了」——这正是「全字段覆盖」式
+/// 实现的症状。于是：
+///
+/// - 外层 = **改不改**（`None` = 不动这一列）；
+/// - 内层 = **改成什么**（`Some(None)` = 写 `NULL`，即「不限」；
+///   `Some(Some(v))` = 写 `v`）。
+///
+/// `title` / `done_when` 不做双层：它们非空才有意义（`title` 是卡片标题，
+/// 清空等于让一张卡变成无名；`DoneWhen` 两列都空会被 [`DoneWhen::validate`]
+/// 拒掉），所以「清空」不是一个合法意图，不需要第二层。
+#[derive(Debug, Default, Clone)]
+pub struct TaskPatch {
+    pub title: Option<String>,
+    pub done_when: Option<DoneWhen>,
+    /// 双层 Option：外层 = 改不改，内层 = 改成什么（`Some(None)` 清空为「不限」）
+    pub allowed_devices: Option<Option<String>>,
+    pub allowed_agents: Option<Option<String>>,
+    pub required_capabilities: Option<Option<String>>,
+    pub retry_limit: Option<Option<i64>>,
+}
+
+impl TaskPatch {
+    /// 一个字的补丁都不含——「这次没有任何字段要改」。
+    ///
+    /// 为什么要能问：`update` 按命中的字段逐条执行 `UPDATE`，每条都带
+    /// `version = version + 1`，所以**空补丁本来就不会涨 version**（一条都不跑）。
+    /// 这个判定留给调用方（HTTP 层用它决定是不是直接回 204），
+    /// 省得调用方自己把六个字段数一遍。
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none()
+            && self.done_when.is_none()
+            && self.allowed_devices.is_none()
+            && self.allowed_agents.is_none()
+            && self.required_capabilities.is_none()
+            && self.retry_limit.is_none()
+    }
+}
+
 impl Task {
     /// 这个任务是不是**只能人判**——看板据此挂「需人工验收」标签。
     ///
@@ -348,6 +392,205 @@ impl TaskRepo {
         }
         self.get(id)?
             .ok_or_else(|| StorageError::TaskNotFound { id: id.to_string() })
+    }
+
+    /// 改任务的标题 / 验收标准 / 约束。返回**新的 `version`**。
+    ///
+    /// # SQL 形状是固定的三条 `UPDATE`
+    ///
+    /// 按 `patch` 命中的字段各执行一条，**全部在同一事务里**，每条都带
+    /// `version = version + 1`：
+    ///
+    /// - `title` 一条；
+    /// - `done_when`（两列）一条——两列必须同进同退，拆成两条会出现
+    ///   「criteria 改了、description 没改」的中间态被别的连接读到；
+    /// - 四条约束列一条——它们共同描述「这个任务要什么条件」，一次改完。
+    ///
+    /// 为什么不用 `Option` 拼动态 SQL：拼出来的语句每次形状都不同，
+    /// SQLite 那边的语句缓存全部落空，而且「哪些列会被写」这个问题
+    /// 变成要读代码才知道。固定三条一眼可数。
+    ///
+    /// # 为什么先校验再开事务
+    ///
+    /// `done_when` 先过 [`DoneWhen::validate`]：**校验失败不写库、`version` 也不涨**。
+    /// 「报错了但 version 涨了」比不报错更糟——用户看到「改过 N 次」里有一次
+    /// 是他没改成的。放在事务外还省掉一次回滚。
+    ///
+    /// # 空补丁
+    ///
+    /// 全 `None` 的补丁不改任何列，于是 `version` 也不涨（`version` 记的是
+    /// 「任务被改过几次」，没人改就不该 +1）。但要**确认任务存在**，
+    /// 否则调用方会以为改成功了。
+    pub fn update(&self, id: &str, patch: &TaskPatch, now: &str) -> Result<i64> {
+        if let Some(dw) = &patch.done_when {
+            // 先拒绝，再写——理由同上。
+            dw.validate()?;
+        }
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+
+        let mut touched = 0usize;
+        if let Some(title) = &patch.title {
+            let n = tx.execute(
+                "UPDATE task SET title = ?2, version = version + 1, updated_at = ?3
+                 WHERE id = ?1",
+                params![id, title, now],
+            )?;
+            touched += n;
+        }
+        if let Some(dw) = &patch.done_when {
+            let n = tx.execute(
+                "UPDATE task
+                    SET done_when_criteria = ?2, done_when_description = ?3,
+                        version = version + 1, updated_at = ?4
+                  WHERE id = ?1",
+                params![id, dw.criteria, dw.description, now],
+            )?;
+            touched += n;
+        }
+        if patch.allowed_devices.is_some()
+            || patch.allowed_agents.is_some()
+            || patch.required_capabilities.is_some()
+            || patch.retry_limit.is_some()
+        {
+            // 四条约束的赋值**各按自己那一层 Option 决定**，不能统一写成
+            // `SET col = ?`——那会把「这次不改」也写成 `NULL`（清空），
+            // 正是双层 `Option` 要挡住的那个 bug。
+            //
+            // 做法是「先读回原值、按需替换、整组写一次」：既保住「四条约束
+            // 一条 UPDATE、只涨一次 version」，又让没给的列保持原值。
+            let current = load_constraints(&tx, id)?;
+            let next = Constraints {
+                allowed_devices: pick(patch.allowed_devices.as_ref(), current.allowed_devices),
+                allowed_agents: pick(patch.allowed_agents.as_ref(), current.allowed_agents),
+                required_capabilities: pick(
+                    patch.required_capabilities.as_ref(),
+                    current.required_capabilities,
+                ),
+                retry_limit: pick(patch.retry_limit.as_ref(), current.retry_limit),
+            };
+            let n = tx.execute(
+                "UPDATE task
+                    SET allowed_devices = ?2, allowed_agents = ?3,
+                        required_capabilities = ?4, retry_limit = ?5,
+                        version = version + 1, updated_at = ?6
+                  WHERE id = ?1",
+                params![
+                    id,
+                    next.allowed_devices,
+                    next.allowed_agents,
+                    next.required_capabilities,
+                    next.retry_limit,
+                    now
+                ],
+            )?;
+            touched += n;
+        }
+
+        if touched == 0 {
+            // 两条路都走到这里：任务不存在（一次都没命中），或补丁是空的
+            // （命中 0 次但任务在）。靠再查一次区分，不猜。
+            let exists: Option<i64> = tx
+                .query_row("SELECT version FROM task WHERE id = ?1", params![id], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            return match exists {
+                Some(v) => Ok(v),
+                None => Err(StorageError::TaskNotFound { id: id.to_string() }),
+            };
+        }
+
+        // 故意**在事务里**读回 version：提交之后再读，别人可能又改了一次，
+        // 返回的就不是本次的结果了。
+        let version: i64 =
+            tx.query_row("SELECT version FROM task WHERE id = ?1", params![id], |r| {
+                r.get(0)
+            })?;
+        tx.commit()?;
+        Ok(version)
+    }
+
+    /// 一个项目的任务，可只取某一态；**固定 `created_at DESC`**。
+    ///
+    /// 按 `state` 分列由服务层做，这里**不在 SQL 里 pivot**：pivot 出来的列名
+    /// 会把六态写死在 SQL 里，加第七态就要改 SQL；而且「看板每列取哪些」
+    /// 是展示决策，属于调用方。
+    ///
+    /// 排序固定 `created_at DESC`（与 `prototype/assets/board.js` 的卡片顺序
+    /// 一致），**不按 `updated_at`**——否则改一下标题卡片就跳位置，
+    /// 多用户下会看到卡片乱跳。
+    pub fn list_for_project_with_state(
+        &self,
+        project_id: &str,
+        state: Option<TaskState>,
+    ) -> Result<Vec<Task>> {
+        let conn = self.pool.get()?;
+        // 两串 SQL 分开写而不是拼 `AND state = ?` 片段：两种查询各自是一次
+        // 完整的语句，读的人不必在脑子里把片段拼起来才知道会跑什么。
+        let raw = match state {
+            None => {
+                let mut stmt = conn.prepare(&format!(
+                    "{SELECT_COLS} WHERE project_id = ?1 ORDER BY created_at DESC, id DESC"
+                ))?;
+                let rows = stmt.query_map(params![project_id], row_to_raw)?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            }
+            Some(s) => {
+                let mut stmt = conn.prepare(&format!(
+                    "{SELECT_COLS} WHERE project_id = ?1 AND state = ?2
+                     ORDER BY created_at DESC, id DESC"
+                ))?;
+                let rows = stmt.query_map(params![project_id, s.as_str()], row_to_raw)?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            }
+        };
+        raw.into_iter().map(RawTask::into_task).collect()
+    }
+}
+
+/// 四条约束列的当前值（`None` = 库里是 `NULL`，即「不限」）。
+struct Constraints {
+    allowed_devices: Option<String>,
+    allowed_agents: Option<String>,
+    required_capabilities: Option<String>,
+    retry_limit: Option<i64>,
+}
+
+/// 读出四条约束列。任务不存在时返回全 `None`——调用方随后那条 `UPDATE`
+/// 会因影响 0 行而报 `TaskNotFound`，这里不必先判断。
+fn load_constraints(conn: &r2d2_sqlite::rusqlite::Connection, id: &str) -> Result<Constraints> {
+    let got = conn
+        .query_row(
+            "SELECT allowed_devices, allowed_agents, required_capabilities, retry_limit
+               FROM task WHERE id = ?1",
+            params![id],
+            |r| {
+                Ok(Constraints {
+                    allowed_devices: r.get(0)?,
+                    allowed_agents: r.get(1)?,
+                    required_capabilities: r.get(2)?,
+                    retry_limit: r.get(3)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(got.unwrap_or(Constraints {
+        allowed_devices: None,
+        allowed_agents: None,
+        required_capabilities: None,
+        retry_limit: None,
+    }))
+}
+
+/// 双层 `Option` 的**唯一**解引用点：外层 `None` 取原值，内层是什么就写什么。
+///
+/// 写成一份而不是四处 `match`：`Some(None)` 与 `None` 的差别只有这个函数
+/// 需要知道，散在四列上迟早有一列写反（而那正是「改标题顺手清空约束」）。
+fn pick<T: Clone>(patch: Option<&Option<T>>, current: Option<T>) -> Option<T> {
+    match patch {
+        None => current,
+        Some(v) => v.clone(),
     }
 }
 
@@ -917,5 +1160,377 @@ mod tests {
             tr.list_for_project("p_a").unwrap().is_empty(),
             "被拒的任务不得落库"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // 子任务 5：`TaskPatch` / `update` / `list_for_project_with_state`
+    // ---------------------------------------------------------------------
+
+    /// 直接读库里那四列约束的原始值。
+    ///
+    /// 为什么不经 `Task`：`Task` 结构体**还没有**这四个字段（本里程碑只加了
+    /// 列，没扩读模型），所以「列到底有没有被写」只能查 SQL。
+    /// 这正是这几条用例要钉的东西，用原始值断言反而更直接。
+    fn raw_constraints(
+        tr: &TaskRepo,
+        id: &str,
+    ) -> (Option<String>, Option<String>, Option<String>, Option<i64>) {
+        tr.pool
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT allowed_devices, allowed_agents, required_capabilities, retry_limit
+                   FROM task WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap()
+    }
+
+    fn raw_version(tr: &TaskRepo, id: &str) -> i64 {
+        tr.pool
+            .get()
+            .unwrap()
+            .query_row("SELECT version FROM task WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// 带全套约束的任务（四条约束都非 NULL，好让「有没有被清空」看得出来）。
+    fn task_with_all_constraints(tr: &TaskRepo) -> Task {
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+        let v = tr
+            .update(
+                &t.id,
+                &TaskPatch {
+                    allowed_devices: Some(Some("[\"n_1\"]".into())),
+                    allowed_agents: Some(Some("[\"opencode\"]".into())),
+                    required_capabilities: Some(Some("{\"arch\":\"x86_64\"}".into())),
+                    retry_limit: Some(Some(2)),
+                    ..TaskPatch::default()
+                },
+                "unix:100",
+            )
+            .unwrap();
+        assert_eq!(v, 2, "前提：一次改四条约束只涨一次 version");
+        tr.get(&t.id).unwrap().unwrap()
+    }
+
+    /// 只给 `title` 的补丁**只能动 `title`**，其余字段逐字段保持原值。
+    ///
+    /// 判红方式：把 `update` 写成「全字段覆盖」（没给的填 `NULL`），这条立刻红
+    /// ——`done_when`、四条约束与 `retry_limit` 都会变成 `None`。
+    #[test]
+    fn update_only_touches_the_fields_given() {
+        let (_d, tr) = setup();
+        let before = task_with_all_constraints(&tr);
+        let constraints_before = raw_constraints(&tr, &before.id);
+
+        tr.update(
+            &before.id,
+            &TaskPatch {
+                title: Some("改成 OIDC".into()),
+                ..TaskPatch::default()
+            },
+            "unix:200",
+        )
+        .unwrap();
+
+        let after = tr.get(&before.id).unwrap().unwrap();
+        assert_eq!(after.title, "改成 OIDC", "给了的字段要改");
+        // 逐字段断言：一条 `assert_eq!(after, before)` 说不清是哪一列被误改了。
+        assert_eq!(after.done_when, before.done_when, "done_when 没给，不得动");
+        assert_eq!(after.done_when.criteria.as_deref(), Some("all_tests_pass"));
+        assert_eq!(
+            after.done_when.description.as_deref(),
+            Some("全部测试通过且登录可用")
+        );
+        assert_eq!(
+            raw_constraints(&tr, &before.id),
+            constraints_before,
+            "四条约束没给，不得动（尤其不得被写成 NULL）"
+        );
+        assert_eq!(after.project_id, before.project_id);
+        assert_eq!(after.created_at, before.created_at, "created_at 不动");
+    }
+
+    /// 一次 `update` 让 `version` **恰好 +1**。
+    ///
+    /// 连调两次 → 从 1 到 3（不是 2：那就说明有一次没涨；也不是 4：那说明
+    /// 某次涨了两格）。
+    ///
+    /// 判红方式：把某条 `UPDATE` 里的 `version = version + 1` 删掉（少涨），
+    /// 或把三条 `UPDATE` 的更新写成两条会同时命中（多涨），这条立刻红。
+    #[test]
+    fn update_bumps_version_once_per_call() {
+        let (_d, tr) = setup();
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+        assert_eq!(raw_version(&tr, &t.id), 1, "新建任务 version 从 1 开始");
+
+        let v = tr
+            .update(
+                &t.id,
+                &TaskPatch {
+                    title: Some("第一次改".into()),
+                    ..TaskPatch::default()
+                },
+                "unix:100",
+            )
+            .unwrap();
+        assert_eq!(v, 2, "返回值就是新 version");
+
+        let v = tr
+            .update(
+                &t.id,
+                &TaskPatch {
+                    title: Some("第二次改".into()),
+                    ..TaskPatch::default()
+                },
+                "unix:200",
+            )
+            .unwrap();
+        assert_eq!(v, 3);
+        assert_eq!(raw_version(&tr, &t.id), 3);
+    }
+
+    /// `done_when` 两项全空 → 报错，且**库里的 `title` 与 `version` 都没变**。
+    ///
+    /// 判红方式：把 `update` 开头那句 `dw.validate()?` 删掉，这条立刻红
+    /// （会写进一个两项都空的 `done_when`，`version` 也会涨到 2）。
+    /// 或者把校验挪到事务提交之后——那会「报错了但 version 涨了」。
+    #[test]
+    fn update_with_an_invalid_done_when_writes_nothing() {
+        let (_d, tr) = setup();
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+        let version_before = raw_version(&tr, &t.id);
+
+        let e = tr
+            .update(
+                &t.id,
+                &TaskPatch {
+                    title: Some("不该生效".into()),
+                    done_when: Some(done_when(None, None)),
+                    ..TaskPatch::default()
+                },
+                "unix:100",
+            )
+            .unwrap_err();
+        assert!(
+            matches!(e, StorageError::InvalidDoneWhenCriteria(_)),
+            "{e:?}"
+        );
+
+        let after = tr.get(&t.id).unwrap().unwrap();
+        assert_eq!(
+            after.title, "把登录改成 OAuth",
+            "同一补丁里的 title 也不得落库"
+        );
+        assert_eq!(after.done_when, t.done_when, "done_when 不得变");
+        assert_eq!(
+            raw_version(&tr, &t.id),
+            version_before,
+            "被拒的补丁不得让 version 涨——「报错了但 version 涨了」比不报错更糟"
+        );
+    }
+
+    /// `Some(None)` = 显式清空成「不限」（列变 `NULL`）。
+    ///
+    /// 判红方式：把双层 `Option` 塌成单层（`None` 既表示「不改」又表示「清空」），
+    /// 这条和 `update_only_touches_the_fields_given` 会同时红——这正是双层
+    /// `Option` 存在的理由。
+    #[test]
+    fn update_clears_a_constraint_with_double_some_none() {
+        let (_d, tr) = setup();
+        let before = task_with_all_constraints(&tr);
+        assert_eq!(
+            raw_constraints(&tr, &before.id).3,
+            Some(2),
+            "前提：先有限制"
+        );
+
+        tr.update(
+            &before.id,
+            &TaskPatch {
+                retry_limit: Some(None),
+                ..TaskPatch::default()
+            },
+            "unix:200",
+        )
+        .unwrap();
+
+        let (devices, agents, caps, retry) = raw_constraints(&tr, &before.id);
+        assert_eq!(retry, None, "Some(None) 必须把 retry_limit 写成 NULL");
+        // 其余三条没给，必须原样留着——「清空一条」不等于「清空全部」。
+        assert_eq!(devices.as_deref(), Some("[\"n_1\"]"));
+        assert_eq!(agents.as_deref(), Some("[\"opencode\"]"));
+        assert_eq!(caps.as_deref(), Some("{\"arch\":\"x86_64\"}"));
+    }
+
+    /// 四条约束可以一次全设上，且只涨一次 `version`。
+    ///
+    /// 判红方式：把那条 `UPDATE` 里少写一个列（比如漏 `required_capabilities`），
+    /// 这条立刻红；或把 `version = version + 1` 写成不加，也会红。
+    #[test]
+    fn update_can_set_all_four_constraints_at_once() {
+        let (_d, tr) = setup();
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+
+        let v = tr
+            .update(
+                &t.id,
+                &TaskPatch {
+                    allowed_devices: Some(Some("[\"n_1\",\"n_2\"]".into())),
+                    allowed_agents: Some(Some("[\"opencode\"]".into())),
+                    required_capabilities: Some(Some("{\"arch\":\"aarch64\"}".into())),
+                    retry_limit: Some(Some(5)),
+                    ..TaskPatch::default()
+                },
+                "unix:100",
+            )
+            .unwrap();
+
+        assert_eq!(v, 2, "四条约束同属一条 UPDATE，只涨一次");
+        assert_eq!(
+            raw_constraints(&tr, &t.id),
+            (
+                Some("[\"n_1\",\"n_2\"]".to_string()),
+                Some("[\"opencode\"]".to_string()),
+                Some("{\"arch\":\"aarch64\"}".to_string()),
+                Some(5),
+            )
+        );
+    }
+
+    /// 只给 `done_when` 时那两列同进同退，`title` 不动。
+    ///
+    /// 判红方式：把 `done_when` 那条 `UPDATE` 拆成两条（只写其中一列），
+    /// 或把两列的顺序写反（criteria 与 description 互换）。
+    #[test]
+    fn update_writes_both_done_when_columns_together() {
+        let (_d, tr) = setup();
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+
+        tr.update(
+            &t.id,
+            &TaskPatch {
+                done_when: Some(done_when(Some("build_passes"), Some("构建通过"))),
+                ..TaskPatch::default()
+            },
+            "unix:100",
+        )
+        .unwrap();
+
+        let after = tr.get(&t.id).unwrap().unwrap();
+        assert_eq!(after.done_when.criteria.as_deref(), Some("build_passes"));
+        assert_eq!(after.done_when.description.as_deref(), Some("构建通过"));
+        assert_eq!(after.title, t.title, "title 没给，不得动");
+    }
+
+    /// 未知 id → `TaskNotFound`（不是静默成功）。
+    ///
+    /// 判红方式：把 `update` 里那段「影响 0 行 → 再查一次」的分支改成
+    /// 直接返回 `Ok`，这条立刻红。
+    #[test]
+    fn update_on_a_missing_task_is_named() {
+        let (_d, tr) = setup();
+        let e = tr
+            .update(
+                "nope",
+                &TaskPatch {
+                    title: Some("x".into()),
+                    ..TaskPatch::default()
+                },
+                TS,
+            )
+            .unwrap_err();
+        assert!(matches!(e, StorageError::TaskNotFound { .. }), "{e:?}");
+    }
+
+    /// 空补丁：不写库、`version` 不涨，但任务存在时不报错。
+    ///
+    /// 判红方式：把 `version = version + 1` 提到「命中判断之外」（无条件涨），
+    /// 这条立刻红。
+    #[test]
+    fn an_empty_patch_changes_nothing_but_still_checks_existence() {
+        let (_d, tr) = setup();
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+        let empty = TaskPatch::default();
+        assert!(empty.is_empty());
+
+        let v = tr.update(&t.id, &empty, "unix:100").unwrap();
+        assert_eq!(v, 1, "没改任何列就不该涨 version");
+        assert_eq!(raw_version(&tr, &t.id), 1);
+        assert_eq!(
+            tr.get(&t.id).unwrap().unwrap().updated_at,
+            TS,
+            "updated_at 也不动"
+        );
+
+        let e = tr.update("nope", &empty, "unix:100").unwrap_err();
+        assert!(
+            matches!(e, StorageError::TaskNotFound { .. }),
+            "空补丁也要确认任务存在：{e:?}"
+        );
+    }
+
+    /// 排序与过滤：3 个任务（两个 `pending` 一早一晚、一个 `running`）。
+    ///
+    /// 判红方式：把 `ORDER BY created_at DESC` 改成 `ASC`（顺序反了）或
+    /// 改成 `updated_at DESC`（改标题会跳位置）。
+    #[test]
+    fn list_for_project_with_state_filters_and_sorts() {
+        let (_d, tr) = setup();
+        let early = tr.create(new_task("p_a"), "unix:10").unwrap();
+        let late = tr.create(new_task("p_a"), "unix:20").unwrap();
+        let running = tr.create(new_task("p_a"), "unix:15").unwrap();
+        tr.set_state(&running.id, TaskState::Queued, TS).unwrap();
+        tr.set_state(&running.id, TaskState::Running, TS).unwrap();
+
+        // 不带 state：3 条，第一条是最晚建的。
+        let all = tr.list_for_project_with_state("p_a", None).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].id, late.id, "最晚 created_at 的在最前");
+        assert_eq!(
+            all.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec![late.id.as_str(), running.id.as_str(), early.id.as_str()]
+        );
+
+        // 带 pending：2 条，晚 → 早。
+        let pending = tr
+            .list_for_project_with_state("p_a", Some(TaskState::Pending))
+            .unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].id, late.id);
+        assert_eq!(pending[1].id, early.id);
+        assert!(pending.iter().all(|t| t.state == TaskState::Pending));
+
+        // 带 running：只剩那一条。
+        let only_running = tr
+            .list_for_project_with_state("p_a", Some(TaskState::Running))
+            .unwrap();
+        assert_eq!(only_running.len(), 1);
+        assert_eq!(only_running[0].id, running.id);
+    }
+
+    /// 另一项目的任务不出现。
+    ///
+    /// 判红方式：漏写 `WHERE project_id = ?`（只按 state 过滤），这条立刻红
+    /// ——`p_b` 的任务会混进来。
+    #[test]
+    fn list_for_project_scopes_by_project() {
+        let (_d, tr) = setup();
+        let mine = tr.create(new_task("p_a"), "unix:10").unwrap();
+        let theirs = tr.create(new_task("p_b"), "unix:20").unwrap();
+
+        let got = tr.list_for_project_with_state("p_a", None).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, mine.id);
+
+        // 带 state 时同样要限定项目：`p_b` 那条也是 pending。
+        let got = tr
+            .list_for_project_with_state("p_a", Some(TaskState::Pending))
+            .unwrap();
+        assert_eq!(got.len(), 1, "另一个项目的 pending 任务不得出现");
+        assert_eq!(got[0].id, mine.id);
+        assert_ne!(got[0].id, theirs.id);
     }
 }
