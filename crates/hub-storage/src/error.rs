@@ -114,6 +114,21 @@ pub enum StorageError {
     #[error("invalid execution.state in database: {0:?}")]
     InvalidExecutionState(String),
 
+    /// `done_when.criteria` 不在判定码闭集里（`crate::task::CRITERIA_CODES`）。
+    ///
+    /// 与 [`StorageError::InvalidTaskState`] **不是一回事**，所以单独一个变体：
+    /// 那一条是「库里的值我们不认识」（数据损坏 / 迁移漏了），这一条是
+    /// 「调用方想写一个不存在的判定码」——是**输入错误**，要告诉人**能填什么**。
+    /// 混用会让 API 层无法区分「该回 400 还是该报警」。
+    ///
+    /// 只带那串值、不带允许集合：允许集合是 `CRITERIA_CODES` 的唯一定义处，
+    /// 在这里再抄一份就会出现第二个答案。上层展示时去读那个常量。
+    #[error(
+        "invalid done_when.criteria {0:?}: must be one of \
+         all_tests_pass / build_passes / review_approved / command_exit_zero"
+    )]
+    InvalidDoneWhenCriteria(String),
+
     /// 库里没有这个任务。
     #[error("no such task: {id:?}")]
     TaskNotFound { id: String },

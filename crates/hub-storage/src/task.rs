@@ -2,7 +2,7 @@
 //!
 //! 六态见 `task-model.md` §2。**`state` 的取值校验在 Rust 侧**，因为
 //! 「哪些态之间能转」本来就是业务规则，而 SQLite 的 `CHECK` 只能表达"取值属于
-//! 这个集合"，无法表达"`done` 不能直接回到 `draft`"这类转移约束。把校验拆成
+//! 这个集合"，无法表达"`done` 不能直接回到 `pending`"这类转移约束。把校验拆成
 //! 两处只会让"什么合法"有两个答案（`schema_v5.sql` 里写了同一个理由）。
 //!
 //! # `base_commit` 的两份，不要混
@@ -80,10 +80,85 @@ impl FromStr for TaskState {
 /// 变成一次自然语言解析。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoneWhen {
-    /// 判定码。`None` = 还没定（`draft` 态的正常情况）。
+    /// 判定码。`None` = 还没定（`pending` 态的正常情况，卡片要标「需人工验收」）。
     pub criteria: Option<String>,
     /// 一句话说明。`None` = 还没写。
     pub description: Option<String>,
+}
+
+/// `done_when.criteria` 的**判定码闭集**，共四个。这是唯一定义处。
+///
+/// 为什么是闭集而不是自由文本：`description` 是给人读的，而 `criteria` 存在的
+/// 全部理由就是**能被机器判**（`DECISIONS.md` D23）。自由文本会让「按判定码
+/// 统计哪种验收最常失败」永远做不了，而 `schema_v5.sql` 那两列就是为这个统计
+/// 拆的。多一个码 = 多一条验收规则，必须是**先有判定实现，再加码**。
+///
+/// 四个码各自对应的判定：
+/// - `all_tests_pass`：项目测试全绿。
+/// - `build_passes`：构建成功（可带时长阈值，本轮只存码）。
+/// - `review_approved`：**人/模型的主观判定，机器判不了**——见
+///   [`Task::needs_manual_acceptance`]，它落在闭集里但语义上仍需人点头。
+/// - `command_exit_zero`：某条命令退出码为 0（`butler.md` §2.2.0 的
+///   `{kind:"command", ..., expect:{exit_code:0}}` 的码形态）。
+///
+/// 大小写敏感：`"ALL_TESTS_PASS"` 不是这四个之一。理由是这些码会被写进
+/// 库、被统计、被前端按字面值匹配，容忍大小写等于让同一个判定码有多个写法。
+///
+/// 不建议调用方自己做 `contains`——用 [`is_known_criteria_code`]，免得每处
+/// 各写一遍（含大小写与空白处理）的口径。
+pub const CRITERIA_CODES: [&str; 4] = [
+    "all_tests_pass",
+    "build_passes",
+    "review_approved",
+    "command_exit_zero",
+];
+
+/// 某串判定码**是否在闭集里**。大小写敏感、不做 trim。
+///
+/// 读路径拿它算 `criteria_known`（本次才引入闭集，库里可能已有闭集外的存量
+/// 值），写路径拿它做校验——同一个口径，不写两份。
+pub fn is_known_criteria_code(code: &str) -> bool {
+    CRITERIA_CODES.contains(&code)
+}
+
+/// 拒绝判定码的提示：把四个允许值写进错误信息。
+///
+/// 只有「不允许」的错误等于把问题丢回给用户——他得知道**能填什么**才能改对。
+fn invalid_criteria(code: &str) -> StorageError {
+    StorageError::InvalidDoneWhenCriteria(code.to_string())
+}
+
+impl DoneWhen {
+    /// 写库前校验判定条件：`criteria` 必须在闭集里、且 `criteria` 与
+    /// `description` **至少有一个非空**。
+    ///
+    /// # 为什么 `None` 也合法（但两者不能同时为空）
+    ///
+    /// `criteria = None` 是**规格内的正常情况**（D23 / `butler.md` §2.2.0：
+    /// 只有 `description` 的任务「只能人判」）。拒绝它会把「需人工验收」这条
+    /// 产品能力直接堵死。空串同 `None` 处理——前端下拉框选「不设判定码」时
+    /// 很可能送上来一个 `""`，那是没填，不是填错。
+    ///
+    /// 但**两者都空**必须拒绝：那是一个连人也不知道怎么算完成的任务，
+    /// 验收环节会彻底空转（`butler.md`「两者至少有一个」）。
+    ///
+    /// # 为什么校验在仓储层而不只在 API 层
+    ///
+    /// 直接摸 `TaskRepo` 的路径（测试、未来的 CLI、迁移脚本）同样会写进那两列；
+    /// 校验只在 HTTP 层等于给闭集留后门。
+    pub fn validate(&self) -> Result<()> {
+        let criteria_blank = matches!(self.criteria.as_deref(), None | Some(""));
+        let description_blank = matches!(self.description.as_deref(), None | Some(""));
+        if criteria_blank && description_blank {
+            return Err(invalid_criteria("criteria 与 description 至少要有其一"));
+        }
+        match self.criteria.as_deref() {
+            // 空串 = 没填判定码，与 `None` 同义。
+            None | Some("") => Ok(()),
+            Some(code) if is_known_criteria_code(code) => Ok(()),
+            Some(code) => Err(invalid_criteria(code)),
+        }
+    }
 }
 
 /// 一个任务。
@@ -112,6 +187,48 @@ pub struct NewTask {
     pub base_commit: Option<String>,
 }
 
+impl Task {
+    /// 这个任务是不是**只能人判**——看板据此挂「需人工验收」标签。
+    ///
+    /// 这是个**派生值，不是列**：它由 `done_when` 纯函数算出，落库就要维护
+    /// 「两个字段改了、标记没跟上」的一致性，而它没有任何自己的信息。
+    ///
+    /// # 判定规则（逐条对回规格，不自己编）
+    ///
+    /// 规格 `task-model.md:290-292`：「**只有 `description` 没有 `criteria`
+    /// 的任务**，卡片上必须标『需人工验收』，不能让用户以为有自动判定在跑。」
+    /// 同一条在 `DECISIONS.md` D23 与 `butler.md` §2.2.0 写作「只有
+    /// `description` → **只能人判**」。
+    ///
+    /// 于是「自动判得了」需要**两个条件同时成立**：
+    ///
+    /// 1. 有 `criteria`（非 `None`、非空串）——没有判定码就没有东西在跑；
+    /// 2. 那个码**机器判得了**（在闭集里，且不是 `review_approved`）。
+    ///
+    /// 任何一条不成立 → `true`（需人工验收）：
+    /// - `criteria` 为空：规格原话的情形。
+    /// - `criteria` 是 `review_approved`：字面就是「评审通过」，那是**判断**，
+    ///   不是命令退出码或测试结果。`butler.md` §2.2.0 说 `criteria` 必须
+    ///   「判定结果确定，**不依赖模型**」，而这个码的判定离不开人或模型——
+    ///   把它当自动可判，等于让卡片假装有个判定在跑，正是规格禁止的那件事。
+    /// - `criteria` 是闭集外的值（存量数据 / 手改库）：我们**不知道**它怎么判，
+    ///   当作「判不了」比当作「能判」安全——后者会让一个没有判定的任务显示成
+    ///   「自动判定中」。
+    ///
+    /// 这条规则对 `description` 是否为 `None` **不敏感**：`criteria` 为空的
+    /// 任务，哪怕描述也没写，也同样是「没人能自动判」，仍要标出来。
+    /// 规格只描述「只有 `description`」这一种，但把「两者都空」判成可自动判定
+    /// 显然与它同一节的用意相反，且没有第二条规格要求在这里报错
+    /// （那是 `DoneWhen::validate` 与 API 层的事）。
+    pub fn needs_manual_acceptance(&self) -> bool {
+        match self.done_when.criteria.as_deref() {
+            None | Some("") => true,
+            Some("review_approved") => true,
+            Some(code) => !is_known_criteria_code(code),
+        }
+    }
+}
+
 /// 任务仓储。
 #[derive(Clone)]
 pub struct TaskRepo {
@@ -123,9 +240,15 @@ impl TaskRepo {
         Self { pool }
     }
 
-    /// 建任务。状态恒为 `draft`——「建好就能派发」会让一个缺验收标准的任务
-    /// 直接进调度候选集，而那是最常见的失败来源。
+    /// 建任务。状态恒为 `pending`——「建好就能派发」会让一个缺验收标准的任务
+    /// 直接进调度候选集，而那是最常见的失败来源。`queued` 要求已选中
+    /// `(device, agent)`，新建时还没有这个选择，所以起点只能是 `pending`。
+    ///
+    /// 写库前先过 [`DoneWhen::validate`]：**先拒绝，再写**。放在仓储层而不只放
+    /// API 层，是因为直接摸 `TaskRepo` 的路径（测试、未来的 CLI、迁移脚本）
+    /// 同样会把值写进那两列；校验只在 HTTP 层等于给闭集留了个后门。
     pub fn create(&self, new: NewTask, now: &str) -> Result<Task> {
+        new.done_when.validate()?;
         let conn = self.pool.get()?;
         let id = crate::workspace::new_id();
         conn.execute(
@@ -336,10 +459,41 @@ mod tests {
 
     /// **新建恒为 `pending`**：规格里 `pending` 是「等被派活」的起点，
     /// `queued` 要求已选中 `(device, agent)`，新建时还没有这个选择。
+    ///
+    /// 这里给 `description` 一个值、`criteria` 留空，是**故意的**：它同时证明
+    /// 「只有描述没有判定码」的任务可以建出来（`task-model.md:291` 的那种），
+    /// 且起点仍是 `pending` 而不是「because 没有判定码所以别的地方」。
     #[test]
     fn a_fresh_task_starts_at_pending_not_queued() {
         let (_d, tr) = setup();
         let t = tr
+            .create(
+                NewTask {
+                    project_id: "p_a".into(),
+                    title: "x".into(),
+                    done_when: DoneWhen {
+                        criteria: None,
+                        description: Some("登录可用".into()),
+                    },
+                    created_by: None,
+                    base_commit: None,
+                },
+                TS,
+            )
+            .unwrap();
+        assert_eq!(t.state, TaskState::Pending);
+        assert_eq!(t.done_when.criteria, None);
+        assert!(t.needs_manual_acceptance(), "没有判定码就只能人判");
+    }
+
+    /// 两者都空的任务**建不出来**——验收环节会彻底空转。
+    ///
+    /// 判红方式：把 `create` 里那句 `validate()?` 删掉，这条立刻红。
+    #[test]
+    fn create_refuses_a_task_with_no_done_when_at_all() {
+        let (_d, tr) = setup();
+        let before = tr.list_for_project("p_a").unwrap().len();
+        let e = tr
             .create(
                 NewTask {
                     project_id: "p_a".into(),
@@ -353,9 +507,17 @@ mod tests {
                 },
                 TS,
             )
-            .unwrap();
-        assert_eq!(t.state, TaskState::Pending);
-        assert_eq!(t.done_when.criteria, None);
+            .unwrap_err();
+        assert!(
+            matches!(e, StorageError::InvalidDoneWhenCriteria(_)),
+            "{e:?}"
+        );
+        // 拒绝之后库里不能多出半行。
+        assert_eq!(
+            tr.list_for_project("p_a").unwrap().len(),
+            before,
+            "校验失败不得写库"
+        );
     }
 
     #[test]
@@ -539,5 +701,221 @@ mod tests {
                 "{legacy} 应当报错，实际 {e:?}"
             );
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // 子任务 3：`done_when` 判定码闭集与「需人工验收」
+    // ---------------------------------------------------------------------
+
+    fn done_when(criteria: Option<&str>, description: Option<&str>) -> DoneWhen {
+        DoneWhen {
+            criteria: criteria.map(Into::into),
+            description: description.map(Into::into),
+        }
+    }
+
+    /// 只有 `done_when` 关心的 `Task`，其余字段填死值。
+    fn task_with(dw: DoneWhen) -> Task {
+        Task {
+            id: "t_1".into(),
+            project_id: "p_a".into(),
+            title: "x".into(),
+            state: TaskState::Pending,
+            done_when: dw,
+            created_by: None,
+            base_commit: None,
+            created_at: TS.into(),
+            updated_at: TS.into(),
+        }
+    }
+
+    /// 判定码与描述**不能同时为空**——那是一个连人都不知道怎么算完成的任务。
+    ///
+    /// 判红方式：把 `validate` 里那段 `criteria_blank && description_blank`
+    /// 的短路删掉，这条立刻红。
+    #[test]
+    fn criteria_and_description_cannot_both_be_empty() {
+        for (c, d) in [
+            (None, None),
+            (Some(""), None),
+            (None, Some("")),
+            (Some(""), Some("")),
+        ] {
+            let dw = done_when(c, d);
+            let e = dw
+                .validate()
+                .expect_err("两者都空必须被拒绝：验收环节会彻底空转");
+            assert!(
+                matches!(e, StorageError::InvalidDoneWhenCriteria(_)),
+                "{e:?}"
+            );
+        }
+        // 有一边非空就合法，两种各测一遍。
+        assert!(done_when(Some("all_tests_pass"), None).validate().is_ok());
+        assert!(done_when(None, Some("登录可用")).validate().is_ok());
+    }
+
+    /// 四个闭集值逐个必须被接受。
+    ///
+    /// 判红方式：闭集里写错一个码名（如把 `all_tests_pass` 写成
+    /// `all_test_pass`），表驱动里那一行立刻红；或 `validate` 改成多拒一个码。
+    #[test]
+    fn every_whitelisted_code_is_accepted() {
+        for code in CRITERIA_CODES {
+            let dw = done_when(Some(code), None);
+            assert!(
+                dw.validate().is_ok(),
+                "{code} 是闭集内的码，必须被接受：{:?}",
+                dw.validate()
+            );
+        }
+        // 顺带钉住闭集的**确切内容与顺序**：闭集是公开契约（前端下拉框、
+        // API 的 `detail.allowed` 都按它渲染），不是实现细节。
+        assert_eq!(
+            CRITERIA_CODES,
+            [
+                "all_tests_pass",
+                "build_passes",
+                "review_approved",
+                "command_exit_zero"
+            ]
+        );
+    }
+
+    /// 闭集外的值必须被拒绝，且错误里带**允许集合**——人得知道能填什么。
+    ///
+    /// 判红方式：把 `validate` 改成永远 `Ok`（放行自由文本），这条立刻红。
+    #[test]
+    fn an_unknown_criteria_code_is_rejected() {
+        for bad in ["all_tests_pass_v2", "looks_good", "all test pass"] {
+            let dw = done_when(Some(bad), Some("人话描述"));
+            let e = dw
+                .validate()
+                .expect_err(&format!("{bad} 不在闭集里，必须被拒绝"));
+            let msg = e.to_string();
+            assert!(
+                matches!(e, StorageError::InvalidDoneWhenCriteria(ref s) if s == bad),
+                "错误要带上是哪串值被拒了，实际 {e:?}"
+            );
+            // 错误信息里必须列全四个允许值，否则用户改不对。
+            for allowed in CRITERIA_CODES {
+                assert!(msg.contains(allowed), "错误信息缺 {allowed}：{msg}");
+            }
+        }
+    }
+
+    /// 大小写敏感：`ALL_TESTS_PASS` 不是 `all_tests_pass`。
+    ///
+    /// 判红方式：把 `is_known_criteria_code` 改成 `eq_ignore_ascii_case`（或
+    /// 先把 code 转小写），这条立刻红。为什么必须敏感：判定码会落库、被统计、
+    /// 被前端按字面值匹配，容忍大小写等于让同一个码有多种写法。
+    #[test]
+    fn criteria_codes_are_case_sensitive() {
+        for code in CRITERIA_CODES {
+            let upper = code.to_uppercase();
+            assert_ne!(upper, code, "前提：{code} 有大写形态可测");
+            let dw = done_when(Some(&upper), Some("人话描述"));
+            let e = dw.validate().expect_err(&format!("{upper} 必须被拒绝"));
+            assert!(
+                matches!(e, StorageError::InvalidDoneWhenCriteria(_)),
+                "{e:?}"
+            );
+            // 反向确认：同一串只要大小写正确就通过——证明拒绝的原因是大小写，
+            // 不是别的东西（比如长度）。
+            assert!(done_when(Some(code), None).validate().is_ok());
+        }
+    }
+
+    /// `criteria = None` 必须被接受：那是「需人工验收」这条产品能力的入口。
+    ///
+    /// 判红方式：把 `validate` 的 `None` 分支改成 `Err`，这条立刻红。
+    #[test]
+    fn a_missing_criteria_is_accepted() {
+        assert!(done_when(None, Some("人话描述")).validate().is_ok());
+        // 空串同 `None`：前端下拉框选「不设判定码」很可能送上来 `""`。
+        assert!(done_when(Some(""), Some("人话描述")).validate().is_ok());
+    }
+
+    /// 「需人工验收」的**真**侧：没有判定码，就只有人能判。
+    ///
+    /// 规格 `task-model.md:290-292`：「只有 `description` 没有 `criteria` 的
+    /// 任务，卡片上必须标『需人工验收』」。
+    ///
+    /// 判红方式：把 `needs_manual_acceptance` 写成恒 `false`（或让 `None` 走
+    /// 「有描述就算自动」的分支），这条立刻红。
+    #[test]
+    fn only_description_needs_manual_acceptance() {
+        let t = task_with(done_when(None, Some("登录可用")));
+        assert!(
+            t.needs_manual_acceptance(),
+            "没有判定码就只能人判，卡片必须标「需人工验收」"
+        );
+        // 空串也是「没填」。
+        assert!(task_with(done_when(Some(""), Some("登录可用"))).needs_manual_acceptance());
+        // 两者都空同样是「没人能自动判」——不该显示成「自动判定中」。
+        assert!(task_with(done_when(None, None)).needs_manual_acceptance());
+    }
+
+    /// 「需人工验收」的**假**侧：有机器判得了的判定码就不打扰人。
+    ///
+    /// 判红方式：把 `needs_manual_acceptance` 写成恒 `true`，这条立刻红。
+    #[test]
+    fn a_machine_judgeable_code_does_not_need_manual_acceptance() {
+        for code in ["all_tests_pass", "build_passes", "command_exit_zero"] {
+            let t = task_with(done_when(Some(code), Some("人话描述")));
+            assert!(
+                !t.needs_manual_acceptance(),
+                "{code} 是机器判得了的，不该标人工验收"
+            );
+            // 没有描述也一样：自动判定不依赖 `description`。
+            assert!(!task_with(done_when(Some(code), None)).needs_manual_acceptance());
+        }
+    }
+
+    /// `review_approved` 在闭集里，但**机器判不了**：它的判定就是「评审通过」，
+    /// 离不开人（或模型），而规格要求 `criteria` 的判定「不依赖模型」
+    /// （`butler.md` §2.2.0）。所以它必须标「需人工验收」。
+    ///
+    /// 判红方式：把 `review_approved` 从 `needs_manual_acceptance` 的 `true`
+    /// 分支删掉（让它落进「闭集内即自动」），这条立刻红。
+    #[test]
+    fn review_approved_is_in_the_closed_set_but_still_needs_a_human() {
+        let t = task_with(done_when(Some("review_approved"), Some("评审通过即算完")));
+        assert!(is_known_criteria_code("review_approved"), "它在闭集里");
+        assert!(t.done_when.validate().is_ok(), "它是合法值，不能被拒");
+        assert!(
+            t.needs_manual_acceptance(),
+            "评审通过是人/模型的判断，不能假装有个自动判定在跑"
+        );
+    }
+
+    /// 存量数据兜底：闭集外的值当作「判不了」，不许 panic、也不许当成能自动判。
+    ///
+    /// 判红方式：让 `needs_manual_acceptance` 的 `Some(_) => false` 兜底，这条立刻红。
+    #[test]
+    fn a_legacy_unknown_code_is_not_treated_as_auto_judgeable() {
+        let t = task_with(done_when(Some("looks_good"), Some("旧值")));
+        assert!(!is_known_criteria_code("looks_good"));
+        assert!(t.needs_manual_acceptance(), "不认识怎么判，就得人来判");
+    }
+
+    /// 校验真的挡在写库之前：非法判定码进来了，库里不能多出一行。
+    ///
+    /// 判红方式：删掉 `TaskRepo::create` 里那句 `validate()`，这条立刻红
+    /// （会 `create` 成功并在库里留下 `looks_good`）。
+    #[test]
+    fn create_refuses_an_unknown_code_and_writes_nothing() {
+        let (_d, tr) = setup();
+        let mut bad = new_task("p_a");
+        bad.done_when.criteria = Some("all_tests_pass_v2".into());
+        let e = tr.create(bad, TS).unwrap_err();
+        assert!(
+            matches!(e, StorageError::InvalidDoneWhenCriteria(ref s) if s == "all_tests_pass_v2"),
+            "{e:?}"
+        );
+        assert!(
+            tr.list_for_project("p_a").unwrap().is_empty(),
+            "被拒的任务不得落库"
+        );
     }
 }

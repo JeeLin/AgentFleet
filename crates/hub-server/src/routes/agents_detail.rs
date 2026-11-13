@@ -249,8 +249,10 @@ mod tests {
                     project_id: "p_1".into(),
                     title: title.into(),
                     done_when: hub_storage::task::DoneWhen {
+                        // 两者不能同时为空（`DoneWhen::validate` 拒绝）：这个夹具
+                        // 造的是「有人写过描述」的任务，不是「什么都没写」的。
                         criteria: None,
-                        description: None,
+                        description: Some("测试用任务".into()),
                     },
                     created_by: None,
                     base_commit: None,
