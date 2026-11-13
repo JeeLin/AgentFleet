@@ -64,6 +64,11 @@ pub const WS_MAX_MESSAGE_BYTES: usize = protocol::MAX_FRAME_BYTES;
 /// 调用点（`/send`、`/open`）各写一份时，症状正是这样。
 pub mod err {
     /// Hub 尚未初始化（两个认证 layer 逐句同措辞的 403 code）。
+    ///
+    /// **与 `protocol::message::reason::HUB_NOT_INITIALIZED` 同名不同值**：
+    /// 这个是 HTTP 的 `code` 域（`snake_case`，页面按它分支），那个是 WS
+    /// `auth_fail.reason` 的域（`"hub not initialized"`，给设备读的短句）。
+    /// 跨域复用即协议不匹配，见 `crates/protocol/src/message.rs` 的模块注释。
     pub const HUB_NOT_INITIALIZED: &str = "hub_not_initialized";
     /// JSON body 缺失 / 形状不对 / 超过上限。
     pub const BAD_BODY: &str = "invalid_request_body";

@@ -637,14 +637,7 @@ pub async fn create_session(
     // 即正确。**它不会显示成错误的起点**——`unknown` 不是 `ok`。不加锁、
     // 不加额外的进度状态。
     let (base_rev, base_rev_status) =
-        super::base_rev::probe_base_rev(&state, &auth, &session.id, &body.node_id).await;
-
-    // 写库失败是一件**真错**（不是「取不到起点」）：会话行已在，但它的起点
-    // 状态会永远停在 `unknown`——与「用户看到一个看起来成功、实际起点永远未知
-    // 的会话」是同一件事。静默吞掉会让它变成「起点偶尔是未知的」，无从排查。
-    hub_storage::SessionRepo::new(state.devices().pool().clone())
-        .set_base_rev(&session.id, base_rev.as_deref(), base_rev_status)
-        .map_err(|e| ApiError::internal_with("cannot record the session's base revision", e))?;
+        finish_new_session(&state, &auth, &session, &body.node_id).await?;
 
     let detail = SessionSummary {
         id: session.id.clone(),
@@ -661,12 +654,41 @@ pub async fn create_session(
         // 所以这里 node_id 一定有值、removed 一定为 None。
         workspace: WorkspaceRef::new(&Some(body.node_id.clone()), &None, &body.path),
     };
+    Ok((StatusCode::CREATED, Json(detail)).into_response())
+}
+
+/// 建会话的**后置尾**：探测起点 → 回填 → 推 `session_state`。
+///
+/// `POST /api/sessions` 与 `POST /device-api/session-imports` 的这三步逐字
+/// 相同，只有 `node_id` 的来源不同（`body.node_id` vs 验签得到的
+/// `identity.node_id`）。收在一处之后，改错误文案 / 改推送时机只改一份——
+/// 分成两处时，改一处不会编译失败，症状是「一条路径的页面不刷新」。
+///
+/// 返回探测到的 `(base_rev, base_rev_status)`：两条路径都要把它放进各自
+/// 的响应体。
+pub(crate) async fn finish_new_session(
+    state: &AppState,
+    auth: &Authenticated,
+    session: &hub_storage::Session,
+    node_id: &str,
+) -> Result<(Option<String>, hub_storage::BaseRevStatus), ApiError> {
+    let (base_rev, base_rev_status) =
+        super::base_rev::probe_base_rev(state, auth, &session.id, node_id).await;
+
+    // 写库失败是一件**真错**（不是「取不到起点」）：会话行已在，但它的起点
+    // 状态会永远停在 `unknown`——与「用户看到一个看起来成功、实际起点永远未知
+    // 的会话」是同一件事。静默吞掉会让它变成「起点偶尔是未知的」，无从排查。
+    hub_storage::SessionRepo::new(state.devices().pool().clone())
+        .set_base_rev(&session.id, base_rev.as_deref(), base_rev_status)
+        .map_err(|e| ApiError::internal_with("cannot record the session's base revision", e))?;
+
     // 页面侧（子任务 5a）：会话建成的瞬间推给所有订阅者，好让另一个标签页
     // 的工作台 tab 条上立刻多出这一条，而不必等它下次轮询。
     state
         .streams()
         .session_state(&session.id, session.state.as_str());
-    Ok((StatusCode::CREATED, Json(detail)).into_response())
+
+    Ok((base_rev, base_rev_status))
 }
 
 /// 新建会话时 `acp_session_id` 的初值来源。

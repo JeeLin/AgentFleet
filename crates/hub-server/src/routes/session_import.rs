@@ -84,9 +84,13 @@ pub struct ImportResponse {
 
 /// `POST /device-api/session-imports`。
 ///
-/// 顺序固定（任一步失败都不落会话行）：
-/// provider allowlist → 会话 id 形状 → 去重 → 共享建会话门禁 → 探测起点 →
-/// 回填起点 → 推 `session_state` → 201。
+/// 顺序固定（前 4 步任一步失败都不落会话行），与下面编号注释一一对应：
+/// 1. provider allowlist → 2. 会话 id 形状 → 3. 去重 + 共享建会话门禁 →
+/// 4. 落行（含去重判据）→ 5. 探测并回填起点 → 6. 推 `session_state` → 201。
+///
+/// **3 与 4 是同一次调用**：`create_session_guarded` 内部走
+/// `NewSession::ImportedIfAbsent`，把「查重」与「INSERT」合成一条原子语句，
+/// 所以中间没有「查完再建」的窗口。
 pub async fn import_session(
     State(state): State<AppState>,
     Extension(imported): Extension<ImportedBody>,
@@ -110,15 +114,15 @@ pub async fn import_session(
         return Err(ApiError::bad_request(err::BAD_BODY));
     }
 
-    // 3. 去重。**检查与 INSERT 合成一条原子 SQL**（`ImportedIfAbsent`）：
-    //    两个不同 nonce 的并发请求通过签名层后，`INSERT ... WHERE NOT EXISTS`
-    //    只会插入一行，另一个拿到 409。先 `find_imported` 再 `create_imported`
-    //    的窗口（中间隔着 probe_base_rev）能让两者都回 201，所以不再分两步。
+    // 3. 去重判据的准备。**检查与 INSERT 合成一条原子 SQL**（`ImportedIfAbsent`，
+    //    由下一步的 `create_session_guarded` 执行）：两个不同 nonce 的并发请求
+    //    通过签名层后，`INSERT ... WHERE NOT EXISTS` 只会插入一行，另一个拿到
+    //    409。先 `find_imported` 再 `create_imported` 的窗口（中间隔着
+    //    probe_base_rev）能让两者都回 201，所以不再分两步。
     //
     //    `provider` 就是 `agent_id`：v1 两者 1:1（`opencode` 同名），`session`
     //    表没有 provider 列，不为此加列（见 `SessionRepo::find_imported`）。
-    let repo = hub_storage::SessionRepo::new(state.pool().clone());
-
+    //
     // 4. 复用 `POST /api/sessions` 的同一串门禁（路径 / 设备 / agent / INSERT）。
     let auth = identity.auth;
     let session = create_session_guarded(
@@ -131,17 +135,10 @@ pub async fn import_session(
     )
     .await?;
 
-    // 5. 起点探测与普通建会话完全相同：先落行、再探测、再回填。导入不改这条
-    //    链路——会话仍是 `Running`，`open_device_channel` 的前提不变。
-    let (base_rev, base_rev_status) =
-        super::base_rev::probe_base_rev(&state, &auth, &session.id, &identity.node_id).await;
-    repo.set_base_rev(&session.id, base_rev.as_deref(), base_rev_status)
-        .map_err(|e| ApiError::internal_with("cannot record the session's base revision", e))?;
-
-    // 6. 让已打开的页面立刻看到新会话，不必等下一次轮询。
-    state
-        .streams()
-        .session_state(&session.id, session.state.as_str());
+    // 5. 起点探测 → 回填 → 推 `session_state`：与 `POST /api/sessions` 走的
+    //    是**同一个** `finish_new_session`。导入不改这条链路——会话仍是
+    //    `Running`，`open_device_channel` 的前提不变。
+    super::api::finish_new_session(&state, &auth, &session, &identity.node_id).await?;
 
     // 标题只进日志，不进库：`session` 表没有 title 列，历史标题归 agent 自己管。
     // 不落库也不丢弃——它是排障时唯一能把日志行对回用户所选历史会话的线索。

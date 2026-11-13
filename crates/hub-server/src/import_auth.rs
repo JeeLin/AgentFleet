@@ -20,7 +20,9 @@
 //!    覆盖 body 里的值，却让 Hub 用头里的值查设备。
 //! 4. **body 摘要**：把 DTO 的两个签名字段清空后按**同一字段顺序**重新序列化，
 //!    SHA-256 必须等于声明的摘要。字段顺序漂移会让这一步恒失败，见
-//!    `tests/session_import.rs::the_hub_dto_field_order_matches_the_cli_canonical_body`。
+//!    `tests/session_import.rs::the_cli_and_hub_share_one_canonical_body_digest`
+//!    （它比 canonical body 的字符串字面量、摘要常量，以及从**原始字节**
+//!    抽出的字段顺序）。
 //! 5. **时间窗**：`|now - t| <= 300 s`。
 //! 6. **设备存在且有库内公钥**：未知 node 与「没公钥」是**同一个** 401——
 //!    对未认证的请求区分「设备不存在」与「签名不对」等于白送一张设备 id 字典。
@@ -72,6 +74,9 @@ use crate::{err, ApiError, AppState};
 // 路径 / method / 版本 / 头名 / DTO 全部来自 `identity::import_protocol`：
 // CLI 与 Hub 只准读同一份定义，改一侧就是改协议本身。
 /// 时间窗：`|now - t| <= 300 s`。同时是 nonce 表的 TTL。
+///
+/// `pub` 只为 `tests/session_import.rs` 推边界值（它按「窗外 = 窗口 + 1」算，
+/// 不写死 300）。**不是**给生产调用方的 API：本 crate 之外没有 `src/**` 读者。
 pub const TIME_WINDOW_SECS: u64 = 300;
 
 /// nonce 表的上限。超过就清掉过期项；仍超上限则整体清空。
@@ -210,9 +215,9 @@ pub async fn require_device_signature(
         return signature_invalid();
     }
 
-    // 验过签名之后才判协议版本：未验签的请求不许借这条探「Hub 支持哪些版本」。
-    // 版本不匹配是请求形状错，在**消费 nonce 之前**拒（否则一次错版本探测会平白
-    // 烧掉设备本来要用的 nonce）。这里既不建会话，也不烧 nonce。
+    // 第 8 步：协议版本。验过签名之后才判——未验签的请求不许借这条探「Hub
+    // 支持哪些版本」。版本不匹配是请求形状错，在**消费 nonce 之前**拒（否则
+    // 一次错版本探测会平白烧掉设备本来要用的 nonce）。这里既不建会话，也不烧 nonce。
     if parsed.v != IMPORT_VERSION {
         return ApiError::bad_request(err::BAD_BODY).into_response();
     }
