@@ -184,13 +184,26 @@ C7 双向比对产线的步骤名——不再存在「两份清单互相漂移�
 存在，缺了就 fail。`scripts/check.sh` 的 C10 钉死「全 workflow 仅一处 `bun run build` / 一处
 `web-dist` 上传 / 无 `macos-14`」。
 
-**GitHub Actions 的版本钉在「Node 24 起步的最低版本」**：GitHub 已弃用 Node.js 20
-运行时，CI 日志里每一步都会打 `Node.js 20 is deprecated ... forced to run on
-Node.js 24`。本 workflow 用的是 `actions/checkout@v5` / `actions/setup-node@v5` /
-`actions/upload-artifact@v6` / `actions/download-artifact@v6`——恰好是**各自改用
-Node 24 runtime 的第一个版本**。为什么不直接上最新的 v7/v8：那两个大版本改的是
-**模块形态**（ESM）与**校验强度**（download-artifact v8 起下载哈希不匹配默认报错），
-属于行为变更而非运行时升级，与「消掉弃用警告」这件事无关，混在一起做会让出问题时
+**GitHub Actions 的 Node runtime 分两组，只有第一组已完成迁移**：GitHub 已弃用
+Node.js 20 运行时，没升级的 action 在 CI 日志里每一步都会打
+`Node.js 20 is deprecated ... forced to run on Node.js 24`。判据是 action 自己
+`action.yml` 的 `using:` 字段，**不是「它是第几个大版本」**——这一点此前写反过
+（2026-11-13 修正，原文档称 `download-artifact@v6` 是「第一个跑 Node 24 的版本」，
+实际 v6 仍是 `node20`，v7.0.0 release notes 明写 v6 只是「preliminary support」）。
+
+- **已跑 node24**（本 workflow 现在用这一组）：`actions/checkout@v5`、
+  `actions/setup-node@v5`、`actions/upload-artifact@v6`、
+  `Swatinem/rust-cache@v2`、`oven-sh/setup-bun@v2`。
+- **仍跑 node20**（这组是要改的对象）：`actions/download-artifact@v6`，
+  以及 docker 系列 `setup-qemu-action@v3` / `setup-buildx-action@v3` /
+  `login-action@v3` / `metadata-action@v5` / `build-push-action@v6`。
+  它们的 node24 首版分别是 `download-artifact@v7`、`setup-qemu`/`setup-buildx`/`login` `v4`、
+  `metadata` `v6`、`build-push` `v7`。升级清单与取舍已由 planner 于 2026-11-13 原样搬入
+  v0.8.0 的 `## Bugs` 表（🟡「CI 仍打 `Node.js 20 is deprecated`」），并成对删了缺陷池行；
+  **本节只记事实，不重复处置方案**。
+
+为什么不直接升到再往上的大版本：`download-artifact` v8 起下载哈希不匹配默认报错，
+改的是**校验强度**而非运行时，与「消掉弃用警告」无关，混在一起做会让出问题时
 分不清是哪个变更带来的。`setup-node` v5 起在 `package.json` 有 `packageManager`
 字段时会**自动开 npm 缓存**，这里显式 `package-manager-cache: false`——本仓的包管理器
 是 bun，npm 的缓存条目对 bun 无效，让它去猜只会写出无效缓存。
@@ -363,8 +376,9 @@ macOS 上 **POSIX 权限位照常生效**（`0o600` / `0o700` 与 Linux 同义�
 | v0.7.2 ✅ 已完成 | **桌面平台支持（设备侧 afcli：Windows + macOS）** | **用户 2026-11-05 裁定**：插一个 v0.7.2 专做设备侧桌面平台移植（Windows + macOS，mac 为用户 2026-11-05 追加裁定），`v0.8.0` 骨架不动、顺延一位。**只做设备侧 `afcli`**，`afhub` 仍只发 Linux（自托管 Hub 一般跑在服务器/容器，Windows 不是主场景）。**改动面已核对**：`afcli` 的生产依赖链是 `node-cli` → `node-core` → `node-connector`，**不经过 `hub-storage`**；`libc` 附着点是 `node-connector` 的 `pty.rs`(27) / `exec.rs`(45) / `terminal.rs`(5) / `files.rs`(4) 与 `node-core/worker.rs`(5，疑为测试夹具)。**核心难点**：`exec.rs` 的「`fork` → 改 fd → `execvpe`」在 Windows 上没有对应物（**Windows 没有 `fork`**），要整体换成 `CreateProcess` + 句柄重定向；会话终端从 `forkpty`/`ioctl(TIOCSWINSZ)` 换成 ConPTY（`CreatePseudoConsole` / `ResizePseudoConsole`）。**不是「加个矩阵条目」的量级**——先抽平台无关的 PTY/进程后端，再写两个实现，且 Windows 分支在 Linux 上测不了，得要 Windows runner 真跑。CI 目标：`x86_64-pc-windows-msvc`（msvc 工具链）与 `aarch64-apple-darwin`（对齐 REX 用 `macos-latest`，Apple Silicon；**Intel runner 在退役时间表上，故 macOS 只发 arm64**）。macOS 是 Unix 系、移植量小，安排在 Windows 之前先做以验证抽象层。见 `.mdflow/milestones/v0.7.2-desktop-platforms.md`。**缺陷池 bug：2 个**（🟡 secret 加固、🟢 工作区同步兜底，planner 2026-11-05 原样搬入 Bugs 表；二者均为**未来补强项**、本期不做，已在 Bugs 表如实保留） | —（承接 v0.7.1 推迟的 `windows-gnu`） |
 | v0.7.3 ✅ 已完成 | **覆盖率补强 + 恢复覆盖率硬门禁（+ 修 Windows 真机测试挂死）** | **版本类型 `patch`**：不加功能，把 v0.7.2 留下的两笔债还掉。①**补测试到 98%**：步骤8 收尾把 `stream.rs` 并发用例改成握手驱动的确定性测试，全量 `cov-gate` 实跑 `TOTAL ... 98.08%`（622 / 32417 行未覆盖），退出码 0；②**恢复硬门禁**：删除 `release.yml` 的 `cov-gate` step 级临时豁免并同步 `AGENTS.md` / `DEVELOPMENT.md` / `CHANGELOG.md`，`scripts/check.sh` 加 C11 护栏禁止该豁免字段回流；门槛、命令文本、下游 `needs` 一律不动；③**修 Windows 真机测试挂死**：`exec_windows` / `pty/windows` 改用 `PeekNamedPipe` 判匿名管道可读性，ConPTY 子进程保持标准句柄接法，给 `test-desktop` 加 `timeout-minutes` 兜底并收口 4 条 Unix-only 假 git 用例；最终判据仍是远端 `test-desktop (x86_64-pc-windows-msvc)` 的 `a_conpty_runs_a_command_and_we_read_its_output` 为 `ok`。**发布方式**：用户 2026-11-07 裁定发 `v0.7.3`，不 force-update 已发布的 `v0.7.2` tag；期间 v0.7.2 的 Release 为空、镜像已推但无 Release 附件 | —（工程补强，无新增 `PRODUCT.md` §6.1 能力项） |
 | v0.7.4 ✅ 已完成 | **会话导入（外部 agent 历史会话 → 设备侧 CLI 导入 → 可继续对话）** | **用户 2026-11-05 裁定立项，2026-11-06 顺延**（原 `v0.7.3`，因插入覆盖率补强里程碑而后移一位）。方案已调研（2026-10-27 实测）：导入=**绑定非搬运**——Hub 建 session 预填 `acp_session_id`，设备走 `session/load` 让 agent 自己找回历史（实测跨进程记得）。**用户 2026-11-10 追加裁定：除了 opencode 还要支持其他支持的 agent 软件**——本轮采用**可插拔 provider registry + opencode 首实现**：provider 按 `agent_id` 注册并各自列出本机历史会话；只有已验证 ACP 入口且 `can_converse()` 为真的软件可标为支持。`KNOWN_AGENTS` 当前 9 条中，只有 `opencode` 有 `acp_args: &["acp"]`；其余 8 条（`claude` / `gemini` / `codex` / `cursor-agent` / `aider` / `crush` / `goose` / `qwen`）`acp_args: &[]`，本轮**明确标注导入 / 对话不支持，不适配、不验证**。opencode 历史会话在 `~/.local/share/opencode/opencode.db` 的 `session_v2` 表，设备侧只读探测、不写库、不搬运轨迹。改动面：设备侧 provider registry / opencode adapter + `afcli import` 子命令 + **1 个设备签名 HTTP Hub 端点**（独立设备认证 layer，不改 `AUTH_EXEMPT_PATHS` / `CSRF_EXEMPT_PATHS` / `INIT_MODE_PATHS`；不建立第二条 WS、不新增 `MessageType`）+ Hub 会话预填 `acp_session_id` 并保留 `base_rev` 探测；与 v0.7.2 无依赖。**设备侧 CLI（步骤3 实现）**：`afcli import list --provider <id>` 列出本机历史会话；`afcli import bind --provider <id> --session <external_id> [--hub <url|host:port>]` 只读 `identity.json` 后向 Hub 发**一次设备签名 HTTP POST**（`POST /device-api/session-imports`，body 摘要 + `identity::import_signing_message` 签名）；不调用 `connect_once`、不建立第二条 WS、不新增 `MessageType`，Hub 地址由 `--hub` / `AFCLI_HUB_URL` 推导同源 http(s)。**缺陷池 bug**：1 个（Hub 镜像缺少 git，基础镜像方案待评估（🟡）），planner 已原样搬入里程碑 `## Bugs` 表并成对删池行。**步骤3 两条延后项**（用户 2026-11-11 裁定，不占本里程碑范围）：`afcli 下载无法选择其他架构`（🟡，前端只按 `navigator` 推断平台、无选择控件；后端 `GET /api/agent-binary?os=&arch=` 已是闭集）；`Windows 上 afcli 连 Hub 握手拿到 HTTP 200`（🔴，重复 `connect failed: HTTP error: 200 OK`，需先定位是代理还是路由）。**跨编译结论（步骤3 实测，不是「已验证」）**：`x86_64-unknown-linux-musl` 真编通过；`x86_64-pc-windows-msvc` 与 `aarch64-apple-darwin` 在本机编不出，根因是本机**没有 Windows / macOS SDK**（`fatal error: 'stdlib.h' file not found` / `'bits/libc-header-start.h' file not found`、缺 `lib.exe` / `link.exe`），不是 `rusqlite` 的依赖形态问题——`release.yml` 的桌面矩阵本就跑在原生 Windows / macOS runner 上，故这两目标由 CI 承担，属**残余风险**，未记为本地已验证。**缺陷池评估结论（步骤3 子任务 5）**：用 v0.7.3 真实产物实建两份 Hub 镜像对照，`FROM scratch` 为 12 MB / 23 文件且无 `git`，`debian:13-slim` + `git ca-certificates` 为 193 MB / 6465 文件 / 113 dpkg 包且 `git 2.47.3` 可用；两者 `afhub --version` 与启动均正常。源码侧 `BareRepo` 的生产调用点当前零线上消费者，`base_rev.rs` 的 `"git"` 是设备 connector 名，故本轮**保留 `FROM scratch`**，不改 `Dockerfile.hub` / `release.yml`，用户可见变化为零；仅当第一条 Hub 侧 git 路由真正接上并重估发布矩阵时才重新评估，优先 distroless / 侧挂 git 而非整块 Debian。里程碑文档：`.mdflow/milestones/v0.7.4-session-import.md` | —（用户新需求） |
-| v0.8.0 🔄 当前 | **任务与看板** | Task 六态 + Task:Execution = 1:N；`done_when` = `criteria` 判定码 + `description`（`DECISIONS.md` D23）；任务级约束与固定过滤顺序（① allowed_* ② 隔离策略 ③ 能力/负载）；失败八形态与重试矩阵（含 `superseded` / `disk_exhausted`）；**执行中改需求的三种处置**；看板六列 + 任务详情页；**看板过滤 / 搜索 / 批量操作**；**项目摘要四行（含管家总结落点）**；**失败面板与验收面板（唯一处置入口）**；**执行复盘（只读轨迹回放）**；**执行监控（`projects/:id/executions`，慢变摘要 + 按行订阅，不编百分比）**；**收件箱（待决策 / 动态两区 + 决策请求 TTL/降级/留痕）**；`disk_exhausted` 时**询问清理并说明清理什么（预演）**；**时间与成本统计（排队与执行分开记，token 拿不到标 unknown）**；执行间接力（缓存复用）；时间线作为第二视图。见 `architecture/task-model.md` | 任务看板、任务与执行、项目时间线、执行监控、执行复盘、收件箱、失败与验收 |
-| v0.8.1 | **页面与原型对齐** | **用户 2026-11-11 裁定立项**（原话「加一个0.8.1 做页面和原型对齐」）。**只对齐已交付页面，不加新业务能力**：先裁决原型基线（用户提供原型 / 参考截图并落进仓库，或显式声明「无原型，以文字规格为准」），再逐屏对照项目页 / 看板 / 任务详情 / 会话页外壳；每条差异可证伪（位置 + 证据 + 断言）并进 Bugs 表；token 与组件复用收口，不新增第二份真相源（`scripts/check.sh` C5）。承接 `v0.8.0` 的「已知待修：页面与原型完全不一致」与「原型基线裁决」阻塞项。**不改变 v0.8.0 / v0.9.0 的范围与状态**。里程碑文档：`.mdflow/milestones/v0.8.1-page-prototype-alignment.md` | 页面与原型对齐 |
+| v0.8.0 🔄 当前 | **任务与看板** | **范围已收口为「任务闭环」+ 并入原 v0.8.1「页面与原型对齐」**（收口 2026-11-11，并入 2026-11-13）。**做**：schema v7 + `Task` 六态对齐规格（`pending/queued/running/review/done/failed`，凡 `draft/ready/blocked` 归并 `pending`）；状态机九条合法边 + 三条硬规则（`running`→`done` 拒、`review`→`failed` 拒、`queued` 超时退 `pending`）；任务 HTTP API（建 / 列 / 详情 / 改 / 推进 / 验收 / 失败处置）；`done_when` = `criteria` 判定码闭集 + `description`，只有 `description` 时标「需人工验收」（`DECISIONS.md` D23）；任务级约束；失败八形态（含 `superseded` / `disk_exhausted`，`superseded` 不占重试）；看板六列真实卡片 + 新建任务；任务详情页（怎么来的 / 执行记录 / 失败面板 / 验收面板 / 任务约束）；**原型基线落库**（`prototype/` 定为唯一前端基准，写进 `AGENTS.md`）；**10 个已交付页面逐屏对齐**；**token 与组件复用收口**（不新增第二份 `--af-*` 真相源，`check.sh` C5）。见 `architecture/task-model.md`、`prototype/`。**移出到 v0.8.2**（2026-11-11 收口，**9 项**）：执行监控 / 执行复盘 / 收件箱 / 时间与成本 / 执行间接力 / 看板过滤搜索批量 / 项目摘要四行 / 时间线第二视图 / 调度器（磁盘清理预演随调度器一起走）。去向逐项见同表 v0.8.2 行与 §4.2。**缺陷池 bug：3 个**（🔴 Windows WS 200 / 🟡 CI node20 / 🟡 afcli 架构选择，planner 2026-11-13 原样搬入 `## Bugs` 表并成对删池行） | 任务看板、任务与执行、失败与验收 + 页面与原型对齐（原 v0.8.1 并入） |
+| ~~v0.8.1~~ ❌ 已放弃（并入 v0.8.0） | ~~**页面与原型对齐**~~ | **用户 2026-11-13 裁定整个 v0.8.1 并入 v0.8.0**，原文档标「已放弃」保留作历史：`.mdflow/milestones/v0.8.1-page-prototype-alignment.md`。并入内容落为 v0.8.0 的子任务 **10（原型基线裁决落库）/ 11（10 个已交付页面逐屏对齐）/ 12（token 与组件复用收口）**。**原「原型基线裁决」阻塞项已解除且是假阻塞**：v0.8.1 原文称「仓库里没有 `prototype/` 目录」，实测为 30 文件 / 21 HTML / 0 死链，用户已拍板以 `prototype/` 为唯一前端基准——缺的不是原型，是**没把它写进 `AGENTS.md`**（`grep -c prototype AGENTS.md` 曾为 0）。**铁律保留**：只对齐**已交付的 10 个页面**，不加新业务能力、不新增路由 / 消息类型 / 数据列；11 个骨架页不对齐（对齐一个不存在的页面没有意义）。**代价如实记录**：v0.8.0 由 9 个子任务扩到 12 个，推翻 2026-11-11 那次「把 9 项移出到 v0.8.2」的收口尺度；移出项**仍然移出**，不因本次并入而回流 | ~~页面与原型对齐~~（并入 v0.8.0） |
+| v0.8.2 | **任务闭环补全** | **2026-11-11 收口 v0.8.0 时派生**（用户裁定把 9 项能力移出，不在 v0.8.0 做）。**承接自 v0.8.0 移出项（9 项，逐项对齐 §4.2）**：执行监控（`projects/:id/executions`，慢变摘要 + 按行订阅，不编百分比）/ 执行复盘（只读轨迹回放）/ 收件箱（待决策 + 动态两区，决策请求 TTL/降级/留痕）/ 时间与成本统计（排队与执行分开记，token 拿不到标 `unknown` 不估算）/ 执行间接力（缓存复用，`parent_execution_id`）/ 看板过滤搜索批量 / 项目摘要四行（含管家总结落点）/ 时间线第二视图 / **调度器与派发器**（三层过滤与打分，`scheduling.md`），**磁盘清理预演随调度器一起走**（§4.2 单列一行，故表内 9 行数据行 + 这一条）。**为什么独立成版**：这些能力都依赖「有真实执行数据」与「有派发器」，挤进 v0.8.0 会让任务闭环本身无法收敛；且 2026-11-13 又把原 v0.8.1 的页面与原型对齐并入 v0.8.0，体量已满。**本轮只登记、不派生里程碑文档、不动代码**；`v0.8.0` 的「不降级凑数」规则在本版表现为「没有派发器就不假装派过」 | —（承接 v0.8.0 移出项） |
 | v0.9.0 | **管家** | 跑在 Hub 上的项目级 agent：接意图 / 建派任务 / 督进度 / 写总结；**技能集（`project.status` / `task.create` / `task.clarify` / `memory.*`），不写死意图分类**（D22）；两处记忆（库 `project_memory` + 仓库 `.afleet/MEMORY.md`）；**建议派活草稿箱（点下发才进看板）**；与调度器的接口（只提交 task，不指定设备）；决策请求与收件箱的接入。调度器侧补三层过滤（`architecture/scheduling.md` 按此改写）。见 `architecture/butler.md` | 管家 |
 | v0.10.0 | **外部 issue 单向导入** | 导入生成 Task + Hub 内收件箱通知 + 管家初筛 + 结论单向往回写。**不做双向同步**。见 `PRODUCT.md` §5.5 | 外部 issue 单向导入 |
 | v0.11.0 | **定时任务（自动化）** | 定时与事件触发的调度：cron 式表达 + 「某任务完成后触发」两类来源，落到既有 Task（生成新 Task 而不是绕过六态）。**必须复用 v0.8.0 的任务模型**——定时任务不是另一套调度，触发只是「谁在什么时候创建了 Task」。要点：触发器本身是项目级配置；错过窗口（Hub 停机）后的补偿策略要显式定（跳过 / 补跑，不默认静默跳过）；触发产生的 Task 带 `created_by=schedule` 以便在看板与失败归因里区分。**⚠️ 原「推理网关」已降级为 TODO**（见 `PRODUCT.md` §6.2.1），本号改由定时任务占用 | —（`PRODUCT.md` §6.2 后续项） |
@@ -474,19 +488,20 @@ Hub 侧透传与能力校验 / 会话页第三个面板的注册与布局 / 状�
 | **任务看板** | **v0.8.0** | `task-model.md` §2/§6（六态、两视图投影） |
 | **任务与执行** | **v0.8.0** | `task-model.md` §1/§3/§4（1:N、失败八形态、约束与过滤顺序） |
 | **管家** | **v0.9.0** | `butler.md` §2/§3/§4（四项能力、两处记忆、调度接口） |
-| **项目时间线** | **v0.8.0** | `task-model.md` §6（同一批事实的两种投影） |
-| **执行监控** | **v0.8.0** | `PRODUCT.md` §3.7（三层信息、按行订阅、不编百分比）；`task-model.md` §2 |
-| **收件箱** | **v0.8.0** | `PRODUCT.md` §5.4；`butler.md` §2.2.2（决策请求形态、TTL、降级、留痕） |
+| **项目时间线** | **v0.8.2** | `task-model.md` §6（同一批事实的两种投影）。**2026-11-11 收口移出 v0.8.0** |
+| **执行监控** | **v0.8.2** | `PRODUCT.md` §3.7（三层信息、按行订阅、不编百分比）；`task-model.md` §2。**2026-11-11 收口移出 v0.8.0** |
+| **收件箱** | **v0.8.2** | `PRODUCT.md` §5.4；`butler.md` §2.2.2（决策请求形态、TTL、降级、留痕）。**2026-11-11 收口移出 v0.8.0** |
 | **连接分层** | **v0.12.0**（随技能 / MCP 的真实批量负载落地） | `protocol.md` §0.1（按用途分连接 + 三条可测断言）；`DECISIONS.md` D18。**2026-11-04 从 v0.7.0 后移**：三条性质（主动外联 / Hub 不拨入 / 可鉴权可审计）现有 WS 已满足，而「按用途分三类连接」是为**批量传输**服务的——v0.7.0 的同步量（worktree 指针 + 元数据）撑不起拆分，现在拆是提前优化；v0.12.0 的技能 / MCP 才有真批量（大文件、S3、DB 导出） |
 | **技能 / MCP** | **v0.12.0** | `PRODUCT.md` §3.6；`DECISIONS.md` D21（凭据不进上下文、审计、不开放任意 connector） |
-| **项目摘要** | **v0.8.0** | `PRODUCT.md` §3.7（四行摘要，管家总结的 UI 落点） |
-| **看板过滤 / 搜索 / 批量** | **v0.8.0** | `PRODUCT.md` §3.3.1（批量重试仍逐张检查约束） |
-| **时间与成本** | **v0.8.0** | `PRODUCT.md` §3.8（排队与执行分开记，token 拿不到标 unknown 不估算） |
+| **项目摘要** | **v0.8.2** | `PRODUCT.md` §3.7（四行摘要，管家总结的 UI 落点）。**2026-11-11 收口移出 v0.8.0** |
+| **看板过滤 / 搜索 / 批量** | **v0.8.2** | `PRODUCT.md` §3.3.1（批量重试仍逐张检查约束）。**2026-11-11 收口移出 v0.8.0** |
+| **时间与成本** | **v0.8.2** | `PRODUCT.md` §3.8（排队与执行分开记，token 拿不到标 unknown 不估算）。**2026-11-11 收口移出 v0.8.0** |
 | **失败与验收面板** | **v0.8.0** | `task-model.md` §4/§5（唯一处置入口）；`PRODUCT.md` §3.9 |
-| **执行复盘** | **v0.8.0** | `PRODUCT.md` §3.11（只读，已有轨迹表的新投影）；`session-and-trajectory.md` |
-| **执行间接力** | **v0.8.0** | `PRODUCT.md` §3.12；`task-model.md` §8（`parent_execution_id`） |
+| **页面与原型对齐** | **v0.8.0**（原 v0.8.1 并入） | `prototype/`（21 页，唯一前端基准）+ `docs/design-system.md`。**2026-11-13 用户裁定整个 v0.8.1 并入 v0.8.0**；只对齐 10 个已交付页面，11 个骨架页不对齐 |
+| **执行复盘** | **v0.8.2** | `PRODUCT.md` §3.11（只读，已有轨迹表的新投影）；`session-and-trajectory.md`。**2026-11-11 收口移出 v0.8.0** |
+| **执行间接力** | **v0.8.2** | `PRODUCT.md` §3.12；`task-model.md` §8（`parent_execution_id`）。**2026-11-11 收口移出 v0.8.0** |
 | **管家建议派活草稿箱** | **v0.9.0** | `butler.md` §2.2.2（草稿不进看板，信任模式默认关） |
-| **磁盘清理预演** | **v0.8.0** | `PRODUCT.md` §5.4；`task-model.md` §3.1 |
+| **磁盘清理预演** | **v0.8.2** | `PRODUCT.md` §5.4；`task-model.md` §3.1。**2026-11-11 收口随调度器移出 v0.8.0** |
 | **绑定管理（双向可改）** | **v0.7.0** | `PRODUCT.md` §3.2（主题色、归档）；`DECISIONS.md` D24/D25 |
 | **会话导入（用户新需求，无独立 §6.1 能力行）** | **v0.7.4** | `session-and-trajectory.md` §2.1（绑定非搬运：只预填 `acp_session_id`，历史仍归 agent；§2 是「会话恢复走 ACP」的母节）；`security-and-lifecycle.md` §1.1（设备密钥对 + 设备签名 HTTP 边界；§1 是「凭据分三类」的母节） |
 | **外部 issue 单向导入** | **v0.10.0** | `PRODUCT.md` §5.5；**无独立架构文档**，规格在 PRODUCT 内 |
@@ -502,6 +517,20 @@ Hub 侧透传与能力校验 / 会话页第三个面板的注册与布局 / 状�
 > **2026-11-01 改版影响**：`PRODUCT.md` §3.1 已改为 §6.1（章节重排）。本表随之更新两列：
 > 左列全部指向 §6.1，并新登记 v0.7.0–v0.10.0 的五项能力。
 > 原「工作区供料」「产物归档」两条撤销项**由新能力承接**，不再是无主之地。
+
+> **2026-11-11 收口影响**：本表有 **9 行**的承接版本从 v0.8.0 改为 **v0.8.2**
+> （项目时间线 / 执行监控 / 收件箱 / 项目摘要 / 看板过滤 · 搜索 · 批量 / 时间与成本 /
+> 执行复盘 / 执行间接力 / 磁盘清理预演），与上方里程碑表 v0.8.0 行的「移出到 v0.8.2」
+> 九项逐项对应。**「调度器」与「时间线第二视图」不单列行**：前者藏在
+> 「磁盘清理预演」（随调度器移出）与 v0.8.2 里程碑行里，后者就是「项目时间线」那一行。
+> 仍留 v0.8.0 的是 **4 行**：任务看板 / 任务与执行 / 失败与验收面板 / 页面与原型对齐
+> （最后一行是 2026-11-13 随原 v0.8.1 并入）。
+> 核对方式**按能力名、不按行号**（本节行号会随表格插行漂移）：
+> 表格内带 v0.8.2 的**数据行**应为 **9 行**：
+> `awk '/^### 4\.2 /,/^### 4\.3 /' docs/DEVELOPMENT.md | grep -cE '^\| \*\*.*\*\* \| \*\*v0\.8\.2\*\*'`
+> 应输出 9（上面这段说明本身也提到 v0.8.2，所以不能拿 `grep -c 'v0.8.2'` 去数）；
+> `grep -nE '^\| \*\*(任务看板|任务与执行|失败与验收面板|页面与原型对齐)\*\*.*v0\.8\.0' docs/DEVELOPMENT.md`
+> 应四条全中。`看板过滤 / 搜索 / 批量` 必在本轮改掉——v0.8.0 本轮不做它。
 
 ### 4.3 反向检查
 

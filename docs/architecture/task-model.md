@@ -351,38 +351,43 @@ v0.8.0 没有调度器、也没有设备会拒接，`queued` 之后只可能是�
 
 ---
 
-## 8. 数据形状（已落库，schema v7）
+## 8. 数据形状（schema v7 实况）
 
-本节的字段**已经落到 schema v7**（`crates/hub-storage/src/schema_v7.sql`）。
-下面标注每一列的落地状态，不再只定语义——一份不标状态的「草案」会让人分不清
-「规格这么写」与「库里真有这一列」。
+本节的字段**已经落到 schema v7**：`crates/hub-storage/src/schema_v7.sql` 加列，
+`crates/hub-storage/src/schema_v5.sql` 是 `task` / `execution` 两张表的建表处
+（v6 只动 `project`）。下面逐列对照**实际的 DDL**，不再只定语义——本节此前叫「草案」，
+那会让人分不清「规格这么写」与「库里真有这一列」。**核对命令**：
+`pragma_table_info('task')` / `pragma_table_info('execution')`（或直接读上面两个 `.sql`）。
 
 ```text
-task                                    -- v7 实际列
+task                                    -- 实际列 = schema_v5.sql:97-109 + v7 加的 7 列
   id, project_id
-  title, intent_ref                     -- intent_ref: v7 加列，本里程碑无写者（v0.9.0 管家）
+  title
   done_when_criteria, done_when_description   -- 两列而非一个 JSON；闭集见 DoneWhen::validate
   state                                 -- pending/queued/running/review/done/failed
+                                        -- DEFAULT 'pending'（v7 从 'draft' 改；旧三态已在迁移里归并）
   base_commit
-  allowed_devices, allowed_agents, required_capabilities   -- 原文 JSON 字符串，NULL = 不限
-  retry_limit                           -- NULL = 用默认上限
-  version                               -- 每次写 +1；乐观锁的守卫列
-  superseded_by                         -- v7 加列，本里程碑无写者（v0.8.2 调度器）
   created_by                            -- human / butler / import:<source>
   created_at, updated_at
+  --- 以下 7 列由 schema_v7.sql 的 ALTER TABLE 加上 ---
+  allowed_devices, allowed_agents, required_capabilities   -- 原文 JSON 字符串，NULL = 不限
+  retry_limit                           -- NULL = 用默认上限
+  version                               -- INTEGER NOT NULL DEFAULT 1；每次写 +1，乐观锁的守卫列
+  superseded_by                         -- 本里程碑无写者（v0.8.2 调度器）
+  intent_ref                            -- 本里程碑无写者（v0.9.0 管家 / v0.10.0 导入）
 
-execution                               -- v7 实际列
+execution                               -- 实际列 = schema_v5.sql:130-139 + v7 加的 6 列
   id, task_id
-  device_id                             -- **不在本表**：设备由 binding 推出
-  binding_id                            -- execution 指向 binding，device_id 从它推
-  agent_id                              -- v7 加列，本里程碑无写者（无派发器）
+  binding_id                            -- execution 指向 binding，device_id 从它推（本表没有 device_id）
   worktree_path, base_commit
-  state                                 -- pending/running/succeeded/failed/aborted
-                                        -- `discarded` 不是第七个取值：aborted + reason='discarded'
-  failure_kind                          -- §3 八种，成功为 NULL
-  reason, evidence                      -- evidence 空要显式标 'none'（§2）
-  started_at, ended_at                  -- v7 加列
+  state                                 -- pending/running/succeeded/failed/aborted（DEFAULT 'pending'）
+                                        -- `discarded` 不是第六个取值：aborted + reason='discarded'
   created_at
+  --- 以下 6 列由 schema_v7.sql 的 ALTER TABLE 加上（全部可空：存量执行没有这些信息） ---
+  agent_id                              -- 本里程碑无写者（无派发器）
+  failure_kind                          -- §3 八种，成功为 NULL
+  reason, evidence                      -- evidence 空要显式标 'none'（§3.1）
+  started_at, ended_at
 
 -- 以下字段**尚未落库**，逐条写明归哪一版，避免被读成「已经有了」
 task.supersedes                         -- 取代关系的反向；v0.8.2
