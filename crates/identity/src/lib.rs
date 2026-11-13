@@ -574,6 +574,32 @@ mod tests {
         }
     }
 
+    /// **规范串的字节级 golden 常量**：顺序、长度前缀、首尾定宽字段全锁死。
+    ///
+    /// `assert_ne!` 只能证明「这两个输入不同」，证不到「字节长这样」——字段
+    /// 顺序对调、`u32` 换成 `u64` 前缀之类的漂移都能让两条 `assert_ne!` 依旧
+    /// 通过。这里把一整串期望字节写出来：任何一位变化都变红，且红点在 diff 里
+    /// 可见。CLI 与 Hub 共用这一份实现，它就是两端的协议常量。
+    #[test]
+    fn import_signing_message_matches_the_golden_bytes() {
+        // v = 1（u32 BE）｜"n" ｜"POST" ｜"/p" ｜"d" ｜"n" ｜ t = 7（u64 BE）
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&1u32.to_be_bytes());
+        for field in ["n", "POST", "/p", "d", "n"] {
+            expected.extend_from_slice(&(field.len() as u32).to_be_bytes());
+            expected.extend_from_slice(field.as_bytes());
+        }
+        expected.extend_from_slice(&7u64.to_be_bytes());
+
+        let actual = import_signing_message(1, "n", "POST", "/p", "d", "n", 7);
+        assert_eq!(
+            actual, expected,
+            "规范串字节漂移：首 4 字节 v、各字段 len(u32 BE)+bytes、末 8 字节 t"
+        );
+        // 总长 = 4 + (4+1) + (4+4) + (4+2) + (4+1) + (4+1) + 8 = 41
+        assert_eq!(actual.len(), 41, "总长也是契约的一部分");
+    }
+
     /// 字段之间必须有长度前缀，且顺序固定：把字节从相邻字段挪过去
     /// （`("ab","c")` vs `("a","bc")`）不得产生同一串。
     #[test]
