@@ -5,7 +5,7 @@
 #   curl -fsSL https://github.com/JeeLin/AgentFleet/releases/latest/download/install.sh | sh
 #   curl -fsSL https://raw.githubusercontent.com/JeeLin/AgentFleet/main/install.sh | sh
 #
-# 可覆盖：AFCLI_VERSION=v0.7.3、AFCLI_REPO、AFCLI_INSTALL_DIR、AFCLI_BASE_URL（内网/离线镜像）。
+# 可覆盖：AFCLI_VERSION=v0.7.4、AFCLI_REPO、AFCLI_INSTALL_DIR、AFCLI_BASE_URL（内网/离线镜像）。
 # Windows 没有 sh：直接下载 Release 里的 afcli-windows-amd64.exe。
 set -eu
 

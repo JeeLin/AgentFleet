@@ -14,6 +14,22 @@ once on 2026-11-05.
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-11-13
+
+> 里程碑：会话导入——把设备上外部 agent 的历史会话绑定成 Hub 会话并继续对话。
+> Milestone: session import — bind a device's existing agent session into the Hub and keep talking.
+
+### Added
+
+- **新增 `afcli import list --provider opencode`**，列出本机 opencode 历史会话供选择。 / **Added `afcli import list --provider opencode`** to list the device's existing opencode sessions.
+- **新增 `afcli import bind`**，用一次设备签名 HTTP 请求把选中的历史会话绑定成 Hub 会话，不建第二条 WebSocket。 / **Added `afcli import bind`**, which binds a chosen session into the Hub with one device-signed HTTP request and no second WebSocket.
+- **新增设备签名端点 `POST /device-api/session-imports`**，Hub 只存恢复所需信息，历史内容仍由 agent 自己保管。 / **Added the device-signed `POST /device-api/session-imports` endpoint**; the Hub stores only what is needed to resume, history stays with the agent.
+
+### Changed
+
+- **导入的会话预填 `acp_session_id`**，从 Hub 打开时由设备侧 `session/load` 接上同一条历史继续对话。 / **Imported sessions carry a prefilled `acp_session_id`**, so opening them resumes the same history through the device's `session/load`.
+- **provider 改为可插拔注册表，本轮只支持 opencode**；其余 8 个 agent 明确标为导入 / 对话不支持，不填猜测参数。 / **Providers are now a pluggable registry with only opencode supported**; the other 8 agents are explicitly unsupported rather than given guessed arguments.
+
 ## [0.7.3] - 2026-11-10
 
 > 里程碑：补测试、恢复覆盖率硬门禁并修复 Windows 真机测试挂死。
