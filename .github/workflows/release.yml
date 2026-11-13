@@ -157,7 +157,7 @@ jobs:
       # 覆盖率门禁要与本地同态：本地检出通常有 `packages/web/dist`。这里下载
       # `gate-web` 唯一一次构建的 dist，不再重复 `bun install` + `bun run build`。
       - name: 取回前端产物
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: web-dist
           path: packages/web/dist
@@ -307,7 +307,7 @@ jobs:
 
       # dist 由 gate-web 编好；这里只取回并校验，绝不重复编译。
       - name: 取回前端产物
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: web-dist
           path: packages/web/dist
@@ -431,7 +431,7 @@ jobs:
 
       # 前端产物落在 build.rs 推算的位置（`crates/hub-server/../../packages/web/dist`）。
       - name: 取回前端产物
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: web-dist
           path: packages/web/dist
@@ -686,13 +686,13 @@ jobs:
       # 每个 artifact 里是**该平台的两个二进制**（afhub + afcli）：
       # Hub 镜像两个都要（afcli 供设备从 Hub 拉取，见 Dockerfile.hub 的说明）。
       - name: 取回 amd64 产物
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: bin-x86_64-unknown-linux-musl
           path: dist/amd64
 
       - name: 取回 arm64 产物
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: bin-aarch64-unknown-linux-musl
           path: dist/arm64
@@ -705,13 +705,13 @@ jobs:
       # 注意：这两个 artifact 是 `build-desktop` 产的，与上面两个 Linux 的
       # 目录结构不同——那边每个 artifact 只有一个 afcli（afhub 不跨平台）。
       - name: 取回桌面 afcli（windows-amd64）
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: bin-x86_64-pc-windows-msvc
           path: dist/windows-amd64
 
       - name: 取回桌面 afcli（macos-arm64）
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: bin-aarch64-apple-darwin
           path: dist/macos-arm64
@@ -733,11 +733,11 @@ jobs:
           done
           ls -la dist/amd64 dist/arm64 dist/windows-amd64 dist/macos-arm64
 
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
 
       - name: 登录 GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -745,7 +745,7 @@ jobs:
 
       - name: 镜像 tag 与标签
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/agentfleet-hub
           # `latest` 只跟**正式** tag（不含 -rc / -beta），否则一次预发就把
@@ -757,7 +757,7 @@ jobs:
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
       - name: 构建并推送
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.hub
@@ -779,13 +779,13 @@ jobs:
 
       # 两个 artifact 都整包取下（各含 afhub + afcli）；本 job 只用 afcli。
       - name: 取回 amd64 产物
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: bin-x86_64-unknown-linux-musl
           path: dist/amd64
 
       - name: 取回 arm64 产物
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: bin-aarch64-unknown-linux-musl
           path: dist/arm64
@@ -798,11 +798,11 @@ jobs:
             chmod +x "$f"
           done
 
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
 
       - name: 登录 GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -810,7 +810,7 @@ jobs:
 
       - name: 镜像 tag 与标签
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/agentfleet-node
           tags: |
@@ -820,7 +820,7 @@ jobs:
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
       - name: 构建并推送
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.node
@@ -852,7 +852,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: 取回全部二进制
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           # 只要 bin-*，不要把 web-dist 也拉进发布包
           pattern: bin-*
