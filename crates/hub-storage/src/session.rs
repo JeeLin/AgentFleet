@@ -7,7 +7,7 @@
 //! 建会话**即挂载工作区**：一次事务里 upsert workspace + insert session
 //! （`workspace.rs` 的 `upsert_in` 是同一条事务的另一半）。
 
-use r2d2_sqlite::rusqlite::{params, OptionalExtension, Row};
+use r2d2_sqlite::rusqlite::{params, OptionalExtension, Row, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
@@ -314,6 +314,10 @@ impl SessionRepo {
     /// 3. **不制造两个相邻的同型 `Option<&str>`**：`agent_id` 已经是
     ///    `Option<&str>`，再加一个同型参数，传反了编译器不会说话，
     ///    而症状是「会话的 agent 变成了 ACP id」。
+    ///
+    /// **[`Self::create_imported_if_absent`] 才是生产去重路径**（导入端点走
+    /// 它）；保留本方法是因为它锁住「事务内读回刚写的行」这条约定，且与
+    /// 幂等路径共用同一个列集合——`create_inner` 的 28 个调用点是 `create` 的。
     #[allow(clippy::too_many_arguments)]
     pub fn create_imported(
         &self,
@@ -348,11 +352,13 @@ impl SessionRepo {
         acp_session_id: Option<&str>,
     ) -> Result<Session> {
         let mut conn = self.pool.get()?;
-        // `transaction()` 而非 `unchecked_transaction()`：见
-        // `DeviceRepo::set_public_key` 的同名注释——库开着 `foreign_keys=ON`，
-        // deferred 的嵌套事务会撞「cannot start a transaction within a
-        // transaction」，`transaction()` 会复用已在进行的那一层。
-        let tx = conn.transaction()?;
+        // `Immediate` 而非默认的 `Deferred`：见
+        // [`Self::create_imported_if_absent`]——这条路径同样是先读后写
+        // （工作区 upsert 先 `SELECT` 再 `INSERT`），`Deferred` 的读→写升级
+        // 在 WAL 下撞并发会直接 `database is locked`，`busy_timeout` 不重试。
+        // 普通建会话没有 `INSERT ... WHERE NOT EXISTS` 的幂等判据，但升级失败
+        // 同样会成为一次 500，所以一并改成 `Immediate`。
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ws = self.workspaces.upsert_in(&tx, node_id, path, now)?;
         let id = crate::workspace::new_id();
         tx.execute(
@@ -508,9 +514,15 @@ impl SessionRepo {
     /// 的 opencode 库，那种情况必须是两条不同的会话行——判据里带 `node_id`
     /// 就是为了这个。因此不建覆盖全表的唯一索引，改由
     /// [`Self::create_imported_if_absent`] 在**一条** `INSERT ... SELECT ...
-    /// WHERE NOT EXISTS` 里把「检查」与「插入」合成单个原子语句：两个并发
-    /// 请求带不同 nonce、同一 `(node_id, agent_id, acp_session_id)` 时最多
-    /// 一个能插进一行，另一个拿 `None` → 409 `import_already_exists`。
+    /// WHERE NOT EXISTS` 里把「检查」与「插入」合成单个原子语句（事务用
+    /// `IMMEDIATE`，先读后写不会撞锁）：两个并发请求带不同 nonce、同一
+    /// `(node_id, agent_id, acp_session_id)` 时最多一个能插进一行，另一个
+    /// 拿 `None` → 409 `import_already_exists`。
+    ///
+    /// **本方法不是去重权威**，只是同一判据的只读查询：导入端点走的是
+    /// [`Self::create_imported_if_absent`]（`routes/api.rs` 的
+    /// `NewSession::ImportedIfAbsent`），生产 `src/**` 里没有本方法的调用点，
+    /// 用到它的是测试与排障。判据若变，两边必须一起变。
     ///
     /// `node_id` 取自 `workspace`（`session` 表没有这一列），所以这也是一次
     /// join；`workspace.node_id` 在设备被删后是 `NULL`，`= ?1` 自然不命中。
@@ -523,6 +535,22 @@ impl SessionRepo {
         acp_session_id: &str,
     ) -> Result<Option<Session>> {
         let conn = self.pool.get()?;
+        self.find_imported_in(&conn, node_id, agent_id, acp_session_id)
+    }
+
+    /// [`Self::find_imported`] 的事务内版本：同一判据、同一 SELECT，只是把
+    /// 连接换成本次事务。
+    ///
+    /// [`Self::create_imported_if_absent`] 用它把「键已存在」读进写事务——
+    /// 那一步不是优化，是共享连接下幂等的**必要条件**（见该方法注释）。
+    /// 判据若变，两处必须一起变；抽这层就是为了它们不可能各改一半。
+    fn find_imported_in(
+        &self,
+        conn: &r2d2_sqlite::rusqlite::Connection,
+        node_id: &str,
+        agent_id: &str,
+        acp_session_id: &str,
+    ) -> Result<Option<Session>> {
         conn.query_row(
             "SELECT s.id, s.workspace_id, s.agent_id, s.acp_session_id, s.state,
                     s.created_at, s.ended_at, s.base_rev, s.base_rev_status, s.execution_id
@@ -543,6 +571,16 @@ impl SessionRepo {
     /// 同一事务），只在 `INSERT` 上加一个 `WHERE NOT EXISTS` 子查询：当前
     /// `(node_id, agent_id, acp_session_id)` 已有行时不插、返回 `None`。
     /// 调用方据此回 409 `import_already_exists`，不会建成两行。
+    ///
+    /// # 幂等判据不只在 SQL 里
+    ///
+    /// `WHERE NOT EXISTS` 只是**语句内**的原子性。两条导入请求若落在**同一个
+    /// 连接**上（连接池 `max_size = 8`，`block_in_place` 下的多个请求可以共享
+    /// 一条连接），先后两个事务的 `NOT EXISTS` 看到的是同一个快照，于是一起
+    /// 判「不存在」、各插一行、各回 201。所以事务开头还要显式
+    /// [`Self::find_imported_in`] 一次：它把这一行先读进本事务，早到的那条
+    /// 提交 / 回滚后 SQLite 会拒掉本语句的写升级（`SQLITE_BUSY`），
+    /// `busy_timeout` 重试的下一轮就能看见新行、走 `None` 分支。
     #[allow(clippy::too_many_arguments)]
     pub fn create_imported_if_absent(
         &self,
@@ -555,8 +593,24 @@ impl SessionRepo {
         acp_session_id: &str,
     ) -> Result<Option<Session>> {
         let mut conn = self.pool.get()?;
-        let tx = conn.transaction()?;
+        // `IMMEDIATE` 而不是默认的 `DEFERRED`：这条路径**先读后写**（工作区
+        // upsert 先 `SELECT` 再 `INSERT`，会话是 `INSERT ... WHERE NOT EXISTS`）。
+        // `DEFERRED` 的读快照在第一次读时取得，升级为写锁时若另一条连接已先
+        // 提交，SQLite 直接回 `database is locked`——而 `busy_timeout` 对这个
+        // 情形**不重试**。结果是「两条真并发导入」里的输家拿到 500 而不是 409。
+        // `IMMEDIATE` 在事务开头就拿写锁（走 `busy_timeout`），把冲突变成
+        // 「排队」，输家随后在 `WHERE NOT EXISTS` 上看到 0 行 → `None`。
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ws = self.workspaces.upsert_in(&tx, node_id, path, now)?;
+        // 先把「这个键是否已有行」读进本事务（见函数注释最后一段）：只靠
+        // `WHERE NOT EXISTS` 在共享连接上的并发下会一起看见空快照。
+        if self
+            .find_imported_in(&tx, node_id, agent_id, acp_session_id)?
+            .is_some()
+        {
+            tx.rollback()?;
+            return Ok(None);
+        }
         let id = crate::workspace::new_id();
         let inserted = tx.execute(
             "INSERT INTO session
@@ -611,9 +665,9 @@ impl SessionRepo {
     /// 去 load 一个 agent 从来不认识的 id。
     ///
     /// **第二个合法来源**（v0.7.4）：用户从设备侧显式导入并签名的历史 id。
-    /// 那条路径走 [`Self::create_imported`]，在**同一条 INSERT** 里写初值；
-    /// 之后 `ready` 帧回来会用本方法再写一次同一个 id（`session/load` 复用原
-    /// id），是幂等重写，不改变「不要填占位值」这条约束。
+    /// 那条路径走 [`Self::create_imported_if_absent`]，在**同一条 INSERT** 里
+    /// 写初值；之后 `ready` 帧回来会用本方法再写一次同一个 id（`session/load`
+    /// 复用原 id），是幂等重写，不改变「不要填占位值」这条约束。
     ///
     /// # 幂等
     ///
@@ -1021,6 +1075,66 @@ mod tests {
             .find_imported("n_a", "opencode", "ses_other")
             .unwrap()
             .is_none());
+    }
+
+    /// 同一个 `(node_id, agent, acp_session_id)` 被**两条真连接**同时创建：
+    /// 只允许成一行，另一条拿 `Ok(None)`，**任何一条都不得返回 `Err`**。
+    ///
+    /// # 为什么必须是两条连接 + 两个线程
+    ///
+    /// 端点级的并发用例拦不住 `WHERE NOT EXISTS` 的失效：导入 handler 在落库
+    /// 之前没有 `.await`，两个请求不会交错。这里直接驱动仓储，两边各从池里
+    /// 拿一条连接、在同一时刻尝试插入，才真正覆盖「判据在并发下是否成立」。
+    ///
+    /// 两种实现都会失败在这里：旧的两步实现（先 `find_imported` 再
+    /// `create_imported`）会各插一行 → 断言「恰好一行」红；只靠
+    /// `WHERE NOT EXISTS`、事务里不做预读的实现会在 WAL 下把写升级撞成
+    /// `database is locked` → 夹具断言「不得 Err」红（那在生产里是 500）。
+    #[test]
+    fn concurrent_creates_of_one_imported_key_never_error() {
+        let (_d, sr) = setup();
+        let sr = std::sync::Arc::new(sr);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for round in 0..20 {
+            let acp = format!("ses_race_{round}");
+            let mut threads = Vec::new();
+            for t in 0..2 {
+                let sr = std::sync::Arc::clone(&sr);
+                let barrier = std::sync::Arc::clone(&barrier);
+                let acp = acp.clone();
+                threads.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    let _ = t;
+                    sr.create_imported_if_absent(
+                        "n_a",
+                        "/srv/app",
+                        "opencode",
+                        TS,
+                        None,
+                        BaseRevStatus::Unknown,
+                        &acp,
+                    )
+                }));
+            }
+            for thread in threads {
+                handles.push(thread.join().expect("thread must not panic"));
+            }
+        }
+        let mut created = 0usize;
+        for outcome in handles {
+            match outcome {
+                Ok(Some(_)) => created += 1,
+                Ok(None) => {}
+                Err(e) => panic!("并发创建不得以错误收场（生产里是 500）：{e}"),
+            }
+        }
+        assert_eq!(created, 20, "每轮恰好一条成功，共 20 条");
+        let conn = sr.workspaces.pool().get().unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM session", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 20, "每轮只能落一行，不得出现重复");
     }
 
     /// 回填给一条不存在的会话要报错，不能静默成功。
