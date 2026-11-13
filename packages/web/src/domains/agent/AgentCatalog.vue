@@ -23,7 +23,7 @@
    而 `available: false` = 「装了，但跑不起来 / 没有 ACP 入口」。
    =========================================================================== */
 
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
 import type { AgentSummary } from '@/domains/agent/api'
@@ -42,6 +42,15 @@ const agents = ref<AgentSummary[]>([])
 const devices = ref<DeviceSummary[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
+
+/**
+ * 现在能对话的那批。
+ *
+ * 单独算一次是为了给分区标题写「可用 X · 不可用 Y」——这个数字与列表里
+ * `data-usable` 的着色**必须同源**，否则会出现「标题说可用 2、列表里灰了 3 行」
+ * 这种自相矛盾的画面。两边都读 `a.available`。
+ */
+const usable = computed(() => agents.value.filter((a) => a.available))
 
 onMounted(load)
 
@@ -111,6 +120,18 @@ function openDetail(name: string): void {
     </EmptyState>
 
     <template v-else>
+      <!-- ①「设备上的 Agent」这一块的标题与计数（原型 `prototype/agents.html:36`）。
+           放在 `v-else` 里而不是页面外壳：标题里的「N 台设备上的 M 个 Agent」
+           要用本组件刚读到的两份真数据算，父页面拿不到。加载中 / 读失败 / 空态
+           时**不显示**——那三种情况下这个计数没有意义（空态自己会说「为什么空」）。 -->
+      <div class="af-region__head af-catalog__head">
+        <h2 class="af-region__title">
+          {{ devices.length }} 台设备上的 {{ agents.length }} 个 Agent
+        </h2>
+        <span class="af-region__note">
+          可用 {{ usable.length }} · 不可用 {{ agents.length - usable.length }}
+        </span>
+      </div>
       <div class="af-roster">
         <div
           v-for="a in agents"
@@ -191,6 +212,15 @@ function openDetail(name: string): void {
   border: 1px solid var(--af-border-subtle);
   border-radius: var(--af-radius-md);
   overflow: hidden;
+}
+/* 分区标题行：`.af-region__head` 自带下边框与内边距，但它是为「有边框的
+   `.af-region` 容器」写的。这里没有外层容器（列表自己就是边框），所以只
+   借它的排版，把下边框去掉——否则标题下会多一条与列表上边框重叠的线。 */
+.af-catalog__head {
+  border-bottom: 0;
+  padding-left: 0;
+  padding-right: 0;
+  background: none;
 }
 .af-agent {
   display: flex;

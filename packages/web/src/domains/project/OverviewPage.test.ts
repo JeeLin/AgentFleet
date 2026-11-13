@@ -183,3 +183,69 @@ describe('OverviewPage：待办那块的归属', () => {
     expect(text).toContain('v0.8.0')
   })
 })
+
+/**
+ * 原型 `prototype/index.html` 的 4 块结构（v0.8.0 子任务 12）。
+ *
+ * 此前这一页只有「项目列表 + 待办空态」，原型的三块说明性结构全缺：
+ * 为什么按项目分的提示条（`:26`）、已归档折叠（`:112`）、管理面三行表（`:126`）。
+ *
+ * **判红方式**：删掉其中任一块，对应用例立刻红。
+ */
+describe('OverviewPage：原型要求的 4 块结构', () => {
+  it('提示条解释「这一页为什么是按项目分」', async () => {
+    stubFetch({ '/api/projects': { body: [] } })
+    const w = mountAtRoot()
+    await flush(w)
+
+    const callout = w.element.querySelector('.af-callout--info')?.textContent ?? ''
+    expect(callout).toContain('这一页为什么是「按项目分」')
+    // 这句话要回答的是「设备为什么退到管理面」，不是一句排版说明。
+    expect(callout).toContain('设备是拿来干活的')
+  })
+
+  it('已归档默认折叠，且写明归档可逆', async () => {
+    stubFetch({ '/api/projects': { body: [] } })
+    const w = mountAtRoot()
+    await flush(w)
+
+    const fold = w.element.querySelector('details.af-ov__fold')
+    expect(fold, '已归档要用原生 details 折叠，默认收起').not.toBeNull()
+    // 没有 `open` 属性 = 默认折叠：归档不该占着主列表的位置。
+    expect(fold?.hasAttribute('open')).toBe(false)
+    const text = fold?.textContent ?? ''
+    // 产品承诺：归档不是删除，随时能取消。这句比「打开归档列表」更重要。
+    expect(text).toContain('归档不是删除')
+    expect(text).toContain('随时能取消归档')
+  })
+
+  it('管理面三行表：设备 / Agent / 设置各自回答什么问题', async () => {
+    stubFetch({ '/api/projects': { body: [] } })
+    const w = mountAtRoot()
+    await flush(w)
+
+    const rows = Array.from(w.element.querySelectorAll('.af-ov__manage tbody tr'))
+    expect(rows).toHaveLength(3)
+    const text = rows.map((r) => r.textContent ?? '').join('|')
+    expect(text).toContain('设备')
+    expect(text).toContain('Agent')
+    expect(text).toContain('设置')
+    // 「回答什么问题」那一列必须真的在：只列三个名字等于没解释分工。
+    expect(text).toContain('有没有漂移')
+    expect(text).toContain('磁盘清理策略')
+    // 这一块的标题要点明它与管理无关（原型 `:129` 的 region note）。
+    const note = w.element.querySelector('.af-ov__manage .af-region__note')?.textContent ?? ''
+    expect(note).toContain('机器怎么样')
+  })
+
+  it('管理面「进入」真的能到那三页', async () => {
+    stubFetch({ '/api/projects': { body: [] } })
+    const w = mountAtRoot()
+    await flush(w)
+
+    const links = Array.from(w.element.querySelectorAll<HTMLButtonElement>('.af-ov__link'))
+    expect(links).toHaveLength(3)
+    await links[1]?.click()
+    expect(location.pathname).toBe('/agents')
+  })
+})

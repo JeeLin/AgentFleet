@@ -34,6 +34,21 @@ const busyId = ref('')
 /** 只看已归档的。后端按 `archived_at IS NULL` 过滤，这里反向挑。 */
 const archived = computed(() => all.value.filter((p) => p.archived_at !== null))
 
+/**
+ * 归档时会连带发生什么（原型 `archived.html:141-164` 五行，逐行照搬）。
+ *
+ * **这五行是「敢不敢点归档」的依据**，不是说明文字：尤其「正在跑的执行
+ * 不打断」与「定时任务不会自动恢复」两条，用户不知道就会以为归档会杀掉
+ * 手上的活、或者以为取消归档之后一切照旧。
+ */
+const ARCHIVE_EFFECTS = [
+  { what: '正在跑的执行', how: '不打断。跑完才归档；跑完的结果照常进待验收' },
+  { what: '待办 / 排队的任务', how: '停止派发。它们仍在这项目里，取消归档后接着走' },
+  { what: '设备上的工作目录', how: '按清理策略回收。历史记录不受影响' },
+  { what: '定时任务', how: '一并暂停，取消归档时不会自动恢复——得你看一眼再开' },
+  { what: '管家记忆', how: '全留着。取消归档后它还记得这个项目发生过什么' },
+] as const
+
 async function load(): Promise<void> {
   loading.value = true
   failure.value = ''
@@ -116,5 +131,72 @@ onMounted(load)
         </button>
       </li>
     </ul>
+
+    <!-- 两段解释性文案（原型 `archived.html:111-133` 与 `:136-166`）。
+         **这类文案是产品承诺，不是装饰**：缺了它，用户就不知道归档能不能
+         撤销、也不知道归档时正在跑的任务会不会被打断——而这两件事恰好是
+         「敢不敢点归档」的全部依据。里程碑交互设计把这句写死为判据。 -->
+    <section class="af-region af-arch__explain" aria-label="为什么这一页没有删除">
+      <div class="af-region__head">
+        <h2 class="af-region__title">为什么这一页没有「删除」</h2>
+        <span class="af-region__note">不是没做，是不提供</span>
+      </div>
+      <div class="af-region__body">
+        <div class="af-callout">
+          <span class="af-callout__k">项目是 Hub 的真相源</span>
+          <span>
+            删掉一个项目，会让已合入的任务历史、失败归因、成本记录一起消失。
+            一个项目哪怕跑了十次失败，这些记录对排障比「一个干净的空项目」更有价值。
+            所以只有归档，没有删除。
+          </span>
+        </div>
+        <div class="af-callout af-callout--info af-arch__callout">
+          <span class="af-callout__k">如果只是想让它消失</span>
+          <span>
+            归档就够了——它不再出现在总览和看板首页，不派新任务，
+            也不会再占用设备上的工作目录。你在这一页随时能找回来。
+          </span>
+        </div>
+      </div>
+    </section>
+
+    <section class="af-region af-arch__explain" aria-label="归档的时候发生了什么">
+      <div class="af-region__head">
+        <h2 class="af-region__title">归档的时候发生了什么</h2>
+      </div>
+      <div class="af-region__body af-region__body--flush">
+        <table class="af-table">
+          <tbody>
+            <tr v-for="row in ARCHIVE_EFFECTS" :key="row.what">
+              <td class="af-arch__what">{{ row.what }}</td>
+              <td class="af-arch__how">{{ row.how }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
   </section>
 </template>
+
+<style scoped>
+/* 两段解释性文案与列表之间的距离。只服务本页，不进 `components.css`。 */
+.af-arch__explain {
+  margin-top: var(--af-space-6);
+}
+/* 第二张 callout 与第一张之间的间距：`.af-region__body` 是普通块容器，
+   两个 `.af-callout` 挨着会连成一片，读起来像一段。 */
+.af-arch__callout {
+  margin-top: var(--af-space-3);
+}
+/* 「归档的时候发生了什么」两列：左列是对象名，固定窄一点，
+   右列是结论（长句）。原型用 `width:38%` 的内联样式，这里换成同一意图的
+   scoped 规则，避免在模板里散落内联样式。 */
+.af-arch__what {
+  width: 38%;
+  font-size: var(--af-text-sm);
+  color: var(--af-fg-secondary);
+}
+.af-arch__how {
+  font-size: var(--af-text-sm);
+}
+</style>

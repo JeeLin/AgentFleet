@@ -350,41 +350,100 @@ async function remove(device: DeviceSummary): Promise<void> {
       </EmptyState>
 
       <template v-else>
-        <DeviceTable
-          :devices="devices"
-          :on-inspect="inspect"
-          :on-create="createSession"
-          :on-remove="remove"
-        />
+        <!-- 原型 `prototype/devices.html:36-107`：设备表是一个 `.af-region`，
+             标题写「N 台设备」，note 写「在线 X · 离线 Y」。此前这里是表格上方
+             一行裸摘要，与原型的分区结构不一致——原型把计数放进**分区标题**，
+             让「这一块是什么」和「里面有几台」在同一行说完。 |
+             注意：上面那行 `.af-dev-summary` 保留，因为既有测试断言「在线 1」
+             这类文案必须出现在页面上（`DevicesPage.test.ts`）；两者同源同值。 -->
+        <section class="af-region af-devpage__table" aria-label="设备列表">
+          <div class="af-region__head">
+            <h2 class="af-region__title">{{ devices.length }} 台设备</h2>
+            <span class="af-region__note">
+              在线 {{ online.length }} · 重连中 {{ reconnecting.length }} · 离线 {{ offline.length }}
+            </span>
+          </div>
+          <div class="af-region__body af-region__body--flush">
+            <DeviceTable
+              :devices="devices"
+              :on-inspect="inspect"
+              :on-create="createSession"
+              :on-remove="remove"
+            />
+          </div>
+        </section>
 
-        <section v-if="inspected" class="af-inspect" aria-label="设备详情">
-          <div class="af-row gap-4">
-            <span class="af-panel__title">{{ inspected.name }}</span>
+        <!-- 原型 `:109-221`：每台设备一块详情 region，内含四组
+             （绑定关系 / 磁盘 / 失败归因 / 能不能删）。这里把内联详情对齐成
+             「一个 region + 四组」的结构；数据齐的照旧显示，缺数据的组写明
+             缺什么——留空会被当成「这台机器没有」，而事实是「这一版没读」。 -->
+        <section
+          v-if="inspected"
+          class="af-region af-inspect af-devpage__detail"
+          aria-label="设备详情"
+        >
+          <div class="af-region__head">
+            <h2 class="af-region__title">{{ inspected.name }}</h2>
             <span class="af-badge">{{ inspected.platform || '平台未上报' }}</span>
             <span v-if="inspected.gpu" class="af-badge af-badge--ok">GPU</span>
             <span class="af-spacer"></span>
+            <span class="af-region__note">心跳 {{ relativeTime(inspected.last_seen) }}</span>
             <button class="af-btn af-btn--sm af-btn--ghost" type="button" @click="inspected = null">
               收起
             </button>
           </div>
-          <div class="af-kv">
-            <span class="af-kv__k">node_id</span>
-            <span class="af-kv__v af-fp af-selectable" title="设备身份锚：与列表里那一行显示的是同一个值">{{ inspected.id }}</span>
-            <span class="af-kv__k">密钥指纹</span>
-            <span class="af-kv__v af-fp" title="Hub 打码后的凭证指纹（前 3 + *** + 后 3）：凭证问题看它，身份看 node_id">{{ inspected.key_fingerprint }}</span>
-            <span class="af-kv__k">afcli</span>
-            <span class="af-kv__v">{{ inspected.node_version || '未上报' }}</span>
-            <span class="af-kv__k">最近心跳</span>
-            <span class="af-kv__v">{{ relativeTime(inspected.last_seen) }}</span>
-            <span class="af-kv__k">资源</span>
-            <span class="af-kv__v">
-              CPU {{ percent(inspected.cpu) }} · 内存 {{ percent(inspected.mem) }}
-              <span v-if="inspected.cpu === null" class="af-t-mute">（未上报，不是 0%）</span>
-            </span>
-            <span class="af-kv__k">凭证</span>
-            <span class="af-kv__v af-t-mute">
-              设备私钥只在设备上生成、永不上传；Hub 存的只有上面那串指纹。
-            </span>
+          <div class="af-region__body">
+            <div class="af-devpage__grid">
+              <!-- ① 机器本身（原有内容，一条不少） -->
+              <div>
+                <h3 class="af-devpage__group">机器</h3>
+                <div class="af-kv">
+                  <span class="af-kv__k">node_id</span>
+                  <span class="af-kv__v af-fp af-selectable" title="设备身份锚：与列表里那一行显示的是同一个值">{{ inspected.id }}</span>
+                  <span class="af-kv__k">密钥指纹</span>
+                  <span class="af-kv__v af-fp" title="Hub 打码后的凭证指纹（前 3 + *** + 后 3）：凭证问题看它，身份看 node_id">{{ inspected.key_fingerprint }}</span>
+                  <span class="af-kv__k">afcli</span>
+                  <span class="af-kv__v">{{ inspected.node_version || '未上报' }}</span>
+                  <span class="af-kv__k">资源</span>
+                  <span class="af-kv__v">
+                    CPU {{ percent(inspected.cpu) }} · 内存 {{ percent(inspected.mem) }}
+                    <span v-if="inspected.cpu === null" class="af-t-mute">（未上报，不是 0%）</span>
+                  </span>
+                  <span class="af-kv__k">凭证</span>
+                  <span class="af-kv__v af-t-mute">
+                    设备私钥只在设备上生成、永不上传；Hub 存的只有上面那串指纹。
+                  </span>
+                </div>
+              </div>
+
+              <!-- ② 绑定关系（原型 `:121`）。「绑了哪些项目 + 各自的固定目录」
+                   要读 `/api/devices/:id/detail`，列表接口没有这个字段。 -->
+              <div>
+                <h3 class="af-devpage__group">绑定关系</h3>
+                <p class="af-devpage__p af-t-mute">
+                  绑了哪些项目、各自钉在这台机器的哪个目录，要读设备详情接口。
+                  这一块还没接——列表里的设备行只说机器在不在线。
+                </p>
+              </div>
+
+              <!-- ③ 磁盘（原型 `:132`）。`DeviceSummary` 没有磁盘字段。 -->
+              <div>
+                <h3 class="af-devpage__group">磁盘</h3>
+                <p class="af-devpage__p af-t-mute">
+                  配额、已用、余量要靠设备心跳上报磁盘；这一版还没有这个字段，
+                  所以这里不画一个没有来源的进度条。
+                </p>
+              </div>
+
+              <!-- ④ 失败归因（原型 `:141`）。要按设备聚合已结束的执行。 -->
+              <div>
+                <h3 class="af-devpage__group">失败归因</h3>
+                <p class="af-devpage__p af-t-mute">
+                  失败集中在哪一类，要按设备聚合已结束的执行，归设备详情接口。
+                  现在能看到的只有左侧这些心跳事实。
+                </p>
+              </div>
+            </div>
           </div>
         </section>
       </template>
@@ -411,6 +470,33 @@ async function remove(device: DeviceSummary): Promise<void> {
 .af-cli-dl__select {
   width: auto;
   min-width: 160px;
+}
+/* 设备表挂进 `.af-region` 后与下面的详情块留一点距离 */
+.af-devpage__table {
+  margin-bottom: var(--af-space-5);
+}
+/* 详情里的四组：窄屏一列，宽屏两列。
+   **不用 `grid-template-columns: repeat(4, 1fr)`**：四组里三组现在是说明文字，
+   四列会把每列挤到几十字宽、每行只放得下三四个字。 */
+.af-devpage__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--af-space-4) var(--af-space-6);
+}
+/* 组标题：小号 + 弱化，与 `.af-region__title` 拉开层级（那是分区级，
+   这是分区内的组级）。原型用的是大写 + 字距，这里沿用 token 里的字距变量。 */
+.af-devpage__group {
+  margin: 0 0 var(--af-space-2);
+  font-size: var(--af-text-xs);
+  font-weight: var(--af-weight-semibold);
+  color: var(--af-fg-tertiary);
+  text-transform: uppercase;
+  letter-spacing: var(--af-tracking-label);
+}
+.af-devpage__p {
+  margin: 0;
+  font-size: var(--af-text-sm);
+  line-height: var(--af-leading-base);
 }
 .af-inspect {
   margin-top: var(--af-space-5);

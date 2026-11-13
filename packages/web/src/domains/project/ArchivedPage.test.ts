@@ -178,3 +178,53 @@ describe('ArchivedPage：读失败', () => {
     expect(text).not.toContain('还没有归档的项目')
   })
 })
+
+/**
+ * 两段解释性文案（v0.8.0 子任务 12，里程碑测试标准 4：
+ * 原型 `archived.html:113` / `:138` 的文案片段须 ≥2 处）。
+ *
+ * **它们是产品承诺，不是装饰**：缺了「为什么没有删除」，用户会一直找那个
+ * 不存在的按钮；缺了「归档时发生了什么」，用户不敢点归档——怕杀掉在跑的活。
+ *
+ * 断言用**空态**跑：这两段必须在列表为空时也在。它们解释的是这一页的
+ * 存在理由，与有没有归档项无关；只在有数据时显示的话，第一次进这一页的人
+ * 恰恰看不到最该看的那段。
+ *
+ * **判红方式**：删掉 `ArchivedPage.vue` 里任一 `.af-arch__explain` 区块，红。
+ */
+describe('ArchivedPage：原型的两段解释文案', () => {
+  it('「为什么这一页没有删除」在，且说清删了会丢什么', async () => {
+    stubFetch({ [LIST]: { body: [] } })
+    const w = mountPage()
+    await flush(w)
+
+    const text = w.element.textContent ?? ''
+    expect(text).toContain('为什么这一页没有「删除」')
+    expect(text).toContain('项目是 Hub 的真相源')
+    // 理由要具体：说「有风险」不够，要说丢失的是哪些记录。
+    expect(text).toContain('失败归因')
+    expect(text).toContain('所以只有归档，没有删除')
+  })
+
+  it('「归档的时候发生了什么」五行都在，含「不打断」与定时任务那条', async () => {
+    stubFetch({ [LIST]: { body: [] } })
+    const w = mountPage()
+    await flush(w)
+
+    const text = w.element.textContent ?? ''
+    expect(text).toContain('归档的时候发生了什么')
+    // 最容易被误解的两条：正在跑的不打断、定时任务不自动恢复。
+    expect(text).toContain('不打断')
+    expect(text).toContain('定时任务')
+    expect(text).toContain('不会自动恢复')
+    expect(text).toContain('管家记忆')
+  })
+
+  it('两段按原型计，至少两处（grep 口径 ≥2）', async () => {
+    stubFetch({ [LIST]: { body: [] } })
+    const w = mountPage()
+    await flush(w)
+
+    expect(w.element.querySelectorAll('.af-arch__explain')).toHaveLength(2)
+  })
+})
