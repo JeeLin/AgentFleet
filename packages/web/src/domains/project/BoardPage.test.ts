@@ -11,17 +11,33 @@
                          「点了没反应」。
    =========================================================================== */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import BoardPage from '@/domains/project/BoardPage.vue'
 import type { Project } from '@/domains/project/api'
+import type { Task, TaskStateWire } from '@/domains/project/taskTypes'
+import { STATES } from '@/shared/state'
 import { mountIn } from '@/test/mount'
 import { settle, stubFetch } from '@/test/http'
 import { navigate, route } from '@/router'
 
-/** 等 fetch 链 + Vue 渲染队列都走完。 */
-async function flush(w: ReturnType<typeof mountIn>): Promise<void> {
-  for (let i = 0; i < 8; i++) {
+/**
+ * 等页面加载**真的结束**，再推进几轮让子组件的渲染队列走完。
+ *
+ * 为什么不用「推进固定轮数」：这一页的 `load()` 里有 `Promise.all` 三个请求，
+ * 固定轮数（`settle(1) × 8`）在机器忙的时候会停在「正在读取项目…」上，
+ * 于是断言变成对着中间态——症状是「单独跑绿、全量跑红」。
+ * 这里等的是页面自己的判据（「正在读取项目」那句消失），而不是一个猜出来的数。
+ */
+async function flushUntilSettled(w: ReturnType<typeof mountIn>): Promise<void> {
+  for (let i = 0; i < 40; i++) {
+    await w.vm.$nextTick()
+    await settle(2)
+    if (!(w.element.textContent ?? '').includes('正在读取项目')) break
+  }
+  // 加载结束后再推几轮：`TaskCard` 是子组件，它的 props 变化要等父组件的
+  // 渲染队列排完才会落到 DOM 上。
+  for (let i = 0; i < 4; i++) {
     await w.vm.$nextTick()
     await settle(1)
   }
@@ -35,6 +51,39 @@ function project(over: Partial<Project> = {}): Project {
     theme_color: null,
     archived_at: null,
     created_at: 'unix:1700000000',
+    ...over,
+  }
+}
+
+/**
+ * 一个任务（形状照子任务 6 的 `TaskView`）。
+ *
+ * 字段**全给**：`TaskCard` 会读 `needs_manual_acceptance` / `executions` /
+ * `updated_at`，缺一个就会走到 `??` 兜底分支上，测的就不是真实形状。
+ */
+function task(over: Partial<Task> = {}): Task {
+  return {
+    id: 'tsk_1',
+    project_id: 'p_1',
+    title: '把构建时间降到 60s 内',
+    state: 'pending',
+    done_when: { criteria: 'build_passes', description: null },
+    needs_manual_acceptance: false,
+    criteria_known: true,
+    created_by: 'user',
+    base_commit: null,
+    created_at: 'unix:1700000000',
+    updated_at: 'unix:1700000000',
+    constraints: {
+      allowed_devices: null,
+      allowed_agents: null,
+      required_capabilities: null,
+      retry_limit: null,
+    },
+    version: 1,
+    superseded_by: null,
+    intent_ref: null,
+    executions: [],
     ...over,
   }
 }
@@ -57,7 +106,7 @@ describe('BoardPage：地址里没有项目 id', () => {
     navigate('/', { replace: true })
     const fetchMock = stubFetch({})
     const w = mountIn(BoardPage)
-    await flush(w)
+    await flushUntilSettled(w)
 
     expect(w.element.textContent).toContain('这个地址缺少项目 id')
     // 空 id 发出去会打到 `/api/projects/`，后端会当成列表端点或 404，
@@ -67,25 +116,33 @@ describe('BoardPage：地址里没有项目 id', () => {
 })
 
 describe('BoardPage：两个请求都成功', () => {
-  it('六列都在，且列名与顺序照六态', async () => {
+  it('六列都在，且列名与顺序照原型六态', async () => {
     stubFetch({
       '/api/projects/p_1': { body: project() },
       '/api/projects': { body: [project()] },
+      // 一个任务就够让六列出现（整板空时只有一条空态，见规格测试标准 3）；
+      // 给了任务的 `state` 是「脏值之外的合法值」，不影响列名断言。
+      '/api/projects/p_1/tasks': { body: { tasks: [task({ state: 'pending' })] } },
     })
     const w = mountAt('p_1')
-    await flush(w)
+    await flushUntilSettled(w)
 
     const text = w.element.textContent ?? ''
-    for (const title of ['待办', '进行中', '待验收', '失败', '完成', '已取消']) {
+    for (const title of ['待办', '排队中', '执行中', '待验收', '已完成', '失败']) {
       expect(text, `缺列「${title}」`).toContain(title)
     }
-    // 顺序也是判据：「失败」必须排在「完成」之前，否则需要处置的一列会被
-    // 滚出视野。这里断 DOM 里的实际次序，不断文字是否出现。
+    // 顺序也是判据，而且**顺序照原型**：`done` 在 `failed` 之前
+    // （`prototype/board.html:95-111`）。旧版本这里断的是「失败在完成之前」，
+    // 那与本里程碑的规格和原型都相反，已按原型改掉——见 `BoardPage.vue`
+    // 头注释「六列的顺序照原型」一节的理由。
+    //
+    // 另：整板无任务时页面只渲染一条空态（规格测试标准 3），所以这一条的
+    // 夹具必须给至少一个任务，否则连 `.af-board` 都不在。
     const titles = Array.from(w.element.querySelectorAll('.af-board__coltitle')).map(
       (e) => e.textContent ?? '',
     )
-    expect(titles.indexOf('失败')).toBeLessThan(titles.indexOf('完成'))
-    expect(titles).toHaveLength(6)
+    expect(titles).toEqual(['待办', '排队中', '执行中', '待验收', '已完成', '失败'])
+    expect(titles.indexOf('已完成')).toBeLessThan(titles.indexOf('失败'))
   })
 })
 
@@ -95,9 +152,10 @@ describe('BoardPage：请求失败', () => {
     stubFetch({
       '/api/projects/p_1': { body: project() },
       '/api/projects': { status: 500, body: { error: 'internal' } },
+      '/api/projects/p_1/tasks': { body: { tasks: [] } },
     })
     const w = mountAt('p_1')
-    await flush(w)
+    await flushUntilSettled(w)
 
     const text = w.element.textContent ?? ''
     expect(text).toContain('打不开这个项目')
@@ -110,9 +168,10 @@ describe('BoardPage：请求失败', () => {
     stubFetch({
       '/api/projects/p_1': { status: 404, body: { error: 'not_found' } },
       '/api/projects': { body: [] },
+      '/api/projects/p_1/tasks': { body: { tasks: [] } },
     })
     const w = mountAt('p_1')
-    await flush(w)
+    await flushUntilSettled(w)
 
     expect(w.element.textContent).toContain('回总览')
   })
@@ -126,14 +185,16 @@ describe('BoardPage：换项目重载', () => {
       '/api/projects': {
         body: [project({ id: 'p_1', name: '内部指标台' }), project({ id: 'p_2', name: '客户现场' })],
       },
+      '/api/projects/p_1/tasks': { body: { tasks: [] } },
+      '/api/projects/p_2/tasks': { body: { tasks: [] } },
     })
     const w = mountAt('p_1')
-    await flush(w)
+    await flushUntilSettled(w)
     expect(w.element.textContent).toContain('内部指标台')
 
     // 走真实的路由跳转，触发 `watch(projectId, load)`。
     navigate('/project/p_2/board', { replace: true })
-    await flush(w)
+    await flushUntilSettled(w)
 
     expect(w.element.textContent).toContain('客户现场')
     // 反向验证：把 `watch(projectId, load)` 删掉，这条会红在「还显示旧项目名」。
@@ -156,13 +217,14 @@ describe('BoardPage：项目切换器', () => {
           project({ id: 'p_2', name: '客户现场', shape: 'isolated' }),
         ],
       },
+      '/api/projects/p_1/tasks': { body: { tasks: [] } },
     })
     return mountAt('p_1')
   }
 
   it('项目名本身就是按钮，点开才出现菜单', async () => {
     const w = setup()
-    await flush(w)
+    await flushUntilSettled(w)
 
     const btn = w.find('.af-switch__btn')
     expect(btn.exists()).toBe(true)
@@ -178,7 +240,7 @@ describe('BoardPage：项目切换器', () => {
 
   it('再点一次关掉菜单', async () => {
     const w = setup()
-    await flush(w)
+    await flushUntilSettled(w)
 
     const btn = w.find('.af-switch__btn')
     await btn.trigger('click')
@@ -190,7 +252,7 @@ describe('BoardPage：项目切换器', () => {
 
   it('菜单里每个项目带形态说明，当前项目标「当前」', async () => {
     const w = setup()
-    await flush(w)
+    await flushUntilSettled(w)
     await w.find('.af-switch__btn').trigger('click')
 
     const items = w.findAll('.af-switch__item')
@@ -208,13 +270,13 @@ describe('BoardPage：项目切换器', () => {
 
   it('选另一个项目就跳过去，并把菜单关掉', async () => {
     const w = setup()
-    await flush(w)
+    await flushUntilSettled(w)
     await w.find('.af-switch__btn').trigger('click')
 
     const target = w.findAll('.af-switch__item').find((i) => i.text().includes('客户现场'))
     expect(target, '菜单里要有「客户现场」').toBeTruthy()
     await target?.trigger('click')
-    await flush(w)
+    await flushUntilSettled(w)
 
     expect(route.value.name).toBe('board')
     expect(route.value.params.id).toBe('p_2')
@@ -225,13 +287,13 @@ describe('BoardPage：项目切换器', () => {
 
   it('点当前项目不跳转，但菜单照样关掉', async () => {
     const w = setup()
-    await flush(w)
+    await flushUntilSettled(w)
     await w.find('.af-switch__btn').trigger('click')
 
     const before = history.length
     const self = w.findAll('.af-switch__item').find((i) => i.text().includes('内部指标台'))
     await self?.trigger('click')
-    await flush(w)
+    await flushUntilSettled(w)
 
     expect(history.length).toBe(before)
     expect(route.value.params.id).toBe('p_1')
@@ -247,17 +309,292 @@ describe('BoardPage：项目切换器', () => {
       },
       '/api/projects/p_1': { body: project({ id: 'p_1' }) },
       '/api/projects/a%2Fb': { body: project({ id: 'a/b', name: '带斜杠的项目' }) },
+      '/api/projects/p_1/tasks': { body: { tasks: [] } },
+      '/api/projects/a%2Fb/tasks': { body: { tasks: [] } },
     })
     const w = mountAt('p_1')
-    await flush(w)
+    await flushUntilSettled(w)
     await w.find('.af-switch__btn').trigger('click')
 
     const target = w.findAll('.af-switch__item').find((i) => i.text().includes('带斜杠的项目'))
     await target?.trigger('click')
-    await flush(w)
+    await flushUntilSettled(w)
 
     // 判据是**落在看板上并且 id 还原正确**，不是「地址字符串长得对」。
     expect(route.value.name).toBe('board')
     expect(route.value.params.id).toBe('a/b')
+  })
+})
+
+/* ===========================================================================
+   v0.8.0 子任务 7 的页面级测试标准（里程碑 §7「测试标准」1–9）。
+   ---------------------------------------------------------------------------
+   每条都写了**判红方式**：这一节的用例全是「实现看起来像那么回事、但其实
+   没做到」的重灾区（列序、空态、index 访问、编码、错误吞成空数组）。
+
+   夹具一律走 `stubFetch` 打真 HTTP 桩而不是 mock API 模块：mock 模块会让
+   「页面拼错了 URL」变成测试仍然绿的事，而拼错 URL 在真实环境里是 404。
+   =========================================================================== */
+
+/**
+ * 一个项目 + 它的任务列表的完整桩。
+ *
+ * **声明顺序就是 `Promise.all` 的入参顺序**（`getProject` / `listProjects` /
+ * `listProjectTasks`）：三个请求同时发出、`Promise.all` 抛的是「最先 reject
+ * 的那个」，而这里三条都是同一个微任务 tick 里回来的——谁先挂取决于谁先入表。
+ * 所以「任务 500」那几条用例里，任务桩必须排在**最前面**，否则被
+ * `describeReadFailure` 报出来的是别的请求（症状是错误文案对不上）。
+ */
+function stubBoard(taskList: Task[], extra: Record<string, { status?: number; body?: unknown }> = {}) {
+  return stubFetch({
+    '/api/projects/p_1/tasks': { body: { tasks: taskList } },
+    '/api/projects/p_1': { body: project() },
+    '/api/projects': { body: [project()] },
+    ...extra,
+  })
+}
+
+/** 六态各一条，`id` 不同。 */
+function sixTasks(): Task[] {
+  const states: Task['state'][] = ['pending', 'queued', 'running', 'review', 'done', 'failed']
+  return states.map((state, i) => task({ id: `tsk_${i}`, state, title: `${state} 的任务` }))
+}
+
+describe('BoardPage（v0.8.0）：六列的列名、顺序与文案', () => {
+  it('renders_six_columns_in_prototype_order：列头文本数组严格等于原型六态', async () => {
+    // 判红方式：`failed` 放回第 4 列（`done` 之前）→ 这条立刻红。
+    // 那正是 `BoardPage.vue` 旧注释要求的顺序，本轮按 `prototype/board.html:59-111`
+    // 改掉：状态机的列序 = 六态的自然生命周期，失败在最后。
+    stubBoard(sixTasks())
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const titles = Array.from(w.element.querySelectorAll('.af-board__coltitle')).map(
+      (e) => e.textContent ?? '',
+    )
+    expect(titles).toEqual(['待办', '排队中', '执行中', '待验收', '已完成', '失败'])
+  })
+
+  it('column_labels_come_from_the_state_table：列头文案与 STATES[k].label 逐项相等', async () => {
+    // 判红方式：页面里硬写中文字面量、与词表不一致 → 红。
+    // 这里断的是**逐键相等**，不是「出现过某个词」——后者在页面硬写一份
+    // 恰好同名的字面量时也绿，那正是本条要防的「第二份词表」。
+    stubBoard(sixTasks())
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const cols = Array.from(w.element.querySelectorAll('.af-board__col'))
+    const keys = ['pending', 'queued', 'running', 'review', 'done', 'failed']
+    expect(cols).toHaveLength(keys.length)
+    keys.forEach((key, i) => {
+      const head = cols[i]?.querySelector('.af-board__coltitle')?.textContent ?? ''
+      expect(head, `第 ${i + 1} 列的列头不是词表里的 ${key}`).toBe(
+        STATES[key as TaskStateWire].label,
+      )
+    })
+  })
+})
+
+describe('BoardPage（v0.8.0）：分组与脏数据', () => {
+  it('an_empty_board_shows_the_board_empty_state_not_six_empty_states：只有一条空态', async () => {
+    // 判红方式：把 `v-if="boardEmpty"` 去掉（六列照渲染）→ 这条红在「六条空态」。
+    // 六条「这一列还没有任务」并排出现时，用户看到的是六个「空」，
+    // 而真相是「一块空板子」。
+    //
+    // 但**六列本身仍照渲染**（`prototype/assets/board.js:347`：「空着的列本身是
+    // 信息」——用户要能看见「这块板子有六站」，而不是一块什么都没有的页面）。
+    // 于是判据是「列在、列内空态不在」，不是「整块板子消失」。
+    stubBoard([])
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const text = w.element.textContent ?? ''
+    expect(text).toContain('这个项目还没有任务')
+    expect(text, '整板空时不该再出现六条列内空态').not.toContain('这一列还没有任务')
+    // 六列仍在：原型 board.js:347 的「空列不隐藏」对整板空同样成立。
+    expect(w.element.querySelectorAll(".af-board__col")).toHaveLength(6)
+    // 整板空态里也要有新建入口（空态必须给出路）。
+    expect(text).toContain('新建任务')
+  })
+
+  it('tasks_are_grouped_by_state：六态各一条 → 每列恰好 1 张卡', async () => {
+    // 判红方式：把分组键写错（例如全用 `t.state` 之外的字段、或写死一列）→ 红。
+    stubBoard(sixTasks())
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const cols = Array.from(w.element.querySelectorAll('.af-board__col'))
+    expect(cols).toHaveLength(6)
+    for (const col of cols) {
+      expect(col.querySelectorAll('.af-taskcard')).toHaveLength(1)
+    }
+    // 计数徽标也要是 1（不是恒 0，也不是「N 张」的字面量）。
+    for (const count of Array.from(w.element.querySelectorAll('.af-board__count'))) {
+      expect(count.textContent?.trim()).toBe('1')
+    }
+  })
+
+  it('an_unknown_state_value_does_not_crash_the_board：脏态不进任何列且不抛错', async () => {
+    // 判红方式：写成 `COLUMNS[i].tasks.push(t)` 式的索引访问（先建桶再按 key
+    // 塞）→ 遇到 `cancelled` 时桶不存在，`push` 抛错，整页白屏。
+    //
+    // `cancelled` 是**存量/脏数据**的代表：v0.8.0 的任务六态里没有它，
+    // 主动放弃现在走失败处置的 `close`（任务留在 `failed`）。
+    stubBoard([
+      task({ id: 'tsk_ok', state: 'pending', title: '正常的任务' }),
+      task({ id: 'tsk_bad', state: 'cancelled', title: '不该出现的任务' }),
+    ])
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const text = w.element.textContent ?? ''
+    expect(text, '合法的任务要照常渲染').toContain('正常的任务')
+    expect(text, '未知态不该被塞进某一列').not.toContain('不该出现的任务')
+    expect(text, '不出现「已取消」这一列').not.toContain('已取消')
+    const total = w.element.querySelectorAll('.af-taskcard').length
+    expect(total, '只该渲染那一条合法任务').toBe(1)
+  })
+})
+
+describe('BoardPage（v0.8.0）：时钟、跳转、错误与新建对话框', () => {
+  it('the_page_passes_now_down_to_every_card：单一时钟，卸载后 clearInterval', async () => {
+    // 判红方式：把 `onUnmounted` 里的 `clearInterval` 删掉 → 这条红在
+    // 「卸载后定时器还在跑」（每次进出看板漏一个每秒一次的定时器）。
+    // 另一半是「20 张卡共用一个时钟」：卡片里各起一个的话，spy 看到的
+    // 间隔数量会等于卡片数，而这里断言的是**恰好一个**。
+    vi.useFakeTimers()
+    try {
+      stubBoard([
+        task({ id: 'tsk_a', state: 'running', executions: [] }),
+        task({ id: 'tsk_b', state: 'running', executions: [] }),
+      ])
+      const setSpy = vi.spyOn(globalThis, 'setInterval')
+      const clearSpy = vi.spyOn(globalThis, 'clearInterval')
+
+      const w = mountAt('p_1')
+      // 假定时器下不能用 `flush` 里那套「等微任务 + 真时间」的写法，
+      // 但 Promise 链是微任务，仍然能靠 `await` 推进。
+      for (let i = 0; i < 8; i++) {
+        await w.vm.$nextTick()
+        await Promise.resolve()
+      }
+
+      const pageClocks = setSpy.mock.calls.filter((c) => c[1] === 1000)
+      expect(pageClocks, '看板应当只有页面层这一个 1 秒定时器').toHaveLength(1)
+
+      w.unmount()
+      expect(clearSpy, '卸载必须清掉定时器').toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clicking_a_card_navigates_to_the_task_route：跳到 /project/<enc>/task/<enc>', async () => {
+    // 判红方式：把 `encodeURIComponent(id)` 去掉 → id 含 `/` 时路径被切成多
+    // 一段（`matchPattern` 把它当成另一条路由），这条红在 params 上。
+    // 也断 `route.params.taskId` 被还原成原值，而不是只断字符串长得对。
+    stubBoard([task({ id: 'a/b', state: 'pending', title: '带斜杠的任务' })])
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const card = w.find('.af-taskcard')
+    expect(card.exists(), '卡片要渲染出来').toBe(true)
+    await card.trigger('click')
+    await flushUntilSettled(w)
+
+    expect(location.pathname).toContain(`/task/${encodeURIComponent('a/b')}`)
+    expect(route.value.name).toBe('project-task')
+    expect(route.value.params.id).toBe('p_1')
+    expect(route.value.params.taskId, '任务 id 必须还原正确').toBe('a/b')
+  })
+
+  it('a_list_error_shows_an_error_state_not_an_empty_board：错误条 ≠「这个项目还没有任务」', async () => {
+    // 判红方式：`catch` 里写成 `tasks.value = []`（把错误吞成空数组）→ 页面
+    // 会显示「这个项目还没有任务」，那是**假话**：板子不是空的，是没读到。
+    // 另一半：整页换成一个空板子而不是错误态 → 「读任务失败」这条红。
+    //
+    // 用 500 而不是「让 fetch 抛异常」：抛异常走的是 `NetworkError`，
+    // 那时页面本来就该说「连不上」。这里要守的是「**服务端拒绝了**，
+    // 页面不能把它说成空板子」——那才是 `tasks.value = []` 这种写法会骗过的分支。
+    //
+    // 判据分两半，缺一不可：
+    //   ① 首次加载失败 → 页面**不出现**「这个项目还没有任务」（一个空板子
+    //      就是在说这句话）；
+    //   ② 先成功渲染出一块有任务的板子、再让刷新失败 → 那张卡不能凭空消失。
+    //      只断 ① 的话，`tasks.value = []` 在 catch 里也能蒙过去（那时板子
+    //      本来就是空的，看不出差别）。
+    stubFetch({
+      '/api/projects/p_1/tasks': { status: 500, body: { error: 'internal' } },
+      '/api/projects/p_1': { body: project() },
+      '/api/projects': { body: [project()] },
+    })
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const text = w.element.textContent ?? ''
+    expect(text, '读取失败不能说成「没有任务」').not.toContain('这个项目还没有任务')
+    expect(w.element.querySelector('.af-board'), '读不到任务时不该画一块空板子').toBeNull()
+    // 错误态必须是一条**可见的错误文案** + 一条重试的路。三个请求是并行的，
+    // `Promise.all` 只会把「先 reject 的那一个」抛出来，所以文案未必是「任务」——
+    // 本条不钉死是哪一个，只钉「不许变成一块空板子」。
+    expect(text, '错误态要说出读失败了').toMatch(/读(任务|项目)失败/)
+    expect(text, '错误态要给一条重试的路').toContain('重新读取')
+
+    // ② 有数据在先，重读失败。
+    stubBoard([task({ id: 'tsk_keep', state: 'pending', title: '已经读到的任务' })])
+    const w2 = mountAt('p_1')
+    await flushUntilSettled(w2)
+    expect(w2.element.textContent).toContain('已经读到的任务')
+
+    stubFetch({
+      '/api/projects/p_1/tasks': { status: 500, body: { error: 'internal' } },
+      '/api/projects/p_1': { body: project() },
+      '/api/projects': { body: [project()] },
+    })
+    const refreshBtn = w2
+      .findAll('.af-btn')
+      .find((b) => (b.text() ?? '') === '刷新' && !b.classes('af-btn--primary'))
+    expect(refreshBtn, '页头要有刷新按钮').toBeTruthy()
+    await refreshBtn?.trigger('click')
+    await flushUntilSettled(w2)
+
+    const text2 = w2.element.textContent ?? ''
+    expect(text2, '重读失败不能说成「没有任务」').not.toContain('这个项目还没有任务')
+    expect(text2, '要出现错误提示').toContain('读任务失败')
+    expect(text2, '不能把已经读到的任务凭空吞掉').toContain('已经读到的任务')
+  })
+
+  it('create_dialog_requires_criteria_or_description：两者皆空 disabled，填一处 enabled', async () => {
+    // 判红方式：把 `doneWhenEmpty` 从 `canSubmit` 里去掉 → 空 `done_when`
+    // 能提交，后端 400 `invalid_criteria`，用户看到的是一句错误码。
+    stubBoard([])
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    // 整板空态里也有「新建任务」按钮；页头那个是第一个。
+    const openers = w.findAll('.af-btn--primary')
+    expect(openers.length).toBeGreaterThan(0)
+    await openers[0]?.trigger('click')
+    await flushUntilSettled(w)
+
+    const modal = w.find('.af-modal')
+    expect(modal.exists(), '对话框要打开').toBe(true)
+
+    /** 提交按钮：脚里那个 `创建`（按钮文案会变成「正在创建…」，所以按**位置**取最后一个）。 */
+    function submitBtn(): ReturnType<typeof w.find> {
+      return modal.findAll('.af-btn').at(-1) as ReturnType<typeof w.find>
+    }
+
+    // 标题空 + 判定码空 + 描述空 → disabled
+    expect(submitBtn().attributes('disabled')).toBeDefined()
+    expect(modal.text()).toContain('至少要有判定码或描述')
+
+    // 只填标题：仍然 disabled（判定条件还是空的）
+    await modal.find('.af-input').setValue('把构建时间降到 60s 内')
+    expect(submitBtn().attributes('disabled')).toBeDefined()
+
+    // 填描述 → enabled
+    await modal.find('.af-textarea').setValue('构建时间肉眼可感地变短')
+    expect(submitBtn().attributes('disabled')).toBeUndefined()
   })
 })

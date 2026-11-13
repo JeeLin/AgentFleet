@@ -1438,6 +1438,18 @@ kbd, .kbd {
 .af-board__col .af-empty__glyph { font-size: var(--af-text-xl); }
 .af-board__col .af-empty__text { font-size: var(--af-text-xs); }
 
+/* 列头计数徽标（原型 `board.html:63` 的 `.af-col__count`）。
+   为什么要有这个数：一列里有没有东西，扫「0」比扫一片空更快；
+   它同时是 `aria-label`（「3 张」）的可见对应物——只给读屏不给眼睛，
+   明眼用户还是得自己数。 */
+.af-board__count {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; height: 20px; padding: 0 var(--af-space-2);
+  border-radius: var(--af-radius-full);
+  background: var(--af-surface-3); color: var(--af-fg-secondary);
+  font-size: var(--af-text-2xs); font-variant-numeric: tabular-nums;
+}
+
 /* ---- 新建项目：形态选择卡 ---------------------------------------------- */
 
 .af-form { display: flex; flex-direction: column; gap: var(--af-space-8); max-width: 72ch; }
