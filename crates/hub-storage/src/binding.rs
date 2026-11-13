@@ -417,7 +417,7 @@ mod tests {
             .unwrap()
             .execute(
                 "INSERT INTO task (id, project_id, title, state, created_at, updated_at)
-                 VALUES ('t_a', 'p_a', 'do it', 'ready', ?1, ?1)",
+                 VALUES ('t_a', 'p_a', 'do it', 'pending', ?1, ?1)",
                 params![TS],
             )
             .unwrap();

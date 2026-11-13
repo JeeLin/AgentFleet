@@ -358,7 +358,8 @@ execution
   id, task_id
   device_id, agent_id         -- ↖ 只有 execution 有三件套
   worktree_path, branch
-  state                       -- running/failed/succeeded/discarded
+  state                       -- pending/running/succeeded/failed/aborted
+                              -- `discarded` 不是第七个取值：它是 aborted + reason='discarded'
   failure_kind                -- §3 八种，成功为 NULL
   reason, evidence
   base_commit                 -- 本次执行实际用的起点（可能与 task 的不同）

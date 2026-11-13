@@ -317,7 +317,7 @@ execution(
   device_id, agent_id,        -- 三件套，只有 execution 有
   worktree_path, branch,
   base_commit,                -- 本次实际起点（baseline_mismatch 的比对依据）
-  state,                      -- running / failed / succeeded
+  state,                      -- pending / running / succeeded / failed / aborted
   failure_kind, reason, evidence,
   interrupted_by_intent, interrupt_count,
   started_at, ended_at

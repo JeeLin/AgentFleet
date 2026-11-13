@@ -9,7 +9,7 @@ use tracing::info;
 use crate::error::{Result, StorageError};
 
 /// 当前 schema 版本。新增表/列时 +1 并在此处追加迁移。
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// 一个迁移：版本号 + 在该事务内执行的 SQL。
 struct Migration {
@@ -70,6 +70,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 6,
         sql: include_str!("schema_v6.sql"),
         // 一条 ADD COLUMN，不重建表。和 v4 一样必须为 false。
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 7,
+        sql: include_str!("schema_v7.sql"),
+        // 三条 UPDATE 归并旧任务态 + 13 条 ADD COLUMN，不重建任何表。
+        // 为 true 会去关外键，而这里没有任何要重建的东西。
         rebuilds_tables: false,
     },
 ];
@@ -1031,5 +1038,149 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1, "project.upstream_url 只能有一列，不能重复加");
+    }
+
+    // ---- v7：任务态对齐规格六态（v0.8.0 子任务 1）----
+
+    /// 造一个 v6 库：跑到 v6 为止，插入三行旧态任务。
+    ///
+    /// 直接跑完整 `run()` 再插旧值是**不行的**——v7 已经把取值域改成六态，
+    /// 但表上没有 CHECK 约束，所以插得进去；这样测出来的就不是迁移行为，
+    /// 而是「跑完之后我又塞了脏数据」。所以这里手工只跑到 v6。
+    fn v6_db_with_legacy_rows() -> Connection {
+        let c = memory();
+        c.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        // 逐条执行 v1..v6，跳过 v7。
+        for m in MIGRATIONS.iter().filter(|m| m.version <= 6) {
+            c.execute_batch(m.sql).unwrap();
+            c.pragma_update(None, "user_version", m.version).unwrap();
+        }
+        c.execute_batch(
+            "INSERT INTO project (id, name, shape, created_at)
+                 VALUES ('p_a', 'app', 'central', 'unix:0');
+             INSERT INTO task (id, project_id, title, state, created_at, updated_at)
+                 VALUES ('t_draft',   'p_a', 'a', 'draft',   'unix:0', 'unix:0'),
+                        ('t_ready',   'p_a', 'b', 'ready',   'unix:0', 'unix:0'),
+                        ('t_blocked', 'p_a', 'c', 'blocked', 'unix:0', 'unix:0'),
+                        ('t_running', 'p_a', 'd', 'running', 'unix:0', 'unix:0'),
+                        ('t_done',    'p_a', 'e', 'done',    'unix:0', 'unix:0'),
+                        ('t_failed',  'p_a', 'f', 'failed',  'unix:0', 'unix:0');",
+        )
+        .unwrap();
+        c
+    }
+
+    fn state_of(c: &Connection, id: &str) -> String {
+        c.query_row("SELECT state FROM task WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// 三条旧态归并到 `pending`，`running`/`done`/`failed` 原样保留。
+    ///
+    /// 判红方式：删掉 `schema_v7.sql` 里任意一条 `UPDATE`，对应行仍是旧值。
+    #[test]
+    fn migration_v7_renames_the_legacy_states() {
+        let mut c = v6_db_with_legacy_rows();
+        run(&mut c).unwrap();
+
+        for id in ["t_draft", "t_ready", "t_blocked"] {
+            assert_eq!(state_of(&c, id), "pending", "{id} 应当归并为 pending");
+        }
+        assert_eq!(state_of(&c, "t_running"), "running");
+        assert_eq!(state_of(&c, "t_done"), "done");
+        assert_eq!(state_of(&c, "t_failed"), "failed");
+    }
+
+    /// 13 个新列**逐个按列名**断言存在。
+    ///
+    /// 不查数量：数量相等但列名写错，`SELECT` 时才炸，那时已经在生产里了。
+    #[test]
+    fn migration_v7_adds_the_new_columns() {
+        let mut c = memory();
+        run(&mut c).unwrap();
+        for (table, cols) in [
+            (
+                "task",
+                &[
+                    "allowed_devices",
+                    "allowed_agents",
+                    "required_capabilities",
+                    "retry_limit",
+                    "version",
+                    "superseded_by",
+                    "intent_ref",
+                ][..],
+            ),
+            (
+                "execution",
+                &[
+                    "agent_id",
+                    "failure_kind",
+                    "reason",
+                    "evidence",
+                    "started_at",
+                    "ended_at",
+                ][..],
+            ),
+        ] {
+            for col in cols {
+                let n: i64 = c
+                    .query_row(
+                        "SELECT count(*) FROM pragma_table_info(?1) WHERE name=?2",
+                        params![table, col],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(n, 1, "{table}.{col} 必须存在且只有一列");
+            }
+        }
+    }
+
+    /// v7 幂等：连跑三次不报 `duplicate column name`。
+    #[test]
+    fn migration_v7_is_idempotent() {
+        let mut c = memory();
+        run(&mut c).unwrap();
+        run(&mut c).unwrap();
+        run(&mut c).unwrap();
+        assert_eq!(
+            c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+    }
+
+    /// 升级把数据搬对，而不是把数据搬没。
+    ///
+    /// 判红方式：把 `UPDATE` 写成 `DELETE`，或写成不带 `WHERE` 的整表重写。
+    #[test]
+    fn a_v6_row_stays_readable_after_v7() {
+        let mut c = v6_db_with_legacy_rows();
+        run(&mut c).unwrap();
+        let (title, created_at): (String, String) = c
+            .query_row(
+                "SELECT title, created_at FROM task WHERE id = 't_ready'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "b", "title 不能在迁移中丢失");
+        assert_eq!(created_at, "unix:0", "created_at 不能在迁移中丢失");
+    }
+
+    /// 存量行的 `version` 必须回填成 1（`NOT NULL DEFAULT 1` 对已有行生效）。
+    ///
+    /// 这一条单独测：`ADD COLUMN ... NOT NULL DEFAULT` 若写成 `NOT NULL` 无 DEFAULT，
+    /// SQLite 会对已有行报错；若写成可空，CAS 的 `WHERE version = ?` 会永远失配。
+    #[test]
+    fn v7_backfills_the_optimistic_lock_version() {
+        let mut c = v6_db_with_legacy_rows();
+        run(&mut c).unwrap();
+        let v: i64 = c
+            .query_row("SELECT version FROM task WHERE id = 't_done'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(v, 1, "存量行的 version 必须回填为 1，否则 CAS 永远失配");
     }
 }

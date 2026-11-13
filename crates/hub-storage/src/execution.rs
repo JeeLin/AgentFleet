@@ -271,7 +271,7 @@ mod tests {
                      (id, project_id, device_id, fixed_dir, cleanup_policy, created_at)
                      VALUES ('b_b', 'p_a', 'n_b', '/srv/b', 'balanced', 'unix:0');
                  INSERT INTO task (id, project_id, title, state, created_at, updated_at)
-                     VALUES ('t_a', 'p_a', 'do it', 'ready', 'unix:0', 'unix:0');",
+                     VALUES ('t_a', 'p_a', 'do it', 'pending', 'unix:0', 'unix:0');",
             )
             .unwrap();
         (d, ExecutionRepo::new(pool))

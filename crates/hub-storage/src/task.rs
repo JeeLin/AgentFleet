@@ -23,15 +23,15 @@ use crate::Db;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskState {
-    /// 刚建，还没准备好派发（缺验收标准、缺约束）。
-    Draft,
-    /// 可派发，等设备/调度。
-    Ready,
-    /// 有执行在跑。
+    /// 待办：人建好了，还没进派发队列。
+    Pending,
+    /// 排队中：已选中设备与 Agent，等设备接活。
+    Queued,
+    /// 执行中：设备已接活，有执行在跑。
     Running,
-    /// 有人在等：等用户决策、等外部依赖。
-    Blocked,
-    /// 验收通过。
+    /// 待验收：产出已交出，等人判 `done_when`。
+    Review,
+    /// 验收通过且已合入。
     Done,
     /// 最后一次执行失败，且已不再重试。
     Failed,
@@ -40,10 +40,10 @@ pub enum TaskState {
 impl TaskState {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Draft => "draft",
-            Self::Ready => "ready",
+            Self::Pending => "pending",
+            Self::Queued => "queued",
             Self::Running => "running",
-            Self::Blocked => "blocked",
+            Self::Review => "review",
             Self::Done => "done",
             Self::Failed => "failed",
         }
@@ -60,14 +60,14 @@ impl FromStr for TaskState {
 
     fn from_str(s: &str) -> Result<Self> {
         match s {
-            "draft" => Ok(Self::Draft),
-            "ready" => Ok(Self::Ready),
+            "pending" => Ok(Self::Pending),
+            "queued" => Ok(Self::Queued),
             "running" => Ok(Self::Running),
-            "blocked" => Ok(Self::Blocked),
+            "review" => Ok(Self::Review),
             "done" => Ok(Self::Done),
             "failed" => Ok(Self::Failed),
-            // 不回落成 `Draft`：把一个已结束的任务显示成草稿，会让用户以为
-            // 它从没跑过。
+            // 不回落成 `Pending`：v7 迁移之后库里再出现 `draft` / `ready` /
+            // `blocked`，说明有代码写回了旧值，静默回落会把它藏起来。
             other => Err(StorageError::InvalidTaskState(other.to_string())),
         }
     }
@@ -132,7 +132,7 @@ impl TaskRepo {
             "INSERT INTO task
                  (id, project_id, title, state, done_when_criteria, done_when_description,
                   created_by, base_commit, created_at, updated_at)
-             VALUES (?1, ?2, ?3, 'draft', ?4, ?5, ?6, ?7, ?8, ?8)",
+             VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?6, ?7, ?8, ?8)",
             params![
                 id,
                 new.project_id,
@@ -296,7 +296,7 @@ mod tests {
         let t = tr.create(new_task("p_a"), TS).unwrap();
         assert_eq!(t.project_id, "p_a");
         assert_eq!(t.title, "把登录改成 OAuth");
-        assert_eq!(t.state, TaskState::Draft, "新任务一律 draft");
+        assert_eq!(t.state, TaskState::Pending, "新任务一律 pending");
         assert_eq!(t.done_when.criteria.as_deref(), Some("all_tests_pass"));
         assert_eq!(
             t.done_when.description.as_deref(),
@@ -311,9 +311,10 @@ mod tests {
         assert_eq!(f.done_when, t.done_when);
     }
 
-    /// **新建恒为 `draft`**：「建好就能派发」会让缺验收标准的任务直接进候选集。
+    /// **新建恒为 `pending`**：规格里 `pending` 是「等被派活」的起点，
+    /// `queued` 要求已选中 `(device, agent)`，新建时还没有这个选择。
     #[test]
-    fn a_fresh_task_never_starts_ready() {
+    fn a_fresh_task_starts_at_pending_not_queued() {
         let (_d, tr) = setup();
         let t = tr
             .create(
@@ -330,7 +331,7 @@ mod tests {
                 TS,
             )
             .unwrap();
-        assert_eq!(t.state, TaskState::Draft);
+        assert_eq!(t.state, TaskState::Pending);
         assert_eq!(t.done_when.criteria, None);
     }
 
@@ -338,12 +339,12 @@ mod tests {
     fn set_state_stamps_updated_at_and_checks_existence() {
         let (_d, tr) = setup();
         let t = tr.create(new_task("p_a"), TS).unwrap();
-        let r = tr.set_state(&t.id, TaskState::Ready, "unix:9999").unwrap();
-        assert_eq!(r.state, TaskState::Ready);
+        let r = tr.set_state(&t.id, TaskState::Queued, "unix:9999").unwrap();
+        assert_eq!(r.state, TaskState::Queued);
         assert_eq!(r.updated_at, "unix:9999");
         assert_eq!(r.created_at, TS, "created_at 不动");
 
-        let e = tr.set_state("nope", TaskState::Ready, TS).unwrap_err();
+        let e = tr.set_state("nope", TaskState::Queued, TS).unwrap_err();
         assert!(matches!(e, StorageError::TaskNotFound { .. }), "{e:?}");
     }
 
@@ -369,15 +370,15 @@ mod tests {
         let (_d, tr) = setup();
         let a = tr.create(new_task("p_a"), TS).unwrap();
         let b = tr.create(new_task("p_a"), "unix:11").unwrap();
-        tr.set_state(&b.id, TaskState::Ready, TS).unwrap();
+        tr.set_state(&b.id, TaskState::Queued, TS).unwrap();
 
-        let draft = tr.list_by_state(TaskState::Draft).unwrap();
-        assert_eq!(draft.len(), 1);
-        assert_eq!(draft[0].id, a.id);
+        let pending = tr.list_by_state(TaskState::Pending).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, a.id);
 
-        let ready = tr.list_by_state(TaskState::Ready).unwrap();
-        assert_eq!(ready.len(), 1);
-        assert_eq!(ready[0].id, b.id);
+        let queued = tr.list_by_state(TaskState::Queued).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].id, b.id);
     }
 
     /// `is_terminal` 只对 `Done` / `Failed` 为真。
@@ -386,17 +387,17 @@ mod tests {
         assert!(TaskState::Done.is_terminal());
         assert!(TaskState::Failed.is_terminal());
         for s in [
-            TaskState::Draft,
-            TaskState::Ready,
+            TaskState::Pending,
+            TaskState::Queued,
             TaskState::Running,
-            TaskState::Blocked,
+            TaskState::Review,
         ] {
             assert!(!s.is_terminal(), "{s:?} 不该是终态");
         }
     }
 
-    /// 库里的非法状态必须报错，**不回落 `Draft`**——回落会让一个已结束的任务
-    /// 显示成草稿，用户会以为它从没跑过。
+    /// 库里的非法状态必须报错，**不回落 `Pending`**——回落会让一个已结束的任务
+    /// 显示成待办，用户会以为它从没跑过。
     #[test]
     fn an_unknown_state_in_the_database_is_an_error_not_a_default() {
         let (_d, tr) = setup();
@@ -416,14 +417,27 @@ mod tests {
     #[test]
     fn every_state_round_trips_through_its_literal() {
         for s in [
-            TaskState::Draft,
-            TaskState::Ready,
+            TaskState::Pending,
+            TaskState::Queued,
             TaskState::Running,
-            TaskState::Blocked,
+            TaskState::Review,
             TaskState::Done,
             TaskState::Failed,
         ] {
             assert_eq!(TaskState::from_str(s.as_str()).unwrap(), s);
+        }
+    }
+
+    /// 迁移之后再出现旧态必须报错，**不回落 `pending`**——静默回落会让
+    /// 「有代码写回了旧值」这件事藏起来，直到用户看见一个状态不对的任务。
+    #[test]
+    fn legacy_states_are_rejected_after_v7() {
+        for legacy in ["draft", "ready", "blocked"] {
+            let e = TaskState::from_str(legacy).unwrap_err();
+            assert!(
+                matches!(e, StorageError::InvalidTaskState(ref s) if s == legacy),
+                "{legacy} 应当报错，实际 {e:?}"
+            );
         }
     }
 }
