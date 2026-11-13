@@ -58,10 +58,11 @@ describe('骨架页：每一页都写明什么时候有', () => {
     // 反向验证：把所有骨架页删掉，这条会红在「骨架页不见了」。
     //
     // **这个数会随着骨架页被实现而下降**，下降本身是好事，不是回归。
-    // v0.7.0 收口时 `BindPage` 与 `ProjectSettingsPage` 都已实现（原本是 13 个里的两个），
-    // 剩 11 个：v0.8.0 七页、v0.9–12 四页。
+    // v0.7.0 收口时 `BindPage` 与 `ProjectSettingsPage` 都已实现（原本是 13 个里的两个）；
+    // v0.8.0 收口时 `BoardPage` 与 `ProjectTaskPage` 已实现。
+    // 剩 10 个：v0.8.0 七页（本里程碑实现 1 页 → 剩 6 页）、v0.9–12 四页 → 6 + 4 = 10。
     // 改这个数时必须同时确认**少的那一页是真的实现了**，而不是被谁删掉了。
-    expect(skeletonPages().length).toBeGreaterThanOrEqual(11)
+    expect(skeletonPages().length).toBeGreaterThanOrEqual(10)
   })
 
   it('每个骨架页都给了 `version`，且形如 vX.Y.Z', () => {
