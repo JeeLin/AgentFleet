@@ -1,7 +1,7 @@
 //! afcli 的**进程级**集成测试：真的 spawn `afcli` 二进制，覆盖 `main.rs` 的每条路径。
 //!
 //! `main.rs` 极薄——读 `std::env::args()` 后整条转发给 [`node_cli::run`]——
-//! 所以这里的三种 argv 组合（无参 / `--version` / `--help` / 未知参数）正好逐一命中
+//! 所以这里的四种 argv 组合（无参 / `--version` / `--help` / 未知参数）正好逐一命中
 //! `main.rs` 的每一行（收集 args → 调 `run` → 返回退出码）。覆盖率门禁要求
 //! `src/main.rs` 行覆盖 100%，就靠本文件承接。
 //!
@@ -245,6 +245,90 @@ impl Captured {
     }
 }
 
+/// 读一个完整的 HTTP 请求并回一段固定响应，返回 stub 捕获的请求。
+///
+/// 两种 stub（单连接 / 带连接计数）共用这一份：改 `Content-Length` 拼法或
+/// 头解析只改这里，不会出现「只修了一个 stub」。
+fn capture_and_reply(
+    mut stream: std::net::TcpStream,
+    status: &'static str,
+    response_body: &'static str,
+) -> Captured {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line).unwrap();
+    let mut headers = Vec::new();
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap() == 0 {
+            break;
+        }
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            headers.push((key.trim().to_string(), value.trim().to_string()));
+        }
+    }
+    let length = headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut body = vec![0u8; length];
+    reader.read_exact(&mut body).unwrap();
+    let (method, path) = request_line
+        .split_once(' ')
+        .map(|(method, rest)| {
+            (
+                method.to_string(),
+                rest.split_whitespace().next().unwrap_or("").to_string(),
+            )
+        })
+        .unwrap_or_default();
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+        response_body.len()
+    );
+    stream.write_all(response.as_bytes()).unwrap();
+    stream.flush().unwrap();
+    Captured {
+        method,
+        path,
+        headers,
+        body,
+    }
+}
+
+/// `afcli import bind` 的 argv（8 元素，`--hub` 包含在内）。
+///
+/// 本文件里 8 处手搓过同一串：漏改一处（比如 `--provider` 写成 `--prov`）不会
+/// 编译失败，只会在运行时变成「未知参数」——抽成一处，argv 形状只有一个来源。
+fn bind_argv<'a>(session: &'a str, hub: &'a str) -> Vec<&'a str> {
+    vec![
+        "import",
+        "bind",
+        "--provider",
+        "opencode",
+        "--session",
+        session,
+        "--hub",
+        hub,
+    ]
+}
+
+/// 与 [`bind_argv`] 相同但**不带 `--hub`**：地址由 `AFCLI_HUB_URL` 提供。
+fn bind_argv_without_hub(session: &str) -> Vec<&str> {
+    vec![
+        "import",
+        "bind",
+        "--provider",
+        "opencode",
+        "--session",
+        session,
+    ]
+}
+
 /// 只接一条连接的本地 HTTP stub。返回端口与「收到的请求」通道。
 ///
 /// 导入必须是**一次性**请求：这条 stub 只 accept 一次，因此第二个连接
@@ -257,52 +341,9 @@ fn start_stub(
     let port = listener.local_addr().unwrap().port();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut reader = BufReader::new(stream.try_clone().unwrap());
-        let mut request_line = String::new();
-        reader.read_line(&mut request_line).unwrap();
-        let mut headers = Vec::new();
-        loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line).unwrap() == 0 {
-                break;
-            }
-            if line == "\r\n" || line == "\n" {
-                break;
-            }
-            if let Some((key, value)) = line.split_once(':') {
-                headers.push((key.trim().to_string(), value.trim().to_string()));
-            }
-        }
-        let length = headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
-            .and_then(|(_, value)| value.parse::<usize>().ok())
-            .unwrap_or(0);
-        let mut body = vec![0u8; length];
-        reader.read_exact(&mut body).unwrap();
-        let (method, path) = request_line
-            .split_once(' ')
-            .map(|(method, rest)| {
-                (
-                    method.to_string(),
-                    rest.split_whitespace().next().unwrap_or("").to_string(),
-                )
-            })
-            .unwrap_or_default();
-        tx.send(Captured {
-            method,
-            path,
-            headers,
-            body,
-        })
-        .unwrap();
-        let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
-            response_body.len()
-        );
-        stream.write_all(response.as_bytes()).unwrap();
-        stream.flush().unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let captured = capture_and_reply(stream, status, response_body);
+        tx.send(captured).unwrap();
     });
     (port, rx)
 }
@@ -329,53 +370,12 @@ fn start_stub_with_connection_count(
     let (tx, rx) = std::sync::mpsc::channel();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let (mut stream, _) = accept_with_deadline(&listener, Duration::from_secs(10))
+        let (stream, _) = accept_with_deadline(&listener, Duration::from_secs(10))
             .expect("stub never received the import request");
-        let mut reader = BufReader::new(stream.try_clone().unwrap());
-        let mut request_line = String::new();
-        reader.read_line(&mut request_line).unwrap();
-        let mut headers = Vec::new();
-        loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line).unwrap() == 0 {
-                break;
-            }
-            if line == "\r\n" || line == "\n" {
-                break;
-            }
-            if let Some((key, value)) = line.split_once(':') {
-                headers.push((key.trim().to_string(), value.trim().to_string()));
-            }
-        }
-        let length = headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
-            .and_then(|(_, value)| value.parse::<usize>().ok())
-            .unwrap_or(0);
-        let mut body = vec![0u8; length];
-        reader.read_exact(&mut body).unwrap();
-        let (method, path) = request_line
-            .split_once(' ')
-            .map(|(method, rest)| {
-                (
-                    method.to_string(),
-                    rest.split_whitespace().next().unwrap_or("").to_string(),
-                )
-            })
-            .unwrap_or_default();
-        tx.send(Captured {
-            method,
-            path,
-            headers,
-            body,
-        })
-        .unwrap();
-        let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
-            response_body.len()
-        );
-        stream.write_all(response.as_bytes()).unwrap();
-        stream.flush().unwrap();
+        // 与 [`start_stub`] 共用同一份「读请求 + 回响应」：两处若各自维护，
+        // 改 `Content-Length` 拼法就必须同时改两遍。
+        let captured = capture_and_reply(stream, status, response_body);
+        tx.send(captured).unwrap();
 
         // 子进程拿到响应后若再发起 connect_once / worker 连接，这里会看见。
         // 不做无限 accept：短窗口足够覆盖同进程退出前的第二条连接。
@@ -497,20 +497,8 @@ fn import_list_reports_unsupported_provider_without_touching_a_database() {
 #[test]
 fn import_bind_says_enroll_before_any_network_or_file_creation() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut child, out, err) = spawn_env(
-        &[
-            "import",
-            "bind",
-            "--provider",
-            "opencode",
-            "--session",
-            "ses_missing",
-            "--hub",
-            "127.0.0.1:1",
-        ],
-        dir.path(),
-        &[],
-    );
+    let (mut child, out, err) =
+        spawn_env(&bind_argv("ses_missing", "127.0.0.1:1"), dir.path(), &[]);
     let status = child.wait_with_timeout();
     let out = drain(out);
     let err = drain(err);
@@ -528,16 +516,7 @@ fn import_bind_says_enroll_before_any_network_or_file_creation() {
 fn import_bind_rejects_an_invalid_hub_address_before_reading_identity() {
     let dir = tempfile::tempdir().unwrap();
     let (mut child, _out, err) = spawn_env(
-        &[
-            "import",
-            "bind",
-            "--provider",
-            "opencode",
-            "--session",
-            "ses_x",
-            "--hub",
-            "http://hub.example.com",
-        ],
+        &bind_argv("ses_x", "http://hub.example.com"),
         dir.path(),
         &[],
     );
@@ -553,20 +532,7 @@ fn import_bind_explains_the_windows_drive_path_limitation() {
     let dir = tempfile::tempdir().unwrap();
     identity_fixture(dir.path());
     opencode_fixture(dir.path(), "ses_win", "C:\\Users\\x");
-    let (mut child, out, err) = spawn_env(
-        &[
-            "import",
-            "bind",
-            "--provider",
-            "opencode",
-            "--session",
-            "ses_win",
-            "--hub",
-            "127.0.0.1:1",
-        ],
-        dir.path(),
-        &[],
-    );
+    let (mut child, out, err) = spawn_env(&bind_argv("ses_win", "127.0.0.1:1"), dir.path(), &[]);
     let status = child.wait_with_timeout();
     let out = drain(out);
     let err = drain(err);
@@ -592,29 +558,16 @@ fn import_bind_explains_the_windows_drive_path_limitation() {
 /// CLI 照常成功，于是「Hub 只返回两个字段」这条契约没有任何可执行约束。
 #[test]
 fn import_bind_posts_a_signed_request_to_a_bare_authority() {
-    let dir = tempfile::tempdir().unwrap();
-    let identity = identity_fixture(dir.path());
-    opencode_fixture(dir.path(), "ses_test", "/tmp/demo");
+    let dir = bind_data_dir();
+    let identity = node_core::Identity::load(&dir.path().join("agentfleet").join("identity.json"))
+        .expect("identity fixture");
+    // 与 Hub `ImportResponse` 完全同形：恰好两个键，不带 `agent_id`。
     let (port, rx) = start_stub(
         "201 Created",
-        // 与 Hub `ImportResponse` 完全同形：恰好两个键，不带 `agent_id`。
         r#"{"session_id":"hub_sess_1","acp_session_id":"ses_test"}"#,
     );
     let hub = format!("127.0.0.1:{port}");
-    let (mut child, out, err) = spawn_env(
-        &[
-            "import",
-            "bind",
-            "--provider",
-            "opencode",
-            "--session",
-            "ses_test",
-            "--hub",
-            &hub,
-        ],
-        dir.path(),
-        &[],
-    );
+    let (mut child, out, err) = spawn_env(&bind_argv("ses_test", &hub), dir.path(), &[]);
     let status = child.wait_with_timeout();
     let out = drain(out);
     let err = drain(err);
@@ -622,22 +575,15 @@ fn import_bind_posts_a_signed_request_to_a_bare_authority() {
     assert!(out.contains("hub_sess_1"), "got: {out}");
     assert!(out.contains("打开既有会话继续对话"), "got: {out}");
 
-    let stub_response: serde_json::Value =
-        serde_json::from_str(r#"{"session_id":"hub_sess_1","acp_session_id":"ses_test"}"#).unwrap();
-    let mut keys: Vec<&str> = stub_response
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    keys.sort_unstable();
-    assert_eq!(
-        keys,
-        ["acp_session_id", "session_id"],
-        "stub 必须是两字段响应"
-    );
-
     let request = captured(rx);
+    assert_request_shape(&request);
+    let body = assert_body_fields(&request.body);
+    assert_signature_verifies(&identity, &body);
+    assert_no_key_material(&identity, &request.body, &out, &err);
+}
+
+/// 请求行 + 四个签名头都在，且打的是导入的固定方法与路径。
+fn assert_request_shape(request: &Captured) {
     assert_eq!(request.method, IMPORT_METHOD);
     assert_eq!(request.path, IMPORT_PATH);
     for header in [
@@ -648,7 +594,11 @@ fn import_bind_posts_a_signed_request_to_a_bare_authority() {
     ] {
         assert!(request.header(header).is_some(), "missing header {header}");
     }
-    let body = json(&request.body);
+}
+
+/// body 是 CLI 该发的那串字段（值取自 `bind_data_dir` 的夹具）。
+fn assert_body_fields(raw: &[u8]) -> serde_json::Value {
+    let body = json(raw);
     assert_eq!(body["node_id"], "n_import_test");
     assert_eq!(body["provider"], "opencode");
     assert_eq!(body["external_session_id"], "ses_test");
@@ -656,8 +606,14 @@ fn import_bind_posts_a_signed_request_to_a_bare_authority() {
     assert_eq!(body["cwd"], "/tmp/demo");
     assert_eq!(body["title"], "demo session");
     assert_eq!(body["v"], IMPORT_VERSION);
+    body
+}
 
-    // 签名覆盖 method / path / body 摘要 / nonce / t，可用本机公钥验证。
+/// 签名覆盖 method / path / body 摘要 / nonce / `t`，可用本机公钥验证。
+///
+/// 换成 Hub 侧 `import_auth` 的任一字段拼法都会失败——这条锁住「两端规范串
+/// 由 `identity::import_signing_message` 唯一实现」。
+fn assert_signature_verifies(identity: &node_core::Identity, body: &serde_json::Value) {
     let message = identity::import_signing_message(
         body["v"].as_u64().unwrap() as u32,
         "n_import_test",
@@ -675,12 +631,14 @@ fn import_bind_posts_a_signed_request_to_a_bare_authority() {
         identity::KeyPair::verify(&identity.key().public_key_bytes(), &message, &sig),
         "signature must verify with the device public key"
     );
+}
 
-    // body / 输出都不得含公钥或私钥材料。
-    let text = String::from_utf8(request.body.clone()).unwrap();
+/// body 与 stdout / stderr 都不得含公钥或私钥材料（约束 13）。
+fn assert_no_key_material(identity: &node_core::Identity, raw: &[u8], out: &str, err: &str) {
+    let text = String::from_utf8(raw.to_vec()).unwrap();
     let public = identity.public_key_b64();
     let private = identity::base64url(&identity.key().to_pkcs8_der());
-    for haystack in [text.as_str(), out.as_str(), err.as_str()] {
+    for haystack in [text.as_str(), out, err] {
         assert!(!haystack.contains(&public), "leaked public key: {haystack}");
         assert!(
             !haystack.contains(&private),
@@ -709,6 +667,8 @@ fn cli_never_calls_connect_once_or_spawns_worker() {
         );
     }
 
+    // 这条用例的会话 id 与其它用例不同（它要 `ses_once` 的回显），
+    // 所以只有身份那一步能共用 `bind_data_dir`；库另行造。
     let dir = tempfile::tempdir().unwrap();
     identity_fixture(dir.path());
     opencode_fixture(dir.path(), "ses_once", "/tmp/demo");
@@ -719,20 +679,7 @@ fn cli_never_calls_connect_once_or_spawns_worker() {
         extra.clone(),
     );
     let hub = format!("127.0.0.1:{port}");
-    let (mut child, out, err) = spawn_env(
-        &[
-            "import",
-            "bind",
-            "--provider",
-            "opencode",
-            "--session",
-            "ses_once",
-            "--hub",
-            &hub,
-        ],
-        dir.path(),
-        &[],
-    );
+    let (mut child, out, err) = spawn_env(&bind_argv("ses_once", &hub), dir.path(), &[]);
     let status = child.wait_with_timeout();
     let out = drain(out);
     let err = drain(err);
@@ -751,29 +698,14 @@ fn cli_never_calls_connect_once_or_spawns_worker() {
 /// 完整 `ws://` URL 与 `AFCLI_HUB_URL` 裸地址都要推导出同源 HTTP 基址。
 #[test]
 fn import_bind_derives_the_origin_from_a_full_ws_url_and_from_the_env_var() {
-    let dir = tempfile::tempdir().unwrap();
-    identity_fixture(dir.path());
-    opencode_fixture(dir.path(), "ses_test", "/tmp/demo");
+    let dir = bind_data_dir();
 
     let (port, rx) = start_stub(
         "201 Created",
         r#"{"session_id":"from_ws","acp_session_id":"ses_test"}"#,
     );
     let hub = format!("ws://127.0.0.1:{port}/ws");
-    let (mut child, out, err) = spawn_env(
-        &[
-            "import",
-            "bind",
-            "--provider",
-            "opencode",
-            "--session",
-            "ses_test",
-            "--hub",
-            &hub,
-        ],
-        dir.path(),
-        &[],
-    );
+    let (mut child, out, err) = spawn_env(&bind_argv("ses_test", &hub), dir.path(), &[]);
     let status = child.wait_with_timeout();
     let out = drain(out);
     let err = drain(err);
@@ -786,14 +718,7 @@ fn import_bind_derives_the_origin_from_a_full_ws_url_and_from_the_env_var() {
     );
     let env_hub = format!("127.0.0.1:{port}");
     let (mut child, out, err) = spawn_env(
-        &[
-            "import",
-            "bind",
-            "--provider",
-            "opencode",
-            "--session",
-            "ses_test",
-        ],
+        &bind_argv_without_hub("ses_test"),
         dir.path(),
         &[("AFCLI_HUB_URL", env_hub.as_str())],
     );
@@ -802,6 +727,20 @@ fn import_bind_derives_the_origin_from_a_full_ws_url_and_from_the_env_var() {
     let err = drain(err);
     assert!(status.success(), "{out}\n{err}");
     assert_eq!(captured(rx).path, IMPORT_PATH);
+}
+
+/// 「临时数据目录 + 身份文件 + 一条 opencode 历史」三件套。
+///
+/// 这是 bind 用例共同的前置：三者缺一，`import bind` 会停在
+/// `not_enrolled` / `provider_unavailable` / `invalid_session` 上，红的原因
+/// 与用例想测的那一层无关。抽成一处，`tempdir` 的生命周期只有一种写法。
+///
+/// 返回 `TempDir`：**必须**活到子进程退出，否则库与身份文件会先被删掉。
+fn bind_data_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    identity_fixture(dir.path());
+    opencode_fixture(dir.path(), "ses_test", "/tmp/demo");
+    dir
 }
 
 /// 五个 bind 响应用例共有的夹具：临时数据目录 + 身份 + opencode 库 + stub。
@@ -813,9 +752,7 @@ fn bind_fixture(
     status: &'static str,
     response_body: &'static str,
 ) -> (tempfile::TempDir, u16, std::sync::mpsc::Receiver<Captured>) {
-    let dir = tempfile::tempdir().unwrap();
-    identity_fixture(dir.path());
-    opencode_fixture(dir.path(), "ses_test", "/tmp/demo");
+    let dir = bind_data_dir();
     let (port, rx) = start_stub(status, response_body);
     (dir, port, rx)
 }
@@ -823,20 +760,7 @@ fn bind_fixture(
 /// 用夹具跑一遍 `import bind`，返回 `(退出码, stdout, stderr)`。
 fn run_bind_fixture(port: u16, dir: &Path) -> (ExitStatus, String, String) {
     let hub = format!("127.0.0.1:{port}");
-    let (mut child, out, err) = spawn_env(
-        &[
-            "import",
-            "bind",
-            "--provider",
-            "opencode",
-            "--session",
-            "ses_test",
-            "--hub",
-            &hub,
-        ],
-        dir,
-        &[],
-    );
+    let (mut child, out, err) = spawn_env(&bind_argv("ses_test", &hub), dir, &[]);
     let status = child.wait_with_timeout();
     (status, drain(out), drain(err))
 }
