@@ -77,7 +77,7 @@ function action(w: { element: HTMLElement }, name: string): HTMLButtonElement | 
   return w.element.querySelector<HTMLButtonElement>(`[data-action='${name}']`)
 }
 
-describe('FailurePanel：4 行数据（`task-model.md:213-217`）', () => {
+describe('FailurePanel：4 行数据（`task-model.md:229-232`）', () => {
   it('失败原因 / 证据 / 第几次 / 产出 四行都在', () => {
     // 判红方式：删掉任意一行（例如「产出」）→ 红。
     const w = mountPanel()
@@ -189,7 +189,7 @@ describe('FailurePanel：事件', () => {
 
 describe('FailurePanel：没写原因的「关掉」按不下去', () => {
   it('reason 空 → 关掉按钮 disabled；写了 → enabled 且发 close 带原因', async () => {
-    // 判红方式：去掉 `closeDisabled` 那层 → 红（`task-model.md:286`
+    // 判红方式：去掉 `closeDisabled` 那层 → 红（`task-model.md:244`
     // 要求留痕，没有原因的关闭会把失败变成「消失的失败」）。
     const w = mountPanel()
     const close = action(w, 'close')

@@ -291,7 +291,15 @@ pub struct FailureBody {
     pub expected_version: Option<i64>,
 }
 
-/// 失败处置的三个动作。
+/// 失败处置的**三个有端点的**动作。
+///
+/// `task-model.md:234` 的面板列了 5 个动作，另外两个在 v0.8.0 **故意没有端点**：
+/// - 「放宽约束」只改任务约束，本轮页面接 `@relax` 但不发请求；
+/// - 「看执行复盘」是只读跳转，复盘页在 v0.8.2 之前还是骨架页。
+///
+/// 所以这个枚举少两个不是漏写。把 `Relax` 加进来会得到一个**只能改约束、
+/// 却又要走失败处置事务**的分支，而它既不对应新的执行记录、也不改任务状态——
+/// 那是把「改任务」和「重派」两件事混进一条边里。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FailureAction {
@@ -339,28 +347,24 @@ async fn read_json<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&body).map_err(|_| ApiError::bad_request_body())
 }
 
-/// 库里那几列「写入口不必知道、但读出口要露出来」的值。
+/// 库里那个「前置条件校验」要用的版本号。
 ///
-/// **这个结构现在只承载版本号**：四条约束与 `superseded_by` / `intent_ref`
-/// 已经进 `hub_storage::TaskView` 读模型（子任务 6 裁决时补的），所以这里
-/// 不再重复读它们。留着 `version` 是因为「前置条件校验」读的是**库里的**版本，
-/// 而不是「上一响应里那个」——两者在别人刚改过时会不同，而 `require_version`
-/// 要拒的正是后者。
-struct TaskMeta {
-    version: i64,
-}
-
-fn read_meta(state: &AppState, id: &str) -> Result<Option<TaskMeta>, ApiError> {
-    let conn = state
-        .pool()
-        .get()
-        .map_err(|e| ApiError::internal_with("cannot check out a db connection", e))?;
-    let got = conn
-        .query_row("SELECT version FROM task WHERE id = ?1", [id], |r| {
-            Ok(TaskMeta { version: r.get(0)? })
-        })
-        .ok();
-    Ok(got)
+/// 读的是**库里的**版本，而不是「上一响应里那个」——两者在别人刚改过时会不同，
+/// 而 `require_version` 要拒的正是后者。
+///
+/// 返回 `i64` 而不是 `TaskView`：调用点只要一个数，把整个读模型传出去会让
+/// 「这个数从哪来」在下一个人手里重新变成一个问题。
+fn read_version(state: &AppState, id: &str) -> Result<Option<i64>, ApiError> {
+    // **不在这里手写 SQL**：`hub-storage` 是唯一摸 SQLite 的地方，而它已经
+    // 提供了 `TaskRepo::get`——用 `.ok()` 手搓一个「读版本」会在两处调用点上
+    // 把「库读坏了」压成 `None`，于是变成 404 `task_not_found`：用户被告知
+    // 「任务不存在」，而真相是服务端读不了库。一个会说谎的 404 比一个诚实的
+    // 500 坏得多——前者让人去重试一个永远不存在的任务，后者让人去看日志。
+    Ok(state
+        .tasks()
+        .get(id)
+        .map_err(|e| ApiError::internal_with("cannot read task version", e))?
+        .map(|t| t.version))
 }
 
 /// 读出最新一行并组装成视图。**所有写端点的最后一步都走它**。
@@ -389,11 +393,11 @@ fn load(state: &AppState, id: &str) -> Result<hub_storage::TaskView, ApiError> {
 /// 不一致 → 409 `task_state_changed`，且**不碰库**：请求描述的是一个已经不存在
 /// 的世界，写进去就是覆盖别人的修改。前端收到它会「保留用户已填的内容、只刷新
 /// `task` 与 `version`、再提示重新提交」。
-fn require_version(meta: &TaskMeta, expected: Option<i64>) -> Result<(), ApiError> {
+fn require_version(actual: i64, expected: Option<i64>) -> Result<(), ApiError> {
     match expected {
-        Some(v) if v != meta.version => Err(ApiError::conflict_with(
+        Some(v) if v != actual => Err(ApiError::conflict_with(
             err::TASK_STATE_CHANGED,
-            || json!({ "expected_version": v, "actual_version": meta.version }),
+            || json!({ "expected_version": v, "actual_version": actual }),
         )),
         _ => Ok(()),
     }
@@ -478,9 +482,9 @@ fn transition(
     extras: TransitionExtras,
 ) -> Result<(), ApiError> {
     let current = load(state, id)?;
-    let meta =
-        read_meta(state, id)?.ok_or_else(|| ApiError::not_found_with(err::TASK_NOT_FOUND))?;
-    require_version(&meta, expected)?;
+    let actual =
+        read_version(state, id)?.ok_or_else(|| ApiError::not_found_with(err::TASK_NOT_FOUND))?;
+    require_version(actual, expected)?;
     // **内部调状态机**，不绕过：`acceptance` / `failure` 与 `/state` 走同一条边表。
     task_state::check_transition(current.state, to)
         .map_err(|e| map_storage(e, "check transition"))?;
@@ -494,7 +498,7 @@ fn transition(
         id,
         to,
         &at,
-        Some(meta.version),
+        Some(actual),
         hub_storage::TaskTransition {
             done_when: extras.done_when.clone(),
         },
@@ -675,9 +679,9 @@ pub async fn patch_task(
     let patch = body.into_patch();
 
     let current = load(&state, &id)?;
-    let meta =
-        read_meta(&state, &id)?.ok_or_else(|| ApiError::not_found_with(err::TASK_NOT_FOUND))?;
-    require_version(&meta, expected)?;
+    let actual =
+        read_version(&state, &id)?.ok_or_else(|| ApiError::not_found_with(err::TASK_NOT_FOUND))?;
+    require_version(actual, expected)?;
 
     if let Some(title) = &patch.title {
         if title.trim().is_empty() {

@@ -724,12 +724,7 @@ impl TaskRepo {
         if touched == 0 {
             // 两条路都走到这里：任务不存在（一次都没命中），或补丁是空的
             // （命中 0 次但任务在）。靠再查一次区分，不猜。
-            let exists: Option<i64> = tx
-                .query_row("SELECT version FROM task WHERE id = ?1", params![id], |r| {
-                    r.get(0)
-                })
-                .optional()?;
-            return match exists {
+            return match read_version_opt_in(&tx, id)? {
                 Some(v) => Ok(v),
                 None => Err(StorageError::TaskNotFound { id: id.to_string() }),
             };
@@ -737,10 +732,7 @@ impl TaskRepo {
 
         // 故意**在事务里**读回 version：提交之后再读，别人可能又改了一次，
         // 返回的就不是本次的结果了。
-        let version: i64 =
-            tx.query_row("SELECT version FROM task WHERE id = ?1", params![id], |r| {
-                r.get(0)
-            })?;
+        let version = read_version_in(&tx, id)?;
         tx.commit()?;
         Ok(version)
     }
@@ -781,6 +773,26 @@ impl TaskRepo {
         };
         raw.into_iter().map(RawTask::into_task).collect()
     }
+}
+
+/// 读出这一行的当前版本号；任务不存在时返回 `None`。
+///
+/// 单独抽出来是因为它被用在**两处语义不同的地方**：`update` 里要区分
+/// 「补丁是空的（命中 0 行但任务在）」与「任务不存在」，所以要 `Option`；
+/// 而同函数末尾无条件读回本次结果时，任务一定在，要的是 `i64`。
+/// 两个 Thin wrapper 共用一条 SQL，避免这条 `SELECT version` 在文件里出现三次。
+fn read_version_opt_in(conn: &r2d2_sqlite::rusqlite::Connection, id: &str) -> Result<Option<i64>> {
+    let got = conn
+        .query_row("SELECT version FROM task WHERE id = ?1", params![id], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok(got)
+}
+
+/// 同上，但调用点已确定这一行存在（读不回来说明有人在事务中途删了它）。
+fn read_version_in(conn: &r2d2_sqlite::rusqlite::Connection, id: &str) -> Result<i64> {
+    read_version_opt_in(conn, id)?.ok_or_else(|| StorageError::TaskNotFound { id: id.to_string() })
 }
 
 /// 四条约束列的当前值（`None` = 库里是 `NULL`，即「不限」）。

@@ -163,7 +163,7 @@ function onKeepBranch(): void {
         </div>
       </div>
 
-      <!-- 三个动作。**没有「判失败」**：那條边服务端 409。 -->
+      <!-- 三个动作。**没有「判失败」**：那条边服务端 409。 -->
       <div class="af-row af-acceptancepanel__actions">
         <button class="af-btn af-btn--primary" type="button" data-action="pass" @click="onPassClick">
           合入主干
@@ -181,7 +181,7 @@ function onKeepBranch(): void {
           只保留分支
         </button>
         <!--
-          第 4 个动作：规格 `task-model.md:268` 的表格与原型
+          第 4 个动作：规格 `task-model.md:275` 的表格与原型
           `prototype/task.html:174-177` 都是四个动作，本轮只做三个。
           与失败面板的「看执行复盘」同一条处置：**渲染但 disabled**，
           不做死链接、也不静默裁掉——裁掉的话用户会以为这个功能不存在。

@@ -160,7 +160,7 @@ const latestExecution = computed<Execution | null>(
  *
  * 后半条覆盖「任务已回 `pending` 但上一次是失败」——那时任务态上看不出
  * 任何异常，而用户最需要的恰恰是「上次为什么挂」和那五个动作
- * （`task-model.md:213-217`）。
+ * （`task-model.md:229-232`）。
  */
 const showFailure = computed(
   () => task.value?.state === 'failed' || latestExecution.value?.state === 'failed',

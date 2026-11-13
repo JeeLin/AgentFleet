@@ -30,10 +30,10 @@ export const FAILURE_DIAGNOSIS: Readonly<Record<FailureKind, string>> = {
    一堆散落按钮，而是「一个诊断 + 一组动作」。**不许在别处（设备页、收件箱、
    命令行）提供第二套**——两处状态会打架。
 
-   ── 4 行数据（`task-model.md:213-217`）────────────────────────────
+   ── 4 行数据（`task-model.md:229-232`）────────────────────────────
      失败原因 / 证据 / 第几次 / 产出
 
-   ── 5 个动作（`task-model.md:225-229`）────────────────────────────
+   ── 5 个动作（`task-model.md:234`）────────────────────────────
      换设备重派 → `retry`    （`failed → queued`，不挑设备；本轮没有「设备拒接」）
      改任务再跑 → `edit`     （task 版本 +1，旧值留痕）
      放宽约束   → `relax`    （只改 allowed_* / required_capabilities）
@@ -110,7 +110,7 @@ const outputText = computed(() => {
   return `${branch}${base}`
 })
 
-/** 关掉必须写明原因（`task-model.md:286`）：reason 空时按钮 disabled。 */
+/** 关掉必须写明原因（`task-model.md:244`）：reason 空时按钮 disabled。 */
 const closeReason = ref('')
 const closeDisabled = computed(() => closeReason.value.trim().length === 0)
 
@@ -146,7 +146,7 @@ const executedAt = computed(() => {
         <span v-if="execution?.reason" class="af-fp">{{ execution.reason }}</span>
       </div>
 
-      <!-- 4 行数据：失败原因 / 证据 / 第几次 / 产出（`task-model.md:213-217`） -->
+      <!-- 4 行数据：失败原因 / 证据 / 第几次 / 产出（`task-model.md:229-232`） -->
       <dl class="af-failurepanel__kv">
         <dt class="af-kv__k">失败原因</dt>
         <dd class="af-kv__v" data-field="reason">{{ reasonValue }}</dd>

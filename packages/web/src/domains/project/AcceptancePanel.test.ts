@@ -71,7 +71,7 @@ describe('AcceptancePanel：三个动作，没有「判失败」', () => {
   })
 
   it('第 4 个动作「查看执行复盘」渲染但 disabled（不静默裁掉）', () => {
-    // 规格 task-model.md:268 与原型 task.html:174-177 都是四个动作，本轮只做三个。
+    // 规格 task-model.md:275 与原型 task.html:174-177 都是四个动作，本轮只做三个。
     // 判红方式：删掉这个按钮 → 红（用户会以为复盘功能不存在）；
     //           把 disabled 去掉 → 红（会指向 v0.8.2 才有的骨架上）。
     const w = mountPanel()

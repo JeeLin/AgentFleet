@@ -86,7 +86,7 @@ const EDGES: &[Edge] = &[
     Edge {
         from: TaskState::Failed,
         to: TaskState::Pending,
-        spec: "task-model.md:286",
+        spec: "task-model.md:95",
     },
     Edge {
         from: TaskState::Failed,
