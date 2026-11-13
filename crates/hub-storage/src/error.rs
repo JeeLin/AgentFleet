@@ -118,6 +118,22 @@ pub enum StorageError {
     #[error("no such task: {id:?}")]
     TaskNotFound { id: String },
 
+    /// 非法状态转移。错误信息必须**指导下一步**，不能只说"非法"：
+    /// `running → done` 要提示先走 `review`，`review → failed` 要提示打回 `pending`。
+    #[error("illegal task transition: {from} → {to}; {hint}")]
+    IllegalTaskTransition {
+        from: &'static str,
+        to: &'static str,
+        hint: &'static str,
+    },
+
+    /// 状态推进时读到的旧态已被别人改掉（CAS 影响 0 行）。
+    #[error("task state changed underneath us: expected {expected}, task is now {actual}")]
+    TaskStateChanged {
+        expected: &'static str,
+        actual: String,
+    },
+
     /// 库里没有这次执行。
     #[error("no such execution: {id:?}")]
     ExecutionNotFound { id: String },

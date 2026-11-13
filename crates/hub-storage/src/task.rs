@@ -186,19 +186,42 @@ impl TaskRepo {
         raw.into_iter().map(RawTask::into_task).collect()
     }
 
-    /// 改状态。
+    /// 改状态。**先校验转移合法性，再写库。**
     ///
-    /// **不校验转移合法性**：六态之间哪些转移合法是 `v0.8.0`（任务与执行）的
-    /// 内容，本里程碑只把状态列立起来。这里能做的是"取值必须合法"与"任务必须
-    /// 存在"——后者不做的话，状态更新会静默作用在 0 行上。
-    pub fn set_state(&self, id: &str, state: TaskState, now: &str) -> Result<Task> {
+    /// 边表在 [`crate::task_state::can_transition`]（唯一定义处），本函数不重复
+    /// 判断「哪些态能到哪些态」。
+    ///
+    /// 写库用 compare-and-swap：`UPDATE ... WHERE id = ? AND state = <读到的旧态>`。
+    /// 影响 0 行有两种可能，靠再查一次区分：
+    /// - 任务不存在 → `TaskNotFound`
+    /// - 任务存在但态已被别人改掉 → `TaskStateChanged`（HTTP 层映射 409）
+    ///
+    /// 为什么值得多写这一句 `WHERE`：多用户不在本轮范围，但**两次点击的竞态是
+    /// 真实的**——详情页上「合入主干」和「打回」挨着，双击或两人同时点会让后写
+    /// 静默覆盖先写。一行 `WHERE` 就能挡住。
+    pub fn set_state(&self, id: &str, to: TaskState, now: &str) -> Result<Task> {
         let conn = self.pool.get()?;
+        // 先读真值：不信任调用方说的 from，也不信任上一次读到的东西。
+        let current = self
+            .get(id)?
+            .ok_or_else(|| StorageError::TaskNotFound { id: id.to_string() })?;
+        crate::task_state::check_transition(current.state, to)?;
+
+        // CAS：`state = 旧态` 是这句 UPDATE 的守卫条件。
         let n = conn.execute(
-            "UPDATE task SET state = ?2, updated_at = ?3 WHERE id = ?1",
-            params![id, state.as_str(), now],
+            "UPDATE task SET state = ?2, updated_at = ?3, version = version + 1
+             WHERE id = ?1 AND state = ?4",
+            params![id, to.as_str(), now, current.state.as_str()],
         )?;
         if n == 0 {
-            return Err(StorageError::TaskNotFound { id: id.to_string() });
+            // 走到这里说明读完到写之间有人插了一脚：要么被删了，要么改了态。
+            return match self.get(id)? {
+                None => Err(StorageError::TaskNotFound { id: id.to_string() }),
+                Some(now_row) => Err(StorageError::TaskStateChanged {
+                    expected: current.state.as_str(),
+                    actual: now_row.state.as_str().to_string(),
+                }),
+            };
         }
         self.get(id)?
             .ok_or_else(|| StorageError::TaskNotFound { id: id.to_string() })
@@ -346,6 +369,83 @@ mod tests {
 
         let e = tr.set_state("nope", TaskState::Queued, TS).unwrap_err();
         assert!(matches!(e, StorageError::TaskNotFound { .. }), "{e:?}");
+    }
+
+    /// 非法转移必须**拒绝且不写库**——「报错了但写了」比不报错更糟。
+    #[test]
+    fn set_state_refuses_an_illegal_transition_without_writing() {
+        let (_d, tr) = setup();
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+        // pending → queued → running：两条合法边。
+        tr.set_state(&t.id, TaskState::Queued, TS).unwrap();
+        tr.set_state(&t.id, TaskState::Running, TS).unwrap();
+
+        // running → done 是硬规则禁止的（跳过 review）。
+        let e = tr.set_state(&t.id, TaskState::Done, TS).unwrap_err();
+        assert!(
+            matches!(e, StorageError::IllegalTaskTransition { .. }),
+            "{e:?}"
+        );
+
+        // 关键是这一条：库里必须还是 running。
+        let after = tr.get(&t.id).unwrap().unwrap();
+        assert_eq!(after.state, TaskState::Running, "拒绝后不得写库");
+    }
+
+    /// 未知 id 报 `TaskNotFound`，不是「转移非法」——两个错不能混。
+    #[test]
+    fn set_state_reports_task_not_found_for_an_unknown_id() {
+        let (_d, tr) = setup();
+        let e = tr.set_state("nope", TaskState::Queued, TS).unwrap_err();
+        assert!(matches!(e, StorageError::TaskNotFound { .. }), "{e:?}");
+    }
+
+    /// CAS 挡住并发覆盖：读到旧态之后、写之前，别人把态改掉。
+    ///
+    /// 模拟方式：直接打两枪相同形状的 SQL——第一枪成功，第二枪带着已经过期的
+    /// `expected` 必然影响 0 行。这样测的是守卫条件本身，不是 `set_state` 的实现细节。
+    #[test]
+    fn a_concurrent_state_change_is_rejected() {
+        let (_d, tr) = setup();
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+        // 把任务推到 running，两个「请求」都会看到 running。
+        tr.set_state(&t.id, TaskState::Queued, TS).unwrap();
+        tr.set_state(&t.id, TaskState::Running, TS).unwrap();
+
+        let conn = tr.pool.get().unwrap();
+        let cas = "UPDATE task SET state = ?2, updated_at = ?3, version = version + 1
+                   WHERE id = ?1 AND state = ?4";
+        // 请求 A：running → review，成功。
+        let a = conn
+            .execute(cas, params![t.id, "review", "unix:1", "running"])
+            .unwrap();
+        assert_eq!(a, 1);
+        // 请求 B：它手上还是「旧态 running」，也想写到 review —— 影响 0 行。
+        let b = conn
+            .execute(cas, params![t.id, "review", "unix:2", "running"])
+            .unwrap();
+        assert_eq!(b, 0, "过期的旧态必须被 CAS 挡住");
+        drop(conn);
+
+        // 且真实态是 A 写进去的 review。
+        assert_eq!(tr.get(&t.id).unwrap().unwrap().state, TaskState::Review);
+    }
+
+    /// `set_state` 成功后 `version` 必须 +1，否则 CAS 守卫形同虚设。
+    #[test]
+    fn a_successful_transition_bumps_the_version() {
+        let (_d, tr) = setup();
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+        let version_of = |id: &str| -> i64 {
+            tr.pool
+                .get()
+                .unwrap()
+                .query_row("SELECT version FROM task WHERE id = ?1", [id], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(version_of(&t.id), 1, "新建任务 version 从 1 开始");
+        tr.set_state(&t.id, TaskState::Queued, TS).unwrap();
+        assert_eq!(version_of(&t.id), 2);
     }
 
     #[test]

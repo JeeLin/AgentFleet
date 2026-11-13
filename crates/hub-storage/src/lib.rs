@@ -14,6 +14,7 @@ pub mod project;
 pub mod repo;
 pub mod session;
 pub mod task;
+pub mod task_state;
 pub mod trajectory;
 pub mod workspace;
 
@@ -28,6 +29,7 @@ pub use repo::{
 };
 pub use session::{BaseRevStatus, Session, SessionDetail, SessionRepo, SessionState};
 pub use task::{DoneWhen, NewTask, Task, TaskRepo, TaskState};
+pub use task_state::{can_transition, check_transition, legal_edges};
 pub use trajectory::{Gap, NewEvent, TrajectoryEvent, TrajectoryRepo, TurnBounds, TURN_END_KIND};
 pub use workspace::{
     list_sessions, recent_sessions, SessionListItem, Workspace, WorkspaceRepo, WorkspaceSession,

@@ -102,6 +102,21 @@ running ──（设备掉线，超时）──→ failed(kind=interrupted)
   任务是对的，产出没达标。
 - **`queued` 超时可退回 `pending`**（设备一直不接活），不是 `failed`。
 
+#### 实现口径：图里的 `queued ─→ failed` 暂不实现
+
+上面图中有 `queued` 指向 `failed` 的箭头，与本节的「`queued` 超时退 `pending`」不冲突：
+
+- 图表达的是**排队期间被判定为不可执行**这种终局——设备侧明确拒绝该任务，
+  或人工在排队时直接把任务关掉；
+- 而**超时**是「设备一直不接活」，`queued → pending`，不是失败。
+
+v0.8.0 没有调度器、也没有设备会拒接，`queued` 之后只可能是超时，因此
+**v0.8.0 只实现 `queued → pending`**，`queued → failed` 留到 v0.8.2 引入调度器时
+随「设备拒接」这个业主一起加。
+
+代码侧的唯一真相源是 `crates/hub-storage/src/task_state.rs` 的 `EDGES`（10 条边），
+`can_transition` / `check_transition` 都读它。
+
 ---
 
 ## 3. 失败的八种形态 / Eight failure shapes
