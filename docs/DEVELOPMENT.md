@@ -184,23 +184,34 @@ C7 双向比对产线的步骤名——不再存在「两份清单互相漂移�
 存在，缺了就 fail。`scripts/check.sh` 的 C10 钉死「全 workflow 仅一处 `bun run build` / 一处
 `web-dist` 上传 / 无 `macos-14`」。
 
-**GitHub Actions 的 Node runtime 分两组，只有第一组已完成迁移**：GitHub 已弃用
-Node.js 20 运行时，没升级的 action 在 CI 日志里每一步都会打
+**判据是 action 自己的 `action.yml`，不是版本号也不是「第几个大版本」**
+GitHub 已弃用 Node.js 20 运行时，没升级的 action 在 CI 日志里每一步都会打
 `Node.js 20 is deprecated ... forced to run on Node.js 24`。判据是 action 自己
-`action.yml` 的 `using:` 字段，**不是「它是第几个大版本」**——这一点此前写反过
-（2026-11-13 修正，原文档称 `download-artifact@v6` 是「第一个跑 Node 24 的版本」，
-实际 v6 仍是 `node20`，v7.0.0 release notes 明写 v6 只是「preliminary support」）。
+`action.yml` 的 `using:` 字段。
+（2026-11-13 第一次修正）原文档称 `download-artifact@v6` 是「第一个跑 Node 24 的版本」，
+实际 v6 仍是 `node20`，v7.0.0 release notes 明写「v6 had preliminary support for Node 24,
+however this action was by default still running on Node.js 20」；
+（2026-11-13 第二次修正）上一版按「v6=node20 / v7=node24」的版本号对写，仍会让人
+把「版本号」当判据——下一个人照样会猜。所以本节改成**按 `action.yml` 的 `using:`
+分组**，下面每个版本号都是对过 `using:` 的结果。
 
-- **已跑 node24**（本 workflow 现在用这一组）：`actions/checkout@v5`、
+- **`using: node24`**（本 workflow 现在用这一组）：`actions/checkout@v5`、
   `actions/setup-node@v5`、`actions/upload-artifact@v6`、
-  `Swatinem/rust-cache@v2`、`oven-sh/setup-bun@v2`。
-- **仍跑 node20**（这组是要改的对象）：`actions/download-artifact@v6`，
-  以及 docker 系列 `setup-qemu-action@v3` / `setup-buildx-action@v3` /
-  `login-action@v3` / `metadata-action@v5` / `build-push-action@v6`。
-  它们的 node24 首版分别是 `download-artifact@v7`、`setup-qemu`/`setup-buildx`/`login` `v4`、
-  `metadata` `v6`、`build-push` `v7`。升级清单与取舍已由 planner 于 2026-11-13 原样搬入
-  v0.8.0 的 `## Bugs` 表（🟡「CI 仍打 `Node.js 20 is deprecated`」），并成对删了缺陷池行；
-  **本节只记事实，不重复处置方案**。
+  `Swatinem/rust-cache@v2`、`oven-sh/setup-bun@v2`、
+  `actions/download-artifact@v7`、
+  docker 侧 `setup-qemu-action@v4` / `setup-buildx-action@v4` / `login-action@v4`、
+  `metadata-action@v6` / `build-push-action@v7`。
+- **`using: node20`**：**本 workflow 已无任何条目**（v0.8.0 子任务 11 升完）。
+  核对命令：`grep -n 'uses:' .github/workflows/release.yml` 逐条比对 + 把
+  「`download-artifact@v` 后跟 6」「`setup-qemu`/`setup-buildx`/`login` 后跟 v3」等
+  旧版本号当模式 grep，应零命中。**不以「CI 已绿」作结论**——那要下一次 release run 的
+  annotations 说了算。
+- **`using: node16` / `node12`**：本 workflow 未使用（`dtolnay/rust-toolchain`、
+  `taiki-e/install-action` 是 composite / 二进制分发型，不带 Node runtime）。
+
+**为什么版本号整体抬一个 major 而不是挑着升**：混搭会让「哪个 action 还没升」变成
+一件只能靠记忆回答的事——而这里刚因为「凭记忆写版本号」写错过两次。全部对齐到
+各自的 node24 首版之后，旧版本号就是一个可以 grep 的**闭集**，漏没漏一眼能看见。
 
 为什么不直接升到再往上的大版本：`download-artifact` v8 起下载哈希不匹配默认报错，
 改的是**校验强度**而非运行时，与「消掉弃用警告」无关，混在一起做会让出问题时
@@ -308,6 +319,71 @@ GitHub）、**版本对齐**（Release 页上有多个版本，选错就连不�
   所以 `Dockerfile.hub` 设 `AFHUB_ALLOW_NON_LOOPBACK=1` + `AFHUB_ADDR=0.0.0.0:8080`。
   开关**只认确切的 `1`**（`0` / `true` / 空串一律当没设），理由见
   `crates/hub-server/src/main.rs` 的 `resolve_addr`。裸机部署不变：仍然只许回环。
+
+#### 部署排障：WebSocket 连不上怎么查（`/ws` 拿不到 `101`）
+
+设备跑 `afcli run` 一直重试、日志里是 `connect failed: connect failed: HTTP error: 200 OK`
+（或 `400` / `404` / `502`）时，**先分清是 Hub 答的还是别人答的**，再决定改哪一侧。
+
+**Hub 的 `/ws` 只可能回两种状态**，`crates/hub-server/src/routes/ws.rs` 的 `upgrade`
+只有两个出口：握手成功 `101`，或 `reject_origin` 命中时 `403`（`ws_error()`）。
+**代码里没有任何 200 分支。** 所以握手拿到 200，只能说明这个请求**根本没进 upgrade
+分支**——响应来自反向代理、端口上的另一个服务、或一个静态站（返回 HTML 外壳）。
+在 Rust 里改任何东西都不会改变这个现象，那是假修复。真正要查的是部署链路。
+
+**判据 1：直连 Hub（绕过代理），期望握手升到 `HTTP/1.1 101`**
+
+```bash
+# 把 <hub-host>:<port> 换成 Hub 实际监听的地址（容器外一般是 <host-ip>:8080）
+curl -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" \
+     -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: $(openssl rand -base64 16)" \
+     http://<hub-host>:<port>/ws
+```
+
+**判据 2：经代理，若返回 200 就看响应头 `Server` / `Via` 判断是谁答的**
+
+```bash
+# 把 <public-host> 换成用户/设备真正连的那个域名或 IP:端口
+curl -i -o - -D - http://<public-host>/ws | head -20
+```
+
+看两处：状态码（`101` 才对），以及 `Server:` / `Via:` / `X-Powered-By:` 这些头——
+它们指认了到底是谁在应答。返回一段 HTML 或 `Content-Type: text/html` 同样是证据：
+那是静态站/前端外壳，不是 Hub。
+
+**判据 3：代理是否把升级请求转发给 Hub**
+
+```bash
+# nginx 的 location /ws 块里必须有两行；少任一行，nginx 会把升级请求当普通
+# HTTP 转发，Hub 收到时它已经不是 upgrade 了
+#   proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";
+grep -n 'proxy_set_header' /etc/nginx/conf.d/afhub.conf
+```
+
+Caddy / Traefik 默认透传升级请求，通常不需要这两行；nginx 需要，且
+`proxy_http_version 1.1` 也必须显式写（HTTP/1.0 不支持连接升级）。
+
+**判定树**
+
+```text
+跑判据 1（直连 Hub）
+├─ 拿到 101
+│   → Hub 没问题，是代理层的问题
+│     查判据 3：proxy_set_header Upgrade $http_upgrade; + Connection "upgrade";
+│     查 proxy_http_version 1.1；查代理是否把 /ws 路由到了别的 upstream
+└─ 不是 101（200 / 400 / 404 / 403 都要看原文）
+    → 报 Hub 缺陷：附 curl -i 的完整原文（含状态行与全部响应头）
+      - 403：`reject_origin()` 只按「请求带没带 Origin 头」判、不看值，
+        命中就回这个固定 code。afcli 是原生程序、从不发 Origin，所以 403
+        说明中间层凭空加了这个头（也说明请求确实到了 Hub）
+      - 200 且 Server 头不像 axum / 正文是 HTML：端口上跑的不是 Hub，核对 AFHUB_ADDR
+```
+
+**本轮状态：这条缺陷在本仓库里修不了，也不冒充已修。** 现象出现在一位 Windows 用户的
+真实部署上（`ws://<公网>:8000/ws`），复现与验证都需要 **Windows 客户端 + 真实反向代理**
+环境；本仓库的开发机是 Linux，没有那个代理。所以本节的完成判据是**判定树可执行**
+（上面三条命令都能照抄照跑、结论能落到具体一侧），而不是「现象消失」。等运维按判定树
+跑完并把 `curl -i` 原文贴回来，才能定位到具体是哪一层的配置。
 
 ---
 
