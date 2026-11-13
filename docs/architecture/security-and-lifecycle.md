@@ -43,8 +43,22 @@
 
 nonce 只在签名 / 摘要 / 时间窗都验过之后消费，业务失败也照样烧掉；集合是
 **进程内、有 TTL 的**，**Hub 重启即清空**。重启后能重放的只剩时间窗内、签名
-与摘要仍有效的原请求，其效果仅是建一个会话，不暴露 secret；未初始化回 403
-`hub_not_initialized`，认证失败一律 401 `device_signature_invalid`。
+与摘要仍有效的原请求，其效果仅是建一个会话，不暴露 secret。
+
+**这一层不是「失败一律 401」**——401 `device_signature_invalid` 只覆盖
+「没能证明自己是谁」的那一档（头 / body 同一事实不等、摘要不符、越时间窗、
+验签不过、未知设备或无库内公钥）。其余各档按语义各回各的码：
+
+| 情形 | 状态码 | code |
+|---|---|---|
+| body 不可读 / 不是约定 DTO | 400 | `invalid_request_body` |
+| 验签通过但 `v` 不等于 `IMPORT_VERSION` | 400 | `invalid_request_body` |
+| 签名 / 摘要 / 时间窗 / 公钥任一不过 | 401 | `device_signature_invalid` |
+| Hub 尚未初始化（已初始化门禁） | 403 | `hub_not_initialized` |
+| 同一 nonce 在时间窗内重放 | 409 | `import_replayed` |
+
+（`crates/hub-server/src/import_auth.rs` 的第 3–9 步与 `middleware_auth.rs`
+的 403 分支即这张表的实现。）
 
 这条边界与浏览器 session / CSRF **并列**，不是替代：`/api/*` 的状态变更端点
 继续只认浏览器认证。请求体**不含公钥或任何私钥材料**，错误体只回固定 code，

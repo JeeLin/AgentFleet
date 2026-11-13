@@ -54,7 +54,7 @@
 
 | 请求 | 去哪 | 不能收敛的原因 |
 |---|---|---|
-| git packfile / 依赖重建输出 / 日志 tail | git Smart HTTP | 单帧上限 1 MiB（`protocol::MAX_FRAME_BYTES`）；读侧令牌桶**按连接**计 4 MiB 突发 / 1 MiB 每秒（`hub-core` 的 `READ_BUCKET_CAPACITY` / `READ_REFILL_PER_SEC`），一次 50 MiB 传输会吃掉整条约 46 秒额度，同一连接上所有通道一起饿 —— 即下面「可测」一节要拦的那件事 |
+| git packfile / 依赖重建输出 / 日志 tail | git Smart HTTP | 单帧上限 1 MiB（`protocol::MAX_FRAME_BYTES`）；读侧令牌桶**按连接**计 4 MiB 突发 / 1 MiB 每秒（`crates/hub-core/src/limits.rs` 的两个**私有**常量 `READ_BUCKET_CAPACITY = 4 * MAX_FRAME_BYTES` / `READ_REFILL_PER_SEC = MAX_FRAME_BYTES`，不是公共 API，改值不必同步改本文），一次 50 MiB 传输会吃掉整条约 46 秒额度，同一连接上所有通道一起饿 —— 即下面「可测」一节要拦的那件事 |
 | 一次性、可重试、幂等的请求（如会话导入） | 设备签名 HTTP | 超阈值是**断整条连接**（`FLOOD_SUSTAINED` 30 s）：收敛后「一次慢传输」升级成「心跳一起断 → 判设备离线 → 通道表清空」。且要用 WS 就得新增 `MessageType`，并让一次性 CLI 依赖常驻进程的活连接（需另做本地 IPC） |
 
 **收敛的三个先决条件**（缺一个就不许收敛，本仓目前一个都没有）：
@@ -228,8 +228,10 @@ ACP 走的是 worker 自己的子进程 stdio，不经过 WS。
 > **会话导入（v0.7.4）也不改消息数**：`afcli import bind` 是设备主动发起的
 > **一次性 HTTP POST**（`POST /device-api/session-imports`），**不是 WS 消息**，
 > 与浏览器 `/api/*` 和 WS 帧都不是同一条通路。它不新增 `MessageType`、不走 `heartbeat` /
-> `channel_data`，因此协议仍是 17 个变体。设备签名只覆盖这一次请求的
-> method / path / body 摘要 / nonce / 时间戳，不参与 WS 握手。
+> `channel_data`，因此协议仍是 17 个变体。设备签名覆盖**七项**——
+> `v / node_id / method / path / body 摘要 / nonce / t`，由
+> `identity::import_signing_message` 唯一实现（`v` 大端在首，各字符串字段
+> `len(u32 BE) + bytes`，`t` 大端在尾）；它不参与 WS 握手。
 
 **ACP 是另一层协议，不归本文档管**。它是 JSON-RPC 2.0 over stdio、一行一条 JSON，
 由 `crates/node-core/src/agent/acp.rs` 实现。设备与 Hub 之间的 WS 只知道 M1 那套帧。
