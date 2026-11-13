@@ -270,8 +270,115 @@ fn a_provider_read_error_is_provider_unavailable_not_invalid_path() {
         }
     }
 
-    let meta = bind_metadata(&BrokenMeta, Path::new("/tmp/xdg"), "ses_x");
+    // 生产路径里这一步是 `run_bind` 内联的 `.map_err(map_import_error)`；
+    // 这里照抄同一串调用，断言「读错误不被吞」这条口径。
+    let meta = import::HistoryProvider::session_meta(&BrokenMeta, Path::new("/tmp/xdg"), "ses_x")
+        .map_err(map_import_error);
     let failure = invalid_path_failure(meta);
     assert_eq!(failure.code(), "provider_unavailable");
     assert_ne!(failure.code(), "invalid_path");
+}
+
+/// 外部库来的字段进终端前必须净化：控制字符（含换行 / ESC / BEL）换空格。
+///
+/// 可执行地证伪「原样打印」：标题里塞 `\n` 能在列表里伪造出一整行会话，
+/// 塞 `\x1b[2J` / `\x1b]52;…\x07` 能清屏或写剪贴板。
+#[test]
+fn control_characters_from_the_session_database_never_reach_the_terminal() {
+    let evil = "evil\x1b[2J\x1b]52;c;cGF3bmVk\x07 title\nfake line";
+    let safe = terminal_safe(evil);
+    assert!(
+        !safe.chars().any(char::is_control),
+        "控制字符泄漏到终端输出: {safe:?}"
+    );
+    assert!(!safe.contains('\n') && !safe.contains('\x1b') && !safe.contains('\x07'));
+    // 只换掉的必须是控制字符：可读部分逐字保留，否则列表就没法用了。
+    assert!(safe.contains(" title"));
+    assert!(safe.contains("fake line"));
+    assert_eq!(safe.len(), evil.len(), "逐个字符替换，不增不删");
+    // 中文 / 引号 / emoji 原样保留。
+    assert_eq!(terminal_safe("会话 \"a\" 🚀"), "会话 \"a\" 🚀");
+}
+
+/// 空 `--data-dir` 是用法错误，不是「回落到当前目录」。
+///
+/// 静默接受会让用户读到 CWD 下另一个目录里的会话库——看到的是一台
+/// 「不存在的设备」的会话列表。
+#[test]
+fn an_empty_data_dir_is_a_usage_error_rather_than_the_current_directory() {
+    for value in ["", "   "] {
+        let parsed = parse(&args(&[
+            "list",
+            "--provider",
+            "opencode",
+            "--data-dir",
+            value,
+        ]));
+        assert!(parsed.is_err(), "--data-dir {value:?} 必须被拒");
+        let parsed = parse(&args(&[
+            "bind",
+            "--provider",
+            "opencode",
+            "--session",
+            "ses_1",
+            "--data-dir",
+            value,
+        ]));
+        assert!(parsed.is_err(), "bind --data-dir {value:?} 必须被拒");
+    }
+    // 不给这个 flag 仍然走缺省：拒绝的是「给了空值」。
+    assert!(matches!(
+        parse(&args(&["list", "--provider", "opencode"])),
+        Ok(Command::List(_))
+    ));
+}
+
+/// 身份文件读不出来与「还没 enroll」是两个 code：前者的下一步是修文件，
+/// 后者的下一步是 `afcli run`。合成一个会把用户引向错误的排查方向。
+#[test]
+fn an_unreadable_identity_file_is_not_reported_as_not_enrolled() {
+    let broken = ImportFailure::Identity(
+        "identity file /x/identity.json is corrupt: expected value".to_string(),
+    );
+    assert_eq!(broken.code(), "identity_unreadable");
+    assert_ne!(broken.code(), ImportFailure::NotEnrolled.code());
+    let message = broken.message();
+    assert!(message.contains("corrupt"), "{message}");
+    assert!(!message.contains("请先 enroll"), "{message}");
+}
+
+/// 写 stdout 失败必须有独立 code 且回非 0：命令的全部产出就是那几行，
+/// 一个字节没写出去却回 0，脚本会以为拿到了结果。
+#[test]
+fn a_failed_write_is_its_own_failure_code() {
+    let failure = ImportFailure::Write("No space left on device".to_string());
+    assert_eq!(failure.code(), "write_failed");
+    assert!(failure.message().contains("No space left on device"));
+}
+
+/// 写 stdout 失败时退出码非 0，且 stderr 说明原因。
+///
+/// `emit` 是「只为给人看」的那几行（空列表 / 成功提示）的收口；`run_list` 的
+/// 每行列表另走同一条 `report`。用一个永远失败的 writer 直接驱动。
+#[test]
+fn a_failed_write_returns_a_failure_exit_code() {
+    struct FullWriter;
+    impl Write for FullWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                "No space left on device",
+            ))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut out = FullWriter;
+    let mut err = Vec::new();
+    let code = emit(&mut err, writeln!(out, "没有可导入的历史会话"));
+    assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::FAILURE));
+    let text = String::from_utf8(err).expect("utf8");
+    assert!(text.contains("write_failed"), "{text}");
+    assert!(text.contains("No space left on device"), "{text}");
 }

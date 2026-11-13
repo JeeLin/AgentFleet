@@ -15,7 +15,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use node_core::identity::{Identity, APP_DIR, IDENTITY_FILE};
+use node_core::identity::{Identity, IdentityError, APP_DIR, IDENTITY_FILE};
 use node_core::import::{self, HistoricalSession, ImportError, ProviderLookup};
 
 use crate::import_http::{self, ImportHttpError};
@@ -29,9 +29,11 @@ const USAGE: &str = "\
   afcli import bind --provider <id> --session <external-id> [--hub <url|host:port>] [--data-dir DIR]
       把选中的历史会话绑定成 Hub 会话（一次设备签名 HTTP 请求）
 
---provider 目前只支持 opencode。--hub 缺省取 AFCLI_HUB_URL，再缺省
-ws://127.0.0.1:8080/ws；host:port / ws:// / wss:// 会推导成同源 http(s)。
---data-dir 指定平台数据基目录（与 AFCLI_DATA_DIR 同义），缺省用平台标准目录。
+--provider 目前只支持 opencode。--hub 缺省取 AFCLI_HUB_URL，再缺省 `afcli` 的
+本机默认 Hub 地址（`runargs::DEFAULT_HUB_URL`，与 `afcli --help` 同源，当前为
+ws://127.0.0.1:8080/ws）；host:port / ws:// / wss:// 会推导成同源 http(s)。
+--data-dir 指定平台数据基目录（与 AFCLI_DATA_DIR 同义），缺省用平台标准目录；
+显式给空串是用法错误，不会静默退化成当前目录。
 导入只读 identity.json，不会 enroll、不会建立 WS 连接、不会启动 worker。";
 
 /// 一条解析后的 `import` 命令。
@@ -87,10 +89,11 @@ fn parse(rest: &[String]) -> Result<Command, String> {
 
 /// 两个子命令共有的 flag：`--provider` / `--data-dir` 与未知参数。
 ///
-/// 返回 `CommonFlags::Skip(2)` 表示本 parser 不必再处理这个 flag；
+/// 返回 `CommonFlags::Skip` 表示本 parser 不必再处理这个 flag（**两个 flag 都
+/// 恰好吃一个值**，所以步长固定是 2；带 `usize` 载荷会暗示存在别的取值）。
 /// 其余分支由各 parser 自己处理。错误字符串与拆分前逐字相同。
 enum CommonFlags {
-    Skip(usize),
+    Skip,
     NotCommon,
 }
 
@@ -104,11 +107,18 @@ fn parse_common_flag(
     match arg {
         "--provider" => {
             *provider = Some(take_value(args, i, "--provider")?.to_string());
-            Ok(CommonFlags::Skip(2))
+            Ok(CommonFlags::Skip)
         }
         "--data-dir" => {
-            *data_dir = Some(PathBuf::from(take_value(args, i, "--data-dir")?));
-            Ok(CommonFlags::Skip(2))
+            let value = take_value(args, i, "--data-dir")?;
+            // 空串 / 纯空白不是「没给」而是「给了一个空路径」：`PathBuf::from("")`
+            // 会退化成相对路径并在 CWD 下找库，用户看到的是另一台「设备」的
+            // 会话列表。缺省行为只由「没写这个 flag」触发。
+            if value.trim().is_empty() {
+                return Err("--data-dir 不能为空".to_string());
+            }
+            *data_dir = Some(PathBuf::from(value));
+            Ok(CommonFlags::Skip)
         }
         _ => Ok(CommonFlags::NotCommon),
     }
@@ -124,8 +134,8 @@ fn parse_list(args: &[String]) -> Result<ListArgs, String> {
     let mut i = 0;
     while let Some(arg) = args.get(i) {
         let common = parse_common_flag(args, i, arg.as_str(), &mut provider, &mut data_dir)?;
-        if let CommonFlags::Skip(step) = common {
-            i += step;
+        if let CommonFlags::Skip = common {
+            i += 2;
             continue;
         }
         return Err(format!("未知参数 `{arg}`"));
@@ -142,8 +152,8 @@ fn parse_bind(args: &[String]) -> Result<BindArgs, String> {
     let mut i = 0;
     while let Some(arg) = args.get(i) {
         let common = parse_common_flag(args, i, arg.as_str(), &mut provider, &mut data_dir)?;
-        if let CommonFlags::Skip(step) = common {
-            i += step;
+        if let CommonFlags::Skip = common {
+            i += 2;
             continue;
         }
         match arg.as_str() {
@@ -182,6 +192,24 @@ fn take_value<'a>(args: &'a [String], i: usize, flag: &str) -> Result<&'a str, S
     Ok(value.as_str())
 }
 
+/// 外部 agent 库来的字段（`title` / `cwd`）进终端前的净化。
+///
+/// 与 Hub 侧 `routes/session_import.rs::log_safe_title` 同一威胁、同一处置：
+/// 这两个字段来自用户本机的外部库，**不是可信输入**。可执行地成立两条：
+///
+/// 1. 换行 / CR 必须变成空格。原样打印时标题里塞一个 `\n` 就能在 `import list`
+///    里伪造出一整行会话（实测：`evil\x1b[2J…\x07 title\nfake line` 会多打一行）。
+/// 2. 其余控制字符（含 ESC / BEL）同样换成空格，防终端转义注入——`\x1b[2J`
+///    清屏、`\x1b]52;c;…\x07` 通过 OSC 52 往剪贴板写内容。
+///
+/// 可打印字符原样保留：中文 / 引号 / emoji 都还在，列表仍可读。
+fn terminal_safe(field: &str) -> String {
+    field
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 fn run_list<W: Write, E: Write>(
     args: ListArgs,
     data_dir: &Path,
@@ -198,27 +226,38 @@ fn run_list<W: Write, E: Write>(
         Err(error) => return report(err, map_import_error(error)),
     };
     if sessions.is_empty() {
-        drop(writeln!(out, "没有可导入的历史会话"));
-        return ExitCode::SUCCESS;
+        return emit(err, writeln!(out, "没有可导入的历史会话"));
     }
     for (index, session) in sessions.iter().enumerate() {
         let title = if session.title.is_empty() {
-            "（无标题）"
+            "（无标题）".to_string()
         } else {
-            session.title.as_str()
+            terminal_safe(&session.title)
         };
         let updated = session.updated_at.as_deref().unwrap_or("-");
-        drop(writeln!(
+        // 写失败（`>/dev/full`、管道已关）不能当成成功：列出会话是这条命令的
+        // 全部产出，一个字节都没写到用户那里却回 0，脚本会以为拿到了清单。
+        if let Err(failure) = writeln!(
             out,
             "{}. {}\t{}\t{}\t{}",
             index + 1,
-            session.external_session_id,
+            terminal_safe(&session.external_session_id),
             title,
-            session.cwd,
-            updated
-        ));
+            terminal_safe(&session.cwd),
+            terminal_safe(updated)
+        ) {
+            return report(err, ImportFailure::Write(failure.to_string()));
+        }
     }
     ExitCode::SUCCESS
+}
+
+/// 把一次「只为给人看」的写结果收成退出码（空列表那条路用它）。
+fn emit<E: Write>(err: &mut E, result: std::io::Result<()>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => report(err, ImportFailure::Write(e.to_string())),
+    }
 }
 
 fn run_bind<W: Write, E: Write>(
@@ -240,9 +279,21 @@ fn run_bind<W: Write, E: Write>(
     let base = data_base(args.data_dir.as_deref(), data_dir);
 
     // 身份**只读**加载。没有 node_id 就停下——绝不临时 enroll，也绝不发请求。
+    //
+    // 读失败的分类**不能塌成一个 `not_enrolled`**：`Identity::load` 区分
+    // `Io` / `Corrupt{path, reason}` / `NoMode`，「文件存在但内容是坏 JSON」与
+    // 「还没 enroll」对用户的下一步完全不同——前者要去修那个文件，后者要跑
+    // `afcli run`。把后者的话术套在前者上，用户会一直找不到问题。错误文本里
+    // 只有路径与解析原因，不含私钥 / 公钥材料（`IdentityError` 的约束）。
+    //
+    // **文件不存在**仍然是 `not_enrolled`：那是「还没跑过 `afcli run`」，
+    // 归到 `identity_unreadable` 会把最常见的一种情形改说成「文件读不出来」。
     let identity = match Identity::load(&identity_file(&base)) {
         Ok(identity) => identity,
-        Err(_) => return report(err, ImportFailure::NotEnrolled),
+        Err(IdentityError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return report(err, ImportFailure::NotEnrolled);
+        }
+        Err(e) => return report(err, ImportFailure::Identity(e.to_string())),
     };
     let node_id = match identity.node_id() {
         Some(id) if !id.trim().is_empty() => id,
@@ -257,7 +308,10 @@ fn run_bind<W: Write, E: Write>(
     //
     // 读失败**绝不**用 `.ok()` 吞掉：那会把 DbMissing / SchemaMismatch /
     // Decode 静默改判成 `invalid_path`，与 `run_list` 的口径分叉。
-    let meta = bind_metadata(provider, &base, session);
+    // 只有一层 `.map_err`，不必再包一个函数。
+    let meta = provider
+        .session_meta(&base, session)
+        .map_err(map_import_error);
     let candidate = match resolved {
         Ok(candidate) => candidate,
         Err(ImportError::InvalidWorkspacePath) => {
@@ -272,42 +326,24 @@ fn run_bind<W: Write, E: Write>(
         Err(failure) => return report(err, failure),
     };
 
-    let signed = match import_http::build_signed_body(
-        identity.key(),
-        &node_id,
-        candidate.provider,
-        &candidate,
-        &title,
-    ) {
+    let signed = match import_http::build_signed_body(identity.key(), &node_id, &candidate, &title)
+    {
         Ok(signed) => signed,
         Err(error) => return report(err, map_http_error(error)),
     };
-    let outcome = match import_http::post(&origin, &signed) {
+    // 期望的回显值就是本次请求带去的那条历史 id：Hub 回一条别的必须判失败，
+    // 否则用户此后打开对话会 `session/load` 到另一条历史上。
+    let outcome = match import_http::post(&origin, &signed, &candidate.acp_session_id) {
         Ok(outcome) => outcome,
         Err(error) => return report(err, map_http_error(error)),
     };
 
-    drop(writeln!(
-        out,
-        "导入成功：session_id = {}",
-        outcome.session_id
-    ));
-    drop(writeln!(out, "打开既有会话继续对话"));
-    ExitCode::SUCCESS
-}
-
-/// 绑定时取那一条会话的完整元数据（cwd / title）。
-///
-/// provider 的读错误按 [`map_import_error`] 归到 `provider_unavailable` 等
-/// 稳定 code，**绝不**静默降级成「没有元数据」。
-fn bind_metadata(
-    provider: &dyn import::HistoryProvider,
-    base: &Path,
-    session: &str,
-) -> Result<Option<HistoricalSession>, ImportFailure> {
-    provider
-        .session_meta(base, session)
-        .map_err(map_import_error)
+    // 请求已经在 Hub 侧生效（会话已建），写不下这条「导入成功」时仍要回非 0：
+    // 用户拿不到 `session_id` 就无法继续，回 0 等于骗他说拿到了。
+    if let Err(failure) = writeln!(out, "导入成功：session_id = {}", outcome.session_id) {
+        return report(err, ImportFailure::Write(failure.to_string()));
+    }
+    emit(err, writeln!(out, "打开既有会话继续对话"))
 }
 
 /// `resolve` 报路径不合法时的最终失败分类：元数据读失败优先于路径结论，
@@ -385,9 +421,20 @@ fn is_windows_drive_path(path: &str) -> bool {
 enum ImportFailure {
     UnsupportedProvider(String),
     NotEnrolled,
+    /// `identity.json` 存在但读不出来（坏 JSON / 权限位 / 与私钥不匹配）。
+    ///
+    /// 与 [`Self::NotEnrolled`] 分两个 code：那个的下一步是 `afcli run` 去
+    /// enroll，这个的下一步是修或删那个文件。合成一个就把用户引向错误的排查方向。
+    Identity(String),
+    /// 写 stdout 失败（`>/dev/full`、下游管道提前关闭）。
+    ///
+    /// 命令的全部产出就是那几行；一个字节没写出去却回 0，脚本会以为拿到了结果。
+    Write(String),
     ProviderUnavailable,
     InvalidSession,
-    InvalidPath { windows: bool },
+    InvalidPath {
+        windows: bool,
+    },
     InvalidHubUrl(String),
     Network(String),
     BadSignature,
@@ -403,6 +450,8 @@ impl ImportFailure {
         match self {
             Self::UnsupportedProvider(_) => "unsupported_provider",
             Self::NotEnrolled => "not_enrolled",
+            Self::Identity(_) => "identity_unreadable",
+            Self::Write(_) => "write_failed",
             Self::ProviderUnavailable => "provider_unavailable",
             Self::InvalidSession => "invalid_session",
             Self::InvalidPath { .. } => "invalid_path",
@@ -423,6 +472,8 @@ impl ImportFailure {
                 format!("该 provider 不支持导入：{id}（没有已验证的 ACP 入口）")
             }
             Self::NotEnrolled => "请先 enroll（未找到可用的设备身份）".to_string(),
+            Self::Identity(reason) => format!("设备身份文件读不出来：{reason}"),
+            Self::Write(reason) => format!("输出写入失败：{reason}"),
             Self::ProviderUnavailable => {
                 "找不到该 provider 的本机会话库，或库结构不受支持".to_string()
             }

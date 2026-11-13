@@ -40,19 +40,35 @@ pub struct SignedImport {
 }
 
 /// Hub 的成功响应：**两个字段都是契约**。`acp_session_id` 是 Hub 的回显
-/// 确认（绑定的是哪条历史），CLI 必须校验它非空——Hub 单方面少回一个字段
-/// 不能被静默忽略。
+/// 确认（绑定的是哪条历史），CLI 必须校验它**非空且等于请求值**——Hub 少回、
+/// 空回或回一条别的历史都不能被静默忽略。
+///
+/// 只在 `parse_response` 里用，刻意不 `pub`：Hub 侧
+/// `routes/session_import.rs::ImportResponse` 是同名独立 DTO，两 crate 不共享。
 #[derive(Debug, Deserialize)]
-pub struct ImportResponse {
-    pub session_id: String,
-    pub acp_session_id: String,
+struct ImportResponse {
+    session_id: String,
+    acp_session_id: String,
 }
 
-/// 解析并校验成功响应体；形状不对或任一字段为空都是 `BadResponse`。
-fn parse_response(bytes: &[u8]) -> Result<ImportOutcome, ImportHttpError> {
+/// 解析并校验成功响应体。
+///
+/// `expected_acp_session_id` 是**本次请求**带上去的那条历史 id。Hub 的 201 体
+/// 把 `acp_session_id` 原样回显，用途是「确认绑定的是哪条历史」；CLI 若只判它
+/// 非空，Hub 回一条**别的**会话 id 也会被当成成功——而用户此后打开对话走的是
+/// `session/load <那个 id>`，绑错等于把用户带到另一条历史上。
+///
+/// 因此三件事都算 `BadResponse`：形状不对、任一字段为空、回显与请求不等。
+fn parse_response(
+    bytes: &[u8],
+    expected_acp_session_id: &str,
+) -> Result<ImportOutcome, ImportHttpError> {
     let parsed: ImportResponse =
         serde_json::from_slice(bytes).map_err(|_| ImportHttpError::BadResponse)?;
     if parsed.session_id.trim().is_empty() || parsed.acp_session_id.trim().is_empty() {
+        return Err(ImportHttpError::BadResponse);
+    }
+    if parsed.acp_session_id != expected_acp_session_id {
         return Err(ImportHttpError::BadResponse);
     }
     Ok(ImportOutcome {
@@ -92,7 +108,6 @@ pub struct ImportOutcome {
 pub fn build_signed_body(
     key: &KeyPair,
     node_id: &str,
-    provider: &str,
     candidate: &ImportCandidate,
     title: &str,
 ) -> Result<SignedImport, ImportHttpError> {
@@ -100,7 +115,10 @@ pub fn build_signed_body(
     let t = unix_seconds();
     let mut request = ImportRequest {
         node_id: node_id.to_string(),
-        provider: provider.to_string(),
+        // 取 `candidate.provider` 而不是再收一个形参：`ImportCandidate` 已经
+        // 带着它，两个可分别传值的入口只会让「用 A provider 的 id 签 B
+        // provider 的会话」变成一个编译器看不见的错误。
+        provider: candidate.provider.to_string(),
         // opencode 首版 external id 与 ACP id 相等；provider 契约保证
         // `acp_session_id` 就是原样的外部会话 id。
         external_session_id: candidate.acp_session_id.clone(),
@@ -147,12 +165,17 @@ pub fn build_signed_body(
 ///
 /// 关闭重定向（3xx 当失败）、只接受 JSON、超时 10 s。错误响应体只解析
 /// `{"error": code}`，**不把原始 HTML / 文本带回给调用方**。
-pub fn post(origin: &str, signed: &SignedImport) -> Result<ImportOutcome, ImportHttpError> {
+pub fn post(
+    origin: &str,
+    signed: &SignedImport,
+    expected_acp_session_id: &str,
+) -> Result<ImportOutcome, ImportHttpError> {
     let url = format!("{}{IMPORT_PATH}", origin.trim_end_matches('/'));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| ImportHttpError::Local(format!("cannot start HTTP runtime: {e}")))?;
+    let expected = expected_acp_session_id.to_string();
     runtime.block_on(async move {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -178,7 +201,7 @@ pub fn post(origin: &str, signed: &SignedImport) -> Result<ImportOutcome, Import
             .map_err(|e| ImportHttpError::Network(e.to_string()))?;
 
         if status.is_success() {
-            return parse_response(&bytes);
+            return parse_response(&bytes, &expected);
         }
 
         let parsed: ImportErrorBody =
@@ -212,8 +235,7 @@ mod tests {
     #[test]
     fn the_body_carries_no_public_or_private_key_material() {
         let kp = KeyPair::generate();
-        let signed =
-            build_signed_body(&kp, "n_test", "opencode", &candidate(), "demo").expect("sign");
+        let signed = build_signed_body(&kp, "n_test", &candidate(), "demo").expect("sign");
         let text = String::from_utf8(signed.body.clone()).expect("utf8");
         let public = base64url(&kp.public_key_bytes());
         let private = base64url(&kp.to_pkcs8_der());
@@ -234,8 +256,7 @@ mod tests {
     #[test]
     fn the_body_digest_covers_the_payload_with_blank_auth_fields() {
         let kp = KeyPair::generate();
-        let signed =
-            build_signed_body(&kp, "n_test", "opencode", &candidate(), "demo").expect("sign");
+        let signed = build_signed_body(&kp, "n_test", &candidate(), "demo").expect("sign");
         let parsed: ImportRequest = serde_json::from_slice(&signed.body).expect("request json");
         assert_eq!(parsed.body_sha256, signed.body_sha256);
         assert_eq!(parsed.signature, signed.signature);
@@ -251,8 +272,7 @@ mod tests {
     #[test]
     fn changing_the_payload_changes_the_digest_and_the_signature_fails() {
         let kp = KeyPair::generate();
-        let signed =
-            build_signed_body(&kp, "n_test", "opencode", &candidate(), "demo").expect("sign");
+        let signed = build_signed_body(&kp, "n_test", &candidate(), "demo").expect("sign");
         let parsed: ImportRequest = serde_json::from_slice(&signed.body).expect("request json");
         let message = import_signing_message(
             parsed.v,
@@ -271,7 +291,7 @@ mod tests {
 
         let mut changed = candidate();
         changed.cwd = "/tmp/other".to_string();
-        let other = build_signed_body(&kp, "n_test", "opencode", &changed, "demo").expect("sign");
+        let other = build_signed_body(&kp, "n_test", &changed, "demo").expect("sign");
         let other: ImportRequest = serde_json::from_slice(&other.body).expect("json");
         assert_ne!(parsed.body_sha256, other.body_sha256);
         // 旧签名不能盖住新 body。
@@ -294,8 +314,7 @@ mod tests {
     #[test]
     fn the_body_has_the_agreed_shape() {
         let kp = KeyPair::generate();
-        let signed =
-            build_signed_body(&kp, "n_test", "opencode", &candidate(), "demo").expect("sign");
+        let signed = build_signed_body(&kp, "n_test", &candidate(), "demo").expect("sign");
         let v: serde_json::Value = serde_json::from_slice(&signed.body).expect("json");
         for key in [
             "node_id",
@@ -332,12 +351,38 @@ mod tests {
             br#"{"session_id":"","acp_session_id":"ses_1"}"#.as_slice(),
         ] {
             assert!(matches!(
-                parse_response(body),
+                parse_response(body, "ses_1"),
                 Err(ImportHttpError::BadResponse)
             ));
         }
-        let ok = parse_response(br#"{"session_id":"s1","acp_session_id":"ses_1"}"#)
+        let ok = parse_response(br#"{"session_id":"s1","acp_session_id":"ses_1"}"#, "ses_1")
             .expect("two-field response");
         assert_eq!(ok.session_id, "s1");
+    }
+
+    /// 回显的 `acp_session_id` **必须等于请求带去的那条**。
+    ///
+    /// Hub 回一条别的历史 id 时，用户此后打开对话会走
+    /// `session/load <那条 id>`——绑错等于把用户带到另一条历史上。只判
+    /// 非空（旧实现）会把这种回包当成成功，退出码 0。
+    #[test]
+    fn an_echoed_acp_session_id_that_differs_from_the_request_is_rejected() {
+        let body = br#"{"session_id":"hub_1","acp_session_id":"ses_TOTALLY_OTHER"}"#;
+        assert!(matches!(
+            parse_response(body, "ses_ok"),
+            Err(ImportHttpError::BadResponse)
+        ));
+        // 同一个回包，请求值一致时才是成功——证明拒的是「不等」而不是形状。
+        let ok = parse_response(body, "ses_TOTALLY_OTHER").expect("matching echo");
+        assert_eq!(ok.session_id, "hub_1");
+        // 只差大小写 / 首尾空白也不是同一条历史：不做归一化比较。
+        assert!(matches!(
+            parse_response(body, "ses_totally_other"),
+            Err(ImportHttpError::BadResponse)
+        ));
+        assert!(matches!(
+            parse_response(body, " ses_TOTALLY_OTHER"),
+            Err(ImportHttpError::BadResponse)
+        ));
     }
 }

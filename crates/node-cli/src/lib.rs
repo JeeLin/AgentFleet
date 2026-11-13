@@ -54,16 +54,18 @@ systemd / Docker，不要加 --background 或 --daemon（会报错并给出用�
 
 `import` 只读本机 `identity.json` 与历史会话库，向 Hub 发一次短请求：
 不建立 WS 连接、不启动 worker、不新增协议消息。Hub 地址取 `--hub`，
-缺省 `AFCLI_HUB_URL`，再缺省 `ws://127.0.0.1:8080/ws`；host:port /
-ws:// / wss:// 会推导成同源 http(s)。`--data-dir` 与 `AFCLI_DATA_DIR`
-同义（平台数据基目录），缺省用平台标准目录。
+缺省 `AFCLI_HUB_URL`，再缺省 `runargs::DEFAULT_HUB_URL`（与上面 `run`
+那条同一常量，当前为 ws://127.0.0.1:8080/ws）；host:port / ws:// / wss://
+会推导成同源 http(s)。`--data-dir` 与 `AFCLI_DATA_DIR` 同义（平台数据基
+目录），缺省用平台标准目录；显式给空串是用法错误。
 
 `run --worker` 是 supervisor 拉起 worker 用的内部形态（DECISIONS D1），
 不需要手工敲；手敲了也只会跑成 worker，不会变成 supervisor。
 
 Hub 地址取环境变量 AFCLI_HUB_URL：写 host:port（如 117.72.123.218:9002）
 即可自动补成 ws://host:port/ws；完整 ws:// 或 wss:// URL 也照常可用。
-IPv6 请用方括号：[::1]:9002。缺省 ws://127.0.0.1:8080/ws。";
+IPv6 请用方括号：[::1]:9002。缺省取 runargs::DEFAULT_HUB_URL（当前
+ws://127.0.0.1:8080/ws，唯一真相源在那个常量，改值不必同步改这段文字）。";
 
 /// 解析 argv（不含程序名）。
 ///
