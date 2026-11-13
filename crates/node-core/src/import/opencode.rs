@@ -152,10 +152,11 @@ fn with_read_snapshot<T>(
 /// `Decode`。不把 SQL / 原始 DB 字符串带到错误里（约束 13）。
 pub(super) fn classify_sql_error(e: rusqlite::Error) -> ImportError {
     let text = e.to_string().to_ascii_lowercase();
+    // `no such column` 已覆盖 `no such column: <name>`——SQLite 的列名诊断
+    // 只多一个冒号与列名，是它的子串，单独再判一次永远不可能单独为真。
     if text.contains("no such table")
         || text.contains("no such column")
         || text.contains("has no column named")
-        || text.contains("no such column:")
     {
         ImportError::SchemaMismatch
     } else {
@@ -272,6 +273,11 @@ pub(super) fn open_read_only(data_dir: &Path) -> Result<Connection, ImportError>
     if !path.is_file() {
         return Err(ImportError::DbMissing);
     }
+    // 这条 open 分支只覆盖**打开动作本身**失败：文件还在但权限位不可读
+    // （`SQLITE_CANTOPEN`）。SQLite 的 open 是惰性的，「文件存在但不是 SQLite」
+    // 不会在这里报错——那种错误推到第一次读（`PRAGMA table_info`），由
+    // [`classify_schema_read_error`] 归到 `Decode`。两条路都到 `Decode`，
+    // 所以坏文件夹具走的是下面那条，而不是这里。
     let conn = Connection::open_with_flags(
         &path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -396,7 +402,6 @@ impl Columns {
             None => None,
         };
         Ok(HistoricalSession {
-            provider: PROVIDER_ID,
             external_session_id,
             title,
             cwd,

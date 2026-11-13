@@ -178,7 +178,6 @@ fn opencode_list_reads_session_v2_without_writing_the_database() {
     assert_eq!(got[0].title, "新会话");
     assert_eq!(got[0].cwd, "/root/new");
     assert_eq!(got[0].updated_at.as_deref(), Some("300"));
-    assert_eq!(got[0].provider, "opencode");
     assert_eq!(got[1].external_session_id, "ses_old");
 
     let after_bytes = std::fs::read(&db).expect("读库");
@@ -223,6 +222,24 @@ fn a_schema_change_between_column_read_and_prepare_is_not_called_decode() {
              VALUES ('ses_x', 'p', '/root/x', 't', 1, 2)",
         ],
     );
+
+    // 先把夹具库的 journal 模式钉成 rollback journal：这条判据**只在**
+    // rollback journal 下成立。WAL 允许「读者存在时执行 DDL」，那时 `blocked`
+    // 会是 false，断言误红——而误红与「读事务没挡住」在现象上不可区分。
+    // 夹具自己声明模式，判据就不依赖 SQLite 的编译期 / 运行期缺省值。
+    // （opencode 自己库用哪种模式与本用例无关：被测的是我们的事务语义。）
+    {
+        let conn = rusqlite::Connection::open(d.path().join("opencode").join("opencode.db"))
+            .expect("打开夹具库以固定 journal 模式");
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode = DELETE", [], |r| r.get(0))
+            .expect("切到 rollback journal");
+        assert_eq!(
+            mode.to_ascii_lowercase(),
+            "delete",
+            "夹具必须是 rollback journal"
+        );
+    }
 
     // hook 在 `Columns::read` 返回后、`prepare` 执行前用另一条连接尝试改名。
     // 快照事务应当把这次 DDL 挡在门外，而不是让它改掉我们脚下的 schema。
@@ -276,9 +293,10 @@ fn a_corrupt_sqlite_file_is_reported_as_decode_without_panicking() {
         Opencode.resolve(d.path(), "ses_x"),
         Err(ImportError::Decode)
     );
-    // 坏文件不是「没装」也不是「schema 漂移」：两个相邻变体不得混进来。
-    assert_ne!(ImportError::Decode, ImportError::DbMissing);
-    assert_ne!(ImportError::Decode, ImportError::SchemaMismatch);
+    // 坏文件不是「没装」也不是「schema 漂移」。上面两条 `assert_eq!` 已经
+    // 逐字锁住具体变体；曾在这里补的两条 `assert_ne!(Decode, DbMissing)` /
+    // `assert_ne!(Decode, SchemaMismatch)` 比较的是两个单元变体，按枚举构造
+    // 恒为不等——任何实现下都不可能失败，删掉不损失覆盖。
 }
 
 /// 空库 / 缺表 / 缺 `id` 列三类夹具各归到具体错误，**不合并成一个
@@ -456,7 +474,6 @@ fn resolve_returns_the_raw_acp_session_id() {
 
     let got = Opencode.resolve(d.path(), "ses_abc").expect("解析会话");
     assert_eq!(got.acp_session_id, "ses_abc", "不得改写 id");
-    assert_eq!(got.provider, "opencode");
     assert_eq!(got.cwd, "/root/ws");
     assert_eq!(
         Opencode.resolve(d.path(), "ses_rel"),
@@ -638,7 +655,6 @@ fn a_real_opencode_database_lists_and_resolves_a_session() {
             .expect("解析真会话");
         assert_eq!(got.acp_session_id, first.external_session_id);
         assert_eq!(got.cwd, first.cwd);
-        assert_eq!(got.provider, "opencode");
     } else {
         assert_eq!(
             Opencode.resolve(&base, &first.external_session_id),

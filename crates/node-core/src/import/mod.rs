@@ -58,8 +58,6 @@ const REASON_UNKNOWN_PROVIDER: &str = "unknown provider: no history provider is 
 /// 不含消息、不含 blob、不含凭据：导入是绑定一个 ACP 会话 id，不是搬运历史。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoricalSession {
-    /// 提供方 id（当前只有 `"opencode"`）。
-    pub provider: &'static str,
     /// provider 自己的会话 id（opencode 形如 `ses_...`）。原样使用，不改写。
     pub external_session_id: String,
     /// 标题。provider 里为空 / 为 NULL 时是空串，**不编造**一个占位标题。
