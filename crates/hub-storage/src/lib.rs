@@ -22,13 +22,22 @@ pub use agent::{AgentConfig, AgentConfigRepo, AgentRuntime, AgentRuntimeRepo};
 pub use binding::{Binding, BindingRepo, BindingSpec, CleanupPolicy};
 pub use db::{data_dir, open, open_in, set_umask_077, Db};
 pub use error::StorageError;
-pub use execution::{Execution, ExecutionRepo, ExecutionState, FailureKind, NewExecution};
+pub use execution::{
+    Execution, ExecutionRepo, ExecutionState, ExecutionView, FailureKind, NewExecution,
+};
 pub use project::{NewProject, Project, ProjectRepo, ProjectShape, ThemeColor};
+/// `rusqlite` 的 `params!` 宏，**只为测试夹具转出**。
+///
+/// 转出的理由只有一条：`hub-server` 的测试要直接断言库里的值（「`close` 到底
+/// 有没有把 reason 落到执行记录上」），而 `rusqlite` 不在它的依赖里。
+/// **生产路径一条裸 SQL 都没有**——全部经 `TaskRepo` / `ExecutionRepo`；
+/// 连接、语句、错误类型仍然只出现在本 crate 里。
+pub use r2d2_sqlite::rusqlite::params;
 pub use repo::{
     base64url_decode, base64url_of, Device, DeviceRepo, DeviceStatus, NewDevice, SecretRepo,
 };
 pub use session::{BaseRevStatus, Session, SessionDetail, SessionRepo, SessionState};
-pub use task::{DoneWhen, NewTask, Task, TaskPatch, TaskRepo, TaskState};
+pub use task::{DoneWhen, NewTask, Task, TaskPatch, TaskRepo, TaskState, TaskTransition, TaskView};
 pub use task_state::{can_transition, check_transition, legal_edges};
 pub use trajectory::{Gap, NewEvent, TrajectoryEvent, TrajectoryRepo, TurnBounds, TURN_END_KIND};
 pub use workspace::{

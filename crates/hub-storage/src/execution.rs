@@ -154,7 +154,13 @@ impl FromStr for FailureKind {
     }
 }
 
-/// 一次执行。
+/// 一次执行的**可写字段**。
+///
+/// 与 [`crate::task::Task`] 同一分工：这里只有「建一条执行时能写进去的东西」。
+/// `agent_id` / `failure_kind` / `reason` / `evidence` / 时间两列都由专用 setter
+/// 写入（[`ExecutionRepo::set_failure`] / [`ExecutionRepo::mark_started`] /
+/// [`ExecutionRepo::mark_ended`]），不让建表入参带它们——建的时候还没有失败，
+/// 也没有开始时刻。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Execution {
     pub id: String,
@@ -166,6 +172,54 @@ pub struct Execution {
     pub worktree_path: Option<String>,
     pub state: ExecutionState,
     pub created_at: String,
+}
+
+/// 一次执行的**读模型**：可写字段 + 只由 setter 写的执行事实。
+///
+/// 分成两个类型而不是把字段塞进 [`Execution`]：塞进去会让 `NewExecution` 的
+/// 反序列化也要求调用方送 `failure_kind`，而「这次执行失败了」不可能在**建它
+/// 的时候**就知道。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionView {
+    pub id: String,
+    pub task_id: String,
+    pub binding_id: String,
+    pub base_commit: Option<String>,
+    pub worktree_path: Option<String>,
+    pub state: ExecutionState,
+    pub created_at: String,
+    /// 在哪台设备的哪个 agent 上跑。本里程碑没有派发器，故恒为 `None`。
+    pub agent_id: Option<String>,
+    /// 失败形态（`task-model.md:128-135` 的八种）。成功为 `None`。
+    pub failure_kind: Option<FailureKind>,
+    /// 失败原因。**没有原因串的失败等于没发生**（`task-model.md:75`）。
+    pub reason: Option<String>,
+    /// 证据（退出码 / stderr 摘要 / 可复现命令）。空要显式标 `'none'`。
+    pub evidence: Option<String>,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+}
+
+impl ExecutionView {
+    /// 投影回可写形状。
+    pub fn to_execution(&self) -> Execution {
+        Execution {
+            id: self.id.clone(),
+            task_id: self.task_id.clone(),
+            binding_id: self.binding_id.clone(),
+            base_commit: self.base_commit.clone(),
+            worktree_path: self.worktree_path.clone(),
+            state: self.state,
+            created_at: self.created_at.clone(),
+        }
+    }
+
+    /// 这次失败算不算一次重试（`superseded` 不算，`task-model.md:138`）。
+    ///
+    /// 只在**有** `failure_kind` 时有意义：成功与还没跑完的执行都不是重试。
+    pub fn counts_as_retry(&self) -> bool {
+        self.failure_kind.is_some_and(FailureKind::counts_as_retry)
+    }
 }
 
 /// 建执行的入参。
@@ -189,7 +243,7 @@ impl ExecutionRepo {
     }
 
     /// 建执行。状态恒为 `pending`。
-    pub fn create(&self, new: NewExecution, now: &str) -> Result<Execution> {
+    pub fn create(&self, new: NewExecution, now: &str) -> Result<ExecutionView> {
         let conn = self.pool.get()?;
         let id = crate::workspace::new_id();
         conn.execute(
@@ -213,7 +267,7 @@ impl ExecutionRepo {
         raw.into_execution()
     }
 
-    pub fn get(&self, id: &str) -> Result<Option<Execution>> {
+    pub fn get(&self, id: &str) -> Result<Option<ExecutionView>> {
         let conn = self.pool.get()?;
         let raw = conn
             .query_row(
@@ -228,7 +282,7 @@ impl ExecutionRepo {
     /// 一个任务的全部执行，最近建的在前。
     ///
     /// 看板的"这个任务跑过几次"与设备页的失败归因都走这里。
-    pub fn list_for_task(&self, task_id: &str) -> Result<Vec<Execution>> {
+    pub fn list_for_task(&self, task_id: &str) -> Result<Vec<ExecutionView>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(&format!(
             "{SELECT_COLS} WHERE task_id = ?1 ORDER BY created_at DESC, id DESC"
@@ -239,7 +293,7 @@ impl ExecutionRepo {
     }
 
     /// 一个绑定上的全部执行（设备页的配额与失败归因）。
-    pub fn list_for_binding(&self, binding_id: &str) -> Result<Vec<Execution>> {
+    pub fn list_for_binding(&self, binding_id: &str) -> Result<Vec<ExecutionView>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(&format!(
             "{SELECT_COLS} WHERE binding_id = ?1 ORDER BY created_at DESC, id DESC"
@@ -250,7 +304,7 @@ impl ExecutionRepo {
     }
 
     /// 改状态。任务必须存在，否则静默作用在 0 行上。
-    pub fn set_state(&self, id: &str, state: ExecutionState) -> Result<Execution> {
+    pub fn set_state(&self, id: &str, state: ExecutionState) -> Result<ExecutionView> {
         let conn = self.pool.get()?;
         let n = conn.execute(
             "UPDATE execution SET state = ?2 WHERE id = ?1",
@@ -267,7 +321,7 @@ impl ExecutionRepo {
     ///
     /// 只在"派发时拿不到起点、设备后来报了"这条路径上调用。**写进去之后就
     /// 不再改**：起点是这次执行的历史事实，中途改写会让 diff 的语义变掉。
-    pub fn set_base_commit(&self, id: &str, base_commit: &str) -> Result<Execution> {
+    pub fn set_base_commit(&self, id: &str, base_commit: &str) -> Result<ExecutionView> {
         let conn = self.pool.get()?;
         let n = conn.execute(
             "UPDATE execution SET base_commit = ?2 WHERE id = ?1 AND base_commit IS NULL",
@@ -335,6 +389,28 @@ impl ExecutionRepo {
         Ok(())
     }
 
+    /// 只写**原因串**，不动 `failure_kind` / `evidence`。
+    ///
+    /// 给「验收打回」用：打回不是失败（`task-model.md:101`），所以它需要一条
+    /// 留痕的理由，但**不能**顺手把这条执行标成某种失败形态——那会让设备页的
+    /// 「失败集中在哪一类」把「人打回」算进「事没做成」。
+    ///
+    /// 空原因同样拒绝：一条没有理由的打回，事后没人说得清当初为什么退。
+    pub fn set_reason(&self, id: &str, reason: &str) -> Result<()> {
+        if reason.trim().is_empty() {
+            return Err(StorageError::FailureReasonRequired);
+        }
+        let conn = self.pool.get()?;
+        let n = conn.execute(
+            "UPDATE execution SET reason = ?2 WHERE id = ?1",
+            params![id, reason],
+        )?;
+        if n == 0 {
+            return Err(StorageError::ExecutionNotFound { id: id.to_string() });
+        }
+        Ok(())
+    }
+
     /// 记开始时间。**只填一次**：`WHERE started_at IS NULL`。
     ///
     /// 重复调用是幂等成功（不报错、不改首次值）。为什么必须保住首次值：
@@ -380,7 +456,8 @@ impl ExecutionRepo {
 }
 
 const SELECT_COLS: &str = "SELECT id, task_id, binding_id, base_commit, worktree_path,
-        state, created_at FROM execution";
+        state, created_at, agent_id, failure_kind, reason, evidence, started_at, ended_at
+        FROM execution";
 
 struct RawExecution {
     id: String,
@@ -390,11 +467,23 @@ struct RawExecution {
     worktree_path: Option<String>,
     state: String,
     created_at: String,
+    agent_id: Option<String>,
+    failure_kind: Option<String>,
+    reason: Option<String>,
+    evidence: Option<String>,
+    started_at: Option<String>,
+    ended_at: Option<String>,
 }
 
 impl RawExecution {
-    fn into_execution(self) -> Result<Execution> {
-        Ok(Execution {
+    fn into_execution(self) -> Result<ExecutionView> {
+        // 闭集之外的值**报错不回落**：把一条认不出的失败形态显示成「未知原因」
+        // 会掩盖「库里被写进了错值」这件事，而失败归因正是靠这一列统计的。
+        let failure_kind = match self.failure_kind {
+            None => None,
+            Some(k) => Some(FailureKind::from_str(&k)?),
+        };
+        Ok(ExecutionView {
             id: self.id,
             task_id: self.task_id,
             binding_id: self.binding_id,
@@ -402,6 +491,12 @@ impl RawExecution {
             worktree_path: self.worktree_path,
             state: ExecutionState::from_str(&self.state)?,
             created_at: self.created_at,
+            agent_id: self.agent_id,
+            failure_kind,
+            reason: self.reason,
+            evidence: self.evidence,
+            started_at: self.started_at,
+            ended_at: self.ended_at,
         })
     }
 }
@@ -415,6 +510,12 @@ fn row_to_raw(r: &Row<'_>) -> std::result::Result<RawExecution, r2d2_sqlite::rus
         worktree_path: r.get(4)?,
         state: r.get(5)?,
         created_at: r.get(6)?,
+        agent_id: r.get(7)?,
+        failure_kind: r.get(8)?,
+        reason: r.get(9)?,
+        evidence: r.get(10)?,
+        started_at: r.get(11)?,
+        ended_at: r.get(12)?,
     })
 }
 
@@ -828,6 +929,36 @@ mod tests {
             .set_failure("nope", FailureKind::Rejected, "无合格设备", "")
             .unwrap_err();
         assert!(matches!(e, StorageError::ExecutionNotFound { .. }), "{e:?}");
+    }
+
+    /// `set_reason` **只写理由**，绝不动 `failure_kind`。
+    ///
+    /// 这是「验收打回不是失败」的可执行判据（`task-model.md:101`）。早先的实现
+    /// 用 `set_failure(TaskFailed, note)` 记打回理由，会让设备页的「失败集中在
+    /// 哪一类」把「人打回」算进「事没做成」。
+    ///
+    /// 判红方式：把 `set_reason` 改成转调 `set_failure(TaskFailed, …)`，
+    /// 这条立刻红（`failure_kind` 从 `None` 变成 `Some(TaskFailed)`）。
+    #[test]
+    fn set_reason_never_touches_the_failure_kind() {
+        let (_d, er) = setup();
+        let e = er.create(new_exec(), TS).unwrap();
+
+        er.set_reason(&e.id, "测试覆盖不够，补上再合").unwrap();
+        let view = er.get(&e.id).unwrap().unwrap();
+        assert_eq!(view.reason.as_deref(), Some("测试覆盖不够，补上再合"));
+        assert_eq!(
+            view.failure_kind, None,
+            "打回不是失败：failure_kind 必须保持 None"
+        );
+        assert_eq!(view.evidence, None, "打回与「证据」无关，不该凭空造一个");
+
+        // 空理由同样被拒（一条没有理由的打回，事后没人说得清为什么退）。
+        let err = er.set_reason(&e.id, "   ").unwrap_err();
+        assert!(
+            matches!(err, StorageError::FailureReasonRequired),
+            "{err:?}"
+        );
     }
 
     /// 重复调用 `mark_started` / `mark_ended` 不报错、**首次值不被洗掉**。

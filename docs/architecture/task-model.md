@@ -351,47 +351,56 @@ v0.8.0 没有调度器、也没有设备会拒接，`queued` 之后只可能是�
 
 ---
 
-## 8. 数据形状（草案）
+## 8. 数据形状（已落库，schema v7）
 
-不写进 schema，只定语义；落库形态由里程碑定。
+本节的字段**已经落到 schema v7**（`crates/hub-storage/src/schema_v7.sql`）。
+下面标注每一列的落地状态，不再只定语义——一份不标状态的「草案」会让人分不清
+「规格这么写」与「库里真有这一列」。
 
 ```text
-task
+task                                    -- v7 实际列
   id, project_id
-  title, intent_ref
-  done_when                   -- { criteria: [...], description } 见 butler.md §2.2.0
-  state                       -- pending/queued/running/review/done/failed
+  title, intent_ref                     -- intent_ref: v7 加列，本里程碑无写者（v0.9.0 管家）
+  done_when_criteria, done_when_description   -- 两列而非一个 JSON；闭集见 DoneWhen::validate
+  state                                 -- pending/queued/running/review/done/failed
   base_commit
-  allowed_devices, allowed_agents, required_capabilities   -- JSON
-  retry_limit
-  version                     -- 每次「改任务再跑」+1，旧值留痕
-  superseded_by, supersedes   -- 取代关系（NULL = 无）
-  created_by                  -- human / butler / import:<source>
+  allowed_devices, allowed_agents, required_capabilities   -- 原文 JSON 字符串，NULL = 不限
+  retry_limit                           -- NULL = 用默认上限
+  version                               -- 每次写 +1；乐观锁的守卫列
+  superseded_by                         -- v7 加列，本里程碑无写者（v0.8.2 调度器）
+  created_by                            -- human / butler / import:<source>
   created_at, updated_at
 
-execution
+execution                               -- v7 实际列
   id, task_id
-  device_id, agent_id         -- ↖ 只有 execution 有三件套
-  worktree_path, branch
-  state                       -- pending/running/succeeded/failed/aborted
-                              -- `discarded` 不是第七个取值：它是 aborted + reason='discarded'
-  failure_kind                -- §3 八种，成功为 NULL
-  reason, evidence
-  base_commit                 -- 本次执行实际用的起点（可能与 task 的不同）
-  parent_execution_id         -- 接力来源（可空），见 PRODUCT.md §3.12
-  cancelled_by                -- user / butler，人点的重派不计自动额度（§4）
-  interrupted_by_intent       -- 执行中被改需求打断时的原话（NULL = 没被打断）
-  interrupt_count             -- 被打断次数；≥2 触发「任务定义不清」告警
-  queued_at, started_at, ended_at   -- 排队与执行分开记（PRODUCT.md §3.8）
-  tokens_in, tokens_out       -- 拿不到为 NULL，**不估算**
+  device_id                             -- **不在本表**：设备由 binding 推出
+  binding_id                            -- execution 指向 binding，device_id 从它推
+  agent_id                              -- v7 加列，本里程碑无写者（无派发器）
+  worktree_path, base_commit
+  state                                 -- pending/running/succeeded/failed/aborted
+                                        -- `discarded` 不是第七个取值：aborted + reason='discarded'
+  failure_kind                          -- §3 八种，成功为 NULL
+  reason, evidence                      -- evidence 空要显式标 'none'（§2）
+  started_at, ended_at                  -- v7 加列
+  created_at
 
--- superseded 需要一条指向新任务的引用（放在 task 上）
-task.superseded_by            -- 被哪个新任务取代（NULL = 未取代）
-task.supersedes               -- 它取代了哪个旧任务（NULL = 不是取代来的）
+-- 以下字段**尚未落库**，逐条写明归哪一版，避免被读成「已经有了」
+task.supersedes                         -- 取代关系的反向；v0.8.2
+execution.queued_at                      -- 排队与执行分开记；v0.8.2（时间与成本统计）
+execution.parent_execution_id            -- 执行间接力；v0.8.2
+execution.cancelled_by                   -- 人点的重派不计自动额度；v0.8.2
+execution.interrupted_by_intent          -- 执行中被改需求打断；v0.8.2
+execution.interrupt_count                -- 被打断次数；v0.8.2
+execution.tokens_in, tokens_out          -- 拿不到为 NULL，**不估算**；v0.8.2
 ```
 
 **关键点**：`base_commit` 在 task 和 execution 上各有一份。task 上的是**期望**，
 execution 上的是**实际**。两者不同就是 `baseline_mismatch` 的证据。
+
+**读模型与写入口分两个类型**（子任务 6 收口时定）：`task::Task` / `execution::Execution`
+只含「一次 `INSERT` 能写进去的字段」；`task::TaskView` / `execution::ExecutionView`
+额外带 `version`、四条约束、`failure_kind` 等只由仓储写的列。硬塞成一个类型会让
+`POST` 的反序列化也要求客户端送 `version`——那是把乐观锁交给客户端。
 
 ---
 

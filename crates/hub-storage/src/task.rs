@@ -161,7 +161,32 @@ impl DoneWhen {
     }
 }
 
-/// 一个任务。
+/// 一次状态转移**顺带要写**的业务字段。
+///
+/// 只有 `done_when`：`failure` 的留痕落在 `execution` 上（`task` 表没有那三列，
+/// 见 `schema_v7.sql`），走 [`crate::execution::ExecutionRepo::set_failure`]，
+/// 不进这条 `UPDATE`。
+#[derive(Debug, Default, Clone)]
+pub struct TaskTransition {
+    /// 这次转移要一起写进 `done_when` 的新验收标准（`failure` 的 `edit` 动作用）。
+    /// `None` = 不动这两列。
+    pub done_when: Option<DoneWhen>,
+}
+
+/// 一个任务的**可写字段**。
+///
+/// # 与读模型 [`Task`] 的分工
+///
+/// 这里只有「一次 `INSERT` 或 `UPDATE` 能写进去的东西」。四列约束、`version`、
+/// `superseded_by`、`intent_ref` 都不在这里，理由三分：
+///
+/// - **约束四列**走 [`TaskPatch`] 的双层 `Option`（`Some(None)` = 清空），
+///   建表时的入参是单层 `Option`，两套语义混在一个结构里必然有一边被写错；
+/// - **`version`** 不是「值」而是「计数器」，写它必须走 CAS（`set_state` /
+///   `update`），让它出现在入参里等于开一个绕过 CAS 的后门；
+/// - **`superseded_by` / `intent_ref`** 本里程碑没有写者（`superseded` 的
+///   接班人是 v0.8.2 调度器，`intent_ref` 来自 v0.9.0 管家与 v0.10.0 导入）。
+///   问一个没有写者的字段要默认值，就是凭空造事实。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
@@ -177,6 +202,67 @@ pub struct Task {
     pub updated_at: String,
 }
 
+/// 一个任务的**读模型**：可写字段 + 只由仓储写、外部只读的元信息。
+///
+/// # 为什么与 [`Task`] 分成两个类型
+///
+/// 硬塞进 [`Task`] 会让 `Task` 同时是「写入口的形状」与「读出口的形状」，
+/// 于是 `POST` / `PATCH` 的反序列化也要求客户端送 `version`——那正是乐观锁
+/// 退化成「客户端说了算」。分成两个类型后，`Task` 只出现在入参一侧，
+/// `TaskView` 只出现在响应一侧，两边的字段集不可能同时正确。
+///
+/// **为什么现在才加**：v0.8.0 子任务 1/5 只要求加列与 setter，没有消费者。
+/// 子任务 6 的响应体要 `version`（乐观锁 + 「这条任务被改过几次」）与四条
+/// 约束（详情页「任务约束」段），消费者到了，读模型才该长出来。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskView {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub state: TaskState,
+    pub done_when: DoneWhen,
+    pub created_by: Option<String>,
+    pub base_commit: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    /// 约束四列，原文 JSON 字符串。`None` = 不限。
+    pub allowed_devices: Option<String>,
+    pub allowed_agents: Option<String>,
+    pub required_capabilities: Option<String>,
+    pub retry_limit: Option<i64>,
+    /// 每次写入 +1。前端拿它做 `expected_version`（乐观锁）。
+    pub version: i64,
+    /// 被哪个新任务取代。本里程碑恒为 `None`（没有写者，见 [`Task`]）。
+    pub superseded_by: Option<String>,
+    /// 任务从哪来。本里程碑恒为 `None`（没有写者，见 [`Task`]）。
+    pub intent_ref: Option<String>,
+}
+
+impl TaskView {
+    /// 把读模型投影回可写形状（`POST` / `PATCH` 的请求体只认这个）。
+    pub fn to_task(&self) -> Task {
+        Task {
+            id: self.id.clone(),
+            project_id: self.project_id.clone(),
+            title: self.title.clone(),
+            state: self.state,
+            done_when: self.done_when.clone(),
+            created_by: self.created_by.clone(),
+            base_commit: self.base_commit.clone(),
+            created_at: self.created_at.clone(),
+            updated_at: self.updated_at.clone(),
+        }
+    }
+
+    /// 约束四列是否全是「不限」。
+    pub fn constraints_are_unset(&self) -> bool {
+        self.allowed_devices.is_none()
+            && self.allowed_agents.is_none()
+            && self.required_capabilities.is_none()
+            && self.retry_limit.is_none()
+    }
+}
+
 /// 建任务的入参。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewTask {
@@ -185,6 +271,40 @@ pub struct NewTask {
     pub done_when: DoneWhen,
     pub created_by: Option<String>,
     pub base_commit: Option<String>,
+    /// 四条约束，建任务时一次写入（`None` = 不限）。
+    ///
+    /// 单层 `Option` 而不是 [`TaskPatch`] 的双层：建的时候没有「保持原值」这个
+    /// 意图——那一行还不存在。
+    ///
+    /// **为什么必须在这里而不是「建完再补写一次」**：补写成 `update` 会让
+    /// `version` 从 1 变 2，而 `version` 记的是「被改过几次」，建任务不是一次
+    /// 修改。一个刚建好就显示「改过 2 次」的任务，会让「这条任务被人动过」这个
+    /// 信号从第一天起就不可信。
+    pub allowed_devices: Option<String>,
+    pub allowed_agents: Option<String>,
+    pub required_capabilities: Option<String>,
+    pub retry_limit: Option<i64>,
+}
+
+impl NewTask {
+    /// 建一个不带约束的任务（多数调用点与测试用）。
+    pub fn new(
+        project_id: impl Into<String>,
+        title: impl Into<String>,
+        done_when: DoneWhen,
+    ) -> Self {
+        Self {
+            project_id: project_id.into(),
+            title: title.into(),
+            done_when,
+            created_by: None,
+            base_commit: None,
+            allowed_devices: None,
+            allowed_agents: None,
+            required_capabilities: None,
+            retry_limit: None,
+        }
+    }
 }
 
 /// 改任务的补丁：**全字段可选，`None` = 保持原值**。
@@ -231,7 +351,7 @@ impl TaskPatch {
     }
 }
 
-impl Task {
+impl TaskView {
     /// 这个任务是不是**只能人判**——看板据此挂「需人工验收」标签。
     ///
     /// 这是个**派生值，不是列**：它由 `done_when` 纯函数算出，落库就要维护
@@ -265,11 +385,28 @@ impl Task {
     /// 显然与它同一节的用意相反，且没有第二条规格要求在这里报错
     /// （那是 `DoneWhen::validate` 与 API 层的事）。
     pub fn needs_manual_acceptance(&self) -> bool {
-        match self.done_when.criteria.as_deref() {
-            None | Some("") => true,
-            Some("review_approved") => true,
-            Some(code) => !is_known_criteria_code(code),
-        }
+        needs_manual_acceptance(&self.done_when)
+    }
+}
+
+impl Task {
+    /// 同 [`TaskView::needs_manual_acceptance`]——两处都只委派给下面那个自由
+    /// 函数，判定规则**只有一份**。
+    pub fn needs_manual_acceptance(&self) -> bool {
+        needs_manual_acceptance(&self.done_when)
+    }
+}
+
+/// 「需人工验收」的唯一判定处。
+///
+/// 抽成自由函数而不是让 `TaskView` 调 `Task::needs_manual_acceptance`：
+/// 两个读模型都要这个派生值，让其中一个去构造另一个只为算一个布尔值，
+/// 会把「哪个是主」的问题带进纯计算里。
+fn needs_manual_acceptance(done_when: &DoneWhen) -> bool {
+    match done_when.criteria.as_deref() {
+        None | Some("") => true,
+        Some("review_approved") => true,
+        Some(code) => !is_known_criteria_code(code),
     }
 }
 
@@ -291,15 +428,16 @@ impl TaskRepo {
     /// 写库前先过 [`DoneWhen::validate`]：**先拒绝，再写**。放在仓储层而不只放
     /// API 层，是因为直接摸 `TaskRepo` 的路径（测试、未来的 CLI、迁移脚本）
     /// 同样会把值写进那两列；校验只在 HTTP 层等于给闭集留了个后门。
-    pub fn create(&self, new: NewTask, now: &str) -> Result<Task> {
+    pub fn create(&self, new: NewTask, now: &str) -> Result<TaskView> {
         new.done_when.validate()?;
         let conn = self.pool.get()?;
         let id = crate::workspace::new_id();
         conn.execute(
             "INSERT INTO task
                  (id, project_id, title, state, done_when_criteria, done_when_description,
-                  created_by, base_commit, created_at, updated_at)
-             VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?6, ?7, ?8, ?8)",
+                  created_by, base_commit, created_at, updated_at,
+                  allowed_devices, allowed_agents, required_capabilities, retry_limit)
+             VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12)",
             params![
                 id,
                 new.project_id,
@@ -308,7 +446,11 @@ impl TaskRepo {
                 new.done_when.description,
                 new.created_by,
                 new.base_commit,
-                now
+                now,
+                new.allowed_devices,
+                new.allowed_agents,
+                new.required_capabilities,
+                new.retry_limit
             ],
         )?;
         let raw = conn.query_row(
@@ -319,7 +461,7 @@ impl TaskRepo {
         raw.into_task()
     }
 
-    pub fn get(&self, id: &str) -> Result<Option<Task>> {
+    pub fn get(&self, id: &str) -> Result<Option<TaskView>> {
         let conn = self.pool.get()?;
         let raw = conn
             .query_row(
@@ -332,7 +474,7 @@ impl TaskRepo {
     }
 
     /// 一个项目的全部任务，最近建的在前。
-    pub fn list_for_project(&self, project_id: &str) -> Result<Vec<Task>> {
+    pub fn list_for_project(&self, project_id: &str) -> Result<Vec<TaskView>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(&format!(
             "{SELECT_COLS} WHERE project_id = ?1 ORDER BY created_at DESC, id DESC"
@@ -343,7 +485,7 @@ impl TaskRepo {
     }
 
     /// 某态的全部任务（调度候选集的入口）。
-    pub fn list_by_state(&self, state: TaskState) -> Result<Vec<Task>> {
+    pub fn list_by_state(&self, state: TaskState) -> Result<Vec<TaskView>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(&format!(
             "{SELECT_COLS} WHERE state = ?1 ORDER BY created_at, id"
@@ -351,6 +493,98 @@ impl TaskRepo {
         let rows = stmt.query_map(params![state.as_str()], row_to_raw)?;
         let raw = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         raw.into_iter().map(RawTask::into_task).collect()
+    }
+
+    /// 一次转移**顺带写业务字段**（HTTP 层 `/state`、`/acceptance`、`/failure`）。
+    ///
+    /// # 为什么与 [`Self::set_state`] 分成两个方法而不是加参数
+    ///
+    /// `set_state` 的契约是「只改状态」，它的调用点（含测试）不需要也不该知道
+    /// `done_when` 会被顺手改掉。把可选参数塞进它，会让「这次转移会不会动别的
+    /// 列」变成要读调用方才知道的事。两个方法各自一个说法：
+    ///
+    /// - `set_state(id, to, now)`：只改状态；
+    /// - `transition_with(id, to, now, expected_version, extra)`：改状态 + 可选的
+    ///   `done_when`，并**额外用 `version` 做第二道 CAS**。
+    ///
+    /// # 两道 CAS 缺一不可
+    ///
+    /// `WHERE id = ? AND state = ?` 只挡状态竞态。两个请求都读 `review`、都写
+    /// `done`，第二个会静默覆盖第一个——那正是「打回之后又被合入」的现场。
+    /// 加上 `AND version = ?`（`expected_version` 为 `None` 时用刚读到的版本），
+    /// 后写的那一个必然影响 0 行。
+    ///
+    /// # 为什么业务字段与状态同一条 `UPDATE`
+    ///
+    /// 拆成两条会出现「态变了、原因还没写」的中间态被别的连接读到，而失败留痕
+    /// 恰恰是事后要反复读的东西。
+    pub fn transition_with(
+        &self,
+        id: &str,
+        to: TaskState,
+        now: &str,
+        expected_version: Option<i64>,
+        extra: TaskTransition,
+    ) -> Result<TaskView> {
+        // 先读真值：不信任调用方说的 from。
+        let current = self
+            .get(id)?
+            .ok_or_else(|| StorageError::TaskNotFound { id: id.to_string() })?;
+        crate::task_state::check_transition(current.state, to)?;
+        if let Some(dw) = &extra.done_when {
+            // 与 `update` 同一条纪律：**校验失败不写库、version 也不涨**。
+            dw.validate()?;
+        }
+        let guard_version = match expected_version {
+            Some(v) if v != current.version => {
+                return Err(StorageError::TaskStateChanged {
+                    expected: current.state.as_str(),
+                    actual: current.state.as_str().to_string(),
+                })
+            }
+            Some(v) => v,
+            None => current.version,
+        };
+
+        let conn = self.pool.get()?;
+        // `?3 = 1` 是「这次改不改 done_when」的开关：两条分支共用一条语句，
+        // 语句形状固定，SQLite 的语句缓存才不会每次落空。
+        let has_done_when: i64 = i64::from(extra.done_when.is_some());
+        let criteria: Option<&str> = extra.done_when.as_ref().and_then(|d| d.criteria.as_deref());
+        let description: Option<&str> = extra
+            .done_when
+            .as_ref()
+            .and_then(|d| d.description.as_deref());
+        let n = conn.execute(
+            "UPDATE task
+                SET state = ?2,
+                    done_when_criteria = CASE WHEN ?3 = 1 THEN ?4 ELSE done_when_criteria END,
+                    done_when_description = CASE WHEN ?3 = 1 THEN ?5 ELSE done_when_description END,
+                    version = version + 1, updated_at = ?6
+              WHERE id = ?1 AND state = ?7 AND version = ?8",
+            params![
+                id,
+                to.as_str(),
+                has_done_when,
+                criteria,
+                description,
+                now,
+                current.state.as_str(),
+                guard_version
+            ],
+        )?;
+        if n == 0 {
+            // 影响 0 行有两种可能，靠再查一次区分，不靠猜。
+            return match self.get(id)? {
+                None => Err(StorageError::TaskNotFound { id: id.to_string() }),
+                Some(now_row) => Err(StorageError::TaskStateChanged {
+                    expected: current.state.as_str(),
+                    actual: now_row.state.as_str().to_string(),
+                }),
+            };
+        }
+        self.get(id)?
+            .ok_or_else(|| StorageError::TaskNotFound { id: id.to_string() })
     }
 
     /// 改状态。**先校验转移合法性，再写库。**
@@ -366,7 +600,7 @@ impl TaskRepo {
     /// 为什么值得多写这一句 `WHERE`：多用户不在本轮范围，但**两次点击的竞态是
     /// 真实的**——详情页上「合入主干」和「打回」挨着，双击或两人同时点会让后写
     /// 静默覆盖先写。一行 `WHERE` 就能挡住。
-    pub fn set_state(&self, id: &str, to: TaskState, now: &str) -> Result<Task> {
+    pub fn set_state(&self, id: &str, to: TaskState, now: &str) -> Result<TaskView> {
         let conn = self.pool.get()?;
         // 先读真值：不信任调用方说的 from，也不信任上一次读到的东西。
         let current = self
@@ -524,7 +758,7 @@ impl TaskRepo {
         &self,
         project_id: &str,
         state: Option<TaskState>,
-    ) -> Result<Vec<Task>> {
+    ) -> Result<Vec<TaskView>> {
         let conn = self.pool.get()?;
         // 两串 SQL 分开写而不是拼 `AND state = ?` 片段：两种查询各自是一次
         // 完整的语句，读的人不必在脑子里把片段拼起来才知道会跑什么。
@@ -595,7 +829,9 @@ fn pick<T: Clone>(patch: Option<&Option<T>>, current: Option<T>) -> Option<T> {
 }
 
 const SELECT_COLS: &str = "SELECT id, project_id, title, state, done_when_criteria,
-        done_when_description, created_by, base_commit, created_at, updated_at FROM task";
+        done_when_description, created_by, base_commit, created_at, updated_at,
+        allowed_devices, allowed_agents, required_capabilities, retry_limit,
+        version, superseded_by, intent_ref FROM task";
 
 struct RawTask {
     id: String,
@@ -608,11 +844,18 @@ struct RawTask {
     base_commit: Option<String>,
     created_at: String,
     updated_at: String,
+    allowed_devices: Option<String>,
+    allowed_agents: Option<String>,
+    required_capabilities: Option<String>,
+    retry_limit: Option<i64>,
+    version: i64,
+    superseded_by: Option<String>,
+    intent_ref: Option<String>,
 }
 
 impl RawTask {
-    fn into_task(self) -> Result<Task> {
-        Ok(Task {
+    fn into_task(self) -> Result<TaskView> {
+        Ok(TaskView {
             id: self.id,
             project_id: self.project_id,
             title: self.title,
@@ -625,6 +868,13 @@ impl RawTask {
             base_commit: self.base_commit,
             created_at: self.created_at,
             updated_at: self.updated_at,
+            allowed_devices: self.allowed_devices,
+            allowed_agents: self.allowed_agents,
+            required_capabilities: self.required_capabilities,
+            retry_limit: self.retry_limit,
+            version: self.version,
+            superseded_by: self.superseded_by,
+            intent_ref: self.intent_ref,
         })
     }
 }
@@ -641,6 +891,13 @@ fn row_to_raw(r: &Row<'_>) -> std::result::Result<RawTask, r2d2_sqlite::rusqlite
         base_commit: r.get(7)?,
         created_at: r.get(8)?,
         updated_at: r.get(9)?,
+        allowed_devices: r.get(10)?,
+        allowed_agents: r.get(11)?,
+        required_capabilities: r.get(12)?,
+        retry_limit: r.get(13)?,
+        version: r.get(14)?,
+        superseded_by: r.get(15)?,
+        intent_ref: r.get(16)?,
     })
 }
 
@@ -668,14 +925,15 @@ mod tests {
 
     fn new_task(project: &str) -> NewTask {
         NewTask {
-            project_id: project.into(),
-            title: "把登录改成 OAuth".into(),
-            done_when: DoneWhen {
-                criteria: Some("all_tests_pass".into()),
-                description: Some("全部测试通过且登录可用".into()),
-            },
             created_by: Some("user".into()),
-            base_commit: None,
+            ..NewTask::new(
+                project,
+                "把登录改成 OAuth",
+                DoneWhen {
+                    criteria: Some("all_tests_pass".into()),
+                    description: Some("全部测试通过且登录可用".into()),
+                },
+            )
         }
     }
 
@@ -711,16 +969,14 @@ mod tests {
         let (_d, tr) = setup();
         let t = tr
             .create(
-                NewTask {
-                    project_id: "p_a".into(),
-                    title: "x".into(),
-                    done_when: DoneWhen {
+                NewTask::new(
+                    "p_a",
+                    "x",
+                    DoneWhen {
                         criteria: None,
                         description: Some("登录可用".into()),
                     },
-                    created_by: None,
-                    base_commit: None,
-                },
+                ),
                 TS,
             )
             .unwrap();
@@ -738,16 +994,14 @@ mod tests {
         let before = tr.list_for_project("p_a").unwrap().len();
         let e = tr
             .create(
-                NewTask {
-                    project_id: "p_a".into(),
-                    title: "x".into(),
-                    done_when: DoneWhen {
+                NewTask::new(
+                    "p_a",
+                    "x",
+                    DoneWhen {
                         criteria: None,
                         description: None,
                     },
-                    created_by: None,
-                    base_commit: None,
-                },
+                ),
                 TS,
             )
             .unwrap_err();
@@ -1196,7 +1450,7 @@ mod tests {
     }
 
     /// 带全套约束的任务（四条约束都非 NULL，好让「有没有被清空」看得出来）。
-    fn task_with_all_constraints(tr: &TaskRepo) -> Task {
+    fn task_with_all_constraints(tr: &TaskRepo) -> TaskView {
         let t = tr.create(new_task("p_a"), TS).unwrap();
         let v = tr
             .update(
@@ -1217,6 +1471,98 @@ mod tests {
 
     /// 只给 `title` 的补丁**只能动 `title`**，其余字段逐字段保持原值。
     ///
+    /// `transition_with` **同时**改状态与 `done_when`，且版本只涨一次。
+    ///
+    /// 判红方式：把那条 `UPDATE` 里 `CASE WHEN ?3 = 1` 的两个分支任一改成
+    /// 「总写」或「总不写」 → 这条立刻红（`done_when` 与状态会有一个不对）。
+    #[test]
+    fn transition_with_writes_state_and_done_when_in_one_step() {
+        let (_d, tr) = setup();
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+        tr.set_state(&t.id, TaskState::Queued, TS).unwrap();
+        tr.set_state(&t.id, TaskState::Running, TS).unwrap();
+
+        let before = tr.get(&t.id).unwrap().unwrap();
+        let r = tr
+            .transition_with(
+                &t.id,
+                TaskState::Review,
+                "unix:200",
+                None,
+                TaskTransition {
+                    done_when: Some(DoneWhen {
+                        criteria: Some("build_passes".into()),
+                        description: None,
+                    }),
+                },
+            )
+            .unwrap();
+        assert_eq!(r.state, TaskState::Review);
+        assert_eq!(r.done_when.criteria.as_deref(), Some("build_passes"));
+        assert_eq!(
+            r.version,
+            before.version + 1,
+            "状态与 done_when 同一条 UPDATE，版本只能涨一次"
+        );
+    }
+
+    /// `transition_with` 的**第二道 CAS**：`expected_version` 不符就报
+    /// `TaskStateChanged` 且**不写库**。
+    ///
+    /// 判红方式：把 `guard_version` 那段删掉（让 `WHERE version = ?` 永远用刚读到
+    /// 的值），这条立刻红——一个过期的版本会把别人的改动静默覆盖掉。
+    #[test]
+    fn transition_with_refuses_a_stale_expected_version() {
+        let (_d, tr) = setup();
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+        tr.set_state(&t.id, TaskState::Queued, TS).unwrap();
+        tr.set_state(&t.id, TaskState::Running, TS).unwrap();
+        let stale = tr.get(&t.id).unwrap().unwrap().version;
+
+        // 别人先改了一次（版本前进）。
+        tr.set_state(&t.id, TaskState::Review, TS).unwrap();
+
+        let e = tr
+            .transition_with(
+                &t.id,
+                TaskState::Pending,
+                TS,
+                Some(stale),
+                TaskTransition::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(e, StorageError::TaskStateChanged { .. }), "{e:?}");
+        assert_eq!(
+            tr.get(&t.id).unwrap().unwrap().state,
+            TaskState::Review,
+            "被拒的转移不得写库"
+        );
+    }
+
+    /// 建任务时**一次写入约束**，不靠「建完再补写一次」——后者会让刚建好的任务
+    /// 显示「改过 2 次」。
+    ///
+    /// 判红方式：把 `create_task` 改回「建完再 `update` 一次约束」，这条立刻红
+    /// （`version` 变成 2）。
+    #[test]
+    fn create_writes_constraints_without_bumping_the_version() {
+        let (_d, tr) = setup();
+        let t = tr
+            .create(
+                NewTask {
+                    allowed_devices: Some("[\"n_1\"]".into()),
+                    retry_limit: Some(3),
+                    ..new_task("p_a")
+                },
+                TS,
+            )
+            .unwrap();
+        assert_eq!(t.version, 1, "建任务不是一次修改，version 必须还是 1");
+        assert_eq!(t.allowed_devices.as_deref(), Some("[\"n_1\"]"));
+        assert_eq!(t.retry_limit, Some(3));
+        assert_eq!(t.allowed_agents, None);
+    }
+
     /// 判红方式：把 `update` 写成「全字段覆盖」（没给的填 `NULL`），这条立刻红
     /// ——`done_when`、四条约束与 `retry_limit` 都会变成 `None`。
     #[test]

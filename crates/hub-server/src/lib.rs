@@ -156,6 +156,53 @@ pub mod err {
     /// 不建第二行：去重键是 `(node_id, agent_id, acp_session_id)`，
     /// 见 `hub_storage::SessionRepo::find_imported`。
     pub const IMPORT_ALREADY_EXISTS: &str = "import_already_exists";
+    /// 状态转移不合法（`POST /api/tasks/{id}/state` 与它的两个语法糖端点）。
+    ///
+    /// **409 而不是 400**：请求的形状是对的（`to` 是一个存在的态），是这个任务
+    /// 现在不在这条边的起点上。400 会让前端提示「参数写错了」，而用户什么都
+    /// 改不了；409 才对应「换个动作」。
+    ///
+    /// 错误体带 `detail: {from, to, hint}`——前端的提示是**据端点对生成**的
+    /// （「待验收不能直接判失败，请打回」），只给一个 code 它拼不出那句话。
+    pub const ILLEGAL_TASK_TRANSITION: &str = "illegal_task_transition";
+    /// 没有这个任务。
+    ///
+    /// **404 而不是 400/409**：id 指向的东西不存在，与「存在但状态不对」是
+    /// 两件事。404 让页面能切到「任务已不在」空态，而不是让用户去猜哪个字段
+    /// 填错了。
+    pub const TASK_NOT_FOUND: &str = "task_not_found";
+    /// 请求里的 `state` 不在六态里（含迁移前的 `draft` / `ready` / `blocked`）。
+    ///
+    /// **400 而不是 409**：这是请求形状问题（查询串或 body 里就写着一个不
+    /// 存在的值），与任务当前处于哪一态无关。**不回落成 `pending`**：静默回落
+    /// 会让「有代码写回了旧值」这件事一直藏着，直到用户看见一张状态不对的卡。
+    pub const INVALID_TASK_STATE: &str = "invalid_task_state";
+    /// `done_when.criteria` 不在判定码闭集里，或 `criteria` 与 `description` 都空。
+    ///
+    /// **400 而不是 409**：允许集合是固定的四个码（`CRITERIA_CODES`），与库里的
+    /// 任何状态无关——改一个字就能过。错误体带 `detail.allowed`，前端据此渲染
+    /// 「判定码只能选：所有测试通过 / 构建通过 / 审查通过 / 命令退出码 0」。
+    pub const INVALID_CRITERIA: &str = "invalid_criteria";
+    /// `override: true` 的验收判定没写 `note`。
+    ///
+    /// **400 而不是 409**：缺的是一个请求字段，补上就能过。一条没有理由的覆盖
+    /// 判定事后没人说得清当初为什么——所以它是必填，不是建议。
+    pub const ACCEPTANCE_NOTE_REQUIRED: &str = "acceptance_note_required";
+    /// `failure_kind` 不在八形态里。
+    ///
+    /// **400 而不是 409**：与判定码同一条口径——闭集外是输入错误，
+    /// **不回落**成「最接近的那个形态」（回落会让缺陷归因统计里凭空多出一批
+    /// 错账）。
+    pub const INVALID_FAILURE_KIND: &str = "invalid_failure_kind";
+    /// 这条任务刚被别人改过（版本或状态在读写之间变了）。
+    ///
+    /// **409 而不是 400**：请求本身没问题，是我们读到的那份事实过期了。
+    /// 前端的处置是**自动重取**（保留用户已填的内容，只刷新 `task` 与
+    /// `version`，再提示重新提交），而不是让用户改参数。
+    ///
+    /// 也用于写端点带的 `expected_version` 与库里不符：那是 `If-Match` 风格的
+    /// 前置条件失败，语义与「被插队」相同。
+    pub const TASK_STATE_CHANGED: &str = "task_state_changed";
 }
 
 /// 启动期错误：数据目录写不了 / 数据库读不了，Hub 起不来。
@@ -210,6 +257,19 @@ impl ApiError {
     /// 让前端多写一套分支（而那份分支在单用户下永远走不到）。
     pub fn not_found() -> Self {
         Self::new(StatusCode::NOT_FOUND, "not_found")
+    }
+
+    /// 404，且用**资源自己的**错误码（`task_not_found` 这类）。
+    ///
+    /// 与 [`Self::not_found`] 的取舍是「谁需要分得清」：`/api/*` 里大多数
+    /// 资源不存在的情形，页面都跳到同一个「没找到」空态，一个 `not_found`
+    /// 就够（那个方法连同它上面那段注释保留着）。而任务详情页要据 code
+    /// 区分「这条任务没了」（回看板）与「别的接口 404」（换个入口）——
+    /// 那是两种不同的下一步，所以给它一个自己的码。
+    ///
+    /// 响应体形状不变：仍是 `{"error": "<code>"}`。
+    pub fn not_found_with(code: &'static str) -> Self {
+        Self::new(StatusCode::NOT_FOUND, code)
     }
 
     /// 409，且错误体里**额外带一个可显示的字段**（设备离线时要带设备状态）。
@@ -867,6 +927,36 @@ pub fn build_app(state: AppState) -> Router {
             "/api/channels/{id}",
             axum::routing::delete(routes::stream::close_channel),
         )
+        // 任务（v0.8.0 子任务 6）：列表 / 建挂在项目下，其余挂在任务下。
+        //
+        // **必须在 `/api/{*rest}` 兜底之前**：那条兜底是认证后的 404，写在它
+        // 后面的话这一组会被整组吃掉（未认证时还是 401，认证后一律 404）。
+        //
+        // POST / PATCH 是状态变更端点，因此也必须在下面那条 `.layer(...)`
+        // 之前——落到之后会绕过 session 认证与 CSRF 双重提交，于是任意网页
+        // 都能推进用户的任务状态、改任务的验收标准。
+        //
+        // `POST /api/tasks/{id}/state` 是**唯一**的状态推进端点；
+        // `acceptance` / `failure` 是它的语法糖，但内部同样过 `check_transition`。
+        // 没有 `POST /api/tasks/{id}/executions`：本里程碑没有派发器，
+        // 执行记录只能由 v0.8.2 的那个端点产生（见 `routes/tasks.rs` 头注释）。
+        .route(
+            "/api/projects/{id}/tasks",
+            get(routes::tasks::list_tasks).post(routes::tasks::create_task),
+        )
+        .route(
+            "/api/tasks/{id}",
+            get(routes::tasks::get_task).patch(routes::tasks::patch_task),
+        )
+        .route("/api/tasks/{id}/state", post(routes::tasks::push_state))
+        .route(
+            "/api/tasks/{id}/acceptance",
+            post(routes::tasks::submit_acceptance),
+        )
+        .route(
+            "/api/tasks/{id}/failure",
+            post(routes::tasks::submit_failure),
+        )
         // **认证后的 404 兜底**（子任务 6）：SPA fallback 挂在 layer 之后，
         // 没有这一条的话未匹配的 `/api/*` 会落到 SPA 上、回一个 200 的
         // index.html——前端的 fetch 会把 HTML 当 JSON 解析失败，而「接口不存在」
@@ -984,14 +1074,15 @@ mod tests {
             .tasks()
             .create(
                 NewTask {
-                    project_id: "p_a".into(),
-                    title: "任务".into(),
-                    done_when: DoneWhen {
-                        criteria: Some("all_tests_pass".into()),
-                        description: None,
-                    },
                     created_by: Some("user".into()),
-                    base_commit: None,
+                    ..NewTask::new(
+                        "p_a",
+                        "任务",
+                        DoneWhen {
+                            criteria: Some("all_tests_pass".into()),
+                            description: None,
+                        },
+                    )
                 },
                 "unix:10",
             )
