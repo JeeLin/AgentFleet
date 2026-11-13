@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
-use common::{connect_enrolled, Hub};
+use common::{connect_enrolled, ok_rev, Hub};
 use http_body_util::BodyExt;
 use hub_server::{build_app, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};
 use node_core::conn::Established;
@@ -277,17 +277,6 @@ fn spawn_rev_stub(
             }
         }
         log
-    })
-}
-
-fn ok_rev(head: &str) -> Value {
-    json!({
-        "op": "rev",
-        "not_a_repo": false,
-        "head": head,
-        "short": &head[..7],
-        "branch": "main",
-        "detached": false,
     })
 }
 

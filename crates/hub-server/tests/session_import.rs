@@ -18,7 +18,7 @@ mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{
-    enroll_device, login, now_secs, send, session_count, session_row, signed_import,
+    enroll_device, login, now_secs, ok_rev, send, session_count, session_row, signed_import,
     signed_import_with_version,
 };
 use hub_server::import_auth::canonical_digest_for_test;
@@ -27,15 +27,22 @@ use serde_json::{json, Value};
 const AGENT: &str = "opencode";
 const CWD: &str = "/srv/app";
 
-fn ok_rev(head: &str) -> Value {
-    json!({
-        "op": "rev",
-        "not_a_repo": false,
-        "head": head,
-        "short": &head[..7],
-        "branch": "main",
-        "detached": false,
-    })
+/// 从 canonical body 的**原始字节**里按出现顺序抽出顶层字段名。
+///
+/// `serde_json::Value` 在没有 `preserve_order` 时是 `BTreeMap`，键序恒为升序
+/// ——拿它比「顺序」按构造恒真。这里扫的是序列化出来的字节本身。
+fn field_order(canonical: &[u8]) -> Vec<String> {
+    let text = std::str::from_utf8(canonical).expect("canonical body is utf8");
+    text.split("\",\"")
+        .skip(1)
+        .filter_map(|chunk| {
+            let (key, rest) = chunk.split_once("\":")?;
+            // 只留顶层键：值的内部字符串里没有 `"<name>":` 形态（本 DTO 全是
+            // 字符串 / 数字），故这个启发式对当前协议是精确的。若将来引入嵌套
+            // 对象，这条 helper 需要换成真解析器——届时它会先红。
+            (!rest.is_empty()).then(|| key.to_string())
+        })
+        .collect()
 }
 
 fn err_code(body: &str) -> String {
@@ -50,7 +57,14 @@ fn err_code(body: &str) -> String {
 /// 201 体**恰好两个键**：`session_id` / `acp_session_id`。断言放在这里而不是
 /// 某个用例里，是因为所有成功路径都经过它——给 `ImportResponse` 加第三个
 /// 字段时，这条会立刻变红，而不会像以前那样 14 个用例全绿。
-async fn import_ok(hub: &common::Hub, stub: &common::DeviceStub, acp: &str, nonce: &str) -> Value {
+/// 打一条成功的导入请求，返回 201 体。
+///
+/// `app` 由调用方传入（就是 `boot_online_import_fixture` 的第三项）：这里**不**
+/// 自己 `build_app(hub.state.clone())`。旧写法在每次调用时重建一个等价 `Router`，
+/// 于是同一个用例里并存 2–3 个实例——它们指向同一个 `AppState`，所以语义没错，
+/// 但「请求打到哪个 app」在测试里就有两个来源，将来给 `Router` 加中间件时
+/// 只有其中一个会带上。
+async fn import_ok(app: &axum::Router, stub: &common::DeviceStub, acp: &str, nonce: &str) -> Value {
     let signed = signed_import(
         &stub.kp,
         &stub.node_id,
@@ -61,8 +75,7 @@ async fn import_ok(hub: &common::Hub, stub: &common::DeviceStub, acp: &str, nonc
         now_secs(),
         nonce,
     );
-    let app = hub_server::build_app(hub.state.clone());
-    let (status, body) = send(&app, signed.request()).await;
+    let (status, body) = send(app, signed.request()).await;
     assert_eq!(status, StatusCode::CREATED, "body: {body}");
     let parsed: Value = serde_json::from_str(&body).expect("json");
     assert_exactly_two_response_keys(&parsed, "import_ok");
@@ -115,7 +128,7 @@ async fn uninitialized_hub_rejects_device_import_with_the_same_forbidden_shape()
     let app = hub_server::build_app(hub.state.clone());
     let (status, body) = send(&app, signed.request()).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
-    assert_eq!(err_code(&body), "hub_not_initialized");
+    assert_eq!(err_code(&body), hub_server::err::HUB_NOT_INITIALIZED);
 }
 
 // ---------------------------------------------------------------------------
@@ -149,7 +162,7 @@ async fn the_signature_binds_body_version_and_an_unknown_version_does_not_burn_t
 
     let (status, body) = send(&app, future.request()).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
-    assert_eq!(err_code(&body), "invalid_request_body");
+    assert_eq!(err_code(&body), hub_server::err::BAD_BODY);
     assert_eq!(session_count(&hub), 0, "未知版本不得建会话");
 
     // 同一个 nonce 改回 v=1 重新签名：若上面已经消费了 nonce，这里会 409。
@@ -189,7 +202,7 @@ async fn missing_or_invalid_signature_is_unauthorized_and_no_session_row_is_writ
     bad.body = serde_json::to_vec(&bad.parsed).expect("body");
     let (status, body) = send(&app, bad.request()).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
-    assert_eq!(err_code(&body), "device_signature_invalid");
+    assert_eq!(err_code(&body), hub_server::err::DEVICE_SIGNATURE_INVALID);
 
     // 2b. body 被改但头里的摘要/签名不动。
     let good = signed_import(
@@ -210,7 +223,7 @@ async fn missing_or_invalid_signature_is_unauthorized_and_no_session_row_is_writ
     );
     let (status, body) = send(&app, req).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
-    assert_eq!(err_code(&body), "device_signature_invalid");
+    assert_eq!(err_code(&body), hub_server::err::DEVICE_SIGNATURE_INVALID);
 
     // 2c. 未知 node（签名本身有效，但库里没有这台设备）。
     let unknown_kp = identity::KeyPair::generate();
@@ -226,7 +239,7 @@ async fn missing_or_invalid_signature_is_unauthorized_and_no_session_row_is_writ
     );
     let (status, body) = send(&app, unknown.request()).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
-    assert_eq!(err_code(&body), "device_signature_invalid");
+    assert_eq!(err_code(&body), hub_server::err::DEVICE_SIGNATURE_INVALID);
 
     // 2d. 设备在库里但没有公钥（历史数据 / 未登记）。
     common::insert_legacy_device(&hub, "n_nokey");
@@ -242,9 +255,180 @@ async fn missing_or_invalid_signature_is_unauthorized_and_no_session_row_is_writ
     );
     let (status, body) = send(&app, nokey.request()).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
-    assert_eq!(err_code(&body), "device_signature_invalid");
+    assert_eq!(err_code(&body), hub_server::err::DEVICE_SIGNATURE_INVALID);
 
     assert_eq!(session_count(&hub), 0, "认证失败不得落任何会话行");
+}
+
+/// 头与 body 的同一事实必须**逐字相等**：四对里任意一对不等都是 401。
+///
+/// 四条分支各自独立可证伪——把 `import_auth.rs` 的逐字比较删掉或改成
+/// 「只看 node_id」，签名仍然有效（body 的摘要与签名都自洽），请求会一路
+/// 走到建会话，用例变红。只测「签名坏了」覆盖不到这一层。
+/// 「把这个字段改坏」的一步，连同它改的是哪个头一起给出。
+type HeaderTamper = (&'static str, fn(&mut common::SignedImport));
+
+#[tokio::test]
+async fn a_header_that_disagrees_with_the_signed_body_is_rejected() {
+    let (hub, stub, app) = common::boot_online_import_fixture().await;
+
+    let cases: [HeaderTamper; 4] = [
+        ("X-AF-Node-Id", |s| s.parsed.node_id.push('x')),
+        ("X-AF-Nonce", |s| s.parsed.nonce.push('x')),
+        ("X-AF-Signature", |s| s.parsed.signature.push('A')),
+        ("X-AF-Body-SHA256", |s| {
+            s.parsed.body_sha256 = "0".repeat(64)
+        }),
+    ];
+    for (label, tamper) in cases {
+        let mut signed = signed_import(
+            &stub.kp,
+            &stub.node_id,
+            AGENT,
+            "ses_header_mismatch",
+            CWD,
+            "t",
+            now_secs(),
+            &format!("nonce-head-{label}"),
+        );
+        // 只改**头**（`request()` 取自 `parsed`），body 字节保持原样。
+        let body = signed.body.clone();
+        tamper(&mut signed);
+        signed.body = body;
+        let (status, response) = send(&app, signed.request()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{label}: {response}");
+        assert_eq!(
+            err_code(&response),
+            hub_server::err::DEVICE_SIGNATURE_INVALID,
+            "{label}"
+        );
+    }
+    assert_eq!(session_count(&hub), 0, "头与 body 不等不得落任何会话行");
+}
+
+/// 时间窗：`t` 早于 / 晚于当前 301 s 都拒，正好 300 s 仍接受。
+///
+/// 删掉 `import_auth.rs` 的 `abs_diff > TIME_WINDOW_SECS` 判断后，下面两条
+/// 「必须拒」的分支会变成 201，用例变红——这条锁住「时间窗真的被校验」。
+/// 边界值由 `TIME_WINDOW_SECS` 推出，不写死 300。
+#[tokio::test]
+async fn a_timestamp_outside_the_window_is_rejected() {
+    let (_hub, stub, app) = common::boot_online_import_fixture().await;
+
+    // 边界由常量推出，不写死 300/301：改 `TIME_WINDOW_SECS` 时这条用例跟着走，
+    // 不会一边改常量、一边留着按旧值写死的「恰好在窗外」。
+    let window = hub_server::import_auth::TIME_WINDOW_SECS as i64;
+    for (label, offset) in [("past", -(window + 1)), ("future", window + 1)] {
+        let t = (now_secs() as i64 + offset) as u64;
+        let signed = signed_import(
+            &stub.kp,
+            &stub.node_id,
+            AGENT,
+            "ses_window",
+            CWD,
+            "t",
+            t,
+            &format!("nonce-window-{label}"),
+        );
+        let (status, body) = send(&app, signed.request()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{label}: {body}");
+        assert_eq!(err_code(&body), hub_server::err::DEVICE_SIGNATURE_INVALID);
+    }
+
+    // 边界内侧仍然受理：判据是 `> 300`，不是 `>= 300`。
+    let edge = signed_import(
+        &stub.kp,
+        &stub.node_id,
+        AGENT,
+        "ses_window_edge",
+        CWD,
+        "t",
+        now_secs() - hub_server::import_auth::TIME_WINDOW_SECS,
+        "nonce-window-edge",
+    );
+    let (status, body) = send(&app, edge.request()).await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+}
+
+/// **坏签名不烧 nonce**：验签失败提前返回，同一个 nonce 随后仍可用于一条
+/// 正确签名的请求。
+///
+/// 把「消费 nonce」挪到验签之前（或干脆在拒绝分支里也消费），第二次请求会
+/// 变成 409 `import_replayed`，用例变红。这条锁住「9 步的顺序」。
+#[tokio::test]
+async fn a_bad_signature_does_not_burn_the_nonce() {
+    let (hub, stub, app) = common::boot_online_import_fixture().await;
+    let t = now_secs();
+
+    let mut bad = signed_import(
+        &stub.kp,
+        &stub.node_id,
+        AGENT,
+        "ses_not_burned",
+        CWD,
+        "t",
+        t,
+        "nonce-not-burned",
+    );
+    bad.parsed.signature = identity::base64url(&[0u8; 64]);
+    bad.body = serde_json::to_vec(&bad.parsed).expect("body");
+    let (status, body) = send(&app, bad.request()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
+
+    // 同一个 nonce、正确签名 → 仍然受理（nonce 没被那次失败消耗掉）。
+    let good = signed_import(
+        &stub.kp,
+        &stub.node_id,
+        AGENT,
+        "ses_not_burned",
+        CWD,
+        "t",
+        t,
+        "nonce-not-burned",
+    );
+    let (status, body) = send(&app, good.request()).await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    assert_eq!(session_count(&hub), 1);
+}
+
+/// 版本不匹配（验签通过、`v != IMPORT_VERSION`）回 400，**且不烧 nonce**。
+///
+/// 这条已有一个用例断言状态码；这里补的是「不消费 nonce」那一半：换成当前
+/// 版本的同一 nonce 仍然可用。
+#[tokio::test]
+async fn an_unknown_version_is_rejected_without_burning_the_nonce() {
+    let (hub, stub, app) = common::boot_online_import_fixture().await;
+    let t = now_secs();
+
+    let future_version = hub_server::import_auth::IMPORT_VERSION + 1;
+    let ahead = signed_import_with_version(
+        &stub.kp,
+        &stub.node_id,
+        AGENT,
+        "ses_version",
+        CWD,
+        "t",
+        t,
+        "nonce-version",
+        future_version,
+    );
+    let (status, body) = send(&app, ahead.request()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(err_code(&body), hub_server::err::BAD_BODY);
+
+    let current = signed_import(
+        &stub.kp,
+        &stub.node_id,
+        AGENT,
+        "ses_version",
+        CWD,
+        "t",
+        t,
+        "nonce-version",
+    );
+    let (status, body) = send(&app, current.request()).await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    assert_eq!(session_count(&hub), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -275,7 +459,7 @@ async fn nonce_cannot_be_replayed() {
 
     let (status, body) = send(&app, signed.request()).await;
     assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
-    assert_eq!(err_code(&body), "import_replayed");
+    assert_eq!(err_code(&body), hub_server::err::IMPORT_REPLAYED);
     assert_eq!(session_count(&hub), 1);
 }
 
@@ -298,7 +482,10 @@ async fn a_business_failure_still_burns_the_nonce() {
     );
     let (status, body) = send(&app, unsupported.request()).await;
     assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
-    assert_eq!(err_code(&body), "unsupported_import_provider");
+    assert_eq!(
+        err_code(&body),
+        hub_server::err::UNSUPPORTED_IMPORT_PROVIDER
+    );
 
     // 第二次：换成合法 provider、重新签名，但 nonce 相同 → 重放。
     let retry = signed_import(
@@ -313,7 +500,7 @@ async fn a_business_failure_still_burns_the_nonce() {
     );
     let (status, body) = send(&app, retry.request()).await;
     assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
-    assert_eq!(err_code(&body), "import_replayed");
+    assert_eq!(err_code(&body), hub_server::err::IMPORT_REPLAYED);
     assert_eq!(session_count(&hub), 0);
 }
 
@@ -326,7 +513,7 @@ async fn a_business_failure_still_burns_the_nonce() {
 async fn a_second_import_of_the_same_acp_session_is_conflict() {
     let (hub, stub, app) = common::boot_online_import_fixture().await;
 
-    let first = import_ok(&hub, &stub, "ses_dup", "nonce-dup-1").await;
+    let first = import_ok(&app, &stub, "ses_dup", "nonce-dup-1").await;
     assert_eq!(first["acp_session_id"], "ses_dup");
     assert_eq!(stub.rev_count.load(std::sync::atomic::Ordering::SeqCst), 1);
 
@@ -342,7 +529,7 @@ async fn a_second_import_of_the_same_acp_session_is_conflict() {
     );
     let (status, body) = send(&app, second.request()).await;
     assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
-    assert_eq!(err_code(&body), "import_already_exists");
+    assert_eq!(err_code(&body), hub_server::err::IMPORT_ALREADY_EXISTS);
     assert_eq!(session_count(&hub), 1);
     assert_eq!(
         stub.rev_count.load(std::sync::atomic::Ordering::SeqCst),
@@ -354,11 +541,20 @@ async fn a_second_import_of_the_same_acp_session_is_conflict() {
 /// 两个**不同 nonce** 的并发请求带同一 `(node_id, agent, acp_session_id)`：
 /// 去重是单条原子 INSERT，最多一个 201、另一个 409，库里只能有一行。
 ///
-/// 旧实现先 `find_imported` 再 `create_imported`，中间隔着 `probe_base_rev`；
-/// 两个请求都查到 `None` 时会各插一行、都回 201。这里用 `join!` 把两串
-/// 完整 handler 真正跑在同一个 runtime 上（不是只并发调仓储方法），锁住
-/// 端点级别的接线。
-#[tokio::test]
+/// # 这条用例能证伪什么、不能证伪什么
+///
+/// 它锁的是**端点语义**：两个并发导入最终必须是一个 201 + 一个 409，
+/// 且库里只有一行（可以挡住「重复返回 201」「两个都 500」这类回归）。
+///
+/// 它**证伪不了**「去重是不是原子的」：导入 handler 在落库之前没有 `.await`
+/// （`create_session_guarded` 全程同步，`probe_base_rev` 在落行之后），所以
+/// 两个请求在同一个 runtime 上不可能交错到 `WHERE NOT EXISTS` 里。换回旧的
+/// check-then-insert 这条用例仍绿（MUT3 实测）——那一层的证伪在
+/// `hub-storage` 的 `concurrent_creates_of_one_imported_key_never_error`，
+/// 它用两条真连接 + 真线程。
+///
+/// 用多线程 runtime 只是让它更接近生产（多个 worker 线程），不作为证伪手段。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_imports_of_one_acp_session_create_exactly_one_row() {
     let (hub, stub, app) = common::boot_online_import_fixture().await;
     let t = now_secs();
@@ -384,7 +580,21 @@ async fn concurrent_imports_of_one_acp_session_create_exactly_one_row() {
     );
     let app2 = app.clone();
 
-    let (r1, r2) = tokio::join!(send(&app, first.request()), send(&app2, second.request()));
+    // 让两个请求尽量同时起步：各自在独立任务里先做一次让出，再由 barrier
+    // 放行——否则一个可能在另一个被调度前就跑完。
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let b1 = barrier.clone();
+    let b2 = barrier.clone();
+    let (r1, r2) = tokio::join!(
+        async {
+            b1.wait().await;
+            send(&app, first.request()).await
+        },
+        async {
+            b2.wait().await;
+            send(&app2, second.request()).await
+        }
+    );
     let mut created = 0;
     let mut conflict = 0;
     for (status, body) in [&r1, &r2] {
@@ -397,7 +607,11 @@ async fn concurrent_imports_of_one_acp_session_create_exactly_one_row() {
                 created += 1;
             }
             StatusCode::CONFLICT => {
-                assert_eq!(err_code(body), "import_already_exists", "body: {body}");
+                assert_eq!(
+                    err_code(body),
+                    hub_server::err::IMPORT_ALREADY_EXISTS,
+                    "body: {body}"
+                );
                 conflict += 1;
             }
             other => panic!("unexpected {other}: {body}"),
@@ -417,7 +631,7 @@ async fn concurrent_imports_of_one_acp_session_create_exactly_one_row() {
 /// 同一个 `ses_*` 属于两台设备各自的 opencode 库：两条都成功。
 #[tokio::test]
 async fn the_same_acp_id_on_another_device_is_not_a_duplicate() {
-    let (hub, a, _app) = common::boot_online_import_fixture().await;
+    let (hub, a, app) = common::boot_online_import_fixture().await;
     let b = enroll_device(
         &hub,
         &["git"],
@@ -426,8 +640,8 @@ async fn the_same_acp_id_on_another_device_is_not_a_duplicate() {
     )
     .await;
 
-    let first = import_ok(&hub, &a, "ses_shared", "nonce-shared-a").await;
-    let second = import_ok(&hub, &b, "ses_shared", "nonce-shared-b").await;
+    let first = import_ok(&app, &a, "ses_shared", "nonce-shared-a").await;
+    let second = import_ok(&app, &b, "ses_shared", "nonce-shared-b").await;
     assert_ne!(first["session_id"], second["session_id"]);
     assert_eq!(session_count(&hub), 2);
 }
@@ -465,7 +679,10 @@ async fn unsupported_provider_is_conflict_before_any_db_or_session_write() {
         );
         let (status, body) = send(&app, signed.request()).await;
         assert_eq!(status, StatusCode::CONFLICT, "provider {provider}: {body}");
-        assert_eq!(err_code(&body), "unsupported_import_provider");
+        assert_eq!(
+            err_code(&body),
+            hub_server::err::UNSUPPORTED_IMPORT_PROVIDER
+        );
     }
     assert_eq!(session_count(&hub), 0);
 }
@@ -530,7 +747,7 @@ async fn import_endpoint_rejects_a_hub_invalid_workspace_path() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "cwd {cwd}: {body}");
         assert_eq!(
             err_code(&body),
-            "invalid_workspace_path",
+            hub_server::err::INVALID_WORKSPACE_PATH,
             "cwd {cwd}: {body}"
         );
         assert_eq!(session_count(&hub), 0);
@@ -559,7 +776,14 @@ async fn import_endpoint_rejects_an_unavailable_agent() {
         )
         .expect("replace_detected");
     let signed = signed_import_for_gate(&stub, CWD, "ses_no_agent", "nonce-no-agent");
-    assert_gate_conflict(&hub, &stub, &app, &signed, "agent_unavailable").await;
+    assert_gate_conflict(
+        &hub,
+        &stub,
+        &app,
+        &signed,
+        hub_server::err::AGENT_UNAVAILABLE,
+    )
+    .await;
 }
 
 /// 设备离线（心跳已过 `OFFLINE_AFTER`）→ 409 `device_offline`。
@@ -590,9 +814,9 @@ async fn import_endpoint_rejects_an_offline_device() {
 /// 导入的会话带 `acp_session_id`，起点探测照常完成；开对话时该 id 非空下发。
 #[tokio::test]
 async fn imported_session_prefills_acp_session_id_and_conversation_open_downlinks_it() {
-    let (hub, stub, _app) = common::boot_online_import_fixture().await;
+    let (hub, stub, app) = common::boot_online_import_fixture().await;
 
-    let body = import_ok(&hub, &stub, "ses_imported", "nonce-prefill").await;
+    let body = import_ok(&app, &stub, "ses_imported", "nonce-prefill").await;
     let session_id = body["session_id"].as_str().expect("session_id").to_string();
 
     let (agent_id, acp, status) = session_row(&hub, &session_id);
@@ -683,7 +907,7 @@ async fn browser_session_and_csrf_rules_are_unchanged() {
     );
     let (status, body) = send(&app, req).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
-    assert_eq!(err_code(&body), "device_signature_invalid");
+    assert_eq!(err_code(&body), hub_server::err::DEVICE_SIGNATURE_INVALID);
 }
 
 // ---------------------------------------------------------------------------
@@ -752,6 +976,61 @@ fn exempt_tables_and_message_type_count_are_unchanged() {
     let unique: std::collections::BTreeSet<usize> = all.iter().map(|t| index(*t)).collect();
     assert_eq!(all.len(), 17);
     assert_eq!(unique.len(), 17);
+
+    // 上面这两个 17 由**本地**手写的 `index()` 与本地数组决定，对「协议仍是
+    // 17 个变体」这条事实按构造恒真。真正锁住它的是**穷尽 match**：新增第 18
+    // 个变体时 `index()` 缺臂 → 编译失败。下面用一段 `match` 把每个变体的
+    // 线上名字写死——这才对「变体集合」本身可证伪（改名 / 加变体都会编译失败
+    // 或断言失败），而不是数一遍自己写的数组。
+    let names: Vec<&str> = [
+        Hello,
+        Challenge,
+        Auth,
+        AuthOk,
+        AuthFail,
+        HubHello,
+        Heartbeat,
+        HeartbeatAck,
+        Disconnect,
+        OpenChannel,
+        ChannelReady,
+        ChannelError,
+        ChannelData,
+        ChannelCredit,
+        CloseChannel,
+        Err,
+        Unknown,
+    ]
+    .iter()
+    .map(|t| match t {
+        // 线上名字取 `protocol::message::types` 的常量，不手抄：改名会让这一
+        // 段跟着变（常量是唯一真相源），新增变体则让 match 缺臂、编译失败。
+        Hello => protocol::message::types::HELLO,
+        Challenge => protocol::message::types::CHALLENGE,
+        Auth => protocol::message::types::AUTH,
+        AuthOk => protocol::message::types::AUTH_OK,
+        AuthFail => protocol::message::types::AUTH_FAIL,
+        HubHello => protocol::message::types::HUB_HELLO,
+        Heartbeat => protocol::message::types::HEARTBEAT,
+        HeartbeatAck => protocol::message::types::HEARTBEAT_ACK,
+        Disconnect => protocol::message::types::DISCONNECT,
+        OpenChannel => protocol::message::types::OPEN_CHANNEL,
+        ChannelReady => protocol::message::types::CHANNEL_READY,
+        ChannelError => protocol::message::types::CHANNEL_ERROR,
+        ChannelData => protocol::message::types::CHANNEL_DATA,
+        ChannelCredit => protocol::message::types::CHANNEL_CREDIT,
+        CloseChannel => protocol::message::types::CLOSE_CHANNEL,
+        Err => protocol::message::types::ERR,
+        // `Unknown` 没有线上名字：它是「解析不出来的兜底」。
+        Unknown => "",
+    })
+    .collect();
+    assert_eq!(names.len(), 17);
+    // 16 个有线上名字的变体两两不同，且都不是空串。
+    let named: std::collections::BTreeSet<&str> =
+        names.iter().copied().filter(|n| !n.is_empty()).collect();
+    assert_eq!(named.len(), 16, "16 个变体各有唯一线上名字");
+    assert_eq!(names.iter().filter(|n| n.is_empty()).count(), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -809,8 +1088,9 @@ fn the_cli_and_hub_share_one_canonical_body_digest() {
     // `canonical_body` 是 CLI `build_signed_body` 与 Hub `canonical_digest`
     // 共用的那一份字节。改 DTO 字段顺序 → 字符串与摘要同时变。
     let canonical = req.canonical_body().expect("canonical");
+    let canonical_text = String::from_utf8(canonical.clone()).unwrap();
     assert_eq!(
-        String::from_utf8(canonical).unwrap(),
+        canonical_text,
         "{\"node_id\":\"n_test\",\"provider\":\"opencode\",\"external_session_id\":\"ses_abc\",\"acp_session_id\":\"ses_abc\",\"cwd\":\"/tmp/work\",\"title\":\"demo\",\"v\":1,\"t\":1700000000,\"nonce\":\"nonce_test\",\"signature\":\"\",\"body_sha256\":\"\"}"
     );
     assert_eq!(
@@ -827,8 +1107,7 @@ fn the_cli_and_hub_share_one_canonical_body_digest() {
         cwd: "/tmp/work".to_string(),
     };
     let signed =
-        node_cli::import_http::build_signed_body(&kp, "n_test", "opencode", &candidate, "demo")
-            .expect("sign");
+        node_cli::import_http::build_signed_body(&kp, "n_test", &candidate, "demo").expect("sign");
     let cli: hub_server::routes::session_import::ImportRequest =
         serde_json::from_slice(&signed.body).expect("cli body");
     assert_eq!(
@@ -843,22 +1122,47 @@ fn the_cli_and_hub_share_one_canonical_body_digest() {
         "Hub 验签重算的摘要必须与 CLI 签名时的摘要一致"
     );
     assert_eq!(signed.body_sha256.len(), 64, "hex sha256");
-    // 字段顺序而不是「键都存在」：两侧序列化的是同一个类型，逐字比键序。
+    // 「字段顺序一致」**不能**靠比较两个 `serde_json::Value` 的键序：本仓没开
+    // `preserve_order`，`Map` 在无该 feature 时是 `BTreeMap`，两侧键序恒为同一
+    // 升序——那两条断言按构造恒真。真正锁顺序的是上面那条 canonical body 的
+    // 字符串字面量（字段名与顺序都写在里面）与摘要常量：任一漂移都会红。
+    //
+    // 这里补的是**可证伪**的那一半：CLI 与 Hub 的 canonical body **字段顺序**
+    // 相同。注意不能解析成 `Value` 再比键序（无 `preserve_order` 时两侧都是
+    // 同一 `BTreeMap` 升序，恒真），也不能期望两串字节相等——CLI 的 `t` /
+    // `nonce` 是本次请求的真实值，与这里的固定夹具必然不同。
+    //
+    // 所以从**原始字节**里按出现顺序抽出顶层字段名：这才是序列化顺序本身。
+    let cli_canonical = cli.canonical_body().expect("cli canonical");
+    assert_eq!(
+        field_order(&cli_canonical),
+        field_order(&canonical),
+        "CLI 与 Hub 的 canonical body 字段顺序必须一致"
+    );
+    // 字段集合再断言一次（少一个字段时上面的解析已失败，这条给出直观定位）。
     let cli_value: Value = serde_json::from_slice(&signed.body).expect("json");
-    let hub_value: Value = serde_json::to_value(&req).expect("json");
-    let cli_keys: Vec<&str> = cli_value
+    let mut cli_keys: Vec<&str> = cli_value
         .as_object()
         .expect("object")
         .keys()
         .map(String::as_str)
         .collect();
-    let hub_keys: Vec<&str> = hub_value
-        .as_object()
-        .expect("object")
-        .keys()
-        .map(String::as_str)
-        .collect();
-    assert_eq!(cli_keys, hub_keys, "CLI 与 Hub 的字段顺序必须一致");
+    cli_keys.sort_unstable();
+    let mut expected_keys = vec![
+        "acp_session_id",
+        "body_sha256",
+        "cwd",
+        "external_session_id",
+        "node_id",
+        "nonce",
+        "provider",
+        "signature",
+        "t",
+        "title",
+        "v",
+    ];
+    expected_keys.sort_unstable();
+    assert_eq!(cli_keys, expected_keys, "body 字段集合");
 }
 
 // ---------------------------------------------------------------------------
@@ -903,7 +1207,7 @@ async fn device_import_route_is_not_under_the_browser_auth_layer() {
     );
     let (status, body) = send(&app, req).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
-    assert_eq!(err_code(&body), "device_signature_invalid");
+    assert_eq!(err_code(&body), hub_server::err::DEVICE_SIGNATURE_INVALID);
 
     let req = Request::builder()
         .method("GET")

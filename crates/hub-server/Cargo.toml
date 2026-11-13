@@ -19,9 +19,6 @@ protocol.workspace = true
 identity.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# 设备签名导入端点要重算 canonical body 的 SHA-256（v0.7.4）。
-# 只加这一个依赖：Hub 仍不依赖 node-core / node-cli（约束 22 / 依赖方向）。
-sha2.workspace = true
 tokio.workspace = true
 axum.workspace = true
 tower.workspace = true
@@ -38,8 +35,11 @@ bytes.workspace = true
 # 启动期错误类型（BootstrapError）；Hub 启动失败必须中止进程而不是半初始化
 thiserror.workspace = true
 # 共享状态里的 Mutex（setup token 计数、登录闸门参数）。
-# 用 parking_lot 而不是 std::sync::Mutex：后者有 poisoning，
-# 而这里的状态只是计数器，poison 后 panic 一次就会把 Hub 带下去。
+# 帧发送侧 / 每秒计数这类共享状态用 parking_lot：没有 poisoning 开销。
+#
+# **注意 `import_auth.rs` 刻意用 `std::sync::Mutex`**：它的状态是「已消费的
+# nonce 集合」，中毒时必须继续拒绝服务（fail-closed）而不是 panic 或静默清空，
+# 那里逐处 `let Ok(..) = .. else { return 401 }` 处理 poisoning。
 parking_lot.workspace = true
 
 [dev-dependencies]
@@ -52,7 +52,11 @@ libc.workspace = true
 node-core.workspace = true
 # Bug 22：端点测试要真的构造一次 CLI 的签名 body，逐字比字段顺序与摘要。
 # 只在 dev-dependencies：Hub 生产依赖仍不含 node-cli / node-core。
-node-cli = { path = "../node-cli" }
+node-cli.workspace = true
+# 端点用例要重算 canonical body 的 SHA-256（`common/mod.rs` 的 `signed_import*`）。
+# 生产代码不算摘要——它走 `ImportRequest::body_digest_hex()`（`identity`，
+# 内部用 sha2），所以 sha2 只在 dev-dependencies：Hub 生产依赖不含它。
+sha2.workspace = true
 identity.workspace = true
 protocol.workspace = true
 tokio-tungstenite.workspace = true

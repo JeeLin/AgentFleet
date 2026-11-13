@@ -454,8 +454,9 @@ pub async fn enroll_device(
 
 /// 一条「已初始化 Hub + 在线 opencode 设备 + 可用路由」的导入夹具。
 ///
-/// 14 个端点用例都从这串序列起步（`Hub::boot` → `enroll_device` →
-/// `build_app`）；把它收在一处，新增错误码用例就不必再抄一遍。返回
+/// 19 个端点用例都从这串序列起步（`Hub::boot` → `enroll_device` →
+/// `build_app`；用 `grep -c 'boot_online_import_fixture().await'` 复核，
+/// 新增用例时这个数字要跟着改）；把它收在一处，新增错误码用例就不必再抄一遍。返回
 /// `(Hub, DeviceStub, Router)`：`Hub` 与 `DeviceStub` 必须活到请求打完，
 /// 否则临时库 / WS 连接会提前消失。
 pub async fn boot_online_import_fixture() -> (Hub, DeviceStub, axum::Router) {
@@ -495,10 +496,21 @@ impl SignedImport {
             .method("POST")
             .uri(hub_server::import_auth::IMPORT_PATH)
             .header("content-type", "application/json")
-            .header("X-AF-Node-Id", &self.parsed.node_id)
-            .header("X-AF-Nonce", &self.parsed.nonce)
-            .header("X-AF-Signature", &self.parsed.signature)
-            .header("X-AF-Body-SHA256", &self.parsed.body_sha256)
+            // 头名取 `identity::import_protocol` 的常量，不手抄：改一处值时
+            // 夹具与客户端一起变，不会靠 `HeaderMap` 大小写不敏感掩盖漂移。
+            .header(
+                identity::import_protocol::NODE_ID_HEADER,
+                &self.parsed.node_id,
+            )
+            .header(identity::import_protocol::NONCE_HEADER, &self.parsed.nonce)
+            .header(
+                identity::import_protocol::SIGNATURE_HEADER,
+                &self.parsed.signature,
+            )
+            .header(
+                identity::import_protocol::BODY_SHA256_HEADER,
+                &self.parsed.body_sha256,
+            )
             .body(axum::body::Body::from(self.body.clone()))
             .expect("build request")
     }
@@ -577,6 +589,21 @@ pub fn signed_import_with_version(
     parsed.body_sha256 = body_sha256;
     let body = serde_json::to_vec(&parsed).expect("signed body");
     SignedImport { parsed, body }
+}
+
+/// `git rev` 探测的成功回包（`op` / `head` / `short` / `branch` / `detached`）。
+///
+/// `session_import.rs` 与 `base_rev.rs` 各有一份逐字节相同的实现，收在这里：
+/// 改一个字段只需改一处，两侧用例不会静默分叉。
+pub fn ok_rev(head: &str) -> serde_json::Value {
+    serde_json::json!({
+        "op": "rev",
+        "not_a_repo": false,
+        "head": head,
+        "short": &head[..7],
+        "branch": "main",
+        "detached": false,
+    })
 }
 
 /// 当前 Unix 秒（用例构造 `t` 用；Hub 只接受 ±300 s）。
