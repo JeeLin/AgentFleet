@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { DOMWrapper } from '@vue/test-utils'
 
 import DevicesPage from '@/domains/device/DevicesPage.vue'
 import { detectDownloadPlatform, downloadAgentBinary } from '@/domains/device/api'
@@ -623,5 +624,271 @@ describe('DevicesPage：空态里的 afcli 下载', () => {
     const text = w.element.textContent ?? ''
     expect(text).not.toContain('这台 Hub 没有可下发的 afcli')
     expect(text).toContain('afcli')
+  })
+})
+
+/* ===========================================================================
+   缺陷池 🟡「afcli 下载无法选择其他架构」（v0.8.0 子任务 11）
+   ---------------------------------------------------------------------------
+   用户的诉求是「我想下载其他架构的怎么办」。后端 `?os=&arch=` 早就是闭集
+   （`routes/agent_binary.rs:154`），缺的只是前端的入口。这一组守四件事：
+
+   ① 真的把**用户选的**平台发出去，而不是浏览器推断的那一个；
+   ② 没选平台时下载按钮必须是 `disabled`——不带参数请求会让后端回落到
+      Hub 自己的平台（Linux），那正是「Windows 用户拿到 Linux 文件」那条 bug；
+   ③ 参数值全部来自闭集，前端不可能造出一个后端要 400 的组合；
+   ④ 下载失败是**行内红字**「下载失败，请重试」，不弹 alert。
+
+   **判红方式**：把 `downloadCli` 改回硬编码 `{ os: 'linux', arch: 'amd64' }`
+   （或改回 `detectDownloadPlatform(navigator.userAgent, …)`），第一条红——
+   那时选 `windows` + `arm64` 发出的仍是 `os=linux&arch=amd64`。
+   =========================================================================== */
+describe('DevicesPage：afcli 下载的平台选择（缺陷池 🟡）', () => {
+  /** 复用本文件既有的姿势：`route` 是模块级 ref，上一条用例会留值。 */
+  beforeEach(() => {
+    window.history.replaceState(null, '', '/devices')
+    route.value = matchRoute('/devices')
+  })
+
+  /**
+   * 把浏览器伪装成某个平台。
+   *
+   * **必须显式设**：`navigator` 在不同用例里会被 `vi.stubGlobal` 换成不同值，
+   * 而 `afterEach` 的 `unstubAllGlobals` 会把它还原成 happy-dom 的默认（一个
+   * 认不出的空 UA）。默认值会决定下拉框的初始选中项，不显式设就等于让「默认
+   * 猜哪个平台」这条断言依赖上一个用例——「单独跑绿、全量跑红」的经典成因。
+   */
+  function stubBrowser(userAgent: string, platform: string): void {
+    vi.stubGlobal('navigator', { userAgent, platform })
+  }
+
+  /** 装好 blob 下载所需的三处打桩（理由同上面那个 `stubBlobFetch`）。 */
+  function stubBlob(onRequest: (url: URL) => Response): { seen: URL[]; clicked: string[] } {
+    const clicked: string[] = []
+    vi.spyOn(URL, 'createObjectURL').mockImplementation(() => 'blob:fake-platform')
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clicked.push(this.download)
+    })
+    const seen: URL[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+        const url = new URL(raw, 'http://hub.local')
+        if (url.pathname === '/api/agent-binary') {
+          seen.push(url)
+          return onRequest(url)
+        }
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }),
+    )
+    return { seen, clicked }
+  }
+
+  /** 下载按钮**按可访问名取**：页面上还有「刷新」「设备」「Agent 目录」等按钮，
+   *  按顺序取第一个会取到它们，症状是「点了没反应」。 */
+  function downloadButton(w: ReturnType<typeof mountIn>): HTMLButtonElement {
+    const btn = [...w.element.querySelectorAll('button')].find((b) =>
+      (b.textContent ?? '').includes('下载 afcli'),
+    )
+    expect(btn, '空态里必须有「下载 afcli」按钮').toBeTruthy()
+    return btn as HTMLButtonElement
+  }
+
+  function platformSelect(w: ReturnType<typeof mountIn>): DOMWrapper<HTMLSelectElement> {
+    const sel = w.find<HTMLSelectElement>('#af-cli-platform')
+    expect(sel.exists(), '下载入口必须有一个平台下拉框').toBe(true)
+    return sel
+  }
+
+  it('选 windows + arm64 → 请求 URL 里是 os=windows&arch=arm64', async () => {
+    // 先把浏览器伪装成 **Linux**：这样「发出去的 windows/arm64」只可能来自
+    // 用户的选择，不可能是 UA 推断的残留。用一个和期望值冲突的 UA 才能让
+    // 「仍然按浏览器推断」的实现变红——两边相同的话那条断言恒真。
+    stubBrowser('Mozilla/5.0 (X11; Linux x86_64)', 'Linux x86_64')
+    const { seen } = stubBlob(
+      () => new Response(new Blob(['\x7fELF']), { status: 200 }),
+    )
+    const w = mountIn(DevicesPage)
+    await flush(w)
+
+    await platformSelect(w).setValue('windows/arm64')
+    await w.vm.$nextTick()
+    downloadButton(w).click()
+    await flush(w)
+
+    expect(seen, '必须真的请求了 /api/agent-binary').toHaveLength(1)
+    const q = seen[0].searchParams
+    expect(q.get('os')).toBe('windows')
+    expect(q.get('arch')).toBe('arm64')
+    // 顺序也钉住：规格的判据原文就是 `os=windows&arch=arm64`。
+    expect(seen[0].search.slice(1)).toBe('os=windows&arch=arm64')
+  })
+
+  it('macOS 的两个选项都能被选中并发出去（Intel / Apple Silicon）', async () => {
+    stubBrowser('Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5)', 'MacIntel')
+    const { seen } = stubBlob(() => new Response(new Blob(['x']), { status: 200 }))
+    const w = mountIn(DevicesPage)
+    await flush(w)
+
+    await platformSelect(w).setValue('mac/amd64')
+    await w.vm.$nextTick()
+    downloadButton(w).click()
+    await flush(w)
+
+    await platformSelect(w).setValue('mac/arm64')
+    await w.vm.$nextTick()
+    downloadButton(w).click()
+    await flush(w)
+
+    expect(seen.map((u) => `${u.searchParams.get('os')}/${u.searchParams.get('arch')}`)).toEqual([
+      'mac/amd64',
+      'mac/arm64',
+    ])
+  })
+
+  it('猜不到平台 → 下拉框空着、下载按钮 disabled，且提示「请选择平台」', async () => {
+    // 空 UA = 认不出操作系统。这时**不许**猜成 Linux：猜错的话 Windows 用户
+    // 会以为自己选对了，拿到一个跑不起来的 Linux 文件，而界面上没有任何提示。
+    stubBrowser('', '')
+    const { seen } = stubBlob(() => new Response(new Blob(['x']), { status: 200 }))
+    const w = mountIn(DevicesPage)
+    await flush(w)
+
+    expect(platformSelect(w).element.value).toBe('')
+    const btn = downloadButton(w)
+    expect(btn.disabled, '没选平台时必须禁用下载按钮').toBe(true)
+
+    // 禁用之外，还要有一句看得见的提示——只说「禁用」会让用户找不到原因。
+    expect(w.element.textContent ?? '').toContain('请选择平台')
+
+    // **断言的另一半**：按钮禁用了→点了不能发请求。只断言 `disabled` 时，
+    // 一个「按钮禁用但 `@click` 照样发请求」的实现仍然全绿，而它真正的问题
+    // 是「没选平台就按后端自己的平台回落」——那正是这条缺陷要消灭的行为。
+    btn.click()
+    await flush(w)
+    expect(seen, '没选平台时一个 /api/agent-binary 请求都不该发').toHaveLength(0)
+  })
+
+  it('能认出来的浏览器有默认值（猜一个，用户仍能改）', async () => {
+    stubBrowser('Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Win32')
+    stubBlob(() => new Response(new Blob(['x']), { status: 200 }))
+    const w = mountIn(DevicesPage)
+    await flush(w)
+
+    expect(platformSelect(w).element.value).toBe('windows/amd64')
+    expect(downloadButton(w).disabled).toBe(false)
+  })
+
+  it('下拉框的选项恰好是后端闭集投影出的六种组合', async () => {
+    stubBrowser('Mozilla/5.0 (X11; Linux x86_64)', 'Linux x86_64')
+    stubBlob(() => new Response(new Blob(['x']), { status: 200 }))
+    const w = mountIn(DevicesPage)
+    await flush(w)
+
+    const labels = [...platformSelect(w).element.querySelectorAll('option')]
+      .map((o) => o.textContent?.trim() ?? '')
+      // 第一项是「请选择平台」（空值占位），不是平台。
+      .filter((t) => t !== '请选择平台')
+    expect(labels).toEqual([
+      'Windows x64',
+      'Windows ARM64',
+      'macOS Intel',
+      'macOS Apple Silicon',
+      'Linux x64',
+      'Linux ARM64',
+    ])
+  })
+
+  it('构造出的 URL 参数值全部来自闭集（六种组合逐个走一遍）', async () => {
+    stubBrowser('Mozilla/5.0 (X11; Linux x86_64)', 'Linux x86_64')
+    const { seen } = stubBlob(() => new Response(new Blob(['x']), { status: 200 }))
+    const w = mountIn(DevicesPage)
+    await flush(w)
+
+    const combos = [
+      ['windows/amd64', 'windows', 'amd64'],
+      ['windows/arm64', 'windows', 'arm64'],
+      ['mac/amd64', 'mac', 'amd64'],
+      ['mac/arm64', 'mac', 'arm64'],
+      ['linux/amd64', 'linux', 'amd64'],
+      ['linux/arm64', 'linux', 'arm64'],
+    ] as const
+    for (const [key] of combos) {
+      await platformSelect(w).setValue(key)
+      await w.vm.$nextTick()
+      downloadButton(w).click()
+      await flush(w)
+    }
+
+    expect(seen).toHaveLength(combos.length)
+    // 后端闭集（`agent_binary.rs:154` 的 `normalize_query_platform`）：
+    // os ∈ {windows, mac, macos, darwin, linux}，arch ∈ {amd64, x86_64, arm64, aarch64}。
+    // 前端只该用**短名**那一支，且每一个值都必须在这个集合里——
+    // 一个 `window`（少了 s）或 `x64` 会让后端回 400，而用户只看到「下载失败」。
+    const OS = new Set(['windows', 'mac', 'linux'])
+    const ARCH = new Set(['amd64', 'arm64'])
+    for (const [i, u] of seen.entries()) {
+      const [wantKey, wantOs, wantArch] = combos[i]
+      expect(wantKey).toBe(`${wantOs}/${wantArch}`)
+      expect(OS.has(u.searchParams.get('os') ?? ''), `os 越界：${u.search}`).toBe(true)
+      expect(ARCH.has(u.searchParams.get('arch') ?? ''), `arch 越界：${u.search}`).toBe(true)
+      expect(u.searchParams.get('os')).toBe(wantOs)
+      expect(u.searchParams.get('arch')).toBe(wantArch)
+    }
+  })
+
+  it('下载失败（网络错误）→ 行内红字「下载失败，请重试」，不弹 alert', async () => {
+    stubBrowser('Mozilla/5.0 (X11; Linux x86_64)', 'Linux x86_64')
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => undefined)
+    vi.spyOn(URL, 'createObjectURL').mockImplementation(() => 'blob:x')
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input), 'http://hub.local')
+        if (url.pathname === '/api/agent-binary') throw new Error('network down')
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }),
+    )
+    const w = mountIn(DevicesPage)
+    await flush(w)
+
+    downloadButton(w).click()
+    await flush(w)
+
+    const err = w.element.querySelector('.af-field__error')
+    expect(err?.textContent?.trim()).toBe('下载失败，请重试')
+    // 不弹 alert：它会阻断整页，而且只能显示一句没法指到控件的话。
+    expect(alertSpy).not.toHaveBeenCalled()
+  })
+
+  it('下载失败（404）同样是「下载失败，请重试」', async () => {
+    stubBrowser('Mozilla/5.0 (X11; Linux x86_64)', 'Linux x86_64')
+    stubBlob(
+      () =>
+        new Response(JSON.stringify({ error: 'not_found' }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    )
+    const w = mountIn(DevicesPage)
+    await flush(w)
+
+    downloadButton(w).click()
+    await flush(w)
+
+    expect(w.element.querySelector('.af-field__error')?.textContent?.trim()).toBe(
+      '下载失败，请重试',
+    )
   })
 })

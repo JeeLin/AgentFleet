@@ -62,6 +62,50 @@ export interface DownloadPlatform {
 }
 
 /**
+ * 下载入口给用户看的**闭集**：六种平台组合，一种都不能多、一种都不能少。
+ *
+ * 为什么不给自由输入：`?os=` / `?arch=` 在 Hub 侧是闭集（`agent_binary.rs:154`
+ * 的 `normalize_query_platform`），闭集之外的写法直接 400。让用户敲字符串，
+ * 唯一的结果是「敲错 → 400 → 看起来像下载坏了」。所以选项表就是后端闭集的
+ * **一次投影**，`value` 一定落在 `DownloadPlatform` 里。
+ *
+ * `label` 用用户认得的说法（`Windows x64` / `macOS Apple Silicon`），`value` 用
+ * 后端产物名（`amd64` / `mac`）——两者混用的话，用户在界面上看到 `mac`
+ * 会以为是自己打错了。
+ */
+export const DOWNLOAD_PLATFORM_OPTIONS = [
+  { label: 'Windows x64', os: 'windows', arch: 'amd64' },
+  { label: 'Windows ARM64', os: 'windows', arch: 'arm64' },
+  { label: 'macOS Intel', os: 'mac', arch: 'amd64' },
+  { label: 'macOS Apple Silicon', os: 'mac', arch: 'arm64' },
+  { label: 'Linux x64', os: 'linux', arch: 'amd64' },
+  { label: 'Linux ARM64', os: 'linux', arch: 'arm64' },
+] as const satisfies ReadonlyArray<DownloadPlatform & { label: string }>
+
+/**
+ * 下拉框用的稳定字符串值（`windows/arm64`）。
+ *
+ * 为什么不直接把 `{os, arch}` 对象塞进 `v-model`：`<select>` 的 `value` 只能是
+ * 字符串，塞对象时 Vue 会拿 `[object Object]` 去比对选项，结果是「选完回到第一项」，
+ * 而症状看起来像下拉框坏了。拼成 `os/arch` 之后，它同时是人可读的诊断信息。
+ */
+export function platformKey(p: DownloadPlatform): string {
+  return `${p.os}/${p.arch}`
+}
+
+/**
+ * 把下拉框的值解析回闭集内的平台；认不出来返回 `null`（= 「请选择平台」）。
+ *
+ * 走查 `DOWNLOAD_PLATFORM_OPTIONS` 而不是按 `/` 切开再断言：切开的写法会接受
+ * 任何 `x/y`，把非法值一路带到 `?os=` 上、由后端 400 兜底——那时错误信息
+ * 只剩一个 `bad_request`，看不出是前端把值放歪了。
+ */
+export function parsePlatformKey(key: string): DownloadPlatform | null {
+  const hit = DOWNLOAD_PLATFORM_OPTIONS.find((o) => platformKey(o) === key)
+  return hit ? { os: hit.os, arch: hit.arch } : null
+}
+
+/**
  * 从 UA / `navigator.platform` 推断**浏览器这台机器**的平台。
  *
  * Hub 缺省用 `std::env::consts::OS`（Linux Hub 上恒为 `linux`），不把平台传出去
@@ -100,6 +144,29 @@ export function detectDownloadPlatform(userAgent: string, platform = ''): Downlo
   // `navigator.platform` 单独给 `MacIntel`/`Win32`/`Linux x86_64` 时上面已覆盖；
   // 完全认不出来时退回 Linux/amd64（CI 与 happy-dom 的默认值都是它）。
   return { os: 'linux', arch: 'amd64' }
+}
+
+/**
+ * 下载入口的**默认值**：猜一个，但猜不出来就**不猜**。
+ *
+ * 与 `detectDownloadPlatform` 的差别只有最后那一条兜底：那个函数的契约是
+ * 「永远给一个平台」（单测里要稳定），而这里是 UI 默认值——把
+ * 「认不出的浏览器」默认成 `Linux x64` 会让 Windows 用户以为自己选对了，
+ * 点下去拿到一个跑不起来的 Linux 文件，而界面上没有任何东西提示他选错了。
+ * 所以认不出来时返回 `null`，页面据此禁用下载按钮并提示「请选择平台」——
+ * 让人主动选一次，比给一个看似合理的错答案好。
+ *
+ * **猜错不影响功能**：用户随时能改下拉框。这也是它只是「默认值」、
+ * 不写进地址栏也不持久化的理由。
+ */
+export function guessDownloadPlatform(userAgent: string, platform = ''): DownloadPlatform | null {
+  // UA 与 platform 拼起来后仍然认不出任何一类系统（含空串）→ 不猜。
+  const probe = `${userAgent} ${platform}`.trim()
+  const recognized =
+    /win(?:dows|32|64|nt)|\bwindows\b|macintosh|\bmac\s*os\b|\bmacos\b|\bmac\b|darwin|linux|x11|ubuntu|fedora|debian|\bbsd\b/i.test(
+      probe,
+    )
+  return recognized ? detectDownloadPlatform(userAgent, platform) : null
 }
 
 /**
@@ -270,15 +337,37 @@ export function describeCleanupPolicy(policy: DeviceBinding['cleanup_policy']): 
  * `os` / `arch` 必须显式带上：省略时后端回落到 `std::env::consts::OS`，
  * 而 Hub 跑在 Linux 上——于是 Windows/macOS 用户会拿到一个跑不起来的
  * Linux 文件。名字用后端产物名的那一套（`mac` 而不是 `macos`）。
+ *
+ * # query 用 `URLSearchParams` 构造，不手拼字符串
+ *
+ * `os` / `arch` 是用户可选的闭集值（`DOWNLOAD_PLATFORM_OPTIONS`），但**闭集
+ * 是页面侧的承诺，不是这一层的保证**——调用方（包括将来的另一个页面、以及
+ * 一遍单测）完全可能传进来任意字符串。手拼 `?os=${os}&arch=${arch}` 时，
+ * 一个含 `&` / `#` / 空格的值会悄悄把参数拆成别的形状，而症状是「后端回了
+ * 400 或选错了架构」，看不出是编码问题。`URLSearchParams` 负责转义，这一层
+ * 就永远不需要相信调用方。
  */
 export function downloadAgentBinary(
   options?: RequestOptions & { os?: DownloadPlatform['os']; arch?: DownloadPlatform['arch'] },
 ): Promise<{ blob: Blob; filename: string }> {
   const { os, arch, ...rest } = options ?? {}
-  return request('/api/agent-binary', {
+  // `undefined` 是「这个参数不存在，让后端按编译期平台回落」——**不能**变成
+  // 空串：后端把空串当闭集之外的非法值直接 400（见 `agent_binary.rs:154`
+  // 的 `normalize_query_platform`），那会把「没选平台」变成「下载失败」。
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(rest.query ?? {})) {
+    if (v === undefined) continue
+    qs.set(k, v === null ? '' : String(v))
+  }
+  if (os !== undefined) qs.set('os', os)
+  if (arch !== undefined) qs.set('arch', arch)
+  const search = qs.toString()
+  return request(search ? `/api/agent-binary?${search}` : '/api/agent-binary', {
     ...rest,
     method: 'GET',
-    query: { ...rest.query, os, arch },
+    // 已由上面的 `URLSearchParams` 编码进 path，这里不再走 `withQuery`，
+    // 否则 `request` 会二次拼一遍 `?`。
+    query: undefined,
   }).then(async (r) => {
     // 文件名**从响应头读**，不在前端另写一个。
     //

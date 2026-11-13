@@ -29,9 +29,12 @@ import DeviceTable from '@/domains/device/DeviceTable.vue'
 import type { DeviceSummary } from '@/domains/device/api'
 import {
   deleteDevice,
-  detectDownloadPlatform,
+  DOWNLOAD_PLATFORM_OPTIONS,
   downloadAgentBinary,
+  guessDownloadPlatform,
   listDevices,
+  parsePlatformKey,
+  platformKey,
 } from '@/domains/device/api'
 import { describeReadFailure } from '@/shared/http'
 import { percent, relativeTime } from '@/shared/format'
@@ -101,24 +104,59 @@ function inspect(device: DeviceSummary): void {
  * 没有的人在离线/内网环境里够不到 GitHub，于是空态就成了一句空话——所以
  * 这里给它一条实际的路。
  *
+ * # 为什么要给用户一个平台下拉
+ *
+ * 原来这里把 `detectDownloadPlatform(navigator.userAgent, …)` 的推断结果直接
+ * 拼进 `?os=&arch=`，也就是**只能**下到「浏览器这台机器」的版本。用户在
+ * Windows 上想给一台 Linux 服务器准备 afcli、或在 x86_64 Mac 上装的是
+ * Apple Silicon 版，都没有任何入口能改——而后端的 `?os=&arch=` 早就是闭集、
+ * 镜像里也备了别的平台，能力在、只是没有按钮。所以入口从「一个按钮」变成
+ * 「平台下拉 + 下载按钮」。
+ *
+ * 默认值由 `guessDownloadPlatform` 猜一个；**猜错不影响功能**（用户能改），
+ * 而**猜不到就不猜**——猜成 Linux 会让 Windows 用户以为自己选对了，拿到一个
+ * 跑不起来的文件。认不出来时下拉框空着、下载按钮禁用、旁边写「请选择平台」。
+ *
  * 三种结果分别处置，**不能合并成一条「下载失败」**：
  * - 成功 → 触发浏览器下载；
  * - `agent_binary_unavailable` → 裸机跑 afhub 时磁盘上没有 afcli，这是
  *   **正常部署形态**，提示应说「这台 Hub 没配」，不是「坏了」；
- * - 其它 → 真的出错了。
+ * - 其它（网络错误 / 404 / 400）→ 行内红字「下载失败，请重试」，不弹 alert。
  */
 const downloadState = ref<'idle' | 'busy'>('idle')
 const downloadError = ref<string | null>(null)
 
+/**
+ * 下拉框选中值（`windows/arm64` 这种形态，理由见 `api.ts` 的 `platformKey`）。
+ * 空串 = 还没选——这时按钮必须禁用，因为不带 `os`/`arch` 请求时后端会回落到
+ * **Hub 自己**的平台（Linux），Windows/macOS 用户会拿到一个跑不起来的文件。
+ *
+ * 默认值在 `setup` 里就地算一次（不放进 `onMounted`）：骨架屏期间控件还没
+ * 渲染，晚一步赋值会让第一帧闪一个「已选中」的下拉框。
+ */
+const downloadPlatformKey = ref<string>(
+  (() => {
+    const guessed = guessDownloadPlatform(navigator.userAgent, navigator.platform)
+    return guessed ? platformKey(guessed) : ''
+  })(),
+)
+
+/** 选中的平台；`null` = 没选/认不出的值 → 下载按钮禁用。 */
+const selectedPlatform = computed(() => parsePlatformKey(downloadPlatformKey.value))
+
 async function downloadCli(): Promise<void> {
+  const platform = selectedPlatform.value
+  // 按钮 `disabled` 已经拦了一层，这里再拦一次：禁用态是靠模板属性实现的，
+  // 而 `@click` 仍可被键盘/程序触发。没有平台就发请求，等于让后端按它自己的
+  // 平台回落——那正是这个缺陷要消灭的行为。
+  if (!platform) return
   downloadState.value = 'busy'
   downloadError.value = null
   try {
-    // 把**浏览器这台机器**的平台交给 Hub：不传时后端按 `std::env::consts::OS`
-    // 回落，而 Hub 跑在 Linux 上，Windows/macOS 用户就会拿到 Linux 二进制。
-    // 推断在 `api.ts` 里是纯函数，页面只读 `navigator` 这两个现成字段。
+    // 把**用户选的**平台交给 Hub，而不是浏览器推断的那一个。
     const { blob, filename } = await downloadAgentBinary({
-      ...detectDownloadPlatform(navigator.userAgent, navigator.platform),
+      os: platform.os,
+      arch: platform.arch,
     })
     // `URL.createObjectURL` + 一个隐藏 `<a>`：这是唯一在主流浏览器上都能
     // 触发下载、且不必让用户先存到别处的做法。用完立刻 revoke——不释放会在
@@ -140,7 +178,10 @@ async function downloadCli(): Promise<void> {
     downloadError.value =
       code === 'agent_binary_unavailable'
         ? '这台 Hub 没有可下发的 afcli：直接跑 afhub（不经容器）时它是外挂文件，需要在 Hub 机器上配 AFCLI_BINARY_PATH 指向它。'
-        : describeReadFailure(err, 'afcli')
+        : // 网络错误、404、400 一律这一句：用户在这里能做的只有「再点一次」或
+          // 「换一个平台」。把 `bad_request` 之类的 code 摊给用户看，既不能指导
+          // 下一步，又让人以为 Hub 坏了。
+          '下载失败，请重试'
   } finally {
     downloadState.value = 'idle'
   }
@@ -267,16 +308,45 @@ async function remove(device: DeviceSummary): Promise<void> {
       >
         <!-- 上面那句「在设备上跑 afcli run」有个前提：那台设备上得**先有**
              afcli。离线/内网环境里够不到 GitHub，那段话就成了一句空话——
-             所以这里给它一条实际的路。 -->
-        <button
-          class="af-btn af-btn--sm"
-          type="button"
-          :disabled="downloadState === 'busy'"
-          @click="downloadCli"
-        >
-          {{ downloadState === 'busy' ? '正在准备下载…' : '下载 afcli' }}
-        </button>
-        <p v-if="downloadError" class="af-t-mute" role="alert">{{ downloadError }}</p>
+             所以这里给它一条实际的路。
+
+             平台是**下拉框**而不是「按浏览器自动决定」：用户常常要给另一台
+             架构不同的机器准备 afcli（Windows 上给 Linux 服务器备一份、x86
+             Mac 上装 Apple Silicon 版），只按浏览器推断时没有任何入口能改。
+             选项来自 `DOWNLOAD_PLATFORM_OPTIONS`，与后端闭集一一对应。 -->
+        <div class="af-row gap-2 af-cli-dl">
+          <label class="af-field__label" for="af-cli-platform">设备平台</label>
+          <select
+            id="af-cli-platform"
+            v-model="downloadPlatformKey"
+            class="af-select af-cli-dl__select"
+          >
+            <!-- 空值是「猜不到平台」时的落点。它必须是一个**真的选项**，
+                 否则 `<select>` 会把第一项（Windows x64）当默认值显示出来，
+                 用户看到的是一个自己没选过的平台。 -->
+            <option value="">请选择平台</option>
+            <option
+              v-for="opt in DOWNLOAD_PLATFORM_OPTIONS"
+              :key="`${opt.os}/${opt.arch}`"
+              :value="`${opt.os}/${opt.arch}`"
+            >
+              {{ opt.label }}
+            </option>
+          </select>
+          <button
+            class="af-btn af-btn--sm"
+            type="button"
+            :disabled="downloadState === 'busy' || selectedPlatform === null"
+            :title="selectedPlatform === null ? '请先选择要下载的平台' : undefined"
+            @click="downloadCli"
+          >
+            {{ downloadState === 'busy' ? '正在准备下载…' : '下载 afcli' }}
+          </button>
+        </div>
+        <!-- 失败一律**行内红字**，不弹 alert：alert 会阻断整页、且只能显示一句
+             没法指到具体控件的话；这里紧挨着下载按钮，用户看得见自己在哪一步失败的。 -->
+        <p v-if="downloadError" class="af-field__error" role="alert">{{ downloadError }}</p>
+        <p v-else-if="selectedPlatform === null" class="af-field__hint">请选择平台</p>
       </EmptyState>
 
       <template v-else>
@@ -331,6 +401,16 @@ async function remove(device: DeviceSummary): Promise<void> {
 .af-dev-summary {
   margin-bottom: var(--af-space-5);
   font-size: var(--af-text-sm);
+}
+/* 下载行：下拉框按内容宽度、按钮按内容宽度，别让 Select 的 `width: 100%`
+   把按钮挤到第二行。这条只作用于本页的这个控件，不动全局 `.af-select`。 */
+.af-cli-dl {
+  align-items: center;
+  flex-wrap: wrap;
+}
+.af-cli-dl__select {
+  width: auto;
+  min-width: 160px;
 }
 .af-inspect {
   margin-top: var(--af-space-5);
