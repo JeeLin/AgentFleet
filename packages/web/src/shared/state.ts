@@ -21,8 +21,18 @@ export type DeviceStatus = 'online' | 'reconnecting' | 'offline' | 'unknown'
 /** 会话态。`GET /api/sessions` 的 `status` 字段取这三个值。 */
 export type SessionStatus = 'active' | 'disconnected' | 'ended'
 
-/** 渲染层认识的全部态。设备态与会话态都在其中。 */
-export type AnyStatus = DeviceStatus | SessionStatus
+/**
+ * 任务态。`GET /api/projects/{id}/tasks` 的 `state` 字段取这六个值
+ * （`docs/architecture/task-model.md:35-40`）。
+ *
+ * 这六个**字面值**与 Rust 侧 `TaskState` 的 `as_str` 逐字对齐——那份实现才是
+ * 状态的真相源（含 10 条边的状态机）。前端只认字符串，不复制状态机：
+ * 一次转移合不合法由服务端 `check_transition` 判，非法转移回 409。
+ */
+export type TaskStatus = 'pending' | 'queued' | 'running' | 'review' | 'done' | 'failed'
+
+/** 渲染层认识的全部态。设备态、会话态、任务态都在其中。 */
+export type AnyStatus = DeviceStatus | SessionStatus | TaskStatus
 
 /** 字形的填充通道。CSS 用 `[data-glyph]` 选，不看字形字符本身。 */
 export type GlyphFill = 'filled' | 'partial' | 'hollow'
@@ -40,12 +50,31 @@ export interface StateSpec {
 }
 
 /**
- * 态表。
+ * 态表（**十三个态**：设备四 + 会话三 + 任务六）。
  *
- * 注意 `components.css` §5 的颜色只覆盖 `online / reconnecting / offline /
- * active / disconnected / ended` 六个值——本表与它一一对应，改一处必须改两处，
- * 而 `state.test.ts` 断言了这个对应关系（表里多一个态而 CSS 没有颜色，
- * 在深色底上就是「继承主文字色」，用户看到的是在线设备显示成灰色）。
+ * 注意 `components.css` §5 的颜色只覆盖本表里的值——本表与它一一对应，
+ * 改一处必须改两处，而 `state.test.ts` 断言了这个对应关系（表里多一个态而
+ * CSS 没有颜色，在深色底上就是「继承主文字色」，用户看到的是在线设备显示成灰色）。
+ *
+ * ── 任务六态的字形为什么这么选 ──────────────────────────────────────
+ * `running` **复用** `●`：它与 `online` / `active` 同为「绿实心 = 活的」，
+ * 规范 §3.4 已有的复用先例；而设备态与任务态不在同一张列表上出现
+ * （设备页 / 会话页 / 看板是三个屏），所以不会有人同时看到两个 `●` 却要分辨。
+ * 其余五个任务态一律用**从未出现过**的字形，保证灰度下也能与既有七态分开：
+ *
+ *   pending ◻ 空心   —— 空方块：还没开始（方块 = 事，方块空着 = 还没动）
+ *   queued  ◔ 半轮   —— 缺右下的一轮：已排队、还没动
+ *   running ● 实心   —— 复用，见上
+ *   review  ◑ 半轮   —— 缺左的一轮
+ *   done    ✓       —— 完成是一个勾，不是又一个圆
+ *   failed  ✕       —— 失败是一个叉，与勾同族（同字号同样式），一眼对立
+ *
+ * **已知取舍：六个任务态里仍有两个与既有态同族**——`◻`（pending）形状同族于
+ * `○`（offline / ended），`◔` / `◑` 同族于 `◐`（reconnecting / disconnected）。
+ * 但**字符本身互不相同**（`state.test.ts` 逐个比的是字符，不是「族」），所以
+ * 灰度下能分开；这与规范 §3.4 已允许 `◐` 由两个会话态共用是同一条取舍。
+ * 为什么不再往「异族字形」上加：进一步异族化会落到 `⚠` / `◆` / `▲` 这类
+ * **与告警 / 优先级语义撞车**的字符上——字形本身会被误读成第二个含义。
  */
 export const STATES: Readonly<Record<AnyStatus, StateSpec>> = {
   online: { state: 'online', glyph: '●', fill: 'filled', label: '在线' },
@@ -55,7 +84,35 @@ export const STATES: Readonly<Record<AnyStatus, StateSpec>> = {
   active: { state: 'active', glyph: '●', fill: 'filled', label: '运行中' },
   disconnected: { state: 'disconnected', glyph: '◐', fill: 'partial', label: '断线' },
   ended: { state: 'ended', glyph: '○', fill: 'hollow', label: '已结束' },
+  pending: { state: 'pending', glyph: '◻', fill: 'hollow', label: '待办' },
+  queued: { state: 'queued', glyph: '◔', fill: 'partial', label: '排队中' },
+  running: { state: 'running', glyph: '●', fill: 'filled', label: '执行中' },
+  review: { state: 'review', glyph: '◑', fill: 'partial', label: '待验收' },
+  done: { state: 'done', glyph: '✓', fill: 'filled', label: '已完成' },
+  failed: { state: 'failed', glyph: '✕', fill: 'filled', label: '失败' },
 }
+
+/** 任务六态的取值（与 `STATES` 的键同源，这里只列出来供遍历与断言用）。 */
+export const TASK_STATE_NAMES: readonly TaskStatus[] = [
+  'pending',
+  'queued',
+  'running',
+  'review',
+  'done',
+  'failed',
+]
+
+/**
+ * 字形复用白名单：**只有这几组**允许同形（`docs/design-system.md` §3.4）。
+ *
+ * 写成数据而不是散在组件断言里：`state.test.ts` 拿它当「允许的复用」的
+ * 唯一依据，同时也反向校验它本身没写错（组内必须真的同形、组外没有态用这个字形）。
+ */
+export const GLYPH_SHARING_GROUPS: readonly (readonly AnyStatus[])[] = [
+  ['online', 'active', 'running'],
+  ['reconnecting', 'disconnected'],
+  ['offline', 'ended'],
+]
 
 /**
  * 取一个态的描述。表外的值**原样回显**而不是抛错：
@@ -77,4 +134,20 @@ export const DEVICE_STATUSES: readonly DeviceStatus[] = [
   'reconnecting',
   'offline',
   'unknown',
+]
+
+/**
+ * 任务态的取值。与 `TaskStatus` 同源，顺序照 `task-model.md:35-40` 的列序
+ * （看板的列也按这个序排）。
+ *
+ * 它存在的理由与 `DEVICE_STATUSES` 一样：**列出一份而不是在各处手抄**。
+ * 看板分列、筛选下拉、契约测试都从这里取。
+ */
+export const TASK_STATUSES: readonly TaskStatus[] = [
+  'pending',
+  'queued',
+  'running',
+  'review',
+  'done',
+  'failed',
 ]

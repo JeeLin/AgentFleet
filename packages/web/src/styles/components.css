@@ -387,6 +387,16 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 .af-state[data-state='ended']    { color: var(--af-fg-tertiary); }
 .af-state[data-state='building'] { color: var(--af-info-fg); }
 .af-state[data-state='readonly'] { color: var(--af-fg-tertiary); }
+/* 任务六态（`shared/state.ts` 的 `TaskStatus`）。颜色按「用户该做什么决定」分，
+   不按色相分（tokens.css §4）：待办 = 还不该看它（tertiary）；排队中 / 待验收 =
+   还能动但你该知道（warn）；执行中 / 已完成 = 成功一侧（ok）；失败 = 阻断（danger）。
+   **只用既有 token**：任务态没有专属色，它借的是同一套语义色。 */
+.af-state[data-state='pending'] { color: var(--af-fg-tertiary); }
+.af-state[data-state='queued'] { color: var(--af-warn-fg); }
+.af-state[data-state='running'] { color: var(--af-ok-fg); }
+.af-state[data-state='review'] { color: var(--af-warn-fg); }
+.af-state[data-state='done'] { color: var(--af-ok-fg); }
+.af-state[data-state='failed'] { color: var(--af-danger-fg); }
 
 /* 字形 + 填充差异：颜色之外的两条备份通道 */
 .af-state__glyph[data-glyph='filled']  { font-style: normal; }
@@ -1560,3 +1570,103 @@ kbd, .kbd {
 .af-callout--info {
   border-color: var(--af-info-line); border-left-color: var(--af-info); background: var(--af-info-bg);
 }
+
+/* ===========================================================================
+   任务组件：TaskCard / FailurePanel / AcceptancePanel
+   -------------------------------------------------------------------------
+   三个组件是纯展示（里程碑 §4），所以这里的规则只做「排版与可读性」，
+   不做任何状态判断以外的逻辑——颜色与文案一律来自 `shared/state.ts` 的
+   词表与组件内的失败映射表。
+
+   **不新增 token**：这一段用到的 `--af-*` 全部在 `tokens.css` 里已有定义
+   （`state.test.ts` / 组件测试里有一条差集断言守着）。
+   =========================================================================== */
+
+/* ---- 任务卡（看板里一格） ---------------------------------------------- */
+
+/* 卡片是 `<button>` 而不是 `<a>`：它在看板里触发的是「打开这张卡」这个动作，
+   而不是导航到另一个文档。用 button 的额外好处是键盘 `Tab` 天然可达、
+   `Enter` / `Space` 天然触发，不需要自己代理键位。 */
+.af-taskcard {
+  display: flex; flex-direction: column; gap: var(--af-space-2);
+  width: 100%; text-align: left; align-items: stretch;
+  background: var(--af-surface-2); border: 1px solid var(--af-border-subtle);
+  border-radius: var(--af-radius-sm); padding: var(--af-space-3);
+  color: inherit; font: inherit; cursor: pointer;
+  transition: background-color var(--af-dur-instant) linear, border-color var(--af-dur-instant) linear;
+}
+.af-taskcard:hover { background: var(--af-surface-3); border-color: var(--af-border-strong); }
+.af-taskcard:focus-visible { outline: 2px solid var(--af-border-focus); outline-offset: -2px; }
+
+/* 标题单行省略 + `title` 全文（原型 `board.js:184-253` 的同一条口径）：
+   看板的价值是扫一眼看全，两三个字折行会让六列一起垮掉。 */
+.af-taskcard__title {
+  font-size: var(--af-text-sm); font-weight: var(--af-weight-medium);
+  line-height: var(--af-leading-base); color: var(--af-fg-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 状态行：徽标 + （仅 running）已跑时长。两者同一行，因为「在跑多久了」
+   是对「执行中」这个态的注解，不是第二块信息。 */
+.af-taskcard__status {
+  display: flex; align-items: center; gap: var(--af-space-2); flex-wrap: wrap;
+}
+/* 等宽数字：计数器每 10 秒跳一次时不能左右抖动。 */
+.af-taskcard__elapsed {
+  font-size: var(--af-text-2xs); color: var(--af-fg-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 失败人话：卡面上最该被看见的一行，所以给底色 + 左线（原型 `.af-card__why`）。
+   颜色用 `--af-danger-fg` 而不是 `--af-danger`：前者是文字用的那一档
+   （`tokens.css` §4：小字必须用它）。 */
+.af-taskcard__why {
+  font-size: var(--af-text-2xs); line-height: var(--af-leading-snug);
+  color: var(--af-danger-fg); background: var(--af-danger-bg);
+  border-left: 2px solid var(--af-danger);
+  border-radius: 0 var(--af-radius-sm) var(--af-radius-sm) 0;
+  padding: var(--af-space-1) var(--af-space-2);
+}
+.af-taskcard__attempt { font-size: var(--af-text-2xs); color: var(--af-fg-tertiary); }
+
+/* 标签行与元信息行：胶囊 + 时间。两者都小一号，卡片才有一眼可分的层级。 */
+.af-taskcard__tags { display: flex; align-items: center; gap: var(--af-space-2); flex-wrap: wrap; }
+.af-taskcard__tag {
+  display: inline-flex; align-items: center;
+  font-size: var(--af-text-2xs); line-height: var(--af-leading-snug);
+  padding: 0 var(--af-space-2); border-radius: var(--af-radius-full);
+  border: 1px solid var(--af-warn-line); color: var(--af-warn-fg); background: var(--af-warn-bg);
+  white-space: nowrap;
+}
+.af-taskcard__meta {
+  font-size: var(--af-text-2xs); color: var(--af-fg-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 失败面板 / 验收面板 ---------------------------------------------- */
+
+/* 两个面板共用一套「键值 + 动作」的排版：键列窄而固定，动作排一行。
+   面板本身用的是 `.af-region` 的既有观感，这里只补内容区的间距。 */
+.af-failurepanel__kv,
+.af-acceptancepanel__kv {
+  display: grid; grid-template-columns: 72px 1fr;
+  gap: var(--af-space-2) var(--af-space-4);
+  font-size: var(--af-text-sm); margin: var(--af-space-3) 0 var(--af-space-4);
+}
+.af-kv__k { color: var(--af-fg-tertiary); font-size: var(--af-text-xs); padding-top: 1px; }
+.af-kv__v { color: var(--af-fg-secondary); overflow-wrap: anywhere; }
+
+/* 动作行：允许折行——五个动作在窄栏里必须还能全部看见
+   （里程碑 §4「少任何一个动作都要写明去向」）。 */
+.af-failurepanel__actions,
+.af-acceptancepanel__actions { flex-wrap: wrap; row-gap: var(--af-space-2); }
+
+/* 关闭原因 / 编辑原因：就在「关掉」按钮左边，因为它是那个动作的必填参数。
+   宽度随内容走（`flex: 0 1 200px`），不占满整行。 */
+.af-failurepanel__close {
+  display: flex; align-items: center; gap: var(--af-space-2);
+  flex-wrap: wrap; margin-top: var(--af-space-3);
+}
+.af-failurepanel__input { flex: 0 1 200px; min-width: 120px; }
+.af-acceptancepanel__note { margin-top: var(--af-space-3); width: 100%; }
+
