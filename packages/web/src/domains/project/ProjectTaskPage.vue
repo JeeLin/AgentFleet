@@ -48,6 +48,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
+import PageHead from '@/domains/shared/components/PageHead.vue'
 import StateBadge from '@/domains/shared/components/StateBadge.vue'
 import AcceptancePanel from '@/domains/project/AcceptancePanel.vue'
 import FailurePanel from '@/domains/project/FailurePanel.vue'
@@ -443,7 +444,7 @@ function backToBoard(): void {
 
     <template v-else-if="task">
       <!-- 页头：返回看板 + 标题 + 状态胶囊 + 需人工验收标签 -->
-      <header class="af-page__head">
+      <PageHead>
         <div>
           <h1 class="af-page__title">
             {{ task.title }}
@@ -461,10 +462,10 @@ function backToBoard(): void {
             {{ stateLabel }} · 第 {{ task.version }} 版 · 更新于 {{ relativeTime(task.updated_at, now) }}
           </p>
         </div>
-        <div class="af-page__actions">
+        <template #actions>
           <button type="button" class="af-btn af-btn--ghost" @click="backToBoard">← 看板</button>
-        </div>
-      </header>
+        </template>
+      </PageHead>
 
       <!-- 写失败：**留在本页**（见文件头「写失败与读失败分开」）。 -->
       <p v-if="actionFailure" class="af-form__error" role="alert" data-alert="write">

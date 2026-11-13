@@ -24,6 +24,7 @@
 import { computed, onMounted, ref } from 'vue'
 
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
+import PageHead from '@/domains/shared/components/PageHead.vue'
 import StateBadge from '@/domains/shared/components/StateBadge.vue'
 import type { AgentDetail } from '@/domains/agent/api'
 import { getAgentDetail } from '@/domains/agent/api'
@@ -95,7 +96,7 @@ function openDevice(nodeId: string): void {
 
 <template>
   <div class="af-page af-agd">
-    <div class="af-page__head">
+    <PageHead>
       <div>
         <h1 class="af-page__title">
           {{ agentName }}
@@ -112,11 +113,12 @@ function openDevice(nodeId: string): void {
           <b>Agent 视角</b>与设备视角是同一批数据的两个问法。
         </p>
       </div>
-      <span class="af-spacer"></span>
-      <button class="af-btn af-btn--sm" type="button" :disabled="loading" @click="load">
-        刷新
-      </button>
-    </div>
+      <template #actions>
+        <button class="af-btn af-btn--sm" type="button" :disabled="loading" @click="load">
+          刷新
+        </button>
+      </template>
+    </PageHead>
 
     <div v-if="error" class="af-inline-error" role="alert">
       {{ error }}

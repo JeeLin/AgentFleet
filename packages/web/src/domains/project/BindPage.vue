@@ -29,6 +29,7 @@
 import { computed, onMounted, ref } from 'vue'
 
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
+import PageHead from '@/domains/shared/components/PageHead.vue'
 import {
   deleteProjectBinding,
   getProject,
@@ -207,23 +208,24 @@ onMounted(load)
 
 <template>
   <div class="af-page">
-    <div class="af-page__head">
+    <PageHead>
       <button type="button" class="af-btn af-btn--ghost" @click="navigate('/')">
         ← 回总览
       </button>
       <h1 class="af-page__title">绑定设备</h1>
       <span v-if="project" class="af-badge">{{ project.name }}</span>
       <span v-if="isolated" class="af-badge af-badge--warn">隔离式</span>
-      <span class="af-page__actions"></span>
-      <button
-        type="button"
-        class="af-btn af-btn--primary"
-        :disabled="saving"
-        @click="save"
-      >
-        {{ saving ? '正在保存…' : '完成，进看板' }}
-      </button>
-    </div>
+      <template #actions>
+        <button
+          type="button"
+          class="af-btn af-btn--primary"
+          :disabled="saving"
+          @click="save"
+        >
+          {{ saving ? '正在保存…' : '完成，进看板' }}
+        </button>
+      </template>
+    </PageHead>
 
     <p v-if="loading" class="af-muted">正在读取项目与设备…</p>
 

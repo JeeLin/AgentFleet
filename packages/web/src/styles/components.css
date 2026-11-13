@@ -262,6 +262,18 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
    要改两处——第二次改的那天必然只改一处。 */
 .af-keyhint { font-size: var(--af-text-sm); }
 .af-t-num { font-variant-numeric: tabular-nums; }
+
+/* 数字列钩子。**不是 `.af-t-num` 的别名**：`af-t-num` 只管 `font-variant-numeric`，
+   而这个类用在 `<dd class="af-num">` 这类**网格单元**上，还要右对齐——
+   网格里左对齐的数字列表看起来像一串标签，「配额 / 已用 / 使用率」三行的高位
+   对不齐，比较大小就要一个字符一个字符地数。
+
+   来历：`AgentDetailPage` 与 `DeviceDetailPage` 一共 6 处写了这个类名，
+   而样式表里从来没有它（v0.8.0 子任务 13 收口时由
+   `styles/class-usage.test.ts` 抓出来）。6 处里既有 `<dd>` 也有 `<span>`，
+   所以这里只给「数字该有的样子」，**不给块级布局**：排版仍由 `.af-kv`
+   （`grid-template-columns: 88px 1fr`）与那个 span 所在的容器决定。 */
+.af-num { font-variant-numeric: tabular-nums; text-align: right; }
 .af-fp { font-family: var(--af-font-mono); color: var(--af-fg-secondary); }
 .af-truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .af-hairline { height: 1px; background: var(--af-border-subtle); border: 0; margin: 0; }
@@ -1347,6 +1359,34 @@ kbd, .kbd {
   background: var(--af-surface-2); border-color: var(--af-border-strong);
 }
 .af-switch__title { margin: 0; }
+
+/* ---- `.af-head__title`：浮层 / 内联块里的块标题 ------------------------ */
+
+/* **这个名字是原型的，规则此前一条都没有**（v0.8.0 子任务 13 收口时发现）。
+ * `prototype/assets/app.css:125` 定义过它（那一份是「顶栏标题」：18px + 600 +
+ * 不换行），而生产样式表里从来没有 —— 于是 `BoardPage.vue` 两处
+ * （`:334` 看板页头的项目名、`:461` 新建任务对话框的标题）拿到的都是
+ * **浏览器默认的 h1/h2 尺寸**：34px / 24px、`font-weight: 700`、
+ * 自带 `line-height`。视觉结果是「项目名比页面标题大一圈」，
+ * 而这既不是原型的意图，也不是任何一处 token 的档位。
+ *
+ * 为什么**不**直接把原型那份 18px（= `--af-text-lg`）搬过来：原型那份描述的是
+ * 「顶栏标题」，而这两个调用点一个是看板页头里的**项目名**（与 `.af-switch__title`
+ * 同元素，应当跟页面标题同档）、一个是**对话框标题**（与 `.af-panel__title` 同档）。
+ * 两处的正确档位都是 `--af-text-lg` / 600，但正确的**家**不是「照抄原型」。
+ *
+ * 所以这条规则定成「块标题」而不是「顶栏标题」：字号唯一一档 `--af-text-lg`、
+ * 字重 600、不换行，**四边都不给**（margin / padding 由所在块给——
+ * 页头与对话框的内边距差了 `space-4` 与 `space-5` 两档，写死在这里就错一处）。
+ * 要页面级的 h1 请用 `.af-page__title`（18px 同档但带 `margin-bottom`，
+ * 是页面外壳的一部分）；这个类只服务于「已经在一个块里」的标题。
+ *
+ * 调用点：`BoardPage`（2 处）。**没有扩到别的页面**：剩下的页面标题一律走
+ * `.af-page__title`，这里多一个调用点就等于多一套标题规则。 */
+.af-head__title {
+  margin: 0; font-size: var(--af-text-lg); font-weight: var(--af-weight-semibold);
+  white-space: nowrap; line-height: var(--af-leading-snug);
+}
 
 /* 向下小箭头：用边框画，不依赖字体字形（字体缺这个字形时会变成一个方块）。 */
 .af-switch__chev {

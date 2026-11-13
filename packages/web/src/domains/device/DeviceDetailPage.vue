@@ -27,6 +27,7 @@
 import { computed, onMounted, ref } from 'vue'
 
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
+import PageHead from '@/domains/shared/components/PageHead.vue'
 import StateBadge from '@/domains/shared/components/StateBadge.vue'
 import type { DeviceBinding, DeviceDetail } from '@/domains/device/api'
 import { describeCleanupPolicy, getDeviceDetail, settledCount } from '@/domains/device/api'
@@ -123,7 +124,7 @@ function openProject(projectId: string): void {
 
 <template>
   <div class="af-page af-devd">
-    <div class="af-page__head">
+    <PageHead>
       <div>
         <h1 class="af-page__title">
           {{ summary?.name ?? '设备' }}
@@ -138,11 +139,12 @@ function openProject(projectId: string): void {
           <b>这是设备视角</b>——项目页是同一个项目的另一个视角，两个都要能看。
         </p>
       </div>
-      <span class="af-spacer"></span>
-      <button class="af-btn af-btn--sm" type="button" :disabled="loading" @click="load">
-        刷新
-      </button>
-    </div>
+      <template #actions>
+        <button class="af-btn af-btn--sm" type="button" :disabled="loading" @click="load">
+          刷新
+        </button>
+      </template>
+    </PageHead>
 
     <div v-if="error" class="af-inline-error" role="alert">
       {{ error }}
