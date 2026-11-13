@@ -73,6 +73,13 @@ run = "cargo test --workspace --doc"
 description = "覆盖率门禁：行覆盖率 ≥98%"
 run = "cargo llvm-cov --workspace --all-targets --summary-only --fail-under-lines 98"
 
+# 真机测试：默认门禁**不跑**（`#[ignore]`），因为它们要求本机装了外部软件并
+# 留下过真实数据。这里给一条可复现的入口，免得「有个 ignored 用例」变成
+# 「永远没人跑」。没装的机器上这些用例各自断言「确实没装」，也会绿。
+[tasks.test-real]
+description = "真机测试（需要本机装有 opencode 并跑过会话；不在 ci 里）"
+run = "cargo test --workspace -- --ignored"
+
 [tasks.ci]
 description = "本地全量门禁 = check + fmt + lint + test-doc + cov-gate + web-ci"
 depends = ["check", "fmt", "lint", "test-doc", "cov-gate", "web-ci"]
