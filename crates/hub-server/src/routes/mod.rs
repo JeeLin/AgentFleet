@@ -113,6 +113,58 @@ pub fn last_event_id(headers: &axum::http::HeaderMap) -> Option<u64> {
         .and_then(|v| v.parse::<u64>().ok())
 }
 
+/// 「这个项目必须存在，否则 404」。**全仓路由层唯一一份实现**。
+///
+/// `tasks.rs`（`list_tasks` / `create_task`）与 `bindings.rs`
+/// （`list_for_project` / `put`）四处都要它。抽出来是因为口径变更（比如将来
+/// 「归档项目不许建任务」）要能一处改完：复制 4 份的话改一处漏一处，同一项目
+/// 会在两个端点上表现不同。
+///
+/// 读库失败翻成 **500 而不是 404**：把「库坏了」说成「项目没了」会让用户去
+/// 检查一个其实还在的项目。一个诚实的 500 比一个说谎的 404 好得多。
+pub(crate) fn ensure_project_exists(
+    state: &crate::AppState,
+    project_id: &str,
+) -> Result<(), crate::ApiError> {
+    if hub_storage::project::ProjectRepo::new(state.pool().clone())
+        .get(project_id)
+        .map_err(project_not_found_or_internal)?
+        .is_none()
+    {
+        return Err(crate::ApiError::not_found());
+    }
+    Ok(())
+}
+
+/// 读项目失败时区分「没有这个项目」（404）与「库坏了」（500）。
+pub(crate) fn project_not_found_or_internal(e: hub_storage::StorageError) -> crate::ApiError {
+    match e {
+        hub_storage::StorageError::ProjectNotFound { .. } => crate::ApiError::not_found(),
+        // coverage: excluded — 走到这里必须把库读坏（系统时间回拨之外没有
+        // 让 SQLite 报错的路子）。留它不是防御性编程：把「库坏了」翻译成 404
+        // 会让用户以为项目没了。
+        other => crate::ApiError::internal_with("cannot read project", other),
+    }
+}
+
+/// 当前时间，写成 `unix:<秒>`。**全仓路由层唯一一份实现**。
+///
+/// 口径：`now` 由调用方传入，repo 自己不读时钟——那样它在测试里就不可注入了。
+/// 所以「读一次真实时钟」只发生在这一层，且只发生在这里。
+///
+/// 早先 `tasks.rs` / `bindings.rs` / `projects.rs` 各抄一份，三份的写法还不
+/// 一致（`map_or(0, …)` vs `map(…).unwrap_or(0)`）。同一个时间口径两处不同
+/// 写法，读代码的人无法判断差异是不是有意的。
+///
+/// 时钟早于 `UNIX_EPOCH` 时（系统时间被拨回去）取 0 而不是 panic：约束 21
+/// 不许生产代码 panic，而 Hub 是常驻服务，`SystemTimeError` 不该把进程带走。
+pub(crate) fn now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    format!("unix:{secs}")
+}
+
 /// 读请求体（上限 1 MiB，与 WS 帧上限同值）。**`/api/*` 的唯一一份实现**。
 ///
 /// 放在这里而不是各路由模块里：读不出来 / 超上限的错误码只有一处定义

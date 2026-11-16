@@ -1074,7 +1074,7 @@ mod tests {
             .tasks()
             .create(
                 NewTask {
-                    created_by: Some("user".into()),
+                    created_by: Some("human".into()),
                     ..NewTask::new(
                         "p_a",
                         "任务",

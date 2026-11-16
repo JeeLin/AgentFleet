@@ -23,6 +23,7 @@ use crate::err;
 use hub_storage::project::{NewProject, Project, ProjectRepo, ProjectShape, ThemeColor};
 use hub_storage::StorageError;
 
+use crate::routes::now;
 use crate::{ApiError, AppState};
 
 /// 一次项目读写的响应体。
@@ -119,20 +120,6 @@ where
 
 fn repo(state: &AppState) -> ProjectRepo {
     ProjectRepo::new(state.pool().clone())
-}
-
-/// 当前时间，写成 `unix:<秒>`。
-///
-/// **与全仓其余 repo 同一个口径**：`now` 由调用方传入，repo 自己不读时钟
-/// （那样它在测试里就不可注入了）。这里只在这一层读一次。
-///
-/// 时钟早于 `UNIX_EPOCH` 时（系统时间被拨回去）取 0 而不是 panic：约束 21
-/// 不许生产代码 panic，而 Hub 是常驻服务，`SystemTimeError` 不该把进程带走。
-fn now() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    format!("unix:{secs}")
 }
 
 /// `shape` 字符串 → 枚举。非法值报 400，**不回落**。

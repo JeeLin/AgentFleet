@@ -16,9 +16,15 @@
 //! 1. **认证与 CSRF 不在这一层**：路由注册在 `build_app` 的 `.layer(require_auth)`
 //!    之前，所以七个端点全部要 session，写端点还要 `af_csrf`（三张豁免表一个字
 //!    没动）。
-//! 2. **四个写端点都支持可选 `expected_version`**：给了且与库里不符 → 409
-//!    `task_state_changed`，**不碰库**。它是 `If-Match` 风格的前置条件，让
-//!    「我读到的是 v1」这件事能在写之前被校验一次。
+//! 2. **四个「改已有任务」的写端点支持可选 `expected_version`**：`PATCH
+//!    /api/tasks/{id}`、`POST /api/tasks/{id}/state`、`.../acceptance`、
+//!    `.../failure`。给了且与库里不符 → 409 `task_state_changed`，**不碰库**。
+//!    它是 `If-Match` 风格的前置条件，让「我读到的是 v1」这件事能在写之前被
+//!    校验一次。
+//!
+//!    **`POST /api/projects/{id}/tasks` 没有这个字段**（`CreateTaskBody` 只有
+//!    `title` / `done_when` / `constraints`）：它建的是新行，「期望版本」对新行
+//!    没有意义。早先这里写的是「五个写端点都支持」，那句话不成立。
 //! 3. **返回最新 task（重新 `get`），不回显请求体**：回显会让「后端其实没存」
 //!    这件事测不出来——请求说什么、响应就说什么，看起来永远一致。
 //!
@@ -44,6 +50,7 @@ use hub_storage::task::{is_known_criteria_code, DoneWhen, NewTask, TaskPatch, Ta
 use hub_storage::task_state;
 use hub_storage::StorageError;
 
+use crate::routes::{ensure_project_exists, now};
 use crate::{err, ApiError, AppState};
 
 // ---------------------------------------------------------------------------
@@ -323,18 +330,6 @@ where
 // 公共小工具
 // ---------------------------------------------------------------------------
 
-/// 当前时间，写成 `unix:<秒>`。
-///
-/// 与全仓其余 repo 同一个口径：`now` 由调用方传入，repo 自己不读时钟（那样
-/// 它在测试里就不可注入了）。时钟早于 `UNIX_EPOCH` 时取 0 而不是 panic——
-/// Hub 是常驻服务，一次系统时间回拨不该把它带走。
-fn now() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    format!("unix:{secs}")
-}
-
 /// 读请求体并解析成 `T`。
 ///
 /// 不用 `Json` 提取器：axum 对形状不对的 JSON 回 **422** 与一段 `text/plain`，
@@ -377,24 +372,6 @@ fn reload(state: &AppState, id: &str) -> Result<TaskView, ApiError> {
         .map_err(|e| ApiError::internal_with("cannot read task", e))?
         .ok_or_else(|| ApiError::not_found_with(err::TASK_NOT_FOUND))?;
     Ok(TaskView::new(&task))
-}
-
-/// 项目仓储。与 `bindings.rs` 里的同名 helper 一个写法：本文件的端点要**先确认
-/// 归属**再读写任务（`task.project_id` 没有外键，见 `schema_v5.sql:97-99`）。
-fn projects(state: &AppState) -> hub_storage::project::ProjectRepo {
-    hub_storage::project::ProjectRepo::new(state.pool().clone())
-}
-
-/// 读项目失败时区分「没有这个项目」（404）与「库坏了」（500）。
-///
-/// 与 `bindings.rs::not_found_or_internal` 同一判据：把库读坏翻成 404 会让用户
-/// 以为项目被删了，从而去重建一个其实还在的项目。
-fn project_not_found_or_internal(e: StorageError) -> ApiError {
-    match e {
-        StorageError::ProjectNotFound { .. } => ApiError::not_found(),
-        // coverage: excluded — 走到这里必须把库读坏。
-        other => ApiError::internal_with("cannot read project", other),
-    }
 }
 
 /// 读当前任务；不存在 → 404 `task_not_found`。
@@ -493,21 +470,49 @@ struct TransitionExtras {
     /// `task` 表本身**没有** `reason` 列（`schema_v7.sql` 只给 `execution` 加了
     /// 那三列），所以这里写的是该任务最近一次执行上的 `failure_kind` / `reason`
     /// （见 [`crate::routes::tasks`] 的 `failure` handler）。
-    failure: Option<(FailureKind, String)>,
+    ///
+    /// **`reason` 独立于 `kind`，不是一个 `(kind, reason)` 对**：早先这里是
+    /// `Option<(FailureKind, String)>`，调用方用 `kind.zip(reason)` 组合，于是
+    /// 「只给 reason 不给 failure_kind」时整个留痕被丢掉——而前端「关掉任务」
+    /// 恰恰只填原因、不填失败类型。`task-model.md:75`「没有原因串的失败等于没
+    /// 发生」要求 reason 必须落库，不管有没有 kind。
+    failure: FailureTrace,
     /// 同一次转移要改的 `done_when`（`action: "edit"`）。
     done_when: Option<DoneWhen>,
 }
 
+/// 一次要写到「最近一次执行」上的失败留痕。
+///
+/// 两个字段各自可选、互相不牵连：`reason` 有就必须写（关单的理由不能丢），
+/// `kind` 没有就不写（人主动关掉不是「执行失败了」，见
+/// [`record_reason_on_latest_execution`] 的理由）。全 `None` 时什么都不做。
+#[derive(Debug, Default)]
+struct FailureTrace {
+    kind: Option<FailureKind>,
+    reason: Option<String>,
+}
+
+impl FailureTrace {
+    /// 两样都没有：这次转移不带失败留痕。
+    fn is_empty(&self) -> bool {
+        self.kind.is_none() && self.reason.is_none()
+    }
+}
+
 /// 读 → 校验前置条件 → `check_transition` → CAS 写入。
 ///
-/// # 为什么是三次读而不是一次
+/// # 只读一次
 ///
-/// 1. 先读当前任务（不存在 404）；
-/// 2. 读版本与约束、比 `expected_version`（不符 409，**不碰库**）；
-/// 3. CAS 影响 0 行时**再读一次**区分「没了」(404) 与「变了」(409)。
+/// 起点任务读**一次**就够：`TaskView` 自带 `state` 与 `version`，两样都在同一
+/// 快照里。早先这里先 `load()` 再 `read_version()`（两次 `get` → 两次取池连接
+/// → 两次 `SELECT` 同一行），且两处的 404 映射各写一遍。
 ///
-/// 第 3 步是这条纪律的全部要点：不靠猜。`UPDATE ... WHERE id = ? AND state = ?
-/// AND version = ?` 三个条件缺一不可——只有 `id` 的话它会静默覆盖别人的写。
+/// 真正的「再读一次」在**第 3 步**：CAS 影响 0 行时由
+/// `TaskRepo::transition_with` 在库侧区分「任务没了」(404) 与「态/版本变了」
+/// (409)——那里不靠猜，也不靠调用方重读。
+///
+/// `UPDATE ... WHERE id = ? AND state = ? AND version = ?` 三个条件缺一不可：
+/// 只有 `id` 的话它会静默覆盖别人的写。
 fn transition(
     state: &AppState,
     id: &str,
@@ -516,8 +521,7 @@ fn transition(
     extras: TransitionExtras,
 ) -> Result<(), ApiError> {
     let current = load(state, id)?;
-    let actual =
-        read_version(state, id)?.ok_or_else(|| ApiError::not_found_with(err::TASK_NOT_FOUND))?;
+    let actual = current.version;
     require_version(actual, expected)?;
     // **内部调状态机**，不绕过：`acceptance` / `failure` 与 `/state` 走同一条边表。
     task_state::check_transition(current.state, to)
@@ -547,13 +551,16 @@ fn transition(
     }
 
     // 失败留痕写到该任务最近一次执行上：`task` 表没有那三列。
-    if let Some((kind, reason)) = extras.failure {
-        record_on_latest_execution(state, id, kind, &reason)?;
+    //
+    // `kind` 与 `reason` **各写各的**：只有 `reason` 时只写 reason（关单不造
+    // 失败类型），两者都有时一次写全，都没有时什么都不做。
+    if !extras.failure.is_empty() {
+        record_on_latest_execution(state, id, extras.failure)?;
     }
     Ok(())
 }
 
-/// 把一次失败记到该任务**最近一次执行**上（有执行记录时）。
+/// 把一次失败留痕记到该任务**最近一次执行**上（有执行记录时）。
 ///
 /// 为什么要绕一层而不是写 `task` 表：`task-model.md` 的失败留痕三列
 /// （`failure_kind` / `reason` / `evidence`）在 v7 里加在 `execution` 上——
@@ -564,11 +571,14 @@ fn transition(
 /// 完全可能作用在一个从没跑过的任务上（人主动关掉一个待办）。那种情况下
 /// 状态与 `reason` 的语义由 `state` + `updated_at` 承载，编一条执行记录反而是
 /// 凭空造事实。
+///
+/// `kind` 与 `reason` **互不牵连**：只给 reason 就只写 reason（不编造
+/// `failure_kind`），只给 kind 则写 kind（reason 由 `set_failure` 要求非空，
+/// 故这条路径不会被调用方走到）。
 fn record_on_latest_execution(
     state: &AppState,
     task_id: &str,
-    kind: FailureKind,
-    reason: &str,
+    trace: FailureTrace,
 ) -> Result<(), ApiError> {
     let latest = state
         .executions()
@@ -577,61 +587,63 @@ fn record_on_latest_execution(
     let Some(exec) = latest.first() else {
         return Ok(());
     };
-    // `evidence` 传空串是刻意的：`ExecutionRepo::set_failure` 会把它写成规格
-    // 约定的字面量 `'none'`（`task-model.md:79`），而不是空串。
-    state
-        .executions()
-        .set_failure(&exec.id, kind, reason, "")
-        .map_err(|e| map_storage(e, "cannot record the failure"))
+    match (trace.kind, trace.reason) {
+        // 两者都有：一次写全三列。`evidence` 传空串是刻意的：`set_failure`
+        // 会把它写成规格约定的字面量 `'none'`（`task-model.md:79`）。
+        (Some(kind), Some(reason)) => state
+            .executions()
+            .set_failure(&exec.id, kind, &reason, "")
+            .map_err(|e| map_storage(e, "cannot record the failure")),
+        // 只有 reason：**不造 failure_kind**（人主动关掉不是「执行失败了」）。
+        (None, Some(reason)) => state
+            .executions()
+            .set_reason(&exec.id, &reason)
+            .map_err(|e| map_storage(e, "cannot record the reason")),
+        // 只有 kind：`set_failure` 要求 reason 非空，所以用规格的「没有原因串」
+        // 之外的场合——这条实际不会被走到（调用方给 kind 必给 reason），
+        // 但保留为显式分支，避免用 `unwrap` 把形状问题藏起来。
+        (Some(_), None) => Ok(()),
+        (None, None) => Ok(()),
+    }
 }
 
-/// 把**关掉任务的理由**写到该任务最近一次执行上，**不写 `failure_kind`**。
+/// 取该任务**最近一次执行**的 id；没有执行记录时返回 `None`。
 ///
-/// 人主动关掉一个任务不是「执行失败了」：它是「这件事不做了」。写成
-/// `failure_kind = 'task_failed'` 会让设备页的「失败集中在哪一类」把「人主动
-/// 关掉」算进「事没做成」，那条统计就废了——这正是 `ExecutionRepo::set_reason`
-/// 存在的原因（`crates/hub-storage/src/execution.rs:923-928`）。
-fn record_reason_on_latest_execution(
-    state: &AppState,
-    task_id: &str,
-    reason: &str,
-) -> Result<(), ApiError> {
+/// 三个 `record_*` 曾各自写一遍「`list_for_task` → `latest.first()`」，
+/// 连错误 context 串都抄。抽出来后各自只剩「往哪一列写什么」这一件事。
+fn latest_execution_id(state: &AppState, task_id: &str) -> Result<Option<String>, ApiError> {
     let latest = state
         .executions()
         .list_for_task(task_id)
         .map_err(|e| ApiError::internal_with("cannot list executions", e))?;
-    let Some(exec) = latest.first() else {
-        // 没有执行记录：理由已经在 `reason` 校验里保证非空，但无处可写。
-        // 不编一条执行记录——那才是凭空造事实。
-        return Ok(());
-    };
-    state
-        .executions()
-        .set_reason(&exec.id, reason)
-        .map_err(|e| map_storage(e, "cannot record the reason"))
+    Ok(latest.first().map(|e| e.id.clone()))
 }
 
-/// 把**验收理由**写到该任务最近一次执行上。
+/// 把**验收理由**写到该任务最近一次执行上，**不写 `failure_kind`**。
 ///
-/// 与 [`record_on_latest_execution`] 分开是因为**它不写 `failure_kind`**：
-/// 打回不是失败（`task-model.md:101`）。把它写成 `task_failed` 会让设备页的
-/// 「失败集中在哪一类」把「人打回」算进「事没做成」，那条统计就废了。
+/// 打回不是失败（`task-model.md:101`）。写成 `task_failed` 会让设备页的
+/// 「失败集中在哪一类」把「人打回」算进「事没做成」，那条统计就废了——这正是
+/// `ExecutionRepo::set_reason`（`crates/hub-storage/src/execution.rs:417`）
+/// 与 `set_failure` 分开存在的原因。
+///
+/// 关单走 [`record_on_latest_execution`]（它按 `FailureTrace` 的两字段各写
+/// 各的，只有 `reason` 时同样不碰 `failure_kind`），所以本函数只剩「打回」这
+/// 一个调用方——原先那个只写 reason 的 `record_reason_on_latest_execution`
+/// 是它的逐字复制，已删。
 fn record_note_on_latest_execution(
     state: &AppState,
     task_id: &str,
     note: &str,
 ) -> Result<(), ApiError> {
-    let latest = state
-        .executions()
-        .list_for_task(task_id)
-        .map_err(|e| ApiError::internal_with("cannot list executions", e))?;
-    let Some(exec) = latest.first() else {
+    let Some(exec_id) = latest_execution_id(state, task_id)? else {
+        // 没有执行记录：理由已经在 `note` 校验里保证非空，但无处可写。
+        // 不编一条执行记录——那才是凭空造事实。
         return Ok(());
     };
     state
         .executions()
-        .set_reason(&exec.id, note)
-        .map_err(|e| ApiError::internal_with("cannot record the acceptance note", e))
+        .set_reason(&exec_id, note)
+        .map_err(|e| map_storage(e, "cannot record the acceptance note"))
 }
 
 // ---------------------------------------------------------------------------
@@ -650,13 +662,7 @@ pub async fn list_tasks(
     // 项目不存在时 404，而不是回空数组：空数组会让看板显示「还没有任务，
     // 新建一个」——那句话在项目不存在时是错的。与 `bindings::list_for_project`
     // 同一判据。
-    if projects(&state)
-        .get(&project_id)
-        .map_err(project_not_found_or_internal)?
-        .is_none()
-    {
-        return Err(ApiError::not_found());
-    }
+    ensure_project_exists(&state, &project_id)?;
     let filter = match q.get("state").map(String::as_str) {
         None => None,
         // 空串 = 没给。前端 `withQuery` 把 `undefined` 与 `""` 分开传，所以这
@@ -725,13 +731,7 @@ pub async fn create_task(
     req: axum::extract::Request,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body: CreateTaskBody = read_json(req).await?;
-    if projects(&state)
-        .get(&project_id)
-        .map_err(project_not_found_or_internal)?
-        .is_none()
-    {
-        return Err(ApiError::not_found());
-    }
+    ensure_project_exists(&state, &project_id)?;
     let title = body.title.trim();
     if title.is_empty() {
         return Err(ApiError::bad_request(err::BAD_BODY));
@@ -745,7 +745,14 @@ pub async fn create_task(
         .tasks()
         .create(
             NewTask {
-                created_by: Some("user".to_string()),
+                // 走 `POST /api/projects/{id}/tasks` 建的都是**人**建的：
+                // 这个端点在 session + CSRF 之后，只有登录的人能调。
+                // 词表见 `docs/architecture/task-model.md:376`
+                // （`human` / `butler` / `import:<source>`）——早先写的是
+                // `"user"`，那不在词表里，于是「任务从哪来」这一列所有行都是
+                // 一个规格外的值，而消费方（设备页的「怎么来的」）按词表分支，
+                // 认不出来就只能落到默认档。
+                created_by: Some("human".to_string()),
                 allowed_devices: constraints.allowed_devices,
                 allowed_agents: constraints.allowed_agents,
                 required_capabilities: constraints.required_capabilities,
@@ -821,10 +828,14 @@ pub async fn patch_task(
             return Err(ApiError::bad_request(err::BAD_BODY));
         }
     }
-    if let Some(dw) = &patch.done_when {
-        dw.validate()
-            .map_err(|e| map_storage(e, "validate done_when"))?;
-    }
+    // **这里不调 `dw.validate()`**：`update_if_version` 会在开事务前先校验一遍，
+    // 且它才是**唯一的**权威——那是所有调用方（本端点、`TaskRepo::update`、
+    // 每个用例）都过的门。在这里再校验一遍不会多挡住任何输入，只会让
+    // `InvalidDoneWhenCriteria` 有两条可能来源，将来改了闭集却漏掉一处时，
+    // 两条路径给出不同结果。
+    //
+    // 顺序仍然对：`update_if_version` 先 `validate()?` 再开事务，所以校验失败
+    // 依旧不写库、`version` 也不涨（这一点由仓储层自己的用例钉住）。
 
     // 空补丁：什么都不改，直接把当前状态回出去（不白涨一次 version）。
     if patch.is_empty() {
@@ -985,18 +996,39 @@ pub async fn submit_failure(
                 body.expected_version,
             )
             .map_err(|e| map_storage(e, "close queued task"))?;
-        // 失败留痕：只写 reason，**不造 `failure_kind`**（见文件下方
-        // `closure note`）。
-        if let Some(reason) = reason.as_deref() {
-            record_reason_on_latest_execution(&state, &id, reason)?;
+        // 失败留痕：与 `pending` / `running` 的 `close` **走同一条**
+        // （`record_on_latest_execution`），因为 handler 的文档表
+        // （`submit_failure` 上方）对所有 `close` 一律承诺「写 `reason` +
+        // `failure_kind`」。
+        //
+        // 早先这里只调 `record_reason_on_latest_execution`，于是**带
+        // `failure_kind` 的 `queued` 关单会把它静默丢掉**——同一个请求在
+        // `pending` 态留痕、在 `queued` 态丢掉一半，而两态在规格里是同一个
+        // 动作。差别不该由「关单时任务恰好停在哪个态」决定。
+        //
+        // `kind` 与 `reason` 仍各自独立：只给 `reason` 时只写 reason，
+        // 不编造 `failure_kind`（人主动关掉不是「执行失败了」）。
+        let trace = FailureTrace {
+            kind,
+            reason: reason.clone(),
+        };
+        if !trace.is_empty() {
+            record_on_latest_execution(&state, &id, trace)?;
         }
     } else {
         let extras = TransitionExtras {
             // `retry` / `edit` 不写失败留痕：这两个动作是「它要重跑」「条件改了」，
             // 把上一轮的失败类型再写一遍只会让人以为又失败了一次。
+            //
+            // `close` 的 `kind` 与 `reason` **各自独立**：前端「关掉任务」只发
+            // `reason` 不发 `failure_kind`，这里若写成 `kind.zip(reason)` 就会把
+            // 理由整条丢掉（`task-model.md:75`）。
             failure: match body.action {
-                FailureAction::Close => kind.zip(reason.clone()),
-                _ => None,
+                FailureAction::Close => FailureTrace {
+                    kind,
+                    reason: reason.clone(),
+                },
+                _ => FailureTrace::default(),
             },
             done_when: match body.action {
                 // `edit` 必须真的改掉条件，否则「重试必须换条件」（约束 16）
@@ -1008,12 +1040,21 @@ pub async fn submit_failure(
                 _ => None,
             },
         };
-        // `retry` 带着 `done_when` / `failure_kind` / `reason` 却没有承载结构：
-        // 静默丢弃会让调用方以为条件换了。明确拒绝，而不是装作收下。
-        if body.action == FailureAction::Retry
-            && (body.done_when.is_some() || kind.is_some() || reason.is_some())
-        {
-            return Err(ApiError::bad_request(err::BAD_BODY));
+        // 带着没有承载结构的字段提交：静默丢弃会让调用方以为条件换了/留痕写了。
+        // 明确拒绝，而不是装作收下。**`retry` 与 `edit` 都要这门**：早先只对
+        // `retry` 检查，`edit` 带 `failure_kind` 会被静默吞掉。
+        match body.action {
+            FailureAction::Retry
+                if body.done_when.is_some() || kind.is_some() || reason.is_some() =>
+            {
+                return Err(ApiError::bad_request(err::BAD_BODY));
+            }
+            // `edit` 的承载结构只有 `done_when`；`reason` 与 `failure_kind` 都
+            // 无处可写（`edit` 不写失败留痕）。
+            FailureAction::Edit if kind.is_some() || reason.is_some() => {
+                return Err(ApiError::bad_request(err::BAD_BODY));
+            }
+            _ => {}
         }
         transition(&state, &id, target, body.expected_version, extras)?;
     }
@@ -1026,11 +1067,15 @@ pub async fn submit_failure(
 /// 实例（认证层的正常模式），并按需插入项目行。
 ///
 /// 为什么走 `build_app` 而不是直调 handler：本文件要钉的东西里有一半在中间件
-/// 与路由装配上——「七个端点都过了认证」「四个写端点都过了 CSRF」「`/api/tasks`
+/// 与路由装配上——「七个端点都过了认证」「五个写端点都过了 CSRF」「`/api/tasks`
 /// 没被 `/api/{*rest}` 兜底吃掉」。直调 handler 会把这三类问题全漏掉。
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 只被测试用到的：`project_not_found_or_internal` 的两个臂各翻成什么，
+    // 由 `project_errors_map_to_404_only_when_the_project_is_really_gone`
+    // 直接打那个映射函数（生产路径都经 `ensure_project_exists`，它内部已用）。
+    use crate::routes::project_not_found_or_internal;
     use crate::{
         build_app, AuthParams, LoginRateLimiter, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE,
     };
@@ -1164,8 +1209,21 @@ mod tests {
             r.json()["task"]["id"].as_str().unwrap().to_string()
         }
 
-        /// 直接把任务推到某个态（**用 repo 推进，不走 HTTP**：这条是夹具，
-        /// 它要造的是「任务已经在这里」，不是「转移端点对不对」）。
+        /// 直接把任务推到某个态。**这是夹具，故意绕开状态机与 repo。**
+        ///
+        /// 它要造的是「任务已经在这里」，而很多用例需要的起点（比如
+        /// `queued`，或者没有任何失败记录的 `failed`）**走不出来**：规格的边表
+        /// 不允许从 `pending` 直达 `queued`，而走 `/state` 又会被 CSRF/认证
+        /// 挡一道。用裸 `UPDATE` 是刻意的——它不会因为被测代码的守卫而失败，
+        /// 也就不可能把「守卫挡住了夹具」伪装成「用例通过」。
+        ///
+        /// 代价是必须自己维护 `version = version + 1`（否则后续 CAS 的
+        /// `expected_version` 全对不上）。这一条是下面这句 SQL 的全部内容，
+        /// 也是它唯一需要小心的地方。
+        ///
+        /// 早先这条注释写的是「用 repo 推进，不走 HTTP」，与实现相反：实现里
+        /// 没有一次调用 `TaskRepo`。文档说 repo、代码打裸 SQL，读的人会以为
+        /// 「夹具也过了状态机」而在排错时走错方向。
         fn force_state(&self, id: &str, to: TaskState) {
             self.state
                 .pool()
@@ -1250,6 +1308,22 @@ mod tests {
             ("POST", "/api/tasks/t_1/acceptance"),
             ("POST", "/api/tasks/t_1/failure"),
         ];
+        // **数量断言**：与 `every_write_endpoint_requires_csrf` 同一个理由——
+        // 定长数组的长度是类型写死的，「7 个端点一个都不能少」这句话只要不
+        // 跟**真实注册**比对，就永远是常量对常量。
+        //
+        // 端点数 = 写方法数（`count_registered_write_handlers`，从 `lib.rs` 实际
+        // 数出）+ 读方法数（`get(...)`，同样从路由段数）。
+        let write = count_registered_write_handlers();
+        let read = count_registered_read_handlers();
+        assert_eq!(
+            cases.len(),
+            write + read,
+            "端点数对不上（`lib.rs` 注册了 {write} 写 + {read} 读 = {} 个，本用例只覆盖 {}）：\
+             请把新端点加进 `cases`",
+            write + read,
+            cases.len()
+        );
         for (method, uri) in cases {
             let resp = h
                 .app
@@ -1276,16 +1350,71 @@ mod tests {
     // 2. 五个写端点都要 CSRF
     // -----------------------------------------------------------------------
 
+    /// 取 `lib.rs` 里**任务路由段**的源码切片。
+    ///
+    /// 为什么读源码而不是问 `Router`：axum 的 `Router` 不暴露路由表（没有
+    /// `routes()` 之类的访问器），运行期拿不到。读源码是次优解，但它读的是
+    /// **注册处**——于是「加了端点忘了加用例」必然两边不等而红，这正是原断言
+    /// （`assert_eq!(cases.len(), 5)`，定长数组恒真）做不到的。
+    ///
+    /// 边界必须选这两句**紧贴任务段的注释**：早先选的是
+    /// `/api/projects/{id}/tasks` 这个路径字面量，它第一次出现在 `lib.rs`
+    /// 更上面（代理配置那一段），于是整段被多截了 9 个写方法（实测数出 9 个）。
+    fn task_route_segment() -> &'static str {
+        let src = include_str!("../../src/lib.rs");
+        let start = src
+            .find("// 任务（v0.8.0 子任务 6）")
+            .expect("lib.rs 里找不到任务路由段的起点");
+        let end = src
+            .find("**认证后的 404 兜底**")
+            .expect("lib.rs 里找不到任务路由段的终点");
+        assert!(start < end, "任务路由段的起点在终点之后，扫描口径要改");
+        &src[start..end]
+    }
+
+    /// 在任务路由段里数某种方法名的出现次数。
+    ///
+    /// 两种形态都要数：链式 `.post(handler)`，以及独立路由的
+    /// `.route("/x", post(handler))`——后者方法名前面是 `, ` 而不是 `.`。
+    /// 所以判据是「前一个字符不是标识符字符」（排除 `list_tasks::` 这类）。
+    fn count_method(segment: &str, names: &[&str]) -> usize {
+        names
+            .iter()
+            .map(|n| {
+                let needle = format!("{n}(");
+                segment
+                    .match_indices(&needle)
+                    .filter(|(i, _)| {
+                        let prev = segment[..*i].chars().next_back();
+                        !matches!(prev, Some(c) if c.is_alphanumeric() || c == '_' || c == ':')
+                    })
+                    .count()
+            })
+            .sum()
+    }
+
+    /// 任务路由段注册了几个**写**端点。
+    fn count_registered_write_handlers() -> usize {
+        count_method(task_route_segment(), &["post", "patch", "put", "delete"])
+    }
+
+    /// 任务路由段注册了几个**读**端点（`get`）。
+    fn count_registered_read_handlers() -> usize {
+        count_method(task_route_segment(), &["get"])
+    }
+
     /// 带 cookie 但不带 `x-csrf-token`：5 个写端点一律 403。
     ///
     /// 判红方式：把这五条路由移到 `.layer(require_auth)` 之后（或者把它们加进
     /// `CSRF_EXEMPT_PATHS`），任一行立刻变 200 而红。
+    ///
+    /// **另一种红法（这条断言存在的理由）**：在 `lib.rs` 的任务路由段加第 6 个
+    /// 写端点而不加进 `cases` → `cases.len() != registered` 立刻红。
     #[tokio::test]
     async fn every_write_endpoint_requires_csrf() {
         let h = Harness::new().await;
-        let id = h.create("csrf 用例").await;
-        // 全部 5 个写端点，一个都不能少。数组长度由下面 `assert_eq!` 钉住，
-        // 「加了个写端点忘了加进这条用例」时数字会先红。
+        // 全部 5 个写端点，一个都不能少。数量由下面的 `count_registered_write_handlers`
+        // 从 `lib.rs` 真实数出来，不是抄一个常量。
         let cases: [(&str, &str, Value); 5] = [
             (
                 "POST",
@@ -1330,7 +1459,36 @@ mod tests {
             ct.status,
             ct.body
         );
-        assert!(!id.is_empty());
+        // **数量断言**：这条用例声称覆盖「每一个写端点」。少了它，新增第 6 个
+        // 写端点而忘记加进 `cases` 时，本用例照旧绿——用例名与函数体就不是
+        // 一回事了。
+        //
+        // # 为什么不能写成 `assert_eq!(cases.len(), 5)`
+        //
+        // 那曾经就是这么写的，而它**恒真**：`cases` 是
+        // `[(&str, &str, Value); 5]`，定长数组的 `len()` 由类型写死。实测在
+        // `lib.rs` 加第 6 个写端点后，那个断言照旧 `ok`——它防不住它注释声称
+        // 要防的情况，属于「常量对常量」的假断言。
+        //
+        // # 现在数的是**真实注册**
+        //
+        // 从 `lib.rs` 的源码里数出路由表上实际挂了几种写方法（`post` / `patch`
+        // / `put` / `delete`）。axum 的 `Router` 不暴露自己的路由表，所以只能
+        // 读源码——但读的是**注册处**，不是用例自己的数组，于是「加了端点忘了
+        // 加用例」必然两边不等而红。
+        let registered = count_registered_write_handlers();
+        assert_eq!(
+            cases.len(),
+            registered,
+            "写端点数量变了（`lib.rs` 注册了 {registered} 个写方法，本用例只覆盖 \
+             {} 个）：请把新端点加进 `cases`",
+            cases.len()
+        );
+        assert_eq!(
+            registered, 5,
+            "任务路由段的写端点数量变了（{registered}）：若这是刻意的，\
+             `cases` 与这个数字都要跟着改"
+        );
         for (method, uri, body) in cases {
             let r = h
                 .send(
@@ -1619,6 +1777,152 @@ mod tests {
             Some("系统库版本不对"),
             "关单必须留下原因串（没有原因串的失败等于没发生）"
         );
+    }
+
+    /// **关单不带 `failure_kind` 时，原因串仍必须落库。**
+    ///
+    /// 这是前端的真实请求形状：`ProjectTaskPage.test.ts` 的关单体是
+    /// `{action:'close', reason:'…', expected_version:7}`，**没有
+    /// `failure_kind`**（面板只让人写理由，不让人选失败类型）。
+    ///
+    /// 判红方式（已实测）：把 `FailureTrace` 的构造改回 `kind.zip(reason)`
+    /// 式的组合（`kind` 为 `None` 就丢掉整个留痕），本用例红——`reason` 读回
+    /// 来是 `None`。
+    #[tokio::test]
+    async fn close_without_failure_kind_still_records_the_reason() {
+        let h = Harness::new().await;
+        let id = h.create("关单无 kind").await;
+        h.force_state(&id, TaskState::Running);
+        let exec_id = insert_execution(&h.state, &id);
+
+        let r = h
+            .mutate(
+                "POST",
+                &format!("/api/tasks/{id}/failure"),
+                Some(serde_json::json!({
+                    "action": "close",
+                    "reason": "这件事不做了",
+                })),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        assert_eq!(r.json()["task"]["state"], "failed");
+
+        let (kind, reason): (Option<String>, Option<String>) = h
+            .state
+            .pool()
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT failure_kind, reason FROM execution WHERE id = ?1",
+                [&exec_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            reason.as_deref(),
+            Some("这件事不做了"),
+            "不带 failure_kind 的关单同样必须留下原因串——前端就是这么发的"
+        );
+        assert_eq!(
+            kind, None,
+            "人主动关掉不是「执行失败了」，不许编造 failure_kind"
+        );
+    }
+
+    /// `queued` 态关单带 `failure_kind` 时，`failure_kind` 也必须落库。
+    ///
+    /// 判红方式（已实测）：把 `queued_close` 分支改回只调
+    /// `record_note_on_latest_execution`（只写 reason），本用例红——`kind` 读回
+    /// 来是 `None`。
+    ///
+    /// 这条盯的是「同一个动作因任务停在哪个态而行为不同」：`pending`/`running`
+    /// 的关单会写 `failure_kind`（见上一条用例），`queued` 的关单此前却把它
+    /// 静默丢掉，而 `submit_failure` 的文档表对所有 `close` 一律承诺写两者。
+    #[tokio::test]
+    async fn closing_a_queued_task_records_the_failure_kind_too() {
+        let h = Harness::new().await;
+        let id = h.create("排队中关单").await;
+        let exec_id = insert_execution(&h.state, &id);
+        h.force_state(&id, TaskState::Queued);
+
+        let r = h
+            .mutate(
+                "POST",
+                &format!("/api/tasks/{id}/failure"),
+                Some(serde_json::json!({
+                    "action": "close",
+                    "failure_kind": "env_broken",
+                    "reason": "排队时发现环境不对，不跑了",
+                })),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        assert_eq!(r.json()["task"]["state"], "failed");
+
+        let (kind, reason): (Option<String>, Option<String>) = h
+            .state
+            .pool()
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT failure_kind, reason FROM execution WHERE id = ?1",
+                [&exec_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            kind.as_deref(),
+            Some("env_broken"),
+            "queued 关单同样必须留下 failure_kind——不是只有 pending/running 才写"
+        );
+        assert_eq!(reason.as_deref(), Some("排队时发现环境不对，不跑了"));
+    }
+
+    /// `edit` 带 `failure_kind` / `reason` 必须 400，而不是静默吞掉。
+    ///
+    /// 判红方式（已实测）：删掉 `submit_failure` 里 `FailureAction::Edit` 那道
+    /// 门，本用例红（实测返回 200）。
+    #[tokio::test]
+    async fn edit_refuses_fields_it_cannot_store() {
+        let h = Harness::new().await;
+
+        for payload in [
+            serde_json::json!({
+                "action": "edit",
+                "done_when": {"criteria": "all_tests_pass"},
+                "failure_kind": "env_broken",
+            }),
+            serde_json::json!({
+                "action": "edit",
+                "done_when": {"criteria": "all_tests_pass"},
+                "reason": "顺手写个理由",
+            }),
+        ] {
+            let id = h.create("edit 带多余字段").await;
+            h.force_state(&id, TaskState::Failed);
+            let r = h
+                .mutate(
+                    "POST",
+                    &format!("/api/tasks/{id}/failure"),
+                    Some(payload.clone()),
+                )
+                .await;
+            assert_eq!(
+                r.status,
+                StatusCode::BAD_REQUEST,
+                "edit 无处安放 {} 时必须 400 而不是静默丢弃：{} {}",
+                payload,
+                r.status,
+                r.body
+            );
+            // 且什么都没改：任务仍在 failed。
+            assert_eq!(
+                h.state.tasks().get(&id).unwrap().unwrap().state,
+                TaskState::Failed,
+                "被拒的 edit 不许动状态"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2129,11 +2433,15 @@ mod tests {
         );
     }
 
-    /// 排队中关单**不写 `failure_kind`**：人主动关掉不是「执行失败」。
+    /// 排队中关单**只给 `reason` 时不得写 `failure_kind`**：人主动关掉不是
+    /// 「执行失败」。
     ///
-    /// 判红方式：把 `record_reason_on_latest_execution` 换回
-    /// `record_on_latest_execution(TaskFailed, ..)`，`failure_kind` 会变成
-    /// `task_failed`，第一条断言立刻红。
+    /// 判红方式（已实测）：把 `queued_close` 分支改成
+    /// `record_on_latest_execution(TaskFailed, ..)`（即硬塞一个 `task_failed`），
+    /// `failure_kind` 会变成 `task_failed`，第一条断言立刻红。
+    ///
+    /// 与上一条用例（`closing_a_queued_task_records_the_failure_kind_too`）是一对：
+    /// 那条管「给了 `failure_kind` 就得写」，这条管「没给就一个字都不许编」。
     #[tokio::test]
     async fn closing_a_queued_task_records_the_reason_but_no_failure_kind() {
         let h = Harness::new().await;
@@ -2215,38 +2523,128 @@ mod tests {
         assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.body);
     }
 
-    /// 只含全角空格的 `reason` 是**用户输入错误** → 400，不是 500。
+    /// 只含空白字符的 `reason` 是**用户输入错误** → 精确定格 400，不是 200/500。
     ///
-    /// HTTP 层的 `filter(|s| !s.is_empty())` 用的是 ASCII trim，放行全角空格；
-    /// 仓储层的 `reason.trim().is_empty()` 认得全角空格并报
-    /// `FailureReasonRequired`。若 `map_storage` 没这一臂，它会落进兜底臂被报成
-    /// 500 `internal_error`——把用户输入错误说成服务端故障。
+    /// # 早先这条用例的立论是假事实
     ///
-    /// 判红方式：删掉 `map_storage` 里的 `FailureReasonRequired` 臂，本用例红。
+    /// 原文写「HTTP 层的 `filter(|s| !s.is_empty())` 用的是 ASCII trim，放行全角
+    /// 空格；仓储层认得全角空格并报 `FailureReasonRequired`」。**两处都错**：
+    /// ① Rust 的 `str::trim()` 是 Unicode-aware，`"\u{3000}".trim()` 就是空串
+    /// （实测 `trim_len=0`），HTTP 层把它滤成 `None`，`:reason.is_none()` 直接
+    /// 400，**根本走不到仓储层**；② 于是「删掉 `map_storage` 的
+    /// `FailureReasonRequired` 臂本用例红」也是假的——删掉后实测仍 `1 passed`。
+    /// 那时断言还是 `status == BAD_REQUEST || status == OK`，两种结果都接受，
+    /// 属于「夹」型假绿。
+    ///
+    /// # 现在钉什么
+    ///
+    /// HTTP 层对空白 `reason` 的行为**是确定的一条**：400 `bad_body`，且任务
+    /// 状态不变（还在 `queued`，没有被推进 `failed`）。这不是「两种都行」——
+    /// 只要 HTTP 层的 `reason.is_none()` 门禁被删掉，任务就会被推进 `failed`，
+    /// 状态断言立刻红。
+    ///
+    /// 判红方式（已实测）：删掉 `submit_failure` 里
+    /// `if body.action == FailureAction::Close && reason.is_none()` 那段，本用例
+    /// 红（任务被推进到 `failed` 且返回 200）。
+    ///
+    /// 仓储层 `FailureReasonRequired` 的守护**不在这里**——它由
+    /// `map_storage_translates_every_arm_to_the_documented_status` 直接打
+    /// 那个映射臂，不需要一条走不到它的端点用例来假装覆盖。
+    /// **只发 `reason` 的关单不得留下上一轮的 `failure_kind`。**
+    ///
+    /// 场景：设备跑完报了 `agent_error`，随后**人**在详情页把任务关掉、只写
+    /// 一句理由（前端就是这样发的，不带 `failure_kind`）。这时那一行执行记录
+    /// 会变成「`failure_kind = agent_error` + 人写的新 reason」——两半不再对应，
+    /// 设备页的「失败集中在哪一类」会把一次**人主动关掉**算成 `agent_error`。
+    ///
+    /// 判红方式（已实测）：把 `record_on_latest_execution` 的
+    /// `(None, Some(reason))` 分支从 `set_reason` 换成「什么都不做」以外的任何
+    /// 保留旧 kind 的写法（或直接改成 `Ok(())`），本用例的 `kind` 断言红。
+    ///
+    /// 这条与 `close_without_failure_kind_still_records_the_reason` 互为止损：
+    /// 那条要求「reason 必须写」，这条要求「kind 不许留」。两者一起把「各写各的」
+    /// 钉成「只写该写的那半」。
     #[tokio::test]
-    async fn a_blank_unicode_reason_is_400_not_500() {
+    async fn closing_over_a_previous_failure_clears_the_stale_kind() {
+        let h = Harness::new().await;
+        let id = h.create("覆盖旧失败").await;
+        let exec_id = insert_execution(&h.state, &id);
+        // 造一台设备已经报过失败的现场。
+        h.state
+            .executions()
+            .set_failure(
+                &exec_id,
+                FailureKind::AgentError,
+                "设备侧崩了",
+                "/tmp/crash.log",
+            )
+            .unwrap();
+        h.force_state(&id, TaskState::Running);
+
+        // 人只写理由关单，**不带 failure_kind**。
+        let r = h
+            .mutate(
+                "POST",
+                &format!("/api/tasks/{id}/failure"),
+                Some(serde_json::json!({
+                    "action": "close",
+                    "reason": "看了下不修了，直接关掉",
+                })),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        assert_eq!(r.json()["task"]["state"], "failed");
+
+        let (kind, reason): (Option<String>, Option<String>) = h
+            .state
+            .pool()
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT failure_kind, reason FROM execution WHERE id = ?1",
+                [&exec_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            kind, None,
+            "人主动关掉之后不许留着上一轮的 agent_error——那会让「失败集中在哪一类」算错"
+        );
+        assert_eq!(reason.as_deref(), Some("看了下不修了，直接关掉"));
+    }
+
+    #[tokio::test]
+    async fn a_blank_unicode_reason_is_400_and_does_not_touch_the_task() {
         let h = Harness::new().await;
         let id = h.create("全角空格原因").await;
         let exec_id = insert_execution(&h.state, &id);
         h.force_state(&id, TaskState::Queued);
 
-        let r = h
-            .mutate(
-                "POST",
-                &format!("/api/tasks/{id}/failure"),
-                // U+3000 全角空格：`str::trim` 认得它，`is_empty()` 之前的
-                // ASCII 判断不认得。
-                Some(serde_json::json!({"action": "close", "reason": "\u{3000}"})),
-            )
-            .await;
-        assert!(
-            r.status == StatusCode::BAD_REQUEST || r.status == StatusCode::OK,
-            "全角空格原因不得报 5xx，实际 {} {}",
-            r.status,
-            r.body
-        );
-        assert_ne!(r.status, StatusCode::INTERNAL_SERVER_ERROR, "{}", r.body);
-        // 无论走哪个分支，都不许把全角空格写进库里。
+        // U+3000（表意空格）与 U+00A0（不换行空格）都是 `str::trim` 认得的
+        // 空白，但都不是 ASCII 空白。
+        for blank in ["\u{3000}", "\u{00A0}", " \t\n "] {
+            let r = h
+                .mutate(
+                    "POST",
+                    &format!("/api/tasks/{id}/failure"),
+                    Some(serde_json::json!({"action": "close", "reason": blank})),
+                )
+                .await;
+            assert_eq!(
+                r.status,
+                StatusCode::BAD_REQUEST,
+                "只含空白的 reason 必须是 400（用户输入错误，不是服务端故障）：{blank:?} → {} {}",
+                r.status,
+                r.body
+            );
+            assert_eq!(
+                h.state.tasks().get(&id).unwrap().unwrap().state,
+                TaskState::Queued,
+                "被拒的关单不许动状态（{blank:?}）"
+            );
+        }
+
+        // 且一条空白原因都没落库。
         let reason: Option<String> = h
             .state
             .pool()
@@ -2258,7 +2656,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_ne!(reason.as_deref(), Some("\u{3000}"), "空白原因不得落库");
+        assert_eq!(reason, None, "空白原因不得落库");
     }
 
     /// `retry` 带着没有承载结构的字段时**明确 400**，不静默丢弃。
@@ -2505,16 +2903,32 @@ mod tests {
         );
     }
 
-    /// **不带 `expected_version` 的 `PATCH` 会静默覆盖**——这是当前实现的形状，
-    /// 登记它是为了让「为什么 `patch_task` 必须传 `Some(actual)`」有一条可执行的
-    /// 证据，而不是只写在注释里。
+    /// **不带 `expected_version` 的 `update_if_version` 会覆盖别人的写**——
+    /// 这是当前实现的形状，登记它是为了让「为什么 `patch_task` 必须传
+    /// `Some(actual)`」有一条可执行的证据，而不是只写在注释里。
     ///
-    /// 判红方式（已实测）：把 `patch_task` 的 `Some(actual)` 改回
-    /// `expected`（= `body.expected_version`，此处为 `None`）→ 本用例的
-    /// 最后一条断言红（title 被覆盖成 `z`），因为 SQL 的 `AND version = ?` 在
-    /// `expected_version: None` 时不参与拼接。
+    /// # 判红方式（已实测：下面这些**都不红**，所以改写了本文档）
     ///
-    /// 注意这条覆盖的是**仓储层**的死角，不是 `patch_task` 的：HTTP 层已改成
+    /// 本用例最初声称「把 `patch_task` 的 `Some(actual)` 改回 `expected`
+    /// → 最后一条断言红」。逐一实测过三种变异，**本用例全绿**：
+    ///
+    /// 1. `guard_version` 的 `None => current.version` 改成 `None => 0`；
+    /// 2. `write_patch` 的 `let base = entry.unwrap_or(0)` 改成 `unwrap_or(999)`；
+    /// 3. `update_if_version` 里 `expected_version` 的前置比对整个跳过。
+    ///
+    /// 不红的原因是结构性的：`entry` 恒为「刚读到的真实版本」（与
+    /// `expected_version` 无关），`write_patch` 用的是 `entry.unwrap_or(…)`
+    /// 的 **`Some` 分支**，于是 `None` 那次写永远拿到真版本、永远成功。
+    /// 也就是说，「传 `None` 会覆盖」不是一条**可能被写错**的逻辑，它是
+    /// 「`None` 就是没有前置条件」这个定义的直接后果——没有可变异之处。
+    ///
+    /// 所以本用例现在的价值只是**把这条形状钉成可执行的事实**（将来若有人
+    /// 让 `None` 也取前置条件，第 3 条断言会红）。它不能证明「`patch_task`
+    /// 传 `Some(actual)` 是必要的」——那个论断的真正证据在
+    /// `patch_with_a_stale_version_does_not_overwrite_the_other_writer`
+    /// （走 HTTP、两个真实请求）。
+    ///
+    /// 注意这条覆盖的是**仓储层**的形状，不是 `patch_task` 的：HTTP 层已改成
     /// 恒传 `Some(actual)`，所以走端点是碰不到这个形状的。
     #[tokio::test]
     async fn update_if_version_without_a_version_condition_overwrites_the_concurrent_write() {
@@ -2549,9 +2963,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             title, "z",
-            "传 None 时 SHOULD 覆盖——若此处不再是 z，说明 `update_if_version` 已改成 \
-             「None 也要前置条件」，那时 `patch_task` 传 `Some(actual)` 就不再是必需的，\
-             本条与它上方那条注释都必须跟着改"
+            "传 None 时 SHOULD 覆盖——这条钉的是「None = 没有前置条件」这个定义。\
+             若此处不再是 z，说明 `update_if_version` 已改成「None 也要前置条件」，\
+             那时 `patch_task` 传 `Some(actual)` 就不再是必需的，本条与它上方那条\
+             注释都必须跟着改"
         );
     }
 

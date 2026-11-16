@@ -30,9 +30,9 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use hub_storage::binding::{Binding, BindingRepo, BindingSpec, CleanupPolicy};
-use hub_storage::project::ProjectRepo;
 use hub_storage::StorageError;
 
+use crate::routes::{ensure_project_exists, now};
 use crate::{err, ApiError, AppState};
 
 /// 一次绑定读写的响应体。
@@ -83,19 +83,6 @@ fn repo(state: &AppState) -> BindingRepo {
     BindingRepo::new(state.pool().clone())
 }
 
-fn projects(state: &AppState) -> ProjectRepo {
-    ProjectRepo::new(state.pool().clone())
-}
-
-/// 当前时间，`unix:<秒>`。与全仓其余 repo 同一口径（`now` 由调用方传入）。
-fn now() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("unix:{secs}")
-}
-
 /// 把 `StorageError::FixedDirInUse` 翻成带条数的 409。
 ///
 /// **带条数**是刻意的：用户要知道「有 3 条执行记录」，而不是只看到「不能改」。
@@ -114,13 +101,7 @@ pub async fn list_for_project(
 ) -> Result<Json<Vec<BindingView>>, ApiError> {
     // 项目不存在时 404，而不是返回空数组：空数组会让页面显示「还没有绑定任何
     // 设备」——那句话在项目不存在时是错的，用户会以为是自己还没绑。
-    if projects(&state)
-        .get(&project_id)
-        .map_err(not_found_or_internal)?
-        .is_none()
-    {
-        return Err(ApiError::not_found());
-    }
+    ensure_project_exists(&state, &project_id)?;
     let rows = repo(&state)
         .list_for_project(&project_id)
         .map_err(internal("cannot list bindings"))?;
@@ -212,13 +193,7 @@ fn put(
     }
 
     // 项目必须存在：绑定挂在项目上，挂一个不存在的项目等于造了一行孤儿。
-    if projects(&state)
-        .get(&project_id)
-        .map_err(not_found_or_internal)?
-        .is_none()
-    {
-        return Err(ApiError::not_found());
-    }
+    ensure_project_exists(&state, &project_id)?;
 
     // 策略不给时交给存储层的默认值；给了就必须是表里的词。
     let cleanup_policy = match body.cleanup_policy.as_deref() {
@@ -263,23 +238,14 @@ fn put(
     Ok((code, Json(binding.into())))
 }
 
-/// 把「项目不存在」与「读库失败」分开：前者 404，后者 500。
-///
-/// 合成一个会让「库坏了」看起来像「项目不存在」——那种错位会把运维引到
-/// 错误的方向去查（`projects.rs` 同一处兜底里写着同样的理由）。
-fn not_found_or_internal(e: StorageError) -> ApiError {
-    match e {
-        StorageError::ProjectNotFound { .. } => ApiError::not_found(),
-        // coverage: excluded — 要走到这里必须把库读坏（见 `internal` 的理由）。
-        // 留它不是防御性编程：把「库坏了」翻译成 404 会让用户以为项目没了。
-        other => internal("cannot read project")(other),
-    }
-}
-
 /// 内部错误。写成闭包是为了让 `map_err` 那里读起来是一句话。
 ///
 /// `StorageError` 余下的变体都是数据库故障（连接池取不到、SQLite 报错、
 /// 序列化失败），留这条兜底是为了不把「库坏了」翻译成 404。
+///
+/// （「项目不存在 → 404 / 读库失败 → 500」那条判据不在这里：它与
+/// `tasks.rs` 共用同一份，已收归 `crate::routes::project_not_found_or_internal`。
+/// 本文件原先的同名副本已删，但它的 doc 段落一度留在这里成了孤儿注释。）
 fn internal(step: &'static str) -> impl Fn(StorageError) -> ApiError {
     // coverage: excluded — 上面那个 `Fn` 的构造行：闭包体只在错误路径执行。
     move |e| ApiError::internal_with(step, e)
@@ -289,9 +255,10 @@ fn internal(step: &'static str) -> impl Fn(StorageError) -> ApiError {
 mod tests {
     use super::*;
     use crate::test_support::{break_table, state};
+    use hub_storage::project::ProjectRepo;
 
     fn new_project(state: &AppState, name: &str) -> String {
-        projects(state)
+        ProjectRepo::new(state.pool().clone())
             .create(
                 hub_storage::project::NewProject {
                     name: name.to_string(),
