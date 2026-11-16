@@ -145,7 +145,7 @@ const PW_HINT_ID = 'setup-pw-hint'
   <main class="af-auth af-auth--setup" tabindex="-1">
     <div class="af-auth__box" style="width: min(560px, 100%)">
       <div class="af-auth__brand">
-        <span class="af-brand__mark" aria-hidden="true"></span>
+        <span class="af-rail__mark" aria-hidden="true">AF</span>
         <span class="af-t-label">AGENTFLEET · 首次 setup</span>
       </div>
 

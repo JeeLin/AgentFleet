@@ -108,14 +108,32 @@ describe('模板里的 af-* 类名都有定义（`.af-head__title` 那次漏定�
   const NO_RULE_BY_DESIGN = new Map<string, string>([
     // ① 纯钩子
     ['af-card', '卡片钩子：外观来自同一元素上的 `af-taskcard` / `af-catalog__card` 等具体类'],
-    ['af-page__section', '分区钩子：没有自己的规则，分区标题的间距写在 `.af-page__subtitle` 上（§2 的注释就是这么定的）'],
+    /*
+      页面外壳那一族（`.af-page` / `__head` / `__title` / `__actions` / `__sub` /
+      `__subtitle` / `--flush` / `__section`）的规则已随类名一起删除（v0.8.1
+      子任务 2）：它们在原型 `prototype/assets/app.css` 里命中 0，是实现自造的
+      第二套页面设计。但**页面模板还留着它们**——逐页换成原型的
+      `.af-head` + `.af-body` 骨架归子任务 4/6/8/9。
+
+      所以这一族暂时整族豁免：不豁免的话本门禁会有 50+ 条假红灯，而人看到
+      一屏红灯的自然反应是去改模板（本轮不该改）而不是修名单。**迁移完成后
+      这一整块要删掉**——下面的反向守卫盯着它别变成永久后门。
+    */
+    ['af-page', '页面根容器：规则已删，骨架迁到 `.af-head` + `.af-body`（子任务 4/6/8/9）'],
+    ['af-page--flush', '同上：无内边距的页面根变体（`SessionPage`），迁到 `.af-body--fill`'],
+    ['af-page__head', '页面页头：迁到原型的 `.af-head`（原型 `index.html:15`）'],
+    ['af-page__title', '页面 h1：迁到原型的 `.af-head__title`'],
+    ['af-page__actions', '页头右侧动作：迁到 `.af-head` 里的 `.af-btn` + `.af-head__spacer`'],
+    ['af-page__sub', '页面副标题：迁到原型的 `.af-head__sub`'],
+    ['af-page__subtitle', '页内分区标题：迁到原型的 `.af-region__title`'],
+    ['af-page__section', '分区钩子：无自有规则，与 `af-ov__todo` 一起用'],
     ['af-catalog', '`AgentCatalog` 的根标记类：后代选择器 `.af-catalog .af-catalog__x` 里已包含它'],
     ['af-agd', '`AgentDetailPage` 的根标记类：同上，`.af-agd .af-agd__x`'],
     ['af-devd', '`DeviceDetailPage` 的根标记类：同上'],
     ['af-taskd', '`ProjectTaskPage` 的根标记类：同上'],
     ['af-acceptancepanel', '`AcceptancePanel` 的根标记类：外观全部走 `.af-region` + `.af-acceptancepanel__x`'],
     ['af-failurepanel', '`FailurePanel` 的根标记类：同上'],
-    ['af-skeletonpage', '`SkeletonPage` 的根标记类：外观走 `.af-skeletonpage__x` 与 `.af-page`'],
+    ['af-skeletonpage', '`SkeletonPage` 的根标记类：外观走 `.af-skeletonpage__x`'],
     ['af-ov__todo', '`OverviewPage` 的待办分区钩子：与 `af-page__section` 一起用，无自有规则'],
     ['af-devpage__detail', '`DevicesPage` 的设备详情分区钩子：与 `af-region` 一起用，外观全部来自 `.af-region`'],
     ['af-auth--setup', '`SetupPage` 的 `af-auth` 变体钩子：当前与 `af-auth` 同观感，保留是为了将来真要分叉时有地方加'],
@@ -129,6 +147,18 @@ describe('模板里的 af-* 类名都有定义（`.af-head__title` 那次漏定�
     ['af-fold', '原型 `.af-fold`：生产用 `.af-ov__fold`（`<details>`），模板里留着这个名字是对照锚点'],
     ['af-fold__sum', '原型 `.af-fold__sum`：生产用 `.af-ov__fold > summary`'],
     ['af-fold__body', '原型 `.af-fold__body`：生产用 `.af-ov__fold-body`（选择器里两个名字并列，故意保留）'],
+  ])
+
+  /** 只有「页面外壳那一族待迁移」才允许整族豁免——它们是子任务 4/6/8/9 的账。 */
+  const MIGRATION_EXEMPT = new Set([
+    'af-page',
+    'af-page--flush',
+    'af-page__head',
+    'af-page__title',
+    'af-page__actions',
+    'af-page__sub',
+    'af-page__subtitle',
+    'af-page__section',
   ])
 
   it('没有任何页面在用「样式表里不存在的类」', () => {
@@ -146,11 +176,45 @@ describe('模板里的 af-* 类名都有定义（`.af-head__title` 那次漏定�
   })
 
   it('判定本身有效：已知有定义的类判「有」，编造的类判「没有」', () => {
-    // 正向：`.af-page__title` / `.af-head__title` 都必须真被找到，
+    // 正向：`.af-rail__mark` / `.af-head__title` 都必须真被找到，
     // 否则 isDefined 恒返回 false，上面那条断言会因为「全都缺」而看起来也在工作。
-    expect(isDefined('af-page__title')).toBe(true)
+    // 正例**必须取自原型**（`prototype/assets/app.css`）：用自造类当正例，等于
+    // 让一条「要删掉自造层」的门禁反过来把自造类当成既有事实（`.af-auth__mark`
+    // 就曾这样混进来——原型里 `grep -c 'af-auth' → 0`）。
+    expect(isDefined('af-rail__mark')).toBe(true)
     expect(isDefined('af-head__title')).toBe(true)
     // 反向：编一个不存在的名字，必须判缺——否则上面那条断言恒真。
     expect(isDefined('af-definitely-not-a-real-class')).toBe(false)
+    // 上面守卫的落点：`.af-page__title` 的规则**真的**已经删了（不是被判成缺）。
+    expect(isDefined('af-page__title')).toBe(false)
+  })
+
+  /*
+    「整族豁免」不许变成永久后门。
+
+    页面外壳那一族（`.af-page` 等 8 个）是**待迁移**的账，不是「本来就不该有
+    规则」。迁移完成的信号是：样式表里重新定义了它（那说明有人把自造层又加
+    回来了）或模板里已经没人用了（那说明迁移做完了，豁免该删）。
+
+    两种情形都要红，于是这份名单只能说一件事：「还没迁完」。
+  */
+  it('页面外壳那一族的豁免只在「还没迁移」时成立', () => {
+    const stillUsed = [...MIGRATION_EXEMPT].filter((name) =>
+      [...VUE_SRC.values()].some((src) => staticClasses(src).includes(name)),
+    )
+    for (const name of MIGRATION_EXEMPT) {
+      expect(
+        isDefined(name),
+        `样式表里又重新定义了 .${name} —— 自造层不许回来（用户 2026-11-16 裁定「以原型为准」）`,
+      ).toBe(false)
+    }
+    // 一份都没人用了 = 迁移完成：那时这个豁免集合必须整个删掉。
+    expect(
+      stillUsed.length,
+      [
+        '页面外壳那一族已经没人用了（迁移完成），请把 MIGRATION_EXEMPT 与',
+        'NO_RULE_BY_DESIGN 里对应的 8 条一起删掉——豁免留着就是对门禁的静默关闭。',
+      ].join('\n'),
+    ).toBeGreaterThan(0)
   })
 })

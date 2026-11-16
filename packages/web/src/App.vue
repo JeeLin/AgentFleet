@@ -2,10 +2,12 @@
 /* ===========================================================================
    App.vue —— 应用外壳（规范 §5.1）
    ---------------------------------------------------------------------------
-   布局：侧栏 + 顶栏 + 主区 + 状态条。一级导航是 4 项（总览 / 设备 / Agent / 设置，v0.7.0）。
+   布局：左栏 + 主区（`prototype/index.html:12` 的 `.af-shell`）。原型**没有全局
+   顶栏**，也没有全局状态条——页头 `.af-head` 属于页面自己。左栏分四组：
+   全站 / 项目 / 收件箱 / 管理面（与 `prototype/assets/shell.js:19-49` 的 `NAV` 同构）。
 
    ── 这个文件负责的三件事 ─────────────────────────────────────────
-   ① 侧栏与顶栏的 chrome；② 键位帮助面板（`?` 由 `KEYS` 渲染，不手写）；
+   ① 左栏的 chrome；② 键位帮助面板（`?` 由 `KEYS` 渲染，不手写）；
    ③ **跳转后的焦点落点**：`main` 每次换页都拿一次焦点（§4.3）。
    页面自己不管外壳，也不重新声明 `main`。
 
@@ -17,16 +19,20 @@
    的跳转也住在这里（`setNotInitializedHandler`），所以 `src/shared/` 里没有第二个
    会整页跳转的地方。
 
-   ── 折叠态为什么不是「藏起来」 ───────────────────────────────────
-   `⌃B` 把侧栏收成 44px 图标轨，导航项仍在（`aria-label` 补偿被
-   `display:none` 掉的名字）。折叠是省空间，不是删功能——所以没有
-   「折叠后只剩一个汉堡菜单」这种等价路径。
+   ── 收起态为什么不是「缩成图标条」 ───────────────────────────────
+   `⌃B` 按**原型**的机制把左栏整体滑出屏幕（`html[data-rail="off"]`），
+   导航仍在 DOM 里、可由品牌行那颗 `.af-navbtn` 唤回。原型
+   `assets/app.css:1212-1227` 就是这么做的，并且写明了理由：13 个导航项里
+   只有 3 个项目色点有形状，其余 9 项是抽象概念——48px 里只能写汉字首字，
+   「设备」和「设置」都变成「设」，那个方案当场就不成立。收起只为一件事：
+   读长内容时把注意力让出来。
    =========================================================================== */
 
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
 import LoginPrompt from '@/domains/shared/components/LoginPrompt.vue'
+import { listProjects, type Project } from '@/domains/project/api'
 import { pop, push, topContainer, trapTab } from '@/shared/focus'
 import { SCOPE_LABEL, KEYS, hintOf, missingActs, onHandlersChanged, PREFIX_LEAD } from '@/shared/keynav'
 import { logout } from '@/shared/auth'
@@ -148,92 +154,135 @@ function redirectLegacy(): void {
  * `name === 'login' || name === 'setup'`：那样加第三个认证页时会漏改一处，
  * 症状是「登录页里出现了侧栏导航」——而那时用户还没登录。
  *
- * 认证页**不带外壳**（§5.1 最后一条「登录前没有导航可言」）：图标轨、
- * 侧栏、顶栏、状态条全部不渲染。状态条尤其不能留——它写着「Hub 已连接」，
- * 而此刻 Hub 可能正回着 403 `hub_not_initialized`。
+ * 认证页**不带外壳**（§5.1 最后一条「登录前没有导航可言」）：侧栏、顶栏、
+ * 状态条全部不渲染。状态条尤其不能留——它写着「Hub 已连接」，
+ * 而此刻 Hub 可能正回着 403 `hub_not_initialized`。（v0.8.1 起全局状态条与
+ * 全局顶栏本身也已按原型删除，状态那几行落在左栏底部 `.af-rail__foot` 里，
+ * 随左栏一起不渲染。）
  */
 const isAuthPage = computed(() => AUTH_ROUTES.has(route.value.name))
 
-/* ---------------------------------------------------------------- 侧栏 */
+/* ------------------------------------------------------------------ 左栏 */
 
 /**
- * 一级导航。**四项**：总览 / 设备 / Agent / 设置。
+ * 一级导航。**分组与原型 `prototype/assets/shell.js:19-49` 的 `NAV` 同构**：
+ * 全站 / 项目 / 收件箱 / 管理面（+ 项目列表）。
  *
  * 标签与键位提示都从 `keynav.ts` / `page-titles.ts` 读：手抄一份的话，改了
  * 键位表而忘了改这里，侧栏就会显示一个按了没反应的键（症状与「改了 `PREFIX`
  * 而侧栏没跟着变」完全一样）。
  *
- * # 为什么是这四项
+ * # 为什么分组是这四组
  *
- * `AGENTS.md` §1 的产品主轴：**「做事从项目进，管理从设备进」**。
- * - **总览**是「做事」的入口——项目列表，进去是某个项目的看板。
- * - **设备**与 **Agent** 是「管理面」。v0.5.0 曾把 Agent 并进设备页的
- *   `?view=agents` 分段，那时侧栏只留三项；v0.7.0 按新原型把它们重新分成
- *   两页：设备回答「这台机器在不在线」，Agent 回答「这台机器上装了什么、
- *   能不能跑」——同一批数据，但一个是运维视角、一个是能力视角。
- *   旧 `/agents` 地址仍由 `LEGACY_PATHS` 接住。
- * - **设置**是整站配置。
+ * 原型把「你在哪」与「你去哪」分成两层：组标题是层级语言，列表项是入口。
+ * - **全站**：总览是「做事」的入口；已归档是「找得回来」的那个门。
+ * - **项目**：每个项目一项，数据来自**既有**的 `listProjects`（与总览页同一个
+ *   端点、同一套读法），不新增请求端点。项目是主轴，所以它在中间。
+ * - **收件箱**：待决策与动态——「等你决定的事」不在项目里，它横跨项目。
+ * - **管理面**：设备 / Agent / 设置。它们回答「机器怎么样」，不是「项目怎么样」
+ *   （`AGENTS.md` §1「做事从项目进，管理从设备进」）。
  *
  * # 项目内页面不进左栏
  *
  * 看板 / 任务 / 执行 / 绑定 / 项目设置**不是「地方」，是「在某个项目里」**。
- * 把它们列进左栏会要求左栏知道「当前是哪个项目」，而切换项目时左栏整列都
- * 要跟着变——用户会失去「我在哪」的稳定参照。它们从总览点进去。
- *
- * `新建项目` 同样不进左栏：它是**动作**，不是地方。
+ * 它们从某个项目的条目点进去（条目高亮由 `isCurrentProject` 判断）。
+ * `新建项目` 是**动作**，挂在「项目」组标题右侧的 `.af-rail__add` 上。
  */
-const NAV = [
+const NAV_GROUPS = [
   {
-    to: '/',
-    label: pageTitle('overview'),
-    icon: '◈',
-    act: 'nav:overview',
-    match: ['overview', 'board', 'projects-new', 'projects-archived'],
+    title: '全站',
+    items: [
+      { to: '/', label: pageTitle('overview'), act: 'nav:overview', match: ['overview'] },
+      {
+        to: '/projects/archived',
+        label: pageTitle('projects-archived'),
+        act: '',
+        match: ['projects-archived'],
+      },
+    ],
   },
   {
-    to: '/devices',
-    label: pageTitle('devices'),
-    icon: '▣',
-    act: 'nav:devices',
-    match: ['devices'],
+    title: '收件箱',
+    items: [
+      { to: '/inbox', label: pageTitle('inbox'), act: '', match: ['inbox'] },
+      { to: '/inbox/activity', label: pageTitle('inbox-activity'), act: '', match: ['inbox-activity'] },
+    ],
   },
   {
-    to: '/agents',
-    label: pageTitle('agents'),
-    icon: '◆',
-    act: 'nav:agents',
-    match: ['agents'],
+    title: '管理面',
+    items: [
+      { to: '/devices', label: pageTitle('devices'), act: 'nav:devices', match: ['devices', 'device-detail'] },
+      { to: '/agents', label: pageTitle('agents'), act: 'nav:agents', match: ['agents', 'agent-detail'] },
+      {
+        to: '/settings',
+        label: pageTitle('settings'),
+        act: 'nav:settings',
+        match: ['settings', 'settings-skills', 'settings-integrations', 'settings-notifications'],
+      },
+    ],
   },
-  {
-    to: '/settings',
-    label: pageTitle('settings'),
-    icon: '⚙',
-    act: 'nav:settings',
-    match: ['settings', 'settings-skills', 'settings-integrations', 'settings-notifications'],
-  },
-]
+] as const
 
-/* ------------------------------------------------- 侧栏：会话页自动收起 */
+/** 左栏的全部分组标题（含「项目」）。断言「4 组」时用的是这一份。 */
+const RAIL_GROUPS = ['全站', '项目', '收件箱', '管理面'] as const
+
+/** 一个分组里的导航项。分组名不在这张表里时返回空数组（模板不自己判）。 */
+function navItemsOf(title: string): readonly { to: string; label: string; act: string; match: readonly string[] }[] {
+  return NAV_GROUPS.find((g) => g.title === title)?.items ?? []
+}
 
 /**
- * 侧栏的用户意图。**只由用户写**（`⌃B` / 侧栏与顶栏那两个按钮）。
+ * 左栏「项目」组里那一列。数据来自既有的 `listProjects`（`domains/project/api`），
+ * 与总览页同一个端点，**没有新增请求**。
+ *
+ * 失败时**什么都不显示**：左栏是导航，不是状态面板——那里弹一条读取失败会把
+ * 「今天做什么」的注意力拉走，而总览页本身会给出完整的失败态与重试。
+ * 收起态下它读不到也不影响用户操作（`.af-rail` 收起后整体滑出屏幕）。
+ */
+const railProjects = ref<Project[]>([])
+
+async function loadRailProjects(): Promise<void> {
+  try {
+    railProjects.value = await listProjects()
+  } catch {
+    // 左栏不是错误展示面（见上）。总览页的 `EmptyState` 才是。
+    railProjects.value = []
+  }
+}
+
+/**
+ * 当前项目 id（路由里有 `:id` 时）。
+ *
+ * 判据取 `route.value.params.id`，**不另写一份路径匹配**：同一判据两处实现
+ * 必然漂开。会话 / 看板 / 任务 / 绑定 / 设置页都带这个段。
+ */
+const currentProjectId = computed(() => route.value.params.id ?? '')
+
+/* --------------------------------------------- 左栏：会话页自动收起 */
+
+/**
+ * 左栏的用户意图。**只由用户写**（`⌃B` / 品牌行那颗 `.af-navbtn`）。
  *
  * ── 为什么「自动收起」不能只是另一个布尔 ──────────────────────────
  * 写成「在会话页里就强制收起」（`autoCollapsed ? 'collapsed' : rail`）时，
  * 会话内的手动展开会被同一个 computed 立刻盖回去，症状是「开关点了没反应」。
  *
  * ── 为什么这次是「以当前可见态为基准翻转」而不是「清标志 + 翻 rail」 ──
- * 后者看起来更干净，但它有一个坏交互：侧栏被自动收起成 `collapsed`，用户点
+ * 后者看起来更干净，但它有一个坏交互：左栏被自动收起成 `collapsed`，用户点
  * 开关 → 清标志、`rail` 由 `open` 翻成 `collapsed` → 可见态**还是** `collapsed`。
  * 用户要的是「展开」，得到的是「没动」，得点第二下才展开。实测踩过。
  *
  * 所以 `toggleRail` 一律以**用户眼前看到的**为基准翻转（见其注释），
  * `rail` 因此始终等于「用户此刻要的样子」——离开会话页时直接恢复它就对了。
+ *
+ * 取值仍是 `open` / `collapsed`（测试锁着这个契约），但它不再写成节点的
+ * `data-rail` 属性：原型把状态放在 **`<html data-rail="off">`** 上，
+ * 由 `html[data-rail="off"] .af-shell` 把整列滑出去（见下面的 `watch`）。
  */
 const rail = ref<'open' | 'collapsed'>('open')
 
 /**
- * 会话页里侧栏被自动收起。唯一写入者是下面那个路由 `watch`。
+ * 会话页里左栏被自动收起。唯一写入者是下面那个路由 `watch`。
  *
  * 与 `rail` 分开是因为两者回答不同的问题：`rail` 是「用户要什么」，这里是
  * 「这一页要不要先替他收起来」。合成一个字段就无法回答「用户手动拨过之后，
@@ -261,7 +310,7 @@ function toggleRail(): void {
 }
 
 /**
- * 进会话工作台自动收侧栏，离开会话页时这条自动收起失效。
+ * 进会话工作台自动收左栏，离开会话页时这条自动收起失效。
  *
  * 它**不写 `rail`**：离开会话页恢复的是用户自己的偏好，而偏好从没被这里改过。
  *
@@ -279,9 +328,42 @@ watch(
   { immediate: true },
 )
 
-/** 一条导航项是否当前页。会话工作台仍高亮「会话」。 */
+/**
+ * 收起态落到 **`<html data-rail="off">`**（原型的机制，`app.css:1212-1227`）。
+ *
+ * 为什么必须写在 `<html>` 上而不是外壳节点上：原型的选择器是
+ * `html[data-rail="off"] .af-shell { grid-template-columns: 0 1fr; }` +
+ * `html[data-rail="off"] .af-rail { transform: translateX(-100%); visibility: hidden; }`
+ * ——收起时整列滑出屏幕、内容区吃满，不留图标条。选择器挂在 `html` 上，
+ * 属性写在别的节点上就一条都不生效（症状是「点了没反应」）。
+ *
+ * **展开时删掉属性而不是写 `"on"`**：原型同样如此（`delete dataset.rail`），
+ * 于是「展开」是缺省态，CSS 里不需要第二条 `[data-rail="on"]` 规则。
+ */
+watch(
+  effectiveRail,
+  (state) => {
+    if (typeof document === 'undefined') return
+    if (state === 'collapsed') document.documentElement.dataset.rail = 'off'
+    else delete document.documentElement.dataset.rail
+  },
+  { immediate: true },
+)
+
+/** 一条导航项是否当前页。 */
 function isCurrent(match: readonly string[]): boolean {
   return (match as readonly string[]).includes(route.value.name)
+}
+
+/**
+ * 项目组里某一项是否当前项目。
+ *
+ * 判据是「路由的 `:id` 等于它」——不看 `route.name`：看板 / 任务 / 会话 / 绑定 /
+ * 设置都发生在同一个项目里，左栏该一直指着那个项目，否则用户一进任务页就
+ * 看不出自己在哪个项目里。
+ */
+function isCurrentProject(id: string): boolean {
+  return currentProjectId.value === id
 }
 
 function onNavClick(e: MouseEvent, anchor: HTMLAnchorElement): void {
@@ -447,6 +529,9 @@ onMounted(() => {
     focusSearch,
   })
   stopRouter = startRouter()
+  // 左栏「项目」组那一列。与总览页同一个端点（`listProjects`），只是这里
+  // 不显示失败态（见 `loadRailProjects` 的注释）。
+  void loadRailProjects()
   // 首屏落在一条已删除的旧地址上（书签、外部链接）：换成它的去处。
   // 必须在 `startRouter` 之后——`navigate` 会改历史记录，先起监听再改，
   // 顺序反了会让这次 `replaceState` 发生在监听装好之前（本身无害，但
@@ -511,90 +596,113 @@ watch(
        会让 `focusMain()` 的 `main[tabindex="-1"]` 选择器命中外层那个空壳。 -->
   <component :is="page" v-if="isAuthPage && page" :key="pageKey" />
 
-  <div v-else class="af-app" :data-rail="effectiveRail">
-    <nav class="af-sidebar" aria-label="主导航">
-      <!-- 品牌区与导航同一列（用户裁定，2026-10-27）：它们同高、同背景色、
-           同受 `⌃B` 折叠，分开只多一条分隔线。放在 `nav` 内部而不是外面，
-           是为了让「折叠侧栏」这一个 flex 容器同时管住两者——否则折叠时
-           品牌区的位置要单独算一次。 -->
-      <div class="af-brand">
-        <span class="af-brand__mark" aria-hidden="true"></span>
-        <span class="af-brand__name">AGENTFLEET</span>
-      </div>
-      <!--
-        导航项直接排在侧栏这一列里，**没有分组标题**：三个组各只有一项，
-        标题与它唯一的条目说的是同一个词（「会话 / 会话」并排放着），
-        多出来的那一行标签只占地方。
-
-        留一层 `.af-navgroup` 保留 1px 的条目间距：`.af-sidebar` 的 gap 是
-        `space-2`（4px），直接铺进去会让三行之间松动 4 倍。这也是折叠态那条
-        `align-items: center` 的落脚点——这里只丢标题、不丢布局。
-      -->
-      <div class="af-navgroup">
-        <a
-          v-for="item in NAV"
-          :key="item.to"
-          class="af-sidebar__item"
-          :href="item.to"
-          :aria-current="isCurrent(item.match) ? 'page' : undefined"
-          :aria-label="item.label"
-          :title="`${item.label}（${hintOf(item.act)}）`"
-          @click="onNavClick($event, $event.currentTarget as HTMLAnchorElement)"
+  <!-- 外壳：原型 `prototype/index.html:12` 的 `.af-shell`（两个网格区：左栏 + 主区）。
+       原型**没有全局顶栏**——页头 `.af-head` 属于页面自己（`prototype/index.html:15`）。
+       收起态由 `<html data-rail="off">` 驱动（见脚本里的那个 watch）。 -->
+  <div v-else class="af-shell">
+    <aside class="af-rail" aria-label="主导航">
+      <!-- 品牌行（原型 `app.css:61-75`）：与页头同高，所以两条水平线对得上。
+           收起按钮在原型里就长在这一行末尾（`.af-rail__brand .af-navbtn`，
+           `app.css:1140`）。左栏整体滑出屏幕之后，它是唤回左栏的唯一入口，
+           所以收起时它必须留在原地——由 `html[data-rail="off"]` 把它切成
+           悬浮形态（见 `prototype-shell.css` §1 末尾那条规则）。 -->
+      <div class="af-rail__brand">
+        <span class="af-rail__mark" aria-hidden="true">AF</span>
+        <span>
+          <span class="af-rail__name">AgentFleet</span><br />
+          <span class="af-rail__sub">self-hosted</span>
+        </span>
+        <button
+          class="af-navbtn"
+          type="button"
+          aria-label="折叠 / 展开侧栏"
+          :title="`折叠侧栏（${hintOf('rail:toggle')}）`"
+          :aria-expanded="effectiveRail === 'open'"
+          @click="toggleRail"
         >
-          <span class="af-sidebar__icon" aria-hidden="true">{{ item.icon }}</span>
-          <span class="af-sidebar__item-text">{{ item.label }}</span>
-          <span class="af-sidebar__hint" aria-hidden="true">{{ hintOf(item.act) }}</span>
-        </a>
+          <span class="af-navbtn__bars" aria-hidden="true"><span></span><span></span><span></span></span>
+        </button>
       </div>
-      <span class="af-spacer"></span>
-      <!-- 折叠后**保留**这个按钮：`.af-spacer` 把它顶在侧栏底部，而它正是折叠
-           态唯一的就地展开入口（顶栏那个也能展开，但用户的手这会儿在侧栏上）。
-           折叠时只藏文字、换图标与 aria-label，按钮本身留着——否则 `.af-spacer`
-           的 `flex:1` 会把一块没有内容的空白带撑在底部，看起来像残留的拖拽区。 -->
-      <button
-        class="af-sidebar__close"
-        type="button"
-        :aria-label="effectiveRail === 'collapsed' ? '展开侧栏' : '折叠侧栏'"
-        @click="toggleRail"
-      >
-        <span class="af-sidebar__icon" aria-hidden="true">{{
-          effectiveRail === 'collapsed' ? '⇥' : '⇤'
-        }}</span>
-        <span class="af-sidebar__item-text">{{ effectiveRail === 'collapsed' ? '展开侧栏' : '折叠侧栏' }}</span>
-      </button>
-    </nav>
 
-    <header class="af-topbar">
-      <button
-        class="af-btn af-btn--ghost af-btn--sm af-btn--icon"
-        type="button"
-        aria-label="折叠 / 展开侧栏"
-        title="折叠侧栏（⌃B）"
-        @click="toggleRail"
-      >
-        <span aria-hidden="true">⇥</span>
-      </button>
-      <h2 class="af-topbar__title">{{ docTitle }}</h2>
-      <span class="af-spacer"></span>
-      <button
-        class="af-btn af-btn--ghost af-btn--sm af-btn--icon"
-        type="button"
-        aria-label="键位帮助"
-        title="键位帮助（?）"
-        @click="openHelp"
-      >
-        <span aria-hidden="true">?</span>
-      </button>
-      <button
-        class="af-btn af-btn--ghost af-btn--sm af-btn--icon"
-        type="button"
-        aria-label="退出登录"
-        title="退出登录"
-        @click="onLogout"
-      >
-        <span aria-hidden="true">⏻</span>
-      </button>
-    </header>
+      <!-- 分组：全站 / 项目 / 收件箱 / 管理面（与原型 `shell.js:19-49` 的 `NAV` 同构）。
+           `RAIL_GROUPS` 决定顺序，不是模板顺序——「项目」组在中间：项目是主轴，
+           而它的数据是异步拿到的。 -->
+      <template v-for="group in RAIL_GROUPS" :key="group">
+        <div class="af-rail__group">
+          <span>{{ group }}</span>
+          <!-- 「项目」组标题挂一个 +（原型 `shell.js:100-104`）：建项目是高频动作，
+               不该逼人先回总览页再找按钮。 -->
+          <a
+            v-if="group === '项目'"
+            class="af-rail__add"
+            href="/projects/new"
+            title="新建项目"
+            aria-label="新建项目"
+            @click="onNavClick($event, $event.currentTarget as HTMLAnchorElement)"
+            >+</a
+          >
+        </div>
+        <ul v-if="group === '项目'" class="af-rail__list">
+          <li v-for="p in railProjects" :key="p.id">
+            <a
+              :href="`/project/${encodeURIComponent(p.id)}/board`"
+              :aria-current="isCurrentProject(p.id) ? 'page' : undefined"
+              @click="onNavClick($event, $event.currentTarget as HTMLAnchorElement)"
+            >
+              <span class="af-rail__label">{{ p.name }}</span>
+            </a>
+          </li>
+        </ul>
+        <ul v-else class="af-rail__list">
+          <li v-for="item in navItemsOf(group)" :key="item.to">
+            <a
+              :href="item.to"
+              :aria-current="isCurrent(item.match) ? 'page' : undefined"
+              :title="item.act ? `${item.label}（${hintOf(item.act)}）` : item.label"
+              @click="onNavClick($event, $event.currentTarget as HTMLAnchorElement)"
+            >
+              <span class="af-rail__label">{{ item.label }}</span>
+            </a>
+          </li>
+        </ul>
+      </template>
+
+      <!-- 底部：状态 + 两个整站动作（原型 `.af-rail__foot`，`app.css:102-106`）。
+           原型的底部只有状态那几行；帮助与退出登录这两个入口在原型里不属于
+           左栏，但实现侧**必须有**（`?` 与登出不能被删掉），而原型没有全局顶栏
+           可以挂，所以它们落在这里——这是「搬位置」，不是新增能力。 -->
+      <div class="af-rail__foot">
+        <div class="af-rail__status">
+          <span><span class="af-dot" aria-hidden="true"></span>Hub 已连接</span>
+          <span>单用户 · 自托管</span>
+          <span class="af-rail__keys">
+            <kbd>{{ hintOf('help:toggle') }}</kbd> 键位
+            <kbd>{{ PREFIX_LEAD }}</kbd> 跳转
+            <kbd>{{ hintOf('rail:toggle') }}</kbd> 侧栏
+          </span>
+        </div>
+        <div class="af-rail__actions">
+          <button
+            class="af-btn af-btn--ghost af-btn--sm"
+            type="button"
+            aria-label="键位帮助"
+            title="键位帮助（?）"
+            @click="openHelp"
+          >
+            <span aria-hidden="true">?</span> 键位
+          </button>
+          <button
+            class="af-btn af-btn--ghost af-btn--sm"
+            type="button"
+            aria-label="退出登录"
+            title="退出登录"
+            @click="onLogout"
+          >
+            <span aria-hidden="true">⏻</span> 退出
+          </button>
+        </div>
+      </div>
+    </aside>
 
     <main class="af-main" tabindex="-1">
       <component :is="page" v-if="page" :key="pageKey" />
@@ -610,20 +718,11 @@ watch(
       </EmptyState>
     </main>
 
-    <footer class="af-statusbar">
-      <span class="af-statusbar__item"><span class="af-dot" style="color: var(--af-ok)"></span>Hub 已连接</span>
-      <span class="af-statusbar__item af-t-mute">单用户 · 自托管</span>
-      <span class="af-spacer"></span>
-      <span class="af-statusbar__item af-statusbar__key"><kbd>{{ hintOf('help:toggle') }}</kbd> 键位</span>
-      <span class="af-statusbar__item af-statusbar__key"><kbd>{{ PREFIX_LEAD }}</kbd> 跳转</span>
-      <span class="af-statusbar__item af-statusbar__key"><kbd>{{ hintOf('rail:toggle') }}</kbd> 侧栏</span>
-    </footer>
-
     <!-- session 过期时弹出的密码框（§4.7「需要别的动作」那一列）。401 的一条
          出路是「填个密码继续」，不是「整页跳走」。它由 `shared/http.ts` 开，
          由这里挂载；取消时跳 /login 是外壳的策略（见 `onLoginCancel`）。
 
-         它待在 `af-app` 里面而不是与它平级：外壳那个 `v-else` 的配对是 `<component
+         它待在外壳里面而不是与它平级：外壳那个 `v-else` 的配对是 `<component
          :is="page" v-if="isAuthPage && page">`，在中间插一个 `v-if` 会抢走
          配对、整个外壳就再也不渲染了。而它自己 Teleport 到 body（焦点栈的
          「背后 inert」才成立），所以放这儿与放在外面在 DOM 上完全一样。 -->
@@ -638,7 +737,7 @@ watch(
        于是「背后全部 inert」退化成「一个都没 inert」：遮罩盖住了视觉，背后的
        侧栏项仍然可 Tab、可点（`aria-modal` 与「焦点归最内层容器」都不成立）。
 
-       它放在 `af-app` 之外，所以 `v-else` 的配对不受影响。 -->
+       它放在外壳之外，所以 `v-else` 的配对不受影响。 -->
   <Teleport to="body">
     <div
       v-if="helpOpen"

@@ -41,14 +41,16 @@
 /* ===========================================================================
    1. 外壳：rail + 主区（原型 §外壳 app.css:46-134）
    -------------------------------------------------------------------------
-   ⚠️ 与 `components.css` §1 的关系：那里有一套 `.af-app` / `.af-sidebar` /
-   `.af-topbar`（带状态条的三行网格），本文件的一套是原型的 `.af-shell` /
-   `.af-rail` / `.af-main` / `.af-head` / `.af-body`。
+   这一层就是**唯一的外壳几何**。`App.vue` 的根节点是 `.af-shell`，里面只有
+   两个网格区：`aside.af-rail` 与 `main.af-main`。
 
-   **两套都得留**：`.af-app` 是 `App.vue` 的实际根节点，它多一条状态条
-   （`.af-statusbar`），原型没有。但它们必须**同一套几何**——栏宽同取
-   `--af-rail-w`、顶栏同取 `--af-head-h`，否则「原型 224px / 实现 208px」
-   这种差值又会回来。
+   ── 曾经并存过的第二套（已删除，2026-11-16） ──────────────────────
+   `components.css` §1 里曾有一套自造的四件套（`.af-app` / 侧栏 / 全局顶栏 /
+   全局状态条，带状态条的三行网格 + 52px 图标轨收起态，共 26 条规则）。
+   那四个类在原型 `assets/app.css` 里命中 **0**，是实现自造的第二套设计：
+   同一棵子树同时受两套网格管，而收起交互的选择器不同
+   （节点上的 `data-rail` vs 原型的 `html[data-rail="off"]`），后者因此失效。
+   用户 2026-11-16 裁定「以原型为准」→ 整体删除，不迁移、不做别名并存。
    =========================================================================== */
 
 /* 双栏：左栏固定 224px，主区吃满。原型 app.css:48-51。 */
@@ -57,12 +59,19 @@
   height: 100vh; height: 100dvh;
 }
 
-/* 左栏：导航是分区清单，组标题是它唯一的层级语言。app.css:54-59。 */
+/* 左栏：导航是分区清单，组标题是它唯一的层级语言。app.css:54-59。
+   `overflow-x: hidden` 不能省：只写 `overflow-y: auto` 时 `overflow-x` 的计算值
+   是 `auto`（CSS Overflow：一轴非 visible 会把另一轴提升成 auto），于是左栏里
+   任何横向溢出——项目名很长、三个 `<kbd>` 挤一行——都长成一条可拖动的滚动条，
+   而它拖出来是一片空白。`min-width: 0` 是同一条理由的另一半：网格项默认
+   `min-width: auto`，内容比轨道宽时会把左栏顶宽、盖到主区上。 */
 .af-rail {
   background: var(--p-bg);
   border-right: 1px solid var(--p-line-2);
   display: flex; flex-direction: column; min-height: 0;
+  min-width: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   transition: transform 200ms var(--p-ease), visibility 200ms var(--p-ease);
 }
 
@@ -135,12 +144,81 @@
   border-top: 1px solid var(--p-line);
   font-size: var(--p-t-2xs); color: var(--p-fg-3); line-height: var(--p-lh-body);
 }
+/* 底部状态那几行（Hub 状态 / 单用户 · 自托管 / 键位提示）。原型 `.af-rail__foot`
+   只有这几行文本；实现侧多了两个整站动作按钮（见下面 `.af-rail__actions`）。 */
+.af-rail__status { display: flex; flex-direction: column; gap: var(--p-s1); }
+.af-rail__status > span { display: flex; align-items: center; gap: var(--p-s2); }
+.af-rail__status .af-dot { background: var(--p-done); }
+/* 键位提示：允许折行。224px 里三个 `<kbd>` 加文字一行放不下，挤成一条横向
+   溢出会在 `.af-rail` 上长出一条滚动条（原型 app.css 的 rail 是 `overflow-y`）。 */
+.af-rail__keys {
+  display: flex; align-items: center; gap: var(--p-s1); flex-wrap: wrap;
+  font-size: var(--p-t-2xs);
+}
+/* 帮助与退出登录：原型没有全局顶栏，这两个入口搬到这里（**只搬位置，
+   不删功能**）。一行两个，放不下就折行。 */
+.af-rail__actions { display: flex; align-items: center; gap: var(--p-s1); flex-wrap: wrap; margin-top: var(--p-s2); }
 
-/* 主区：`components.css` §1 已定义 `.af-main`（`grid-area: main`），此处不重复。 */
-/* 顶栏：贴顶、底部一条线、最小高 = --head-h。app.css:118-124。
-   这是原型每一页的**页头**——注意它和外层的 `.af-topbar`（App.vue 的
-   全局导航条）不是同一个东西：`.af-head` 属于页面自己，里面放页面标题、
-   项目切换器、页面级动作。 */
+/* ── 左栏收起态（原型 app.css:1212-1227）─────────────────────────────
+   桌面收起：整列滑出，内容区吃满。状态存在 `<html data-rail="off">`，
+   而**不是**节点上的一套 52px 图标轨几何（那是自造层，已删除）。
+
+   属性写在 `<html>` 上而不是外壳节点上，是因为下面这两条选择器以 `html` 为根；
+   写在别处就一条都不生效，症状是「点了收起没反应」。 */
+html[data-rail='off'] .af-shell { grid-template-columns: 0 1fr; }
+html[data-rail='off'] .af-rail {
+  transform: translateX(-100%);
+  visibility: hidden;
+  border-right: none;
+}
+
+/* 收起后开关要留在原地——否则收起来就再也点不回去。
+   原型把唤回按钮做成一颗悬浮饼（`.af-recallsplit`）。实现侧**不新造几何**：
+   那个按钮仍是品牌行
+   里那颗 `.af-navbtn`，收起时给它一份 `position: fixed` 的悬浮形态。
+   这不是第二套类名（`.af-navbtn` 就是原型的类），只是把「收起后它得浮住」
+   这件事落在同一颗按钮上。 */
+html[data-rail='off'] .af-rail__brand .af-navbtn {
+  position: fixed; left: var(--p-s3); top: var(--p-s3); z-index: 95;
+  background: var(--p-pop); border-color: var(--p-line-3);
+  box-shadow: var(--p-sh-2); border-radius: var(--p-r-full);
+  visibility: visible;
+}
+
+/* ── 导航开关（原型 app.css:1115-1141）────────────────────────────────
+   为什么收起是「整体滑走」而不是缩成图标条：导航项里只有 3 个项目色点是有
+   形状的，其余是抽象概念（设备 / Agent / 设置）。48px 里只能写汉字首字，
+   「设备」和「设置」都变成「设」，并排两个「设」——那个方案当场就不成立。
+   而正文本来就限宽，「收起」只为一件事：读长内容时把注意力让出来。 */
+.af-navbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: var(--p-s2);
+  min-width: var(--af-navbtn); min-height: var(--af-navbtn);
+  padding: 0 var(--p-s2);
+  border: 1px solid var(--p-line-2); border-radius: var(--p-r-sm);
+  background: transparent; color: var(--p-fg-2);
+  font: inherit; font-size: var(--p-t-sm);
+  text-decoration: none; cursor: pointer;
+  flex: 0 0 auto;
+}
+.af-navbtn:hover { background: var(--p-surf-2); color: var(--p-fg-strong); text-decoration: none; }
+.af-navbtn:active { transform: translateY(1px); }
+/* 三条横线的图标：不依赖字体，任何主题下都画得出来 */
+.af-navbtn__bars {
+  display: flex; flex-direction: column; gap: 3px;
+  width: 15px; flex: 0 0 auto;
+}
+.af-navbtn__bars span {
+  display: block; height: 1.5px; border-radius: 1px;
+  background: currentColor;
+}
+/* 桌面：塞进左栏品牌行，放在最后（原型 app.css:1139-1141）。 */
+.af-rail__brand .af-navbtn { margin-left: auto; }
+
+/* 主区：`.af-main` 的权威定义在 `components.css` §1（聚焦落点与内边距）。
+   顶栏：贴顶、底部一条线、最小高 = --head-h。app.css:118-124。
+   这是原型每一页的**页头**——注意它属于页面自己（`h1.af-head__title` +
+   副标题 + 右侧动作），原型**没有全局顶栏**，外壳里也没有 header 元素。 */
 .af-head {
   display: flex; align-items: center; gap: var(--p-s3);
   padding: 0 var(--p-s6);
@@ -563,6 +641,10 @@ a.af-meter:hover { background: var(--p-surf-2); text-decoration: none; }
 @media (max-width: 900px) {
   .af-shell { grid-template-columns: 1fr; }
   .af-rail { display: none; }
+  /* 窄屏没有「收起」这回事：左栏根本不渲染（见上一行），靠底部面板。
+     这条覆盖掉桌面那条 `0 1fr`，否则窄屏收起后主区宽度会是 0+1fr 的一栏。 */
+  html[data-rail='off'] .af-shell { grid-template-columns: 1fr; }
+  html[data-rail='off'] .af-rail__brand .af-navbtn { display: none; }
   .af-split { grid-template-columns: 1fr; }
   .af-head { padding: 0 var(--p-s4); }
   .af-meters { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: var(--p-s3) var(--p-s3) 0; }

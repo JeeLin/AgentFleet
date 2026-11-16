@@ -139,27 +139,31 @@ describe('一条规则只有一个家（跨受管文件数次数，toContain 看
   })
 })
 
-describe('页面级布局的规模（文件头「三族合计 ≤30 条规则」的门禁）', () => {
+describe('页面级布局的规模（文件头「两族合计 ≤30 条规则」的门禁）', () => {
   /**
-   * 「页面级布局」= 页面外壳的那三族：.af-page（列表/设置页外壳）、
-   * .af-auth（登录 / setup 的居中窄列）、.af-wb（会话工作台）。
+   * 「页面级布局」= 页面外壳的那两族：.af-auth（登录 / setup 的居中窄列）、
+   * .af-wb（会话工作台）。
+   *
+   * v0.8.1 子任务 2 把第三族 `.af-page` 整体删除了：它在原型
+   * `prototype/assets/app.css` 里命中 0，是实现自造的第二套页面外壳
+   * （用户裁定「以原型为准」）。所以现在只有两族。
    *
    * 用「条」（规则数）不用「行」：一条规则写成一行还是七行只差换行，行数
    * 量的是排版、不是规模——文件头已经写明这条账。
    */
-  const PAGE_LAYOUT = ['.af-page', '.af-auth', '.af-wb']
+  const PAGE_LAYOUT = ['.af-auth', '.af-wb']
 
-  it('三族合计不超过 30 条规则（超了就该拆组件，不是继续往页面壳里堆）', () => {
+  it('两族合计不超过 30 条规则（超了就该拆组件，不是继续往页面壳里堆）', () => {
     const css = stripComments(readRepoFile('packages/web/src/styles/components.css'))
     let total = 0
     for (const prefix of PAGE_LAYOUT) {
       const escaped = prefix.replace('.', '\\.')
       const hits = css.match(new RegExp(`^\\s*${escaped}[^{\\n]*\\{`, 'gm')) ?? []
-      // 单看一族也要有东西：`.af-page` 是 5 个页面共用的外壳，一条都没有
+      // 单看一族也要有东西：`.af-auth` 是登录 / setup 共用的外壳，一条都没有
       // 说明这一族被整个搬走了，页面壳会散掉。
       expect(hits.length, `${prefix} 一族的规则不见了`).toBeGreaterThan(0)
       total += hits.length
     }
-    expect(total, `页面级布局三族合计 ${total} 条，超过 30`).toBeLessThanOrEqual(30)
+    expect(total, `页面级布局两族合计 ${total} 条，超过 30`).toBeLessThanOrEqual(30)
   })
 })

@@ -83,9 +83,11 @@ describe('LoginPage：表单与无障碍', () => {
     expect(submit?.disabled).toBe(true)
   })
 
-  it('没有外壳 chrome：页面上没有侧栏导航', () => {
+  it('没有外壳 chrome：页面上没有左栏导航', () => {
     const w = mountLogin()
-    expect(w.element.querySelector('.af-sidebar')).toBeNull()
+    expect(w.element.querySelector('.af-rail')).toBeNull()
+    // 原型的左栏/外壳类一概不出现（`.af-shell` 才带 grid 外壳）
+    expect(w.element.querySelector('.af-shell')).toBeNull()
     // `main` 是页面的根节点，`tabindex="-1"` 让 `focusMain()` 落得住（§4.3）
     const main = w.element.matches('main') ? w.element : w.element.querySelector('main')
     expect(main?.classList.contains('af-auth')).toBe(true)

@@ -87,7 +87,7 @@ const ERR_ID = 'login-error'
   <main class="af-auth" data-role="auth" tabindex="-1">
     <div class="af-auth__box">
       <div class="af-auth__brand">
-        <span class="af-brand__mark" aria-hidden="true"></span>
+        <span class="af-rail__mark" aria-hidden="true">AF</span>
         <span class="af-t-label">AGENTFLEET</span>
       </div>
 

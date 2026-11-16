@@ -2,14 +2,14 @@
    components.css —— 组件样式（原型与实现共用）
    ---------------------------------------------------------------------------
    这个文件放两类东西：可复用的组件形状与状态；以及**跨页面共用的**那部分
-   页面级布局（.af-page §2 / .af-auth §18 / .af-wb §20 三族）。
+   页面级布局（.af-auth §18 / .af-wb §20 两族）。
 
    ── 「内联布局不得超过 30 行」这条**已撤回**：不是没人守，是守不了 ──
    上一版这里写「页面级布局一律内联在页面 <style> 里，且不得超过 30 行——
    超过说明它本该在这里」。实测它两处都不成立，所以改写而不是补门禁：
-     ① 「一律内联」与本文件矛盾：.af-page / .af-auth / .af-wb 本身就是页面
-        级布局，而且**只能**住在这里——.af-page 是 5 个页面的外壳、
-        .af-auth 是登录 / setup 共用、.af-wb 是工作台与 PanelDock 共用，
+     ① 「一律内联」与本文件矛盾：.af-auth / .af-wb 本身就是页面
+        级布局，而且**只能**住在这里——.af-auth 是登录 / setup 共用、
+        .af-wb 是工作台与 PanelDock 共用，
         内联进某一个页面的 scoped 块，别的页面就取不到了。
      ② 「不超过 30 行」量错了对象：页面 <style> 装的不只是布局，还有本页
         私有的组件形状（.af-opt / .af-summary / .af-radio…）。按行数卡会把
@@ -18,11 +18,11 @@
         而其中绝大多数是私有形状。这条规矩没有可判的边界，写成门禁只会
         卡住合法代码。
 
-   唯一可判、也唯一值得守的那一条：**本文件里**的页面级布局三族合计
-   **≤30 条规则**（实测 24 条：.af-page 5 / .af-auth 6 / .af-wb 13），由
+   唯一可判、也唯一值得守的那一条：**本文件里**的页面级布局两族合计
+   **≤30 条规则**（实测 19 条：.af-auth 6 / .af-wb 13），由
    `src/styles/components.test.ts` 断言。用「条」不用「行」：一条规则写成
    一行还是七行只差换行，行数量的是排版、不是规模。超了说明往页面壳里
-   塞了本该是组件的东西——那时该拆组件，不是继续往这三族里堆。
+   塞了本该是组件的东西——那时该拆组件，不是继续往这两族里堆。
 
    ── 三条组织规则 ──────────────────────────────────────────────────
    ① 每个组件的四态（hover / active / focus / disabled）在同一个块里写完，
@@ -63,234 +63,53 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 [hidden] { display: none !important; }
 
 /* ===========================================================================
-   1. 应用外壳：侧栏（品牌区 + 一级导航）+ 顶栏 + 主区 + 状态条
+   1. 应用外壳：主区几何
+   -------------------------------------------------------------------------
+   **外壳的其余部分不在这里**——左栏、页头、内容区全部归
+   `prototype-shell.css`（原型的 `.af-shell` / `.af-rail` / `.af-head` /
+   `.af-body`），`App.vue` 的根节点是 `.af-shell`。
+
+   这里只留 `.af-main`：它是**焦点落点**（`main[tabindex="-1"]`，见
+   `shared/focus.ts`），并且承担主区的列容器几何与底色。放在本文件而不是
+   原型层，是因为它同时被 `shared/focus.ts` 与页面写死引用（选择器
+   `main.af-main[tabindex="-1"]`），比外壳的其余部分更靠近组件契约。
+
+   ── 曾经在这里的第二套，已整体删除（2026-11-16） ──────────────────
+   上一版这里有一套自造的「应用外壳」四件套（根 / 侧栏 / 全局顶栏 /
+   全局状态条，共 26 条规则）。它们在原型 `assets/app.css` 里命中 **0**——
+   是实现自造的第二套设计。用户裁定「以原型为准，现在的前端代码我很不满意」
+   → 不迁移、不做别名并存。
    =========================================================================== */
-.af-app {
-  display: grid;
-  /* 原型 `tokens.css:38` 的 `--rail-w: 224px`。上一版写死 208px，比原型窄 16px
-     —— 侧栏一窄，导航项的文字就更容易截断，而「哪一档是真的」没人量过。
-     现在两侧共用同一个布局常量，改一处两句一起动。 */
-  grid-template-columns: var(--af-rail-w) 1fr;
-  /* 顶栏高度对齐原型的 `--head-h: 56px`（上一版 40px，比原型矮 16px）。 */
-  grid-template-rows: var(--af-head-h) 1fr 24px;
-  grid-template-areas: 'sidebar topbar' 'sidebar main' 'status status';
-  height: 100vh;
-  height: 100dvh;
-  background: var(--p-bg);
-}
-.af-app[data-rail='collapsed'] { grid-template-columns: 52px 1fr; }
-/* 折叠只看文字与提示，**按钮本身留着**：`.af-sidebar__close` 是折叠态唯一的
-   就地展开入口，而 `.af-spacer` 的 `flex:1` 会把它的位置撑成一块没有内容的
-   空白带——用户把这读成「残留的拖拽区」（2026-10-27 反馈）。 */
-.af-app[data-rail='collapsed'] .af-sidebar__item-text,
-.af-app[data-rail='collapsed'] .af-sidebar__hint { display: none; }
-.af-app[data-rail='collapsed'] .af-sidebar { align-items: center; }
-.af-app[data-rail='collapsed'] .af-sidebar__close {
-  width: 40px; justify-content: center; padding: 0;
-}
+/* 原型 `.af-main`（`app.css:113-116`）：一列 flex，**不换底色**（与外壳同一个
+   `--bg`），分区靠区域容器亮一档。上一版把主区压成 surface-0、外壳 surface-1，
+   等于把层次关系倒过来。
 
-/* 折叠态导航项跟着一起居中（用户裁定，2026-10-27 合并品牌区时发现）。
-   `.af-sidebar` 折叠后是 `align-items: center`，子项不再被 `stretch` 拉满，
-   于是 `.af-sidebar__item` 的宽度缩成内容宽（16px 图标 + 左右各 6px 内边距
-   = 28px），而品牌区居中在 40px 的内容区里。两者基准不同：图标贴着左侧
-   6px，方块在正中。给导航项一个和内容区等宽的定宽，两处才同轴。
+   `display: flex; flex-direction: column` 不是装饰：页面是
+   `.af-head` + `.af-body` 两块（原型每一页都是），`.af-body` 的
+   `flex: 1; min-height: 0; overflow: auto` 只有在 flex 列容器里才成立。
+   少了它，`.af-body` 退化成普通块，长内容会把整页顶出一条滚动条、
+   页头跟着滚出视野。
 
-   定宽取 40px（侧栏 52px 减去左右 `space-3` 各 6px）——不写 `100%`，因为
-   折叠态父级是 `align-items: center`，`100%` 解析出来仍是内容宽，等于没改。 */
-.af-app[data-rail='collapsed'] .af-sidebar__item {
-  width: 40px; justify-content: center; padding: 0;
+   `overflow: auto` 留在主区上（原型没有，它把滚动交给 `.af-body`）：
+   `main` 是焦点落点，`overflow: hidden` 会在它拿到焦点时把焦点环裁掉。
+   两者同时 `auto` 不会造出两条滚动条——`.af-body` 撑满列高时主区没有溢出。 */
+.af-main {
+  display: flex; flex-direction: column; position: relative;
+  overflow: auto; background: var(--p-bg); min-width: 0; min-height: 0;
 }
-
-/* 品牌区与一级导航**同一列**（用户裁定，2026-10-27）。
-   它们本来就同高、同背景色、同受 `⌃B` 折叠——分开只多一条分隔线，而
-   竖排 `AGENTFLEET` 挤在 44px 里几乎读不出来。合并后品牌横排、字号回到
-   正常档，侧栏总宽从 44+208 降到 208（省下的还给主区）。
-
-   注意这里**不设** `grid-area`：`.af-brand` 是 `.af-sidebar` 的子节点，
-   它跟着侧栏一起被 grid 摆放，自己不再是一个网格区域。 */
-.af-brand {
-  display: flex; align-items: center; gap: var(--p-s3);
-  /* 原型 `.af-rail__brand`：`padding: 16px` + `min-height: var(--head-h)`，
-     并且有 `border-bottom`。两者同高才让侧栏品牌行与顶栏在一条水平线上
-     —— 上一版品牌行只有内容高、顶栏 40px，两条线错开，看起来像两张表格
-     拼在一起。 */
-  padding: var(--p-s4) var(--p-s4);
-  min-height: var(--af-head-h);
-  border-bottom: 1px solid var(--p-line);
-  /* 品牌区不随导航滚动：滚动侧栏时标题必须一直可见 */
-  flex: 0 0 auto;
-}
-.af-brand__mark {
-  flex: 0 0 auto;
-  width: 26px; height: 26px; border-radius: var(--p-r-sm);
-  background: var(--p-acc-bg); border: 1px solid var(--p-acc-line);
-  display: grid; place-items: center;
-  color: var(--p-acc); font-size: var(--p-t-xs); font-weight: var(--af-weight-bold);
-}
-.af-brand__mark::after { content: 'AF'; }
-.af-brand__name {
-  font-size: var(--p-t-sm); font-weight: var(--af-weight-semibold);
-  color: var(--p-fg-strong);
-  white-space: nowrap;
-}
-
-/* 折叠态的品牌区**保留原来的图标轨形态**（用户裁定，2026-10-27）：
-   竖排 `AGENTFLEET` 回来了，方块在上、名字在下的竖列。理由不是美观——
-   折叠后侧栏只剩 52px，横排名字根本放不下（`white-space: nowrap` 会溢出
-   并被裁掉一半），竖排是唯一能在这个宽度里读完的排法。
-   折叠不是「藏起来」，品牌标识得留下。 */
-.af-app[data-rail='collapsed'] .af-brand {
-  flex-direction: column; align-items: center;
-  /* 收起态内容区实测 40px：`gap: var(--af-space-4)`（12px）加上竖排名字的
-     字宽会把这一列撑到 40px 以外，横向溢出因此产生。给一个 1px 的 gap 是
-     够的（竖排名字自己带 `letter-spacing`，行距不缺），而 padding 收到 0
-     是因为 `.af-sidebar` 自己已有 `space-3` 的左右内边距，这里再叠一层就
-     双重缩进。 */
-  gap: var(--af-space-1); padding: var(--af-space-3) 0;
-  min-width: 0;
-}
-.af-app[data-rail='collapsed'] .af-brand__name {
-  writing-mode: vertical-rl;
-}
-
-.af-sidebar {
-  grid-area: sidebar;
-  display: flex; flex-direction: column; gap: 1px;
-  padding: 0 var(--p-s2);
-  background: var(--p-bg);
-  border-right: 1px solid var(--p-line-2);
-  /* **`overflow-x: hidden` 不能省**（2026-10-28 用户反馈）。
-     只写 `overflow-y: auto` 时 `overflow-x` 的计算值**是 `auto` 而不是
-     `visible`**（CSS Overflow 规范：一轴非 visible 会把另一轴的 visible
-     提升成 auto），于是侧栏里任何一点横向溢出都变成一条可拖动的横向滚动条。
-     收起态内容区只有 40px（52px 减左右各 6px），竖排 `AGENTFLEET` 的
-     `letter-spacing` 与 `.af-brand` 的 `gap` 很容易越出去，那条滚动条就
-     出现了，而它拖出来是一片空白——用户把它读成「页面坏了」。
-     侧栏本来就没有横向可看的东西，纵向滚就够，所以直接裁掉。 */
-  overflow-x: hidden;
-  overflow-y: auto;
-  /* 网格项默认 `min-width: auto` 会被内容顶宽，收到 52px 的轨道之外。 */
-  min-width: 0;
-}
-/* 只负责 1px 的条目间距。上一版这里还有分组标题（`.af-navgroup__title`），
-   但三个组各只有一项——标题与它唯一的条目说的常常是同一个词，所以标题与
-   分组的字段一起删掉了，布局这一半留着（见 App.vue 模板里的说明）。 */
-.af-navgroup { display: flex; flex-direction: column; gap: 1px; padding: var(--p-s4) 0 var(--p-s2); }
-.af-sidebar__item {
-  display: flex; align-items: center; gap: var(--p-s3);
-  /* 原型 `.af-rail__list a` 是 `min-height: var(--row)`(32px) + `padding: 0 12px`。
-     用 `min-height` 而不是 `height`：导航项文字放大字号或换行时不该被切掉。 */
-  min-height: var(--p-row); padding: 0 var(--p-s3);
-  border-radius: var(--p-r-sm); text-decoration: none;
-  color: var(--p-fg-2); font-size: var(--p-t-sm);
-  position: relative;
-  transition: background var(--p-dur) var(--p-ease), color var(--p-dur) var(--p-ease);
-}
-.af-sidebar__item:hover { background: var(--p-surf-1); color: var(--p-fg-strong); }
-.af-sidebar__item:active { background: var(--p-surf-3); }
-/* 原型 `.af-rail__list a[aria-current="page"]`：底色 + 整圈 1px 内描边 + 中等字重，
-   **不是**左边一条 2px 的强调色竖线（上一版是竖线，原型不是）。 */
-.af-sidebar__item[aria-current='page'] {
-  background: var(--p-surf-2); color: var(--p-fg-strong);
-  font-weight: var(--af-weight-medium);
-  box-shadow: inset 0 0 0 1px var(--p-line-2);
-}
-.af-sidebar__icon { flex: 0 0 16px; text-align: center; font-size: var(--p-t-sm); }
-.af-sidebar__item-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.af-sidebar__hint {
-  font-size: var(--p-t-2xs); color: var(--p-fg-3);
-  opacity: 0; transition: opacity var(--af-dur-fast) var(--p-ease);
-}
-.af-sidebar__item:hover .af-sidebar__hint,
-.af-sidebar__item:focus-visible .af-sidebar__hint { opacity: 1; }
-.af-sidebar__close {
-  text-align: left; background: none; border: 0; cursor: pointer;
-  color: var(--p-fg-3); font-size: var(--p-t-sm);
-  font-family: inherit; padding: var(--p-s2) var(--p-s3);
-  border-radius: var(--p-r-sm);
-}
-.af-sidebar__close:hover { background: var(--p-surf-1); color: var(--p-fg-strong); }
-
-.af-topbar {
-  grid-area: topbar;
-  display: flex; align-items: center; gap: var(--p-s3);
-  padding: 0 var(--p-s6);
-  background: var(--p-bg);
-  border-bottom: 1px solid var(--p-line-2);
-}
-/* 原型 `.af-main`：主区**不换底色**（与外壳同一个 --bg），分区靠区域容器亮一档。
-   上一版把主区压成 surface-0、外壳 surface-1，等于把层次关系倒过来。 */
-.af-main { grid-area: main; overflow: auto; background: var(--p-bg); min-width: 0; min-height: 0; }
-.af-topbar__title {
-  font-size: var(--p-t-lg); font-weight: var(--af-weight-semibold);
-  color: var(--p-fg-strong); margin: 0; white-space: nowrap;
-}
-
-.af-statusbar {
-  grid-area: status;
-  display: flex; align-items: center; gap: var(--af-space-4);
-  padding: 0 var(--af-space-4);
-  background: var(--af-surface-1);
-  border-top: 1px solid var(--af-border-subtle);
-  font-size: var(--af-text-sm); color: var(--af-fg-tertiary);
-}
-.af-statusbar__item { display: flex; align-items: center; gap: var(--af-space-2); white-space: nowrap; }
-.af-statusbar__key { color: var(--af-fg-tertiary); }
 .af-spacer { flex: 1 1 auto; }
 
 /* ===========================================================================
    2. 布局原语
+   -------------------------------------------------------------------------
+   ── 页面根容器这一类名**已全部删除**（2026-11-16） ──────────────────
+   上一版这里有一族自造的页面外壳类（根 + `--flush` + `__head` / `__title` /
+   `__actions` / `__sub` / `__subtitle`，共 7 条规则）。它们不是原型里的东西，
+   是实现自造的第二套设计。用户裁定「以原型为准」→ **删，不迁移、
+   不做别名并存**，与上面外壳那四件套同一条裁定。页面骨架换成原型的
+   `.af-head` + `.af-body`，逐页迁移归子任务 4 / 9；在那之前各页面用
+   本节的原语自己拼（`.af-col` / `.af-stack`）。
    =========================================================================== */
-/* 页面根容器。
-   ---------------------------------------------------------------------------
-   **上一版这里是「居中单栏」**：`max-width: 1400px; margin: 0 auto`。原型不是这样
-   ——原型每一页都是「外壳里吃满宽度的主区 + 贴顶页头」（`app.css:113-134` 的
-   `.af-main` / `.af-head` / `.af-body`）。居中单栏在宽屏上左右各留一大片空白，
-   而原型是把内容铺满主区，这正是用户说「整个页面和新的原型设计完全不一样」
-   最直接的一条。
-
-   现在把 `.af-page` 改成**原型主区的几何**，于是 10 个已交付页面同时对齐，
-   不必逐页改模板：
-     · 不设 `max-width`，不居中（主区就是它的宽度）
-     · 内边距取原型 `.af-body--pad` 的 `var(--p-s6)`（24px），不是原来的 24/32 混用
-     · 撑满高度并允许内部纵向滚动（原型 `.af-body { flex:1; min-height:0; overflow:auto }`）
-   逐页迁移到 `.af-body` / `.af-head` 显式类仍在做（`BoardPage` 已完成），
-   但在那之前这条兜底保证「没有哪一页还是居中单栏」。 */
-.af-page {
-  padding: var(--p-s6);
-  height: 100%;
-  min-height: 0;
-  overflow-y: auto;
-  background: var(--p-bg);
-}
-.af-page--flush { padding: 0; height: 100%; }
-/* 页头是「标题 + 右侧动作」的一行。两侧**顶对齐**而不是底对齐：标题是两行时，
-   动作按钮要贴着第一行，贴着最后一行会看起来掉下来。
-   最小高度取原型的 `--head-h`，让各页页头在同一水平线上。 */
-.af-page__head {
-  display: flex; align-items: flex-start; justify-content: space-between;
-  gap: var(--p-s3); margin-bottom: var(--p-s5);
-  min-height: var(--af-head-h);
-}
-.af-page__title {
-  /* 原型 `.af-head__title` 是 `--t-lg`(18px) + semibold；上一版是 `text-xl`(18px)
-     但底边距 8px、字距 -0.01em 都多出来了。 */
-  font-size: var(--p-t-lg); font-weight: var(--af-weight-semibold);
-  margin: 0; line-height: var(--p-lh-tight); color: var(--p-fg-strong);
-}
-.af-page__actions { display: flex; align-items: center; gap: var(--p-s2); flex: 0 0 auto; }
-.af-page__sub {
-  margin: 0; color: var(--af-fg-secondary); font-size: var(--af-text-md);
-  line-height: var(--af-leading-base); max-width: 76ch;
-}
-/* 页内次级区块的标题。**间距写在它自己身上**而不是外面的 `.af-page__section`
-   ——每个区块的第一行就是它，多一条容器规则只是把同一件事说两遍。
-   **这一族有硬上限**（`components.test.ts` 三族 ≤30 条）：加规则前先问
-   「它真的属于页面外壳吗」，内容样式归 `.af-<领域>` 那一族。 */
-.af-page__subtitle {
-  font-size: var(--af-text-lg); font-weight: var(--af-weight-semibold);
-  margin: var(--af-space-11) 0 var(--af-space-4); letter-spacing: -0.005em;
-}
 .af-col { display: flex; flex-direction: column; }
 .af-col.gap-1 { gap: var(--af-space-1); } .af-col.gap-2 { gap: var(--af-space-2); }
 .af-col.gap-3 { gap: var(--af-space-3); } .af-col.gap-4 { gap: var(--af-space-4); }
@@ -828,6 +647,11 @@ kbd, .kbd {
 }
 .af-auth__box { width: min(400px, 100%); display: flex; flex-direction: column; gap: var(--af-space-6); }
 .af-auth__brand { display: flex; align-items: center; gap: var(--af-space-3); }
+/* 品牌方块直接用原型的 `.af-rail__mark`（`prototype/assets/app.css:67-73`，26px 方块 +
+   `--r-sm` 圆角 + `--acc-bg`/`--acc-line`），不另造 `.af-auth__mark`——原型没有登录页，
+   凡无原型依据的类名一律不自造。`prototype-shell.css` 已定义 `.af-rail__mark`。
+   「AF」两个字写在 DOM 里而不是 `::after { content: 'AF' }` 里：
+   伪元素的内容对读屏与「页面里有没有这两个字」的断言都不存在。 */
 .af-auth__title { font-size: var(--af-text-3xl); font-weight: var(--af-weight-semibold); margin: 0; letter-spacing: -0.02em; }
 .af-auth__sub { color: var(--af-fg-secondary); font-size: var(--af-text-md); line-height: var(--af-leading-base); margin: 0; }
 .af-auth__foot { font-size: var(--af-text-sm); color: var(--af-fg-tertiary); line-height: var(--af-leading-base); text-align: center; }
@@ -1335,12 +1159,10 @@ kbd, .kbd {
    **说明句**，色点只是附加。灰度打印与色觉障碍下仍能区分。
    =========================================================================== */
 
-/* ---- 页面头扩展：页内次级区块 ------------------------------------------ */
+/* ---- 页内次级区块 ------------------------------------------------------ */
 
-/* `.af-page__head` / `.af-page__actions` / `.af-page__title` / `.af-page__section`
-   的规则都在 §2「布局原语」里——它们与页头同家，放这里会变成两处各存一半、
-   改一处漏一处。本节只放**不属于页面外壳**的东西：领域级的列表、看板、
-   形态卡、骨架页。 */
+/* 页面外壳那一族的规则已随类名一起删除（见 §2 的注释）。本节只放
+   **不属于页面外壳**的东西：领域级的列表、看板、形态卡、骨架页。 */
 
 /* 次要说明句（「正在读取…」「归档不删除任何东西」）。**不是** `.af-t-mute`：
    那个是行内小字，这个是整段说明，要给行高与最大宽度。 */
@@ -1435,11 +1257,11 @@ kbd, .kbd {
  * 所以这条规则定成「块标题」而不是「顶栏标题」：字号唯一一档 `--af-text-lg`、
  * 字重 600、不换行，**四边都不给**（margin / padding 由所在块给——
  * 页头与对话框的内边距差了 `space-4` 与 `space-5` 两档，写死在这里就错一处）。
- * 要页面级的 h1 请用 `.af-page__title`（18px 同档但带 `margin-bottom`，
- * 是页面外壳的一部分）；这个类只服务于「已经在一个块里」的标题。
+ * 要页面级的 h1 请让页面自己给（页面外壳那一族已删除，各页面按原型的
+ * `.af-head` 骨架自持标题）；这个类只服务于「已经在一个块里」的标题。
  *
- * 调用点：`BoardPage`（2 处）。**没有扩到别的页面**：剩下的页面标题一律走
- * `.af-page__title`，这里多一个调用点就等于多一套标题规则。 */
+ * 调用点：`BoardPage`（2 处）。**没有扩到别的页面**：多一个调用点就等于
+ * 多一套标题规则。 */
 .af-head__title {
   margin: 0; font-size: var(--af-text-lg); font-weight: var(--af-weight-semibold);
   white-space: nowrap; line-height: var(--af-leading-snug);
@@ -1629,7 +1451,6 @@ kbd, .kbd {
 @media (max-width: 900px) {
   .af-shapecards { grid-template-columns: 1fr; }
   .af-board { grid-template-columns: 1fr; overflow-x: visible; }
-  .af-page { padding: var(--af-space-7) var(--af-space-5); }
 }
 
 /* ---- 骨架页（`SkeletonPage.vue`） -------------------------------------- */
