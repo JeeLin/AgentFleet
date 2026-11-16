@@ -158,6 +158,52 @@ describe('外壳骨架类与原型对齐', () => {
       expect((decl as RegExpExecArray)[1].trim()).toBe(protoValue)
     }
   })
+
+  it('六档字号与原型逐档相等（原型值现读，不硬编码）', () => {
+    // 原型 `prototype/assets/tokens.css:20-25` 定义 6 档字号。这里**读原型文件**
+    // 取值再与实现比，而不是把 11.5/12.5/… 抄进断言：抄进来就等于允许两边
+    // 一起漂——原型改了、断言里的数没改，测试照样绿。
+    //
+    // 映射是「同义传名」，不是「就近取档」：
+    //   t-2xs↔text-2xs  t-xs↔text-xs  t-sm↔text-sm
+    //   t-md↔text-md    t-lg↔text-xl  t-xl↔text-2xl
+    const PROTO_TOKENS = stripComments(readRepoFile('prototype/assets/tokens.css'))
+    const PAIRS = [
+      ['--t-2xs', '--af-text-2xs'],
+      ['--t-xs', '--af-text-xs'],
+      ['--t-sm', '--af-text-sm'],
+      ['--t-md', '--af-text-md'],
+      ['--t-lg', '--af-text-xl'],
+      ['--t-xl', '--af-text-2xl'],
+    ] as const
+    const impl = stripComments(TOKENS_CSS)
+    const mismatches: string[] = []
+    for (const [protoName, implName] of PAIRS) {
+      const p = new RegExp(`${protoName}\\s*:\\s*([^;]+);`).exec(PROTO_TOKENS)
+      expect(p, `原型 tokens.css 里找不到 ${protoName}`).not.toBeNull()
+      const i = new RegExp(`${implName}\\s*:\\s*([^;]+);`).exec(impl)
+      expect(i, `tokens.css 里找不到 ${implName}`).not.toBeNull()
+      const pv = (p as RegExpExecArray)[1].trim()
+      const iv = (i as RegExpExecArray)[1].trim()
+      if (pv !== iv) mismatches.push(`${protoName}=${pv} vs ${implName}=${iv}`)
+    }
+    expect(
+      mismatches,
+      [
+        '字号档与原型不一致（逐屏对照时会差 0.5–1.5px 且说不清谁错）：',
+        ...mismatches,
+      ].join('\n'),
+    ).toEqual([])
+  })
+
+  it('两档行高与原型逐档相等', () => {
+    const PROTO_TOKENS = stripComments(readRepoFile('prototype/assets/tokens.css'))
+    const impl = stripComments(TOKENS_CSS)
+    const pTight = /--lh-tight\s*:\s*([^;]+);/.exec(PROTO_TOKENS)?.[1].trim()
+    const pBody = /--lh-body\s*:\s*([^;]+);/.exec(PROTO_TOKENS)?.[1].trim()
+    expect(/--af-leading-tight\s*:\s*([^;]+);/.exec(impl)?.[1].trim()).toBe(pTight)
+    expect(/--af-leading-base\s*:\s*([^;]+);/.exec(impl)?.[1].trim()).toBe(pBody)
+  })
 })
 
 // ---------------------------------------------------------------------------
