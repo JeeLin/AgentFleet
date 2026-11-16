@@ -154,11 +154,21 @@ fn legal_next_hint(from: TaskState) -> &'static str {
 /// 本模块的边表，供测试与文档核对使用。
 ///
 /// 返回 `(from, to)` 对，顺序与 `EDGES` 一致。
+///
+/// **生产零调用，且被 `lib.rs` 对外 `pub use`**——这是刻意的：边表是 v0.8.0
+/// 交付的「任务状态机」这个概念的公开形状，前端/文档核对（`every_edge_cites_the_spec`
+/// 那条断言、以及里程碑里的边数对账）都直接读它。删掉它就得让每个核对方自己
+/// 抄一份 `EDGES`，那正是「两份边表迟早不一致」的来源。
 pub fn legal_edges() -> Vec<(TaskState, TaskState)> {
     EDGES.iter().map(|e| (e.from, e.to)).collect()
 }
 
 /// 一条边的规格依据，供测试断言「每条边都能指回文档」。
+///
+/// **只服务测试**（`every_edge_cites_the_spec`）：生产代码只问「这条边允不
+/// 允许」，不问「它写在哪」。留着是因为「每条边都得有出处」是本里程碑的硬
+/// 要求——那条断言的判红能力来自这个函数，删了它，边表就重新变成一份没有
+/// 出处的清单。
 pub fn spec_of(from: TaskState, to: TaskState) -> Option<&'static str> {
     EDGES
         .iter()

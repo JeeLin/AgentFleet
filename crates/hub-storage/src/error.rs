@@ -218,8 +218,17 @@ pub enum StorageError {
     ///
     /// 起点是这次执行的历史事实，`set_base_commit` 只填 `NULL`，不改已有的值。
     /// 撞上这一条说明有两条路径都试图定起点——那是要修的问题，不是能盖过去的事。
+    ///
+    /// `existing` 是 `Option` 而不是 `String`：影响 0 行的另一个来路是「这一行
+    /// 仍在、`base_commit` 仍是 `NULL`」（读完到写之间被别的连接 `NULL` 回去，
+    /// 或者上面那次 `get` 与这次不是同一行）。早先这里 `unwrap_or_default()`
+    /// 会把它写成 `existing: ""`，与「已经有起点、但起点是空串」不可区分——
+    /// 而空串起点本身是非法值，那两种 409 在日志里长得一模一样，排查会走错方向。
     #[error("execution {id:?} already has base commit {existing:?}: refusing to overwrite it")]
-    BaseCommitAlreadySet { id: String, existing: String },
+    BaseCommitAlreadySet {
+        id: String,
+        existing: Option<String>,
+    },
 
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),

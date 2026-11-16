@@ -354,20 +354,17 @@ impl TaskView {
     /// 显然与它同一节的用意相反，且没有第二条规格要求在这里报错
     /// （那是 `DoneWhen::validate` 与 API 层的事）。
     pub fn needs_manual_acceptance(&self) -> bool {
-        needs_manual_acceptance(&self.done_when)
-    }
-}
-
-/// 「需人工验收」的唯一判定处。
-///
-/// 抽成自由函数而不是写进 `TaskView` 的方法体：判定只看 `done_when` 一个字段，
-/// 与视图的其余部分无关；独立成函数后方法只剩一行转发，判定逻辑可以单独读、
-/// 单独测，不必先造一个视图。
-fn needs_manual_acceptance(done_when: &DoneWhen) -> bool {
-    match done_when.criteria.as_deref() {
-        None | Some("") => true,
-        Some("review_approved") => true,
-        Some(code) => !is_known_criteria_code(code),
+        // 直接内联判定，不再转发一层：`TaskView` 的这个方法就是唯一调用点，
+        // 中间那个自由函数只是把这个 match 挪到了下面十行。判定本身一眼能读，
+        // 「抽出来好单独测」也不成立——`DoneWhen` 的用例本来就都从这里过。
+        match self.done_when.criteria.as_deref() {
+            // `criteria` 为空（含空串）：没人能自动判，必须人工。
+            None | Some("") => true,
+            // 规格里唯一一个「结果是人给的」判定码。
+            Some("review_approved") => true,
+            // 闭集外的判定码：本版没有它的判定器，同样退到人工。
+            Some(code) => !is_known_criteria_code(code),
+        }
     }
 }
 
@@ -434,18 +431,14 @@ impl TaskRepo {
         raw.map(RawTask::into_task).transpose()
     }
 
-    /// 一个项目的全部任务，最近建的在前。
-    pub fn list_for_project(&self, project_id: &str) -> Result<Vec<TaskView>> {
-        let conn = self.pool.get()?;
-        let mut stmt = conn.prepare(&format!(
-            "{SELECT_COLS} WHERE project_id = ?1 ORDER BY created_at DESC, id DESC"
-        ))?;
-        let rows = stmt.query_map(params![project_id], row_to_raw)?;
-        let raw = rows.collect::<std::result::Result<Vec<_>, _>>()?;
-        raw.into_iter().map(RawTask::into_task).collect()
-    }
-
     /// 某态的全部任务（调度候选集的入口）。
+    ///
+    /// **本里程碑生产零调用**：v0.8.0 没有派发器，没有「挑一批 `pending` 派出去」
+    /// 的代码，本函数的第一个真实调用方是 v0.8.2 的调度器。保留它是因为调度器
+    /// 的形状已经由规格定下（`task-model.md` 的 `pending → queued` 边要求
+    /// 「按态取候选集」），删掉之后 v0.8.2 还要照原样写回来——那不是精简，是把
+    /// 工作推迟到更贵的时刻。它有意外的单测（`list_by_state_filters_on_the_state`），
+    /// 所以不是「写了没人验证的死代码」。
     pub fn list_by_state(&self, state: TaskState) -> Result<Vec<TaskView>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(&format!(
@@ -460,13 +453,11 @@ impl TaskRepo {
     ///
     /// # 为什么与 [`Self::set_state`] 分成两个方法而不是加参数
     ///
-    /// `set_state` 的契约是「只改状态」，它的调用点（含测试）不需要也不该知道
-    /// `done_when` 会被顺手改掉。把可选参数塞进它，会让「这次转移会不会动别的
-    /// 列」变成要读调用方才知道的事。两个方法各自一个说法：
-    ///
-    /// - `set_state(id, to, now)`：只改状态；
-    /// - `transition_with(id, to, now, expected_version, extra)`：改状态 + 可选的
-    ///   `done_when`，并**额外用 `version` 做第二道 CAS**。
+    /// `set_state` 是「只改状态」的**薄转发**——它就是本方法配
+    /// `expected_version: None` 与空的 `TaskTransition`。两个名字并存是因为调用
+    /// 点的意图不同：「改状态」与「一次带业务字段的转移」在代码里不该长得一样。
+    /// 可选参数塞进一个方法，会让「这次转移会不会动别的列」变成要读调用方才知道
+    /// 的事。
     ///
     /// # 两道 CAS 缺一不可
     ///
@@ -553,40 +544,21 @@ impl TaskRepo {
     /// 边表在 [`crate::task_state::can_transition`]（唯一定义处），本函数不重复
     /// 判断「哪些态能到哪些态」。
     ///
-    /// 写库用 compare-and-swap：`UPDATE ... WHERE id = ? AND state = <读到的旧态>`。
-    /// 影响 0 行有两种可能，靠再查一次区分：
-    /// - 任务不存在 → `TaskNotFound`
-    /// - 任务存在但态已被别人改掉 → `TaskStateChanged`（HTTP 层映射 409）
+    /// 写库走 [`Self::transition_with`]：CAS 守卫（`WHERE id = ? AND state = ?
+    /// AND version = ?`）、「影响 0 行靠再查一次区分 `TaskNotFound` 与
+    /// `TaskStateChanged`」、以及校验失败不写库这三件事都只有**一份**实现。
+    /// 早先这里手抄了同一段 `UPDATE` + 同一段 0 行分支，两处的守卫条件渐渐不
+    /// 一样（这版没有 `version`，`transition_with` 有）——而两处守卫不一致就是
+    /// 「一个入口挡得住竞态、另一个挡不住」。
     ///
-    /// 为什么值得多写这一句 `WHERE`：多用户不在本轮范围，但**两次点击的竞态是
-    /// 真实的**——详情页上「合入主干」和「打回」挨着，双击或两人同时点会让后写
-    /// 静默覆盖先写。一行 `WHERE` 就能挡住。
+    /// **本里程碑生产零调用**：`/state`、`/acceptance`、`/failure` 三个端点都走
+    /// `transition_with`（它们要顺带写 `done_when`，且要 `expected_version` 那道
+    /// CAS）。留着它是 `transition_with`「不动业务字段、不带 `expected_version`」
+    /// 的那条路径的**独立入口**——v0.8.2 的派发器把 `pending → queued` 推上去时
+    /// 正好是这个形状，且它的单测是本文件里 `transition_with` 之外唯一覆盖
+    /// 「非法转移不写库」的用例。
     pub fn set_state(&self, id: &str, to: TaskState, now: &str) -> Result<TaskView> {
-        let conn = self.pool.get()?;
-        // 先读真值：不信任调用方说的 from，也不信任上一次读到的东西。
-        let current = self
-            .get(id)?
-            .ok_or_else(|| StorageError::TaskNotFound { id: id.to_string() })?;
-        crate::task_state::check_transition(current.state, to)?;
-
-        // CAS：`state = 旧态` 是这句 UPDATE 的守卫条件。
-        let n = conn.execute(
-            "UPDATE task SET state = ?2, updated_at = ?3, version = version + 1
-             WHERE id = ?1 AND state = ?4",
-            params![id, to.as_str(), now, current.state.as_str()],
-        )?;
-        if n == 0 {
-            // 走到这里说明读完到写之间有人插了一脚：要么被删了，要么改了态。
-            return match self.get(id)? {
-                None => Err(StorageError::TaskNotFound { id: id.to_string() }),
-                Some(now_row) => Err(StorageError::TaskStateChanged {
-                    expected: current.state.as_str(),
-                    actual: now_row.state.as_str().to_string(),
-                }),
-            };
-        }
-        self.get(id)?
-            .ok_or_else(|| StorageError::TaskNotFound { id: id.to_string() })
+        self.transition_with(id, to, now, None, TaskTransition::default())
     }
 
     /// 一次「跨多步」的状态推进，**整个推进在同一个事务里**。
@@ -652,6 +624,12 @@ impl TaskRepo {
     }
 
     /// 改任务的标题 / 验收标准 / 约束。返回**新的 `version`**。
+    ///
+    /// 这是 [`Self::update_if_version`] 不带 `expected_version` 的薄转发。
+    /// **生产零调用**（`PATCH /api/tasks/{id}` 走的是带 CAS 的那个，它要
+    /// `expected_version` 挡「两个页面同时改」），但**测试大量使用**——它们是
+    /// 「补丁写对了没有」这一层唯一的覆盖。删掉它就得让每个用例多写一个 `None`，
+    /// 而那正是「为了少一个两行函数去改三十个调用点」的坏交易。
     ///
     /// # SQL 形状是固定的三条 `UPDATE`
     ///
@@ -1070,7 +1048,7 @@ mod tests {
 
     fn new_task(project: &str) -> NewTask {
         NewTask {
-            created_by: Some("user".into()),
+            created_by: Some("human".into()),
             ..NewTask::new(
                 project,
                 "把登录改成 OAuth",
@@ -1094,7 +1072,7 @@ mod tests {
             t.done_when.description.as_deref(),
             Some("全部测试通过且登录可用")
         );
-        assert_eq!(t.created_by.as_deref(), Some("user"));
+        assert_eq!(t.created_by.as_deref(), Some("human"));
         assert_eq!(t.created_at, TS);
         assert_eq!(t.updated_at, TS);
 
@@ -1136,7 +1114,7 @@ mod tests {
     #[test]
     fn create_refuses_a_task_with_no_done_when_at_all() {
         let (_d, tr) = setup();
-        let before = tr.list_for_project("p_a").unwrap().len();
+        let before = tr.list_for_project_with_state("p_a", None).unwrap().len();
         let e = tr
             .create(
                 NewTask::new(
@@ -1156,7 +1134,7 @@ mod tests {
         );
         // 拒绝之后库里不能多出半行。
         assert_eq!(
-            tr.list_for_project("p_a").unwrap().len(),
+            tr.list_for_project_with_state("p_a", None).unwrap().len(),
             before,
             "校验失败不得写库"
         );
@@ -1206,33 +1184,109 @@ mod tests {
 
     /// CAS 挡住并发覆盖：读到旧态之后、写之前，别人把态改掉。
     ///
-    /// 模拟方式：直接打两枪相同形状的 SQL——第一枪成功，第二枪带着已经过期的
-    /// `expected` 必然影响 0 行。这样测的是守卫条件本身，不是 `set_state` 的实现细节。
+    /// # 这条用例以前测的不是产品代码
+    ///
+    /// 旧版在测试里手抄了一遍那条 `UPDATE task SET state = ?2 … WHERE id = ?1
+    /// AND state = ?4`，然后断言「第二枪影响 0 行」。它证明的是「SQLite 的
+    /// `WHERE` 有用」——一句 SQL 引擎的事实——而不是「`TaskRepo` 真的那样写」。
+    /// 产品代码哪天把 `WHERE state = ?` 删了，这条照样绿。
+    ///
+    /// 现在两半都走真实路径：
+    ///
+    /// 1. **状态竞态**：A 已把 `running` 改成 `review`；B 手上还是 `running`
+    ///    （它就是「另一个已经读过旧值的请求」），它的 `set_state` 必须报
+    ///    `IllegalTaskTransition`——因为 `set_state` 在写之前重新读了真值。
+    /// 2. **版本竞态**：两个请求都读到同一个 `version`，第一个写成，
+    ///    第二个带 `Some(旧版本)` 进 `transition_with`，必须报
+    ///    `TaskVersionChanged`（HTTP 层映射 409）。
+    ///
+    /// 判红方式（已实测）：把 `transition_with` 的 `AND version = ?8` 从
+    /// `WHERE` 里删掉，第二段红（第二个请求静默覆盖成功）；把
+    /// `set_state` 里那次 `check_transition` 删掉变成「不重读真值」，第一段红。
     #[test]
     fn a_concurrent_state_change_is_rejected() {
         let (_d, tr) = setup();
         let t = tr.create(new_task("p_a"), TS).unwrap();
-        // 把任务推到 running，两个「请求」都会看到 running。
         tr.set_state(&t.id, TaskState::Queued, TS).unwrap();
         tr.set_state(&t.id, TaskState::Running, TS).unwrap();
 
-        let conn = tr.pool.get().unwrap();
-        let cas = "UPDATE task SET state = ?2, updated_at = ?3, version = version + 1
-                   WHERE id = ?1 AND state = ?4";
-        // 请求 A：running → review，成功。
-        let a = conn
-            .execute(cas, params![t.id, "review", "unix:1", "running"])
-            .unwrap();
-        assert_eq!(a, 1);
-        // 请求 B：它手上还是「旧态 running」，也想写到 review —— 影响 0 行。
-        let b = conn
-            .execute(cas, params![t.id, "review", "unix:2", "running"])
-            .unwrap();
-        assert_eq!(b, 0, "过期的旧态必须被 CAS 挡住");
-        drop(conn);
+        // ---- 1. 状态竞态：A 先把它推到 review ----
+        tr.set_state(&t.id, TaskState::Review, TS).unwrap();
+        // B 手上还是 running，于是它想走 `running → queued`（合法边）——
+        // 但现在真值是 review，`review → queued` 不是合法边。`set_state`
+        // 在写之前重读了真值，所以必须拒；如果它信了 B 手上的旧态，就会
+        // 把一条 review 的任务硬拽回 queued。
+        let e = tr.set_state(&t.id, TaskState::Queued, TS).unwrap_err();
+        assert!(
+            matches!(e, StorageError::IllegalTaskTransition { .. }),
+            "B 手上的旧态已经过期，必须被拒（实际 {e:?}）"
+        );
+        assert_eq!(
+            tr.get(&t.id).unwrap().unwrap().state,
+            TaskState::Review,
+            "被拒之后真实态仍是 A 写进去的 review"
+        );
 
-        // 且真实态是 A 写进去的 review。
-        assert_eq!(tr.get(&t.id).unwrap().unwrap().state, TaskState::Review);
+        // ---- 2. 版本竞态：两个请求读到同一版，第二个必须撞 409 ----
+        // 这里重新取一次版本：上面第 1 段的两次写已经把它推高了，而本段要
+        // 构造的是「两个请求**都读到**同一版」——A 与 B 的 `seen` 必须相同。
+        let seen = tr.get(&t.id).unwrap().unwrap().version;
+        // A 带着 `seen` 把 review → pending（打回）。
+        tr.transition_with(
+            &t.id,
+            TaskState::Pending,
+            TS,
+            Some(seen),
+            TaskTransition::default(),
+        )
+        .unwrap();
+        // B 同样带着 `seen`——它读到的版本已经作废，但它**以为自己还在
+        // review**，于是想走 `review → done`。真值已经是 `pending`，所以
+        // `check_transition` 会先红——这也说明「版本守卫」在状态机之后。
+        // 为了只测版本守卫，让 B 走一条**现在也合法**的边：`pending → queued`。
+        // 状态机放行它，唯一能挡住的就只有 `AND version = ?`。
+        let e = tr
+            .transition_with(
+                &t.id,
+                TaskState::Queued,
+                TS,
+                Some(seen),
+                TaskTransition::default(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(e, StorageError::TaskVersionChanged { expected, .. } if expected == seen),
+            "过期的 version 必须报 TaskVersionChanged（实际 {e:?}）"
+        );
+        assert_eq!(
+            tr.get(&t.id).unwrap().unwrap().state,
+            TaskState::Pending,
+            "被拒的第二个请求不得写库"
+        );
+
+        // ---- 3. `guard_version` 用的是 `current.version`，不是 `expected` ----
+        //
+        // 上一段的 409 来自 Rust 侧的 `guard_version` 前置比对，**不是** SQL 里的
+        // `AND version = ?8`：把 SQL 里那个条件整个去掉，第 1、2 段仍然全绿
+        // （已实测）。也就是说 SQL 那道守卫只挡「`get()` 之后、`execute` 之前
+        // 别人插队」这个极窄窗口，单线程测试构造不出来。
+        //
+        // 所以本段不去假装覆盖 SQL，而是钉住前置比对**拿对了比较对象**：
+        // `expected = None` 时它必须用刚读到的 `current.version`（而不是 0、
+        // 也不是上一次的 `seen`），否则「不带版本号的写」会永远 0 行。
+        tr.transition_with(
+            &t.id,
+            TaskState::Queued,
+            TS,
+            None,
+            TaskTransition::default(),
+        )
+        .expect("expected=None 时前置比对必须用 current.version，这条合法边应当写成");
+        assert_eq!(
+            tr.get(&t.id).unwrap().unwrap().state,
+            TaskState::Queued,
+            "不带 expected_version 的合法转移必须真的落库"
+        );
     }
 
     /// `set_state` 成功后 `version` 必须 +1，否则 CAS 守卫形同虚设。
@@ -1260,7 +1314,7 @@ mod tests {
         tr.create(new_task("p_b"), TS).unwrap();
 
         let got: Vec<String> = tr
-            .list_for_project("p_a")
+            .list_for_project_with_state("p_a", None)
             .unwrap()
             .into_iter()
             .map(|t| t.id)
@@ -1567,7 +1621,9 @@ mod tests {
             "{e:?}"
         );
         assert!(
-            tr.list_for_project("p_a").unwrap().is_empty(),
+            tr.list_for_project_with_state("p_a", None)
+                .unwrap()
+                .is_empty(),
             "被拒的任务不得落库"
         );
     }

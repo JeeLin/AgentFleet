@@ -50,6 +50,12 @@ impl ExecutionState {
         }
     }
 
+    /// 执行是否已经收尾（不再会变）。
+    ///
+    /// **本里程碑生产零调用**：`execution` 表的状态由 v0.8.2 的执行端点推进，
+    /// v0.8.0 没有那条路径，所以没有「结算前先问一句它收尾了没有」的地方。
+    /// 留着是因为它是 `ExecutionState` 的**语义定义**（哪三个是终态），
+    /// 且有单测逐个断言；删掉之后「终态是哪三个」这个问题就只剩散文。
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Succeeded | Self::Failed | Self::Aborted)
     }
@@ -126,6 +132,11 @@ impl FailureKind {
     ///
     /// 不接受 `&self` 之外的形态是刻意的：`FailureKind` 是 `Copy` 的小枚举，
     /// 传值比拼引用短，且 `kind.counts_as_retry()` 读起来就是一句判断。
+    ///
+    /// **本里程碑生产零调用**：`retry_limit` 的扣减发生在 v0.8.2 的重派路径上，
+    /// v0.8.0 只校验「重试必须换条件」（约束 16），不数次数。留着是因为这条
+    /// 判定有明确的规格依据（`task-model.md:113-117` 的 `Superseded` 特例）且
+    /// 有单测钉住；它若被删，那个特例会退化成调用方各自的口头约定。
     pub fn counts_as_retry(self) -> bool {
         !matches!(self, Self::Superseded)
     }
@@ -298,7 +309,16 @@ impl ExecutionRepo {
         raw.into_iter().map(RawExecution::into_execution).collect()
     }
 
-    /// 改状态。任务必须存在，否则静默作用在 0 行上。
+    /// 改状态。**执行不存在时报 [`StorageError::ExecutionNotFound`]，不是静默
+    /// 作用在 0 行上。**
+    ///
+    /// 这句以前写的是「任务必须存在，否则静默作用在 0 行上」，与实现相反：
+    /// 实现里 `n == 0` 就返回 `ExecutionNotFound`。文档说静默、代码说报错，
+    /// 结果调用方按文档写就不做错误处理——而那种 bug 的表现是「状态没改，
+    /// 但没人知道」。
+    ///
+    /// 报错才是对的：`set_state` 的调用方都是在推进某一条它有 id 的执行，
+    /// 0 行只可能是「这条执行没了」，那是要让人知道的事。
     pub fn set_state(&self, id: &str, state: ExecutionState) -> Result<ExecutionView> {
         let conn = self.pool.get()?;
         let n = conn.execute(
@@ -332,7 +352,10 @@ impl ExecutionRepo {
             if current.base_commit.as_deref() != Some(base_commit) {
                 return Err(StorageError::BaseCommitAlreadySet {
                     id: id.to_string(),
-                    existing: current.base_commit.unwrap_or_default(),
+                    // **不 `unwrap_or_default()`**：`None` 是「起点还是空的」，
+                    // 与「起点是空串」是两件事。压成 `""` 会让这两种 409 在日志
+                    // 里不可区分，而 `""` 作为起点本身就不合法。
+                    existing: current.base_commit,
                 });
             }
             return Ok(current);
@@ -384,20 +407,34 @@ impl ExecutionRepo {
         Ok(())
     }
 
-    /// 只写**原因串**，不动 `failure_kind` / `evidence`。
+    /// 写**原因串**，并把 `failure_kind` 清成 `NULL`。**不动 `evidence`。**
     ///
-    /// 给「验收打回」用：打回不是失败（`task-model.md:101`），所以它需要一条
-    /// 留痕的理由，但**不能**顺手把这条执行标成某种失败形态——那会让设备页的
-    /// 「失败集中在哪一类」把「人打回」算进「事没做成」。
+    /// 给两类「人写的理由」用：
     ///
-    /// 空原因同样拒绝：一条没有理由的打回，事后没人说得清当初为什么退。
+    /// - 「验收打回」：打回不是失败（`task-model.md:101`），需要一条留痕的理由，
+    ///   但**不能**把这条执行标成某种失败形态；
+    /// - 「人主动关单，只写理由」：同上。
+    ///
+    /// # 为什么要顺手清 `failure_kind`
+    ///
+    /// 同一条执行上可能**已经有一轮设备报的失败**（`agent_error` + 设备写的原因）。
+    /// 人随后关单只写新理由：若只 `SET reason = ?`，那一行会变成
+    /// 「`agent_error` + 人写的新理由」——两半不再对应，设备页的「失败集中在
+    /// 哪一类」会把一次**人主动关掉**算成 `agent_error`（已由
+    /// `closing_over_a_previous_failure_clears_the_stale_kind` 实测坐实：
+    /// 改之前读回来是 `Some("agent_error")`）。
+    ///
+    /// 清掉才是对的：这次留痕的**归因方是人**，不是设备。`evidence` 不动是因为
+    /// 它记录的是「设备当时给的证据文件」，那是另一件事，删了就是销毁事实。
+    ///
+    /// 空原因同样拒绝：一条没有理由的打回/关单，事后没人说得清当初为什么。
     pub fn set_reason(&self, id: &str, reason: &str) -> Result<()> {
         if reason.trim().is_empty() {
             return Err(StorageError::FailureReasonRequired);
         }
         let conn = self.pool.get()?;
         let n = conn.execute(
-            "UPDATE execution SET reason = ?2 WHERE id = ?1",
+            "UPDATE execution SET reason = ?2, failure_kind = NULL WHERE id = ?1",
             params![id, reason],
         )?;
         if n == 0 {
@@ -411,37 +448,55 @@ impl ExecutionRepo {
     /// 重复调用是幂等成功（不报错、不改首次值）。为什么必须保住首次值：
     /// 重试 / 重连会再报一次「开始」，若每次都覆盖，「这次跑了多久」就变成
     /// 「最后一次心跳到结束」，时长统计彻底失真。
+    ///
+    /// **本里程碑生产零调用**：没有派发器就没有「执行开始了」这个事件，
+    /// `started_at` / `ended_at` 唯一会在 v0.8.2 由执行端点写入。留着是因为
+    /// 「只填一次」这条口径（与 `ensure_exists` 的 0 行区分）已经写对并有单测，
+    /// 删掉等于把已解决的问题退回去。
     pub fn mark_started(&self, id: &str, at: &str) -> Result<()> {
-        let conn = self.pool.get()?;
-        let n = conn.execute(
-            "UPDATE execution SET started_at = ?2 WHERE id = ?1 AND started_at IS NULL",
-            params![id, at],
-        )?;
-        if n == 0 {
-            // 0 行有两种：不存在（要报错），或已经开始了（幂等成功）。
-            return self.ensure_exists(id);
-        }
-        Ok(())
+        self.mark_once("started_at", id, at)
     }
 
     /// 记结束时间。与 [`Self::mark_started`] 同一条口径：`WHERE ended_at IS NULL`，
     /// 重复调用不改首次值。
+    ///
+    /// **本里程碑生产零调用**，理由同上。
     pub fn mark_ended(&self, id: &str, at: &str) -> Result<()> {
+        self.mark_once("ended_at", id, at)
+    }
+
+    /// 幂等时间戳 setter 的唯一实现：`WHERE <column> IS NULL` + 影响 0 行时区分
+    /// 「不存在」与「已经写过」。
+    ///
+    /// 抽出来是因为 `mark_started` / `mark_ended` 除了列名**逐字同构**。各写一遍
+    /// 迟早有一处漏掉存在性检查，于是打错 id 也静默成功——而那种 bug 的表现是
+    /// 「时长统计偶尔少一条」，没人会当场发现。
+    ///
+    /// # 列名为什么能拼进 SQL
+    ///
+    /// `column` **不是**用户输入，它只有两个字面量调用点（`"started_at"` /
+    /// `"ended_at"`），且都在本文件内。参数化只能替值，替不了列名；把列名做成
+    /// 字符串参数就得放弃「一条固定的 SQL 语句」，SQLite 那边的语句缓存会落空。
+    /// 所以这里是 `format!` 拼列名 **+ 白名单断言**，而不是裸拼：将来若有人把
+    /// `column` 接到别处，这里会立刻 panic 而不是拼出一条可注入的语句。
+    fn mark_once(&self, column: &'static str, id: &str, at: &str) -> Result<()> {
+        debug_assert!(
+            matches!(column, "started_at" | "ended_at"),
+            "mark_once 只接受这两个时间戳列"
+        );
         let conn = self.pool.get()?;
         let n = conn.execute(
-            "UPDATE execution SET ended_at = ?2 WHERE id = ?1 AND ended_at IS NULL",
+            &format!("UPDATE execution SET {column} = ?2 WHERE id = ?1 AND {column} IS NULL"),
             params![id, at],
         )?;
         if n == 0 {
+            // 0 行有两种：不存在（要报错），或已经写过了（幂等成功）。
             return self.ensure_exists(id);
         }
         Ok(())
     }
 
     /// 幂等 setter 的收尾：影响 0 行时区分「不存在」与「已经写过」。
-    ///
-    /// 抽成一个函数是因为 `mark_started` / `mark_ended` 是同一个判断；
-    /// 各写一遍迟早有一处漏掉存在性检查，于是打错 id 也静默成功。
     fn ensure_exists(&self, id: &str) -> Result<()> {
         match self.get(id)? {
             Some(_) => Ok(()),
@@ -586,6 +641,97 @@ mod tests {
         let list = er.list_for_task("t_a").unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].id, b.id, "新的在前");
+    }
+
+    /// `list_for_tasks`：一批任务一条 SQL 取完，按 `task_id` 分组、组内新的在前。
+    ///
+    /// 判红方式（已实测）：把 `out.entry(task_id)` 换成 `out.entry(String::new())`，
+    /// 分组断言红；把 `ORDER BY created_at DESC` 改成 `ASC`，组内顺序断言红。
+    #[test]
+    fn list_for_tasks_groups_by_task_and_is_newest_first() {
+        let (_d, er) = setup();
+        // 夹具里只有一个任务，再补一个。
+        er.pool
+            .get()
+            .unwrap()
+            .execute(
+                "INSERT INTO task (id, project_id, title, state, created_at, updated_at)
+                 VALUES ('t_b', 'p_a', 'other', 'pending', 'unix:0', 'unix:0')",
+                [],
+            )
+            .unwrap();
+
+        let a1 = er.create(new_exec(), "unix:10").unwrap();
+        let a2 = er.create(new_exec(), "unix:20").unwrap();
+        let b1 = er
+            .create(
+                NewExecution {
+                    task_id: "t_b".into(),
+                    ..new_exec()
+                },
+                "unix:30",
+            )
+            .unwrap();
+
+        let got = er
+            .list_for_tasks(&["t_a".to_string(), "t_b".to_string()])
+            .unwrap();
+        assert_eq!(got.len(), 2, "两个任务各一组");
+        assert_eq!(
+            got["t_a"].iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec![a2.id.as_str(), a1.id.as_str()],
+            "组内新的在前"
+        );
+        assert_eq!(
+            got["t_b"].iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec![b1.id.as_str()]
+        );
+    }
+
+    /// **没跑过的任务不出现在返回值里**——不要凭空给一个空数组。
+    ///
+    /// 调用方靠 `.get(task_id)` 取不到来区分「没跑过」，与「跑了 0 条」是两件事：
+    /// 前者看板显示「还没跑」，后者是数据异常。
+    ///
+    /// 判红方式（已实测）：把 `for r in raw` 循环改成先给每个 `task_id` 塞一个
+    /// 空 `Vec`，本用例红。
+    #[test]
+    fn list_for_tasks_omits_tasks_that_never_ran() {
+        let (_d, er) = setup();
+        er.pool
+            .get()
+            .unwrap()
+            .execute(
+                "INSERT INTO task (id, project_id, title, state, created_at, updated_at)
+                 VALUES ('t_never', 'p_a', 'never ran', 'pending', 'unix:0', 'unix:0')",
+                [],
+            )
+            .unwrap();
+        let e = er.create(new_exec(), TS).unwrap();
+
+        let got = er
+            .list_for_tasks(&["t_a".to_string(), "t_never".to_string()])
+            .unwrap();
+        assert_eq!(got.len(), 1, "只含真的执行过的任务");
+        assert_eq!(got["t_a"].len(), 1);
+        assert_eq!(got["t_a"][0].id, e.id);
+        assert!(
+            !got.contains_key("t_never"),
+            "没跑过的任务不许出现在返回值里"
+        );
+    }
+
+    /// 空输入不发 SQL、直接回空表（批量端点在没有任务时的稳态）。
+    ///
+    /// 判红方式（已实测）：删掉 `if task_ids.is_empty()` 那段守卫——这条**不会红**，
+    /// 因为 SQLite 对 `IN ()` 返回 `prepare OK` + 空集（已实测）。所以这不是
+    /// 「挡崩」的守卫，是**省一次取连接**的守卫；它存在的目的是让这条路径不依赖
+    /// SQLite 对空 `IN` 的非标准行为。
+    #[test]
+    fn list_for_tasks_of_nothing_is_an_empty_map() {
+        let (_d, er) = setup();
+        let got = er.list_for_tasks(&[]).unwrap();
+        assert!(got.is_empty());
     }
 
     #[test]
