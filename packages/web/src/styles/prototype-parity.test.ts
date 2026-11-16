@@ -24,9 +24,14 @@
         用 `var(--af-*)`。字面色值意味着「这一层又开了第二份真相源」。
    =========================================================================== */
 
+import { readdirSync, readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import { describe, expect, it } from 'vitest'
 
 import { readRepoFile } from '@/test/css'
+import { templateOf } from '@/test/sfc'
 
 const PROTOTYPE_CSS = readRepoFile('prototype/assets/app.css')
 const IMPL_CSS = readRepoFile('packages/web/src/styles/prototype-shell.css')
@@ -308,3 +313,326 @@ describe('prototype-shell.css 不许自己发明取值', () => {
     expect(pNames.length, '原型槽位别名层不见了').toBeGreaterThanOrEqual(70)
   })
 })
+
+// ===========================================================================
+// ④ 跨文件门禁：**页面有没有真的用这些骨架类**
+// ---------------------------------------------------------------------------
+// 上面 ① ② ③ 全部只问「类**存在**且取值同源」——从没问过「页面用没用」。
+// 这正是 🔴「实现与原型是两套不同的视觉设计」的根因：v0.8.0 收尾时
+// `prototype-shell.css` 已定义全部 12 个外壳类、12 条门禁全绿，而
+// `App.vue` 里 `af-shell` / `af-rail` 出现 **0 次**、10 个页面全部用自造的
+// `af-page`。类定义了但没人用，用户看到的就是另一套设计。
+//
+// 所以这一节把判据从「类存在」推进到「**模板在用**」。实现要点：
+//   - 判据读的是 `templateOf()`（`test/sfc.ts`）：只取 `<template>` 段并**剥掉
+//     HTML 注释**。不做全文子串搜索——注释里写个 `class="af-body"` 就能骗过全文搜索。
+//   - 只认**静态** `class="…"`。`:class="[...]"` 动态绑定**不算命中**：
+//     它在渲染时是否出现取决于运行时状态，门禁不能说「绑了个三元就算用了」。
+//   - 尚未迁移的部分用**显式清单**列出来（`expect(stillPending).toEqual([])`），
+//     迁移一个删一个。不用 `it.fails` / `it.skip`：那两种写法会把「真失败」
+//     一起吞掉，而且清单在这里是可读的账——每行都写着由哪个子任务负责。
+// ===========================================================================
+
+const WEB_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
+
+/** 10 个已交付页面（`grep -rL SkeletonPage` 结果里属于对齐范围的 10 个）。 */
+const DELIVERED_PAGES = [
+  'packages/web/src/domains/project/OverviewPage.vue',
+  'packages/web/src/domains/project/BoardPage.vue',
+  'packages/web/src/domains/project/ProjectTaskPage.vue',
+  'packages/web/src/domains/project/ProjectSettingsPage.vue',
+  'packages/web/src/domains/project/ArchivedPage.vue',
+  'packages/web/src/domains/project/NewProjectPage.vue',
+  'packages/web/src/domains/project/BindPage.vue',
+  'packages/web/src/domains/device/DevicesPage.vue',
+  'packages/web/src/domains/device/DeviceDetailPage.vue',
+  'packages/web/src/domains/session/SessionPage.vue',
+] as const
+
+/** 模板里出现的**静态**类名（`class="…"` / `class='…'`），`:class` 不算。 */
+function staticClassesOfTemplate(vueSource: string): Set<string> {
+  const out = new Set<string>()
+  for (const m of templateOf(vueSource).matchAll(/(?<![:\w-])class\s*=\s*(["'])([^"']*)\1/g)) {
+    for (const name of m[2].split(/\s+/)) if (name) out.add(name)
+  }
+  return out
+}
+
+/**
+ * 「待迁移」清单：本门禁对**还没迁移**的文件判红，是有意的。
+ *
+ * 整条断言仍会在任何**新的**违规上判红；只有清单里的条目被豁免。
+ * 迁移完成时把对应行删掉即可（删掉后该文件立刻回到门禁里）。
+ * 之所以不做成 `it.fails`：`it.fails` 在「意外失败」时也会绿，等于让
+ * 一条真失败有机会藏起来；清单形式则永远只有「清单外零违规」这一种绿法。
+ */
+describe('跨文件门禁：页面必须真的用骨架类', () => {
+  it('App.vue 承载外壳三件套 af-shell / af-rail / af-main', () => {
+    const classes = staticClassesOfTemplate(readRepoFile('packages/web/src/App.vue'))
+    const missing = ['af-shell', 'af-rail', 'af-main'].filter((c) => !classes.has(c))
+    expect(
+      missing,
+      [
+        `App.vue 的模板里缺这些外壳类（静态 class，:class 不算）：${missing.join(', ')}`,
+        '原型 21/21 页都用 .af-shell/.af-rail；缺了就是「页面长在别的东西里」。',
+        '由子任务 2 负责（App.vue 外壳重做）。',
+      ].join('\n'),
+    ).toEqual([])
+  })
+
+  it('10 个已交付页面每个都出现 af-body 或 af-head', () => {
+    /**
+     * 尚未迁移的页面 → 负责迁移的子任务。
+     *
+     * **2026-11-16 实测**（本次改动当刻）：任务书里写的是「这 10 个页面**还没有**
+     * 骨架类」，实测有 **1 个例外**——`BoardPage.vue` 已出现 `af-body`(2)/`af-head`(7)
+     * （子任务 1 的差异清单已如实记过「BoardPage 仅需补 `af-body--fill`」）。
+     * 所以初始清单是 **9 条**，不是 10 条：`BoardPage` 一开始就绿，
+     * 把它留在清单里会被下面的「清单反向守卫」当场判红。
+     * 其余 9 个页面根容器仍是自造的 `af-page` / `af-page--flush`。
+     * 迁移一个就从这里删一个。
+     */
+    const TODO_SUBTASKS_4_TO_9: Record<string, string> = {
+      'packages/web/src/domains/project/OverviewPage.vue': '子任务 6（总览页 + 管家抽屉壳）',
+      'packages/web/src/domains/project/ProjectTaskPage.vue': '子任务 8（任务详情页）',
+      'packages/web/src/domains/project/ProjectSettingsPage.vue': '子任务 9（其余 7 页）',
+      'packages/web/src/domains/project/ArchivedPage.vue': '子任务 9（其余 7 页）',
+      'packages/web/src/domains/project/NewProjectPage.vue': '子任务 9（其余 7 页）',
+      'packages/web/src/domains/project/BindPage.vue': '子任务 9（其余 7 页）',
+      'packages/web/src/domains/device/DevicesPage.vue': '子任务 9（其余 7 页）',
+      'packages/web/src/domains/device/DeviceDetailPage.vue': '子任务 9（其余 7 页）',
+      'packages/web/src/domains/session/SessionPage.vue': '子任务 9（其余 7 页）',
+    }
+
+    const stillPending: string[] = []
+    const migratedButListed: string[] = []
+    for (const page of DELIVERED_PAGES) {
+      const classes = staticClassesOfTemplate(readRepoFile(page))
+      const hasSkeleton = classes.has('af-body') || classes.has('af-head')
+      const listed = page in TODO_SUBTASKS_4_TO_9
+      if (!hasSkeleton && !listed) stillPending.push(page)
+      if (hasSkeleton && listed) migratedButListed.push(page)
+    }
+
+    expect(
+      stillPending,
+      [
+        '这些页面模板里既没有 af-body 也没有 af-head（口径：静态 class="…" 才算，',
+        ':class="[...]" 动态绑定不算，须留静态类名兜底；注释里的类名也不算）：',
+        ...stillPending.map((p) => `  ${p}`),
+        '原型每一页都是 .af-head + .af-body 两块，页面只负责 .af-body 里的内容。',
+      ].join('\n'),
+    ).toEqual([])
+
+    // 反向守卫：清单不许变成「迁移完了还留着」的摆设——那样门禁对已迁移的页面
+    // 仍然豁免，等于把判据悄悄关掉。
+    expect(
+      migratedButListed,
+      [
+        '这些页面已经有骨架类了，却还挂在待迁移清单里（清单会越来越水）：',
+        ...migratedButListed.map((p) => `  ${p} —— 请从 TODO_SUBTASKS_4_TO_9 删掉`),
+      ].join('\n'),
+    ).toEqual([])
+  })
+
+  it('10 个页面模板里不许有内联样式（style="）', () => {
+    /**
+     * 残留内联样式 → 由哪个子任务清掉。
+     *
+     * **2026-11-16 实测**（`grep -c 'style="'`）：`DevicesPage.vue` **5**、
+     * `ProjectSettingsPage.vue` **4**、`SessionPage.vue` **1**，合计 10 处；
+     * 其余 7 页为 0。
+     *
+     * **与任务书口径的偏差（如实记下）**：任务书写的是 `ProjectTaskPage.vue`
+     * **4 处**，实测该文件为 **0 处**——那 4 处在 `ProjectSettingsPage.vue`。
+     * 两者合计都是 4，所以「共 10 处」的总数对得上，但归属写错了。
+     * 本门禁按**实测**记账（`ProjectSettingsPage` 归子任务 9），不照抄任务书。
+     */
+    const TODO_INLINE_STYLE: Record<string, { count: number; owner: string }> = {
+      'packages/web/src/domains/device/DevicesPage.vue': { count: 5, owner: '子任务 9' },
+      'packages/web/src/domains/project/ProjectSettingsPage.vue': { count: 4, owner: '子任务 9' },
+      'packages/web/src/domains/session/SessionPage.vue': { count: 1, owner: '子任务 9' },
+    }
+
+    const offenders: string[] = []
+    const stale: string[] = []
+    const drifted: string[] = []
+    for (const page of DELIVERED_PAGES) {
+      const count = (templateOf(readRepoFile(page)).match(/style="/g) ?? []).length
+      const listed = TODO_INLINE_STYLE[page]
+      if (count > 0 && !listed) offenders.push(`${page}：${count} 处`)
+      else if (count === 0 && listed) stale.push(`${page}：已清零，请从 TODO_INLINE_STYLE 删掉`)
+      else if (listed && count !== listed.count) {
+        drifted.push(`${page}：清单写 ${listed.count} 处，实测 ${count} 处`)
+      }
+    }
+    expect(
+      offenders,
+      [
+        '这些页面模板里有内联样式。原型自己有内联是原型的事，实现侧必须走 --af-* token，',
+        '否则主题一改就跟 token 分叉（对齐门禁 v0.8.1 子任务 3 第 2 条）：',
+        ...offenders,
+      ].join('\n'),
+    ).toEqual([])
+    expect(stale, ['清单与实测不符（已清零却还在豁免名单里）：', ...stale].join('\n')).toEqual(
+      [],
+    )
+    // 清单里的数字也要跟实测一致：否则「还剩几处」这件事没人知道，
+    // 清掉 1 处之后清单会一直写着老的数字，门禁看起来还是「有账可查」。
+    expect(drifted, ['清单里的计数与实测不符：', ...drifted].join('\n')).toEqual([])
+  })
+
+  it('没有第二份顶栏：外壳里没有 af-head，且全仓没有第二套顶栏类名', () => {
+    // ① 页头归**页面**，不归外壳。原型 `index.html:15` 的 `header.af-head` 长在
+    //    `main.af-main` 里、由页面自己渲染（`prototype/index.html:12-23`），
+    //    `shell.js` 的 `renderRail` 只画左栏。
+    //
+    //    所以「App.vue 里有 af-head」恰恰是要判红的那个形态：外壳再画一个页头，
+    //    页面上就有了两行标题（一条是 `docTitle`，一条是页面自己的 `h1`）。
+    //    这条断言在 v0.8.1 子任务 2 之前是反过来的（当时它是「待迁移」清单项，
+    //    指望子任务 4 把 af-head 搬进外壳）——现在判据按原型钉死。
+    //
+    //    **没有豁免清单**：子任务 2 已把自造的外壳四件套从外壳删除，
+    //    原型的 `.af-shell > main.af-main` 里不放页头，因此这条现在就该绿。
+    const appClasses = staticClassesOfTemplate(readRepoFile('packages/web/src/App.vue'))
+    const appTemplate = templateOf(readRepoFile('packages/web/src/App.vue'))
+    expect(
+      appClasses.has('af-head'),
+      [
+        'App.vue 的模板里出现了 af-head —— 页头是页面自己的（原型 index.html:15 的',
+        'header.af-head 长在 main.af-main 里），外壳再画一行就是第二个页面标题。',
+      ].join('\n'),
+    ).toBe(false)
+    // 让「读到了模板」这件事显式可见：模板读成空串时上面那条会毫无意义地绿。
+    expect(appTemplate.length, 'App.vue 的模板读成空串 —— 上面的断言变成恒真').toBeGreaterThan(
+      1000,
+    )
+    // 外壳三件套必须还在：上面那条在「App.vue 模板被清空」时也绿，这里反向钉住。
+    const shell = ['af-shell', 'af-rail', 'af-main']
+    const missingShell = shell.filter((c) => !appClasses.has(c))
+    expect(missingShell, `外壳三件套缺了：${missingShell.join(', ')}`).toEqual([])
+
+    // ② 全仓不许出现第二份顶栏类名。这是**零豁免**的硬门禁：
+    //    原型里没有全局顶栏（那个类名在 prototype/assets/app.css 命中 0 条）。
+    //
+    //    判据串由片段拼出来，且**本文件跳过不扫**：直接写字面量会让本文件
+    //    命中自己，门禁从此永远红（第一次写就是这样）。
+    const BANNED = ['af-top' + 'bar', 'app-' + 'header', 'global-' + 'header']
+    const selfPath = fileURLToPath(import.meta.url)
+    const srcRoot = resolve(WEB_ROOT, 'src')
+    const hits: string[] = []
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = resolve(dir, entry.name)
+        if (entry.isDirectory()) walk(full)
+        else if (/\.(vue|ts|css)$/.test(entry.name)) {
+          if (full === selfPath) continue
+          const text = readFileSync(full, 'utf-8')
+          const found = BANNED.filter((name) => text.includes(name))
+          if (found.length > 0) {
+            hits.push(`${full.slice(WEB_ROOT.length + 1)}：命中 ${found.join(' / ')}`)
+          }
+        }
+      }
+    }
+    walk(srcRoot)
+    expect(
+      hits,
+      [
+        '实现里还有第二份顶栏（原型没有全局顶栏，页头归页面 .af-head）：',
+        ...hits,
+        '判红方式：留任意一条 → 非空 → 红。子任务 2/4 负责删除。',
+      ].join('\n'),
+    ).toEqual([])
+  })
+})
+
+// ===========================================================================
+// ⑤ 排除集守卫：不许用「把状态塞进 unused」的方式绕过上面这些门禁
+// ===========================================================================
+
+describe('state.test.ts 的 unused 排除集只能装 building / readonly', () => {
+  it('不得混入任务六态，也不得新增任何值', () => {
+    // 背景：`state.test.ts` 的「CSS 有、省表没有」排除集
+    // （`new Set([…])`，只装 `building` / `readonly`）
+    // 是它唯一的**例外集**。它天然是一条后门——有人把某个任务态
+    // 从 `STATES` 里删掉、再把它塞进 `unused`，`state.test.ts` 照样绿，
+    // 而六态的词表已经不完整了。本断言把排除集的大小与内容都钉死。
+    const source = readRepoFile('packages/web/src/shared/state.test.ts')
+    const decl = /const unused = new Set\(\[([^\]]*)\]\)/.exec(source)
+    expect(decl, 'state.test.ts 里找不到 `const unused = new Set([...])` —— 断言失效').not.toBeNull()
+
+    const values = [...(decl as RegExpExecArray)[1].matchAll(/'([^']+)'/g)].map((m) => m[1])
+    const TASK_SIX = ['pending', 'queued', 'running', 'review', 'done', 'failed']
+    expect(
+      values.filter((v) => TASK_SIX.includes(v)),
+      [
+        '任务六态被塞进了 state.test.ts 的排除集。',
+        '排除集的语义是「CSS 有、省表永远走不到的值」，任务六态全都会走到，',
+        '把它们塞进去等于用排除集绕过 state 门禁（里程碑设计核对点 10）。',
+      ].join('\n'),
+    ).toEqual([])
+    expect(values.sort(), '状态词表：排除集只允许 building / readonly').toEqual([
+      'building',
+      'readonly',
+    ])
+  })
+})
+
+// ===========================================================================
+// ⑥ 门禁本身的三条守卫（**零豁免**）
+// ---------------------------------------------------------------------------
+// 上一节把「待迁移」写成了显式清单，这本身有风险：清单可以变成摆设——把
+// 一个永远不该绿的页面塞进去，门禁就再也看不见它。这里补三条**没有清单**的
+// 反向守卫：判据读到的内容必须是真的、「绿」必须是因为真绿。
+// ===========================================================================
+
+describe('跨文件门禁自己的守卫（零豁免）', () => {
+  it('每个已交付页面都真的读到了模板（防「读成空串所以永远绿」）', () => {
+    // `templateOf` 抛错在下面会变成「这条红」，但更坏的是它返回空串：
+    // 空串里既没有 af-body（会红）也没有 style="（会绿）——门禁失去意义。
+    const tooSmall = DELIVERED_PAGES.map((page) => ({
+      page,
+      size: templateOf(readRepoFile(page)).length,
+    })).filter((x) => x.size < 500)
+    expect(
+      tooSmall.map((x) => `${x.page}：模板只有 ${x.size} 字符`),
+      '这些页面的模板段没读到内容 —— 所有依赖模板的门禁都会失真',
+    ).toEqual([])
+  })
+
+  it('口径本身能生效：:class 动态绑定不算命中、注释里的类名也不算', () => {
+    // 这是 `test/sfc.ts` 的口径在**本文件**里也确实生效的证据。夹具故意写成
+    // 最容易被误判成命中的两种形态。
+    const dynamicOnly = `<template>
+      <div :class="['af-body', extra]"></div>
+    </template>
+    `
+    const commentedOnly = `<template>
+      <!-- 骨架类只写在注释里：class="af-body" -->
+      <div class="af-legacy"></div>
+    </template>
+    `
+    expect(
+      staticClassesOfTemplate(dynamicOnly).has('af-body'),
+      ':class 动态绑定被当成了命中 —— 门禁会被一行三元表达式骗过',
+    ).toBe(false)
+    expect(
+      staticClassesOfTemplate(commentedOnly).has('af-body'),
+      '注释里的类名被当成了命中 —— 门禁会被一条注释骗过',
+    ).toBe(false)
+    // 反向：真正的静态类名必须认（否则上面两条在「永远返回空集合」时也绿）
+    expect(staticClassesOfTemplate(commentedOnly).has('af-legacy')).toBe(true)
+  })
+
+  it('state.test.ts 的排除集守卫自己不会退化成恒真', () => {
+    // 上面 ⑤ 的正则如果匹配不到，`decl` 为 null 会红；但若有人把正则改成
+    // 「匹配任意内容」，`values` 会是空数组、两条断言都会绿。这里钉住
+    // 「正则确实锚在 `const unused = new Set([` 上」，并且**真的取到了值**。
+    const source = readRepoFile('packages/web/src/shared/state.test.ts')
+    const decl = /const unused = new Set\(\[([^\]]*)\]\)/.exec(source)
+    const values = [...(decl?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1])
+    expect(values.length, '排除集读成了空 —— ⑤ 的两条断言会变成恒真').toBe(2)
+  })
+})
+
