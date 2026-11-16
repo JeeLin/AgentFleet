@@ -26,3 +26,13 @@
 @import './tokens.css';
 @import './components.css';
 @import './prototype-shell.css';
+
+/* 四套主题**必须排在最后**：它们定义的是 `--p-*` 字面色值，而 `tokens.css` 的
+   映射层也定义了同名 `--p-*`（值是指向 `--af-*` 的 `var()`）。同名属性后定义
+   的赢，所以主题放在这里才能真正接管配色。放在 `tokens.css` 之前会被映射层
+   覆盖回去，症状是「主题切换没反应」——而且不报错，极难查。
+   `html[data-theme="..."]` 选择器优先级高于 `:root`，故非默认主题也能赢。 */
+@import './theme-neutral.css';
+@import './theme-warm.css';
+@import './theme-paper.css';
+@import './theme-cream.css';

@@ -39,6 +39,21 @@ const COMPONENTS_CSS = readRepoFile('packages/web/src/styles/components.css')
 const TOKENS_CSS = readRepoFile('packages/web/src/styles/tokens.css')
 
 /**
+ * 四份主题文件串起来 —— **颜色变量的定义处**。
+ *
+ * v0.8.1 起颜色不再住在 `tokens.css`：那是「一套写死的暗色」，换主题时
+ * 组件全停在旧配色上。现在配色按原型的分层放进 `theme-*.css`，`tokens.css`
+ * 只留尺度/字体/动效（零个颜色字面值）。所以「引用的变量有没有定义」这件事
+ * 必须连主题文件一起看，否则本文件下面那条门禁会在删掉颜色后**假红**。
+ */
+const THEME_CSS = ['neutral', 'warm', 'paper', 'cream']
+  .map((t) => readRepoFile(`packages/web/src/styles/theme-${t}.css`))
+  .join('\n')
+
+/** 声明了变量的全部样式源（`tokens.css` + 四份主题）。 */
+const VARS_ALL = `${TOKENS_CSS}\n${THEME_CSS}`
+
+/**
  * 实现侧的**全部**样式源。
  *
  * 判「外壳类是否存在」必须跨这两份文件看：`.af-main` 的权威定义在
@@ -257,8 +272,10 @@ describe('prototype-shell.css 不许自己发明取值', () => {
     ).toEqual([])
   })
 
-  it('引用的每个变量都在 tokens.css 里定义过（含 --p-* 别名）', () => {
-    const cleanTokens = stripComments(TOKENS_CSS)
+  it('引用的每个变量都在 tokens.css 或主题文件里定义过（含 --p-* 别名）', () => {
+    // 定义侧看 `VARS_ALL`（`tokens.css` + 四份 `theme-*.css`）：v0.8.1 起颜色
+    // 住在主题文件里，只扫 `tokens.css` 会把每一个颜色引用都判成悬空。
+    const cleanTokens = stripComments(VARS_ALL)
     const defined = new Set(
       [...cleanTokens.matchAll(/^\s*(--(?:af|p)-[a-z0-9-]+)\s*:/gm)].map((m) => m[1]),
     )
@@ -309,8 +326,41 @@ describe('prototype-shell.css 不许自己发明取值', () => {
       ].join('\n'),
     ).toEqual([])
     // 反向守卫：别名层必须真的存在，否则上面这条在「全删光」时也绿。
+    //
+    // **数字从 70 降到 26 是 v0.8.1 的合法变化，不是放宽判据**：颜色别名
+    // （`--p-bg` / `--p-fg` / `--p-line-*` / `--p-acc` / 六态 / `--p-sh-*`，
+    // 约 50 条）已按用户裁定搬进 `theme-*.css`——它们现在是那边的字面值，
+    // 不再转发 `--af-*`。若把颜色别名留在这里，它会用主题转发来的 `--af-*`
+    // 把主题的 `--p-*` 覆盖回去，**主题切换会静默失效**。
+    // §14 现在只剩与配色无关的尺度别名（间距 8 / 圆角 5 / 字号 6 / 行高 2 /
+    // 行高常量 1 / 动效 2 / 字族 2 = 26 条）。
+    //
+    // 所以这里判「尺度别名必须齐全」而不是一个魔数：少一条就是原型骨架的
+    // 规则会静默丢样式，多一条则是没人用的死重量。
     const pNames = [...section14.matchAll(/^\s*(--p-[a-z0-9-]+)\s*:/gm)].map((m) => m[1])
-    expect(pNames.length, '原型槽位别名层不见了').toBeGreaterThanOrEqual(70)
+    const SIZING_ALIASES = [
+      ...Array.from({ length: 8 }, (_, i) => `--p-s${i + 1}`),
+      ...['xs', 'sm', 'md', 'lg', 'full'].map((r) => `--p-r-${r}`),
+      ...['2xs', 'xs', 'sm', 'md', 'lg', 'xl'].map((t) => `--p-t-${t}`),
+      '--p-lh-body',
+      '--p-lh-tight',
+      '--p-row',
+      '--p-ease',
+      '--p-dur',
+      '--p-sans',
+      '--p-mono-c',
+    ]
+    const missing = SIZING_ALIASES.filter((n) => !pNames.includes(n))
+    expect(missing, `§14 缺这些尺度别名（原型骨架会静默丢样式）：${missing.join(', ')}`).toEqual([])
+    // 颜色别名不许回来（否则主题切换会被覆盖回写死的旧配色）。
+    const colorBack = pNames.filter((n) =>
+      /^--p-(bg|surf-\d|panel|pop|inset-c|fg|fg-strong|fg-2|fg-3|line|line-\d|acc|acc-strong|acc-bg|acc-line|on-acc|pending|queued|running|review|done|failed|butler|warn|warn-c|sh-\d|add-ink-c|del-ink-c)$/.test(
+        n,
+      ),
+    )
+    expect(colorBack, `颜色别名回到了 tokens.css，会让主题切换失效：${colorBack.join(', ')}`).toEqual(
+      [],
+    )
   })
 })
 

@@ -38,7 +38,16 @@
    有测试守着（约束 11）。它们归入「Hub 连接」分区之后。
    =========================================================================== */
 
+import { onMounted, ref } from 'vue'
+
 import { navigate } from '@/router'
+import {
+  currentTheme,
+  followOS,
+  setTheme,
+  toggleFollowOS,
+  type ThemeId,
+} from '@/styles/theme'
 
 interface Row {
   title: string
@@ -174,6 +183,67 @@ const NOTIFY_EXITS: readonly NotifyExit[] = [
   { label: '邮件', on: false },
   { label: 'IM 机器人', on: true },
 ]
+
+/**
+ * 外观：四套配色（原型 `settings.html:191-231`）。
+ *
+ * 名字与说明**逐字照原型**：`desc` 里的对比度（9.3:1 / 12.8:1）不是装饰，
+ * 它是「这套配色能不能当正文用」的可核对数字。改配色时必须同步改这里，
+ * 否则卡片会替一套它已不再是的配色作证。
+ */
+interface ThemeChoice {
+  id: ThemeId
+  name: string
+  desc: string
+}
+
+const THEME_CHOICES: readonly ThemeChoice[] = [
+  { id: 'neutral', name: '甲 · 中性冷灰', desc: '暗色 · 冷调 · 正文 9.3:1' },
+  { id: 'warm', name: '乙 · 暖米灰', desc: '暗色 · 暖调 · 蓝光更少' },
+  { id: 'paper', name: '丙 · 纸白偏冷', desc: '亮色 · 冷调 · 正文 12.8:1' },
+  { id: 'cream', name: '丁 · 米白偏暖', desc: '亮色 · 暖调 · 蓝光更少' },
+]
+
+/**
+ * 选中态是**本地状态**，不是「渲染时问一次模块」。
+ *
+ * `currentTheme()` 要在挂载后才读：模块在 `main.ts` 里更早应用主题，但设置页
+ * 也可能在测试里被单独挂载（那时 `document` 上还没有任何主题）。用一个 ref
+ * 保存「现在选的是哪套」，点击时先改 ref 再落盘——界面不必等存储写成功。
+ */
+const picked = ref<ThemeId>('neutral')
+const followOSOn = ref(false)
+
+onMounted(() => {
+  picked.value = currentTheme()
+  followOSOn.value = followOS()
+})
+
+/**
+ * 选一套配色。
+ *
+ * **手动选一套 = 不再跟随系统**（原型 `swatch.js:106-111` 就是这么做的）：
+ * 用户刚明确点了一套，界面却还按系统明暗自动切换，那次点击看起来就是没生效。
+ *
+ * 用 `setTheme` 而不是 `applyTheme`：前者会**持久化**（写 localStorage `af-theme`
+ * 并把 `?theme=` 换掉，刷新/复制地址都还是这套），后者只改 DOM。
+ */
+function pickTheme(id: ThemeId): void {
+  picked.value = setTheme(id)
+  followOSOn.value = followOS()
+}
+
+/**
+ * 跟随系统开关。切换后立刻按新的来源重算一次当前配色（原型 `swatch.js:126-131`）。
+ *
+ * 开关状态由模块决定并返回，页面不自己算——否则两边各存一份布尔值，
+ * 迟早不一致（比如 localStorage 抛异常时模块仍能工作，页面那份却已经翻了）。
+ */
+function onToggleFollowOS(): void {
+  const r = toggleFollowOS()
+  followOSOn.value = r.follow
+  picked.value = r.theme
+}
 </script>
 
 <template>
@@ -350,30 +420,58 @@ const NOTIFY_EXITS: readonly NotifyExit[] = [
       </div>
     </section>
 
-    <!-- ⑤ 外观（原型 `:184-252`） -->
+    <!-- ⑤ 外观（原型 `:184-252`）。这是**产品功能，不是原型调试开关**：
+         四套配色与跟随系统都能真的切换，所以这一块不是禁用控件。 -->
     <section class="af-region af-settings__region" aria-label="外观">
       <div class="af-region__head">
         <h2 class="af-region__title">外观</h2>
         <span class="af-region__note">只影响这台设备，不同步到别的机器</span>
       </div>
-      <div class="af-region__body">
-        <p class="af-settings__p">
-          四套配色（甲 · 中性冷灰 / 乙 · 暖米灰 / 丙 · 纸白偏冷 / 丁 · 米白偏暖），
-          以及「跟随系统的明暗设置」。
-        </p>
-        <div class="af-settings__themes">
-          <button
-            v-for="(name, i) in ['甲 · 中性冷灰', '乙 · 暖米灰', '丙 · 纸白偏冷', '丁 · 米白偏暖']"
-            :key="name"
-            class="af-btn af-btn--sm"
-            type="button"
-            :class="{ 'af-btn--primary': i === 0 }"
-            disabled
-          >
-            {{ name }}
-          </button>
+      <div class="af-region__body af-stack">
+        <!-- 四套配色：直接把「长什么样」摆出来，不靠色块让人猜 -->
+        <div class="af-field">
+          <span class="af-field__label">配色方案</span>
+          <div class="af-themes" role="radiogroup" aria-label="配色方案">
+            <button
+              v-for="t in THEME_CHOICES"
+              :key="t.id"
+              type="button"
+              class="af-theme"
+              role="radio"
+              :data-theme-pick="t.id"
+              :aria-checked="picked === t.id ? 'true' : 'false'"
+              @click="pickTheme(t.id)"
+            >
+              <span class="af-theme__prev" aria-hidden="true">
+                <span class="af-theme__pv-bar"></span>
+                <span class="af-theme__pv-line"></span>
+                <span class="af-theme__pv-line af-theme__pv-line--short"></span>
+              </span>
+              <span class="af-theme__name">{{ t.name }}</span>
+              <span class="af-theme__desc">{{ t.desc }}</span>
+            </button>
+          </div>
         </div>
-        <div class="af-callout af-settings__callout">
+
+        <!-- 跟随系统：很多人要的不是「选一套」，而是「白天亮、晚上暗」 -->
+        <div class="af-row">
+          <span
+            class="af-switch"
+            role="switch"
+            :aria-checked="followOSOn ? 'true' : 'false'"
+            id="af-follow-os"
+            tabindex="0"
+            @click="onToggleFollowOS"
+            @keydown.enter.prevent="onToggleFollowOS"
+            @keydown.space.prevent="onToggleFollowOS"
+          >
+            <span class="af-switch__track" aria-hidden="true"></span>
+            <span>跟随系统的明暗设置</span>
+          </span>
+          <span class="af-2xs af-mute">打开后不再用上面选的那套，而是按系统自动在冷调 / 暖调里挑</span>
+        </div>
+
+        <div class="af-callout">
           <span class="af-callout__k">为什么只存在这台设备上</span>
           <span>
             配色是看的人的事，不是项目的事。在笔记本上换成暖色，不该把同伴的屏幕也一起改掉。
@@ -486,11 +584,163 @@ const NOTIFY_EXITS: readonly NotifyExit[] = [
   font-size: var(--af-text-sm);
   color: var(--af-fg-secondary);
 }
-.af-settings__themes {
+/* ── 外观：四张配色卡 + 跟随系统开关（原型 `app.css:725-793`、`636-651`）──
+   这些类在原型里是全局的，但生产样式表尚未移植（`.af-theme*` / `.af-switch__track`
+   在 `components.css` / `prototype-shell.css` 里命中 0）。按 design-system §（页面级
+   共享类）的做法先落在本页 scoped 块里，逐个值照原型搬，不发明档位。 */
+.af-themes {
+  display: grid;
+  gap: var(--af-space-6);
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  margin-top: var(--af-space-4);
+}
+.af-theme {
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
   display: flex;
-  gap: var(--af-space-2);
-  flex-wrap: wrap;
-  margin-bottom: var(--af-space-3);
+  flex-direction: column;
+  gap: var(--af-space-4);
+  padding: var(--af-space-4);
+  background: var(--af-surface-2);
+  border: 1px solid var(--af-border-subtle);
+  border-radius: var(--af-radius-lg);
+  color: var(--af-fg-primary);
+  position: relative;
+  transition: border-color var(--af-dur-fast) var(--af-ease-out),
+    background var(--af-dur-fast) var(--af-ease-out);
+}
+.af-theme:hover {
+  border-color: var(--af-border-strong);
+  background: var(--af-surface-3);
+}
+.af-theme[aria-checked='true'] {
+  border-color: var(--af-accent);
+  background: var(--af-accent-bg);
+  box-shadow: inset 0 0 0 1px var(--af-accent);
+}
+.af-theme:focus-visible {
+  outline: 2px solid var(--af-accent-hover);
+  outline-offset: 2px;
+}
+/* 选中项的勾：不只靠边框，色盲下也分得出来（原型 `app.css:780-790`）。 */
+.af-theme::after {
+  content: '✓';
+  position: absolute;
+  top: var(--af-space-4);
+  right: var(--af-space-4);
+  width: 16px;
+  height: 16px;
+  border-radius: var(--af-radius-full);
+  display: grid;
+  place-items: center;
+  font-size: var(--af-text-2xs);
+  font-weight: var(--af-weight-semibold);
+  line-height: 1;
+  background: var(--af-accent);
+  color: var(--af-fg-on-accent);
+  opacity: 0;
+  transform: scale(0.7);
+  transition: opacity var(--af-dur-fast) var(--af-ease-out),
+    transform var(--af-dur-fast) var(--af-ease-out);
+}
+.af-theme[aria-checked='true']::after {
+  opacity: 1;
+  transform: scale(1);
+}
+/* 缩略图用**该套配色自己的色值**，不跟当前主题走——它存在的意义就是
+   「显示别套配色的样子」。这是全站唯一允许写死色值的地方
+   （原型 `app.css:760-776` 的原话），值逐条照抄。 */
+.af-theme__prev {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  height: 46px;
+  padding: 6px 8px;
+  border-radius: var(--af-radius-md);
+  border: 1px solid var(--af-border-strong);
+  overflow: hidden;
+}
+.af-theme__pv-bar {
+  height: 7px;
+  border-radius: 2px;
+  margin-bottom: 2px;
+}
+.af-theme__pv-line {
+  height: 4px;
+  border-radius: 2px;
+  width: 82%;
+}
+.af-theme__pv-line--short {
+  width: 55%;
+}
+[data-theme-pick='neutral'] .af-theme__prev { background: #191d21; }
+[data-theme-pick='neutral'] .af-theme__pv-bar { background: #272c31; }
+[data-theme-pick='neutral'] .af-theme__pv-line { background: #cdd2d9; }
+[data-theme-pick='warm'] .af-theme__prev { background: #1d1c19; }
+[data-theme-pick='warm'] .af-theme__pv-bar { background: #2b2a26; }
+[data-theme-pick='warm'] .af-theme__pv-line { background: #d2cec6; }
+[data-theme-pick='paper'] .af-theme__prev { background: #eceef1; }
+[data-theme-pick='paper'] .af-theme__pv-bar { background: #f8f9fb; }
+[data-theme-pick='paper'] .af-theme__pv-line { background: #2a2f36; }
+[data-theme-pick='cream'] .af-theme__prev { background: #efece4; }
+[data-theme-pick='cream'] .af-theme__pv-bar { background: #faf8f2; }
+[data-theme-pick='cream'] .af-theme__pv-line { background: #33302a; }
+.af-theme__name {
+  font-size: var(--af-text-xs);
+  font-weight: var(--af-weight-semibold);
+  color: var(--af-fg-primary);
+}
+.af-theme__desc {
+  font-size: var(--af-text-2xs);
+  color: var(--af-fg-secondary);
+  line-height: var(--af-leading-snug);
+}
+/* 跟随系统开关：原型是 `span.af-switch[role=switch][aria-checked]` + `__track`
+   （`app.css:636-651`）。`.af-switch` 这个名字在生产里已经给了看板页的项目
+   切换器，所以这里必须把三件事都写好（inline-flex / gap / 字号），不能只补
+   `__track`——否则它会继承切换器的 `position: relative` 与裸排。 */
+.af-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--af-space-4);
+  font-size: var(--af-text-md);
+  color: var(--af-fg-primary);
+  cursor: pointer;
+}
+.af-switch:focus-visible {
+  outline: 2px solid var(--af-accent-hover);
+  outline-offset: 2px;
+}
+.af-switch__track {
+  width: 34px;
+  height: 20px;
+  border-radius: var(--af-radius-full);
+  flex: 0 0 auto;
+  background: var(--af-surface-3);
+  border: 1px solid var(--af-border-default);
+  position: relative;
+  transition: background var(--af-dur-fast) var(--af-ease-out);
+}
+.af-switch__track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: var(--af-radius-full);
+  background: var(--af-fg-secondary);
+  transition: transform var(--af-dur-fast) var(--af-ease-out),
+    background var(--af-dur-fast) var(--af-ease-out);
+}
+.af-switch[aria-checked='true'] .af-switch__track {
+  background: var(--af-accent);
+  border-color: var(--af-accent);
+}
+.af-switch[aria-checked='true'] .af-switch__track::after {
+  transform: translateX(14px);
+  background: var(--af-fg-on-accent);
 }
 
 /* ── 原来的四行：排版不变，只把外层从「页面级行」改成「分区内的行」 ── */

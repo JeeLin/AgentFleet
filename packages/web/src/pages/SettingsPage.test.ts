@@ -38,18 +38,25 @@ describe('SettingsPage：不提假的承诺', () => {
     expect(text).toContain('任务分发')
     expect(text).toContain('推理网关')
     expect(text).toContain('M5+')
-    // 页面上没有任何可操作控件（只有指向设备页的那一个链接按钮）。
+    // 页面上没有任何**未实现**的可操作控件（只有指向设备页的那一个链接按钮）。
     //
     // **选择器从 `select` 改成 `select:not([disabled])`**（v0.8.0 子任务 12）：
     // 原来那条 `select` 不带 `:not([disabled])`，于是任何一个**禁用**的下拉
     // （磁盘默认清理策略，原型 `settings.html:126` 就有）都会被算成可操作控件。
     // 这条用例的意图是「没有能点的东西」，禁用控件点不动，不该算进来——
     // 这不是放宽口径，是把选择器修回它本来要表达的意思。
+    //
+    // **外观区的控件要排除**（v0.8.1 子任务 11）：四张配色卡与「跟随系统」开关
+    // 在这一轮**真的实现了**（`@/styles/theme` + 四份 `theme-*.css`），它们是
+    // 已交付功能，不是「灰掉的承诺」。这条用例守的是「不许摆没做的控件」，
+    // 已做的控件当然该能点——所以按 `[data-theme-pick]` 与 `#af-follow-os`
+    // 精确排除，而不是把这四个按钮硬编码进期望数组（那样以后加第五套配色
+    // 会莫名其妙变红，而人看不出为什么）。
     const controls = Array.from(
       w.element.querySelectorAll<HTMLElement>(
         'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])',
       ),
-    )
+    ).filter((el) => !el.closest('[data-theme-pick]') && el.id !== 'af-follow-os')
     expect(controls.map((el) => el.textContent?.trim() ?? el.tagName)).toEqual(['设备页'])
   })
 

@@ -39,12 +39,26 @@
    =========================================================================== */
 *, *::before, *::after { box-sizing: border-box; }
 
+/* `color-scheme` 决定浏览器**自己画**的东西的明暗：滚动条、输入框原生的
+   自动填充底色、日期选择器、`<select>` 下拉、`::placeholder` 的默认值。
+   写死 `dark` 时，切到纸白/米白主题后页面是亮的而滚动条还是黑的——那正是
+   「换主题只换了一半」最扎眼的形态。
+
+   `data-theme-mode` 由 `styles/theme.ts` 的 `applyTheme()` 写在 `<html>` 上
+   （值 `dark` / `light`），是主题与浏览器的唯一接口。缺省（脚本没跑／内联
+   在 SSR）落到 `dark`，与默认主题 neutral 一致。 */
 html { color-scheme: dark; }
+html[data-theme-mode='light'] { color-scheme: light; }
+html[data-theme-mode='dark'] { color-scheme: dark; }
 
 body {
   margin: 0;
-  background: var(--af-surface-0);
-  color: var(--af-fg-primary);
+  /* 用 `--p-bg` / `--p-fg` 而不是 `--af-surface-0` / `--af-fg-primary`：
+     后两者是**上一轮自造的配色**，不参与主题切换——写成它们，换主题时
+     页面底会顽固地留在旧黑色上（`--af-surface-0` 是 `#080a0d`，原型是
+     `#191d21`），而其余面板都变了色，看起来像「一半页面没跟着换」。 */
+  background: var(--p-bg);
+  color: var(--p-fg);
   font-family: var(--af-font-sans);
   font-size: var(--af-text-md);
   line-height: var(--af-leading-snug);

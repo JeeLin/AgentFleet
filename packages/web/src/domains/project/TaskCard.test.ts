@@ -22,7 +22,6 @@ import { mountIn } from '@/test/mount'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const COMPONENTS_CSS = resolve(HERE, '../../styles/components.css')
-const TOKENS_CSS = resolve(HERE, '../../styles/tokens.css')
 const STATE_TS = resolve(HERE, '../../shared/state.ts')
 
 /** 固定时刻：`started_at` 用 `unix:` 秒（与 `format.ts:parseStamp` 同一种格式）。 */
@@ -293,10 +292,16 @@ describe('TaskCard：组件纪律（源码级）', () => {
 })
 
 describe('组件与新增样式只使用已有 token', () => {
-  it('三个组件与 components.css 里的 --af- 变量都在 tokens.css 里定义过', () => {
-    // 判红方式：写一个 tokens.css 里没有的 `--af-task-xxx` → 红（C5 的补充）。
-    const tokens = readFileSync(TOKENS_CSS, 'utf-8')
-    const defined = new Set([...tokens.matchAll(/(--af-[a-z0-9-]+)\s*:/g)].map((m) => m[1] as string))
+  it('三个组件与 components.css 里的 --af- 变量都在 tokens.css 或主题文件里定义过', () => {
+    // 判红方式：写一个哪都没有的 `--af-task-xxx` → 红（C5 的补充）。
+    //
+    // **定义侧要看主题文件**（v0.8.1）：颜色已从 `tokens.css` 搬进
+    // `theme-*.css`，只扫 `tokens.css` 会把每一个颜色引用都判成没定义。
+    const defined = new Set<string>()
+    for (const file of ['tokens.css', 'theme-neutral.css', 'theme-warm.css', 'theme-paper.css', 'theme-cream.css']) {
+      const css = readFileSync(resolve(HERE, '../../styles', file), 'utf-8')
+      for (const m of css.matchAll(/(--af-[a-z0-9-]+)\s*:/g)) defined.add(m[1] as string)
+    }
     const sources = [
       readFileSync(resolve(HERE, 'TaskCard.vue'), 'utf-8'),
       readFileSync(resolve(HERE, 'FailurePanel.vue'), 'utf-8'),
@@ -307,7 +312,7 @@ describe('组件与新增样式只使用已有 token', () => {
       sources.flatMap((s) => [...s.matchAll(/var\((--af-[a-z0-9-]+)\)/g)].map((m) => m[1] as string)),
     )
     const missing = [...used].filter((name) => !defined.has(name))
-    expect(missing, `这些 token 没在 tokens.css 里定义：${missing.join(', ')}`).toEqual([])
+    expect(missing, `这些 token 在 tokens.css 和主题文件里都没定义：${missing.join(', ')}`).toEqual([])
   })
 
   it('任务六态的字形字符只来自 shared/state.ts 的词表（卡片不自己写字形）', () => {

@@ -1,0 +1,171 @@
+/* 主题 · 丁 · 米白偏暖（亮 · 暖）——逐值搬运自 `prototype/styles/theme-cream.css`。
+   命名与本文件的分层理由见 `theme-neutral.css` 顶部说明。 */
+html[data-theme="cream"] {
+  --p-bg: #efece4;
+  --p-surf-1: #f5f2ea;
+  --p-surf-2: #faf8f2;
+  --p-surf-3: #fffdf8;
+  --p-surf-4: #fffdf8;
+  --p-panel: #f7f4ec;
+  --p-pop: #fffdf8;
+  --p-scrim: rgba(38, 30, 16, 0.30);
+  --p-inset-c: #e6e1d6;
+  --p-fg: #33302a;   /* 正文 12.38:1 on 卡片 */
+  --p-fg-strong: #23211c;   /* 标题 14.53:1 */
+  --p-fg-2: #655f54;   /* 次要 5.96:1，最亮面 6.23:1 */
+  --p-fg-3: #96907f;
+  --p-sh-1: 0 1px 2px rgba(40, 34, 20, 0.08);
+  --p-sh-2: 0 4px 14px rgba(40, 34, 20, 0.11);
+  --p-sh-3: 0 12px 36px rgba(40, 34, 20, 0.17);
+  --p-line: rgba(40, 34, 20, 0.08);
+  --p-line-2: rgba(40, 34, 20, 0.13);
+  --p-line-3: rgba(40, 34, 20, 0.19);
+  --p-line-4: rgba(40, 34, 20, 0.29);
+  --p-acc: #7d5a0c;
+  --p-acc-strong: #5f4408;
+  --p-acc-bg: rgba(125, 90, 12, 0.10);
+  --p-acc-line: rgba(125, 90, 12, 0.28);
+  --p-on-acc: #fffcf3;   /* 主按钮浅字 6.14:1 */
+  --p-pending: #5c636d;
+  --p-pending-bg: rgba(92, 99, 109, 0.10);
+  --p-pending-line: rgba(92, 99, 109, 0.26);
+  --p-queued: #8a6208;
+  --p-queued-bg: rgba(138, 98, 8, 0.11);
+  --p-queued-line: rgba(138, 98, 8, 0.28);
+  --p-running: #1d5c96;
+  --p-running-bg: rgba(29, 92, 150, 0.10);
+  --p-running-line: rgba(29, 92, 150, 0.26);
+  --p-review: #6b3fa0;
+  --p-review-bg: rgba(107, 63, 160, 0.10);
+  --p-review-line: rgba(107, 63, 160, 0.26);
+  --p-done: #166b34;
+  --p-done-bg: rgba(22, 107, 52, 0.11);
+  --p-done-line: rgba(22, 107, 52, 0.28);
+  --p-failed: #a52a1e;
+  --p-failed-bg: rgba(165, 42, 30, 0.10);
+  --p-failed-line: rgba(165, 42, 30, 0.26);
+  --p-butler: #6a4a90;
+  --p-butler-bg: rgba(106, 74, 144, 0.10);
+  --p-butler-line: rgba(106, 74, 144, 0.26);
+  --p-warn: #8a6208;
+  --p-warn-bg: rgba(138, 98, 8, 0.11);
+  --p-warn-line: rgba(138, 98, 8, 0.28);
+  --p-add-ink-c: rgba(22, 107, 52, 0.13);
+  --p-del-ink-c: rgba(165, 42, 30, 0.13);
+  --p-dot-a: var(--p-acc);
+  --p-dot-b: var(--p-review);
+  --p-dot-c: var(--p-queued);
+
+  /* 警告槽位（原型 `--warn` 一族），说明见 theme-neutral.css 同段 */
+  --p-warn-c: var(--p-queued);
+  --p-warn-bg-c: var(--p-queued-bg);
+  --p-warn-line-c: var(--p-queued-line);
+
+  /* --af-* 颜色槽位：纯转发到本主题的 --p-*，逐字与 theme-neutral.css 同一段。
+     理由与逐条映射的说明见 theme-neutral.css 里那段注释（这里是转发层，
+     不新增任何取值——改配色改上面的 `--p-*`，不要改这里）。 */
+  --af-surface-0: var(--p-bg);
+  --af-surface-1: var(--p-surf-1);
+  --af-surface-2: var(--p-surf-2);
+  --af-surface-3: var(--p-surf-3);
+  --af-inset: var(--p-inset-c);
+  --af-scrim: var(--p-scrim);
+
+  --af-fg-primary: var(--p-fg);
+  --af-fg-strong: var(--p-fg-strong);
+  --af-fg-secondary: var(--p-fg-2);
+  --af-fg-tertiary: var(--p-fg-3);
+  --af-fg-muted: var(--p-fg-3);
+  --af-fg-disabled: var(--p-fg-3);
+  --af-fg-on-accent: var(--p-on-acc);
+
+  --af-border-subtle: var(--p-line);
+  --af-border-default: var(--p-line-2);
+  --af-border-strong: var(--p-line-3);
+  --af-border-focus: var(--p-acc);
+  --af-border-disabled: var(--p-line-2);
+  --af-border-selected: var(--p-acc-line);
+
+  --af-accent: var(--p-acc);
+  --af-accent-hover: var(--p-acc-strong);
+  --af-accent-active: var(--p-acc-strong);
+  --af-accent-bg: var(--p-acc-bg);
+  --af-accent-line: var(--p-acc-line);
+  --af-accent-fg: var(--p-acc-strong);
+
+  --af-ok: var(--p-done);
+  --af-ok-fg: var(--p-done);
+  --af-ok-bg: var(--p-done-bg);
+  --af-ok-line: var(--p-done-line);
+
+  --af-warn: var(--p-queued);
+  --af-warn-fg: var(--p-queued);
+  --af-warn-bg: var(--p-queued-bg);
+  --af-warn-line: var(--p-queued-line);
+
+  --af-danger: var(--p-failed);
+  --af-danger-fg: var(--p-failed);
+  --af-danger-bg: var(--p-failed-bg);
+  --af-danger-line: var(--p-failed-line);
+  --af-danger-ink: var(--p-del-ink-c);
+
+  --af-info: var(--p-running);
+  --af-info-fg: var(--p-running);
+  --af-info-bg: var(--p-running-bg);
+  --af-info-line: var(--p-running-line);
+
+  --af-agent: var(--p-review);
+  --af-agent-fg: var(--p-review);
+  --af-agent-bg: var(--p-review-bg);
+  --af-agent-line: var(--p-review-line);
+
+  --af-pending-fg: var(--p-pending);
+  --af-pending-bg: var(--p-pending-bg);
+  --af-pending-line: var(--p-pending-line);
+
+  --af-add-ink: var(--p-add-ink-c);
+  --af-add-ink-strong: var(--p-add-ink-c);
+  --af-del-ink: var(--p-del-ink-c);
+  --af-del-ink-strong: var(--p-del-ink-c);
+
+  --af-shadow-1: var(--p-sh-1);
+  --af-shadow-2: var(--p-sh-2);
+  --af-shadow-3: var(--p-sh-3);
+
+  --af-term-bg: var(--p-inset-c);
+  --af-term-fg: var(--p-fg);
+  --af-term-ansi-black: var(--p-inset-c);
+  --af-term-ansi-red: var(--p-failed);
+  --af-term-ansi-green: var(--p-done);
+  --af-term-ansi-yellow: var(--p-queued);
+  --af-term-ansi-blue: var(--p-running);
+  --af-term-ansi-magenta: var(--p-review);
+  --af-term-ansi-cyan: var(--p-acc);
+  --af-term-ansi-white: var(--p-fg);
+  --af-term-ansi-bright-black: var(--p-fg-3);
+  --af-term-ansi-bright-red: var(--p-failed);
+  --af-term-ansi-bright-green: var(--p-done);
+  --af-term-ansi-bright-yellow: var(--p-queued);
+  --af-term-ansi-bright-blue: var(--p-running);
+  --af-term-ansi-bright-magenta: var(--p-review);
+  --af-term-ansi-bright-cyan: var(--p-acc-strong);
+  --af-term-ansi-bright-white: var(--p-fg-strong);
+}
+
+/* ── 高对比度模式：把边界全部提到 3:1 以上 ──
+   密度优先的界面在 Windows 高对比度下会「看不见边界」，所以这个模式下
+   刻意放弃密度，换可读性。
+
+   **为什么写在最后这份主题文件里**：这两个变量由主题文件定义，媒体查询
+   不提高选择器优先级，`tokens.css`（先加载）里的覆写会被主题文件盖掉。
+   本文件是 `index.css` 里最后 `@import` 的一份，写在这里才真的生效。
+   选择器用 `html[data-theme]`（不是 `:root`）是为了压过四份主题各自的
+   `html[data-theme="<id>"]`——属性选择器+属性选择器的特异性高于单个属性
+   选择器，且这里不带具体 id，对四套配色一视同仁。 */
+@media (forced-colors: active) {
+  html[data-theme],
+  :root {
+    --af-border-subtle: CanvasText;
+    --af-border-default: CanvasText;
+  }
+}

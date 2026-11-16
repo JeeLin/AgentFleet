@@ -107,14 +107,35 @@ describe('KEYS 与设计文档一致（grep 校验，不靠人眼）', () => {
 
 
 describe('token / 组件数与设计文档一致', () => {
-  it('tokens.css 的变量数与 §1 的「136 个变量」一致', () => {
+  it('tokens.css 的变量数与 §2 的「（62 个变量）」一致', () => {
+    // v0.8.1 起颜色搬进 `theme-*.css`，`tokens.css` 只剩尺度/字体/动效/层级。
+    // 所以这个数从 136 降到 62——**不是丢东西**，是 74 条颜色定义换了住处。
+    // 这条门禁守的仍然是「文档写的数与文件里的定义行数必须相等」，
+    // 换了口径就得两边一起改，这正是它存在的意义。
     const doc = readFileSync(DESIGN_DOC, 'utf-8')
     const m = doc.match(/（(\d+) 个变量）/g)
-    expect(m, 'design-system.md §1 不再声明 token 变量数').not.toBeNull()
+    expect(m, 'design-system.md §2 不再声明 token 变量数').not.toBeNull()
     const declared = Number(/(\d+)/.exec(m?.[0] as string)?.[1])
     const css = readFileSync(TOKENS_CSS, 'utf-8')
     const actual = (css.match(/^\s*--af-[a-z0-9-]+:/gm) ?? []).length
     expect(actual).toBe(declared)
+  })
+
+  it('四份主题文件各自定义的 --af-* 颜色变量数相同（否则切换会缺色）', () => {
+    // 主题文件是颜色真相源。四份变量名必须齐平，否则切到某套时
+    // `var(--af-xxx)` 会静默失效——表现为「换了主题后某块没了颜色」。
+    //
+    // **要剥掉 `forced-colors` 那段再数**：它只写在 `theme-cream.css`
+    // （最后加载的一份）末尾，覆写 `--af-border-subtle/default` 两条。
+    // 那是四份共用的一份收尾，不是「cream 多两个颜色」——不剥会误报。
+    const FC = '@media (forced-colors: active)'
+    const counts = ['neutral', 'warm', 'paper', 'cream'].map((t) => {
+      const css = readFileSync(resolve(REPO_ROOT, `packages/web/src/styles/theme-${t}.css`), 'utf-8')
+      const body = css.includes(FC) ? css.slice(0, css.indexOf(FC)) : css
+      return (body.match(/^\s*--af-[a-z0-9-]+:/gm) ?? []).length
+    })
+    expect(new Set(counts).size, `四份主题的 --af-* 定义数不一致：${counts.join(' / ')}`).toBe(1)
+    expect(counts[0], '主题文件里一个 --af-* 颜色都没定义').toBeGreaterThan(0)
   })
 
   it('components.css 的小节数与 §3 的「23 组组件（23 节）」一致', () => {

@@ -1,0 +1,223 @@
+/* ===========================================================================
+   主题 · 甲 · 中性冷灰（默认）
+   ---------------------------------------------------------------------------
+   逐值搬运自 `prototype/styles/theme-neutral.css`（原型 38 个变量，一个不漏）。
+   命名改成 `--p-*`：这是本仓库的「移植层」命名空间（见 `tokens.css` 里那段
+   说明），刻意**不带 `--af-` 前缀**——`scripts/check.sh` C5 判「第二份 token
+   真相源」的判据就是「有没有定义 `--af-*:` 字面值」，本文件定义的是 `--p-*`
+   字面值，是原型的配色本身，不是第二份生产 token。
+
+   为什么配色必须在**主题文件**里而不是 `tokens.css` 里：原型就是这么分层的。
+   `prototype/index.html:7-9` 引三份样式表——`assets/tokens.css`（尺度/字体/
+   圆角，**零个颜色变量**）+ `styles/theme-neutral.css`（**全部颜色**）+
+   `assets/app.css`（骨架与组件，颜色一律 `var()` 引用）。四套主题文件变量名
+   完全一致，切换时只换一份 `:root`，组件一处都不用改。
+
+   四套与原型逐条对应：
+     甲 中性冷灰 暗·冷（本文件，默认）  乙 暖米灰 暗·暖
+     丙 纸白偏冷 亮·冷                丁 米白偏暖 亮·暖
+   =========================================================================== */
+
+html[data-theme="neutral"], :root {
+  /* ── 亮度阶梯 ─────────────────────────────────────────────────────── */
+  --p-bg: #191d21;   /* 页面底 */
+  --p-surf-1: #202529;   /* 区域容器：看板列、分组、条带 */
+  --p-surf-2: #272c31;   /* 卡片 */
+  --p-surf-3: #2e343a;   /* 卡片悬停 */
+  --p-surf-4: #353b42;   /* 按下 / 选中 */
+  --p-panel: #2b3035;   /* 侧滑面板、浮层 */
+  --p-pop: #333a41;   /* 弹出菜单、悬浮按钮 */
+  --p-scrim: rgba(8, 10, 13, 0.62);
+  --p-inset-c: #12151a;   /* 输入框：比页面底更暗 */
+
+  /* ── 文字：非纯白，压掉光晕 ──────────────────────────────────────── */
+  --p-fg: #cdd2d9;   /* 正文   9.27:1 on 卡片 */
+  --p-fg-strong: #dfe3e8;   /* 标题  10.86:1 */
+  --p-fg-2: #a5acb5;   /* 次要   6.15:1，最亮的面 5.19:1 */
+  --p-fg-3: #6f767e;   /* 装饰   仅用于非文字元素与占位 */
+
+  /* ── 阴影 ─────────────────────────────────────────────────────────── */
+  --p-sh-1: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --p-sh-2: 0 6px 18px rgba(0, 0, 0, 0.38);
+  --p-sh-3: 0 18px 48px rgba(0, 0, 0, 0.52);
+
+  /* ── 边界 ─────────────────────────────────────────────────────────── */
+  --p-line: rgba(255, 255, 255, 0.06);
+  --p-line-2: rgba(255, 255, 255, 0.10);
+  --p-line-3: rgba(255, 255, 255, 0.15);
+  --p-line-4: rgba(255, 255, 255, 0.23);
+
+  /* ── 强调 ─────────────────────────────────────────────────────────── */
+  --p-acc: #8ab0ea;
+  --p-acc-strong: #a3c2f0;
+  --p-acc-bg: rgba(138, 176, 234, 0.14);
+  --p-acc-line: rgba(138, 176, 234, 0.34);
+  --p-on-acc: #131820;   /* 主按钮深字 8.04:1 */
+
+  /* ── 六态 + 管家 + 警告 ───────────────────────────────────────────── */
+  --p-pending: #a2a9b2;
+  --p-pending-bg: rgba(147, 154, 163, 0.14);
+  --p-pending-line: rgba(147, 154, 163, 0.32);
+  --p-queued: #cdae7a;
+  --p-queued-bg: rgba(205, 174, 122, 0.14);
+  --p-queued-line: rgba(205, 174, 122, 0.32);
+  --p-running: #7fb0e8;
+  --p-running-bg: rgba(127, 176, 232, 0.14);
+  --p-running-line: rgba(127, 176, 232, 0.34);
+  --p-review: #a79ad8;
+  --p-review-bg: rgba(167, 154, 216, 0.14);
+  --p-review-line: rgba(167, 154, 216, 0.34);
+  --p-done: #84c3a1;
+  --p-done-bg: rgba(132, 195, 161, 0.14);
+  --p-done-line: rgba(132, 195, 161, 0.32);
+  --p-failed: #dc908b;
+  --p-failed-bg: rgba(220, 144, 139, 0.14);
+  --p-failed-line: rgba(220, 144, 139, 0.34);
+  --p-butler: #b4a5e0;
+  --p-butler-bg: rgba(180, 165, 224, 0.14);
+  --p-butler-line: rgba(180, 165, 224, 0.34);
+  --p-warn: #cdae7a;
+  --p-warn-bg: rgba(205, 174, 122, 0.14);
+  --p-warn-line: rgba(205, 174, 122, 0.32);
+
+  /* ── diff 两侧 ─────────────────────────────────────────────────────── */
+  --p-add-ink-c: rgba(132, 195, 161, 0.16);
+  --p-del-ink-c: rgba(220, 144, 139, 0.16);
+
+  /* ── 档位点：原型用「甲/乙/丙」三色标出同一批数据的三个来源 ────────── */
+  --p-dot-a: var(--p-acc);
+  --p-dot-b: var(--p-review);
+  --p-dot-c: var(--p-queued);
+
+  /* ── 警告槽位（原型 `--warn` 一族） ───────────────────────────────────
+     名字带 `-c` 后缀是为了与 `--af-warn-*` 区分，避免撞名。值与 `queued`
+     同源（原型里 `--warn` 与 `--queued` 本就是同一组色值），但语义是
+     「这块区域需要警示」而不是「任务在排队」。 */
+  --p-warn-c: var(--p-queued);
+  --p-warn-bg-c: var(--p-queued-bg);
+  --p-warn-line-c: var(--p-queued-line);
+
+  /* =========================================================================
+     --af-* 颜色槽位（生产组件的调用名）
+     -------------------------------------------------------------------------
+     为什么这里还有一层 `--af-*`：`components.css` 与各组件里有 ~300 处写的是
+     `var(--af-surface-2)` / `var(--af-fg-secondary)` 这类**生产语义名**。它们
+     不跟着主题变，换主题时按钮、输入框、卡片就停在旧配色上——实测症状是
+     「外壳变了、组件没变」。
+
+     解法不是去改那 300 处调用点（每处都可能打错字，且 `--af-fg-disabled`
+     这类在原型里没有对应槽位，改完还得造名），而是**在主题里把生产名接到
+     本主题的 `--p-*` 上**。于是：
+       · 单一真相源仍是上面的 `--p-*` 字面值，这一层**只做转发、不新增取值**；
+       · 四套主题各转发一次，组件层一个字都不用改；
+       · 加第五套配色 = 复制一份文件、改上面的字面值，下面这段原样不动。
+
+     少数槽位原型没有同名槽位，按语义就近接（每条都写了理由）。 */
+
+  /* ── 表面 ─────────────────────────────────────────────────────────── */
+  --af-surface-0: var(--p-bg);
+  --af-surface-1: var(--p-surf-1);
+  --af-surface-2: var(--p-surf-2);
+  --af-surface-3: var(--p-surf-3);
+  --af-inset: var(--p-inset-c);
+  --af-scrim: var(--p-scrim);
+
+  /* ── 前景 ─────────────────────────────────────────────────────────── */
+  --af-fg-primary: var(--p-fg);
+  --af-fg-strong: var(--p-fg-strong);
+  --af-fg-secondary: var(--p-fg-2);
+  --af-fg-tertiary: var(--p-fg-3);
+  /* 原型没有 muted 这个级别：它本就是 tertiary 的兼容别名（见 tokens.css §2） */
+  --af-fg-muted: var(--p-fg-3);
+  /* 原型没有 disabled：取 fg-3（装饰级）。禁用控件的文字本就该弱到不抢眼，
+     且 WCAG 对禁用态豁免对比度要求，取最弱一档语义上最贴近。 */
+  --af-fg-disabled: var(--p-fg-3);
+  --af-fg-on-accent: var(--p-on-acc);
+
+  /* ── 边界 ─────────────────────────────────────────────────────────── */
+  --af-border-subtle: var(--p-line);
+  --af-border-default: var(--p-line-2);
+  --af-border-strong: var(--p-line-3);
+  --af-border-focus: var(--p-acc);
+  /* 原型无 disabled 描边：与 fg-disabled 同理，接最弱一档边界 */
+  --af-border-disabled: var(--p-line-2);
+  /* 原型无 selected 边界：选中行用的就是强调色的弱版 */
+  --af-border-selected: var(--p-acc-line);
+
+  /* ── 强调 ─────────────────────────────────────────────────────────── */
+  --af-accent: var(--p-acc);
+  --af-accent-hover: var(--p-acc-strong);
+  /* 按下态：原型没有专门一档，取 hover 与基底之间的**更亮**一档（acc-strong）。
+     按下要「看起来被压亮」而不是压暗——暗色主题里压暗会与底色糊在一起。 */
+  --af-accent-active: var(--p-acc-strong);
+  --af-accent-bg: var(--p-acc-bg);
+  --af-accent-line: var(--p-acc-line);
+  --af-accent-fg: var(--p-acc-strong);
+
+  /* ── 功能色：五态 + 管家 + 警告 ───────────────────────────────────── */
+  --af-ok: var(--p-done);
+  --af-ok-fg: var(--p-done);
+  --af-ok-bg: var(--p-done-bg);
+  --af-ok-line: var(--p-done-line);
+
+  --af-warn: var(--p-queued);
+  --af-warn-fg: var(--p-queued);
+  --af-warn-bg: var(--p-queued-bg);
+  --af-warn-line: var(--p-queued-line);
+
+  --af-danger: var(--p-failed);
+  --af-danger-fg: var(--p-failed);
+  --af-danger-bg: var(--p-failed-bg);
+  --af-danger-line: var(--p-failed-line);
+  --af-danger-ink: var(--p-del-ink-c);
+
+  --af-info: var(--p-running);
+  --af-info-fg: var(--p-running);
+  --af-info-bg: var(--p-running-bg);
+  --af-info-line: var(--p-running-line);
+
+  --af-agent: var(--p-review);
+  --af-agent-fg: var(--p-review);
+  --af-agent-bg: var(--p-review-bg);
+  --af-agent-line: var(--p-review-line);
+
+  /* pending 的两块底是原型少见的「直接给了色值」的一对 */
+  --af-pending-fg: var(--p-pending);
+  --af-pending-bg: var(--p-pending-bg);
+  --af-pending-line: var(--p-pending-line);
+
+  /* ── diff 两侧 ─────────────────────────────────────────────────────── */
+  --af-add-ink: var(--p-add-ink-c);
+  --af-add-ink-strong: var(--p-add-ink-c);
+  --af-del-ink: var(--p-del-ink-c);
+  --af-del-ink-strong: var(--p-del-ink-c);
+
+  /* ── 阴影 ─────────────────────────────────────────────────────────── */
+  --af-shadow-1: var(--p-sh-1);
+  --af-shadow-2: var(--p-sh-2);
+  --af-shadow-3: var(--p-sh-3);
+
+  /* ── 终端 ANSI 色 ──────────────────────────────────────────────────────
+     原型 `app.css` 里没有终端配色（原型没有真终端），故这里按语义接到功能色：
+     终端里「红=错、绿=成、黄=警告、蓝=信息、品红=agent、青=强调」与控制台
+     其余部分保持同一套色相，用户不会在终端里看到第二种红。
+     `-bright-*` 接各色的亮版（即 `*-fg` 那一档，本就是为小字提亮过的）。 */
+  --af-term-bg: var(--p-inset-c);
+  --af-term-fg: var(--p-fg);
+  --af-term-ansi-black: var(--p-inset-c);
+  --af-term-ansi-red: var(--p-failed);
+  --af-term-ansi-green: var(--p-done);
+  --af-term-ansi-yellow: var(--p-queued);
+  --af-term-ansi-blue: var(--p-running);
+  --af-term-ansi-magenta: var(--p-review);
+  --af-term-ansi-cyan: var(--p-acc);
+  --af-term-ansi-white: var(--p-fg);
+  --af-term-ansi-bright-black: var(--p-fg-3);
+  --af-term-ansi-bright-red: var(--p-failed);
+  --af-term-ansi-bright-green: var(--p-done);
+  --af-term-ansi-bright-yellow: var(--p-queued);
+  --af-term-ansi-bright-blue: var(--p-running);
+  --af-term-ansi-bright-magenta: var(--p-review);
+  --af-term-ansi-bright-cyan: var(--p-acc-strong);
+  --af-term-ansi-bright-white: var(--p-fg-strong);
+}
