@@ -71,7 +71,7 @@ const EDGES: &[Edge] = &[
     Edge {
         from: TaskState::Running,
         to: TaskState::Failed,
-        spec: "task-model.md:92",
+        spec: "task-model.md:97",
     },
     Edge {
         from: TaskState::Review,
@@ -153,7 +153,7 @@ fn legal_next_hint(from: TaskState) -> &'static str {
 
 /// 本模块的边表，供测试与文档核对使用。
 ///
-/// 返回 `(from, to)` 对，顺序与 [`EDGES`] 一致。
+/// 返回 `(from, to)` 对，顺序与 `EDGES` 一致。
 pub fn legal_edges() -> Vec<(TaskState, TaskState)> {
     EDGES.iter().map(|e| (e.from, e.to)).collect()
 }
@@ -276,15 +276,125 @@ mod tests {
         }
     }
 
+    /// 六个态各自的 `hint` 都要能说出来，且**必须带英文态名**。
+    ///
+    /// 只写「非法操作」等于把问题丢回给用户：他不知道下一步该做什么。而只写
+    /// 中文「待验收」会让调用方对不上 API 的 `detail.from` / `detail.to`
+    /// （那两个是 `pending` / `review` 这类字面值）。
+    ///
+    /// 判红方式：把任一 `legal_next_hint` 臂改成空串 → `!hint.is_empty()` 红；
+    /// 改成只写中文 → 「含至少一个英文态名」那句红。
+    #[test]
+    fn every_state_has_a_hint_that_names_a_state() {
+        // 每个态挑一条非法边，凑齐六个 `from`。
+        let illegal = [
+            (TaskState::Pending, TaskState::Running),
+            (TaskState::Queued, TaskState::Failed),
+            (TaskState::Running, TaskState::Done),
+            (TaskState::Review, TaskState::Failed),
+            (TaskState::Done, TaskState::Pending),
+            (TaskState::Failed, TaskState::Review),
+        ];
+        let mut seen = Vec::new();
+        for (from, to) in illegal {
+            let e = check_transition(from, to).unwrap_err();
+            let StorageError::IllegalTaskTransition { hint, .. } = &e else {
+                panic!("{from:?} → {to:?} 必须报 IllegalTaskTransition：{e:?}");
+            };
+            assert!(
+                !hint.is_empty(),
+                "{from:?} 的提示是空串——用户只知道「错了」，不知道下一步"
+            );
+            assert!(
+                ALL.iter().any(|s| hint.contains(s.as_str())),
+                "{from:?} 的提示里没有任何英文态名，前端对不上 detail.from/detail.to：{hint}"
+            );
+            seen.push(from);
+        }
+        // 六个 `from` 一个不漏：漏一个就有一条 hint 臂永远没人读。
+        seen.sort_by_key(|s| s.as_str());
+        let mut all = ALL.to_vec();
+        all.sort_by_key(|s| s.as_str());
+        assert_eq!(seen, all, "六个态必须各覆盖一次");
+    }
+
     /// 每条边都能指回规格行号——没有「凭感觉加的边」。
+    ///
+    /// **不止比前缀**：早先这条只断言 `starts_with("task-model.md:")`，于是把任意
+    /// 锚点改成 `task-model.md:99999` 仍然全绿。现在把每条锚点指的那一行真的读
+    /// 出来，并要求它含有能认出这条边的字样（`expected`），锚点漂移即红。
     #[test]
     fn every_edge_cites_the_spec() {
+        let doc = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../docs/architecture/task-model.md"),
+        )
+        .expect("规格文档必须可读");
+        let lines: Vec<&str> = doc.lines().collect();
+
+        // 每条边「凭什么成立」的那一行里，必须出现的字样。
+        let expectations: &[((TaskState, TaskState), &str)] = &[
+            // 图里的主链一行写出四段转移。
+            (
+                (TaskState::Pending, TaskState::Queued),
+                "pending ──→ queued",
+            ),
+            (
+                (TaskState::Queued, TaskState::Running),
+                "queued ──→ running",
+            ),
+            (
+                (TaskState::Running, TaskState::Review),
+                "running ──→ review",
+            ),
+            ((TaskState::Review, TaskState::Done), "review ──→ done"),
+            // 人主动撤回那条支线。
+            ((TaskState::Pending, TaskState::Failed), "人主动撤回"),
+            // 失败是人工的三个出口。
+            ((TaskState::Failed, TaskState::Pending), "人主动撤回"),
+            ((TaskState::Failed, TaskState::Queued), "放宽约束重派"),
+            // `running` 掉线这条：图里只有箭头，真值在下面那行散文。
+            ((TaskState::Running, TaskState::Failed), "设备掉线"),
+            // 两条「退回」各有自己的散文行。
+            (
+                (TaskState::Review, TaskState::Pending),
+                "退回时进 `pending`",
+            ),
+            (
+                (TaskState::Queued, TaskState::Pending),
+                "超时可退回 `pending`",
+            ),
+        ];
+
         for (from, to) in legal_edges() {
             let spec =
                 spec_of(from, to).unwrap_or_else(|| panic!("{from:?} → {to:?} 缺少规格依据"));
+            let n: usize = spec
+                .strip_prefix("task-model.md:")
+                .and_then(|s| s.split('-').next())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| panic!("{from:?} → {to:?} 的锚点格式不对：{spec}"));
             assert!(
-                spec.starts_with("task-model.md:"),
-                "{from:?} → {to:?} 的依据必须指向规格文件，实际 {spec}"
+                n >= 1 && n <= lines.len(),
+                "{from:?} → {to:?} 的锚点 {spec} 越界（文档共 {} 行）",
+                lines.len()
+            );
+            let (_, expected) = expectations
+                .iter()
+                .find(|((f, t), _)| *f == from && *t == to)
+                .unwrap_or_else(|| panic!("{from:?} → {to:?} 没有登记期望字样"));
+            // 锚点是一段区间时，区间内任意一行含有期望字样即可。
+            let range = spec.strip_prefix("task-model.md:").unwrap();
+            let (lo, hi) = match range.split_once('-') {
+                Some((a, b)) => (a.parse::<usize>().unwrap(), b.parse::<usize>().unwrap()),
+                None => (n, n),
+            };
+            let hit = (lo..=hi).any(|i| lines[i - 1].contains(expected));
+            assert!(
+                hit,
+                "{from:?} → {to:?} 的锚点 {spec} 指向的行里没有 `{expected}`——\
+                 锚点漂了或这条边是凭感觉加的。实际内容：{:?}",
+                lines[n - 1]
             );
         }
     }

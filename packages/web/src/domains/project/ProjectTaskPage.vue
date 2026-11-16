@@ -25,12 +25,13 @@
 
    ── 产出只给「分支名 + 合入状态」────────────────────────────────
    diff 入口**不画**（画了就是死链接：`/execution/…/replay` 还是骨架页）。
-   分支名是**派生值**（`afleet/<task>/e<第几次>`，与 `FailurePanel` 里那行
-   同一个口径），库里没有分支这一列——所以这一行写的是「预期的分支名」，
-   不是「已存在的引用」。
+   **不编分支名**：库里没有 `branch` 这一列（`branch` 归 v0.8.2 的执行间接力），
+   所以这一格写「库里还没有记录分支（v0.8.2 上线）」，与 `FailurePanel` 的
+   `outputText` 同一个口径。拼一个 `afleet/<id>/eN` 出去，那串东西拿去
+   `git checkout` 必然失败，而「看起来像真 ref」比一个空格外危险。
 
    ── 状态胶囊与看板列头同一张表 ──────────────────────────────────
-   文案一律读 `shared/state.ts` 的 `STATES[key].label`（`BoardPage.vue:90-92`
+   文案一律读 `shared/state.ts` 的 `STATES[key].label`（`BoardPage.vue:91-93`
    就是这么做的）。规格原文希望从 `taskApi.ts` 导出 `STATE_LABELS`，但那份
    映射早就在 `state.ts`，`taskApi.ts` 再导出一份就是第二个真相源——看板写
    「待验收」而详情写「review」正是这条要防的事。

@@ -27,12 +27,14 @@
 
      状态机的列序（六态的自然生命周期）  ≠  需要处置的提示
 
-   后者的正确位置是**页头的「等你决定」计数**（原型 `:35`），不是把失败列
+   后者的正确位置是**页头的「等你决定」计数**（原型 `prototype/index.html:50`
+   的项目卡上有这个数；`board.html` 本身**没有**它——看板页只有六列）。不是把失败列
    搬到中间。把失败插在完成之前反而会让「完成」这个终点看起来在板子中间。
 
    两列被去掉：`todo` 从来不是任务态（旧代码里的占位键）；`cancelled` 也不
-   是——v0.8.0 的任务六态里没有「已取消」，**主动放弃 = 失败处置的 `close`**
-   （`task-model.md:81-85`），任务留在 `failed` 并记下原因。所以「主动放弃」
+   是——v0.8.0 的任务六态里没有「已取消」，**主动放弃 = 失败处置的「关掉」**
+   （`task-model.md:244`：`failed` 终态 + `closed_reason`），任务留在 `failed`
+   并记下原因。所以「主动放弃」
    的任务显示在失败列，那不是遗漏，是语义。
 
    ── 列头文案从词表取，不在这里再写一遍 ────────────────────────────
@@ -56,6 +58,8 @@ import { getProject, listProjects, type Project } from '@/domains/project/api'
 import { CRITERIA_CODES, createTask, listProjectTasks } from '@/domains/project/taskApi'
 import type { DoneWhen, Task, TaskStateWire } from '@/domains/project/taskTypes'
 import { STATES } from '@/shared/state'
+import { describeShape } from '@/shared/projectShape'
+import { parseStamp } from '@/shared/format'
 import { ApiError, describeReadFailure } from '@/shared/http'
 import { navigate, route } from '@/router'
 
@@ -109,14 +113,21 @@ const boardEmpty = computed(() => tasks.value.length === 0)
 /**
  * 卡片要的「最近一次执行」。
  *
- * 列表端点也带 `executions`（子任务 6 的 `TaskView`），但组件把它声明成
- * 可选——后端某天裁剪这个数组时卡片仍要能渲染。所以这里按时间取最后一条，
- * 取不到就是 `null`（卡片自己决定不显示什么）。
+ * 列表端点带 `executions`（`list_tasks` 里一条 SQL 批量取，没跑过的任务给
+ * `[]`），但组件把它声明成可选——数组万一缺了，卡片仍要能渲染。
+ *
+ * **必须和 `ProjectTaskPage.latestExecution` 同口径**：后端 `list_for_task` 是
+ * `created_at DESC`（最新在前），所以「数组最后一条」是**最旧**那条——
+ * 直接取 `list[list.length - 1]` 会把上一轮的失败显示成这一轮的。这里按
+ * `started_at` 升序排完再取最后一条，与详情页逐字同口径。
  */
 function latestExecution(t: Task): NonNullable<Task['executions']>[number] | null {
   const list = t.executions
   if (!list || list.length === 0) return null
-  return list[list.length - 1] ?? null
+  const stamp = (e: NonNullable<Task['executions']>[number]): number =>
+    parseStamp(e.started_at) ?? Number.MAX_SAFE_INTEGER
+  const ordered = [...list].sort((a, b) => stamp(a) - stamp(b))
+  return ordered[ordered.length - 1] ?? null
 }
 
 /* ---- 时钟 -------------------------------------------------------------- */
@@ -213,14 +224,6 @@ async function refresh(): Promise<void> {
  */
 const menuOpen = ref(false)
 
-/** 形态的三个人话说法。菜单里每个项目后面带一个，否则同名的两个项目无从区分。 */
-function describeShape(shape: string): string {
-  if (shape === 'central') return '中心式'
-  if (shape === 'mirror') return '镜像式'
-  if (shape === 'isolated') return '隔离式'
-  return shape
-}
-
 function switchTo(id: string): void {
   // 先关菜单再跳转：不关的话，同一页换了项目之后菜单还开着，
   // 用户会以为「点了没反应」（其实已经跳了，菜单挡住了新内容）。
@@ -237,7 +240,7 @@ function switchTo(id: string): void {
  * 打开一张卡。
  *
  * 走既有的 `navigate()`，并**必须 `encodeURIComponent`**（与本文件的
- * `switchTo`、`BoardPage.vue:97` 的既有写法同口径）：任务 id 里含 `/` 或
+ * `switchTo`（`:226`）同口径）：任务 id 里含 `/` 或
  * `%` 时不编码会把路径切成多一段。
  *
  * 卡片上**没有其他可点区域**：本轮不做拖拽换列——拖拽要 6×6 的合法边判断，
@@ -250,8 +253,13 @@ function openTask(id: string): void {
 /* ---- 新建任务对话框 ---------------------------------------------------- */
 
 /**
- * 三个字段照原型（`prototype/board.html:42` 的「新建任务」）：
- * 标题（必填）+ 判定码下拉（四码 + 「不设判定码」）+ 描述。
+ * 标题 + 判定码两列，取自 `task-model.md` 的 `criteria` / `description`。
+ *
+ * ⚠️ 原型里**没有**这个表单：`prototype/board.html:42` 只有一行入口链接
+ * `<a class="af-btn af-btn--primary" href="task.html">新建任务</a>`，全文零
+ * `<form>`、零「标题 / 判定码 / 描述」字段。所以字段组成不是「照原型抄」，
+ * 而是按任务模型（`criteria` + `description`）定的；原型的 `task.html` 里才有
+ * 任务详情的字段排布。
  *
  * 「不设判定码」不是一个缺失值，而是一个**有意义的选择**：它让任务变成
  * 「跑完要人看过才算完」（`needs_manual_acceptance`）。所以选它的时候当场
@@ -320,8 +328,12 @@ async function submitCreate(): Promise<void> {
 </script>
 
 <template>
-  <section class="af-page">
-    <header class="af-page__head">
+  <!-- 页面骨架照原型 `board.html:38-56`：
+         `.af-body.af-body--pad` 包住整页内容，页头是 `.af-head` 那一行。
+       上一版是 `.af-page`（`max-width:1400px; margin:0 auto` 的居中单栏），
+       原型是「外壳里吃满宽度的主区」——两者的第一眼差别就在这里。 -->
+  <div class="af-body af-body--pad">
+    <header class="af-head af-head--page">
       <div class="af-switch" :data-open="menuOpen ? 'true' : 'false'">
         <button
           type="button"
@@ -352,7 +364,9 @@ async function submitCreate(): Promise<void> {
           </button>
         </div>
       </div>
-      <nav class="af-projectnav" aria-label="项目内导航">
+      <!-- 项目内导航：原型 `board.html` 页头的第二段。`af-head__spacer` 把它与
+           右侧动作分开（原型 `.af-head__spacer { margin-left: auto }`）。 -->
+      <nav class="af-projectnav af-head__spacer" aria-label="项目内导航">
         <button type="button" class="af-projectnav__item" @click="navigate(`/project/${encodeURIComponent(projectId)}/bind`)">
           绑定设备
         </button>
@@ -373,7 +387,7 @@ async function submitCreate(): Promise<void> {
       </nav>
       <!-- 刷新与新建在右上（原型 `:42` 的「新建任务」就是页头主按钮）：
            不做自动轮询（见脚本里的理由），所以要有一个手动的口子。 -->
-      <button type="button" class="af-btn af-btn--ghost" @click="refresh">刷新</button>
+      <button type="button" class="af-btn" @click="refresh">刷新</button>
       <button type="button" class="af-btn af-btn--primary" @click="openDialog">新建任务</button>
     </header>
 
@@ -430,21 +444,26 @@ async function submitCreate(): Promise<void> {
           </header>
           <p class="af-board__hint">{{ col.hint }}</p>
 
-          <TaskCard
-            v-for="t in byState(col.key)"
-            :key="t.id"
-            :task="t"
-            :now="now"
-            :execution="latestExecution(t)"
-            @open="openTask"
-          />
+          <!-- 列体：卡片都排在这一层里，内边距与卡片间距来自 `.af-board__colbody`
+               （原型 `.af-col__body`：`padding:8px; gap:8px`）。上一版卡片直接
+               排在列里，所以列头的左边与卡片左边差 16px。 -->
+          <div class="af-board__colbody">
+            <TaskCard
+              v-for="t in byState(col.key)"
+              :key="t.id"
+              :task="t"
+              :now="now"
+              :execution="latestExecution(t)"
+              @open="openTask"
+            />
 
-          <!-- 整板空时不再逐列重复空态（见上）。 -->
-          <EmptyState
-            v-if="!boardEmpty && byState(col.key).length === 0"
-            glyph="▢"
-            title="这一列还没有任务"
-          />
+            <!-- 整板空时不再逐列重复空态（见上）。 -->
+            <EmptyState
+              v-if="!boardEmpty && byState(col.key).length === 0"
+              glyph="▢"
+              title="这一列还没有任务"
+            />
+          </div>
         </section>
       </div>
     </template>
@@ -532,5 +551,5 @@ async function submitCreate(): Promise<void> {
         </div>
       </div>
     </div>
-  </section>
+  </div>
 </template>

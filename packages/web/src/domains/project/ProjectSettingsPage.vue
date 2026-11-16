@@ -47,6 +47,7 @@ import {
   type Project,
 } from '@/domains/project/api'
 import { ApiError, describeReadFailure } from '@/shared/http'
+import { SHAPE_LABELS } from '@/shared/projectShape'
 import { navigate, route } from '@/router'
 
 const projectId = computed(() => route.value.params.id ?? '')
@@ -70,19 +71,19 @@ const archived = computed(() => project.value?.archived_at !== null && project.v
  */
 const SHAPES: Record<string, { label: string; where: string; stored: string; origin: string }> = {
   central: {
-    label: '中心式',
+    label: SHAPE_LABELS.central,
     where: 'Hub 的裸仓库',
     stored: '全部代码 + 元数据',
     origin: 'Hub 上的 commit',
   },
   mirror: {
-    label: '镜像式',
+    label: SHAPE_LABELS.mirror,
     where: '上游 + Hub 镜像',
     stored: '镜像的全部代码 + 元数据',
     origin: 'Hub 上镜像的 commit',
   },
   isolated: {
-    label: '隔离式',
+    label: SHAPE_LABELS.isolated,
     where: '只在指定设备，永不出该设备',
     stored: '只有元数据',
     origin: '设备上的 commit hash，Hub 不验证内容',
@@ -92,6 +93,7 @@ const SHAPES: Record<string, { label: string; where: string; stored: string; ori
 function describeShape(shape: string): string {
   return SHAPES[shape]?.label ?? shape
 }
+
 
 /**
  * 能不能升到中心式。

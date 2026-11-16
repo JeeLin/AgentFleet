@@ -34,9 +34,17 @@ import { describeReadFailure } from '@/shared/http'
 import { navigate } from '@/router'
 
 const emit = defineEmits<{
-  /** 用户点了「用它开会话」。**由父页面决定去哪**：目录不该知道路由。 */
+  /**
+   * 用户点了「用它开会话」。**由父页面决定去哪**：目录不该知道路由。
+   *
+   * v0.8.0：触发它的两个按钮都恒禁用（没有可达的会话入口，见文件头），
+   * 所以这里暂时没有调用点。声明保留是给 v0.8.2「从设备开工」用——那时
+   * 把按钮的 `disabled` 去掉即可，父页面的处理约定不必重新设计。
+   */
   (e: 'start-session'): void
 }>()
+// 显式标注「暂时没有发起点」，免得 lint 把它当遗漏删掉。
+void emit
 
 const agents = ref<AgentSummary[]>([])
 const devices = ref<DeviceSummary[]>([])
@@ -116,7 +124,15 @@ function openDetail(name: string): void {
       title="还没有设备上报 agent"
       :text="`${devices.length} 台设备里没有任何一台上报 agent。设备上装一个（例如 opencode）后，它会在下次心跳里出现。探测不到就是空，设备和 Hub 都不会编造。`"
     >
-      <button class="af-btn" type="button" @click="emit('start-session')">新建会话</button>
+      <button
+        class="af-btn"
+        type="button"
+        disabled
+        aria-disabled="true"
+        title="从 agent 开会话需要先选项目，v0.8.2 上线；现在请到项目里新建会话。"
+      >
+        新建会话
+      </button>
     </EmptyState>
 
     <template v-else>
@@ -161,9 +177,13 @@ function openDetail(name: string): void {
             class="af-btn af-btn--sm"
             type="button"
             data-act="start"
-            :disabled="!a.available"
-            :title="a.available ? '用它开会话' : '这个 agent 现在不能对话'"
-            @click="emit('start-session')"
+            disabled
+            aria-disabled="true"
+            :title="
+              a.available
+                ? '从 agent 开会话需要先选项目，v0.8.2 上线；现在请到项目里新建会话。'
+                : '这个 agent 现在不能对话'
+            "
           >
             用它开会话
           </button>

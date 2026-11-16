@@ -5,7 +5,7 @@ import DevicesPage from '@/domains/device/DevicesPage.vue'
 import { detectDownloadPlatform, downloadAgentBinary } from '@/domains/device/api'
 import { device, mountIn } from '@/test/mount'
 import { settle, stubFetch } from '@/test/http'
-import { matchRoute, route } from '@/router'
+import { legacyTarget, matchRoute, route } from '@/router'
 
 /** 等 fetch 链 + Vue 渲染队列都走完。 */
 async function flush(w: ReturnType<typeof mountIn>): Promise<void> {
@@ -184,14 +184,38 @@ describe('DevicesPage：离线设备', () => {
     expect(btn?.getAttribute('title')).toContain('离线')
   })
 
-  it('「用它开会话」跳到新建会话页并把设备带在 query 上', async () => {
+  it('「用它开会话」恒禁用，且写明「没有可达入口」的理由', async () => {
     stubFetch({ '/api/devices': { body: [device({ id: 'n_1' })] } })
     const w = mountIn(DevicesPage)
     await flush(w)
 
-    await w.element.querySelector<HTMLButtonElement>('tbody [data-act="create"]')?.click()
-    expect(location.pathname).toBe('/sessions/new')
-    expect(location.search).toBe('?device=n_1')
+    const btn = w.element.querySelector<HTMLButtonElement>('tbody [data-act="create"]')
+    // **在线设备也禁用**：这个入口在 v0.8.0 没有任何可达目的地。
+    expect(btn?.disabled, '在线设备也必须禁用').toBe(true)
+    expect(btn?.getAttribute('aria-disabled')).toBe('true')
+    expect(btn?.getAttribute('title')).toContain('v0.8.2')
+    // 理由要**看得见**，不能只挂在 `title` 上（触屏与键盘用户看不到 tooltip）。
+    const why = btn?.parentElement?.textContent ?? ''
+    expect(why).toContain('v0.8.2')
+
+    // 点它不跳转：地址栏原地不动（以前会变成 `/sessions/new?device=…` 再被
+    // `LEGACY_PATHS` replace 回 `/`，用户看到的是「点了没反应还回首页」）。
+    // 与点之前的快照比：用例之间共享同一个 jsdom，地址栏不保证从 `/` 开始。
+    const before = location.pathname + location.search
+    btn?.click()
+    await flush(w)
+    expect(location.pathname + location.search, '点禁用按钮不该改地址栏').toBe(before)
+  })
+
+  it('`/sessions/new` 本来就不是真路由——这正是上面禁用它的理由', async () => {
+    // 这条**不挂载组件**，只钉路由事实：如果哪天 `/sessions/new` 变成了真路由，
+    // 上面那条用例的「禁用」就失去依据，两处必须一起改。
+    // 判红方式：给 `router.ts` 加 `{ name: 'session-new', pattern: '/sessions/new' }`
+    // → 第一条断言红（那时应连同上面那条用例一起改写，而不是悄悄删掉）。
+    expect(matchRoute('/sessions/new').name, '本里程碑 `/sessions/new` 不是真路由').toBe(
+      'not-found',
+    )
+    expect(legacyTarget('/sessions/new'), '旧地址的去处是总览，不是新建页').toBe('/')
   })
 })
 

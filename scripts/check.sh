@@ -945,8 +945,12 @@ for m in BROAD.finditer(strip_comments(flat)):
             seen.setdefault((fld, tuple(words)), m.group(0)[:80])
 
 if not seen:
+    # 一个字段都没检查过。**不能报 ✅**：`✅ workflow 的 gh --json 字段都真实
+    # 存在` 是对「检查过且都对」的断言，而这里根本没有被检查的样本——空断言集
+    # 判绿是假绿。用独立的退出码 3 让外层打 ⚠️ 而不是 ❌（确实可能改成 gh api
+    # 了，那本门禁就无事可做，不能因此判红）。
     print('      workflow 里没有 `gh ... --json` 的用法（若已改用 gh api，本门禁无事可做）')
-    sys.exit(0)
+    sys.exit(3)
 
 for (fld, words), sample in sorted(seen.items()):
     fields, kind = field_table(words)
@@ -971,7 +975,11 @@ for b in bad:
     print(f'      {b}')
 sys.exit(1 if bad else 0)
 PYEOF
-  [[ $? -ne 0 ]] && { echo "  ❌ workflow 用了 gh CLI 不存在的 --json 字段"; fail=1; } || ok "workflow 的 gh --json 字段都真实存在"
+  case $? in
+    0) ok "workflow 的 gh --json 字段都真实存在" ;;
+    3) echo "  ⚠️  workflow 里没有 gh --json 用法，本门禁**未检查任何字段**（不计 ✅）" ;;
+    *) echo "  ❌ workflow 用了 gh CLI 不存在的 --json 字段"; fail=1 ;;
+  esac
 
 echo
 echo "== C10 release.yml 不得把前端 / Rust 编译重复铺开 =="

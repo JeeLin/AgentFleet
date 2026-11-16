@@ -154,31 +154,12 @@ impl FromStr for FailureKind {
     }
 }
 
-/// 一次执行的**可写字段**。
+/// 一次执行的**读模型**：建的时候能写进去的字段 + 只由 setter 写的执行事实。
 ///
-/// 与 [`crate::task::Task`] 同一分工：这里只有「建一条执行时能写进去的东西」。
-/// `agent_id` / `failure_kind` / `reason` / `evidence` / 时间两列都由专用 setter
-/// 写入（[`ExecutionRepo::set_failure`] / [`ExecutionRepo::mark_started`] /
-/// [`ExecutionRepo::mark_ended`]），不让建表入参带它们——建的时候还没有失败，
-/// 也没有开始时刻。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Execution {
-    pub id: String,
-    pub task_id: String,
-    pub binding_id: String,
-    /// **起点唯一真相源**。`None` 只在隔离式且设备还没报起点时出现。
-    pub base_commit: Option<String>,
-    /// 设备上的绝对路径。`None` = worktree 还没建。
-    pub worktree_path: Option<String>,
-    pub state: ExecutionState,
-    pub created_at: String,
-}
-
-/// 一次执行的**读模型**：可写字段 + 只由 setter 写的执行事实。
-///
-/// 分成两个类型而不是把字段塞进 [`Execution`]：塞进去会让 `NewExecution` 的
-/// 反序列化也要求调用方送 `failure_kind`，而「这次执行失败了」不可能在**建它
-/// 的时候**就知道。
+/// 写入口是 [`NewExecution`]，读出口是本类型——不是「两个类型」，而是
+/// 「一套入参 + 一个读模型」。早先这里还有一个 `pub struct Execution` 想当
+/// 「写模型」，但它**零构造点**（`ExecutionRepo::create` 直接返回本类型），
+/// 留着只会让人以为存在两套结构。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionView {
     pub id: String,
@@ -198,28 +179,6 @@ pub struct ExecutionView {
     pub evidence: Option<String>,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
-}
-
-impl ExecutionView {
-    /// 投影回可写形状。
-    pub fn to_execution(&self) -> Execution {
-        Execution {
-            id: self.id.clone(),
-            task_id: self.task_id.clone(),
-            binding_id: self.binding_id.clone(),
-            base_commit: self.base_commit.clone(),
-            worktree_path: self.worktree_path.clone(),
-            state: self.state,
-            created_at: self.created_at.clone(),
-        }
-    }
-
-    /// 这次失败算不算一次重试（`superseded` 不算，`task-model.md:138`）。
-    ///
-    /// 只在**有** `failure_kind` 时有意义：成功与还没跑完的执行都不是重试。
-    pub fn counts_as_retry(&self) -> bool {
-        self.failure_kind.is_some_and(FailureKind::counts_as_retry)
-    }
 }
 
 /// 建执行的入参。
@@ -290,6 +249,42 @@ impl ExecutionRepo {
         let rows = stmt.query_map(params![task_id], row_to_raw)?;
         let raw = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         raw.into_iter().map(RawExecution::into_execution).collect()
+    }
+
+    /// 一批任务的执行，按 `task_id` 分组，组内最近建的在前。
+    ///
+    /// 看板要的是「每个任务最近一次执行」（`failure_kind` / `started_at` /
+    /// 跑过几次），一张看板有几十张卡。逐个任务调 [`ExecutionRepo::list_for_task`]
+    /// 是 N+1：一屏 40 张卡就要 40 次往返。这里**一条 SQL 取完**再在内存里分组。
+    ///
+    /// 返回的 `HashMap` 里**只含真的执行过的任务**：没跑过的任务不要凭空给一个空
+    /// 数组，调用方用 `.get(task_id)` 取不到就是「没跑过」，这个区别本身有意义。
+    pub fn list_for_tasks(
+        &self,
+        task_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<ExecutionView>>> {
+        use std::collections::HashMap;
+        if task_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        // 占位符 `?1..?N`：`rusqlite` 不支持把数组直接绑进 `IN (...)`。
+        let placeholders = (1..=task_ids.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(&format!(
+            "{SELECT_COLS} WHERE task_id IN ({placeholders}) ORDER BY created_at DESC, id DESC"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(task_ids.iter()), row_to_raw)?;
+        let raw = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut out: HashMap<String, Vec<ExecutionView>> = HashMap::new();
+        for r in raw {
+            let task_id = r.task_id.clone();
+            out.entry(task_id).or_default().push(r.into_execution()?);
+        }
+        Ok(out)
     }
 
     /// 一个绑定上的全部执行（设备页的配额与失败归因）。
@@ -929,6 +924,49 @@ mod tests {
             .set_failure("nope", FailureKind::Rejected, "无合格设备", "")
             .unwrap_err();
         assert!(matches!(e, StorageError::ExecutionNotFound { .. }), "{e:?}");
+    }
+
+    /// `set_reason` 打错的 id 也必须报 `ExecutionNotFound`。
+    ///
+    /// HTTP 层 `record_note_on_latest_execution` 在「任务没有执行记录」时会
+    /// 提前 `Ok(())` 返回，所以那里走不到这一臂；但一个**被删掉的执行**仍会
+    /// 落在这里。静默成功会让「打回理由没写进去」这件事永远看不见。
+    ///
+    /// 判红方式：把 `set_reason` 里 `n == 0` 那段删掉，这条立刻红（返回 `Ok`）。
+    #[test]
+    fn set_reason_on_a_missing_execution_is_named() {
+        let (_d, er) = setup();
+        let e = er.set_reason("nope", "理由写了但行不在").unwrap_err();
+        assert!(matches!(e, StorageError::ExecutionNotFound { .. }), "{e:?}");
+    }
+
+    /// 库里存了闭集外的 `failure_kind` → 读出来**报错不回落**。
+    ///
+    /// 这是「数据坏了要能被看见」的可执行判据：把认不出的形态显示成
+    /// 「未知原因」，会让「谁写进了错值」这件事永远不出现，而失败归因
+    /// 正是按这一列统计的。
+    ///
+    /// 判红方式：把 `FailureKind::from_str(&k)?` 改成 `unwrap_or(Superseded)`
+    /// 之类的回落，本用例从 `Err` 变成 `Ok` 而红。
+    #[test]
+    fn an_unknown_failure_kind_in_the_database_is_an_error_not_a_fallback() {
+        let (_d, er) = setup();
+        let e = er.create(new_exec(), TS).unwrap();
+        // 绕过 `set_failure` 直接写库：这条要测的正是「库里有坏值」。
+        er.pool
+            .get()
+            .unwrap()
+            .execute(
+                "UPDATE execution SET failure_kind = 'test_failed' WHERE id = ?1",
+                [&e.id],
+            )
+            .unwrap();
+
+        let err = er.get(&e.id).unwrap_err();
+        assert!(
+            matches!(err, StorageError::InvalidFailureKind(ref s) if s == "test_failed"),
+            "必须带上被拒的那串值，实际 {err:?}"
+        );
     }
 
     /// `set_reason` **只写理由**，绝不动 `failure_kind`。

@@ -29,8 +29,18 @@ import { describe, expect, it } from 'vitest'
 const SRC = join(process.cwd(), 'src')
 const REPO = join(SRC, '..', '..', '..')
 
-/** 仓库里**样式可能被定义**的地方。`styles/` 与页面级共享类都算。 */
-const STYLE_SHEETS = ['packages/web/src/styles/components.css', 'packages/web/src/page-chrome.css']
+/**
+ * 仓库里**样式可能被定义**的地方。`styles/` 与页面级共享类都算。
+ *
+ * ⚠️ 新增样式表时必须加进这里，否则那个文件里定义的类会被判成「不存在」——
+ * 症状是**假阳性**（门禁红了但代码是对的），而人的自然反应是去改模板而不是
+ * 修这份名单。`tokens.css` 不在此列：它只定义变量，不定义类。
+ */
+const STYLE_SHEETS = [
+  'packages/web/src/styles/components.css',
+  'packages/web/src/styles/prototype-shell.css',
+  'packages/web/src/page-chrome.css',
+]
 
 function vueFiles(dir: string): string[] {
   const out: string[] = []

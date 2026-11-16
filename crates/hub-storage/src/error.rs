@@ -143,11 +143,24 @@ pub enum StorageError {
     },
 
     /// 状态推进时读到的旧态已被别人改掉（CAS 影响 0 行）。
+    ///
+    /// 两个字段都是**状态名**，不是版本号。版本不符走
+    /// [`StorageError::TaskVersionChanged`]——早先这两件事共用一个变体，于是
+    /// 「版本不对」的报错里 `expected` 与 `actual` 填的是同一个状态名，客户端
+    /// 拿到的 409 无从判断该刷新什么。
     #[error("task state changed underneath us: expected {expected}, task is now {actual}")]
     TaskStateChanged {
         expected: &'static str,
         actual: String,
     },
+
+    /// 调用方给的 `expected_version` 与库里的版本不一致（**未写库**）。
+    ///
+    /// 与 [`StorageError::TaskStateChanged`] 分开：那一件的语义是「态被别人改
+    /// 掉了」，这一件是「版本对不上」，两者要回给客户端的东西不同（版本号 vs
+    /// 状态名），合成一个变体就必然有一边的字段是错的。
+    #[error("task version conflict: expected version {expected}, task is at {actual}")]
+    TaskVersionChanged { expected: i64, actual: i64 },
 
     /// 库里没有这次执行。
     #[error("no such execution: {id:?}")]

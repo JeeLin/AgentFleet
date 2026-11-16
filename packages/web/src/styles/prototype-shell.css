@@ -1,0 +1,571 @@
+/* ===========================================================================
+   prototype-shell.css —— 原型的「外壳 + 页面骨架」层
+   ---------------------------------------------------------------------------
+   本文件是 `prototype/assets/app.css` 的**逐条对照移植**，不是重新设计。
+   为什么单独成文件而不是继续往 `components.css` 里堆：
+
+     ① `components.css` 是「组件契约」（按钮、表格、徽标…23 节），本文件是
+        「页面骨架」（外壳、区域容器、双栏、看板列、摘要带…）。两者的判据
+        不同：前者问「这个控件长什么样」，后者问「这一页怎么分区」。
+     ② 逐条移植需要一个**能与原型 diff 的位置**。混进 components.css 之后，
+        下一次「和原型比一比」又要从头翻 1700 行。
+
+   ── 与原型的关系 ──────────────────────────────────────────────────────
+   原型：`assets/tokens.css`（结构令牌）+ `styles/theme-neutral.css`（配色）
+        + `assets/app.css`（1608 行规则）
+   实现：`styles/tokens.css`（`--af-*` 真身 + 第 14 节的原型槽位别名）
+        + **本文件**（用别名的规则）
+
+   于是本文件里的 `var(--p-s3)` / `var(--p-line-2)` / `var(--p-pending)`
+   与原型的 `var(--s3)` / `var(--line-2)` / `var(--pending)` 一一对应，
+   两边规则的形状可以逐行对照。这一层存在的全部理由就是「能对照」。
+
+   `--p-`（prototype）是**独立命名空间**，不与 `--af-*` 共用前缀。理由写在
+   `tokens.css` §14 的注释里（混用时 `keynav.test.ts` 的两条不变量会红：
+   「变量数」把别名也算进去、「同名不许定义两次」把别名判成重复定义）。
+   保留 `--af-` 的只有**真身引用**：`--af-font-mono` / `--af-weight-*` /
+   `--af-rail-w` / `--af-head-h` / `--af-border-focus`——原型里没有对应槽位
+   （字重、栏宽、顶栏高、焦点色都是本项目的），所以没有别名可安。
+
+   ── 上一轮的教训（写在这里，防止再犯） ─────────────────────────────────
+   子任务 12「10 个已交付页面逐屏对齐」曾经判 ✅，依据是「类名锚点可 grep
+   + token 计数 + 文档行号」。而实测：原型 `app.css` 定义 255 个类，实现
+   `components.css` 定义 271 个，**两边同名的只有 47 个（18%）**。外壳四件
+   `.af-shell` / `.af-head` / `.af-body` / `.af-drawer` 在原型 **21/21 页**
+   使用，实现里 **0 处定义**。形式证据全绿，用户看到的是「完全不一样」。
+
+   所以本文件的验收判据不是「grep 得到」，是「同一个类在两边的声明能对上」，
+   由 `src/styles/prototype-parity.test.ts` 按类名清单断言。
+   =========================================================================== */
+
+/* ===========================================================================
+   1. 外壳：rail + 主区（原型 §外壳 app.css:46-134）
+   -------------------------------------------------------------------------
+   ⚠️ 与 `components.css` §1 的关系：那里有一套 `.af-app` / `.af-sidebar` /
+   `.af-topbar`（带状态条的三行网格），本文件的一套是原型的 `.af-shell` /
+   `.af-rail` / `.af-main` / `.af-head` / `.af-body`。
+
+   **两套都得留**：`.af-app` 是 `App.vue` 的实际根节点，它多一条状态条
+   （`.af-statusbar`），原型没有。但它们必须**同一套几何**——栏宽同取
+   `--af-rail-w`、顶栏同取 `--af-head-h`，否则「原型 224px / 实现 208px」
+   这种差值又会回来。
+   =========================================================================== */
+
+/* 双栏：左栏固定 224px，主区吃满。原型 app.css:48-51。 */
+.af-shell {
+  display: grid; grid-template-columns: var(--af-rail-w) 1fr;
+  height: 100vh; height: 100dvh;
+}
+
+/* 左栏：导航是分区清单，组标题是它唯一的层级语言。app.css:54-59。 */
+.af-rail {
+  background: var(--p-bg);
+  border-right: 1px solid var(--p-line-2);
+  display: flex; flex-direction: column; min-height: 0;
+  overflow-y: auto;
+  transition: transform 200ms var(--p-ease), visibility 200ms var(--p-ease);
+}
+
+/* 品牌行：与顶栏同高，所以两条水平线对得上。app.css:61-75。 */
+.af-rail__brand {
+  display: flex; align-items: center; gap: var(--p-s3);
+  padding: var(--p-s4) var(--p-s4);
+  min-height: var(--af-head-h);
+  border-bottom: 1px solid var(--p-line);
+  flex: 0 0 auto;
+}
+.af-rail__mark {
+  width: 26px; height: 26px; flex: 0 0 auto;
+  border-radius: var(--p-r-sm);
+  background: var(--p-acc-bg); border: 1px solid var(--p-acc-line);
+  display: grid; place-items: center;
+  color: var(--p-acc); font-size: var(--p-t-xs); font-weight: var(--af-weight-bold);
+}
+.af-rail__name { font-size: var(--p-t-sm); font-weight: var(--af-weight-semibold); color: var(--p-fg-strong); }
+.af-rail__sub { font-size: var(--p-t-2xs); color: var(--p-fg-3); font-family: var(--af-font-mono); }
+
+/* 组标题：全大写小标签。写在 `components.css` 的注释里被删掉过，但**原型有**
+   （app.css:77-82），而且项目组那一项还带一个「+」入口（app.css:796-812）。 */
+.af-rail__group {
+  display: flex; align-items: center; gap: var(--p-s2);
+  padding: var(--p-s4) var(--p-s4) var(--p-s2);
+  font-size: var(--p-t-2xs); font-weight: var(--af-weight-semibold);
+  letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--p-fg-3);
+  flex: 0 0 auto;
+}
+.af-rail__group > span { flex: 1; }
+.af-rail__add {
+  width: 18px; height: 18px; flex: 0 0 auto;
+  display: grid; place-items: center;
+  border-radius: var(--p-r-xs);
+  border: 1px solid var(--p-line-3);
+  color: var(--p-fg-2); font-size: var(--p-t-sm); line-height: 1;
+  text-decoration: none;
+  transition: background var(--p-dur) var(--p-ease),
+              color var(--p-dur) var(--p-ease),
+              border-color var(--p-dur) var(--p-ease);
+}
+.af-rail__add:hover {
+  background: var(--p-acc-bg); border-color: var(--p-acc-line);
+  color: var(--p-acc); text-decoration: none;
+}
+
+.af-rail__list { list-style: none; margin: 0; padding: 0 var(--p-s2); }
+.af-rail__list a {
+  display: flex; align-items: center; gap: var(--p-s3);
+  min-height: var(--p-row);
+  padding: 0 var(--p-s3);
+  border-radius: var(--p-r-sm);
+  color: var(--p-fg-2); font-size: var(--p-t-sm);
+  text-decoration: none;
+  transition: background var(--p-dur) var(--p-ease), color var(--p-dur) var(--p-ease);
+}
+.af-rail__list a:hover { background: var(--p-surf-1); color: var(--p-fg-strong); }
+/* 当前项：底色 + 整圈内描边 + 中等字重（**不是**左边一条强调竖线）。 */
+.af-rail__list a[aria-current='page'] {
+  background: var(--p-surf-2); color: var(--p-fg-strong);
+  font-weight: var(--af-weight-medium);
+  box-shadow: inset 0 0 0 1px var(--p-line-2);
+}
+.af-rail__label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.af-rail__foot {
+  margin-top: auto; padding: var(--p-s3) var(--p-s4);
+  border-top: 1px solid var(--p-line);
+  font-size: var(--p-t-2xs); color: var(--p-fg-3); line-height: var(--p-lh-body);
+}
+
+/* 主区：`components.css` §1 已定义 `.af-main`（`grid-area: main`），此处不重复。 */
+/* 顶栏：贴顶、底部一条线、最小高 = --head-h。app.css:118-124。
+   这是原型每一页的**页头**——注意它和外层的 `.af-topbar`（App.vue 的
+   全局导航条）不是同一个东西：`.af-head` 属于页面自己，里面放页面标题、
+   项目切换器、页面级动作。 */
+.af-head {
+  display: flex; align-items: center; gap: var(--p-s3);
+  padding: 0 var(--p-s6);
+  min-height: var(--af-head-h); flex: 0 0 auto;
+  border-bottom: 1px solid var(--p-line-2);
+  background: var(--p-bg);
+}
+.af-head__title {
+  font-size: var(--p-t-lg); font-weight: var(--af-weight-semibold);
+  white-space: nowrap; margin: 0; color: var(--p-fg-strong);
+}
+.af-head__sub { font-size: var(--p-t-xs); color: var(--p-fg-3); white-space: nowrap; }
+.af-head__spacer { margin-left: auto; }
+
+/* 页头用在 `.af-body--pad` 里面时（看板页）：`.af-head` 原本是「贴顶、底部有线、
+   水平内边距 24px」的整幅顶栏，放进已带 24px padding 的 body 里会双重缩进、
+   而且那条底边线会横在内容中间。`--page` 变体去掉粘顶与底边，只留
+   「一行 flex + 最小高」。 */
+.af-head--page {
+  padding: 0;
+  border-bottom: 0;
+  margin-bottom: var(--p-s5);
+}
+
+/* 内容区三态。app.css:132-134。 */
+.af-body { flex: 1; min-height: 0; overflow: auto; }
+.af-body--pad { padding: var(--p-s6); }
+.af-body--fill { display: flex; flex-direction: column; overflow: hidden; }
+
+/* ===========================================================================
+   2. 生效过滤条（原型 app.css:136-147）
+   -------------------------------------------------------------------------
+   原型 12 个页面用它显示「当前生效的筛选条件」。实现里此前没有对应类，
+   于是「筛了但看不出筛了什么」——用户只能靠列里少了几张卡来推断。
+   =========================================================================== */
+
+.af-filters {
+  display: flex; align-items: center; gap: var(--p-s2); flex-wrap: wrap;
+  padding: var(--p-s2) var(--p-s5); flex: 0 0 auto;
+  border-bottom: 1px solid var(--p-line);
+  font-size: var(--p-t-2xs);
+}
+.af-filters__k {
+  font-size: var(--p-t-2xs); font-weight: var(--af-weight-semibold);
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--p-fg-3);
+}
+
+/* ===========================================================================
+   3. 区域容器（原型 app.css:262-290）
+   -------------------------------------------------------------------------
+   `components.css` 里已有一版 `.af-region`，但那是「补漏」写的：它把
+   `--af-border-default` 当作边框色，而原型用 `--line-2`（更淡的一档）。
+   高信息密度下一条更重的边会把区域切碎。这里按原型取淡一档。
+   =========================================================================== */
+
+.af-region--warn { border-color: var(--p-warn-line-c); }
+.af-region--warn .af-region__head { background: var(--p-warn-bg-c); }
+
+/* ===========================================================================
+   4. 卡片（原型 app.css:292-327）
+   -------------------------------------------------------------------------
+   原型 `.af-card` 是看板里那张卡片的**视觉基准**：`--surf-2` 底 +
+   `--line` 边 + `--r-sm` 圆角 + 140ms 过渡。实现里的 `.af-taskcard`
+   （components.css）目前用 `--af-surface-2` + `--af-border-subtle`，
+   对应的是同一组槽位，但少了 `--af-card__meta` / `--af-card__why` 两个子块。
+   这里补齐，并让 `.af-taskcard` 与 `.af-card` 的取值走同一套别名。
+   =========================================================================== */
+
+.af-card {
+  display: flex; flex-direction: column; gap: var(--p-s2);
+  width: 100%; text-align: left;
+  background: var(--p-surf-2);
+  border: 1px solid var(--p-line);
+  border-radius: var(--p-r-sm);
+  padding: var(--p-s3);
+  color: inherit; font: inherit;
+  cursor: pointer; text-decoration: none;
+  transition: background var(--p-dur) var(--p-ease), border-color var(--p-dur) var(--p-ease);
+}
+.af-card:hover { background: var(--p-surf-3); border-color: var(--p-line-3); text-decoration: none; }
+.af-card:focus-visible { outline: 2px solid var(--af-border-focus); outline-offset: -2px; }
+
+.af-card__title {
+  font-size: var(--p-t-sm); font-weight: var(--af-weight-medium);
+  line-height: var(--p-lh-tight);
+  color: var(--p-fg);
+}
+.af-card__meta {
+  display: flex; align-items: center; gap: var(--p-s2); flex-wrap: wrap;
+  font-size: var(--p-t-2xs); color: var(--p-fg-2);
+}
+
+/* 失败原因：卡片上最该被看见的一行，所以给它底色 + 左线。app.css:317-327。 */
+.af-card__why {
+  font-family: var(--af-font-mono); font-size: var(--p-t-2xs); line-height: 1.55;
+  color: var(--p-failed);
+  background: var(--p-failed-bg);
+  border-left: 2px solid var(--p-failed);
+  border-radius: 0 var(--p-r-xs) var(--p-r-xs) 0;
+  padding: var(--p-s1) var(--p-s2);
+  display: flex; flex-direction: column; gap: 1px;
+}
+.af-card__why b { font-weight: var(--af-weight-semibold); }
+
+/* ===========================================================================
+   5. 看板（原型 app.css:368-413）
+   -------------------------------------------------------------------------
+   差异要点（本轮逐条对照出来的）：
+     · 列宽原型 `minmax(236px, 1fr)`，实现写 180px —— 卡片标题更容易折行
+     · 列头原型有 `border-top: 2px solid` 的**状态色带**，实现没有
+     · 空列原型用 `::after` 画一块虚线框写「这一列是空的」，实现只有空态组件
+   =========================================================================== */
+
+.af-board--proto {
+  display: grid; grid-auto-flow: column;
+  grid-auto-columns: minmax(236px, 1fr);
+  gap: var(--p-s3);
+  padding: var(--p-s4) var(--p-s5) var(--p-s5);
+  height: 100%; min-height: 0; overflow-x: auto;
+  align-items: stretch;
+}
+
+.af-col {
+  background: var(--p-surf-1);
+  border: 1px solid var(--p-line-2);
+  border-radius: var(--p-r-md);
+  display: flex; flex-direction: column;
+  min-height: 0; min-width: 0; overflow: hidden;
+}
+.af-col__head {
+  display: flex; align-items: center; gap: var(--p-s2);
+  padding: var(--p-s3);
+  border-top: 2px solid var(--p-line-3);
+  border-bottom: 1px solid var(--p-line-2);
+  flex: 0 0 auto;
+}
+/* 六列各自的顶部状态色带。**形状 + 文字 + 颜色三重编码**的第三重：
+   只靠列标题文字的话，扫视时六列长得一样。 */
+.af-col[data-state='pending'] .af-col__head { border-top-color: var(--p-pending); }
+.af-col[data-state='queued']  .af-col__head { border-top-color: var(--p-queued); }
+.af-col[data-state='running'] .af-col__head { border-top-color: var(--p-running); }
+.af-col[data-state='review']  .af-col__head { border-top-color: var(--p-review); }
+.af-col[data-state='done']    .af-col__head { border-top-color: var(--p-done); }
+.af-col[data-state='failed']  .af-col__head { border-top-color: var(--p-failed); }
+
+.af-col__name { font-size: var(--p-t-xs); font-weight: var(--af-weight-semibold); color: var(--p-fg-strong); }
+.af-col__count {
+  margin-left: auto;
+  font-size: var(--p-t-2xs); font-weight: var(--af-weight-semibold); color: var(--p-fg-2);
+  font-variant-numeric: tabular-nums;
+  background: var(--p-surf-2); border-radius: var(--p-r-full);
+  padding: 0 var(--p-s2); min-width: 22px; text-align: center;
+}
+.af-col__body {
+  padding: var(--p-s2);
+  display: flex; flex-direction: column; gap: var(--p-s2);
+  overflow-y: auto; min-height: 0; flex: 1;
+}
+
+/* 空的列：不能什么都不显示 —— 空着本身是信息，但要让人分清
+   「这个项目没有失败」和「失败被筛掉了」。app.css:1413-1424。 */
+.af-col--empty .af-col__body::after {
+  content: '这一列是空的';
+  display: block;
+  padding: var(--p-s4) var(--p-s2);
+  font-size: var(--p-t-2xs);
+  color: var(--p-fg-3);
+  text-align: center;
+  border: 1px dashed var(--p-line-2);
+  border-radius: var(--p-r-sm);
+}
+
+/* ===========================================================================
+   6. 摘要读数带（原型 app.css:415-445）
+   -------------------------------------------------------------------------
+   四行项目摘要（v0.8.2 落实内容，但**视觉基座**在这里：一条四格的带子）。
+   本里程碑不填内容，先把「带子怎么长」定下来，否则 v0.8.2 会再造一套。
+   =========================================================================== */
+
+.af-meters {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: var(--p-s4) var(--p-s5) 0;
+  background: var(--p-surf-1);
+  border: 1px solid var(--p-line-2);
+  border-radius: var(--p-r-md);
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+.af-meter {
+  padding: var(--p-s3) var(--p-s4);
+  display: flex; flex-direction: column; gap: 1px;
+  min-width: 0; border-left: 1px solid var(--p-line);
+  color: inherit; text-decoration: none;
+}
+.af-meter:first-child { border-left: none; }
+a.af-meter:hover { background: var(--p-surf-2); text-decoration: none; }
+.af-meter--action { background: var(--p-warn-bg-c); }
+.af-meter__k {
+  font-size: var(--p-t-2xs); font-weight: var(--af-weight-semibold);
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--p-fg-2);
+  display: flex; align-items: center; gap: var(--p-s1);
+}
+.af-meter__v {
+  font-size: var(--p-t-sm); font-weight: var(--af-weight-medium); color: var(--p-fg-strong);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.af-meter__v--warn { color: var(--p-warn-c); }
+.af-meter__sub { font-size: var(--p-t-2xs); color: var(--p-fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ===========================================================================
+   7. 双栏（详情页，原型 app.css:687-694）
+   =========================================================================== */
+
+.af-split {
+  display: grid; grid-template-columns: minmax(0, 1fr) 360px;
+  gap: var(--p-s4); padding: var(--p-s5); min-height: 0;
+}
+.af-split--fill { flex: 1; overflow: hidden; }
+.af-split__col {
+  display: flex; flex-direction: column; gap: var(--p-s4);
+  min-height: 0; min-width: 0; overflow-y: auto;
+}
+
+/* ===========================================================================
+   8. 折叠区（原型 app.css:1557-1581）
+   =========================================================================== */
+
+.af-fold {
+  border: 1px solid var(--p-line-2);
+  border-radius: var(--p-r-md);
+  background: var(--p-surf-1);
+}
+.af-fold__sum {
+  display: flex; align-items: center; gap: var(--p-s3);
+  padding: var(--p-s3) var(--p-s4);
+  cursor: pointer; list-style: none;
+  font-size: var(--p-t-sm); color: var(--p-fg-2);
+  flex-wrap: wrap;
+}
+.af-fold__sum::-webkit-details-marker { display: none; }
+.af-fold__sum::before {
+  content: '▸'; color: var(--p-fg-3); font-size: 10px;
+  transition: transform var(--p-dur) var(--p-ease);
+  display: inline-block;
+}
+.af-fold[open] > .af-fold__sum::before { transform: rotate(90deg); }
+.af-fold__sum:hover { color: var(--p-fg-strong); }
+.af-fold__body { padding: 0 var(--p-s4) var(--p-s4); }
+
+/* ===========================================================================
+   8b. 通用件与键值对（原型 app.css:168-185、464-468）
+   -------------------------------------------------------------------------
+   为什么要搬到这里来：`.af-kv` / `.af-kv__k` / `.af-kv__v` **只在
+   `DevicesPage.vue` 的 scoped 块里定义过一次**，而模板里还有 4 个别的页面
+   在用它们（`DeviceDetailPage` / `ProjectTaskPage` / `BindPage` /
+   `ProjectSettingsPage`）。scoped 样式不外泄，于是那 4 处的键值对退化成
+   「一个接一个的裸 span」——没有两列网格，标签与值全挤在一行。
+
+   这正是子任务 13「跨页组件抽取」应当抓出、但按类名 grep 抓不出的问题：
+   类名在模板里**有**，只是定义在别人的 scoped 里。
+   =========================================================================== */
+
+.af-kv {
+  display: grid; grid-template-columns: 128px 1fr;
+  gap: var(--p-s2) var(--p-s4); font-size: var(--p-t-sm);
+  margin: 0;
+}
+.af-kv__k, .af-kv dt {
+  color: var(--p-fg-2); font-size: var(--p-t-xs); padding-top: 2px; margin: 0;
+}
+.af-kv__v, .af-kv dd { margin: 0; color: var(--p-fg); overflow-wrap: anywhere; }
+
+/* 原型 app.css:170-185 的排版小工具。它们是**语言**不是组件：`af-mute`（7 页）
+   与 `af-xs` 在没有定义时不会报错，只是那句话和正文一样亮——「次要信息」
+   这一层语义就消失了。 */
+.af-mono { font-family: var(--af-font-mono); font-size: 0.93em; }
+.af-num-c { font-variant-numeric: tabular-nums; }
+.af-dim { color: var(--p-fg-2); }
+.af-mute { color: var(--p-fg-3); }
+.af-strong { color: var(--p-fg-strong); }
+.af-xs { font-size: var(--p-t-xs); }
+.af-2xs { font-size: var(--p-t-2xs); }
+.af-row { display: flex; align-items: center; gap: var(--p-s3); flex-wrap: wrap; }
+.af-row--tight { gap: var(--p-s2); }
+.af-stack { display: flex; flex-direction: column; gap: var(--p-s4); }
+.af-spacer { flex: 1; }
+.af-sep { color: var(--p-fg-3); }
+.af-sr {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* 六态形状：色盲也能分（失败 / 排队色值亮度接近）。app.css:233-260。
+   `StateBadge` 的图形部分就是这几个，定义在这里才能被多页共用。 */
+.af-shape { width: 9px; height: 9px; flex: 0 0 auto; display: inline-block; }
+.af-shape--pending { background: transparent; border: 1.5px solid var(--p-pending); border-radius: 2px; }
+.af-shape--queued { background: var(--p-queued); border-radius: 1px; transform: rotate(45deg); }
+.af-shape--running { background: var(--p-running); border-radius: 50%; }
+.af-shape--review {
+  background: transparent; border: 1.5px solid var(--p-review); border-radius: 50%;
+  position: relative;
+}
+.af-shape--review::after {
+  content: ''; position: absolute; inset: 2px;
+  border-radius: 50%; background: var(--p-review);
+}
+.af-shape--done { background: var(--p-done); border-radius: 2px; }
+.af-shape--failed {
+  background: var(--p-failed); border-radius: 1px;
+  transform: skewX(-20deg); width: 10px;
+}
+
+/* 标签胶囊：形状是胶囊，颜色只做辅助。app.css:215-231。 */
+.af-tag {
+  display: inline-flex; align-items: center; gap: var(--p-s1);
+  font-size: var(--p-t-2xs); font-weight: var(--af-weight-medium); line-height: 1.7;
+  padding: 0 var(--p-s2); border-radius: var(--p-r-full);
+  border: 1px solid var(--p-line-2); color: var(--p-fg-2); background: transparent;
+  white-space: nowrap;
+}
+.af-tag--pending { color: var(--p-pending); background: var(--p-pending-bg); border-color: var(--p-pending-line); }
+.af-tag--queued  { color: var(--p-queued);  background: var(--p-queued-bg);  border-color: var(--p-queued-line); }
+.af-tag--running { color: var(--p-running); background: var(--p-running-bg); border-color: var(--p-running-line); }
+.af-tag--review  { color: var(--p-review);  background: var(--p-review-bg);  border-color: var(--p-review-line); }
+.af-tag--done    { color: var(--p-done);    background: var(--p-done-bg);    border-color: var(--p-done-line); }
+.af-tag--failed  { color: var(--p-failed);  background: var(--p-failed-bg);  border-color: var(--p-failed-line); }
+.af-tag--butler  { color: var(--p-butler);  background: var(--p-butler-bg);  border-color: var(--p-butler-line); }
+.af-tag--warn    { color: var(--p-warn-c);  background: var(--p-warn-bg-c);  border-color: var(--p-warn-line-c); }
+
+/* ===========================================================================
+   9. 项目切换器（原型 app.css:1341-1429）
+   -------------------------------------------------------------------------
+   看板页头里那个「项目名本身就是按钮」的切换器。`BoardPage.vue` 已用
+   `.af-switch` 系列类名，但样式表里只有 `.af-switch` 一条——所以下拉菜单
+   此前是**裸的**（无边框、无阴影、无定位）。
+   =========================================================================== */
+
+.af-switch { position: relative; display: flex; align-items: center; }
+.af-switch__btn {
+  display: inline-flex; align-items: center; gap: var(--p-s3);
+  padding: var(--p-s1) var(--p-s2) var(--p-s1) var(--p-s1);
+  margin-left: calc(-1 * var(--p-s1));
+  background: transparent; border: 1px solid transparent; border-radius: var(--p-r-sm);
+  color: inherit; font: inherit; cursor: pointer;
+}
+.af-switch__btn:hover { background: var(--p-surf-2); border-color: var(--p-line-2); }
+.af-switch__btn[aria-expanded='true'] {
+  background: var(--p-surf-2); border-color: var(--p-line-3);
+}
+.af-switch__title { margin: 0; }
+.af-switch__chev {
+  width: 0; height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--p-fg-3);
+  transition: transform 160ms var(--p-ease);
+}
+.af-switch__btn[aria-expanded='true'] .af-switch__chev { transform: rotate(180deg); }
+
+.af-switch__menu {
+  position: absolute; left: 0; top: calc(100% + var(--p-s2)); z-index: 80;
+  min-width: 268px;
+  background: var(--p-pop);
+  border: 1px solid var(--p-line-3);
+  border-radius: var(--p-r-md);
+  box-shadow: var(--p-sh-3);
+  padding: var(--p-s2);
+  display: none; flex-direction: column; gap: 1px;
+}
+.af-switch[data-open='true'] .af-switch__menu { display: flex; }
+.af-switch__item {
+  display: flex; align-items: center; gap: var(--p-s3);
+  padding: var(--p-s2) var(--p-s3);
+  border-radius: var(--p-r-sm);
+  font-size: var(--p-t-sm); color: var(--p-fg);
+  text-decoration: none;
+}
+.af-switch__item:hover { background: var(--p-surf-3); color: var(--p-fg-strong); text-decoration: none; }
+/* 当前项目：不只靠底色区分，前面加一个「当前」标签 —— 状态不能只靠颜色。 */
+.af-switch__item[aria-current='true'] {
+  background: var(--p-surf-2); color: var(--p-fg-strong); font-weight: var(--af-weight-semibold);
+}
+.af-switch__item[aria-current='true'] .af-switch__shape::before {
+  content: '当前 · ';
+  color: var(--p-fg-3); font-weight: var(--af-weight-regular);
+}
+.af-switch__label { flex: 1; min-width: 0; }
+.af-switch__shape { font-size: var(--p-t-2xs); color: var(--p-fg-3); font-weight: var(--af-weight-regular); }
+.af-switch__item--add {
+  margin-top: var(--p-s2); padding-top: var(--p-s3);
+  border-top: 1px solid var(--p-line-2);
+  border-radius: 0 0 var(--p-r-sm) var(--p-r-sm);
+  color: var(--p-fg-2); font-size: var(--p-t-xs);
+}
+
+/* ===========================================================================
+   10. 空状态 / 时间线 / 进度（原型 app.css:490-527、675-685）
+   =========================================================================== */
+
+.af-empty {
+  display: flex; flex-direction: column; align-items: center; gap: var(--p-s2);
+  padding: var(--p-s6) var(--p-s4); text-align: center;
+  color: var(--p-fg-3); font-size: var(--p-t-xs); line-height: var(--p-lh-body);
+}
+.af-empty__shape {
+  width: 18px; height: 18px; border-radius: var(--p-r-xs);
+  border: 1.5px dashed var(--p-line-4);
+}
+
+.af-bar { height: 5px; border-radius: var(--p-r-full); background: var(--p-surf-4); overflow: hidden; }
+.af-bar__fill { height: 100%; border-radius: var(--p-r-full); background: var(--p-acc); }
+.af-bar__fill--done { background: var(--p-done); }
+.af-bar__fill--failed { background: var(--p-failed); }
+.af-bar__fill--warn { background: var(--p-warn-c); }
+
+/* ===========================================================================
+   11. 窄屏（原型 app.css:709-719）
+   =========================================================================== */
+
+@media (max-width: 900px) {
+  .af-shell { grid-template-columns: 1fr; }
+  .af-rail { display: none; }
+  .af-split { grid-template-columns: 1fr; }
+  .af-head { padding: 0 var(--p-s4); }
+  .af-meters { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: var(--p-s3) var(--p-s3) 0; }
+  .af-meters .af-meter:nth-child(3) { border-left: none; }
+  .af-board--proto { grid-auto-columns: 86%; padding: var(--p-s3); }
+}

@@ -34,7 +34,7 @@ UPDATE task SET state = 'pending' WHERE state = 'ready';
 UPDATE task SET state = 'pending' WHERE state = 'blocked';
 
 -- ---------------------------------------------------------------------------
--- 二、task 表补列（`task-model.md:344-354`）
+-- 二、task 表补列（`task-model.md:363-383`）
 -- ---------------------------------------------------------------------------
 --
 -- 三个约束列存**原文 JSON 字符串**，不在类型层解析：本里程碑没有消费者需要
@@ -58,7 +58,7 @@ ALTER TABLE task ADD COLUMN superseded_by TEXT;
 ALTER TABLE task ADD COLUMN intent_ref TEXT;
 
 -- ---------------------------------------------------------------------------
--- 三、execution 表补列（`task-model.md:357-370`）
+-- 三、execution 表补列（`task-model.md:385-396`）
 -- ---------------------------------------------------------------------------
 --
 -- 全部可空：存量执行没有这些信息，无法反推。给 DEFAULT 等于凭空造事实。

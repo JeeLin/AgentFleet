@@ -220,6 +220,11 @@ export function getTask(
  * 改标题 / 判定条件 / 约束 → `{ task }`。
  *
  * 约束四列的「不改 / 清成不限 / 改成它」三层语义见文件头。
+ *
+ * **生产代码目前零调用**：本里程碑的页面里没有编辑任务的入口（改标题与改
+ * `done_when` 归 v0.8.2 的任务编辑视图），只有 `taskApi.test.ts` 拿它钉住
+ * 请求体与错误码。留着的理由与 `pushTaskState` 同：它是端点契约的前端侧
+ * 唯一副本，删了下一个里程碑就会照后端再手写一遍。
  */
 export function patchTask(
   taskId: string,
@@ -238,6 +243,10 @@ export function patchTask(
  * 409 `illegal_task_transition`（`detail.from` / `detail.to` / `detail.hint`）。
  * 复制一份 6×6 的合法边表意味着两处都得维护，而漂移的那一次会把非法转移
  * 画成合法。
+ *
+ * **生产代码目前零调用**：看板本轮不做拖拽换列，详情页的转移走
+ * `submitAcceptance` / `submitFailure` 两个具名端点，只有 `taskApi.test.ts`
+ * 用它钉住「前端不复制状态机」这条契约。真正需要它是 v0.8.2 的看板批量操作。
  */
 export function pushTaskState(
   taskId: string,

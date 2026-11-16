@@ -57,18 +57,19 @@ describe('AgentCatalog：渲染', () => {
     expect(text).toContain('不会编造')
   })
 
-  it('空态给出去处（新建会话），不把用户留在死路上', async () => {
+  it('空态给出「新建会话」按钮，但它在 v0.8.0 是禁用的', async () => {
     stubFetch({ '/api/agents': { body: [] }, '/api/devices': { body: [] } })
     const w = mountIn(AgentCatalog)
     await flush(w)
 
     const btn = w.element.querySelector<HTMLButtonElement>('.af-empty__actions button')
     expect(btn?.textContent).toContain('新建会话')
-    // 组件不自己跳：它把意图交给父页面（`emit('start-session')`），
-    // 「去哪」由设备页决定——见文件头注释。这里断言**确实发了事件**。
+    // v0.8.0：没有可达的会话入口（见 `AgentCatalog.vue` 文件头），所以禁用。
+    expect(btn?.disabled).toBe(true)
+    // 禁用之后也不该再发出 `start-session`——否则父页面拿到一个它实现不了的意图。
     await btn?.click()
     await settle(1)
-    expect(w.emitted('start-session')).toHaveLength(1)
+    expect(w.emitted('start-session')).toBeUndefined()
   })
 
   it('「用它开会话」把意图交给父页面，不自己改地址', async () => {
@@ -79,11 +80,14 @@ describe('AgentCatalog：渲染', () => {
     const before = location.pathname
     // `[data-act="start"]` 而不是「行里第一个 button」：行内现在还有一个进
     // 详情页的名字按钮。属性选择器表达的是意图，不依赖顺序。
+    //
+    // v0.8.0：按钮恒禁用（没有可达的会话入口，见 `AgentCatalog.vue` 与
+    // `DeviceTable.vue` 的文件头），所以点它**不该**发出 `start-session`。
     await w.element
       .querySelector<HTMLButtonElement>('.af-agent [data-act="start"]')
       ?.click()
     await settle(1)
-    expect(w.emitted('start-session')).toHaveLength(1)
+    expect(w.emitted('start-session'), '禁用按钮不该触发 start-session').toBeUndefined()
     // 反证：组件里没有 `navigate()`，地址不动
     expect(location.pathname).toBe(before)
   })
@@ -126,7 +130,12 @@ describe('AgentCatalog：渲染', () => {
     ).toBe(true)
 
     const ok = rows.find((r) => r.getAttribute('data-usable') === 'true')
-    expect(ok?.querySelector<HTMLButtonElement>('[data-act="start"]')?.disabled).toBe(false)
+    // v0.8.0：**可用的那个也禁用**——入口本身不通（没有可达的会话地址），
+    // 与这个 agent 能不能对话无关。见 `AgentCatalog.vue` 文件头。
+    expect(
+      ok?.querySelector<HTMLButtonElement>('[data-act="start"]')?.disabled,
+      '可用 agent 的按钮同样禁用（入口未上线）',
+    ).toBe(true)
   })
 
   it('设备没给原因时不编一句——只说不能对话', async () => {

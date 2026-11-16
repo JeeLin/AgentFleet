@@ -119,27 +119,30 @@ describe('DeviceTable：离线设备', () => {
     expect(btn?.getAttribute('title')).toContain('重新上线')
   })
 
-  it('重连中的设备可以建会话（45 秒内 PTY 还活着）', () => {
-    const w = mountIn(DeviceTable, {
-      props: {
-        devices: [device({ id: 'n_rc', status: 'reconnecting' })],
-        onInspect: vi.fn(),
-        onCreate: vi.fn(),
-        onRemove: vi.fn(),
-      },
-    })
-    const btn = w.element.querySelector<HTMLButtonElement>('tbody [data-act="create"]')
-    expect(btn?.disabled).toBe(false)
+  it('「用它开会话」恒禁用——在线 / 重连中也一样（v0.8.0 没有可达入口）', () => {
+    for (const status of ['online', 'reconnecting'] as const) {
+      const w = mountIn(DeviceTable, {
+        props: {
+          devices: [device({ id: 'n_rc', status })],
+          onInspect: vi.fn(),
+          onCreate: vi.fn(),
+          onRemove: vi.fn(),
+        },
+      })
+      const btn = w.element.querySelector<HTMLButtonElement>('tbody [data-act="create"]')
+      expect(btn?.disabled, `${status} 也必须禁用`).toBe(true)
+    }
   })
 
-  it('点「用它开会话」触发 onCreate，不触发 onInspect', async () => {
+  it('点「用它开会话」不触发 onCreate（按钮已禁用）', async () => {
     const onInspect = vi.fn()
     const onCreate = vi.fn()
     const w = mountIn(DeviceTable, {
       props: { devices: [device({ id: 'n_1' })], onInspect, onCreate, onRemove: vi.fn() },
     })
     await w.element.querySelector<HTMLButtonElement>('tbody [data-act="create"]')?.click()
-    expect(onCreate).toHaveBeenCalledTimes(1)
+    // 禁用按钮上的 click 不会派发到 Vue 的处理器上；这条钉的是「不会误触发」。
+    expect(onCreate).not.toHaveBeenCalled()
     expect(onInspect).not.toHaveBeenCalled()
   })
 })

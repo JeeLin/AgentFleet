@@ -104,6 +104,22 @@ describe('FailurePanel：4 行数据（`task-model.md:229-232`）', () => {
     const output = w.element.querySelector("[data-field='output']")?.textContent ?? ''
     expect(output).toContain('没有产出')
   })
+
+  it('有执行记录时也不编分支名——与详情页同口径', () => {
+    // 判红方式：把 `afleet/${task.id}/e1` 拼回 `outputText` → 红。
+    //
+    // F-2：早先这里硬编码 `afleet/<task>/e1`，与同一页 `ProjectTaskPage` 的
+    // 「库里还没有记录分支（v0.8.2 上线）」互相矛盾，而且那串东西拿去
+    // `git checkout` 必然失败。`branch` 列本里程碑没有落库，就不该有值。
+    const w = mountPanel(task(), execution({ base_commit: 'abcdef1234567890' }))
+    const output = w.element.querySelector("[data-field='output']")?.textContent ?? ''
+    expect(output).not.toContain('afleet/')
+    // 不得拼出任何形似真 ref 的分支名（`/e1` 是早先那串的尾巴）。
+    expect(output).not.toContain('/e1')
+    expect(output).toContain('库里还没有记录')
+    // 起点是事实，照旧显示（前 7 位）。
+    expect(output).toContain('abcdef1')
+  })
 })
 
 describe('FailurePanel：证据为 none 时显示「无证据」', () => {
@@ -244,10 +260,15 @@ describe('FailurePanel：八种失败形态都有诊断人话', () => {
   })
 
   it('未知 failure_kind → 「未知原因」，不原样吐英文', () => {
-    // 判红方式：去掉 `?? '未知原因'` → 红。
+    // 判红方式：去掉 `未知原因（${k}）` 里的「未知原因」→ 第一条红
+    // （`expected 'brand_new_kind' to contain '未知原因'`）。
     const w = mountPanel(task(), execution({ failure_kind: 'brand_new_kind' }))
     const row = w.element.querySelector("[data-field='reason']")?.textContent ?? ''
     expect(row).toContain('未知原因')
+    // 与 `TaskCard.test.ts` 同口径：裸值不得作为主语出现。早先这里写的是
+    // `not.toContain('brand_new_kind 的')`——全仓没有任何代码产出「X 的」，
+    // 那条断言对任何实现都为真，等于没测。
+    expect(row).not.toBe('brand_new_kind')
     expect(textOf(w)).not.toContain('brand_new_kind 的')
   })
 })

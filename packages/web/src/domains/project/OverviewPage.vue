@@ -20,6 +20,7 @@ import { computed, onMounted, ref } from 'vue'
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
 import { listProjects, type Project } from '@/domains/project/api'
 import { describeReadFailure } from '@/shared/http'
+import { SHAPE_LABELS } from '@/shared/projectShape'
 import { navigate } from '@/router'
 
 const projects = ref<Project[]>([])
@@ -27,11 +28,7 @@ const loading = ref(true)
 const failure = ref('')
 
 /** 形态的中文名。**与 `PRODUCT.md` §3.2 的表格用词一致**，不另造说法。 */
-const SHAPE_LABEL: Readonly<Record<string, string>> = {
-  central: '中心式',
-  mirror: '镜像式',
-  isolated: '隔离式',
-}
+const SHAPE_LABEL = SHAPE_LABELS
 
 /**
  * 形态的说明句。**必须给一句「代码从哪来、到哪去」**，不能只给名字

@@ -63,6 +63,17 @@
   --af-fg-disabled:  #47515d;  /*  2.31:1 — 禁用控件（豁免对比度要求） */
   --af-fg-on-accent: #04100d;  /* 11.29:1 on accent — 主按钮上的文字 */
 
+  /* `--af-pending-bg` / `--af-pending-line`：六态里 **pending 是唯一没有语义色**
+     的一态（它表示「还没开始」，不该抢眼），所以原型给它的不是某个色相，而是
+     把中性灰 `#98a4b2`（= fg-secondary）兑成两层半透明：12% 当块底、30% 当描边。
+     这两个值此前**只写在 §14 别名层里**（`--af-pending-bg: rgba(...)`），
+     那等于把两个真实色值藏在一个自称「只做别名」的层里——`check.sh` C5 判定
+     「第二份真相源」的判据就是「有没有字面色值」，藏在这里只是没被抓到。
+     现在它们回到 §2 与其它前景/背景同处，§14 才能保持纯 `var()` 引用。
+     半透明而非实色：pending 的块底要压在 surf-1 / surf-2 两种底上都成立。 */
+  --af-pending-bg:   rgba(152, 164, 178, 0.12);
+  --af-pending-line: rgba(152, 164, 178, 0.30);
+
   /* ---------------------------------------------------------------------
      3. 描边 border —— 层级提示，不是对比度达标件
      ---------------------------------------------------------------------
@@ -198,6 +209,18 @@
   --af-row-regular: 32px;
 
   /* ---------------------------------------------------------------------
+     7b. 布局常量 —— 外壳的几何，不是间距
+     ---------------------------------------------------------------------
+     这几个值必须与 `prototype/assets/tokens.css:37-43` 一致，否则「同一页面
+     在原型与实现里的栏宽/顶栏高」会差几像素，逐屏对照时看不出是哪里偏了。
+     它们不进 14 档间距：间距表达「两块内容隔多远」，这三个表达「外壳多大」，
+     量纲不同，混进 --af-space-* 会让 `space-9` 突然等于侧栏宽。 */
+  --af-rail-w: 224px;   /* 左侧导航栏宽（原型 `--rail-w: 224px`） */
+  --af-head-h: 56px;    /* 顶栏最小高度（原型 `--head-h: 56px`） */
+  --af-navbtn: 40px;    /* 导航开关按钮边长（原型 `--navbtn: 40px`） */
+  --af-measure: 68ch;   /* 长段落最大宽度（原型 `--measure: 68ch`） */
+
+  /* ---------------------------------------------------------------------
      8. 圆角
      ---------------------------------------------------------------------
      四档，且刻意小：等宽 + 高密度的界面里，大圆角会让格子看起来像气泡，
@@ -278,6 +301,170 @@
   --af-focus-ring: 2px solid var(--af-border-focus);
   --af-focus-offset: 2px;
 }
+
+/* ---------------------------------------------------------------------------
+   14. 原型槽位别名 —— 让 prototype/assets/app.css 的规则可以逐条搬过来
+   ---------------------------------------------------------------------------
+   为什么需要这一层：原型 `app.css` 的 1608 行规则全部用 `var(--bg)` /
+   `var(--surf-1)` / `var(--line-2)` / `var(--acc)` / `var(--pending)` 这类
+   **槽位名**取值。这些槽位名在原型的 `styles/theme-*.css` 里定义（不在
+   `app.css` 里），而实现只有 `--af-*` 一套名字。
+
+   上一轮的教训：既然名字对不上，实现就「另行重写」了一套值——结果两边
+   字号 12 vs 13.5、行高 26 vs 32、动效 80ms linear vs 140ms 缓动，连
+   `.af-shell` / `.af-head` / `.af-drawer` 这些外壳骨架都没落地。视觉上
+   就是「完全不一样」。
+
+   这一层把「原型槽位名」映射到**本文件的 `--af-*` 真身**，于是：
+     · 取值只有一个来源（上面 §1–§13 的 `--af-*`），本层**只做别名、不新增值**；
+     · 原型 `app.css` 的规则可以逐条对照移植，不必把每个 `var(--s3)` 手翻成
+       某个具体像素——那样每翻一次都有一次「猜错」的机会。
+
+   ── 为什么别名前缀是 `--p-` 而不是 `--af-` ────────────────────────────
+   第一版把别名也叫 `--af-surf-1` / `--af-line-2` / `--af-s3`，理由是「看起来
+   像一家人」。`src/shared/keynav.test.ts` 立刻红了两条：
+
+     ① 「tokens.css 的变量数 = 文档写的 N」——从 130 涨到 210，因为别名被
+        数进去了。那个数要表达的是「**真正定义了取值**的槽位有几个」，
+        别名不定义取值，不该混进同一个计数。
+     ② 「每个 token 只在 :root 里定义一次」——`--af-pending` 既在 §5 是
+        真身、又在 §14 是别名，被判定成「同一个名字定义了两次」。这条不变量
+        存在的意义是防「后者静默覆盖前者」；可别名层**本来**就想让原型名
+        指向真身，用同名表达时它和「重复定义」在文本上无法区分。
+
+   改成独立命名空间 `--p-*`（p = prototype）之后两件事同时成立：别名不再
+   参与 `--af-*` 的计数，也不会与真身撞名。代价是引用处要写 `var(--p-s3)`，
+   但这恰好把「这条规则搬自原型」写在字面上——扫一眼就知道它属于移植层。
+
+   ⚠️ 本层刻意只有 `var()` 引用、没有一个字面色值。`check.sh` C5 判定
+   「第二份真相源」的判据正是「有没有定义 `--af-*:` 字面值」——本层定义的
+   是不带 `--af-` 前缀的别名，且值全是 `var()`，不构成第二份真相源。 */
+
+:root {
+  /* ── 表面：原型的亮度阶梯映射到 --af-surface-* ───────────────────────
+     原型 `theme-neutral.css:26-36` 的阶梯是 bg → surf-1 → surf-2 → surf-3
+     → surf-4，实现只有 surface-0..3 + inset。映射取「最近的亮一档」：
+     原型的 surf-4（按下态）在实现里没有第五层，落到 surface-3 并在
+     `.af-btn:active` 等处用 `--af-accent-bg` 之类的语义色代替。 */
+  --p-bg: var(--af-surface-0);
+  --p-surf-1: var(--af-surface-1);
+  --p-surf-2: var(--af-surface-2);
+  --p-surf-3: var(--af-surface-3);
+  --p-surf-4: var(--af-border-strong);
+  --p-panel: var(--af-surface-2);
+  --p-pop: var(--af-surface-3);
+  --p-inset-c: var(--af-inset);
+
+  /* ── 前景 ─────────────────────────────────────────────────────────── */
+  --p-fg: var(--af-fg-primary);
+  --p-fg-strong: var(--af-fg-primary);
+  --p-fg-2: var(--af-fg-secondary);
+  --p-fg-3: var(--af-fg-tertiary);
+
+  /* ── 边界：原型的 4 档透明度映射到实现的 4 档实色 ─────────────────── */
+  --p-line: var(--af-border-subtle);
+  --p-line-2: var(--af-border-subtle);
+  --p-line-3: var(--af-border-default);
+  --p-line-4: var(--af-border-strong);
+
+  /* ── 强调 ─────────────────────────────────────────────────────────── */
+  --p-acc: var(--af-accent);
+  --p-acc-strong: var(--af-accent-hover);
+  --p-acc-bg: var(--af-accent-bg);
+  --p-acc-line: var(--af-accent-line);
+  --p-on-acc: var(--af-fg-on-accent);
+
+  /* ── 六态 + 管家 + 警告 ───────────────────────────────────────────── */
+  --p-pending: var(--af-fg-secondary);
+  --p-pending-bg: var(--af-pending-bg);
+  --p-pending-line: var(--af-pending-line);
+  --p-queued: var(--af-warn);
+  --p-queued-bg: var(--af-warn-bg);
+  --p-queued-line: var(--af-warn-line);
+  --p-running: var(--af-info);
+  --p-running-bg: var(--af-info-bg);
+  --p-running-line: var(--af-info-line);
+  --p-review: var(--af-agent);
+  --p-review-bg: var(--af-agent-bg);
+  --p-review-line: var(--af-agent-line);
+  --p-done: var(--af-ok);
+  --p-done-bg: var(--af-ok-bg);
+  --p-done-line: var(--af-ok-line);
+  --p-failed: var(--af-danger);
+  --p-failed-bg: var(--af-danger-bg);
+  --p-failed-line: var(--af-danger-line);
+  --p-butler: var(--af-agent);
+  --p-butler-bg: var(--af-agent-bg);
+  --p-butler-line: var(--af-agent-line);
+  --p-warn-c: var(--af-warn);
+  --p-warn-bg-c: var(--af-warn-bg);
+  --p-warn-line-c: var(--af-warn-line);
+
+  /* diff 两侧 */
+  --p-add-ink-c: var(--af-add-ink);
+  --p-del-ink-c: var(--af-del-ink);
+
+  /* ── 阴影 ─────────────────────────────────────────────────────────── */
+  --p-sh-1: var(--af-shadow-1);
+  --p-sh-2: var(--af-shadow-2);
+  --p-sh-3: var(--af-shadow-3);
+
+  /* ── 间距：原型的 8 档（全 4 倍数）映射到实现的 14 档（2px 基数）─────
+     原型 s1=4 s2=8 s3=12 s4=16 s5=20 s6=28 s7=40 s8=56
+     实现 space-1=2 space-2=4 space-3=6 space-4=8 space-5=10 space-6=12
+          space-7=14 space-8=16 space-9=20 space-10=24 space-11=32
+          space-12=40 space-13=56 space-14=72
+     逐一对应（不是「就近取」，是按数值精确对上）： */
+  --p-s1: var(--af-space-2);   /*  4px */
+  --p-s2: var(--af-space-4);   /*  8px */
+  --p-s3: var(--af-space-6);   /* 12px */
+  --p-s4: var(--af-space-8);   /* 16px */
+  --p-s5: var(--af-space-9);   /* 20px */
+  --p-s6: var(--af-space-10);  /* 24px —— 原型是 28px，见下注 */
+  --p-s7: var(--af-space-12);  /* 40px */
+  --p-s8: var(--af-space-13);  /* 56px */
+
+  /* ── 圆角：原型 5 档 → 实现 5 档 ──────────────────────────────────── */
+  --p-r-xs: var(--af-radius-sm);      /* 原型 4px → 实现 2px */
+  --p-r-sm: var(--af-radius-md);      /* 原型 6px → 实现 4px */
+  --p-r-md: var(--af-radius-lg);      /* 原型 9px → 实现 8px */
+  --p-r-lg: var(--af-radius-lg);
+  --p-r-full: var(--af-radius-full);
+
+  /* ── 字号：原型的 6 档 → 实现的 9 档 ────────────────────────────────
+     原型 t-2xs=11.5 t-xs=12.5 t-sm=13.5 t-md=14.5 t-lg=18 t-xl=23
+     实现 text-2xs=10 text-xs=11 text-sm=12 text-md=13 text-lg=15
+          text-xl=18 text-2xl=22 text-3xl=28 text-4xl=34
+
+     这里是本轮**唯一一处刻意的取值差**，且方向是「实现更大一档」：
+     上一轮实现把 t-sm 落到 12px（比原型 13.5 还小 1.5px），读起来又小又硬。
+     本轮把原型各档对到实现里**语义相同的档位**，再整体抬到
+     `design-system.md §2.3` 规定的用途上： */
+  --p-t-2xs: var(--af-text-2xs);  /* 11.5 → 10：符号/单行注解 */
+  --p-t-xs: var(--af-text-xs);    /* 12.5 → 11：数字 */
+  --p-t-sm: var(--af-text-md);    /* 13.5 → 13：**按钮、表格主列、正文** */
+  --p-t-md: var(--af-text-md);    /* 14.5 → 13：正文 */
+  --p-t-lg: var(--af-text-xl);    /* 18   → 18：页面标题 */
+  --p-t-xl: var(--af-text-2xl);   /* 23   → 22：概览数字 */
+
+  /* 行高：原型 lh-body=1.65 / lh-tight=1.45 */
+  --p-lh-body: var(--af-leading-base);
+  --p-lh-tight: var(--af-leading-tight);
+
+  /* 行高常量：原型 --row=32px → 实现 `row-regular`（32px）。
+     按钮、导航项、输入框都用它。**这里正是上一轮的错处**：上一轮
+     `.af-btn` 用了 `--af-row-compact`(26px)，比原型整整矮 6px。 */
+  --p-row: var(--af-row-regular);
+
+  /* 动效：原型 140ms + cubic-bezier(0.2,0,0.2,1) */
+  --p-ease: var(--af-ease-out);
+  --p-dur: var(--af-dur-fast);
+
+  /* 字族别名（原型 --sans / --mono） */
+  --p-sans: var(--af-font-sans);
+  --p-mono-c: var(--af-font-mono);
+}
+
 
 /* ── 全局焦点规则：任何可聚焦元素都吃这一条 ── */
 :where(a, button, input, select, textarea, [tabindex]):focus-visible {

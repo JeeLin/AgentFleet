@@ -12,6 +12,7 @@ import {
   describeStatus,
 } from './state'
 import type { AnyStatus, GlyphFill } from './state'
+import { TASK_STATE_WIRE } from '@/domains/project/taskTypes'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..')
 const COMPONENTS_CSS = resolve(REPO_ROOT, 'packages/web/src/styles/components.css')
@@ -219,5 +220,20 @@ describe('TASK_STATUSES', () => {
     // 判红方式：把某个 label 改成英文或空串 → 红。
     const labels = TASK_STATUSES.map((s) => STATES[s].label)
     expect(labels).toEqual(['待办', '排队中', '执行中', '待验收', '已完成', '失败'])
+  })
+
+  it('线格式数组 `TASK_STATE_WIRE` 与 `TASK_STATUSES` 是同一组值', () => {
+    // 为什么这两处会分叉：`state.ts` 的 `TaskStatus` 是 **UI 词表**（给
+    // `StateBadge` 查表用），`taskTypes.ts` 的 `TaskStateWire` 是 **Hub 返回的
+    // JSON 里的字符串**。分层不同所以类型分开写，但**值必须同源**——后端加一个
+    // 态而这两处有一处没跟上，就会出现「看板认、API 不认」或反之。
+    //
+    // 这条比对的是 `taskTypes.ts` 导出的 `TASK_STATE_WIRE`（类型约束为
+    // `readonly TaskStateWire[]`），不是测试里另抄一份字面量——抄一份的话
+    // 被测的是测试自己。
+    //
+    // 判红方式：只改 `taskTypes.ts` 那份（例如把 `review` 写成 `reviewing`，
+    // 需同步改类型否则 `type-check` 先红）→ 红。
+    expect([...TASK_STATE_WIRE]).toEqual([...TASK_STATUSES])
   })
 })

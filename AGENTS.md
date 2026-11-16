@@ -250,7 +250,7 @@ scripts/        check.sh（grep 门禁）、e2e-*.sh
   （`board.html` / `task.html` / `devices.html` 等，索引页 `index.html`）。
   逐页对照时以原型的选择器与结构为准；对不上的地方登记进里程碑 Bugs 表，不在实现里默默偏移。
 - **视觉 token 真相源**：`packages/web/src/styles/{tokens,components}.css`（`--af-*`）。
-  原型 `prototype/assets/tokens.css` 定义的是**另一套命名**（`--t-2xs` / `--s-3` 等，
+  原型 `prototype/assets/tokens.css` 定义的是**另一套命名**（`--t-2xs` / `--s3` 等，
   **不含 `--af-*`**），因此它**不是**第二份真相源，`scripts/check.sh` C5 判它合法。
   把原型视觉搬到实现时，**只搬取值与结构，不搬命名**。
 - **文档规格**：`docs/PRODUCT.md`（做什么）> `docs/architecture/*.md`（怎么设计）> `prototype/`（长什么样）。

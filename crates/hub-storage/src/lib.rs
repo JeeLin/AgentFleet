@@ -22,9 +22,7 @@ pub use agent::{AgentConfig, AgentConfigRepo, AgentRuntime, AgentRuntimeRepo};
 pub use binding::{Binding, BindingRepo, BindingSpec, CleanupPolicy};
 pub use db::{data_dir, open, open_in, set_umask_077, Db};
 pub use error::StorageError;
-pub use execution::{
-    Execution, ExecutionRepo, ExecutionState, ExecutionView, FailureKind, NewExecution,
-};
+pub use execution::{ExecutionRepo, ExecutionState, ExecutionView, FailureKind, NewExecution};
 pub use project::{NewProject, Project, ProjectRepo, ProjectShape, ThemeColor};
 /// `rusqlite` 的 `params!` 宏，**只为测试夹具转出**。
 ///
@@ -37,7 +35,7 @@ pub use repo::{
     base64url_decode, base64url_of, Device, DeviceRepo, DeviceStatus, NewDevice, SecretRepo,
 };
 pub use session::{BaseRevStatus, Session, SessionDetail, SessionRepo, SessionState};
-pub use task::{DoneWhen, NewTask, Task, TaskPatch, TaskRepo, TaskState, TaskTransition, TaskView};
+pub use task::{DoneWhen, NewTask, TaskPatch, TaskRepo, TaskState, TaskTransition, TaskView};
 pub use task_state::{can_transition, check_transition, legal_edges};
 pub use trajectory::{Gap, NewEvent, TrajectoryEvent, TrajectoryRepo, TurnBounds, TURN_END_KIND};
 pub use workspace::{

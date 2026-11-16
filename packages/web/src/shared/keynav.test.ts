@@ -107,7 +107,7 @@ describe('KEYS 与设计文档一致（grep 校验，不靠人眼）', () => {
 
 
 describe('token / 组件数与设计文档一致', () => {
-  it('tokens.css 的变量数与 §1 的「129 个变量」一致', () => {
+  it('tokens.css 的变量数与 §1 的「136 个变量」一致', () => {
     const doc = readFileSync(DESIGN_DOC, 'utf-8')
     const m = doc.match(/（(\d+) 个变量）/g)
     expect(m, 'design-system.md §1 不再声明 token 变量数').not.toBeNull()
@@ -128,10 +128,14 @@ describe('token / 组件数与设计文档一致', () => {
   })
 
   it('每个 token 只在 :root 里定义一次，重复出现的名字只在 reduce-motion 里覆写', () => {
-    // 文档里的 129 是「文件里的定义数」，不是「不同变量名数」：5 个动效时长
-    // 在 `prefers-reduced-motion` 下被覆写一遍（规范 §2 要求动效可关）。
-    // 真正的 bug 形态是**同一个名字在 :root 里定义两次**——那让「后者生效」
-    // 变成一条没人读到的隐藏规则。所以这里分开量。
+    // 文档里的 136 是「文件里的定义行数」，不是「不同变量名数」：5 个动效/描边
+    // 在 `prefers-reduced-motion` / `forced-colors` 下被覆写一遍（规范 §2 要求
+    // 动效可关）。真正的 bug 形态是**同一个名字在 :root 里定义两次**——那让
+    // 「后者生效」变成一条没人读到的隐藏规则。所以这里分开量。
+    //
+    // 只扫 `--af-*`：§14 的原型槽位别名用 `--p-*` 前缀，不进这个守恒式。
+    // 它们**本来就该**指向真身，若也取 `--af-` 前缀就会被判成「同名定义两次」
+    // ——那会让这条不变量逼着人删掉别名层，而别名层正是两边能逐条对照的前提。
     const css = readFileSync(TOKENS_CSS, 'utf-8')
     const all = [...css.matchAll(/^\s*(--af-[a-z0-9-]+):/gm)].map((m) => m[1] as string)
     const rootBlock = /:root\s*\{([\s\S]*?)\n\}/.exec(css)?.[1] ?? ''

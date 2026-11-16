@@ -12,7 +12,16 @@
 
    ── 离线行为什么仍可选中 ──────────────────────────────────────────
    `data-inert` 是**降亮但不禁用**（§3.7）：离线设备的 `node_id` 仍然要被
-   复制出来排障。真正被禁用的只有「用它开会话」，且按钮旁边写清为什么。
+   复制出来排障。
+
+   ── 「用它开会话」**一律禁用**（不是只有离线时）───────────────────
+   这条按钮现在**没有任何可达目的地**：会话是项目下的实体
+   （`/project/:id/session/:sessionId`），而设备页是管理面、不带项目上下文；
+   `/sessions/new` 不在 `router.ts` 的 `ROUTES` 里（`LEGACY_PATHS` 会把它
+   replace 回总览）。点它只会静默回首页、`?device=` 被丢掉——比禁用更糟。
+   真正可用的入口要先定「哪个项目」，属 v0.8.2「从设备开工」。
+   所以这里恒 `disabled`，并把理由写在 `title` 与按钮旁的一句话里，
+   而不是留一个点了会失败的可点控件。
 
    ── 身份锚是 node_id，不是指纹 ────────────────────────────────────
    这一行画的身份锚**必须与详情块第一行是同一个值**（`DevicesPage.vue` 的
@@ -27,7 +36,6 @@ import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 import StateBadge from '@/domains/shared/components/StateBadge.vue'
 import type { DeviceSummary } from '@/domains/device/api'
-import { canCreateSession } from '@/domains/device/api'
 import { attach, type ListboxHandle } from '@/shared/listbox'
 import { percent, relativeTime } from '@/shared/format'
 
@@ -106,6 +114,17 @@ function offlineReason(device: DeviceSummary): string {
   return device.status === 'offline'
     ? '设备已判离线：心跳超过 45 秒没到，Hub 连不上它，会话建不起来。等它重新上线。'
     : ''
+}
+
+/**
+ * 「用它开会话」为什么点不了。**恒有值**——这个入口在 v0.8.0 里没有任何可达
+ * 目的地（见文件头「一律禁用」）。离线时先说离线，因为那是更近的一层原因。
+ */
+function createSessionReason(device: DeviceSummary): string {
+  return (
+    offlineReason(device) ||
+    '从设备开会话需要先选项目，v0.8.2 上线；现在请到项目里新建会话。'
+  )
 }
 </script>
 
@@ -218,13 +237,14 @@ function offlineReason(device: DeviceSummary): string {
                 class="af-btn af-btn--sm af-btn--primary"
                 type="button"
                 data-act="create"
-                :disabled="!canCreateSession(d)"
-                :aria-disabled="!canCreateSession(d)"
-                :title="offlineReason(d) || `在这台设备上开一个会话`"
+                disabled
+                aria-disabled="true"
+                :title="createSessionReason(d)"
                 @click.stop="onCreate(d)"
               >
                 用它开会话
               </button>
+              <span class="af-dev-confirm af-t-mute">{{ createSessionReason(d) }}</span>
               <button
                 class="af-btn af-btn--sm af-btn--ghost af-dev-remove"
                 type="button"

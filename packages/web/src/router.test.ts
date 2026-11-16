@@ -15,6 +15,19 @@ import {
 } from '@/router'
 
 describe('路由表：`prototype/` 的 21 页 + 两个详情地址', () => {
+  it('文件头写的路由条数与 `ROUTES.length` 一致', () => {
+    // 这一条守的是 F-4：文件头两次把条数写错（23、27），实际是 25。
+    // 计数类注释没人会重算，所以让它被机械核对。
+    const src = readRepoFile('packages/web/src/router.ts')
+    const stated = [...src.matchAll(/(\d+) 条路由/g)].map((m) => Number(m[1]))
+    expect(stated.length, '文件头应当至少写一次「N 条路由」').toBeGreaterThan(0)
+    for (const n of stated) {
+      expect(n, `文件头写「${n} 条路由」，实际 ROUTES.length = ${ROUTES.length}`).toBe(
+        ROUTES.length,
+      )
+    }
+  })
+
   it('路由表与 `prototype/` 的页面对照表逐条一致', () => {
     // 这张表是 v0.7.0 子任务 8 的落点清单。**顺序有意义**：`/projects/new`
     // 必须排在 `/projects/:id/...` 之前，否则新建会被当成 id 为 `new` 的项目。

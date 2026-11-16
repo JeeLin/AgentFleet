@@ -1136,9 +1136,60 @@ mod tests {
         }
     }
 
-    /// v7 幂等：连跑三次不报 `duplicate column name`。
+    /// v7 的**数据归并**部分可重跑：直接执行 `schema_v7.sql` 里的三条 `UPDATE`
+    /// 两次，第二次影响 0 行且不报错。
+    ///
+    /// 为什么不能只连跑 `run()` 三次：`apply()` 在 `current == target` 处直接
+    /// 返回（`migrate.rs:106-108`），第二、三次根本没执行 SQL——那样测出来的是
+    /// 「升级闸门会短路」，不是脚本本身可重跑。`ALTER TABLE ADD COLUMN` 没有
+    /// `IF NOT EXISTS`，本来就不可能重跑，脚本头已明说这件事由闸门负责；这里
+    /// 只钉住「闸门万一说谎时，`UPDATE` 那半段仍是安全的」。
+    ///
+    /// 判红方式：把任一条 `UPDATE` 改成 `DELETE FROM task`，第二次执行会把行
+    /// 删光，下面的行数断言立刻红。
     #[test]
-    fn migration_v7_is_idempotent() {
+    fn v7_data_merge_is_idempotent() {
+        let mut c = memory();
+        run(&mut c).unwrap();
+        // 造一行「旧态」，模拟闸门失灵后脚本被再跑一次的情形。
+        c.execute(
+            "INSERT INTO task (id, project_id, title, state, created_at, updated_at)
+             VALUES ('t_old', 'p_1', '旧任务', 'draft', 'unix:1', 'unix:1')",
+            [],
+        )
+        .unwrap();
+        let before: i64 = c
+            .query_row("SELECT COUNT(*) FROM task", [], |r| r.get(0))
+            .unwrap();
+
+        // 只跑三条 UPDATE（与 `schema_v7.sql:32-34` 逐字相同）。
+        for sql in [
+            "UPDATE task SET state = 'pending' WHERE state = 'draft'",
+            "UPDATE task SET state = 'pending' WHERE state = 'ready'",
+            "UPDATE task SET state = 'pending' WHERE state = 'blocked'",
+        ] {
+            let first = c.execute(sql, []).unwrap();
+            let second = c.execute(sql, []).unwrap();
+            assert_eq!(second, 0, "第二次执行 `{sql}` 必须影响 0 行");
+            if sql.contains("'draft'") {
+                assert_eq!(first, 1, "第一次必须改到那一行");
+            }
+        }
+        let after: i64 = c
+            .query_row("SELECT COUNT(*) FROM task", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(before, after, "重跑归并不得删行");
+        let state: String = c
+            .query_row("SELECT state FROM task WHERE id = 't_old'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(state, "pending");
+    }
+
+    /// `run()` 连跑三次不报错（闸门本身的行为）。
+    #[test]
+    fn migration_gate_short_circuits_when_already_current() {
         let mut c = memory();
         run(&mut c).unwrap();
         run(&mut c).unwrap();

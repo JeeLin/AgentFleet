@@ -2,7 +2,9 @@
 /* ===========================================================================
    DevicesPage —— 设备与 Agent（规范 §5.1 / §5.3）
    ---------------------------------------------------------------------------
-   这一页只有一个会话入口：「用它开会话」。**没有面板 / 工作区入口**：
+   这一页只有一个会话入口：「用它开会话」，而它**在 v0.8.0 恒禁用**
+   （拿不到项目上下文，`/sessions/new` 也不是真路由；见
+   `DeviceTable.vue` 文件头）。**没有面板 / 工作区入口**：
    终端与文件绑定会话的工作区 `(node_id, path)`，生命周期随会话（约束 3）。
 
    状态只看心跳年龄：45 秒内是 `reconnecting`（Hub 内存推导值，带「推」徽标），
@@ -187,11 +189,34 @@ async function downloadCli(): Promise<void> {
   }
 }
 
+/**
+ * 「用它开会话」的落点。**v0.8.0 里它不可达，函数保留但不再跳转**。
+ *
+ * v0.7.0 起会话是项目下的实体（`/project/:id/session/:sessionId`），而设备页
+ * 是**管理面**（「管理从设备进」），本身不带项目上下文——所以没有一条能带着
+ * 设备直达新建页的地址。`/sessions/new` 不在 `router.ts` 的 `ROUTES` 里
+ * （`matchRoute` 判 `not-found`，`LEGACY_PATHS` 把它 replace 回总览），
+ * 以前跳过去的结果是「静默回首页、`?device=` 被丢掉」。
+ *
+ * 现在按钮在 `DeviceTable.vue` 里恒 `disabled` 并写明理由，所以这个函数
+ * **在正常路径上不会被调用**（`@click` 在禁用按钮上不触发）。保留它是为了
+ * 让「入口为什么不可用」有一个可读的落点，以及 v0.8.2「从设备开工」接上
+ * 真正入口时不必重新找位置。
+ */
 function createSession(device: DeviceSummary): void {
-  // v0.7.0 起会话地址是 `/project/:id/session/:sessionId`，所以新建页需要项目 id
-  // 才能把用户送回去。设备页是**管理面**（「管理从设备进」），它本身不带项目
-  // 上下文——这里只把设备带下去，项目由新建页按缺省处理（落到总览）。
-  navigate(`/sessions/new?device=${encodeURIComponent(device.id)}`)
+  // 不跳转：没有可达目的地。留着参数是为了签名与 `onCreate` 一致。
+  void device
+}
+
+/**
+ * `AgentCatalog` 的 `start-session` 落点：同样**不跳转**。
+ *
+ * 原因与 `createSession` 逐字相同（`/sessions/new` 不是路由）。两处放在一起
+ * 是为了让「这两个入口在 v0.8.0 都不可用」在代码里是一眼可见的一件事，
+ * 而不是散在模板里两处各写一遍跳转。
+ */
+function noSessionEntry(): void {
+  // 见 `createSession` 的文档：v0.8.0 没有可达的会话入口。
 }
 
 /**
@@ -273,7 +298,7 @@ async function remove(device: DeviceSummary): Promise<void> {
     <AgentCatalog
       v-if="segment === 'agents'"
       ref="catalog"
-      @start-session="navigate('/sessions/new')"
+      @start-session="noSessionEntry"
     />
 
     <template v-else>
@@ -508,21 +533,7 @@ async function remove(device: DeviceSummary): Promise<void> {
   flex-direction: column;
   gap: var(--af-space-3);
 }
-.af-kv {
-  display: grid;
-  grid-template-columns: 88px 1fr;
-  gap: var(--af-space-2) var(--af-space-4);
-  font-size: var(--af-text-sm);
-}
-.af-kv__k {
-  color: var(--af-fg-tertiary);
-  text-transform: uppercase;
-  letter-spacing: var(--af-tracking-label);
-  font-size: var(--af-text-sm);
-  padding-top: 1px;
-}
-.af-kv__v {
-  color: var(--af-fg-secondary);
-  overflow-wrap: anywhere;
-}
+/* `.af-kv` / `.af-kv__k` / `.af-kv__v` 已移到 `styles/prototype-shell.css` §8b：
+   这四个类被 5 个页面用，而 scoped 块不外泄 —— 留在本文件里时其余 4 个页面
+   拿到的是没有两列网格的裸 span。同一条规则只有一个家。 */
 </style>

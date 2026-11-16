@@ -101,13 +101,23 @@ const attemptText = computed(() => {
   return `第 ${Math.max(done, 1)} 次 · 上限 ${limit} 次`
 })
 
-/** 「产出」：分支 + 起点。没有执行记录时说「没有产出」，不编。 */
+/**
+ * 「产出」：起点。**不编分支名**。
+ *
+ * `task-model.md` §8 明列 `branch` 尚未落库（v0.8.2 的执行间接力才写）。
+ * 早先这里拼了一个 `afleet/<task>/e1` 出去——它与同一页 `ProjectTaskPage`
+ * 的「库里还没有记录分支（v0.8.2 上线）」互相矛盾，而且那串东西拿去
+ * `git checkout` 必然失败（`e1` 也恒为第 1 次，重试过就是错的）。
+ * **一个看上去像真 ref 的字符串比一个空格外危险**。
+ *
+ * 没有执行记录时说「没有产出」——那是事实，不是编的。
+ */
 const outputText = computed(() => {
   const ex = props.execution
   if (!ex) return '没有产出（这条失败没有产生执行）'
-  const branch = `afleet/${props.task.id}/e1`
-  const base = ex.base_commit ? ` · 起点 ${ex.base_commit.slice(0, 7)}` : ''
-  return `${branch}${base}`
+  return ex.base_commit
+    ? `分支：库里还没有记录（v0.8.2 上线） · 起点 ${ex.base_commit.slice(0, 7)}`
+    : '分支：库里还没有记录（v0.8.2 上线）'
 })
 
 /** 关掉必须写明原因（`task-model.md:244`）：reason 空时按钮 disabled。 */

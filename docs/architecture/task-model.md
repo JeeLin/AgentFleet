@@ -365,7 +365,13 @@ task                                    -- 实际列 = schema_v5.sql:97-109 + v7
   title
   done_when_criteria, done_when_description   -- 两列而非一个 JSON；闭集见 DoneWhen::validate
   state                                 -- pending/queued/running/review/done/failed
-                                        -- DEFAULT 'pending'（v7 从 'draft' 改；旧三态已在迁移里归并）
+                                        -- **列默认值仍是 v5 的 `'draft'`**：v7 只 UPDATE 了存量
+                                        -- 行，没有改 DEFAULT（`ALTER TABLE` 改不了默认值，
+                                        -- 要改必须重建表）。所有写入都显式给 state
+                                        -- （`TaskRepo::create` 写 `'pending'`），所以这个默认
+                                        -- 值今天是不可达的；但它一旦被省略 state 的写者命中，
+                                        -- 那一行就会因为 `'draft'` 不在六态里而读不出来。
+                                        -- 归并入 v0.8.2 的表重建。
   base_commit
   created_by                            -- human / butler / import:<source>
   created_at, updated_at

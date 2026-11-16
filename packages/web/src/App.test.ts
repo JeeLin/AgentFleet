@@ -482,8 +482,9 @@ describe('App：登出', () => {
    ③ 折叠态品牌区**退回原来的图标轨形态**（竖排名字留着，不是藏掉）。
 
    反向验证：把 `.af-brand` 挪回 `nav` 外面 → ①红；把 grid 改回
-   `44px 208px 1fr` → ②红；把折叠态的 `writing-mode: vertical-rl` 删掉或
-   加回 `.af-brand__name { display: none }` → ③红。
+   `44px 208px 1fr` 或把侧栏宽写死像素 → ②红；把折叠态的
+   `writing-mode: vertical-rl` 删掉或加回 `.af-brand__name { display: none }`
+   → ③红。
    =========================================================================== */
 describe('App：品牌区与导航合并成一列', () => {
   it('品牌区是 nav 的子节点，不是并列的另一块', async () => {
@@ -503,8 +504,13 @@ describe('App：品牌区与导航合并成一列', () => {
     // 取 `.af-app` 的声明体
     const body = cssRuleOf(css, '.af-app')
 
-    // 正面：列名只剩 sidebar / topbar / main / status
-    expect(body).toContain('grid-template-columns: 208px 1fr')
+    // 正面：侧栏只有一个 grid 列，宽度取自共享布局常量。
+    // **不写死像素**：宽度是 `--af-rail-w`（原型 `tokens.css:38` 的 224px），
+    // 写死 `208px` 就又把「哪一档是真的」变成一个没人量的数字——上一版正是
+    // 208px，比原型窄 16px，而这条断言当时钉住的恰恰是那个错值。
+    expect(body, '侧栏宽必须取 --af-rail-w，不能写死像素').toContain(
+      'grid-template-columns: var(--af-rail-w) 1fr',
+    )
     expect(body).not.toContain('44px 208px')
     // `brand` 不再是 grid 区域名。注意 `af-brand` 作为**类名**仍会出现在
     // 别处，所以这里只查 `grid-template-areas` 那一行里的裸词 `brand`。

@@ -17,27 +17,28 @@ import { ref } from 'vue'
 
 import { createProject } from '@/domains/project/api'
 import { ApiError } from '@/shared/http'
+import { SHAPE_LABELS } from '@/shared/projectShape'
 import { navigate } from '@/router'
 
 /** 三种形态。说明句照 `PRODUCT.md` §3.2 的表，不另造说法。 */
 const SHAPES = [
   {
     key: 'central',
-    name: '中心式',
+    name: SHAPE_LABELS.central,
     from: '代码从 Hub 的仓库来',
     to: '任务产出推回 Hub',
     hint: 'Hub 上存全部代码，起点是 Hub 上的 commit。适合自己从头做的项目。',
   },
   {
     key: 'mirror',
-    name: '镜像式',
+    name: SHAPE_LABELS.mirror,
     from: '代码从上游仓库来',
     to: 'Hub 镜像一份，任务产出推回 Hub',
     hint: 'Hub 镜像 GitHub 等上游仓库，起点是镜像的 commit。适合给别人的项目做贡献。',
   },
   {
     key: 'isolated',
-    name: '隔离式',
+    name: SHAPE_LABELS.isolated,
     from: '代码只在设备上',
     to: '永不上传，Hub 只存元数据',
     hint: 'Hub 不知道代码长什么样，但仍能看到每次执行的对话与 diff。适合客户现场、内网、合规。',

@@ -67,11 +67,16 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
    =========================================================================== */
 .af-app {
   display: grid;
-  grid-template-columns: 208px 1fr;
-  grid-template-rows: 40px 1fr 24px;
+  /* 原型 `tokens.css:38` 的 `--rail-w: 224px`。上一版写死 208px，比原型窄 16px
+     —— 侧栏一窄，导航项的文字就更容易截断，而「哪一档是真的」没人量过。
+     现在两侧共用同一个布局常量，改一处两句一起动。 */
+  grid-template-columns: var(--af-rail-w) 1fr;
+  /* 顶栏高度对齐原型的 `--head-h: 56px`（上一版 40px，比原型矮 16px）。 */
+  grid-template-rows: var(--af-head-h) 1fr 24px;
   grid-template-areas: 'sidebar topbar' 'sidebar main' 'status status';
   height: 100vh;
-  background: var(--af-surface-1);
+  height: 100dvh;
+  background: var(--p-bg);
 }
 .af-app[data-rail='collapsed'] { grid-template-columns: 52px 1fr; }
 /* 折叠只看文字与提示，**按钮本身留着**：`.af-sidebar__close` 是折叠态唯一的
@@ -104,20 +109,28 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
    注意这里**不设** `grid-area`：`.af-brand` 是 `.af-sidebar` 的子节点，
    它跟着侧栏一起被 grid 摆放，自己不再是一个网格区域。 */
 .af-brand {
-  display: flex; align-items: center; gap: var(--af-space-3);
-  padding: var(--af-space-3) var(--af-space-3) var(--af-space-2);
+  display: flex; align-items: center; gap: var(--p-s3);
+  /* 原型 `.af-rail__brand`：`padding: 16px` + `min-height: var(--head-h)`，
+     并且有 `border-bottom`。两者同高才让侧栏品牌行与顶栏在一条水平线上
+     —— 上一版品牌行只有内容高、顶栏 40px，两条线错开，看起来像两张表格
+     拼在一起。 */
+  padding: var(--p-s4) var(--p-s4);
+  min-height: var(--af-head-h);
+  border-bottom: 1px solid var(--p-line);
   /* 品牌区不随导航滚动：滚动侧栏时标题必须一直可见 */
   flex: 0 0 auto;
 }
 .af-brand__mark {
   flex: 0 0 auto;
-  width: 22px; height: 22px; border-radius: var(--af-radius-sm);
-  background: var(--af-accent);
-  box-shadow: 0 0 0 3px var(--af-accent-bg);
+  width: 26px; height: 26px; border-radius: var(--p-r-sm);
+  background: var(--p-acc-bg); border: 1px solid var(--p-acc-line);
+  display: grid; place-items: center;
+  color: var(--p-acc); font-size: var(--p-t-xs); font-weight: var(--af-weight-bold);
 }
+.af-brand__mark::after { content: 'AF'; }
 .af-brand__name {
-  font-size: var(--af-text-2xs);
-  color: var(--af-fg-tertiary); letter-spacing: var(--af-tracking-label);
+  font-size: var(--p-t-sm); font-weight: var(--af-weight-semibold);
+  color: var(--p-fg-strong);
   white-space: nowrap;
 }
 
@@ -142,10 +155,10 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 
 .af-sidebar {
   grid-area: sidebar;
-  display: flex; flex-direction: column; gap: var(--af-space-2);
-  padding: var(--af-space-3);
-  background: var(--af-surface-1);
-  border-right: 1px solid var(--af-border-subtle);
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 0 var(--p-s2);
+  background: var(--p-bg);
+  border-right: 1px solid var(--p-line-2);
   /* **`overflow-x: hidden` 不能省**（2026-10-28 用户反馈）。
      只写 `overflow-y: auto` 时 `overflow-x` 的计算值**是 `auto` 而不是
      `visible`**（CSS Overflow 规范：一轴非 visible 会把另一轴的 visible
@@ -162,48 +175,55 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 /* 只负责 1px 的条目间距。上一版这里还有分组标题（`.af-navgroup__title`），
    但三个组各只有一项——标题与它唯一的条目说的常常是同一个词，所以标题与
    分组的字段一起删掉了，布局这一半留着（见 App.vue 模板里的说明）。 */
-.af-navgroup { display: flex; flex-direction: column; gap: 1px; }
+.af-navgroup { display: flex; flex-direction: column; gap: 1px; padding: var(--p-s4) 0 var(--p-s2); }
 .af-sidebar__item {
-  display: flex; align-items: center; gap: var(--af-space-3);
-  height: var(--af-row-regular); padding: 0 var(--af-space-3);
-  border-radius: var(--af-radius-sm); text-decoration: none;
-  color: var(--af-fg-secondary); font-size: var(--af-text-sm);
+  display: flex; align-items: center; gap: var(--p-s3);
+  /* 原型 `.af-rail__list a` 是 `min-height: var(--row)`(32px) + `padding: 0 12px`。
+     用 `min-height` 而不是 `height`：导航项文字放大字号或换行时不该被切掉。 */
+  min-height: var(--p-row); padding: 0 var(--p-s3);
+  border-radius: var(--p-r-sm); text-decoration: none;
+  color: var(--p-fg-2); font-size: var(--p-t-sm);
   position: relative;
-  transition: background-color var(--af-dur-instant) linear, color var(--af-dur-instant) linear;
+  transition: background var(--p-dur) var(--p-ease), color var(--p-dur) var(--p-ease);
 }
-.af-sidebar__item:hover { background: var(--af-surface-2); color: var(--af-fg-primary); }
-.af-sidebar__item:active { background: var(--af-surface-3); }
+.af-sidebar__item:hover { background: var(--p-surf-1); color: var(--p-fg-strong); }
+.af-sidebar__item:active { background: var(--p-surf-3); }
+/* 原型 `.af-rail__list a[aria-current="page"]`：底色 + 整圈 1px 内描边 + 中等字重，
+   **不是**左边一条 2px 的强调色竖线（上一版是竖线，原型不是）。 */
 .af-sidebar__item[aria-current='page'] {
-  background: var(--af-accent-bg); color: var(--af-accent-fg);
-  box-shadow: inset 2px 0 0 var(--af-accent);
+  background: var(--p-surf-2); color: var(--p-fg-strong);
+  font-weight: var(--af-weight-medium);
+  box-shadow: inset 0 0 0 1px var(--p-line-2);
 }
-.af-sidebar__icon { flex: 0 0 16px; text-align: center; font-size: var(--af-text-sm); }
-.af-sidebar__item-text { flex: 1 1 auto; }
+.af-sidebar__icon { flex: 0 0 16px; text-align: center; font-size: var(--p-t-sm); }
+.af-sidebar__item-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .af-sidebar__hint {
-  font-size: var(--af-text-sm); color: var(--af-fg-tertiary);
-  opacity: 0; transition: opacity var(--af-dur-fast) var(--af-ease-out);
+  font-size: var(--p-t-2xs); color: var(--p-fg-3);
+  opacity: 0; transition: opacity var(--af-dur-fast) var(--p-ease);
 }
 .af-sidebar__item:hover .af-sidebar__hint,
 .af-sidebar__item:focus-visible .af-sidebar__hint { opacity: 1; }
 .af-sidebar__close {
   text-align: left; background: none; border: 0; cursor: pointer;
-  color: var(--af-fg-tertiary); font-size: var(--af-text-sm);
-  font-family: inherit; padding: var(--af-space-2) var(--af-space-3);
-  border-radius: var(--af-radius-sm);
+  color: var(--p-fg-3); font-size: var(--p-t-sm);
+  font-family: inherit; padding: var(--p-s2) var(--p-s3);
+  border-radius: var(--p-r-sm);
 }
-.af-sidebar__close:hover { background: var(--af-surface-2); color: var(--af-fg-primary); }
+.af-sidebar__close:hover { background: var(--p-surf-1); color: var(--p-fg-strong); }
 
 .af-topbar {
   grid-area: topbar;
-  display: flex; align-items: center; gap: var(--af-space-3);
-  padding: 0 var(--af-space-4);
-  background: var(--af-surface-1);
-  border-bottom: 1px solid var(--af-border-subtle);
+  display: flex; align-items: center; gap: var(--p-s3);
+  padding: 0 var(--p-s6);
+  background: var(--p-bg);
+  border-bottom: 1px solid var(--p-line-2);
 }
-.af-main { grid-area: main; overflow: auto; background: var(--af-surface-0); }
+/* 原型 `.af-main`：主区**不换底色**（与外壳同一个 --bg），分区靠区域容器亮一档。
+   上一版把主区压成 surface-0、外壳 surface-1，等于把层次关系倒过来。 */
+.af-main { grid-area: main; overflow: auto; background: var(--p-bg); min-width: 0; min-height: 0; }
 .af-topbar__title {
-  font-size: var(--af-text-md); font-weight: var(--af-weight-medium);
-  color: var(--af-fg-primary); margin: 0;
+  font-size: var(--p-t-lg); font-weight: var(--af-weight-semibold);
+  color: var(--p-fg-strong); margin: 0; white-space: nowrap;
 }
 
 .af-statusbar {
@@ -221,19 +241,44 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 /* ===========================================================================
    2. 布局原语
    =========================================================================== */
-.af-page { max-width: 1400px; margin: 0 auto; padding: var(--af-space-10) var(--af-space-11); }
-.af-page--flush { max-width: none; padding: 0; height: 100%; }
+/* 页面根容器。
+   ---------------------------------------------------------------------------
+   **上一版这里是「居中单栏」**：`max-width: 1400px; margin: 0 auto`。原型不是这样
+   ——原型每一页都是「外壳里吃满宽度的主区 + 贴顶页头」（`app.css:113-134` 的
+   `.af-main` / `.af-head` / `.af-body`）。居中单栏在宽屏上左右各留一大片空白，
+   而原型是把内容铺满主区，这正是用户说「整个页面和新的原型设计完全不一样」
+   最直接的一条。
+
+   现在把 `.af-page` 改成**原型主区的几何**，于是 10 个已交付页面同时对齐，
+   不必逐页改模板：
+     · 不设 `max-width`，不居中（主区就是它的宽度）
+     · 内边距取原型 `.af-body--pad` 的 `var(--p-s6)`（24px），不是原来的 24/32 混用
+     · 撑满高度并允许内部纵向滚动（原型 `.af-body { flex:1; min-height:0; overflow:auto }`）
+   逐页迁移到 `.af-body` / `.af-head` 显式类仍在做（`BoardPage` 已完成），
+   但在那之前这条兜底保证「没有哪一页还是居中单栏」。 */
+.af-page {
+  padding: var(--p-s6);
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--p-bg);
+}
+.af-page--flush { padding: 0; height: 100%; }
 /* 页头是「标题 + 右侧动作」的一行。两侧**顶对齐**而不是底对齐：标题是两行时，
-   动作按钮要贴着第一行，贴着最后一行会看起来掉下来。 */
+   动作按钮要贴着第一行，贴着最后一行会看起来掉下来。
+   最小高度取原型的 `--head-h`，让各页页头在同一水平线上。 */
 .af-page__head {
   display: flex; align-items: flex-start; justify-content: space-between;
-  gap: var(--af-space-4); margin-bottom: var(--af-space-8);
+  gap: var(--p-s3); margin-bottom: var(--p-s5);
+  min-height: var(--af-head-h);
 }
 .af-page__title {
-  font-size: var(--af-text-xl); font-weight: var(--af-weight-semibold);
-  margin: 0 0 var(--af-space-2); letter-spacing: -0.01em;
+  /* 原型 `.af-head__title` 是 `--t-lg`(18px) + semibold；上一版是 `text-xl`(18px)
+     但底边距 8px、字距 -0.01em 都多出来了。 */
+  font-size: var(--p-t-lg); font-weight: var(--af-weight-semibold);
+  margin: 0; line-height: var(--p-lh-tight); color: var(--p-fg-strong);
 }
-.af-page__actions { display: flex; align-items: center; gap: var(--af-space-3); flex: 0 0 auto; }
+.af-page__actions { display: flex; align-items: center; gap: var(--p-s2); flex: 0 0 auto; }
 .af-page__sub {
   margin: 0; color: var(--af-fg-secondary); font-size: var(--af-text-md);
   line-height: var(--af-leading-base); max-width: 76ch;
@@ -285,37 +330,49 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
    禁用态三管齐下：opacity + pointer-events + aria-disabled。
    =========================================================================== */
 .af-btn {
-  display: inline-flex; align-items: center; justify-content: center; gap: var(--af-space-2);
-  height: var(--af-row-compact); padding: 0 var(--af-space-4);
-  background: var(--af-surface-2); color: var(--af-fg-primary);
-  border: 1px solid var(--af-border-default); border-radius: var(--af-radius-sm);
-  font-family: inherit; font-size: var(--af-text-sm); font-weight: var(--af-weight-medium);
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--p-s2);
+  /* **按钮行高是 `row-regular`(32px)，不是 `row-compact`(26px)**。
+     依据 `design-system.md:222`：「`row-compact` 26px（表格、树、日志）/
+     `row-regular` 32px（**按钮**、导航项）」；原型 `.af-btn` 也是
+     `min-height: var(--row)` = 32px。
+     上一轮这里写的是 `height: var(--af-row-compact)`，比原型矮 6px，
+     文档还专门警示过「部分控件命中区只有 26px 高 → 必须有替代路径」——
+     而主按钮本身成了那个 26px。这是「视觉又小又硬」最直接的来源。
+     用 `min-height` 而非 `height`：文字放大或换行时不该被切。 */
+  min-height: var(--p-row); padding: 0 var(--p-s3);
+  background: var(--p-surf-2); color: var(--p-fg);
+  border: 1px solid var(--p-line-3); border-radius: var(--p-r-sm);
+  font-family: inherit; font-size: var(--p-t-sm); font-weight: var(--af-weight-medium);
   cursor: pointer; white-space: nowrap; text-decoration: none;
-  transition: background-color var(--af-dur-instant) linear, border-color var(--af-dur-instant) linear;
+  transition: background var(--p-dur) var(--p-ease),
+              border-color var(--p-dur) var(--p-ease),
+              color var(--p-dur) var(--p-ease);
 }
-.af-btn:hover { background: var(--af-surface-3); border-color: var(--af-border-strong); }
-.af-btn:active { background: var(--af-surface-1); }
+.af-btn:hover { background: var(--p-surf-3); border-color: var(--p-line-4); color: var(--p-fg-strong); }
+.af-btn:active { background: var(--p-surf-2); }
 .af-btn:disabled, .af-btn[aria-disabled='true'] {
   opacity: 0.5; pointer-events: none; color: var(--af-fg-disabled);
 }
-.af-btn--sm { height: 22px; padding: 0 var(--af-space-3); font-size: var(--af-text-sm); }
-.af-btn--lg { height: var(--af-row-regular); padding: 0 var(--af-space-6); font-size: var(--af-text-md); }
-.af-btn--icon { width: 26px; padding: 0; }
-.af-btn--icon.af-btn--sm { width: 22px; }
+/* 原型 `.af-btn--sm { min-height: 26px; font-size: var(--t-2xs); padding: 0 8px }` */
+.af-btn--sm { min-height: 26px; padding: 0 var(--p-s2); font-size: var(--p-t-2xs); }
+.af-btn--lg { min-height: var(--af-row-regular); padding: 0 var(--p-s6); font-size: var(--af-text-md); }
+.af-btn--icon { width: var(--p-row); padding: 0; }
+.af-btn--icon.af-btn--sm { width: 26px; }
 
 .af-btn--primary {
-  background: var(--af-accent); color: var(--af-fg-on-accent); border-color: var(--af-accent);
+  background: var(--p-acc); color: var(--p-on-acc); border-color: var(--p-acc);
+  font-weight: var(--af-weight-semibold);
 }
-.af-btn--primary:hover { background: var(--af-accent-hover); border-color: var(--af-accent-hover); }
+.af-btn--primary:hover { background: var(--p-acc-strong); border-color: var(--p-acc-strong); color: var(--p-on-acc); }
 .af-btn--primary:active { background: var(--af-accent-active); border-color: var(--af-accent-active); }
 
 .af-btn--danger {
-  background: var(--af-danger-bg); color: var(--af-danger-fg); border-color: var(--af-danger-line);
+  background: var(--p-failed-bg); color: var(--p-failed); border-color: var(--p-failed-line);
 }
-.af-btn--danger:hover { background: var(--af-danger); color: var(--af-fg-on-accent); border-color: var(--af-danger); }
+.af-btn--danger:hover { background: var(--p-failed-bg); color: var(--p-failed); border-color: var(--p-failed); }
 
-.af-btn--ghost { background: none; border-color: transparent; color: var(--af-fg-secondary); }
-.af-btn--ghost:hover { background: var(--af-surface-2); color: var(--af-fg-primary); border-color: transparent; }
+.af-btn--ghost { background: transparent; border-color: transparent; color: var(--p-fg-2); }
+.af-btn--ghost:hover { background: var(--p-surf-2); color: var(--p-fg-strong); border-color: transparent; }
 
 /* 分段控件：互斥选项，选中的那格必须比 hover 更亮（否则分不出） */
 .af-seg { display: inline-flex; background: var(--af-surface-2); border-radius: var(--af-radius-sm); padding: 1px; }
@@ -1448,23 +1505,56 @@ kbd, .kbd {
 
 /* ---- 看板：六列 -------------------------------------------------------- */
 
-/* 六列横向排开。**列不收缩**（`flex: 1 0 …`）：任务列被挤窄会让卡片里的标题
-   变成两三个字一行，而看板的价值就在于扫一眼能看全。容器横向滚动。 */
+/* 六列横向排开。**列不收缩**：任务列被挤窄会让卡片里的标题变成两三个字
+   一行，而看板的价值就在于扫一眼能看全。容器横向滚动。
+
+   列宽下限 **236px 与原型一致**（`prototype/assets/app.css:372` 的
+   `grid-auto-columns: minmax(236px, 1fr)`）。上一版写 180px，比原型窄 56px
+   —— 同一张卡片在原型里一行放得下，在实现里折成两行。 */
 .af-board {
-  display: grid; grid-template-columns: repeat(6, minmax(180px, 1fr));
-  gap: var(--af-space-4); align-items: start;
-  overflow-x: auto; padding-bottom: var(--af-space-4);
+  display: grid; grid-template-columns: repeat(6, minmax(236px, 1fr));
+  gap: var(--p-s3); align-items: start;
+  overflow-x: auto; padding-bottom: var(--p-s3);
 }
 .af-board__col {
-  display: flex; flex-direction: column; gap: var(--af-space-3);
-  background: var(--af-surface-1); border: 1px solid var(--af-border-subtle);
-  border-radius: var(--af-radius-md); padding: var(--af-space-4);
-  min-height: 220px;
+  display: flex; flex-direction: column; gap: var(--p-s2);
+  background: var(--p-surf-1); border: 1px solid var(--p-line-2);
+  border-radius: var(--p-r-md); padding: 0;
+  min-height: 220px; overflow: hidden;
 }
-.af-board__colhead { display: flex; align-items: center; justify-content: space-between; }
+/* 列头：原型 `.af-col__head`（`app.css:387-393`）是一条**贴着列顶的横带**，
+   带 2px 状态色带、底部一条细线，左右 12px 内边距，而不是列内的一块内容。
+   下面 `.af-board__colhead` 的 `padding` 就来自这里——上一版列头是裸的一行
+   flex，所以六列顶端没有任何状态标记。 */
+.af-board__colhead {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--p-s2);
+  padding: var(--p-s3);
+  border-top: 2px solid var(--p-line-3);
+  border-bottom: 1px solid var(--p-line-2);
+  flex: 0 0 auto;
+}
+/* 六态的顶部色带：这里与 `prototype-shell.css` §5 是同一件事的两个落点——
+   看板页用的是 `.af-board__col[data-state]`，原型用的是 `.af-col[data-state]`。
+   两处都必须有，否则「原型对齐但页面没生效」或反之。 */
+.af-board__col[data-state='pending'] .af-board__colhead { border-top-color: var(--p-pending); }
+.af-board__col[data-state='queued']  .af-board__colhead { border-top-color: var(--p-queued); }
+.af-board__col[data-state='running'] .af-board__colhead { border-top-color: var(--p-running); }
+.af-board__col[data-state='review']  .af-board__colhead { border-top-color: var(--p-review); }
+.af-board__col[data-state='done']    .af-board__colhead { border-top-color: var(--p-done); }
+.af-board__col[data-state='failed']  .af-board__colhead { border-top-color: var(--p-failed); }
+
+/* 列体的内边距与卡片间距（原型 `.af-col__body`：`padding: 8px`、`gap: 8px`）。
+   `.af-board__colbody` 是卡片列表的容器——上一版没有它，卡片直接排在
+   有 16px padding 的列里，于是列头与卡片左边不对齐。 */
+.af-board__colbody {
+  padding: var(--p-s2);
+  display: flex; flex-direction: column; gap: var(--p-s2);
+  overflow-y: auto; min-height: 0; flex: 1;
+}
 .af-board__coltitle {
-  margin: 0; font-size: var(--af-text-sm); font-weight: var(--af-weight-semibold);
-  color: var(--af-fg-primary); letter-spacing: var(--af-tracking-label);
+  margin: 0; font-size: var(--p-t-xs); font-weight: var(--af-weight-semibold);
+  color: var(--p-fg-strong); letter-spacing: normal;
 }
 /* 列的说明句（「失败的任务停在这里，不会自动回待办」）。它是**列语义的一部分**，
    不是装饰：六态的名字对第一次见到的人不足以说明「为什么失败要单独一列」。 */

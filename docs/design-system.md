@@ -15,7 +15,7 @@
 > 1. **原型代码**：逐页对照时以 `prototype/` 的选择器与结构为准；对不上的地方登进
 >    里程碑 Bugs 表，**不在实现里默默偏移**。
 > 2. **token 真身仍只有一份**：`packages/web/src/styles/{tokens,components}.css`（`--af-*`）。
->    原型 `prototype/assets/tokens.css` 定义的是**另一套命名**（`--t-2xs` / `--s-3` 等，
+>    原型 `prototype/assets/tokens.css` 定义的是**另一套命名**（`--t-2xs` / `--s3` 等，
 >    **零个 `--af-*`**），所以它**不是**第二份真相源，`scripts/check.sh` C5 据此判它合法。
 >    搬视觉时**只搬取值与结构，不搬命名**。
 > 3. **优先级写死**：`docs/PRODUCT.md`（做什么）> `docs/architecture/*.md`（怎么设计）
@@ -86,8 +86,23 @@
 
 ## 2. 设计 token
 
-全部定义在 `packages/web/src/styles/tokens.css`（130 个变量），那是被 grep 检查的唯一真相源。
+全部定义在 `packages/web/src/styles/tokens.css`（136 个变量）；`sort -u` 后是 131 个唯一名，
+差的 5 个是两条响应式覆盖（口径见 §2.1）。那是被 grep 检查的唯一真相源。
 下面只写**判断依据**。
+
+> **为什么是「定义行」而不是「变量数」**：`grep -cE '^\s*--af-[a-z0-9-]+\s*:'` 数的是**定义行**，
+> 得 136；`sort -u` 去重后是 **131 个唯一名**。差的 5 个不是笔误，是两条响应式覆盖：
+> `--af-dur-{instant,fast,slow}` 在 `@media (prefers-reduced-motion: reduce)` 里被重写成 `0ms`，
+> `--af-border-{subtle,default}` 在 `@media (forced-colors: active)` 里被重写成 `CanvasText`。
+> **口径**：说「136」时指定义行（v0.8.0 从 130 行涨到 136 行：新增 4 个布局常量
+> `--af-rail-w` / `--af-head-h` / `--af-navbtn` / `--af-measure`，以及 2 个 pending 色块
+> `--af-pending-bg` / `--af-pending-line`——后两个原先是写在别名层里的字面色值，
+> 被搬回了真身层）；说「131」时指唯一名。两个数都对，但不能混用。
+>
+> **原型槽位别名（`tokens.css` 末尾那一节）不计入这两个数**：它们用独立命名空间 `--p-*`
+> （`--p-s3`、`--p-line-2`、`--p-pending`…），只做 `var()` 转发、不定义取值。
+> 混用 `--af-` 前缀会让上面这个计数把别名也算进去（130 → 210），
+> 并让「每个 token 只定义一次」那条不变量把别名判成重复定义。
 
 ### 2.0 三条纪律
 
@@ -247,7 +262,7 @@
 | 用途 | 前缀 | 例 | 与原型的关系 |
 |---|---|---|---|
 | 字号 | `--af-text-*` | `--af-text-2xs` | 原型 `--t-2xs` 的取值搬过来，名字重写 |
-| 间距 | `--af-space-*` | `--af-space-3` | 原型 `--s-3` |
+| 间距 | `--af-space-*` | `--af-space-3` | 原型 `--s3` |
 | 行高 | `--af-leading-*` | `--af-leading-body` | 原型 `--lh-*` |
 | 圆角 | `--af-radius-*` | `--af-radius-md` | 原型 `--r-*` |
 | 颜色 | `--af-color-*` | `--af-color-accent` | 原型颜色在 `theme-*.css`，同理搬运 |
@@ -270,8 +285,11 @@
    「第二套命名活下来」。
 3. **判定方式是可 grep 的两条**（`scripts/check.sh` C5 + 里程碑测试标准）：
    `grep -rn -- '--af-' prototype/ | wc -l` 必须是 **0**（原型不定义生产
-   token）；`grep -rn -- '--t-2xs\|--s-3\b' packages/web/src | wc -l` 必须是
+   token）；`grep -rnE -- '--t-2xs\|\-\-s[1-8]\b' packages/web/src | wc -l` 必须是
    **0**（实现里不出现原型前缀）。两条都是 0，才算「只搬取值不搬命名」。
+   第二条要匹配**原型真名** `--s1`…`--s8`（`prototype/assets/tokens.css:32-33`）——
+   早先这里写的是 `--s-3`，原型里根本没有这个名字，于是把真名 `--s3` 抄进实现
+   也照旧返回 0，等于什么都没测。
 
 **默认无动效。** 动效只用在「状态真的变了」的时刻，且必须能被 `prefers-reduced-motion` 关掉
 （tokens.css 里降为 0ms）。**数据刷新不加动效**——那会让「刷新」本身变成一件需要等待的事。
@@ -330,22 +348,30 @@
 > 若拆回页面，同一段焦点陷阱 / 拖拽语义会立刻在第二个页面里重写一遍。
 > 判据：**调用点只有 1 个、但实现抄第二遍的概率 > 0，就留着；否则拆掉。**
 
-**为什么 `PageHead` 只收敛了 4 页，另外 10 个页头照旧**：剩下的页头
+**为什么 `PageHead` 只收敛了 4 页，另外 9 个页头照旧**：剩下的页头
 （`OverviewPage` / `ArchivedPage` / `NewProjectPage` / `DevicesPage` /
-`SettingsPage` / `NewSessionPage` / `ProjectSettingsPage` …）用的是**另一套
+`SettingsPage` / `NewSessionPage` / `ProjectSettingsPage` / `BoardPage` /
+`AgentCatalogPage`）用的是**另一套
 更简单的形状**——直接 `<header class="af-page__head">` 里放 `h1` +
 `.af-page__actions`，没有裸 `<div>` 包主区、也没有间隔柱，本来就没有需要
 收敛的分叉。为了「统一」把它们也改成组件，只会给一个没有问题的形状增加
-一层跳转，而且那 10 页里有 8 页正被**并行的页面重排任务**改着
-（`domains/project/**`），改它们是制造冲突而不是收敛。
+一层跳转，而且这 9 页里有 5 页在 `domains/project/**`
+（`OverviewPage` / `ArchivedPage` / `NewProjectPage` / `ProjectSettingsPage` /
+`BoardPage`），那是**并行的页面重排任务**正在整段改的目录，改它们是制造
+冲突而不是收敛。
+
+> **口径**：27 个 `*Page.vue` 实测 4 页用 `<PageHead>`、9 页用裸
+> `.af-page__head`（`SkeletonPage.vue` 这个组件本身也渲染该类，不计），
+> 其余 13 页（骨架页与认证页）没有页头。此前这里写「10 个页头」把
+> `SkeletonPage.vue` 组件自身算了进去，现已排除。
 
 #### 3.0.1 已知重复，暂不抽取
 
 | 重复项 | 出现在哪 | 为什么现在抽不划算 |
 |--------|---------|-----------------|
-| `.af-region`（分区：head + title + note + body）的结构 | 7 个文件 **26 处**：`ProjectTaskPage`(6)、`BindPage`(6)、`ProjectSettingsPage`(5)、`DeviceDetailPage`(5)、`AgentDetailPage`(3)、`FailurePanel`(1)、`AcceptancePanel`(1) | 结构确实重复，但**抽取的代价落在最坏的位置**：26 处里有 13 处在 `domains/project/**`，那是并行任务正在整段重写的文件，此刻抽组件会让两份改动在同一批行上互相打架。更实的理由是这个结构**只有 4 个节点、零 props、零状态**，重复的是标签而不是逻辑——`<section class="af-region"><div class="af-region__head"><h2 class="af-region__title">…` 读起来比 `<PageRegion title="…" note="…">` 更接近 `prototype/` 的原文，而「照原型结构核对」是本里程碑的验收方式。等 `domains/project/**` 的页面重排落地、26 处里不再有一半在改的时候再抽，那时还能顺便定 `flush` / `todo` 两个变体的契约 |
+| `.af-region`（分区：head + title + note + body）的结构 | 7 个文件 **27 处**（口径：模板里 `class` 属性拆分后含整词 `af-region` 的元素数，不是 `grep -c af-region` 的字符串命中数——后者会连同 `af-region__head` 一起数）：`ProjectTaskPage`(6)、`BindPage`(6)、`ProjectSettingsPage`(5)、`DeviceDetailPage`(5)、`AgentDetailPage`(3)、`FailurePanel`(1)、`AcceptancePanel`(1) | 结构确实重复，但**抽取的代价落在最坏的位置**：27 处里有 **19 处**在 `domains/project/**`（`ProjectTaskPage` 6 + `BindPage` 6 + `ProjectSettingsPage` 5 + 两个面板 2），那是并行任务正在整段重写的文件，此刻抽组件会让两份改动在同一批行上互相打架。更实的理由是这个结构**只有 4 个节点、零 props、零状态**，重复的是标签而不是逻辑——`<section class="af-region"><div class="af-region__head"><h2 class="af-region__title">…` 读起来比 `<PageRegion title="…" note="…">` 更接近 `prototype/` 的原文，而「照原型结构核对」是本里程碑的验收方式。等 `domains/project/**` 的页面重排落地、27 处里不再有一半在改的时候再抽，那时还能顺便定 `flush` / `todo` 两个变体的契约 |
 | 页头里「标题 + `<StateBadge>`」的组合 | `AgentDetailPage`、`DeviceDetailPage`、`ProjectTaskPage`（3 页） | 看起来达标（≥2 页），但三处的**第二行各不相同**：Agent 是一句能力说明、设备是一段视角解释、任务是一行 `state · 第 n 版 · 更新时间`（且带 `needs_manual_acceptance` 标签）。合成一个组件就要 3 个 props 加 2 个插槽，而它省下的只是一个 `<h1 class="af-page__title">`。`PageHead` 已经把这一行的**布局**收掉了，剩下的重复是内容 |
-| 表格外框 `<div class="af-tablewrap"><table class="af-table">` | `BindPage`(3)、`ProjectSettingsPage`(4)、`ProjectTaskPage`(1)、`AgentDetailPage`(1)、`DeviceTable.vue`(1) | 5 个文件 10 处，**但每张表的列结构完全不同**（列数 3–7、表头文案、单元格是按钮还是文本）。要抽成组件就得把列定义也传进去，那是一个「表格引擎」，不是复用；而 `components.test.ts` 已经钉住 `.af-tablewrap` / `.af-table` 的规则**只有一份**（住在 `components.css` 的表格段），重复的只是两个 `class` 属性。等真有第二张**列结构相同**的表再抽 |
+| 表格外框 `<div class="af-tablewrap"><table class="af-table">` | 全仓**只有 1 处**：`DeviceTable.vue`（`:113`）。其余 12 张 `<table class="af-table">` 分布在 `ProjectSettingsPage`(4)、`BindPage`(2)、`SettingsPage`(2)、`OverviewPage`(1)、`ArchivedPage`(1)、`AgentCatalogPage`(1)、`DeviceTable.vue`(1)，它们**没有** `af-tablewrap` 外框 | 没有 5 个文件 10 处这回事：`af-table` 有 12 处，但外框只有 1 处，**能抽的样本是 1 而不是 10**——不满足「≥2 个调用点」的门槛，所以本轮既不抽也不登记为重复。另外每张表的列结构确实完全不同（列数 3–7、表头文案、单元格是按钮还是文本），要抽成组件就得把列定义也传进去，那是一个「表格引擎」，不是复用；而 `components.test.ts` 已经钉住 `.af-tablewrap` / `.af-table` 的规则**只有一份**（住在 `components.css` 的表格段），重复的只是两个 `class` 属性。等真有第二张**列结构相同**的表再抽 |
 | `.af-page__sub` 之外的页面副标题写法（`af-muted` 说明段落） | `OverviewPage`、`ArchivedPage`、`BindPage`、`ProjectSettingsPage` 等多页 | 已经是**一个类**（`components.css` 的「次要说明句」段，`.af-muted`），不是一段模板。这里没有结构可抽，只有类名在用 |
 | `.af-head__title`（块标题） | `BoardPage` **2 处**（看板页头的项目名、新建任务对话框标题） | 规则**已经补上**（`components.css` 新增一条 `.af-head__title`）——这是本次收口抓到的一个真缺陷：类名在模板里用了两次，样式表里一条规则都没有，于是 `h1` / `h2` 吃的是浏览器默认尺寸（34px / 24px、700 字重）。**不抽组件**：它只是一个类，抽组件只会得到一层套 `h2` 的 `<BlockTitle>`，而两处的元素一个是 `h1`、一个是 `h2`（一个在页面头里、一个在对话框里），语义不同不能合并 |
 
@@ -1656,7 +1682,7 @@ Mock 形状 = 将来 API 的形状。前端只读。
 > 留着会让人照着旧信息架构实现。但**结论不是「不要原型」而是「重建原型」**——
 > 现在 `prototype/` 下是 21 页新原型，覆盖项目 / 看板 / 任务 / 执行 / 会话 /
 > 设备 / Agent / 收件箱 / 管家 IM / 设置 等全部界面。**但两者不是「同一份令牌」**——
-> 原型 `prototype/assets/tokens.css` 用的是另一套命名（`--t-2xs` / `--s-3` 等，零个
+> 原型 `prototype/assets/tokens.css` 用的是另一套命名（`--t-2xs` / `--s3` 等，零个
 > `--af-*`），取值与生产对齐、**命名不对齐**（2026-11-13 修正，原文写「同一份 `tokens.css` 取值」，
 > 那会让人以为可以原样复制变量名）：
 >
@@ -1670,7 +1696,7 @@ Mock 形状 = 将来 API 的形状。前端只读。
 | 规范条目 | 生产文件（唯一真相源） |
 |---|---|
 | 本文件（判断依据） | `docs/design-system.md` |
-| §2 token 定义（130 个变量） | `packages/web/src/styles/tokens.css` |
+| §2 token 定义（130 个定义行 / 125 个唯一名） | `packages/web/src/styles/tokens.css` |
 | §3 组件样式（23 节） | `packages/web/src/styles/components.css` |
 | §4 交互范式 / 焦点栈 / 键位表 | `packages/web/src/shared/keynav.ts` + `shared/focus.ts` + `shared/shell-keys.ts` |
 | 外壳与导航 | `packages/web/src/App.vue` + `page-chrome.css` | 
@@ -1751,7 +1777,7 @@ Mock 形状 = 将来 API 的形状。前端只读。
 > | 量的是什么 | 命令 | 实测 | 结论 |
 > |-----------|------|------|------|
 > | 原型是否偷偷定义了生产 token | `grep -rn -- '--af-' prototype/ \| wc -l` | `0` | 成立。原型确实只有 `--t-*` / `--s*` / `--lh-*` / `--r-*` 这套命名 |
-> | 实现里是否抄了原型前缀 | `grep -rn -- '--t-2xs\|--s-3\b' packages/web/src \| wc -l` | `0` | 成立。此前担心的「两套命名并存」没有发生 |
+> | 实现里是否抄了原型前缀 | `grep -rnE -- '--t-2xs\|--s[1-8]\b' packages/web/src \| wc -l` | `0` | 成立。此前担心的「两套命名并存」没有发生。**注意**：这条命令原先写的是 `--s-3`，原型里没有那个名字（真名是 `--s1`…`--s8`），所以那个 `0` 什么也证明不了——已于 v0.8.0 步骤5 改正 |
 > | 页面里有没有硬编码颜色 / 字号 | `grep -rnE '#[0-9a-fA-F]{3,8}\|font-size:\s*[0-9]+px' packages/web/src --include=*.vue` | 起初 **1 命中，且是注释**（`StateBadge.vue` 里解释「早先是个 9px 的裸值」的那句）；把那句改写掉之后为 **0** | 零个真实的裸值。改写注释而不是留着列清单：那句注释本身就是 `font-size: 9px` 的字面，它让门禁永远有一个要人工解释的命中 |
 > | 引用了但没定义的 token | Vue 里 `var(--af-*)` 的集合 减 tokens.css 的定义集合 | **1 个：`--af-fg-muted`** | 已修（见下） |
 > | C5 是否真的在检查原型目录 | 往 `prototype/assets/tokens.css` 加一行 `--af-x: 1px` 再跑 | C5 从 ✅ 变 ❌，并点名 `./prototype/assets/tokens.css`；删掉后恢复 ✅，`check.sh` RC 回到 0 | 判定逻辑无缺陷，**`scripts/check.sh:487-520` 一个字没动** |
@@ -1822,7 +1848,7 @@ Mock 形状 = 将来 API 的形状。前端只读。
 | 9 | 会话 | `prototype/session.html` | `SessionPage.vue` | 3 | 0 | 0 | 3 | 只登记 |
 | 10 | 看板 | `prototype/board.html` | `BoardPage.vue` | 4 | 0 | 0 | 4 | 只复核登记 |
 
-合计 **42 条差异，16 条必修且已全部修复，26 条登记不修**（逐页详情见 §10.2，四页合计 3+2+4+5+2 = 16）。
+合计 **42 条差异，16 条必修且已全部修复，26 条不修**（逐页详情见 §10.2；26 = 真正「不修」19 条 + 「无需修」2 条 + 判给子任务 6/7 的 5 条）。**必修 16 条全部落在前 5 页：3+2+4+5+2 = 16**，第 6–10 页一条必修都没有。
 
 ### 10.2 逐页清单
 
@@ -1935,14 +1961,14 @@ Mock 形状 = 将来 API 的形状。前端只读。
 
 #### 10. 看板 `BoardPage.vue`（只复核登记，**代码不改**）
 
-原型 `prototype/board.html` 存在（205 行）。实现 536 行。**以下四条真实存在，但按要求只在报告里列出、不自行修改**：
+原型 `prototype/board.html` 存在（205 行）。实现 538 行。**以下四条真实存在，但按要求只在报告里列出、不自行修改**：
 
-| # | 原型位置 | 差异 | 归属 |
-|---|---------|------|------|
-| 10-1 | `board.html:46` | **缺**：`.af-meters` 项目摘要四行（由 `assets/board.js:288-308` 填） | 子任务 6/7 范围 |
-| 10-2 | `board.html:49` | **缺**：`.af-filters` 生效中的筛选条（`assets/board.js:311-340`） | 子任务 6/7 范围 |
-| 10-3 | `board.html:42-45` | **缺**：隔离式 callout | 子任务 6/7 范围 |
-| 10-4 | 页头 | **缺**：「筛选 / 时间线 / 执行监控 / 会话 / 定时任务」按钮组 | 子任务 6/7 范围（其中时间线、执行监控、会话、定时任务指向骨架页） |
+| # | 原型位置 | 实现位置 | 差异 | 处置 |
+|---|---------|---------|------|------|
+| 10-1 | `board.html:46` | — | **缺**：`.af-meters` 项目摘要四行（由 `assets/board.js:288-308` 填） | **不修**：项目摘要四行归 v0.8.2（要读任务历史聚合，本里程碑看板只有单项目视图） |
+| 10-2 | `board.html:49` | — | **缺**：`.af-filters` 生效中的筛选条（`assets/board.js:311-340`） | **不修**：看板过滤与搜索归 v0.8.2 |
+| 10-3 | `board.html:42-45` | — | **缺**：隔离式 callout | **不修**：隔离策略的说明已在项目设置页，看板不再重复一句 |
+| 10-4 | 页头 | — | **缺**：「筛选 / 时间线 / 执行监控 / 会话 / 定时任务」按钮组 | **不修**：其中时间线、执行监控、会话、定时任务指向骨架页；筛选归 v0.8.2 |
 
 规格写明「`BoardPage.vue` 只复核登记，不改；若真有必修差异，在报告中列出而不自行修改」——故此处只登记。
 

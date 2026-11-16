@@ -26,6 +26,25 @@
 export type TaskStateWire = 'pending' | 'queued' | 'running' | 'review' | 'done' | 'failed'
 
 /**
+ * 上面那个类型的**运行期副本**，供测试核对「与 UI 词表同源」。
+ *
+ * 为什么要有：`TaskStateWire` 是纯类型，编译后消失，没有任何运行期断言能发现
+ * 「Hub 加了一个态、这里与前端的 `TASK_STATUSES` 有一处没跟上」。这份数组
+ * 由 `shared/state.test.ts` 直接比对，两处一旦分叉就红。
+ *
+ * 类型约束 `readonly TaskStateWire[]` 保证它**不会**写出集合外的值——所以它
+ * 不会成为第二份「可能更宽松」的真相源。
+ */
+export const TASK_STATE_WIRE: readonly TaskStateWire[] = [
+  'pending',
+  'queued',
+  'running',
+  'review',
+  'done',
+  'failed',
+]
+
+/**
  * 失败的八种形态（`docs/architecture/task-model.md` §3 的表）。
  *
  * 与 `failure_kind === null`（还没失败 / 成功了）区分开：`null` 是「没有失败

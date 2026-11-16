@@ -97,7 +97,7 @@ pub struct DoneWhen {
 /// - `all_tests_pass`：项目测试全绿。
 /// - `build_passes`：构建成功（可带时长阈值，本轮只存码）。
 /// - `review_approved`：**人/模型的主观判定，机器判不了**——见
-///   [`Task::needs_manual_acceptance`]，它落在闭集里但语义上仍需人点头。
+///   `needs_manual_acceptance`，它落在闭集里但语义上仍需人点头。
 /// - `command_exit_zero`：某条命令退出码为 0（`butler.md` §2.2.0 的
 ///   `{kind:"command", ..., expect:{exit_code:0}}` 的码形态）。
 ///
@@ -173,47 +173,18 @@ pub struct TaskTransition {
     pub done_when: Option<DoneWhen>,
 }
 
-/// 一个任务的**可写字段**。
-///
-/// # 与读模型 [`Task`] 的分工
-///
-/// 这里只有「一次 `INSERT` 或 `UPDATE` 能写进去的东西」。四列约束、`version`、
-/// `superseded_by`、`intent_ref` 都不在这里，理由三分：
-///
-/// - **约束四列**走 [`TaskPatch`] 的双层 `Option`（`Some(None)` = 清空），
-///   建表时的入参是单层 `Option`，两套语义混在一个结构里必然有一边被写错；
-/// - **`version`** 不是「值」而是「计数器」，写它必须走 CAS（`set_state` /
-///   `update`），让它出现在入参里等于开一个绕过 CAS 的后门；
-/// - **`superseded_by` / `intent_ref`** 本里程碑没有写者（`superseded` 的
-///   接班人是 v0.8.2 调度器，`intent_ref` 来自 v0.9.0 管家与 v0.10.0 导入）。
-///   问一个没有写者的字段要默认值，就是凭空造事实。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Task {
-    pub id: String,
-    pub project_id: String,
-    pub title: String,
-    pub state: TaskState,
-    pub done_when: DoneWhen,
-    /// 谁建的（`user` / `butler` / `external:github` …）。`None` = 早期数据。
-    pub created_by: Option<String>,
-    /// **默认起点**，不是唯一真相源——见模块文档。
-    pub base_commit: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
 /// 一个任务的**读模型**：可写字段 + 只由仓储写、外部只读的元信息。
 ///
-/// # 为什么与 [`Task`] 分成两个类型
+/// # 写入口是 `NewTask`，不是第二个结构体
 ///
-/// 硬塞进 [`Task`] 会让 `Task` 同时是「写入口的形状」与「读出口的形状」，
-/// 于是 `POST` / `PATCH` 的反序列化也要求客户端送 `version`——那正是乐观锁
-/// 退化成「客户端说了算」。分成两个类型后，`Task` 只出现在入参一侧，
-/// `TaskView` 只出现在响应一侧，两边的字段集不可能同时正确。
+/// 硬塞进写模型会让「建任务的入参」同时是「响应体的形状」，于是 `POST` /
+/// `PATCH` 的反序列化也要求客户端送 `version`——那正是乐观锁退化成「客户端
+/// 说了算」。所以写入口是 [`NewTask`]（只含能写进去的列），读出口是本类型。
 ///
-/// **为什么现在才加**：v0.8.0 子任务 1/5 只要求加列与 setter，没有消费者。
-/// 子任务 6 的响应体要 `version`（乐观锁 + 「这条任务被改过几次」）与四条
-/// 约束（详情页「任务约束」段），消费者到了，读模型才该长出来。
+/// **早先这里还有一个 `pub struct Task`** 想当「写模型」，但它零构造点
+/// （`RawTask::into_task` 直接产出 `TaskView`，`TaskRepo` 的每个方法也返回
+/// `TaskView`），留着只会让人以为存在两套结构、并让 `Task::needs_manual_acceptance`
+/// 成为一条没有生产调用者的 `pub` API。已删除。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskView {
     pub id: String,
@@ -232,35 +203,10 @@ pub struct TaskView {
     pub retry_limit: Option<i64>,
     /// 每次写入 +1。前端拿它做 `expected_version`（乐观锁）。
     pub version: i64,
-    /// 被哪个新任务取代。本里程碑恒为 `None`（没有写者，见 [`Task`]）。
+    /// 被哪个新任务取代。本里程碑恒为 `None`（没有写者，见 [`TaskView`]）。
     pub superseded_by: Option<String>,
-    /// 任务从哪来。本里程碑恒为 `None`（没有写者，见 [`Task`]）。
+    /// 任务从哪来。本里程碑恒为 `None`（没有写者，见 [`TaskView`]）。
     pub intent_ref: Option<String>,
-}
-
-impl TaskView {
-    /// 把读模型投影回可写形状（`POST` / `PATCH` 的请求体只认这个）。
-    pub fn to_task(&self) -> Task {
-        Task {
-            id: self.id.clone(),
-            project_id: self.project_id.clone(),
-            title: self.title.clone(),
-            state: self.state,
-            done_when: self.done_when.clone(),
-            created_by: self.created_by.clone(),
-            base_commit: self.base_commit.clone(),
-            created_at: self.created_at.clone(),
-            updated_at: self.updated_at.clone(),
-        }
-    }
-
-    /// 约束四列是否全是「不限」。
-    pub fn constraints_are_unset(&self) -> bool {
-        self.allowed_devices.is_none()
-            && self.allowed_agents.is_none()
-            && self.required_capabilities.is_none()
-            && self.retry_limit.is_none()
-    }
 }
 
 /// 建任务的入参。
@@ -337,7 +283,7 @@ pub struct TaskPatch {
 impl TaskPatch {
     /// 一个字的补丁都不含——「这次没有任何字段要改」。
     ///
-    /// 为什么要能问：`update` 按命中的字段逐条执行 `UPDATE`，每条都带
+    /// 为什么要能问：`update_if_version` 按命中的字段逐条执行 `UPDATE`，每条都带
     /// `version = version + 1`，所以**空补丁本来就不会涨 version**（一条都不跑）。
     /// 这个判定留给调用方（HTTP 层用它决定是不是直接回 204），
     /// 省得调用方自己把六个字段数一遍。
@@ -348,6 +294,29 @@ impl TaskPatch {
             && self.allowed_agents.is_none()
             && self.required_capabilities.is_none()
             && self.retry_limit.is_none()
+    }
+
+    /// 这次补丁会不会动四条约束里的至少一条。
+    ///
+    /// 四条约束共用**一条** `UPDATE`（只涨一次 `version`），所以「动没动」
+    /// 是一个整组判断，不能逐列问。用双层 `Option` 的外层判：`Some(None)`
+    /// 是「清成不限」，同样算动。
+    pub fn touches_constraints(&self) -> bool {
+        self.allowed_devices.is_some()
+            || self.allowed_agents.is_some()
+            || self.required_capabilities.is_some()
+            || self.retry_limit.is_some()
+    }
+
+    /// 这个补丁应当产生几条 `UPDATE`（标题 / `done_when` / 约束组各算一条）。
+    ///
+    /// 这是核对「一次都没落空」的基准数：实际影响行数少于它，就说明某条的
+    /// `AND version = ?` 落空了。它必须与 `write_patch` 的分支**逐条对应**
+    /// ——两处一旦不同步，CAS 就会在该报 409 的时候沉默。
+    pub fn update_statements(&self) -> usize {
+        usize::from(self.title.is_some())
+            + usize::from(self.done_when.is_some())
+            + usize::from(self.touches_constraints())
     }
 }
 
@@ -389,19 +358,11 @@ impl TaskView {
     }
 }
 
-impl Task {
-    /// 同 [`TaskView::needs_manual_acceptance`]——两处都只委派给下面那个自由
-    /// 函数，判定规则**只有一份**。
-    pub fn needs_manual_acceptance(&self) -> bool {
-        needs_manual_acceptance(&self.done_when)
-    }
-}
-
 /// 「需人工验收」的唯一判定处。
 ///
-/// 抽成自由函数而不是让 `TaskView` 调 `Task::needs_manual_acceptance`：
-/// 两个读模型都要这个派生值，让其中一个去构造另一个只为算一个布尔值，
-/// 会把「哪个是主」的问题带进纯计算里。
+/// 抽成自由函数而不是写进 `TaskView` 的方法体：判定只看 `done_when` 一个字段，
+/// 与视图的其余部分无关；独立成函数后方法只剩一行转发，判定逻辑可以单独读、
+/// 单独测，不必先造一个视图。
 fn needs_manual_acceptance(done_when: &DoneWhen) -> bool {
     match done_when.criteria.as_deref() {
         None | Some("") => true,
@@ -537,9 +498,9 @@ impl TaskRepo {
         }
         let guard_version = match expected_version {
             Some(v) if v != current.version => {
-                return Err(StorageError::TaskStateChanged {
-                    expected: current.state.as_str(),
-                    actual: current.state.as_str().to_string(),
+                return Err(StorageError::TaskVersionChanged {
+                    expected: v,
+                    actual: current.version,
                 })
             }
             Some(v) => v,
@@ -628,6 +589,68 @@ impl TaskRepo {
             .ok_or_else(|| StorageError::TaskNotFound { id: id.to_string() })
     }
 
+    /// 一次「跨多步」的状态推进，**整个推进在同一个事务里**。
+    ///
+    /// 用于 `queued` 态关掉任务：规格不实现 `queued → failed` 边
+    /// （`task-model.md:114-118`），但「人工在排队时直接把任务关掉」是图里列出的
+    /// 终局之一（`:108-110`），于是要经 `queued → pending → failed` 两步。
+    /// 两次独立 `transition_with` 会各取一条连接、各自提交，中间崩了就把任务留在
+    /// `pending`——而 `pending` 是调度器（v0.8.2）会拾起的可派发态，用户刚说
+    /// 「不做了」的任务反而排进了队列。
+    ///
+    /// 每一跳仍然是**合法边**（逐跳过 `check_transition`），不是绕过状态机直写终态。
+    pub fn transition_chain(
+        &self,
+        id: &str,
+        hops: &[TaskState],
+        now: &str,
+        expected_version: Option<i64>,
+    ) -> Result<TaskView> {
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+        // 入口版本在事务里读一次，整条链都按它推，避免中间被人插队。
+        let entry = read_version_in(&tx, id)?;
+        if let Some(v) = expected_version {
+            if v != entry {
+                return Err(StorageError::TaskVersionChanged {
+                    expected: v,
+                    actual: entry,
+                });
+            }
+        }
+        // 入口状态**必须在事务内读**。这里早先用 `self.get(id)?`，而
+        // `get()` 的第一行是 `self.pool.get()?` —— 另取一条连接，WAL 下看不见
+        // 本事务之外的任何未提交写，于是 `from` 可能是「别人提交前的旧态」。
+        let mut from = read_state_opt_in(&tx, id)?
+            .ok_or_else(|| StorageError::TaskNotFound { id: id.to_string() })?;
+        for (i, to) in hops.iter().enumerate() {
+            crate::task_state::check_transition(from, *to)?;
+            let n = tx.execute(
+                "UPDATE task SET state = ?2, updated_at = ?3, version = version + 1
+                  WHERE id = ?1 AND state = ?4 AND version = ?5",
+                params![id, to.as_str(), now, from.as_str(), entry + i as i64],
+            )?;
+            if n == 0 {
+                // 事务随之回滚，库上一个字节都没动。
+                //
+                // `actual` 同样**在事务内读**：早先走 `self.get(id)`（池外连接），
+                // 读到的是事务开始前的旧态，而那时 `from` 也取自同一份旧态，
+                // 结果 `actual == expected` —— 409 的 `detail.actual` 永远是错的。
+                // 读不到就说明这一行在事务中途被删了，按「任务不存在」报。
+                let now_state = read_state_opt_in(&tx, id)?
+                    .ok_or_else(|| StorageError::TaskNotFound { id: id.to_string() })?;
+                return Err(StorageError::TaskStateChanged {
+                    expected: from.as_str(),
+                    actual: now_state.as_str().to_string(),
+                });
+            }
+            from = *to;
+        }
+        tx.commit()?;
+        self.get(id)?
+            .ok_or_else(|| StorageError::TaskNotFound { id: id.to_string() })
+    }
+
     /// 改任务的标题 / 验收标准 / 约束。返回**新的 `version`**。
     ///
     /// # SQL 形状是固定的三条 `UPDATE`
@@ -656,6 +679,24 @@ impl TaskRepo {
     /// 「任务被改过几次」，没人改就不该 +1）。但要**确认任务存在**，
     /// 否则调用方会以为改成功了。
     pub fn update(&self, id: &str, patch: &TaskPatch, now: &str) -> Result<i64> {
+        self.update_if_version(id, patch, now, None)
+    }
+
+    /// 带 CAS 的 [`TaskRepo::update`]：`expected_version` 为 `Some(v)` 时，
+    /// **每条 `UPDATE` 都带 `AND version = ?`**，且整个补丁在同一事务里；
+    /// 任何一条影响 0 行就整体回滚并返回 [`StorageError::TaskVersionChanged`]。
+    ///
+    /// 为什么版本条件必须在 `WHERE` 里而不是「写完再看涨了几」：涨几步与
+    /// 「有没有人插队」不是同一个量（改一个字段也可能涨 1），事后判断
+    /// 既拦不住 1–2 次插队，又会在已经提交之后才报 409——那时数据已被覆盖，
+    /// 而 409 的语义是「什么都没发生」。
+    pub fn update_if_version(
+        &self,
+        id: &str,
+        patch: &TaskPatch,
+        now: &str,
+        expected_version: Option<i64>,
+    ) -> Result<i64> {
         if let Some(dw) = &patch.done_when {
             // 先拒绝，再写——理由同上。
             dw.validate()?;
@@ -663,71 +704,51 @@ impl TaskRepo {
         let mut conn = self.pool.get()?;
         let tx = conn.transaction()?;
 
-        let mut touched = 0usize;
-        if let Some(title) = &patch.title {
-            let n = tx.execute(
-                "UPDATE task SET title = ?2, version = version + 1, updated_at = ?3
-                 WHERE id = ?1",
-                params![id, title, now],
-            )?;
-            touched += n;
-        }
-        if let Some(dw) = &patch.done_when {
-            let n = tx.execute(
-                "UPDATE task
-                    SET done_when_criteria = ?2, done_when_description = ?3,
-                        version = version + 1, updated_at = ?4
-                  WHERE id = ?1",
-                params![id, dw.criteria, dw.description, now],
-            )?;
-            touched += n;
-        }
-        if patch.allowed_devices.is_some()
-            || patch.allowed_agents.is_some()
-            || patch.required_capabilities.is_some()
-            || patch.retry_limit.is_some()
-        {
-            // 四条约束的赋值**各按自己那一层 Option 决定**，不能统一写成
-            // `SET col = ?`——那会把「这次不改」也写成 `NULL`（清空），
-            // 正是双层 `Option` 要挡住的那个 bug。
-            //
-            // 做法是「先读回原值、按需替换、整组写一次」：既保住「四条约束
-            // 一条 UPDATE、只涨一次 version」，又让没给的列保持原值。
-            let current = load_constraints(&tx, id)?;
-            let next = Constraints {
-                allowed_devices: pick(patch.allowed_devices.as_ref(), current.allowed_devices),
-                allowed_agents: pick(patch.allowed_agents.as_ref(), current.allowed_agents),
-                required_capabilities: pick(
-                    patch.required_capabilities.as_ref(),
-                    current.required_capabilities,
-                ),
-                retry_limit: pick(patch.retry_limit.as_ref(), current.retry_limit),
-            };
-            let n = tx.execute(
-                "UPDATE task
-                    SET allowed_devices = ?2, allowed_agents = ?3,
-                        required_capabilities = ?4, retry_limit = ?5,
-                        version = version + 1, updated_at = ?6
-                  WHERE id = ?1",
-                params![
-                    id,
-                    next.allowed_devices,
-                    next.allowed_agents,
-                    next.required_capabilities,
-                    next.retry_limit,
-                    now
-                ],
-            )?;
-            touched += n;
+        // 有事可做时先记下入口版本：补丁可能命中 1~3 条 `UPDATE`，每条都按
+        // 「入口版本 + 已涨次数」做条件，于是三步之间也不会被别人插进来。
+        let entry = match read_version_opt_in(&tx, id)? {
+            Some(v) => Some(v),
+            None if patch.is_empty() => None,
+            None => return Err(StorageError::TaskNotFound { id: id.to_string() }),
+        };
+        if let (Some(v), Some(entry)) = (expected_version, entry) {
+            if v != entry {
+                return Err(StorageError::TaskVersionChanged {
+                    expected: v,
+                    actual: entry,
+                });
+            }
         }
 
+        let touched = write_patch(&tx, id, patch, now, entry)?;
         if touched == 0 {
-            // 两条路都走到这里：任务不存在（一次都没命中），或补丁是空的
-            // （命中 0 次但任务在）。靠再查一次区分，不猜。
-            return match read_version_opt_in(&tx, id)? {
-                Some(v) => Ok(v),
+            // 「一条都没命中」有三种来路，必须分开处置：
+            //
+            //   a. 空补丁 —— `version` 不涨，是**正确**结果；
+            //   b. 任务不存在 —— 404；
+            //   c. 任务在、补丁非空，但 `AND version = ?` 全落空 —— 有人在我们
+            //      开事务之后插队，必须 409。
+            //
+            // 早先这里把 b 与 c 合成一条「再读一次，读到就 `Ok(v)`」，于是 c
+            // 被当成成功返回，`version` 还是插队者写下的那个——调用方以为改成了，
+            // 实际一个字都没写。判据不能是「版本读到了」，而是「这次要不要写东西」。
+            let now_version = read_version_opt_in(&tx, id)?;
+            return match now_version {
                 None => Err(StorageError::TaskNotFound { id: id.to_string() }),
+                Some(v) if patch.is_empty() => Ok(v),
+                Some(v) => Err(StorageError::TaskVersionChanged {
+                    expected: entry.unwrap_or(0) + touched as i64,
+                    actual: v,
+                }),
             };
+        }
+        if touched != patch.update_statements() {
+            // 命中了但不够数：某条 `UPDATE` 落空、别的命中了，整批回滚。
+            let actual = read_version_in(&tx, id)?;
+            return Err(StorageError::TaskVersionChanged {
+                expected: entry.unwrap_or(0) + touched as i64,
+                actual,
+            });
         }
 
         // 故意**在事务里**读回 version：提交之后再读，别人可能又改了一次，
@@ -777,9 +798,11 @@ impl TaskRepo {
 
 /// 读出这一行的当前版本号；任务不存在时返回 `None`。
 ///
-/// 单独抽出来是因为它被用在**两处语义不同的地方**：`update` 里要区分
+/// 单独抽出来是因为它被用在**两处语义不同的地方**：`update_if_version` 里要区分
 /// 「补丁是空的（命中 0 行但任务在）」与「任务不存在」，所以要 `Option`；
 /// 而同函数末尾无条件读回本次结果时，任务一定在，要的是 `i64`。
+/// （`update_if_version` 的两个调用点是 `read_version_opt_in` 的唯二使用者；
+/// `TaskRepo::update` 只是它的 `None` 转发，体内没有任何版本读取。）
 /// 两个 Thin wrapper 共用一条 SQL，避免这条 `SELECT version` 在文件里出现三次。
 fn read_version_opt_in(conn: &r2d2_sqlite::rusqlite::Connection, id: &str) -> Result<Option<i64>> {
     let got = conn
@@ -793,6 +816,31 @@ fn read_version_opt_in(conn: &r2d2_sqlite::rusqlite::Connection, id: &str) -> Re
 /// 同上，但调用点已确定这一行存在（读不回来说明有人在事务中途删了它）。
 fn read_version_in(conn: &r2d2_sqlite::rusqlite::Connection, id: &str) -> Result<i64> {
     read_version_opt_in(conn, id)?.ok_or_else(|| StorageError::TaskNotFound { id: id.to_string() })
+}
+
+/// 事务**内**读当前状态（`None` = 这一行不存在）。
+///
+/// 为什么必须有这个函数：`transition_chain` 早先用 `self.get(id)` 读入口状态，
+/// 而 `TaskRepo::get`（`:425` 起）自己的第一行是 `let conn = self.pool.get()?`——
+/// **另取一条连接**。WAL 下未提交的写对别的连接不可见，于是事务里拿到的是
+/// 「别人提交前的旧状态」：
+///   · 第一跳的 `from` 与库里真实状态对不上 → 正常点「关掉」也会命中 `n == 0` / 409；
+///   · 409 响应体里的 `actual` 读到的必是旧值，等于把 `expected` 原样还回去，
+///     用户看到「状态从 A 变成了 A」。
+/// 事务内读一律走 `&tx`（它 Deref 到 `Connection`），与 `read_version_in` 同一个口径。
+fn read_state_opt_in(
+    conn: &r2d2_sqlite::rusqlite::Connection,
+    id: &str,
+) -> Result<Option<TaskState>> {
+    let got: Option<String> = conn
+        .query_row("SELECT state FROM task WHERE id = ?1", params![id], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    // 库里存的是 `TaskState::as_str()` 的闭集字面；读不回来意味着有人绕过
+    // 状态机写了别的字符串，这时宁可报错也不要猜一个默认态
+    // （`FromStr` 的实现正是这条口径：不回落成 `Pending`）。
+    got.map(|s| s.parse::<TaskState>()).transpose()
 }
 
 /// 四条约束列的当前值（`None` = 库里是 `NULL`，即「不限」）。
@@ -838,6 +886,91 @@ fn pick<T: Clone>(patch: Option<&Option<T>>, current: Option<T>) -> Option<T> {
         None => current,
         Some(v) => v.clone(),
     }
+}
+
+impl Constraints {
+    /// 把补丁**叠加**到当前值上，得到这一组要整批写下去的四列。
+    ///
+    /// 四条约束必须是**一条 `UPDATE`**（只涨一次 `version`），所以「叠什么」
+    /// 与「怎么写」分开：`load_constraints` 读原值，这里算新值，调用点只剩一条
+    /// 语句。四列的叠法全是 [`pick`]——谁漏了这一层，那一列就会被「这次不改」
+    /// 写成 `NULL`。
+    fn overlay(&self, patch: &TaskPatch) -> Constraints {
+        Constraints {
+            allowed_devices: pick(patch.allowed_devices.as_ref(), self.allowed_devices.clone()),
+            allowed_agents: pick(patch.allowed_agents.as_ref(), self.allowed_agents.clone()),
+            required_capabilities: pick(
+                patch.required_capabilities.as_ref(),
+                self.required_capabilities.clone(),
+            ),
+            retry_limit: pick(patch.retry_limit.as_ref(), self.retry_limit),
+        }
+    }
+}
+
+/// 把补丁写进库，返回**实际影响的行数之和**。
+///
+/// 三条 `UPDATE` 各自按「入口版本 + 已涨次数」做条件，所以每一条都必须用
+/// **执行前**的 `touched` 算版本号、执行后累加。抽成函数是为了让这个「算版本」
+/// 只有一处：写错在这里是**静默**的（后写覆盖先写、`version` 涨错步数），
+/// 三份同构代码若有一份算错，测试照样绿而数据已错。
+///
+/// 影响行数由调用方核对——不在这里报错，因为「少一条」与「任务不存在」的
+/// 处置不同（前者 409、后者 404），而这里只看得见前者。
+fn write_patch(
+    tx: &r2d2_sqlite::rusqlite::Transaction<'_>,
+    id: &str,
+    patch: &TaskPatch,
+    now: &str,
+    entry: Option<i64>,
+) -> Result<usize> {
+    let base = entry.unwrap_or(0);
+    let mut touched = 0usize;
+    macro_rules! bump {
+        ($sql:expr, $args:expr) => {{
+            let n = tx.execute($sql, $args)?;
+            touched += n;
+        }};
+    }
+    if let Some(title) = &patch.title {
+        bump!(
+            "UPDATE task SET title = ?2, version = version + 1, updated_at = ?3
+             WHERE id = ?1 AND version = ?4",
+            params![id, title, now, base + touched as i64]
+        );
+    }
+    if let Some(dw) = &patch.done_when {
+        bump!(
+            "UPDATE task
+                SET done_when_criteria = ?2, done_when_description = ?3,
+                    version = version + 1, updated_at = ?4
+              WHERE id = ?1 AND version = ?5",
+            params![id, dw.criteria, dw.description, now, base + touched as i64]
+        );
+    }
+    if patch.touches_constraints() {
+        // 四条约束的赋值**各按自己那一层 Option 决定**，不能统一写成
+        // `SET col = ?`——那会把「这次不改」也写成 `NULL`（清空），
+        // 正是双层 `Option` 要挡住的那个 bug。做法见 [`Constraints::overlay`]。
+        let next = load_constraints(tx, id)?.overlay(patch);
+        bump!(
+            "UPDATE task
+                SET allowed_devices = ?2, allowed_agents = ?3,
+                    required_capabilities = ?4, retry_limit = ?5,
+                    version = version + 1, updated_at = ?6
+              WHERE id = ?1 AND version = ?7",
+            params![
+                id,
+                next.allowed_devices,
+                next.allowed_agents,
+                next.required_capabilities,
+                next.retry_limit,
+                now,
+                base + touched as i64
+            ]
+        );
+    }
+    Ok(touched)
 }
 
 const SELECT_COLS: &str = "SELECT id, project_id, title, state, done_when_criteria,
@@ -1224,8 +1357,12 @@ mod tests {
     }
 
     /// 只有 `done_when` 关心的 `Task`，其余字段填死值。
-    fn task_with(dw: DoneWhen) -> Task {
-        Task {
+    /// 只把 `done_when` 包成一个能问 `needs_manual_acceptance` 的读模型。
+    ///
+    /// 判定规则只吃 `done_when`，其余字段与这条规则无关；早先这里构造的是
+    /// 已删除的 `Task` 写模型。
+    fn task_with(dw: DoneWhen) -> TaskView {
+        TaskView {
             id: "t_1".into(),
             project_id: "p_a".into(),
             title: "x".into(),
@@ -1235,6 +1372,13 @@ mod tests {
             base_commit: None,
             created_at: TS.into(),
             updated_at: TS.into(),
+            allowed_devices: None,
+            allowed_agents: None,
+            required_capabilities: None,
+            retry_limit: None,
+            version: 1,
+            superseded_by: None,
+            intent_ref: None,
         }
     }
 
@@ -1272,10 +1416,10 @@ mod tests {
     fn every_whitelisted_code_is_accepted() {
         for code in CRITERIA_CODES {
             let dw = done_when(Some(code), None);
+            let verdict = dw.validate();
             assert!(
-                dw.validate().is_ok(),
-                "{code} 是闭集内的码，必须被接受：{:?}",
-                dw.validate()
+                verdict.is_ok(),
+                "{code} 是闭集内的码，必须被接受：{verdict:?}"
             );
         }
         // 顺带钉住闭集的**确切内容与顺序**：闭集是公开契约（前端下拉框、
@@ -1519,7 +1663,7 @@ mod tests {
     }
 
     /// `transition_with` 的**第二道 CAS**：`expected_version` 不符就报
-    /// `TaskStateChanged` 且**不写库**。
+    /// `TaskVersionChanged`（带真实的版本号，不是状态名）且**不写库**。
     ///
     /// 判红方式：把 `guard_version` 那段删掉（让 `WHERE version = ?` 永远用刚读到
     /// 的值），这条立刻红——一个过期的版本会把别人的改动静默覆盖掉。
@@ -1533,6 +1677,8 @@ mod tests {
 
         // 别人先改了一次（版本前进）。
         tr.set_state(&t.id, TaskState::Review, TS).unwrap();
+        let fresh = tr.get(&t.id).unwrap().unwrap().version;
+        assert!(fresh > stale, "前提：版本确实前进了");
 
         let e = tr
             .transition_with(
@@ -1543,7 +1689,15 @@ mod tests {
                 TaskTransition::default(),
             )
             .unwrap_err();
-        assert!(matches!(e, StorageError::TaskStateChanged { .. }), "{e:?}");
+        // 报的是**版本号**，而且两个数字都与真实值对得上——早先这里报的是
+        // `TaskStateChanged`，两个字段填的是同一个状态名，客户端无从判断。
+        match e {
+            StorageError::TaskVersionChanged { expected, actual } => {
+                assert_eq!(expected, stale, "expected 必须是调用方给的那一版");
+                assert_eq!(actual, fresh, "actual 必须是库里真实的那一版");
+            }
+            other => panic!("过期版本必须报 TaskVersionChanged，实际 {other:?}"),
+        }
         assert_eq!(
             tr.get(&t.id).unwrap().unwrap().state,
             TaskState::Review,
@@ -1648,6 +1802,570 @@ mod tests {
             .unwrap();
         assert_eq!(v, 3);
         assert_eq!(raw_version(&tr, &t.id), 3);
+    }
+
+    /// `transition_chain` 的两处「读」都必须在**事务内**，不得走池外连接。
+    ///
+    /// 这条守的是一个曾经真实存在的缺陷：函数体里 `conn.transaction()` 之后
+    /// 用 `self.get(id)` 读入口状态，而 `TaskRepo::get` 自己的第一行是
+    /// `self.pool.get()?` —— **另取一条连接**。WAL 下事务外的连接看不见本事务
+    /// 的未提交写，于是：
+    ///
+    ///   ① `from` 拿到的是别人提交前的旧态（`expected` 错）；
+    ///   ② `n == 0` 分支里的 `actual` 也走同一条池外连接，而那时 `from` 与它
+    ///      取自同一份旧快照，结果 **`actual == expected`** —— 409 的
+    ///      `detail.actual` 永远是错的（页面会显示「状态从 X 变成 X」）。
+    ///
+    /// 复现手法与 `set_state_distinguishes_…` 同一个：`BEFORE UPDATE` 触发器在
+    /// 写之前把库改掉，模拟「另一个人在这几微秒里提交了」。不用两个线程真跑
+    /// 竞态——那样测出来的是「有时红有时绿」。
+    ///
+    /// 判红方式：
+    ///   · 把 `read_state_opt_in(&tx, id)` 改回 `self.get(id)?…state`
+    ///     → ② 的 `actual` 断言红（拿到旧态 `pending`，而真值是 `review`）；
+    ///   · 把 `:636` 的 `read_state_opt_in(&tx, …)` 改回 `self.get(id)`
+    ///     → 同样红。
+    ///   两种改法都能被这条用例抓住，因为断言钉的是「`actual` 必须是库里的真值
+    ///   且不等于 `expected`」——池外连接永远给不出这个结果。
+    #[test]
+    fn transition_chain_reads_state_inside_the_transaction() {
+        let (_d, tr) = setup();
+        let pool = tr.pool.clone();
+
+        // 起点：queued。链的第一跳 `queued → pending` 会因为态被抢改而落空。
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+        tr.set_state(&t.id, TaskState::Queued, TS).unwrap();
+
+        // 把 CAS 的条件列 version 也一起改掉，确保外层 UPDATE 影响 0 行：
+        // 只改 state 时，若夹具恰好也命中 `state = from` 就不会走到 `n == 0`。
+        pool.get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER race_before_update BEFORE UPDATE ON task
+                   WHEN NEW.id = '{}'
+                 BEGIN
+                   UPDATE task SET state = 'review', version = version + 100
+                    WHERE id = '{}';
+                   SELECT RAISE(IGNORE);
+                 END;",
+                t.id, t.id
+            ))
+            .unwrap();
+
+        let e = tr
+            .transition_chain(&t.id, &[TaskState::Pending, TaskState::Failed], TS, None)
+            .unwrap_err();
+        let StorageError::TaskStateChanged { expected, actual } = e else {
+            panic!("态被抢改必须报 TaskStateChanged，实际 {e:?}");
+        };
+
+        // 核心断言：`actual` 是**事务内**读到的真值，不是旧快照。
+        assert_eq!(
+            actual, "review",
+            "409 的 actual 必须在事务内读——取池外连接会拿到旧态 `pending`，\
+             于是 detail.actual 等于 expected，前端显示「状态从 pending 变成 pending」"
+        );
+        assert_ne!(
+            actual, expected,
+            "actual 与 expected 相等说明读到的是同一份旧快照（池外连接）"
+        );
+
+        // 整条链回滚：库里仍是 `queued`。
+        //
+        // 注意这里**不能**断言 `review`：触发器的写入发生在同一个事务里，
+        // 事务回滚会把它一起撤销。`set_state` 那组用例能断言 `review`，是因为
+        // 它的 CAS 失败后没有再回滚外层事务。这个差别本身就是证据——说明
+        // `transition_chain` 确实整体在一个事务里。
+        assert_eq!(
+            tr.get(&t.id).unwrap().unwrap().state,
+            TaskState::Queued,
+            "被拒的链必须整批回滚（连触发器在同一事务里写的改动也一并撤销）"
+        );
+        pool.get()
+            .unwrap()
+            .execute_batch("DROP TRIGGER race_before_update;")
+            .unwrap();
+    }
+
+    /// `transition_chain` 的**三条拒绝路径**都不写库。
+    ///
+    /// 一条链要经 `queued → pending → failed`（规格不实现 `queued → failed` 边）。
+    /// 拒绝有三处：入口版本不符、任务不存在、某一跳不是合法边。任何一处都必须
+    /// 整批回滚——留下半条链会把任务卡在 `pending`，那是调度器会拾起的可派发态。
+    ///
+    /// 判红方式：把 `tx` 改成每条 `UPDATE` 自己提交（或去掉 `AND state/version`
+    /// 守卫），成功路径之外的某一条会留下痕迹而红。
+    #[test]
+    fn transition_chain_refuses_every_bad_path_without_writing() {
+        let (_d, tr) = setup();
+
+        // ① 版本不符。
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+        tr.set_state(&t.id, TaskState::Queued, TS).unwrap();
+        let v = tr.get(&t.id).unwrap().unwrap().version;
+        let e = tr
+            .transition_chain(
+                &t.id,
+                &[TaskState::Pending, TaskState::Failed],
+                TS,
+                Some(v - 1),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(e, StorageError::TaskVersionChanged { .. }),
+            "版本不符必须报 TaskVersionChanged：{e:?}"
+        );
+        assert_eq!(
+            tr.get(&t.id).unwrap().unwrap().state,
+            TaskState::Queued,
+            "被拒的链不得改状态"
+        );
+
+        // ② 任务不存在。
+        let e = tr
+            .transition_chain("t_missing", &[TaskState::Pending], TS, None)
+            .unwrap_err();
+        assert!(matches!(e, StorageError::TaskNotFound { .. }), "{e:?}");
+
+        // ③ 某一跳不是合法边（`queued → review` 不在边表里）。
+        let e = tr
+            .transition_chain(&t.id, &[TaskState::Review], TS, None)
+            .unwrap_err();
+        assert!(
+            matches!(e, StorageError::IllegalTaskTransition { .. }),
+            "非法边必须报 IllegalTaskTransition：{e:?}"
+        );
+        assert_eq!(
+            tr.get(&t.id).unwrap().unwrap().state,
+            TaskState::Queued,
+            "非法链不得改状态"
+        );
+
+        // ④ 正常路径：两跳都落地，版本涨两次。
+        let v0 = tr.get(&t.id).unwrap().unwrap().version;
+        let after = tr
+            .transition_chain(&t.id, &[TaskState::Pending, TaskState::Failed], TS, None)
+            .unwrap();
+        assert_eq!(after.state, TaskState::Failed);
+        assert_eq!(after.version, v0 + 2, "两跳各涨一次版本");
+    }
+
+    /// `set_state` 的 CAS 影响 0 行时**必须再读一次**区分两种原因。
+    ///
+    /// 这条覆盖的是 `n == 0` 的两支：任务在读到写入之间被删（`TaskNotFound`），
+    /// 或态被改（`TaskStateChanged`）。用 `BEFORE UPDATE` 触发器在写之前
+    /// 把库改掉——模拟的正是「另一个人在这几微秒里提交了」。
+    ///
+    /// 为什么不用两个线程真跑竞态：那样测出来的是「有时红有时绿」。
+    ///
+    /// 判红方式：把 `n == 0` 那段改成直接 `return Err(TaskStateChanged{..})`
+    /// （不再查一次），第 ① 条的 `TaskNotFound` 断言红——那正是「把『没了』
+    /// 说成『被人改了』」的早期实现。
+    #[test]
+    fn set_state_distinguishes_a_deleted_task_from_a_raced_state() {
+        let (_d, tr) = setup();
+        let pool = tr.pool.clone();
+
+        // ① 读到之后、写之前任务被删 → TaskNotFound。
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+        pool.get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER del_before_update BEFORE UPDATE ON task
+                   WHEN NEW.id = '{}'
+                 BEGIN DELETE FROM task WHERE id = '{}'; END;",
+                t.id, t.id
+            ))
+            .unwrap();
+        let e = tr.set_state(&t.id, TaskState::Queued, TS).unwrap_err();
+        assert!(
+            matches!(e, StorageError::TaskNotFound { .. }),
+            "任务没了要报 TaskNotFound（报 TaskStateChanged 会让页面说「别人改了」，\
+             而真相是它已经不存在）：{e:?}"
+        );
+        pool.get()
+            .unwrap()
+            .execute_batch("DROP TRIGGER del_before_update;")
+            .unwrap();
+
+        // ② 读到之后、写之前态被别人改掉 → TaskStateChanged，且 actual 是真值。
+        //
+        // 触发器先把态改成 review，再用 `RAISE(IGNORE)` 跳过本行的外层 UPDATE
+        // ——`WHERE` 早已判过，只有这样才能让外层「影响 0 行」而态确实变了。
+        let t2 = tr.create(new_task("p_a"), TS).unwrap();
+        pool.get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER move_before_update BEFORE UPDATE ON task
+                   WHEN NEW.id = '{}'
+                 BEGIN
+                   UPDATE task SET state = 'review' WHERE id = '{}';
+                   SELECT RAISE(IGNORE);
+                 END;",
+                t2.id, t2.id
+            ))
+            .unwrap();
+        let e = tr.set_state(&t2.id, TaskState::Queued, TS).unwrap_err();
+        let StorageError::TaskStateChanged { expected, actual } = e else {
+            panic!("态被抢改必须报 TaskStateChanged，实际 {e:?}");
+        };
+        assert_eq!(expected, "pending", "expected 是我们读到的那个态");
+        assert_eq!(actual, "review", "actual 必须是库里现在的真值");
+        assert_eq!(
+            tr.get(&t2.id).unwrap().unwrap().state,
+            TaskState::Review,
+            "被拒的转移不得写库（态仍是抢改者写进去的 review）"
+        );
+        pool.get()
+            .unwrap()
+            .execute_batch("DROP TRIGGER move_before_update;")
+            .unwrap();
+    }
+
+    /// `transition_with` 的 CAS 同样区分「没了」与「被抢改」。
+    ///
+    /// 与 [`set_state_distinguishes_a_deleted_task_from_a_raced_state`] 同一
+    /// 判据，但走的是另一条写路径（`transition_with` 带 `version = ?`）。
+    /// 两条路径各有一份 `n == 0` 的再读逻辑——修一处漏另一处是本项目反复
+    /// 出现的缺陷形状，所以两条都要有负样本。
+    ///
+    /// 判红方式：把 `transition_with` 里 `n == 0` 的再读删掉、直接
+    /// `Err(TaskStateChanged)`，第 ① 条红。
+    #[test]
+    fn transition_with_distinguishes_a_deleted_task_from_a_raced_state() {
+        let (_d, tr) = setup();
+        let pool = tr.pool.clone();
+
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+        pool.get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER del_before_update2 BEFORE UPDATE ON task
+                   WHEN NEW.id = '{}'
+                 BEGIN DELETE FROM task WHERE id = '{}'; END;",
+                t.id, t.id
+            ))
+            .unwrap();
+        let e = tr
+            .transition_with(
+                &t.id,
+                TaskState::Queued,
+                TS,
+                None,
+                TaskTransition::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(e, StorageError::TaskNotFound { .. }), "{e:?}");
+        pool.get()
+            .unwrap()
+            .execute_batch("DROP TRIGGER del_before_update2;")
+            .unwrap();
+
+        let t2 = tr.create(new_task("p_a"), TS).unwrap();
+        pool.get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER move_before_update2 BEFORE UPDATE ON task
+                   WHEN NEW.id = '{}'
+                 BEGIN
+                   UPDATE task SET state = 'review' WHERE id = '{}';
+                   SELECT RAISE(IGNORE);
+                 END;",
+                t2.id, t2.id
+            ))
+            .unwrap();
+        let e = tr
+            .transition_with(
+                &t2.id,
+                TaskState::Queued,
+                TS,
+                None,
+                TaskTransition::default(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(e, StorageError::TaskStateChanged { ref actual, .. } if actual == "review"),
+            "actual 必须是库里现在的真值：{e:?}"
+        );
+        pool.get()
+            .unwrap()
+            .execute_batch("DROP TRIGGER move_before_update2;")
+            .unwrap();
+    }
+
+    /// `update_if_version` 的 CAS **在 SQL 里**：过期的 `expected_version` 一行都改不动。
+    ///
+    /// 这条必须打在仓储层，不能在 HTTP 层打：`patch_task` 自己先调
+    /// `require_version`，所以走端点永远到不了这里——用端点测，把仓储的
+    /// `AND version = ?` 全删掉也照样绿（本人实测过）。
+    ///
+    /// 判红方式：把函数开头 `expected_version != entry` 那段预检删掉，本用例红
+    /// （过期写被接受、`title` 被覆盖成「我的」且返回 `Ok`）。
+    ///
+    /// **注意这条只测到预检**：入口版本与库一致时预检就会放行，所以「库在我读完
+    /// 之后、写之前被别人改了」这种情况它构造不出来。那一层由
+    /// `update_if_version_cas_lives_in_the_sql_not_only_in_the_precheck` 用触发器打。
+    #[test]
+    fn update_if_version_refuses_a_stale_version_without_writing() {
+        let (_d, tr) = setup();
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+        assert_eq!(raw_version(&tr, &t.id), 1);
+
+        // 别人先改一次，版本走到 2。
+        tr.update_if_version(
+            &t.id,
+            &TaskPatch {
+                title: Some("插队者的".into()),
+                ..TaskPatch::default()
+            },
+            "unix:100",
+            Some(1),
+        )
+        .unwrap();
+        assert_eq!(raw_version(&tr, &t.id), 2);
+
+        // 我拿过期的 1 再改：必须报 TaskVersionChanged，且标题不变。
+        let e = tr
+            .update_if_version(
+                &t.id,
+                &TaskPatch {
+                    title: Some("我的".into()),
+                    ..TaskPatch::default()
+                },
+                "unix:200",
+                Some(1),
+            )
+            .unwrap_err();
+        match e {
+            StorageError::TaskVersionChanged { expected, actual } => {
+                assert_eq!(expected, 1);
+                assert_eq!(actual, 2);
+            }
+            other => panic!("过期版本必须报 TaskVersionChanged，实际 {other:?}"),
+        }
+        let title = |tr: &TaskRepo| -> String { tr.get(&t.id).unwrap().unwrap().title };
+        assert_eq!(title(&tr), "插队者的", "过期版本的写不得覆盖别人的改动");
+        assert_eq!(raw_version(&tr, &t.id), 2, "被拒的写不得涨版本");
+    }
+
+    /// `update_if_version` 的 CAS **真的在 SQL 里**：入口预检放行之后、`UPDATE`
+    /// 执行之前，库被别人改了版本 → 那条 `UPDATE` 影响 0 行 → 必须报
+    /// `TaskVersionChanged` 且什么都不写。
+    ///
+    /// # 为什么这条必须单独存在
+    ///
+    /// SQL 里的 `AND version = ?` 在**正常的单线程流程里永远拦不到东西**：函数
+    /// 一进来就 `SELECT version` 并做预检，两条语句之间没有别人的位置。于是
+    /// 把三处 `AND version = ?` 全换成恒真，既有用例**一条都不会红**（本人实测：
+    /// 261 passed / 0 failed）——这正是「注释声称的判红方式不成立」。
+    ///
+    /// # 怎么构造那个窗口
+    ///
+    /// 用 `BEFORE UPDATE` 触发器：外层 `UPDATE` 进来时先把 `version` 改掉，再
+    /// `SELECT RAISE(IGNORE)` 让外层那一行的写入被跳过。于是「读到版本」与
+    /// 「用版本」之间就真的隔了一次别人的修改，而且是**确定性的**，不靠双线程。
+    ///
+    /// 判红方式（逐条实测）：
+    /// 1. 把 `title` 那条的 `AND version = ?` 换成恒真、并把
+    ///    `touched != patch.update_statements()` 改成永假 → **本用例红**
+    ///    （返回 `Ok`，`title` 被覆盖）；
+    /// 2. 只删 `AND version = ?` 而留着 `touched != patch.update_statements()`
+    ///    → **仍绿**：命中 0 行本来就不会被算成成功。两道都在是**双层**，不是假绿；
+    /// 3. 只删 `touched != patch.update_statements()` 而留着 `AND version = ?`
+    ///    → **仍绿**：那条 `UPDATE` 本来就改不动。故判红必须同时拆两道。
+    #[test]
+    fn update_if_version_cas_lives_in_the_sql_not_only_in_the_precheck() {
+        let (_d, tr) = setup();
+        let pool = tr.pool.clone();
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+        assert_eq!(raw_version(&tr, &t.id), 1);
+
+        // 触发器在 UPDATE 之前把 version 从 1 推到 7，再 IGNORE 掉这一行的写入。
+        // `WHEN NEW.version = 2` 只匹配「入口版本 1、涨一步」的那条语句，避免
+        // 触发器把自己的内部 UPDATE 也再次触发（SQLite 默认不重入，但仍写明）。
+        pool.get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER bump_before_update BEFORE UPDATE ON task
+                   WHEN NEW.id = '{}' AND NEW.version = 2
+                 BEGIN
+                   UPDATE task SET version = 7 WHERE id = '{}';
+                   SELECT RAISE(IGNORE);
+                 END;",
+                t.id, t.id
+            ))
+            .unwrap();
+
+        let e = tr
+            .update_if_version(
+                &t.id,
+                &TaskPatch {
+                    title: Some("我的".into()),
+                    ..TaskPatch::default()
+                },
+                "unix:200",
+                Some(1),
+            )
+            .unwrap_err();
+        // `actual` 报的是**读到的那一刻**库里的真值（触发器写的 7），而不是
+        // 回滚之后的 1：调用方要据此知道「该刷新成几」，回滚掉的是本次事务。
+        assert!(
+            matches!(
+                e,
+                StorageError::TaskVersionChanged {
+                    expected: 1,
+                    actual: 7
+                }
+            ),
+            "版本在写的瞬间变了：必须报 TaskVersionChanged{{1,7}}，实际 {e:?}"
+        );
+        // 整个事务（连触发器的写）一起回滚，库里回到事务前的样子。
+        assert_eq!(raw_version(&tr, &t.id), 1, "整批回滚：版本回到事务前");
+        assert_eq!(
+            tr.get(&t.id).unwrap().unwrap().title,
+            "把登录改成 OAuth",
+            "被拒的写不得改标题"
+        );
+
+        pool.get()
+            .unwrap()
+            .execute_batch("DROP TRIGGER bump_before_update;")
+            .unwrap();
+    }
+
+    /// `update_if_version` 的 CAS 在**多字段补丁**下也成立：三条 UPDATE 中任意一条
+    /// 落空，整批回滚（不留半截补丁）。
+    ///
+    /// 判红方式：把 `touched != patch.update_statements()` 那段改成永假
+    /// （`if false && …`），再让 `title` 那条的 `AND version = ?` 落空（例如把
+    /// `base + touched` 换成常量 0），本用例会看到 `title` 被改而返回 `Ok`。
+    ///
+    /// **必须与 `update_if_version_cas_lives_in_the_sql_not_only_in_the_precheck`
+    /// 一起看**：本用例走的是「入口版本已过期」，那条路径由函数开头的
+    /// `expected_version != entry` 预检先拦下，`write_patch` 根本不会执行。
+    /// 所以本用例**测不到** `write_patch` 里的 `AND version = ?`；那一段由另一条
+    /// 用例用触发器构造「事务中途被插队」来打。
+    ///
+    /// 而 `touched != patch.update_statements()` 这条「命中了一部分」的分支，
+    /// 两条用例都走不到——它要求**同一次调用里第一条 UPDATE 命中、第二条落空**。
+    /// 由 `update_if_version_rolls_back_a_partially_applied_patch` 单独覆盖。
+    #[test]
+    fn update_if_version_rolls_the_whole_patch_back_on_a_miss() {
+        let (_d, tr) = setup();
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+        tr.update_if_version(
+            &t.id,
+            &TaskPatch {
+                title: Some("插队者的".into()),
+                ..TaskPatch::default()
+            },
+            "unix:100",
+            Some(1),
+        )
+        .unwrap();
+
+        // 三字段一起改，但版本已过期。
+        let e = tr
+            .update_if_version(
+                &t.id,
+                &TaskPatch {
+                    title: Some("我的标题".into()),
+                    done_when: Some(done_when(Some("build_passes"), Some("我的条件"))),
+                    retry_limit: Some(Some(5)),
+                    ..TaskPatch::default()
+                },
+                "unix:200",
+                Some(1),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(e, StorageError::TaskVersionChanged { .. }),
+            "{e:?}"
+        );
+
+        let view = tr.get(&t.id).unwrap().unwrap();
+        assert_eq!(view.title, "插队者的", "标题不得被改");
+        assert_eq!(
+            view.done_when.criteria.as_deref(),
+            Some("all_tests_pass"),
+            "done_when 不得被改"
+        );
+        assert_eq!(view.retry_limit, None, "约束不得被改");
+        assert_eq!(raw_version(&tr, &t.id), 2, "版本不得涨");
+    }
+
+    /// `touched != patch.update_statements()`：**第一条命中、第二条落空**，
+    /// 整批回滚。这是「半截补丁」唯一可能的入口。
+    ///
+    /// # 为什么需要单独一条
+    ///
+    /// 另两条用例都走不到这里：
+    /// - 「入口版本过期」→ 函数开头的预检先返回，`write_patch` 不执行；
+    /// - 「一条都没命中」→ 走的是 `touched == 0` 那条分支。
+    ///
+    /// 要走到本分支，必须让**同一次调用里**第一条 `UPDATE` 影响 1 行、第二条
+    /// 影响 0 行。用 `BEFORE UPDATE` 触发器按 `NEW.title` 区分是哪一条：
+    /// `title` 那条放行，`done_when` 那条 `RAISE(IGNORE)`。
+    ///
+    /// 判红方式：把 `if touched != patch.update_statements()` 改成 `if false`，
+    /// 本用例会拿到 `Ok` 而不是 `TaskVersionChanged`，且 `title` 被改（因为事务
+    /// 提交了）——两处断言同时红。
+    #[test]
+    fn update_if_version_rolls_back_a_partially_applied_patch() {
+        let (_d, tr) = setup();
+        let pool = tr.pool.clone();
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+        assert_eq!(raw_version(&tr, &t.id), 1);
+
+        // 只让「写 title 的那条」过，写 done_when 的那条被 IGNORE 掉。
+        // 判据必须用**只有那条语句会写的列**：用 `NEW.title` 不行——title 那条
+        // 先执行完，done_when 那条的 `NEW.title` 也已经是「我的标题」，会把两条
+        // 一起 IGNORE 掉（于是变成 `touched == 0` 那条分支，测不到本分支）。
+        // `NEW.done_when_criteria` 只有 done_when 那条会改成 `build_passes`。
+        pool.get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER skip_done_when BEFORE UPDATE ON task
+                   WHEN NEW.id = '{}' AND NEW.done_when_criteria = 'build_passes'
+                 BEGIN SELECT RAISE(IGNORE); END;",
+                t.id
+            ))
+            .unwrap();
+
+        let e = tr
+            .update_if_version(
+                &t.id,
+                &TaskPatch {
+                    title: Some("我的标题".into()),
+                    done_when: Some(done_when(Some("build_passes"), Some("我的条件"))),
+                    ..TaskPatch::default()
+                },
+                "unix:200",
+                Some(1),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(e, StorageError::TaskVersionChanged { .. }),
+            "半截补丁必须报 TaskVersionChanged，实际 {e:?}"
+        );
+
+        // 事务整体回滚：连那条命中的 title 也不许留下。
+        let view = tr.get(&t.id).unwrap().unwrap();
+        assert_eq!(
+            view.title, "把登录改成 OAuth",
+            "命中了一条也必须整批回滚，不得留下半截补丁"
+        );
+        assert_eq!(
+            view.done_when.criteria.as_deref(),
+            Some("all_tests_pass"),
+            "done_when 不得被改"
+        );
+        assert_eq!(raw_version(&tr, &t.id), 1, "版本不得涨");
+
+        pool.get()
+            .unwrap()
+            .execute_batch("DROP TRIGGER skip_done_when;")
+            .unwrap();
     }
 
     /// `done_when` 两项全空 → 报错，且**库里的 `title` 与 `version` 都没变**。

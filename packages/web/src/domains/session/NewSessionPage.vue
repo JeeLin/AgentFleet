@@ -190,7 +190,9 @@ async function submit(): Promise<void> {
     // ── 为什么地址里要带项目 id ────────────────────────────────────
     // v0.7.0 起会话挂在项目下（`/project/:id/session/:sessionId`），会话不再有
     // 顶层地址。建会话这一步本身只认设备与路径，**项目 id 从查询串带进来**
-    // （`/sessions/new?device=n_1&project=p_1`，由设备页或项目页发起）。
+    // （`?device=n_1&project=p_1`）。**v0.8.0 里发起方只有项目页**：设备页的
+    // 「用它开会话」恒禁用（拿不到项目上下文，`/sessions/new` 也不是真路由），
+    // 见 `domains/device/DeviceTable.vue` 的文件头。
     // 没带项目 id 时落到总览：**不要编一个项目 id**，那样会写进一条 404 地址，
     // 用户看到的是「建好了，但打不开」。
     const projectId = route.value.query.get('project')

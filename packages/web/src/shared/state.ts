@@ -92,16 +92,6 @@ export const STATES: Readonly<Record<AnyStatus, StateSpec>> = {
   failed: { state: 'failed', glyph: '✕', fill: 'filled', label: '失败' },
 }
 
-/** 任务六态的取值（与 `STATES` 的键同源，这里只列出来供遍历与断言用）。 */
-export const TASK_STATE_NAMES: readonly TaskStatus[] = [
-  'pending',
-  'queued',
-  'running',
-  'review',
-  'done',
-  'failed',
-]
-
 /**
  * 字形复用白名单：**只有这几组**允许同形（`docs/design-system.md` §3.4）。
  *
@@ -128,7 +118,11 @@ export function describeStatus(state: string): StateSpec {
   return { state: state as AnyStatus, glyph: '◌', fill: 'partial', label: state }
 }
 
-/** 设备态的取值。子任务 5 的契约测试与它对齐。 */
+/**
+ * 设备态的取值。**只有测试在用**（`state.test.ts` 拿它核对词表完整性）；
+ * 生产页面都走 `describeStatus()` 或 `StateBadge`。它留在这里而不是删掉，
+ * 是因为删了就没有一条断言守着「`STATES` 少了某个设备态」。
+ */
 export const DEVICE_STATUSES: readonly DeviceStatus[] = [
   'online',
   'reconnecting',
@@ -137,11 +131,13 @@ export const DEVICE_STATUSES: readonly DeviceStatus[] = [
 ]
 
 /**
- * 任务态的取值。与 `TaskStatus` 同源，顺序照 `task-model.md:35-40` 的列序
- * （看板的列也按这个序排）。
+ * 任务态的取值。与 `TaskStatus` 同源，顺序照 `task-model.md:35-40` 的列序。
  *
  * 它存在的理由与 `DEVICE_STATUSES` 一样：**列出一份而不是在各处手抄**。
- * 看板分列、筛选下拉、契约测试都从这里取。
+ * **但它不是看板的取数来源**——`BoardPage.vue` 的 `COLUMNS` 自己带
+ * 每列一句 `hint`，那是列数据不是词表，仍读 `STATES[key].label` 取中文。
+ * 生产代码零引用；用它的只有 `state.test.ts`（含与 `TASK_STATE_WIRE`
+ * 的同源断言，见 `state.test.ts:237`）。
  */
 export const TASK_STATUSES: readonly TaskStatus[] = [
   'pending',
