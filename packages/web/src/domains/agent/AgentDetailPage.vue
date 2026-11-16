@@ -98,7 +98,7 @@ function openDevice(nodeId: string): void {
   <div class="af-page af-agd">
     <PageHead>
       <div>
-        <h1 class="af-page__title">
+        <h1 class="af-head__title">
           {{ agentName }}
           <span
             v-if="detail"
@@ -108,7 +108,7 @@ function openDevice(nodeId: string): void {
             {{ detail.available ? '现在能对话' : '装了但跑不起来' }}
           </span>
         </h1>
-        <p class="af-page__sub">
+        <p class="af-head__sub">
           这个 agent 装在哪几台机器上、跑过哪些任务、成功率多少。
           <b>Agent 视角</b>与设备视角是同一批数据的两个问法。
         </p>

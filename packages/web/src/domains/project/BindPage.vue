@@ -212,7 +212,7 @@ onMounted(load)
       <button type="button" class="af-btn af-btn--ghost" @click="navigate('/')">
         ← 回总览
       </button>
-      <h1 class="af-page__title">绑定设备</h1>
+      <h1 class="af-head__title">绑定设备</h1>
       <span v-if="project" class="af-badge">{{ project.name }}</span>
       <span v-if="isolated" class="af-badge af-badge--warn">隔离式</span>
       <template #actions>

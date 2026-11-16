@@ -3,10 +3,14 @@
    ---------------------------------------------------------------------------
    两条分开测，各自对应一处会**静默**出错的地方：
 
-   ① **结构**：组件必须渲染 `.af-page__head`，主区（默认插槽）与动作
-      （`#actions`）分别落在 `af-page__head` 的直接子节点与 `.af-page__actions`
-      里。少了 `af-page__head` 这一类名，页头就退回成一条裸 flex 行——
-      而 `.af-page__head` 的两端对齐、间距、`margin-bottom` 全在它身上。
+   ① **结构**：组件必须渲染原型那一行页头——`header.af-head`
+      （`prototype/index.html:15`），主区（默认插槽）是它的直接子节点，动作
+      （`#actions`）排在 `.af-head__spacer` **之后**。少了 `af-head` 这一类名，
+      页头就退回成一条裸 flex 行——`.af-head` 的弹性行、间距、贴顶、底部那条
+      线全在它身上（`prototype/assets/app.css:118-124`）。
+      少了 `af-head__spacer`，右侧动作会被挤在标题后面——原型靠它
+      （`margin-left: auto`，`app.css:130`）把动作顶到右边，**不是**套一层
+      动作 div（那个自造的 `.af-page__actions` 已随类名删除）。
    ② **调用点数量**：为一个页面抽组件是伪复用。这条断言读的是**仓库真源码**，
       不是某个 mock——把调用点删到 1 处时它必须红。
 
@@ -52,22 +56,27 @@ function callSites(component: string): string[] {
 }
 
 describe('PageHead 的结构', () => {
-  it('根是 .af-page__head，主区在外层、动作在 .af-page__actions 里', () => {
+  it('根是 .af-head，主区在外层、动作排在 .af-head__spacer 之后', () => {
     const w = mountIn(PageHead, {
-      slots: { default: '<h1 class="af-page__title">标题</h1>', actions: '<button class="af-btn">刷新</button>' },
+      slots: { default: '<h1 class="af-head__title">标题</h1>', actions: '<button class="af-btn">刷新</button>' },
     })
     const root = w.element as HTMLElement
-    expect(root.classList.contains('af-page__head')).toBe(true)
-    // 主区必须是**直接子节点**：塞进 .af-page__actions 就会被当成动作挤到右边
-    expect(root.querySelector(':scope > .af-page__title')).not.toBeNull()
-    const actions = root.querySelector(':scope > .af-page__actions')
-    expect(actions, '动作容器必须存在且是直接子节点').not.toBeNull()
-    expect(actions?.querySelector('.af-btn')).not.toBeNull()
+    expect(root.tagName, '页头必须是 header 元素（原型 index.html:15）').toBe('HEADER')
+    expect(root.classList.contains('af-head')).toBe(true)
+    // 原型没有自造的 `.af-page__head` / `__actions` 这两层。
+    expect(root.classList.contains('af-page__head'), '自造的 .af-page__head 不许回来').toBe(false)
+    // 主区必须是**直接子节点**：被包进动作那一侧就会被顶到右边、当按钮排
+    expect(root.querySelector(':scope > .af-head__title')).not.toBeNull()
+    const spacer = root.querySelector(':scope > .af-head__spacer')
+    expect(spacer, '右侧动作要靠 .af-head__spacer（margin-left:auto）顶过去').not.toBeNull()
+    const actions = root.querySelector(':scope > .af-btn')
+    expect(actions, '动作必须是页头的直接子节点，且排在 spacer 之后').not.toBeNull()
+    expect(spacer?.nextElementSibling, '动作必须紧跟在 spacer 后面').toBe(actions)
   })
 
-  it('没有动作时仍然渲染出 .af-page__actions（页头形状不随内容变）', () => {
-    const w = mountIn(PageHead, { slots: { default: '<h1 class="af-page__title">标题</h1>' } })
-    expect((w.element as HTMLElement).querySelector(':scope > .af-page__actions')).not.toBeNull()
+  it('没有动作时仍然渲染出 .af-head__spacer（页头形状不随内容变）', () => {
+    const w = mountIn(PageHead, { slots: { default: '<h1 class="af-head__title">标题</h1>' } })
+    expect((w.element as HTMLElement).querySelector(':scope > .af-head__spacer')).not.toBeNull()
   })
 })
 
@@ -103,6 +112,35 @@ describe('页头不再用「间隔柱」凑两端对齐', () => {
       const block = src.slice(at, end)
       expect(block, `${file} 的页头仍用 .af-spacer 当间隔柱`).not.toContain('class="af-spacer"')
       expect(block, `${file} 的页头仍有空 .af-page__actions 柱`).not.toContain('class="af-page__actions"')
+    }
+  })
+
+  /**
+   * 页头里的类名必须是**原型有的**（`prototype/assets/app.css:118-130`）：
+   * `.af-head__title` / `.af-head__sub`，右侧动作由组件内的
+   * `.af-head__spacer` 顶住。自造的 `.af-page__*` 那一族规则已删（v0.8.1
+   * 子任务 2），留在页头块里就等于这几页的标题退回浏览器默认尺寸——
+   * 没有编译错误、没有别的断言会红。
+   *
+   * 子任务 4 的迁移不变量就落在这条上：**4 个调用点的页头块里
+   * `af-page__` 一次都不许出现**。页面根容器上的 `af-page` 不在此列
+   * （它不在这段里），归子任务 6/8/9。
+   */
+  it('调用点的页头块里只有原型的 .af-head__* 类，没有自造的 af-page__*', () => {
+    const sites = callSites('PageHead')
+    expect(sites.length, '没有调用点时这条断言什么都量不到').toBeGreaterThan(0)
+    for (const file of sites) {
+      const src = readFileSync(join(REPO, file), 'utf-8')
+      const at = src.indexOf('<PageHead')
+      const end = src.indexOf('</PageHead>', at)
+      const block = src.slice(at, end)
+      const legacy = [...block.matchAll(/class="([^"]*)"/g)]
+        .flatMap((m) => m[1].split(/\s+/))
+        .filter((name) => name.startsWith('af-page__'))
+      expect(
+        legacy,
+        [`${file} 的页头块里还有自造的类名（${legacy.join(', ')}）。`, '页头请用原型的 .af-head__title / .af-head__sub（prototype/assets/app.css:125-130）。'].join('\n'),
+      ).toEqual([])
     }
   })
 })

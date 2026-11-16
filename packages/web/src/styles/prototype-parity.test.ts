@@ -359,6 +359,45 @@ function staticClassesOfTemplate(vueSource: string): Set<string> {
 }
 
 /**
+ * 模板里出现的静态类名——**含 `<PageHead>` 这类共享组件贡献的类**。
+ *
+ * 判「骨架类落地了没有」不能只读页面自己的模板：原型每一页的
+ * `header.af-head` 由页面自己画，实现里抽成了 `PageHead` 组件
+ * （`domains/shared/components/PageHead.vue`），调用点写的只有
+ * `<PageHead>…</PageHead>`——它的页头类名在兄弟文件里。
+ *
+ * **口径不因此放宽**：仍然只认 `class="…"` 的静态类名、仍然剥注释、
+ * 仍然不认 `:class` 动态绑定（判据住在 `test/sfc.ts` 的 `staticClassesOf`）。
+ * 而且组件是真的在渲染（不会被渲染时才出现），所以这不是「算它用了」，
+ * 是「它确实用了」。
+ */
+function staticClassesWithShared(vueSource: string): Set<string> {
+  const out = staticClassesOfTemplate(vueSource)
+  // 只并入被这个模板**实际引用**（`<PageHead` / `<PageHead>`）的共享骨架
+  // 组件贡献的类名——不并入全仓，否则随便哪个页面只要页头写对了就能白拿。
+  for (const [name, source] of sharedComponents()) {
+    if (new RegExp(`<${name}[\\s>/]`).test(vueSource)) {
+      for (const cls of staticClassesOfTemplate(source)) out.add(cls)
+    }
+  }
+  return out
+}
+
+/**
+ * `shared/components` 里可复用的骨架组件：组件名 → 源码。
+ *
+ * 每次调用**现读**（不缓存）：文件被改名 / 删掉时必须当场抛错（`readRepoFile`
+ * 的行为），而不是让上面那条断言因为「读不到组件」悄悄退化成
+ * 「页面自己没写 af-head → 清单外 → 红在一个假原因上」。
+ */
+function sharedComponents(): Array<[string, string]> {
+  return ['PageHead'].map((name) => [
+    name,
+    readRepoFile(`packages/web/src/domains/shared/components/${name}.vue`),
+  ])
+}
+
+/**
  * 「待迁移」清单：本门禁对**还没迁移**的文件判红，是有意的。
  *
  * 整条断言仍会在任何**新的**违规上判红；只有清单里的条目被豁免。
@@ -391,23 +430,29 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
      * 把它留在清单里会被下面的「清单反向守卫」当场判红。
      * 其余 9 个页面根容器仍是自造的 `af-page` / `af-page--flush`。
      * 迁移一个就从这里删一个。
+     *
+     * **v0.8.1 子任务 4 删了 3 条**（`ProjectTaskPage` / `BindPage` /
+     * `DeviceDetailPage`）：这三页的页头由 `PageHead` 渲染，组件渲染的是原型的
+     * `header.af-head`（`prototype/index.html:15`）。所以判据从
+     * `staticClassesOfTemplate(page)` 换成 `staticClassesWithShared(page)`——
+     * 只并入**该模板实际引用的**共享骨架组件贡献的静态类名，口径本身
+     * （只认 `class="…"`、剥注释、不认 `:class`）没有放宽。
+     * 这三页的 `.af-body` 仍是子任务 8/9 的账，但本门禁问的是
+     * 「af-body **或** af-head」，页头落地即算命中。
      */
     const TODO_SUBTASKS_4_TO_9: Record<string, string> = {
       'packages/web/src/domains/project/OverviewPage.vue': '子任务 6（总览页 + 管家抽屉壳）',
-      'packages/web/src/domains/project/ProjectTaskPage.vue': '子任务 8（任务详情页）',
       'packages/web/src/domains/project/ProjectSettingsPage.vue': '子任务 9（其余 7 页）',
       'packages/web/src/domains/project/ArchivedPage.vue': '子任务 9（其余 7 页）',
       'packages/web/src/domains/project/NewProjectPage.vue': '子任务 9（其余 7 页）',
-      'packages/web/src/domains/project/BindPage.vue': '子任务 9（其余 7 页）',
       'packages/web/src/domains/device/DevicesPage.vue': '子任务 9（其余 7 页）',
-      'packages/web/src/domains/device/DeviceDetailPage.vue': '子任务 9（其余 7 页）',
       'packages/web/src/domains/session/SessionPage.vue': '子任务 9（其余 7 页）',
     }
 
     const stillPending: string[] = []
     const migratedButListed: string[] = []
     for (const page of DELIVERED_PAGES) {
-      const classes = staticClassesOfTemplate(readRepoFile(page))
+      const classes = staticClassesWithShared(readRepoFile(page))
       const hasSkeleton = classes.has('af-body') || classes.has('af-head')
       const listed = page in TODO_SUBTASKS_4_TO_9
       if (!hasSkeleton && !listed) stillPending.push(page)
@@ -447,18 +492,38 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
      * **4 处**，实测该文件为 **0 处**——那 4 处在 `ProjectSettingsPage.vue`。
      * 两者合计都是 4，所以「共 10 处」的总数对得上，但归属写错了。
      * 本门禁按**实测**记账（`ProjectSettingsPage` 归子任务 9），不照抄任务书。
+     *
+     * ── 2026-11 修正：`style="` ≠ `:style="` ─────────────────────────────
+     * 上一版的正则是 `/style="/g`，它**分不清静态内联与动态绑定**：
+     *
+     *     '<div style="x">'      → 旧 1 / 新 1
+     *     '<div :style="x">'     → 旧 1 / 新 0   ← 旧判据的假阳性
+     *     '<div v-bind:style="x">' → 旧 1 / 新 0
+     *
+     * `SessionPage.vue:2723` 的唯一一处正是 `:style="activeWs?.dock ? …"`
+     * ——那是**动态绑定**（宽度随分栏拖拽变，值在运行期才算得出来），
+     * 它不能被"清掉"，所以旧判据下那一行是**永远清不掉的死账**。
+     * 判据改为 `/(?<!:)style="/g`：只认静态 `style="`。
+     *
+     * 动态 `:style` / `v-bind:style` 是**正当写法**（值依赖运行时状态时
+     * 没有静态替代），不在本门禁范围内。
+     *
+     * 这条是**卫生规则，不是忠实度规则**：原型自己就大量使用内联
+     * `style="`——`session.html` 22 处、`index.html` 16 处、`devices.html`
+     * 29 行 / 32 处（同一行里出现多次时按行数与按次数会分叉，两个数都记）。
+     * 实现侧要求清掉，是为了「主题一改就与 token 分叉」，不是为了像原型。
      */
     const TODO_INLINE_STYLE: Record<string, { count: number; owner: string }> = {
       'packages/web/src/domains/device/DevicesPage.vue': { count: 5, owner: '子任务 9' },
       'packages/web/src/domains/project/ProjectSettingsPage.vue': { count: 4, owner: '子任务 9' },
-      'packages/web/src/domains/session/SessionPage.vue': { count: 1, owner: '子任务 9' },
     }
 
     const offenders: string[] = []
     const stale: string[] = []
     const drifted: string[] = []
     for (const page of DELIVERED_PAGES) {
-      const count = (templateOf(readRepoFile(page)).match(/style="/g) ?? []).length
+      // 静态 `style="` 才算；`:style=` / `v-bind:style=` 是动态绑定，合法。
+      const count = (templateOf(readRepoFile(page)).match(/(?<!:)style="/g) ?? []).length
       const listed = TODO_INLINE_STYLE[page]
       if (count > 0 && !listed) offenders.push(`${page}：${count} 处`)
       else if (count === 0 && listed) stale.push(`${page}：已清零，请从 TODO_INLINE_STYLE 删掉`)
@@ -480,6 +545,21 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
     // 清单里的数字也要跟实测一致：否则「还剩几处」这件事没人知道，
     // 清掉 1 处之后清单会一直写着老的数字，门禁看起来还是「有账可查」。
     expect(drifted, ['清单里的计数与实测不符：', ...drifted].join('\n')).toEqual([])
+  })
+
+  it('内联样式判据本身分得清静态 style=" 与动态 :style="', () => {
+    // 上面那条断言的口径全靠这个正则。写成 `/style="/g` 时它会把
+    // `:style="…"` / `v-bind:style="…"` 也算成内联样式——**假阳性**，
+    // 而且假阳性落在一个「永远清不掉」的方向上（动态绑定不能改静态）。
+    // 所以这里用最小夹具把三个用例钉死，改回 `/style="/g` 时当场红。
+    const STATIC_STYLE = /(?<!:)style="/g
+    const countOf = (src: string): number => (src.match(STATIC_STYLE) ?? []).length
+    expect(countOf('<div style="x">'), '静态内联样式必须算命中').toBe(1)
+    expect(countOf('<div :style="x">'), ':style 是动态绑定，不算内联样式').toBe(0)
+    expect(countOf('<div v-bind:style="x">'), 'v-bind:style 同上').toBe(0)
+    // 反向：这条夹具必须真的能区分——旧写法在同样的输入上给出 1/1/1。
+    const OLD = /style="/g
+    expect(['<div style="x">', '<div :style="x">', '<div v-bind:style="x">'].map((s) => (s.match(OLD) ?? []).length)).toEqual([1, 1, 1])
   })
 
   it('没有第二份顶栏：外壳里没有 af-head，且全仓没有第二套顶栏类名', () => {

@@ -227,7 +227,7 @@ onMounted(load)
       <span v-if="project" class="af-badge">{{ project.name }}</span>
       <span v-if="project" class="af-badge">{{ describeShape(project.shape) }}</span>
       <span v-if="archived" class="af-badge af-badge--warn">已归档</span>
-      <span class="af-page__actions"></span>
+      <span class="af-head__spacer"></span>
       <button
         type="button"
         class="af-btn af-btn--ghost"

@@ -113,18 +113,25 @@ describe('模板里的 af-* 类名都有定义（`.af-head__title` 那次漏定�
       `__subtitle` / `--flush` / `__section`）的规则已随类名一起删除（v0.8.1
       子任务 2）：它们在原型 `prototype/assets/app.css` 里命中 0，是实现自造的
       第二套页面设计。但**页面模板还留着它们**——逐页换成原型的
-      `.af-head` + `.af-body` 骨架归子任务 4/6/8/9。
+      `.af-head` + `.af-body` 骨架归子任务 6/8/9。
 
-      所以这一族暂时整族豁免：不豁免的话本门禁会有 50+ 条假红灯，而人看到
-      一屏红灯的自然反应是去改模板（本轮不该改）而不是修名单。**迁移完成后
-      这一整块要删掉**——下面的反向守卫盯着它别变成永久后门。
+      v0.8.1 子任务 4 只迁了**共享页头**（`PageHead.vue` + 它的 4 个调用点
+      `AgentDetailPage` / `DeviceDetailPage` / `ProjectTaskPage` / `BindPage`）。
+      那 4 页里 `af-page__title` 已换成原型的 `.af-head__title`
+      （`app.css:125`）、`af-page__sub` 已换成 `.af-head__sub`（`app.css:129`），
+      `af-page__head` 与 `af-page__actions` 由 `PageHead` 渲染的
+      `header.af-head` + `.af-head__spacer` 取代。
+
+      **这一族仍然一条都不能从下面删**：另外 9 个页面模板还在用它们
+      （`af-page__head` 9 处、`af-page__sub` 4 处、`af-page__title` 9 处……），
+      删掉任何一条都会立刻变成正向门禁的 9+ 条假红灯。整块归子任务 6/8/9。
     */
-    ['af-page', '页面根容器：规则已删，骨架迁到 `.af-head` + `.af-body`（子任务 4/6/8/9）'],
+    ['af-page', '页面根容器：规则已删，骨架迁到 `.af-head` + `.af-body`（子任务 6/8/9）'],
     ['af-page--flush', '同上：无内边距的页面根变体（`SessionPage`），迁到 `.af-body--fill`'],
-    ['af-page__head', '页面页头：迁到原型的 `.af-head`（原型 `index.html:15`）'],
-    ['af-page__title', '页面 h1：迁到原型的 `.af-head__title`'],
+    ['af-page__head', '页面页头：迁到原型的 `.af-head`（`PageHead` 已迁，其余 9 页归子任务 6/8/9）'],
+    ['af-page__title', '页面 h1：迁到原型的 `.af-head__title`（`PageHead` 的 4 个调用点已迁完，其余归 6/8/9）'],
     ['af-page__actions', '页头右侧动作：迁到 `.af-head` 里的 `.af-btn` + `.af-head__spacer`'],
-    ['af-page__sub', '页面副标题：迁到原型的 `.af-head__sub`'],
+    ['af-page__sub', '页面副标题：迁到原型的 `.af-head__sub`（`PageHead` 的 4 个调用点已迁完，其余归 6/8/9）'],
     ['af-page__subtitle', '页内分区标题：迁到原型的 `.af-region__title`'],
     ['af-page__section', '分区钩子：无自有规则，与 `af-ov__todo` 一起用'],
     ['af-catalog', '`AgentCatalog` 的根标记类：后代选择器 `.af-catalog .af-catalog__x` 里已包含它'],
@@ -149,7 +156,7 @@ describe('模板里的 af-* 类名都有定义（`.af-head__title` 那次漏定�
     ['af-fold__body', '原型 `.af-fold__body`：生产用 `.af-ov__fold-body`（选择器里两个名字并列，故意保留）'],
   ])
 
-  /** 只有「页面外壳那一族待迁移」才允许整族豁免——它们是子任务 4/6/8/9 的账。 */
+  /** 只有「页面外壳那一族待迁移」才允许整族豁免——它们是子任务 6/8/9 的账。 */
   const MIGRATION_EXEMPT = new Set([
     'af-page',
     'af-page--flush',
@@ -192,11 +199,16 @@ describe('模板里的 af-* 类名都有定义（`.af-head__title` 那次漏定�
   /*
     「整族豁免」不许变成永久后门。
 
-    页面外壳那一族（`.af-page` 等 8 个）是**待迁移**的账，不是「本来就不该有
-    规则」。迁移完成的信号是：样式表里重新定义了它（那说明有人把自造层又加
-    回来了）或模板里已经没人用了（那说明迁移做完了，豁免该删）。
+    页面外壳那一族是**待迁移**的账，不是「本来就不该有规则」。迁移完成的
+    信号是：样式表里重新定义了它（那说明有人把自造层又加回来了）或模板里
+    已经没人用了（那说明迁移做完了，豁免该删）。
 
     两种情形都要红，于是这份名单只能说一件事：「还没迁完」。
+
+    子任务 4 迁的是**共享页头**（`PageHead.vue` + 4 个调用点），页面根容器与
+    另外 9 个页面的页头仍是自造那一套，所以这份名单**一条都没减**。配套的
+    迁移不变量在 `PageHead.test.ts` 里钉着（那 4 页的页头块里不许再出现
+    `af-page__*`），不靠这里删条目来表达。
   */
   it('页面外壳那一族的豁免只在「还没迁移」时成立', () => {
     const stillUsed = [...MIGRATION_EXEMPT].filter((name) =>

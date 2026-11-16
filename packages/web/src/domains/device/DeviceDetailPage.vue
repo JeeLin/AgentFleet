@@ -126,7 +126,7 @@ function openProject(projectId: string): void {
   <div class="af-page af-devd">
     <PageHead>
       <div>
-        <h1 class="af-page__title">
+        <h1 class="af-head__title">
           {{ summary?.name ?? '设备' }}
           <StateBadge
             v-if="summary"
@@ -134,7 +134,7 @@ function openProject(projectId: string): void {
             :derived="summary.derived"
           />
         </h1>
-        <p class="af-page__sub">
+        <p class="af-head__sub">
           这台机器在线吗、绑了哪些项目、磁盘还剩多少、失败集中在哪一类。
           <b>这是设备视角</b>——项目页是同一个项目的另一个视角，两个都要能看。
         </p>

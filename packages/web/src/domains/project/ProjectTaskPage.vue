@@ -447,7 +447,7 @@ function backToBoard(): void {
       <!-- 页头：返回看板 + 标题 + 状态胶囊 + 需人工验收标签 -->
       <PageHead>
         <div>
-          <h1 class="af-page__title">
+          <h1 class="af-head__title">
             {{ task.title }}
             <StateBadge :state="task.state" />
             <span
@@ -459,7 +459,7 @@ function backToBoard(): void {
               需人工验收
             </span>
           </h1>
-          <p class="af-page__sub">
+          <p class="af-head__sub">
             {{ stateLabel }} · 第 {{ task.version }} 版 · 更新于 {{ relativeTime(task.updated_at, now) }}
           </p>
         </div>
