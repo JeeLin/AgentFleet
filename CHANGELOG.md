@@ -14,6 +14,35 @@ once on 2026-11-05.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-16
+
+> 里程碑：任务与看板——把任务从「两张空表」变成可看、可管、可处置的执行单元。
+> Milestone: tasks and board — tasks become viewable, manageable and actionable execution units.
+
+### Added
+
+- **新增任务看板**，六列对应任务六态（待办 / 排队中 / 执行中 / 待验收 / 已完成 / 失败），卡片显示时长、失败人话与验收标记。 / **Added the task board** with one column per state; cards show elapsed time, a plain-language failure reason and an acceptance marker.
+- **新增任务详情页**，按「怎么来的 / 执行记录 / 失败面板 / 验收面板 / 任务约束」分区。 / **Added the task detail page** split into origin, executions, failure, acceptance and constraints.
+- **新增任务 HTTP API**（建 / 列 / 详情 / 改 / 推进 / 验收 / 失败处置）。 / **Added the task HTTP API** for create, list, detail, patch, transition, accept and failure handling.
+- **新增失败八形态**，其中 `superseded` 与 `disk_exhausted` 单列，`superseded` 不占重试次数。 / **Added eight failure kinds**, with `superseded` and `disk_exhausted` distinguished and `superseded` not consuming a retry.
+- **新增 `done_when` 判定码闭集**，只有 `description` 时任务被明确标为「需人工验收」。 / **Added a closed set of `done_when` criteria**; a description-only task is explicitly marked as needing manual acceptance.
+- **设备页新增平台选择**，不再只能下载浏览器自身平台的 `afcli`。 / **Added a platform picker on the devices page**, so the `afcli` download is no longer limited to the browser's own platform.
+
+### Changed
+
+- **任务状态迁移到规格六态**（`pending` / `queued` / `running` / `review` / `done` / `failed`，schema v7），原 `draft` / `ready` / `blocked` 归并为 `pending`。 / **Task state moved to the six spec values** (schema v7), folding `draft` / `ready` / `blocked` into `pending`.
+- **状态机开始校验转移**，十条合法边生效，非法转移返回明确错误而非静默改库。 / **The state machine now validates transitions**: ten legal edges are enforced and illegal ones return an explicit error instead of silently writing.
+- **页面视觉层改以 `prototype/` 为基准**，外壳、页头、内容区与密度按原型重建。 / **The visual layer now follows `prototype/` as its baseline**, with the shell, page head, content area and density rebuilt to match.
+- **原型基准写进 `AGENTS.md`**，不再依赖口头约定。 / **The prototype baseline is now recorded in `AGENTS.md`** instead of relying on verbal agreement.
+
+### Fixed
+
+- **修复关单时丢失失败原因**，失败原因与失败类型改为各自独立的可选字段。 / **Fixed the failure reason being lost when closing a task**: the reason and the failure kind are now independent optional fields.
+- **修复改任务时多余字段被静默接受**，未知字段现在返回 400。 / **Fixed patch requests silently accepting stray fields**; unknown fields now return 400.
+- **修复数据库损坏被误报成「任务不存在」**，接错时如实报告内部错误。 / **Fixed a broken database read being reported as "task not found"**; it now surfaces an internal error truthfully.
+- **修复 CI 仍跑 Node 20 已弃用 action 的告警**。 / **Fixed the deprecated Node 20 actions still used by the release workflow.**
+- **修复 Windows 上 `afcli` 连 Hub 握手拿到 HTTP 200**，补一份可执行的排查判定树。 / **Fixed the Windows `afcli` handshake receiving HTTP 200** by adding an executable troubleshooting tree.
+
 ## [0.7.4] - 2026-11-13
 
 > 里程碑：会话导入——把设备上外部 agent 的历史会话绑定成 Hub 会话并继续对话。
