@@ -133,15 +133,15 @@ function createSessionReason(device: DeviceSummary): string {
     <table class="af-table">
       <thead>
         <tr>
-          <th style="width: 116px">状态</th>
+          <th class="af-devt__c-state">状态</th>
           <th>名称</th>
-          <th style="width: 128px">平台</th>
-          <th style="width: 92px" data-num>afcli</th>
-          <th style="width: 190px">已装 agent</th>
-          <th style="width: 72px" data-num>CPU</th>
-          <th style="width: 72px" data-num>内存</th>
-          <th style="width: 92px">最近心跳</th>
-          <th style="width: 160px"></th>
+          <th class="af-devt__c-platform">平台</th>
+          <th class="af-devt__c-num" data-num>afcli</th>
+          <th class="af-devt__c-agents">已装 agent</th>
+          <th class="af-devt__c-num" data-num>CPU</th>
+          <th class="af-devt__c-num" data-num>内存</th>
+          <th class="af-devt__c-seen">最近心跳</th>
+          <th class="af-devt__c-actions"></th>
         </tr>
       </thead>
       <tbody
@@ -263,6 +263,20 @@ function createSessionReason(device: DeviceSummary): string {
 </template>
 
 <style scoped>
+/* 列宽。原型 `devices.html:44-46` 的 `<th>` 不带宽度——它靠内容撑，
+   因为原型每格只有一个短词。实现这一列的单元格里有「名称 + node_id 两行」
+   与「已装 agent 多个胶囊」，不给下限时窄屏下纵向堆叠、列宽随呼吸跳动。
+   这些**不是**内联 `style="width:Npx"`：静态内联样式被 `prototype-parity`
+   门禁禁止（主题/密度改一次就分叉），所以落成带语义的列类。
+   数值取自改造前实测的视觉稳定宽度，不是从原型抄来的（原型没有这组数）。 */
+.af-devt__c-state { width: 116px; }
+.af-devt__c-platform { width: 128px; }
+.af-devt__c-agents { width: 190px; }
+.af-devt__c-seen { width: 92px; }
+.af-devt__c-actions { width: 160px; }
+/* CPU / 内存 / afcli 三列都是右对齐数字，同一档宽度。 */
+.af-devt__c-num { width: 82px; }
+
 /* 表格外框 `.af-tablewrap` 在 `styles/components.css` §8：两张表共用同一个框，
    各存一份就是两份逐字相同的副本。
 

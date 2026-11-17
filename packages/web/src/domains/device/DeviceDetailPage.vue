@@ -128,29 +128,25 @@ function openProject(projectId: string): void {
        上一版根容器是自造的 `.af-page`（规则已随 v0.8.1 子任务 2 删除），
        `.af-devd` 只是这一页的局部样式命名空间（后代选择器要用它）。
        `.af-body` 是原型里承载滚动的那一层（`app.css:132`）。 -->
-  <div class="af-body af-devd">
-    <PageHead>
-      <div>
-        <h1 class="af-head__title">
-          {{ summary?.name ?? '设备' }}
-          <StateBadge
-            v-if="summary"
-            :state="summary.status"
-            :derived="summary.derived"
-          />
-        </h1>
-        <p class="af-head__sub">
-          这台机器在线吗、绑了哪些项目、磁盘还剩多少、失败集中在哪一类。
-          <b>这是设备视角</b>——项目页是同一个项目的另一个视角，两个都要能看。
-        </p>
-      </div>
-      <template #actions>
-        <button class="af-btn af-btn--sm" type="button" :disabled="loading" @click="load">
-          刷新
-        </button>
-      </template>
-    </PageHead>
+  <PageHead>
+    <div>
+      <h1 class="af-head__title">
+        {{ summary?.name ?? '设备' }}
+        <StateBadge v-if="summary" :state="summary.status" :derived="summary.derived" />
+      </h1>
+      <p class="af-head__sub">
+        这台机器在线吗、绑了哪些项目、磁盘还剩多少、失败集中在哪一类。
+        <b>这是设备视角</b>——项目页是同一个项目的另一个视角，两个都要能看。
+      </p>
+    </div>
+    <template #actions>
+      <button class="af-btn af-btn--sm" type="button" :disabled="loading" @click="load">
+        刷新
+      </button>
+    </template>
+  </PageHead>
 
+  <div class="af-body af-devd">
     <!-- 原型 `devices.html:24` 的内容层：`.af-body` 里这一层自己带内边距。
          没有它时内容贴着页头那条分隔线，四条 region 之间也没有外边距。 -->
     <div class="af-devd__body">

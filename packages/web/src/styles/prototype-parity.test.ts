@@ -481,6 +481,24 @@ const DELIVERED_PAGES = [
   'packages/web/src/domains/session/SessionPage.vue',
 ] as const
 
+/**
+ * 内联样式门禁的扫描范围：10 个页面**加上被它们渲染的共享组件**。
+ *
+ * 只扫页面是不够的（2026-11-17 子任务 10 实测）：`DevicesPage` 的表格主体由
+ * `DeviceTable.vue` 渲染，那 8 处 `style="width: Npx"` 于是完全在门禁视野之外
+ * ——门禁绿、页面上却真有内联样式。判据是「用户看到的页面上有没有内联样式」，
+ * 不是「页面那个文件里有没有」，所以范围必须跟着渲染树走。
+ *
+ * 目前纳入的共享件只列**被这 10 页渲染、且模板里出现过静态 style 的**那几个；
+ * 全仓 `.vue` 一律扫会把登录页 / setup 页也算进来，它们不属于本里程碑的
+ * 10 个页面。
+ */
+const INLINE_STYLE_SCOPE = [
+  ...DELIVERED_PAGES,
+  'packages/web/src/domains/device/DeviceTable.vue',
+  'packages/web/src/domains/shared/components/PageHead.vue',
+] as const
+
 /** 模板里出现的**静态**类名（`class="…"` / `class='…'`），`:class` 不算。 */
 function staticClassesOfTemplate(vueSource: string): Set<string> {
   const out = new Set<string>()
@@ -638,6 +656,59 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
     expect(staleOverride, `设计豁免过期：\n${staleOverride.join('\n')}`).toEqual([])
   })
 
+  it('页头必须排在 .af-body 之前，不许嵌在它里面（原型 8 页无一例外）', () => {
+    /**
+     * 这条是**对着活 Hub 实测**补的（2026-11-17 子任务 10）：上一版判据是
+     * 「`af-body` 在类名集合里，且页头是 `header.af-head` 或 `<PageHead>`」——
+     * 两个条件**各自为真**，于是 `DeviceDetailPage.vue` 把 `<PageHead>` 整个写在
+     * `div.af-body` 内部也照样绿。而真实渲染里 `document.querySelector('.af-head')
+     * .parentElement === document.querySelector('.af-body').parentElement` 是
+     * `false`：页头成了内容层的子节点。
+     *
+     * 后果不是审美问题：`.af-body` 是 `overflow:auto` 那一层，页头嵌进去就跟着
+     * 一起滚走，而 `.af-body--pad` 的内边距把页头挤成内缩。原型每一页都是
+     * `header.af-head` 然后 `div.af-body` 两块并排（`prototype/index.html:15` 与
+     * `:23`、`devices.html:15` 与 `:23`）。
+     *
+     * 判据用**位置**而不是「类名出现过」：模板里 `<PageHead>` / `header.af-head`
+     * 的起始下标必须小于 `class="af-body"` 的那处。裸 `<header>` 不带 `af-head`
+     * 不算页头（那可能只是某个面板的小标题）。
+     */
+    const HEAD_AT = [/<PageHead[\s>]/g, /<header[^>]*\bclass="[^"]*\baf-head\b[^"]*"/g]
+    const nested: string[] = []
+    for (const page of DELIVERED_PAGES) {
+      const tpl = templateOf(readRepoFile(page))
+      const bodyAt = tpl.search(/class="[^"]*\baf-body\b/)
+      if (bodyAt < 0) continue // 缺 af-body 由上面那条用例负责，这里不重复报
+      for (const re of HEAD_AT) {
+        for (const m of tpl.matchAll(re)) {
+          if ((m.index ?? 0) > bodyAt) nested.push(`${page}：页头出现在 .af-body 之后`)
+        }
+      }
+    }
+    expect(
+      nested,
+      [
+        '页头必须与 .af-body 平级且排在它前面；嵌进 .af-body 会让页头随内容一起滚走：',
+        ...nested,
+      ].join('\n'),
+    ).toEqual([])
+  })
+
+  it('页头位置判据本身有效：把 PageHead 挪进 .af-body 必须判红', () => {
+    // 变异夹具：串起来的源与真文件同一形状，只是页头换了位置。不具备这条，
+    // 上面那条在正则写错（例如永远匹配不到）时会静默全绿。
+    const ok = 'X\n<PageHead><h1>t</h1></PageHead>\n<div class="af-body">y</div>'
+    const bad = 'X\n<div class="af-body"><PageHead><h1>t</h1></PageHead>y</div>'
+    const judge = (tpl: string): boolean => {
+      const bodyAt = tpl.search(/class="[^"]*\baf-body\b/)
+      if (bodyAt < 0) return true
+      return ![...tpl.matchAll(/<PageHead[\s>]/g)].some((m) => (m.index ?? 0) > bodyAt)
+    }
+    expect(judge(ok), '平级且在前 → 通过').toBe(true)
+    expect(judge(bad), '嵌在 .af-body 里 → 必须判红').toBe(false)
+  })
+
   it('10 个页面模板里不许有内联样式（style="）', () => {
     /**
      * 残留内联样式 → 由哪个子任务清掉。
@@ -678,7 +749,7 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
      * 「这里还有账」。`offenders` 仍然是零豁免的：任何一页再写内联都会红。
      */
     const offenders: string[] = []
-    for (const page of DELIVERED_PAGES) {
+    for (const page of INLINE_STYLE_SCOPE) {
       // 静态 `style="` 才算；`:style=` / `v-bind:style=` 是动态绑定，合法。
       const count = (templateOf(readRepoFile(page)).match(/(?<!:)style="/g) ?? []).length
       if (count > 0) offenders.push(`${page}：${count} 处`)
