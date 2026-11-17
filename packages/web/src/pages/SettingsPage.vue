@@ -42,6 +42,7 @@ import { onMounted, ref } from 'vue'
 
 import { navigate } from '@/router'
 import {
+  DEFAULT_THEME,
   currentTheme,
   followOS,
   setTheme,
@@ -211,7 +212,7 @@ const THEME_CHOICES: readonly ThemeChoice[] = [
  * 也可能在测试里被单独挂载（那时 `document` 上还没有任何主题）。用一个 ref
  * 保存「现在选的是哪套」，点击时先改 ref 再落盘——界面不必等存储写成功。
  */
-const picked = ref<ThemeId>('neutral')
+const picked = ref<ThemeId>(DEFAULT_THEME)
 const followOSOn = ref(false)
 
 onMounted(() => {

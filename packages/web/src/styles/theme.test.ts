@@ -40,14 +40,16 @@ describe('四套主题的元数据', () => {
     expect(THEMES.filter((t) => t.tone === '冷').map((t) => t.id)).toEqual(['neutral', 'paper'])
   })
 
-  it('默认是甲 · 中性冷灰（与原型 index.html:8 引的 theme-neutral 一致）', () => {
-    expect(DEFAULT_THEME).toBe('neutral')
+  it('默认是乙 · 暖米灰（用户裁定 2026-11-16，不照抄原型 index.html:8）', () => {
+    // 原型首页先引 `theme-neutral.css` 只说明演示顺序；产品默认是 warm。
+    // 判红方式：把 DEFAULT_THEME 改回 'neutral' → 红。
+    expect(DEFAULT_THEME).toBe('warm')
   })
 })
 
 describe('决定用哪套：优先序', () => {
-  it('什么都没设时用默认', () => {
-    expect(currentTheme()).toBe('neutral')
+  it('什么都没设时用默认（warm）', () => {
+    expect(currentTheme()).toBe('warm')
   })
 
   it('localStorage 里的选择生效', () => {
@@ -63,7 +65,7 @@ describe('决定用哪套：优先序', () => {
 
   it('URL 里是垃圾值时不采信，回落默认而不是返回垃圾', () => {
     window.history.replaceState(null, '', '/?theme=neon')
-    expect(currentTheme()).toBe('neutral')
+    expect(currentTheme()).toBe('warm')
   })
 })
 
@@ -75,12 +77,15 @@ describe('跟随系统', () => {
     const mq = vi.spyOn(window, 'matchMedia').mockImplementation(
       (q: string) => ({ matches: q.includes('dark'), media: q, addEventListener: vi.fn(), removeEventListener: vi.fn() }) as unknown as MediaQueryList,
     )
-    expect(currentTheme()).toBe('neutral') // 暗 + 用户未选过 → 冷调暗色
+    // 暗 + 用户未选过 → 按默认主题（warm）的**冷暖**（暖）取暗色 → warm。
+    // 上一版这里期望 neutral：那时兜底写死 '冷'，与默认主题的冷暖无关。
+    expect(currentTheme()).toBe('warm')
 
     mq.mockImplementation(
       (q: string) => ({ matches: !q.includes('dark'), media: q, addEventListener: vi.fn(), removeEventListener: vi.fn() }) as unknown as MediaQueryList,
     )
-    expect(currentTheme()).toBe('paper') // 亮 + 默认冷调
+    // 亮 + 同样按暖调 → cream（不是 paper）。
+    expect(currentTheme()).toBe('cream')
 
     mq.mockRestore()
   })
@@ -138,7 +143,7 @@ describe('存储不可用时的健壮性（原型 swatch.js:43-51 的理由）',
       throw new Error('SecurityError: private mode')
     })
     expect(() => currentTheme()).not.toThrow()
-    expect(currentTheme()).toBe('neutral')
+    expect(currentTheme()).toBe('warm')
     spy.mockRestore()
   })
 
@@ -153,10 +158,13 @@ describe('存储不可用时的健壮性（原型 swatch.js:43-51 的理由）',
 })
 
 describe('未知 id 不让状态坏掉', () => {
-  it('applyTheme 收到不存在的 id 时回落到第一套，而不是写出垃圾 data-theme', () => {
+  it('applyTheme 收到不存在的 id 时回落到**默认主题**，而不是写出垃圾 data-theme', () => {
+    // 兜底从 `THEMES[0]`（清单第一项 neutral）改成 `DEFAULT_THEME`（warm）：
+    // 默认改成 warm 之后，「清单第一项」与「默认主题」已经不是同一个东西，
+    // 取前者会让「非法 id」和「什么都没设」落到两套不同的配色上。
     const bad = 'neon' as ThemeId
     const applied = applyTheme(bad)
-    expect(applied).toBe('neutral')
-    expect(document.documentElement.dataset.theme).toBe('neutral')
+    expect(applied).toBe('warm')
+    expect(document.documentElement.dataset.theme).toBe('warm')
   })
 })

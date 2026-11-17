@@ -455,45 +455,6 @@ function staticClassesOfTemplate(vueSource: string): Set<string> {
 }
 
 /**
- * 模板里出现的静态类名——**含 `<PageHead>` 这类共享组件贡献的类**。
- *
- * 判「骨架类落地了没有」不能只读页面自己的模板：原型每一页的
- * `header.af-head` 由页面自己画，实现里抽成了 `PageHead` 组件
- * （`domains/shared/components/PageHead.vue`），调用点写的只有
- * `<PageHead>…</PageHead>`——它的页头类名在兄弟文件里。
- *
- * **口径不因此放宽**：仍然只认 `class="…"` 的静态类名、仍然剥注释、
- * 仍然不认 `:class` 动态绑定（判据住在 `test/sfc.ts` 的 `staticClassesOf`）。
- * 而且组件是真的在渲染（不会被渲染时才出现），所以这不是「算它用了」，
- * 是「它确实用了」。
- */
-function staticClassesWithShared(vueSource: string): Set<string> {
-  const out = staticClassesOfTemplate(vueSource)
-  // 只并入被这个模板**实际引用**（`<PageHead` / `<PageHead>`）的共享骨架
-  // 组件贡献的类名——不并入全仓，否则随便哪个页面只要页头写对了就能白拿。
-  for (const [name, source] of sharedComponents()) {
-    if (new RegExp(`<${name}[\\s>/]`).test(vueSource)) {
-      for (const cls of staticClassesOfTemplate(source)) out.add(cls)
-    }
-  }
-  return out
-}
-
-/**
- * `shared/components` 里可复用的骨架组件：组件名 → 源码。
- *
- * 每次调用**现读**（不缓存）：文件被改名 / 删掉时必须当场抛错（`readRepoFile`
- * 的行为），而不是让上面那条断言因为「读不到组件」悄悄退化成
- * 「页面自己没写 af-head → 清单外 → 红在一个假原因上」。
- */
-function sharedComponents(): Array<[string, string]> {
-  return ['PageHead'].map((name) => [
-    name,
-    readRepoFile(`packages/web/src/domains/shared/components/${name}.vue`),
-  ])
-}
-
-/**
  * 「待迁移」清单：本门禁对**还没迁移**的文件判红，是有意的。
  *
  * 整条断言仍会在任何**新的**违规上判红；只有清单里的条目被豁免。
@@ -527,30 +488,72 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
      * 其余 9 个页面根容器仍是自造的 `af-page` / `af-page--flush`。
      * 迁移一个就从这里删一个。
      *
-     * **v0.8.1 子任务 4 删了 3 条**（`ProjectTaskPage` / `BindPage` /
-     * `DeviceDetailPage`）：这三页的页头由 `PageHead` 渲染，组件渲染的是原型的
-     * `header.af-head`（`prototype/index.html:15`）。所以判据从
-     * `staticClassesOfTemplate(page)` 换成 `staticClassesWithShared(page)`——
-     * 只并入**该模板实际引用的**共享骨架组件贡献的静态类名，口径本身
-     * （只认 `class="…"`、剥注释、不认 `:class`）没有放宽。
-     * 这三页的 `.af-body` 仍是子任务 8/9 的账，但本门禁问的是
-     * 「af-body **或** af-head」，页头落地即算命中。
+     * **v0.8.1 子任务 4 / 9 陆续删到只剩 1 条**
+     * （`ProjectSettingsPage` / `ArchivedPage` / `NewProjectPage` / `DevicesPage` /
+     * `SessionPage` / `BindPage` / `DeviceDetailPage` 都已把根容器换成原型的骨架，
+     * 页头由 `PageHead` 渲染）。
+     *
+     * **剩下的 1 条属于别的子任务**（`OverviewPage` = 子任务 6，总览页 +
+     * 管家抽屉壳），它不在子任务 9 的 7 个文件里。
      */
-    const TODO_SUBTASKS_4_TO_9: Record<string, string> = {
+    const TODO_OVERVIEW: Record<string, string> = {
       'packages/web/src/domains/project/OverviewPage.vue': '子任务 6（总览页 + 管家抽屉壳）',
-      'packages/web/src/domains/project/ProjectSettingsPage.vue': '子任务 9（其余 7 页）',
-      'packages/web/src/domains/project/ArchivedPage.vue': '子任务 9（其余 7 页）',
-      'packages/web/src/domains/project/NewProjectPage.vue': '子任务 9（其余 7 页）',
-      'packages/web/src/domains/device/DevicesPage.vue': '子任务 9（其余 7 页）',
-      'packages/web/src/domains/session/SessionPage.vue': '子任务 9（其余 7 页）',
     }
 
+    /**
+     * 页头**有意**不复刻原型单行 `.af-head` 的页面：理由必须具体到「为什么这里
+     * 单行装不下」，不能写成「先这样」。
+     *
+     * `SessionPage`：原型的 `header.af-head`（`session.html:14`）是一行
+     * 「← 项目 / 会话 / 进行中 / 执行监控 / 任务 #1042」。会话页在 v0.5.0 起是
+     * **三层 chrome**（tab 条 → 标题行 → 状态行），每一层的语义不同：tab 条答
+     * 「我在哪几个会话里」，标题行答「这个是哪个」，状态行答「绑在哪台设备、
+     * 哪个目录、哪个 agent」。挤成一行时窄屏下路径会把设备名挤没，而两者说的
+     * 不是同一件事（`SessionPage.test.ts` 三条用例钉着这个分层）。所以它用
+     * 自己的 `.af-wb__head`（`components.css:703`，有独立的 padding / 背景 /
+     * 发丝线），不套 `.af-head`——这不是漏做，是**不做**。
+     */
+    const HEAD_DESIGN_OVERRIDE: Record<string, string> = {
+      'packages/web/src/domains/session/SessionPage.vue':
+        '三层 chrome（tab 条 / 标题行 / 状态行），见 SessionPage.test.ts',
+    }
+
+    /**
+     * 判据是「页面**外壳**里有原型的两块之一」，不是「页面里出现过这两个类名」。
+     *
+     * **为什么不能只看「出现过」**（2026-11-16 实测发现门禁被绕过）：上一版用
+     * `staticClassesWithShared()`，它会把 `<PageHead>` 组件贡献的 `af-head`
+     * 并进页面的类名集合。可 `PageHead` 渲染的页头**本来就是页面自己的第一个
+     * 子节点**，于是任何一页只要用了 `<PageHead>` 就无条件命中，哪怕根容器
+     * 还是被删掉的 `af-page`——`ProjectTaskPage.vue`（`af-page af-taskd`）
+     * 挂着 TODO 却一直绿，正是这么漏的。这个判据等于永远为真，必须改。
+     *
+     * **也不能只看根节点**：`App.vue:707` 已经渲染了 `<main class="af-main">`
+     * （外壳的唯一根，带 `tabindex="-1"` 供 `focusMain()` 用），页面再包一层
+     * `main.af-main` 就是嵌套 `<main>`——非法 HTML，且 `querySelector` 会先命中
+     * 外层那个空的。所以页面根节点**不该**是 `af-main`，而是它里面的内容。
+     *
+     * 现在判两件事，缺一不可：
+     * ① 页面**自己**的模板里有 `af-body`（静态 class）——内容层必须由页面给；
+     * ② 页头要么是页面自己的 `header.af-head`，要么是 `<PageHead>` 组件，且
+     *    **排在 `.af-body` 之前**——原型 8 页全是这个次序
+     *    （`prototype/index.html:15` 的 `header.af-head` 在 `:23` 的
+     *    `div.af-body` 之前）。次序写反或嵌套会让 `.af-body--pad` 的内边距
+     *    把页头挤成内缩、滚动时页头跟着滚走。
+     */
     const stillPending: string[] = []
     const migratedButListed: string[] = []
     for (const page of DELIVERED_PAGES) {
-      const classes = staticClassesWithShared(readRepoFile(page))
-      const hasSkeleton = classes.has('af-body') || classes.has('af-head')
-      const listed = page in TODO_SUBTASKS_4_TO_9
+      const src = readRepoFile(page)
+      const classes = staticClassesOfTemplate(src)
+      const listed = page in TODO_OVERVIEW
+      // ① 内容层由页面自己给
+      const hasBody = classes.has('af-body')
+      // ② 页头：页面自己写 header.af-head，或用 <PageHead>，或声明了设计变更豁免
+      const headUsesComponent = /<PageHead[\s>]/.test(src)
+      const hasOwnHead = classes.has('af-head')
+      const exemptHead = page in HEAD_DESIGN_OVERRIDE
+      const hasSkeleton = hasBody && (headUsesComponent || hasOwnHead || exemptHead)
       if (!hasSkeleton && !listed) stillPending.push(page)
       if (hasSkeleton && listed) migratedButListed.push(page)
     }
@@ -558,10 +561,11 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
     expect(
       stillPending,
       [
-        '这些页面模板里既没有 af-body 也没有 af-head（口径：静态 class="…" 才算，',
-        ':class="[...]" 动态绑定不算，须留静态类名兜底；注释里的类名也不算）：',
+        '这些页面缺少原型骨架（判据：页面自己要有静态 class="af-body"，',
+        '且页头是 `header.af-head` 或用 `<PageHead>` 组件——`:class` 动态绑定不算，',
+        '注释里的类名也不算）：',
         ...stillPending.map((p) => `  ${p}`),
-        '原型每一页都是 .af-head + .af-body 两块，页面只负责 .af-body 里的内容。',
+        '原型每一页都是 .af-head + .af-body 两块，页面只负责这两块里的内容。',
       ].join('\n'),
     ).toEqual([])
 
@@ -571,9 +575,25 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
       migratedButListed,
       [
         '这些页面已经有骨架类了，却还挂在待迁移清单里（清单会越来越水）：',
-        ...migratedButListed.map((p) => `  ${p} —— 请从 TODO_SUBTASKS_4_TO_9 删掉`),
+        ...migratedButListed.map((p) => `  ${p} —— 请从 TODO_OVERVIEW 删掉`),
       ].join('\n'),
     ).toEqual([])
+
+    // 反向守卫：设计豁免必须**真的**还成立。它免掉的是「套 `.af-head`」这一条，
+    // 不是「随便什么页头都行」——豁免的页面必须仍然带 `.af-body`，还要有它
+    // 自陈的那套结构（`SessionPage` 的三层 chrome 用 `af-wb__head` + `af-tabbar`
+    // 标识）。若哪天它改回 `.af-head`，这条会红，提醒把豁免删掉。
+    const staleOverride: string[] = []
+    for (const page of Object.keys(HEAD_DESIGN_OVERRIDE)) {
+      const src = readRepoFile(page)
+      const classes = staticClassesOfTemplate(src)
+      if (!classes.has('af-body')) staleOverride.push(`${page} —— 缺 af-body`)
+      if (classes.has('af-head')) staleOverride.push(`${page} —— 已改用 af-head，删掉豁免`)
+      if (page.endsWith('SessionPage.vue') && !classes.has('af-wb__head')) {
+        staleOverride.push(`${page} —— 豁免理由说的 .af-wb__head 不在模板里了`)
+      }
+    }
+    expect(staleOverride, `设计豁免过期：\n${staleOverride.join('\n')}`).toEqual([])
   })
 
   it('10 个页面模板里不许有内联样式（style="）', () => {
@@ -608,24 +628,18 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
      * `style="`——`session.html` 22 处、`index.html` 16 处、`devices.html`
      * 29 行 / 32 处（同一行里出现多次时按行数与按次数会分叉，两个数都记）。
      * 实现侧要求清掉，是为了「主题一改就与 token 分叉」，不是为了像原型。
+     *
+     * **v0.8.1 子任务 9 把清单清空了**：全 10 页的静态 `style="` 实测为 **0**
+     * （`DevicesPage` 5 处换成 `.af-2xs` + 三个语义色点类；`ProjectSettingsPage`
+     * 4 处换成 `.af-pset__xs { margin: 0 }` 与 `.af-pset__cell--first`）。
+     * 所以 `TODO_INLINE_STYLE` 整个删除——留一个空表只是让下一个人以为
+     * 「这里还有账」。`offenders` 仍然是零豁免的：任何一页再写内联都会红。
      */
-    const TODO_INLINE_STYLE: Record<string, { count: number; owner: string }> = {
-      'packages/web/src/domains/device/DevicesPage.vue': { count: 5, owner: '子任务 9' },
-      'packages/web/src/domains/project/ProjectSettingsPage.vue': { count: 4, owner: '子任务 9' },
-    }
-
     const offenders: string[] = []
-    const stale: string[] = []
-    const drifted: string[] = []
     for (const page of DELIVERED_PAGES) {
       // 静态 `style="` 才算；`:style=` / `v-bind:style=` 是动态绑定，合法。
       const count = (templateOf(readRepoFile(page)).match(/(?<!:)style="/g) ?? []).length
-      const listed = TODO_INLINE_STYLE[page]
-      if (count > 0 && !listed) offenders.push(`${page}：${count} 处`)
-      else if (count === 0 && listed) stale.push(`${page}：已清零，请从 TODO_INLINE_STYLE 删掉`)
-      else if (listed && count !== listed.count) {
-        drifted.push(`${page}：清单写 ${listed.count} 处，实测 ${count} 处`)
-      }
+      if (count > 0) offenders.push(`${page}：${count} 处`)
     }
     expect(
       offenders,
@@ -635,12 +649,6 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
         ...offenders,
       ].join('\n'),
     ).toEqual([])
-    expect(stale, ['清单与实测不符（已清零却还在豁免名单里）：', ...stale].join('\n')).toEqual(
-      [],
-    )
-    // 清单里的数字也要跟实测一致：否则「还剩几处」这件事没人知道，
-    // 清掉 1 处之后清单会一直写着老的数字，门禁看起来还是「有账可查」。
-    expect(drifted, ['清单里的计数与实测不符：', ...drifted].join('\n')).toEqual([])
   })
 
   it('内联样式判据本身分得清静态 style=" 与动态 :style="', () => {

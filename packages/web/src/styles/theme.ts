@@ -14,7 +14,13 @@
      ① URL `?theme=<id>`（可分享、换页不丢）
      ② 「跟随系统」开启 → 按 `prefers-color-scheme` 在**保留用户冷暖**的前提下挑
      ③ localStorage `af-theme`
-     ④ 默认 `neutral`（甲 · 中性冷灰，与原型 `index.html:8` 一致）
+     ④ 默认 `warm`（乙 · 暖米灰，暗色暖调）
+
+    ── 为什么默认是 `warm` 而不是原型 `index.html:8` 引的 `neutral` ──────
+    **这是用户裁定，不是照抄原型**（2026-11-16：「默认改为 warm 吧」）。
+    原型首页引 `theme-neutral.css` 只说明「演示时先看这套」，不代表产品默认；
+    深色暖调蓝光更少，是长时间盯着的控制台更合适的起点。
+    `theme-*.css` 四份文件的内容仍逐值照搬原型，只有「先选哪一套」不同。
 
    设置页的外观区调 `applyTheme` / `followOS` / `setFollowOS` / `currentTheme`。
    =========================================================================== */
@@ -35,7 +41,13 @@ export const THEMES: readonly ThemeMeta[] = [
   { id: 'cream', mode: '亮', tone: '暖' },
 ]
 
-export const DEFAULT_THEME: ThemeId = 'neutral'
+/**
+ * 无任何偏好时的默认主题：乙 · 暖米灰（暗色暖调）。
+ *
+ * **用户裁定 2026-11-16**（上一版是甲 · 中性冷灰）。理由见文件头注释：
+ * 原型首页先引 `theme-neutral.css` 只是演示顺序，不构成产品默认的依据。
+ */
+export const DEFAULT_THEME: ThemeId = 'warm'
 
 const KEY = 'af-theme'
 const OS_KEY = 'af-theme-follow-os'
@@ -74,11 +86,20 @@ export function followOS(): boolean {
 
 /* 跟随系统时：暗色环境给甲/乙，亮色环境给丙/丁。
    保留用户上次选的那一侧的「冷暖」，只换明暗——否则白天打开是纸白、晚上
-   突然变成暖米灰，冷暖也跟着跳（原型 `swatch.js:57-67`）。 */
+   突然变成暖米灰，冷暖也跟着跳（原型 `swatch.js:57-67`）。
+
+   **用户从未选过时按默认主题的冷暖走**（`DEFAULT_THEME` = `warm` → 暖），
+   而不是写死 `'冷'`：否则「开了跟随系统的新用户」在暗色环境得到 neutral（冷）、
+   而「没开跟随系统的新用户」得到 warm（暖），同一个产品里存在两套不同的
+   「无偏好默认」。
+   注意**不能**写成 `?? ambiguous` 之类——`savedTheme()` 为 null 时必须有确定的
+   一侧，这里取 `DEFAULT_THEME` 自身的 tone，让默认值只有一个定义处。 */
 function themeFromOS(): ThemeId {
   const dark = globalThis.matchMedia?.('(prefers-color-scheme: dark)')?.matches ?? true
   const saved = savedTheme()
-  const tone = THEMES.find((t) => t.id === saved)?.tone ?? '冷'
+  const fallbackTone =
+    THEMES.find((t) => t.id === DEFAULT_THEME)?.tone ?? THEMES[0]?.tone ?? '冷'
+  const tone = THEMES.find((t) => t.id === saved)?.tone ?? fallbackTone
   const want = dark ? '暗' : '亮'
   const hit = THEMES.find((t) => t.mode === want && t.tone === tone)
   return hit?.id ?? THEMES.find((t) => t.mode === want)?.id ?? DEFAULT_THEME
@@ -100,7 +121,11 @@ export function currentTheme(): ThemeId {
 
 /** 把一套主题落到 `<html data-theme data-theme-mode>` 上。 */
 export function applyTheme(id: ThemeId, persist = false): ThemeId {
-  const theme = THEMES.find((t) => t.id === id) ?? THEMES[0]
+  // 兜底必须走 `DEFAULT_THEME` 而不是 `THEMES[0]`：后者是「清单第一项」，
+  // 与「默认主题」在默认改成 warm 之后已经不是同一个东西了。取 `THEMES[0]`
+  // 会让「传了非法 id」静默落到 neutral，而「什么都没设」落到 warm——同一个
+  // 产品里两套「默认」，且改默认值时只改一处不会跟着变。
+  const theme = THEMES.find((t) => t.id === id) ?? THEMES.find((t) => t.id === DEFAULT_THEME)!
   const root = globalThis.document?.documentElement
   if (root) {
     root.dataset.theme = theme.id
