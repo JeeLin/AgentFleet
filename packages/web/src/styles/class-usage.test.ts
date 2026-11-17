@@ -133,7 +133,6 @@ describe('模板里的 af-* 类名都有定义（`.af-head__title` 那次漏定�
     ['af-page__actions', '页头右侧动作：迁到 `.af-head` 里的 `.af-btn` + `.af-head__spacer`'],
     ['af-page__sub', '页面副标题：迁到原型的 `.af-head__sub`（`PageHead` 的 4 个调用点已迁完，其余归 6/8/9）'],
     ['af-page__subtitle', '页内分区标题：迁到原型的 `.af-region__title`'],
-    ['af-page__section', '分区钩子：无自有规则，与 `af-ov__todo` 一起用'],
     ['af-catalog', '`AgentCatalog` 的根标记类：后代选择器 `.af-catalog .af-catalog__x` 里已包含它'],
     ['af-agd', '`AgentDetailPage` 的根标记类：同上，`.af-agd .af-agd__x`'],
     ['af-devd', '`DeviceDetailPage` 的根标记类：同上'],
@@ -141,7 +140,6 @@ describe('模板里的 af-* 类名都有定义（`.af-head__title` 那次漏定�
     ['af-acceptancepanel', '`AcceptancePanel` 的根标记类：外观全部走 `.af-region` + `.af-acceptancepanel__x`'],
     ['af-failurepanel', '`FailurePanel` 的根标记类：同上'],
     ['af-skeletonpage', '`SkeletonPage` 的根标记类：外观走 `.af-skeletonpage__x`'],
-    ['af-ov__todo', '`OverviewPage` 的待办分区钩子：与 `af-page__section` 一起用，无自有规则'],
     ['af-devpage__detail', '`DevicesPage` 的设备详情分区钩子：与 `af-region` 一起用，外观全部来自 `.af-region`'],
     ['af-auth--setup', '`SetupPage` 的 `af-auth` 变体钩子：当前与 `af-auth` 同观感，保留是为了将来真要分叉时有地方加'],
     ['af-auth__note--info', '`af-auth__note` 的语义变体：说明性提示与错误提示目前同观感，靠 `role="alert"` 区分对读屏的语义'],
@@ -151,9 +149,11 @@ describe('模板里的 af-* 类名都有定义（`.af-head__title` 那次漏定�
     ['af-wb__baserev', '会话工作台起点标记：与 `data-base-rev` 属性配合，外观由 `.af-wb__meta` 承担'],
     ['af-wb__baseov', '同上，起点「超出上限」那一档'],
     // ② 原型类名，外观由本地类承担
-    ['af-fold', '原型 `.af-fold`：生产用 `.af-ov__fold`（`<details>`），模板里留着这个名字是对照锚点'],
-    ['af-fold__sum', '原型 `.af-fold__sum`：生产用 `.af-ov__fold > summary`'],
-    ['af-fold__body', '原型 `.af-fold__body`：生产用 `.af-ov__fold-body`（选择器里两个名字并列，故意保留）'],
+    //
+    // `.af-fold` / `.af-fold__sum` / `.af-fold__body` 曾挂在这里（生产侧当时用
+    // 自造的 `.af-ov__fold`）。v0.8.1 子任务 6 已把总览页换成原型的
+    // `details.af-fold` 结构，这三条在 `prototype-shell.css:449-469` 有真规则，
+    // 豁免随之删除——留着就是给已定义的类再开一个静默通道。
   ])
 
   /** 只有「页面外壳那一族待迁移」才允许整族豁免——它们是子任务 6/8/9 的账。 */
@@ -165,7 +165,9 @@ describe('模板里的 af-* 类名都有定义（`.af-head__title` 那次漏定�
     'af-page__actions',
     'af-page__sub',
     'af-page__subtitle',
-    'af-page__section',
+    // `af-page__section` 不在此列：它唯一的调用点在总览页，v0.8.1 子任务 6 换
+    // 成原型的 `.af-region` 之后模板里已经 0 处使用，豁免与
+    // `NO_RULE_BY_DESIGN` 那一条一起删掉了。
   ])
 
   it('没有任何页面在用「样式表里不存在的类」', () => {

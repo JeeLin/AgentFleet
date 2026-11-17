@@ -271,6 +271,42 @@ describe('关键规则的取值来源与原型一致', () => {
     }
   })
 
+  it('总览页那一组原型类必须在实现里有真规则（不止类名出现）', () => {
+    /**
+     * 这一条的由来（2026-11-17 变异验证实测）：`class-usage.test.ts` 只查
+     * **模板里静态写出的** `af-*`。总览页这组类里有三个查不到——
+     *
+     *   · `dot-a/b/c` 走 `:class="dotClass(i)"`，静态 class 里只有 `af-dot`；
+     *   · `.af-msg` 在抽屉里是静态的，但 `components.css` 里也有一份同名规则，
+     *     于是「删掉抽屉那份」仍然判绿（同名类被另一个家的定义顶住）；
+     *   · `.af-fold__sum` / `.af-fold__body` 同上，删掉整个 `.af-fold` 族才红。
+     *
+     * 结果是：把 `prototype-shell.css` §10b / §10c 整段删掉，全仓测试**全绿**，
+     * 而总览页退化成一堆没有色点的裸 `<section>`。所以这里对「总览页专属」
+     * 这一组逐条钉住**规则体**，缺一条就红。
+     *
+     * 判据是「规则体里出现了预期的令牌」，不是「选择器存在」——`ruleBody()`
+     * 取的是第一条同名规则的声明体，删掉声明只留空块会得到空串。
+     */
+    const CASES: Array<[selector: string, needle: string, why: string]> = [
+      ['.af-groups', 'grid-template-columns', '项目分块靠网格并排，缺了就成了竖排长列表'],
+      ['.dot-a', 'var(--p-dot-a)', '装饰色槽：缺了三个项目的点全是同一个前景色'],
+      ['.dot-b', 'var(--p-dot-b)', '同上'],
+      ['.dot-c', 'var(--p-dot-c)', '同上'],
+      ['.af-fab', 'position: fixed', '管家入口是右下角悬浮按钮，缺了就找不到抽屉'],
+      ['.af-drawer', 'transform', '抽屉靠 transform 滑出，缺了面板会一直摊在页面上'],
+      ['.af-drawer--open', 'translateX(0)', '开合只有一个类在切，缺了就打不开'],
+      ['.af-fold', 'border', '已归档折叠块要有自己的框，否则与正文粘在一起'],
+      ['.af-fold__sum', 'cursor: pointer', '折叠条要看起来可点'],
+    ]
+    const clean = stripComments(IMPL_CSS)
+    for (const [selector, needle, why] of CASES) {
+      expect(ruleBody(clean, selector), `${selector} 没有规则：${why}`).toContain(needle)
+    }
+    // 反向守卫：`ruleBody()` 对不存在的选择器必须返回空串，否则上面全是恒真。
+    expect(ruleBody(clean, '.af-definitely-not-a-rule'), '判据本身要能判「没有」').toBe('')
+  })
+
   it('动效时长取标准档而非「瞬时」档', () => {
     // 原型 .af-btn / .af-card / .af-rail__list a 都是 140ms var(--ease)。
     const protoBtn = ruleBody(PROTOTYPE_CSS, '.af-btn')
@@ -495,10 +531,16 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
      *
      * **剩下的 1 条属于别的子任务**（`OverviewPage` = 子任务 6，总览页 +
      * 管家抽屉壳），它不在子任务 9 的 7 个文件里。
+     *
+     * **v0.8.1 子任务 6 已清空这份清单**：`OverviewPage` 的页头 `<PageHead>` 已
+     * 提到 `.af-body` 之外当兄弟、内容层是 `div.af-body`，两项判据都真命中。
+     *
+     * **保留空表而不是删掉这个常量**：上面的反向守卫（`hasSkeleton && listed`）
+     * 只在「清单里还挂着已迁移的页面」时判红，空表时它恒绿、不会失效；而属性
+     * `in {}` 永远为假，`stillPending` 于是对**每一页**都是零豁免——这正是要的
+     * 终态。删掉常量还得连带改两处用法，收益只是少一个空对象。
      */
-    const TODO_OVERVIEW: Record<string, string> = {
-      'packages/web/src/domains/project/OverviewPage.vue': '子任务 6（总览页 + 管家抽屉壳）',
-    }
+    const TODO_OVERVIEW: Record<string, string> = {}
 
     /**
      * 页头**有意**不复刻原型单行 `.af-head` 的页面：理由必须具体到「为什么这里

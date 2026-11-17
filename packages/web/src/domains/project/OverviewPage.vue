@@ -1,24 +1,43 @@
 <script setup lang="ts">
 /* ===========================================================================
-   OverviewPage —— 总览（`prototype/index.html`，v0.7.0 子任务 8）
+   OverviewPage —— 总览（`prototype/index.html`，v0.7.0 子任务 8；v0.8.1 子任务 6 重排）
    ---------------------------------------------------------------------------
    这是**全站入口**（`router.ts` 的 `INDEX_PATH = '/'`）。v0.7.0 之前根路径落在
    会话列表，那时会话是顶层；项目主轴改版后顶层是项目，所以第一屏是项目。
 
-   ── 这一页现在有什么、没有什么 ────────────────────────────────────
-   有：项目列表（真数据，读 `GET /api/projects`）、新建项目入口、已归档入口。
-   没有：「待办摘要」那一块。它需要任务的聚合数字，而任务归 v0.8.0。
-   所以那一块**显式写成空态并说明归属**，不是留白——留白会被当成加载失败。
+   ── 骨架：页头是 `.af-body` 的兄弟 ──────────────────────────────────
+   原型 `index.html:18` 的 `header.af-head` 排在 `:23` 的 `div.af-body` **之前**，
+   8 个原型页无一例外。嵌进去的后果是 `.af-body` 的滚动把页头一起带走。所以
+   这里 `<PageHead>` 在 `.af-body` 外面，两块都由外壳 `.af-main`
+   （`display:flex; flex-direction:column`）竖排。
+   页头与内容层之间**不再包 `main.af-main`**：外壳 `App.vue` 已经渲染了那个
+   唯一的 `<main tabindex="-1">`（`focusMain()` 的落点），再包一层就是嵌套 `<main>`。
 
-   ── 为什么空态要说「还没有项目」而不是「暂无数据」 ────────────────
-   「暂无数据」是加载失败时的措辞，用户分不清「真的没有」和「出错了」。
-   新建状态下第一件事就是建一个项目，空态必须直接给出那条路（规范 §3.11）。
+   ── 四行摘要：两行真数据 + 两行显式空态（用户裁定） ─────────────────
+   原型每个项目块里有四行：上次做到哪 / 正在跑 / 等你决定 / 最近总结。
+     · 「正在跑」「等你决定」读 `GET /api/projects/{id}/tasks`，是**真数据**；
+     · 「上次做到哪」要执行记录的时间线、「最近总结」要管家的总结，两者分别
+       归 v0.8.2（`POST /api/tasks/{id}/executions`）与 v0.9.0。这两行**写明确
+       的空态并说明归属**，不画假句子——一个写着「2 小时前合入了…」的假摘要
+       在验收时会被当成真数据。
+
+   ── 一处与原型的有意偏离（两个动作按钮） ────────────────────────────
+   原型 `index.html:55-58` 是「看板 / 执行监控」。执行监控页
+   （`ExecutionPage.vue`）现在是骨架页，且要看执行必须带 `execId`——从总览
+   直接点过去只能是死链。所以第二个动作换成「设置」，两个都指向真实页面；
+   等执行监控落地后换回来（记在里程碑 Bugs 表）。
    =========================================================================== */
 
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
-import { listProjects, type Project } from '@/domains/project/api'
+import PageHead from '@/domains/shared/components/PageHead.vue'
+import {
+  listProjectBindings,
+  listProjects,
+  type Project,
+} from '@/domains/project/api'
+import { listProjectTasks, type Task } from '@/domains/project/taskApi'
 import { describeReadFailure } from '@/shared/http'
 import { SHAPE_LABELS } from '@/shared/projectShape'
 import { navigate } from '@/router'
@@ -30,10 +49,99 @@ const failure = ref('')
 /** 形态的中文名。**与 `PRODUCT.md` §3.2 的表格用词一致**，不另造说法。 */
 const SHAPE_LABEL = SHAPE_LABELS
 
+const hasProjects = computed(() => projects.value.length > 0)
+
+/* ===========================================================================
+   每个项目那四行摘要的取数
+   ---------------------------------------------------------------------------
+   两个请求合成一次「这个项目的摘要」：任务列表（正在跑 / 等你决定）与绑定
+   列表（几台已绑定）。**任一失败都不写 0**——0 是一个真实的数量（真的没有
+   在跑的执行），把它当成失败的兜底会让「读不到」伪装成「没有」。
+   =========================================================================== */
+
+interface ProjectSummary {
+  /** `running` 的任务数。 */
+  running: number
+  /** 正在跑的执行落在哪些设备上（去重；没上报就不写）。 */
+  runningDevices: string[]
+  /** `failed` 的任务数——「失败待处置」。 */
+  failed: number
+  /** `review` 的任务数——「待验收」。 */
+  review: number
+  /** 绑了几台设备。`null` = 读不到（**不是 0**）。 */
+  bindings: number | null
+  /** 非空 = 这个项目的摘要读不到，值是能读的人话。 */
+  failure: string
+}
+
+const summaries = ref<Record<string, ProjectSummary>>({})
+
+function summaryOf(id: string): ProjectSummary | undefined {
+  return summaries.value[id]
+}
+
+function summarize(tasks: Task[], bindings: number): ProjectSummary {
+  const runningTasks = tasks.filter((t) => t.state === 'running')
+  const devices = new Set<string>()
+  for (const t of runningTasks) {
+    for (const e of t.executions ?? []) {
+      if (e.device_id) devices.add(e.device_id)
+    }
+  }
+  return {
+    running: runningTasks.length,
+    runningDevices: [...devices],
+    failed: tasks.filter((t) => t.state === 'failed').length,
+    review: tasks.filter((t) => t.state === 'review').length,
+    bindings,
+    failure: '',
+  }
+}
+
+async function loadSummaries(list: Project[]): Promise<void> {
+  const rows = await Promise.all(
+    list.map(async (p): Promise<readonly [string, ProjectSummary]> => {
+      try {
+        const [tasks, bindings] = await Promise.all([
+          listProjectTasks(p.id),
+          listProjectBindings(p.id),
+        ])
+        return [p.id, summarize(tasks, bindings.length)] as const
+      } catch (e) {
+        return [
+          p.id,
+          {
+            running: 0,
+            runningDevices: [],
+            failed: 0,
+            review: 0,
+            bindings: null,
+            failure: describeReadFailure(e, '这个项目的任务与绑定'),
+          },
+        ] as const
+      }
+    }),
+  )
+  summaries.value = Object.fromEntries(rows)
+}
+
+/** 区域头右侧那句：绑定数是真数据；读不到就直说，不写「0 台已绑定」。 */
+function boundNote(p: Project): string {
+  const s = summaryOf(p.id)
+  if (!s) return '正在读取绑定…'
+  if (s.bindings === null) return '绑定数读不到'
+  const tail = p.shape === 'isolated' ? ' · 代码不出设备' : ''
+  return `${s.bindings} 台已绑定${tail}`
+}
+
 /**
- * 形态的说明句。**必须给一句「代码从哪来、到哪去」**，不能只给名字
- * （`prototype/project-new.html` 的形态卡就是这么写的）：三个名字对第一次
- * 见到的人没有区别，而它们的差别恰恰是产品最容易讲不清的地方。
+ * 形态名旁边那句「代码从哪来」（悬停可见）。
+ *
+ * 原型 `index.html:36-40` 的区域头里只有形 `.af-tag`（「中心式」三个字），
+ * 对第一次见到的人没有区别——但原型只给**真正需要**的那一款补一句说明：
+ * `:83` 的隔离式项目在 `.af-region__note` 里写「1 台已绑定 · 代码不出设备」。
+ * 这里照这个取舍走：隔离式在 note 里明说（`boundNote` 的 tail），另外两个
+ * 形态挂 `title`，不占版面。
  */
 const SHAPE_HINT: Readonly<Record<string, string>> = {
   central: '代码在 Hub 的仓库里',
@@ -41,17 +149,31 @@ const SHAPE_HINT: Readonly<Record<string, string>> = {
   isolated: '代码只在设备上，永不上传',
 }
 
-const hasProjects = computed(() => projects.value.length > 0)
-
 /**
- * 管理面三行（原型 `prototype/index.html:137-151`）。
+ * 区域头那个小色点：原型 `index.html:39/64/87` 是 `span.af-dot.dot-a / dot-b / dot-c`
+ * ——三个色槽**轮着用**，不承载信息（`aria-hidden`，`:347-349` 各取一个固定色）。
  *
- * **三行的「回答什么问题」照原型逐字搬**：那一列是「点进去会得到什么」的
- * 说明，措辞一变，用户对「设备页」与「Agent 页」的分工判断就变了。
- *
- * 路由写死在这里而不是给每行存一个 href：这三条是本页唯一的对外出口，
- * 集中一处才看得出「管理面一共只有三页」。
+ * 为什么不改成「按项目主题色取色」（上一版的写法）：原型没有给五个色名各留
+ * 一个色槽，硬折过去只能就近借 `--p-done` / `--p-review` 之类的语义色——那样
+ * 一个**装饰**点会随语义色漂移，还会让人误以为「绿色点 = 这个项目成功」。
+ * 项目主题色在项目设置页与归档页都有文字，不靠这个点表达。
  */
+const DOT_CLASS = ['dot-a', 'dot-b', 'dot-c'] as const
+
+function dotClass(index: number): string {
+  return DOT_CLASS[index % DOT_CLASS.length]
+}
+
+
+/* ===========================================================================
+   管理面三行（原型 `index.html:137-151`）
+   ---------------------------------------------------------------------------
+   三行的「回答什么问题」照原型逐字搬：那一列是「点进去会得到什么」的说明，
+   措辞一变，用户对「设备页」与「Agent 页」的分工判断就变了。
+
+   路由写死在这里而不是给每行存一个 href：这三条是本页唯一的对外出口，
+   集中一处才看得出「管理面一共只有三页」。
+   =========================================================================== */
 const MANAGE_ENTRIES = [
   {
     name: '设备',
@@ -71,68 +193,67 @@ const MANAGE_ENTRIES = [
   },
 ] as const
 
+/* ===========================================================================
+   管家抽屉：只做壳
+   ---------------------------------------------------------------------------
+   原型右下角一个悬浮按钮 + 右侧滑出的 `.af-drawer`（`index.html:161-199`）。
+   **这一版面板里没有任何业务逻辑**：不发请求、不建建议、不派任务，只有一句
+   「归 v0.9.0」的说明。画一个「今天三件事」的假摘要成本最低、也最容易被当成
+   真数据带进验收，所以不画。
+
+   开合用组件里的布尔值而不是原型的 `:target`：`:target` 把状态塞进 URL 片段，
+   刷新会误开、浏览器历史里会多出一堆条目。
+
+   悬浮按钮**始终在**（原型用两个 `<a>` 互斥显示），靠 `aria-expanded` 与文字
+   表达状态——藏掉再显示会让键盘焦点无处可回。
+   =========================================================================== */
+const butlerOpen = ref(false)
+const drawerEl = ref<HTMLElement | null>(null)
+const closeEl = ref<HTMLButtonElement | null>(null)
+
+async function toggleButler(): Promise<void> {
+  butlerOpen.value = !butlerOpen.value
+  if (!butlerOpen.value) return
+  await nextTick()
+  closeEl.value?.focus()
+}
+
+async function closeButler(): Promise<void> {
+  butlerOpen.value = false
+  await nextTick()
+  drawerEl.value?.blur()
+}
+
 async function load(): Promise<void> {
   loading.value = true
   failure.value = ''
+  summaries.value = {}
   try {
     projects.value = await listProjects()
   } catch (e) {
     failure.value = describeReadFailure(e, '项目')
-  } finally {
     loading.value = false
+    return
   }
+  loading.value = false
+  // 摘要单独一趟：项目列表先出来，四行慢慢填。**不 `await`** 在这里，
+  // 否则一页要等 2N 个请求才显示第一个字。
+  void loadSummaries(projects.value)
 }
 
 onMounted(load)
 </script>
 
 <template>
-  <section class="af-page">
-    <header class="af-page__head">
-      <h1 class="af-page__title">总览</h1>
-      <p class="af-page__sub">今天要处理的事，按项目分</p>
-      <div class="af-page__actions">
-        <button type="button" class="af-btn" @click="navigate('/projects/archived')">
-          已归档
-        </button>
-        <button
-          type="button"
-          class="af-btn af-btn--primary"
-          @click="navigate('/projects/new')"
-        >
-          新建项目
-        </button>
-      </div>
-    </header>
-
-    <!-- 原型 `:26-32` 的提示条。**这一句解释的是页面结构本身**：为什么第一屏
-         是项目而不是设备清单。没有它的话，「管理面」被挪到页面最下面这件事
-         看起来像是排错了顺序。 -->
-    <div class="af-callout af-callout--info af-ov__lead">
-      <span class="af-callout__k">这一页为什么是「按项目分」</span>
-      <span>
-        AgentFleet 的主轴是项目。设备是拿来干活的，不是拿来日常浏览的。
-        所以这里先给你「哪个项目卡住了」，设备健康退到管理面里去。
-      </span>
+  <PageHead>
+    <div>
+      <h1 class="af-head__title">总览</h1>
+      <span class="af-head__sub">今天要处理的事，按项目分</span>
     </div>
-
-    <p v-if="loading" class="af-muted">正在读取项目…</p>
-
-    <EmptyState
-      v-else-if="failure"
-      glyph="⚠"
-      title="读取项目失败"
-      :text="failure"
-    >
-      <button type="button" class="af-btn" @click="load">重试</button>
-    </EmptyState>
-
-    <EmptyState
-      v-else-if="!hasProjects"
-      glyph="◈"
-      title="还没有项目"
-      text="项目是这里的起点：每个项目有自己的仓库、自己的看板，任务挂在项目下面。先建一个。"
-    >
+    <template #actions>
+      <button type="button" class="af-btn af-btn--ghost" @click="navigate('/projects/archived')">
+        已归档
+      </button>
       <button
         type="button"
         class="af-btn af-btn--primary"
@@ -140,141 +261,297 @@ onMounted(load)
       >
         新建项目
       </button>
-    </EmptyState>
+    </template>
+  </PageHead>
 
-    <ul v-else class="af-projectlist">
-      <li v-for="p in projects" :key="p.id" class="af-projectlist__row">
+  <div class="af-body">
+    <div class="af-ov__wrap af-stack">
+      <!-- 原型 `:26-32` 的提示条。**这一句解释的是页面结构本身**：为什么第一屏
+           是项目而不是设备清单。没有它的话，「管理面」被挪到页面最下面这件事
+           看起来像是排错了顺序。 -->
+      <div class="af-callout af-callout--info">
+        <span class="af-callout__k">这一页为什么是「按项目分」</span>
+        <span>
+          AgentFleet 的主轴是项目。设备是拿来干活的，不是拿来日常浏览的。
+          所以这里先给你「哪个项目卡住了」，设备健康退到管理面里去。
+        </span>
+      </div>
+
+      <p v-if="loading" class="af-muted">正在读取项目…</p>
+
+      <EmptyState
+        v-else-if="failure"
+        glyph="⚠"
+        title="读取项目失败"
+        :text="failure"
+      >
+        <button type="button" class="af-btn" @click="load">重试</button>
+      </EmptyState>
+
+      <EmptyState
+        v-else-if="!hasProjects"
+        glyph="◈"
+        title="还没有项目"
+        text="项目是这里的起点：每个项目有自己的仓库、自己的看板，任务挂在项目下面。先建一个。"
+      >
         <button
           type="button"
-          class="af-projectlist__link"
-          @click="navigate(`/project/${encodeURIComponent(p.id)}/board`)"
+          class="af-btn af-btn--primary"
+          @click="navigate('/projects/new')"
         >
-          <span class="af-projectlist__name">{{ p.name }}</span>
-          <span class="af-projectlist__hint">{{ SHAPE_HINT[p.shape] ?? '' }}</span>
+          新建项目
         </button>
-        <span class="af-projectlist__shape">{{ SHAPE_LABEL[p.shape] ?? p.shape }}</span>
-        <span
-          v-if="p.theme_color"
-          class="af-projectlist__dot"
-          :data-color="p.theme_color"
-          :title="p.theme_color"
-        >
-          {{ p.theme_color }}
-        </span>
-      </li>
-    </ul>
+      </EmptyState>
 
-    <!-- 原型 `:34-108`：每个项目一块 `.af-region`，块内是四行摘要（上次做到哪 /
-         正在跑 / 等你决定 / 最近总结）。**这四行现在取不到数据**：它们分别要
-         任务历史、进行中的执行、待处置数量、管家总结，而任务模型归
-         v0.8.0 之后。所以这一块保留「说明归属」的形态，不画四个假数字——
-         一个写着「2 小时前合入了…」的假摘要在验收时会被当成真数据。 -->
-    <section class="af-page__section af-ov__todo">
-      <h2 class="af-page__subtitle">待办</h2>
-      <EmptyState
-        glyph="▢"
-        title="待办摘要要等任务模型落地"
-        text="每一个项目的「上次做到哪 / 正在跑 / 等你决定 / 最近总结」四行摘要，要读任务历史与执行状态。任务模型归 v0.8.0，本里程碑只把项目与绑定做起来。"
+      <!-- 原型 `:34-108`：每个项目一块 `.af-region`，块内四行摘要 + 两个动作。
+           网格是 `app.css:363` 的 `.af-groups`（320px 下限自适应列宽）。 -->
+      <div v-else class="af-groups">
+        <section
+          v-for="(p, i) in projects"
+          :key="p.id"
+          class="af-region"
+          :data-project="p.id"
+        >
+          <div class="af-region__head">
+            <span class="af-dot" :class="dotClass(i)" aria-hidden="true"></span>
+            <h2 class="af-region__title">
+              <a
+                :href="`/project/${encodeURIComponent(p.id)}/board`"
+                @click.prevent="navigate(`/project/${encodeURIComponent(p.id)}/board`)"
+              >{{ p.name }}</a>
+            </h2>
+            <span class="af-tag">{{ SHAPE_LABEL[p.shape] ?? p.shape }}</span>
+            <!-- 「代码从哪来」为什么必须写在明处而不是放进 `title`：形态名三个
+                 字对第一次见到的人没有区别，而「代码在 Hub」与「代码只在设备上」
+                 是这个产品最要紧的一条边界（PRODUCT §3.2）。悬停才看得见等于
+                 只有鼠标用户看得见。原型只给隔离式补了这句（`:83` 的 note），
+                 实现把三种都写上——它们各占一行字宽，头部放得下。 -->
+            <span class="af-2xs af-mute">{{ SHAPE_HINT[p.shape] ?? '' }}</span>
+            <span class="af-spacer"></span>
+            <span class="af-region__note">{{ boundNote(p) }}</span>
+          </div>
+
+          <div class="af-region__body af-stack">
+            <!-- ① 上次做到哪：要执行记录的时间线，归 v0.8.2。 -->
+            <div class="af-row">
+              <span class="af-2xs af-mute af-ov__k">上次做到哪</span>
+              <span class="af-xs af-dim">执行记录归 v0.8.2，这里还没有时间线可读</span>
+            </div>
+
+            <!-- ② 正在跑：真数据。读不到时说读不到，不写「没有在跑的执行」。 -->
+            <div class="af-row" data-row="running">
+              <span class="af-2xs af-mute af-ov__k">正在跑</span>
+              <span v-if="!summaryOf(p.id)" class="af-xs af-mute">正在读取执行状态…</span>
+              <span v-else-if="summaryOf(p.id)?.failure" class="af-xs af-dim">
+                {{ summaryOf(p.id)?.failure }}
+              </span>
+              <span
+                v-else-if="(summaryOf(p.id)?.running ?? 0) > 0"
+                class="af-xs"
+              >
+                {{ summaryOf(p.id)?.running }} 个执行进行中<template
+                  v-if="(summaryOf(p.id)?.runningDevices.length ?? 0) > 0"
+                > · {{ summaryOf(p.id)?.runningDevices.join(' / ') }}</template>
+              </span>
+              <span v-else class="af-xs af-dim">没有在跑的执行</span>
+            </div>
+
+            <!-- ③ 等你决定：真数据。失败待处置与待验收是两件事，分开数。 -->
+            <div class="af-row" data-row="decide">
+              <span class="af-2xs af-mute af-ov__k">等你决定</span>
+              <span v-if="!summaryOf(p.id)" class="af-xs af-mute">正在读取执行状态…</span>
+              <span v-else-if="summaryOf(p.id)?.failure" class="af-xs af-dim">
+                读不到，先不猜
+              </span>
+              <span
+                v-else-if="
+                  (summaryOf(p.id)?.failed ?? 0) > 0 || (summaryOf(p.id)?.review ?? 0) > 0
+                "
+                class="af-xs af-ov__chips"
+              >
+                <span
+                  v-if="(summaryOf(p.id)?.failed ?? 0) > 0"
+                  class="af-tag af-tag--failed"
+                >{{ summaryOf(p.id)?.failed }} 个失败待处置</span>
+                <span
+                  v-if="(summaryOf(p.id)?.review ?? 0) > 0"
+                  class="af-tag af-tag--review"
+                >{{ summaryOf(p.id)?.review }} 张待验收</span>
+              </span>
+              <span v-else class="af-xs af-dim">没有等你的事</span>
+            </div>
+
+            <!-- ④ 最近总结：管家总结归 v0.9.0。 -->
+            <div class="af-row">
+              <span class="af-2xs af-mute af-ov__k">最近总结</span>
+              <span class="af-xs af-dim">管家总结归 v0.9.0，这一行现在还空着</span>
+            </div>
+
+            <!-- 第二个动作是「设置」而不是原型的「执行监控」：后者要 execId，
+                 且执行监控页还是骨架页，点过去只能是死链（见文件头）。 -->
+            <div class="af-row af-row--tight">
+              <a
+                class="af-btn af-btn--sm"
+                :href="`/project/${encodeURIComponent(p.id)}/board`"
+                @click.prevent="navigate(`/project/${encodeURIComponent(p.id)}/board`)"
+              >看板</a>
+              <a
+                class="af-btn af-btn--sm"
+                :href="`/project/${encodeURIComponent(p.id)}/settings`"
+                @click.prevent="navigate(`/project/${encodeURIComponent(p.id)}/settings`)"
+              >设置</a>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- 原型 `:112-123`：已归档默认折叠。**「归档不是删除、随时能取消」这句话
+           必须在这一页出现**——它出现在详情页太晚：用户在第一屏做「要不要归档」
+           的判断时就需要知道它可逆。 -->
+      <details class="af-fold">
+        <summary class="af-fold__sum">
+          已归档的项目
+          <span class="af-2xs af-mute">归档不是删除，历史都留着，随时能取消归档</span>
+        </summary>
+        <div class="af-fold__body">
+          <div class="af-row">
+            <button
+              type="button"
+              class="af-btn af-btn--sm"
+              @click="navigate('/projects/archived')"
+            >
+              打开归档列表
+            </button>
+            <span class="af-2xs af-mute">
+              归档后不出现在列表里、不派新任务；执行记录、失败原因、管家总结全保留
+            </span>
+          </div>
+        </div>
+      </details>
+
+      <!-- 原型 `:126-155`：管理面三行表。**放在项目列表之后而不是之前**：
+           这一页回答「今天做什么」，管理面回答「机器怎么样」——把后者放前面
+           会让第一屏变成一份设备清单，正是提示条里说的那种误读。 -->
+      <section class="af-region" aria-label="管理面">
+        <div class="af-region__head">
+          <h2 class="af-region__title">管理面</h2>
+          <span class="af-region__note">这些页面回答的是「机器怎么样」，不是「项目怎么样」</span>
+        </div>
+        <div class="af-region__body af-region__body--flush">
+          <table class="af-table">
+            <thead>
+              <tr>
+                <th>页面</th>
+                <th>回答什么问题</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in MANAGE_ENTRIES" :key="row.to">
+                <td><strong>{{ row.name }}</strong></td>
+                <td class="af-ov__manage-q">{{ row.question }}</td>
+                <td>
+                  <button type="button" class="af-ov__link" @click="navigate(row.to)">
+                    进入
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- 管家抽屉壳（`index.html:161-199`）。`aria-hidden` 跟着状态走：
+       面板收起时它在 DOM 里但不可见，读屏与 Tab 都不该进去。 -->
+  <aside
+    ref="drawerEl"
+    class="af-drawer"
+    :class="{ 'af-drawer--open': butlerOpen }"
+    :aria-hidden="butlerOpen ? 'false' : 'true'"
+    aria-label="管家"
+    @keydown.esc="closeButler"
+  >
+    <div class="af-drawer__head">
+      <div>
+        <h2 class="af-drawer__title">管家</h2>
+        <div class="af-drawer__sub">总览页的管家只看全局；要对某个项目说话，进那个项目</div>
+      </div>
+      <button
+        ref="closeEl"
+        type="button"
+        class="af-btn af-btn--ghost af-drawer__close"
+        aria-label="关闭管家面板"
+        @click="closeButler"
+      >
+        关闭
+      </button>
+    </div>
+    <div class="af-drawer__log">
+      <div class="af-msg">
+        <span class="af-msg__who">管家</span>
+        <span class="af-msg__body">
+          管家要读全部项目的执行记录与总结，才说得出「今天先处理什么」。它归
+          <b>v0.9.0</b> —— 这一版只有这个抽屉壳：没有建议、没有数字，也不会替你派任务。
+        </span>
+      </div>
+      <div class="af-callout">
+        <span class="af-callout__k">管家是绑定到项目的</span>
+        <span class="af-2xs af-dim">
+          每个项目有自己的管家和自己的记忆。这一页只是汇总，在这里让它干活它会先问你「哪个项目」。
+        </span>
+      </div>
+    </div>
+    <div class="af-drawer__compose">
+      <input
+        class="af-input"
+        type="text"
+        placeholder="v0.9.0 起能在这里问管家"
+        aria-label="对管家说话"
+        disabled
       />
-    </section>
+      <button class="af-btn af-btn--primary" type="button" disabled>发送</button>
+    </div>
+  </aside>
 
-    <!-- 原型 `:112-123`：已归档默认折叠。**「归档不是删除、随时能取消」这句话
-         必须在这一页出现**——它出现在详情页太晚：用户在第一屏做「要不要归档」
-         的判断时就需要知道它可逆。 -->
-    <details class="af-fold af-ov__fold">
-      <summary class="af-fold__sum">
-        已归档的项目
-        <span class="af-t-mute af-ov__fold-note">
-          归档不是删除，历史都留着，随时能取消归档
-        </span>
-      </summary>
-      <div class="af-fold__body">
-        <button type="button" class="af-btn af-btn--sm" @click="navigate('/projects/archived')">
-          打开归档列表
-        </button>
-        <span class="af-t-mute af-ov__fold-hint">
-          归档后不出现在列表里、不派新任务；执行记录、失败原因、管家总结全保留
-        </span>
-      </div>
-    </details>
-
-    <!-- 原型 `:126-155`：管理面三行表。**放在项目列表之后而不是之前**：
-         这一页回答「今天做什么」，管理面回答「机器怎么样」——把后者放前面
-         会让第一屏变成一份设备清单，正是提示条里说的那种误读。 -->
-    <section class="af-region af-ov__manage" aria-label="管理面">
-      <div class="af-region__head">
-        <h2 class="af-region__title">管理面</h2>
-        <span class="af-region__note">这些页面回答的是「机器怎么样」，不是「项目怎么样」</span>
-      </div>
-      <div class="af-region__body af-region__body--flush">
-        <table class="af-table">
-          <thead>
-            <tr>
-              <th>页面</th>
-              <th>回答什么问题</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="row in MANAGE_ENTRIES" :key="row.to">
-              <td><strong>{{ row.name }}</strong></td>
-              <td class="af-ov__manage-q">{{ row.question }}</td>
-              <td>
-                <button type="button" class="af-ov__link" @click="navigate(row.to)">
-                  进入
-                </button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-  </section>
+  <button
+    class="af-fab"
+    type="button"
+    aria-haspopup="true"
+    :aria-expanded="butlerOpen ? 'true' : 'false'"
+    @click="toggleButler"
+  >
+    <span class="af-fab__mark" aria-hidden="true">管</span>
+    <span>{{ butlerOpen ? '收起' : '管家' }}</span>
+  </button>
 </template>
 
 <style scoped>
-/* 提示条与下方列表的间隔。只服务本页的阅读节奏，不进 `components.css`。 */
-.af-ov__lead {
-  margin-bottom: var(--af-space-6);
+/* 内容层的内边距。原型 `index.html:24` 是内联 `padding:20px 20px 64px`——
+   模板里的静态内联样式被门禁禁掉了（prototype-parity 的 style=" 判据），
+   所以落成这条 scoped 规则。64px 没有对应 token，取最近的一档 `--p-s8`（56px）。 */
+.af-ov__wrap {
+  padding: var(--p-s5) var(--p-s5) var(--p-s8);
 }
 
-/* 已归档折叠块（原型 `.af-fold`，生产样式表里没有这个类）。
-   **为什么用 `<details>` 而不是自己做一个开合状态**：浏览器原生支持键盘
-   `Enter` / 空格开合、自带展开语义，而自己写的版本要再实现一遍焦点与
-   `aria-expanded`——那正是「看起来能跑、实际不可用」的一类缺陷。 */
-.af-ov__fold {
-  margin-top: var(--af-space-6);
-  border: 1px solid var(--af-border-default);
-  border-radius: var(--af-radius-md);
-  background: var(--af-surface-1);
+/* 四行摘要左边那个固定 76px 的标签列（原型是内联 `width:76px`）。
+   `flex: 0 0 auto` 保证长标签（「上次做到哪」五个字）不被压窄。 */
+.af-ov__k {
+  width: 76px;
+  flex: 0 0 auto;
 }
-.af-ov__fold > summary {
-  cursor: pointer;
-  padding: var(--af-space-3) var(--af-space-4);
-  font-size: var(--af-text-sm);
-  font-weight: var(--af-weight-semibold);
-  color: var(--af-fg-secondary);
-}
-.af-ov__fold-note {
-  font-weight: var(--af-weight-regular);
-  margin-left: var(--af-space-2);
-}
-.af-ov__fold-body,
-.af-fold__body {
-  display: flex;
+
+/* 「等你决定」两个胶囊之间留一点缝：`.af-tag` 是 `inline-flex`，
+   紧挨着写会粘成一个长条。 */
+.af-ov__chips {
+  display: inline-flex;
   align-items: center;
-  gap: var(--af-space-3);
+  gap: var(--p-s2);
   flex-wrap: wrap;
-  padding: 0 var(--af-space-4) var(--af-space-3);
-}
-.af-ov__fold-hint {
-  font-size: var(--af-text-xs);
 }
 
 /* 管理面表格 */
-.af-ov__manage {
-  margin-top: var(--af-space-6);
-}
 .af-ov__manage-q {
   font-size: var(--af-text-sm);
 }

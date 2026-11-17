@@ -635,6 +635,110 @@ a.af-meter:hover { background: var(--p-surf-2); text-decoration: none; }
 .af-bar__fill--warn { background: var(--p-warn-c); }
 
 /* ===========================================================================
+   10b. 项目分组网格（原型 app.css:363-367）
+   -------------------------------------------------------------------------
+   总览页每个项目一块 `.af-region`，排成自适应列宽的网格：320px 下限，够宽就
+   并排、不够就落成一列。实现侧此前没有这个类（`grep -c .af-groups` 在
+   `components.css` 与本节之前都是 0），于是「按项目分」只能靠一行行列表表达，
+   而原型的意思是「每块都是一张能横着比的小卡」。
+   =========================================================================== */
+
+.af-groups {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--p-s4); align-items: start;
+}
+
+/* 区域头那个小圆点的三个装饰色（原型 app.css:347-349）。
+   `.af-dot` 自己是 `background: currentColor`（components.css:279），没有这三条
+   时「项目 A / B / C」的点全是同一个前景色——区分度归零。 */
+.dot-a { background: var(--p-dot-a); }
+.dot-b { background: var(--p-dot-b); }
+.dot-c { background: var(--p-dot-c); }
+
+/* ===========================================================================
+   10c. 管家抽屉（原型 app.css:528-600）
+   -------------------------------------------------------------------------
+   右下角一个悬浮按钮 + 右侧滑出面板。**v0.8.1 只做壳**：面板里只有「v0.9.0
+   上线」的空态，没有管家的任何业务逻辑（不发请求、不建建议、不派任务）。
+
+   原型的开合靠 `:target`（`href="#butler"` / `#butler-closed`），那是静态
+   HTML 的手法：它把状态藏进 URL 片段，刷新会误开、`历史` 会多出一堆条目。
+   这里改用 `.af-drawer--open` 一个类，由组件持有布尔值——键盘 / Esc / 焦点
+   归位才有地方挂。
+
+   `visibility` 与 `transform` 一起切，而不是只切 `transform`：面板里将来会放
+   可聚焦的东西（输入框、按钮），`visibility:hidden` 才会把它们从 Tab 序列里
+   摘掉；只平移的话「看不见但 Tab 得到」是一类典型缺陷。
+   =========================================================================== */
+
+.af-fab {
+  position: fixed; right: var(--p-s5); bottom: var(--p-s5); z-index: 60;
+  display: inline-flex; align-items: center; gap: var(--p-s2);
+  min-height: 44px; padding: 0 var(--p-s4) 0 var(--p-s3);
+  border: 1px solid var(--p-line-4); border-radius: var(--p-r-full);
+  background: var(--p-pop); color: var(--p-fg-strong);
+  font: inherit; font-size: var(--p-t-sm); font-weight: var(--af-weight-medium);
+  cursor: pointer; box-shadow: var(--p-sh-3); text-decoration: none;
+  transition: background var(--p-dur) var(--p-ease), transform 120ms var(--p-ease);
+}
+.af-fab:hover { background: var(--p-surf-4); text-decoration: none; }
+.af-fab:active { transform: translateY(1px); }
+.af-fab__mark {
+  width: 24px; height: 24px; flex: 0 0 auto; border-radius: 50%;
+  background: var(--p-butler-bg); border: 1px solid var(--p-butler-line);
+  display: grid; place-items: center;
+  color: var(--p-butler); font-size: var(--p-t-2xs); font-weight: var(--af-weight-bold);
+}
+/* 角标：写清「几条、什么事」，不然待确认会被藏进按钮里 */
+.af-fab__badge {
+  display: inline-flex; align-items: center; gap: var(--p-s1);
+  font-size: var(--p-t-2xs); font-weight: var(--af-weight-semibold);
+  padding: 1px var(--p-s2); border-radius: var(--p-r-full);
+  background: var(--p-warn-bg); border: 1px solid var(--p-warn-line); color: var(--p-warn);
+}
+
+.af-drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 100;
+  width: 420px; max-width: 94vw;
+  background: var(--p-panel);
+  border-left: 1px solid var(--p-line-3);
+  box-shadow: var(--p-sh-3);
+  display: flex; flex-direction: column;
+  transform: translateX(100%);
+  visibility: hidden;
+  transition: transform 220ms var(--p-ease), visibility 220ms;
+}
+.af-drawer--open { transform: translateX(0); visibility: visible; }
+
+.af-drawer__head {
+  display: flex; align-items: flex-start; gap: var(--p-s3);
+  padding: var(--p-s4); border-bottom: 1px solid var(--p-line-2); flex: 0 0 auto;
+}
+.af-drawer__title { font-size: var(--p-t-md); font-weight: var(--af-weight-semibold); }
+.af-drawer__sub { font-size: var(--p-t-2xs); color: var(--p-fg-3); line-height: var(--p-lh-body); }
+.af-drawer__close { margin-left: auto; flex: 0 0 auto; }
+.af-drawer__log {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: var(--p-s4); display: flex; flex-direction: column; gap: var(--p-s4);
+}
+.af-drawer__compose {
+  display: flex; align-items: center; gap: var(--p-s2);
+  padding: var(--p-s3) var(--p-s4); border-top: 1px solid var(--p-line-2);
+  flex: 0 0 auto;
+}
+
+/* 抽屉里的消息行**不能**直接重定义 `.af-msg`：那个类在 `components.css:764`
+   已经是会话页的聊天气泡（内边距 + 边框 + 底色的卡片），而本文件在它**之后**
+   加载——写一条裸 `.af-msg__body { font-size: … }` 会静默改掉会话页的字号与
+   行高，两处都读得通、谁也不报错。所以抽屉自己带作用域。 */
+.af-drawer .af-msg { display: flex; flex-direction: column; gap: 2px; }
+.af-drawer .af-msg__who {
+  font-size: var(--p-t-2xs); font-weight: var(--af-weight-semibold);
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--p-fg-3);
+}
+.af-drawer .af-msg__body { font-size: var(--p-t-sm); line-height: var(--p-lh-body); }
+
+/* ===========================================================================
    11. 窄屏（原型 app.css:709-719）
    =========================================================================== */
 
