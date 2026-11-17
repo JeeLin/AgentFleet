@@ -32,9 +32,13 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
 import LoginPrompt from '@/domains/shared/components/LoginPrompt.vue'
+import NavIcon from '@/shared/NavIcon.vue'
+import type { NavIconKey } from '@/shared/navIcons'
 import { listProjects, type Project } from '@/domains/project/api'
+import { listDevices } from '@/domains/device/api'
+import { listAgents } from '@/domains/agent/api'
 import { pop, push, topContainer, trapTab } from '@/shared/focus'
-import { SCOPE_LABEL, KEYS, hintOf, missingActs, onHandlersChanged, PREFIX_LEAD } from '@/shared/keynav'
+import { SCOPE_LABEL, KEYS, hintOf, missingActs, onHandlersChanged } from '@/shared/keynav'
 import { logout } from '@/shared/auth'
 import { setNotInitializedHandler } from '@/shared/http'
 import { loginPromptOpen, dismissLoginPrompt } from '@/shared/login-prompt'
@@ -226,6 +230,23 @@ const NAV_GROUPS = [
 /** 左栏的全部分组标题（含「项目」）。断言「4 组」时用的是这一份。 */
 const RAIL_GROUPS = ['全站', '项目', '收件箱', '管理面'] as const
 
+/**
+ * 导航项 → 图标键。以 `match[0]` 为键（每个导航项的第一个 match 值唯一）。
+ *
+ * **为什么是单独一张表而不是塞进 `NAV_GROUPS`**：`NAV_GROUPS` 是原型
+ * `shell.js` 的 `NAV` 同构，加字段会让它对不齐原型；图标是本里程碑新增的
+ * 表现层概念（原型没有图标条），放在一起会让人以为原型也有。
+ */
+const NAV_ICON: Record<string, NavIconKey> = {
+  overview: 'overview',
+  'projects-archived': 'archived',
+  inbox: 'inbox',
+  'inbox-activity': 'activity',
+  devices: 'devices',
+  agents: 'agents',
+  settings: 'settings',
+}
+
 /** 一个分组里的导航项。分组名不在这张表里时返回空数组（模板不自己判）。 */
 function navItemsOf(title: string): readonly { to: string; label: string; act: string; match: readonly string[] }[] {
   return NAV_GROUPS.find((g) => g.title === title)?.items ?? []
@@ -249,6 +270,43 @@ async function loadRailProjects(): Promise<void> {
     railProjects.value = []
   }
 }
+
+/* ------------------------------------------- 左栏底部：设备数 / Agent 数 */
+
+/**
+ * 左栏底部第二行的计数（原型 `shell.js:149` 的形态：
+ * `3 台设备 · 6 个 Agent · v0.6.0`）。
+ *
+ * **原型那两个数字是写死的假数据**，用户 2026-11-17 裁定「用真实数据」，
+ * 所以这里真联 `listDevices` 与 `listAgents`。两个请求**并发**发（`Promise.all`），
+ * 失败一律回落成 `null` → 该行整行不渲染。
+ *
+ * **为什么失败就不渲染、而不是显示 0 或 `—`**：左栏是导航，不是状态面板
+ * （与 `loadRailProjects` 同一条理由）。把读不到写成 `0 台设备` 是在说假话，
+ * 写成 `— 台设备` 是在制造一个用户点不动也读不懂的哑格；而设备页自身有完整的
+ * 失败态与重试。**宁可整行消失，也不写假数字**——这正是原型那条假数据的问题。
+ */
+const railCounts = ref<{ devices: number; agents: number } | null>(null)
+
+async function loadRailCounts(): Promise<void> {
+  const [devices, agents] = await Promise.allSettled([listDevices(), listAgents()])
+  // 两个都成功才显示：只显示一半（「3 台设备 · ? 个 Agent」）比不显示更让人困惑。
+  if (devices.status === 'fulfilled' && agents.status === 'fulfilled') {
+    railCounts.value = { devices: devices.value.length, agents: agents.value.length }
+  } else {
+    railCounts.value = null
+  }
+}
+
+/**
+ * 构建期注入的版本号（`vite.config.ts` 的 `define`）。
+ *
+ * 取 `import.meta.env` 而不是运行时请求 `/version`：左栏底部只是标注「你跑的
+ * 是哪一版」，它必须**离线也画得出来**，多一个请求就多一种这一行空着的情形。
+ * `__APP_VERSION__` 在 `vite.config.ts` 里定义为 `package.json` 的 `version`，
+ * 测试环境（vitest）下由 `test/setup.ts` 兜底定义，所以这里不做 `typeof` 判断。
+ */
+const appVersion = __APP_VERSION__
 
 /**
  * 当前项目 id（路由里有 `:id` 时）。
@@ -532,6 +590,10 @@ onMounted(() => {
   // 左栏「项目」组那一列。与总览页同一个端点（`listProjects`），只是这里
   // 不显示失败态（见 `loadRailProjects` 的注释）。
   void loadRailProjects()
+  // 左栏底部第二行的「N 台设备 · M 个 Agent」。**只加载一次**，不跟着路由刷新：
+  // 它是「这台 Hub 上有多少东西」的背景数字，不是某个页面的实时状态；滚动导航
+  // 时反复拉两个列表端点既浪费也会让那行数字跳。
+  void loadRailCounts()
   // 首屏落在一条已删除的旧地址上（书签、外部链接）：换成它的去处。
   // 必须在 `startRouter` 之后——`navigate` 会改历史记录，先起监听再改，
   // 顺序反了会让这次 `replaceState` 发生在监听装好之前（本身无害，但
@@ -603,12 +665,17 @@ watch(
     <aside class="af-rail" aria-label="主导航">
       <!-- 品牌行（原型 `app.css:61-75`）：与页头同高，所以两条水平线对得上。
            收起按钮在原型里就长在这一行末尾（`.af-rail__brand .af-navbtn`，
-           `app.css:1140`）。左栏整体滑出屏幕之后，它是唤回左栏的唯一入口，
-           所以收起时它必须留在原地——由 `html[data-rail="off"]` 把它切成
-           悬浮形态（见 `prototype-shell.css` §1 末尾那条规则）。 -->
+           `app.css:1140`）。
+
+           **收起态在本里程碑改成了 56px 图标条**（用户 2026-11-17 裁定，见
+           `prototype-shell.css` §2 的注释）：左栏不再整列滑出屏幕，所以这颗
+           开关既不需要 `position: fixed` 悬浮，也不需要「唤回胶囊」兜底——
+           它常驻在图标条顶部。 -->
       <div class="af-rail__brand">
         <span class="af-rail__mark" aria-hidden="true">AF</span>
-        <span>
+        <!-- 品牌文字在收起态隐藏（56px 放不下两行字），`AF` 那个方块保留：
+             它是图标条里唯一不带 tooltip 的定位物。 -->
+        <span class="af-rail__titleblock">
           <span class="af-rail__name">AgentFleet</span><br />
           <span class="af-rail__sub">self-hosted</span>
         </span>
@@ -642,7 +709,7 @@ watch(
             >+</a
           >
         </div>
-        <ul v-if="group === '项目'" class="af-rail__list">
+        <ul v-if="group === '项目'" class="af-rail__list af-rail__list--projects">
           <li v-for="p in railProjects" :key="p.id">
             <a
               :href="`/project/${encodeURIComponent(p.id)}/board`"
@@ -659,29 +726,44 @@ watch(
               :href="item.to"
               :aria-current="isCurrent(item.match) ? 'page' : undefined"
               :title="item.act ? `${item.label}（${hintOf(item.act)}）` : item.label"
+              :aria-label="item.label"
               @click="onNavClick($event, $event.currentTarget as HTMLAnchorElement)"
             >
+              <!-- 收起态（56px 图标条）只显示这个图标，文字靠 `aria-label` 与
+                   `title`（tooltip）。展开态图标在文字左边，两种状态用同一个
+                   节点——不按状态渲染两份 DOM，否则 `aria-label` 与可见文字
+                   会在两种状态间打架。 -->
+              <NavIcon :name="NAV_ICON[item.match[0]] ?? 'overview'" />
               <span class="af-rail__label">{{ item.label }}</span>
             </a>
           </li>
         </ul>
       </template>
 
-      <!-- 底部：状态 + 两个整站动作（原型 `.af-rail__foot`，`app.css:102-106`）。
-           原型的底部只有状态那几行；帮助与退出登录这两个入口在原型里不属于
-           左栏，但实现侧**必须有**（`?` 与登出不能被删掉），而原型没有全局顶栏
-           可以挂，所以它们落在这里——这是「搬位置」，不是新增能力。 -->
+      <!-- 底部（原型 `shell.js:146-151` + `app.css:102-106`）：**原型只有两行文本**
+           ——「单用户 · Hub 本地」/「N 台设备 · M 个 Agent · vX.Y.Z」。
+           上一版这里被改成了三行状态 + 三个 `<kbd>` 键位提示 + 两颗按钮，
+           是实现自造的第二套底部设计（用户 2026-11-17：「左侧栏底部的和原型不一致」）。
+
+           用户裁定保留键位与退出这两个入口，但**排在两行文本下方**，
+           所以 `.af-rail__foot` 的 DOM 顺序是：原型那两行 → 两颗按钮。
+           中间的键位提示排（`g` 跳转 / `^B` 侧栏）已按用户 2026-11-17 裁定
+           整排删除：那只是说明文字、点了没反应，摆在常驻左栏里白占两行高度。
+           两行文本本身逐字对齐原型；计数用真实数据（原型是写死的假数字）。 -->
       <div class="af-rail__foot">
-        <div class="af-rail__status">
-          <span><span class="af-dot" aria-hidden="true"></span>Hub 已连接</span>
-          <span>单用户 · 自托管</span>
-          <span class="af-rail__keys">
-            <kbd>{{ hintOf('help:toggle') }}</kbd> 键位
-            <kbd>{{ PREFIX_LEAD }}</kbd> 跳转
-            <kbd>{{ hintOf('rail:toggle') }}</kbd> 侧栏
+        <div class="af-rail__meta">
+          <span>单用户 · Hub 本地</span>
+          <!-- 计数读不到就整行不渲染：宁可少一行，也不写「0 台设备」这种假话。 -->
+          <span v-if="railCounts">
+            {{ railCounts.devices }} 台设备 · {{ railCounts.agents }} 个 Agent ·
+            <span class="af-mono">v{{ appVersion }}</span>
           </span>
         </div>
+        <!-- 原型没有这两块，是「搬位置不是加能力」：`?` 与登出不能删，
+             而原型没有全局顶栏可以挂。 -->
         <div class="af-rail__actions">
+          <!-- 图标常驻、文字在收起态隐藏（`.af-rail__btnlabel`）：56px 里放不下
+               「键位」两个字。`aria-label` 提供无障碍名，两种状态都不变。 -->
           <button
             class="af-btn af-btn--ghost af-btn--sm"
             type="button"
@@ -689,7 +771,8 @@ watch(
             title="键位帮助（?）"
             @click="openHelp"
           >
-            <span aria-hidden="true">?</span> 键位
+            <NavIcon name="help" :size="16" />
+            <span class="af-rail__btnlabel">键位</span>
           </button>
           <button
             class="af-btn af-btn--ghost af-btn--sm"
@@ -698,33 +781,12 @@ watch(
             title="退出登录"
             @click="onLogout"
           >
-            <span aria-hidden="true">⏻</span> 退出
+            <NavIcon name="logout" :size="16" />
+            <span class="af-rail__btnlabel">退出</span>
           </button>
         </div>
       </div>
     </aside>
-
-    <!-- 收起后的唤回入口（原型 `app.css:1229-1260` 的 `.af-recallsplit`）。
-         **必须在 `.af-rail` 外面**：收起态那条规则是
-         `html[data-rail='off'] .af-rail { visibility: hidden }`，`hidden` 作用在
-         整棵子树上，`position: fixed` 也逃不掉——上一版把按钮留在品牌行里，于是
-         收起后 `elementFromPoint` 命中不到它，点不回展开（用户 2026-11-17 报的
-         「左侧栏收起后无法打开」）。原型同样把它放在 `.af-shell` 之外。
-
-         左半那颗三横线就是原型的 `.af-recallsplit__rail`；原型的右半是「全部
-         页面清单」，本里程碑不落地，所以不做一颗点了没反应的假按钮。 -->
-    <button
-      class="af-recallsplit"
-      type="button"
-      aria-label="展开导航"
-      title="展开导航"
-      :aria-expanded="effectiveRail === 'open'"
-      @click="toggleRail"
-    >
-      <span class="af-recallsplit__rail">
-        <span class="af-navbtn__bars" aria-hidden="true"><span></span><span></span><span></span></span>
-      </span>
-    </button>
 
     <main class="af-main" tabindex="-1">
       <component :is="page" v-if="page" :key="pageKey" />

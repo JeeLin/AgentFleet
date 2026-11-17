@@ -24,6 +24,21 @@
 
 import { beforeEach } from 'vitest'
 
+/**
+ * `__APP_VERSION__` 的兜底：`vite.config.ts` 用 `define` 注入它，但 **vitest 不
+ * 执行 `define` 的替换**（它走自己的 transform），所以测试环境里这个全局常量
+ * 根本不存在，`App.vue` 引用它会在每个挂载 `App` 的用例里抛 ReferenceError。
+ *
+ * 值**不带 `v` 前缀**：`vite.config.ts` 注入的是 `package.json` 的 `version`
+ * （`0.8.0`），`v` 由 `App.vue` 模板自己加。这里写成 `v9.9.9-test` 会让页面上
+ * 出现 `vv9.9.9-test`（实测踩过）。
+ *
+ * 值写死一个固定的假版本号、**不读 `package.json`**：测试要判断的是「这一行
+ * 渲染了版本号」，不是「版本号等于 package.json 里的值」——后者会让每次发版
+ * 都改一次测试。真值的正确性由 `vite.config.ts` 那一处保证。
+ */
+globalThis.__APP_VERSION__ = '9.9.9-test'
+
 if (!('inert' in HTMLElement.prototype)) {
   Object.defineProperty(HTMLElement.prototype, 'inert', {
     configurable: true,

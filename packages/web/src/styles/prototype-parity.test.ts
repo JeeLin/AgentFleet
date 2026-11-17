@@ -31,7 +31,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 import { readRepoFile } from '@/test/css'
-import { templateOf } from '@/test/sfc'
+import { staticClassesOf as staticClassesOfTemplate, templateOf } from '@/test/sfc'
 
 const PROTOTYPE_CSS = readRepoFile('prototype/assets/app.css')
 const IMPL_CSS = readRepoFile('packages/web/src/styles/prototype-shell.css')
@@ -497,6 +497,17 @@ const INLINE_STYLE_SCOPE = [
   ...DELIVERED_PAGES,
   'packages/web/src/domains/device/DeviceTable.vue',
   'packages/web/src/domains/shared/components/PageHead.vue',
+  /* 下面四个是 2026-11-17 步骤7 验收补进来的（发现 🟡-1）：
+     上一版这份清单只覆盖「10 个已交付页面 + 两个被它们渲染的共享组件」，
+     于是 `App.vue`（外壳本身）、登录页、初始化页、`LoginPrompt` 里的
+     **5 处静态内联样式**长期在门禁视野之外——门禁是绿的，但那不是
+     「扫过且干净」，而是「根本没扫」。范围外的绿是会骗人的绿。
+     补进来之后这 5 处已全部改成类名（`.af-t-2xs` / `.af-t-sm` /
+     `.af-auth--setup` 规则 / `.af-auth__sub--spaced`）。 */
+  'packages/web/src/App.vue',
+  'packages/web/src/pages/LoginPage.vue',
+  'packages/web/src/pages/SetupPage.vue',
+  'packages/web/src/domains/shared/components/LoginPrompt.vue',
 ] as const
 
 /**
@@ -561,15 +572,6 @@ const OUT_OF_SCOPE_PAGES: Record<string, string> = {
   'packages/web/src/pages/SkillsSettingsPage.vue': 'SkeletonPage 占位',
   'packages/web/src/pages/IntegrationsSettingsPage.vue': 'SkeletonPage 占位',
   'packages/web/src/pages/NotificationsSettingsPage.vue': 'SkeletonPage 占位',
-}
-
-/** 模板里出现的**静态**类名（`class="…"` / `class='…'`），`:class` 不算。 */
-function staticClassesOfTemplate(vueSource: string): Set<string> {
-  const out = new Set<string>()
-  for (const m of templateOf(vueSource).matchAll(/(?<![:\w-])class\s*=\s*(["'])([^"']*)\1/g)) {
-    for (const name of m[2].split(/\s+/)) if (name) out.add(name)
-  }
-  return out
 }
 
 /**

@@ -162,10 +162,14 @@ describe('App：外壳骨架', () => {
 
     const foot = w.element.querySelector<HTMLElement>('.af-rail__foot')
     expect(foot).not.toBeNull()
-    expect(foot?.textContent).toContain('Hub 已连接')
-    // 「单用户 · 自托管」曾是自造状态条里的字：它现在只能出现在左栏里。
+    // 原型 `shell.js:146-151` 的两行：第一行「单用户 · Hub 本地」是事实，
+    // 第二行是计数（真实数据，读不到就不渲染）。
+    expect(foot?.textContent).toContain('单用户 · Hub 本地')
+    // 「Hub 已连接」是上一版自造的底部状态条文案，原型底部没有它。
+    // 用户 2026-11-17：「左侧栏底部的和原型不一致」→ 这条文案必须消失。
+    expect(foot?.textContent).not.toContain('Hub 已连接')
     const aside = w.element.querySelector('.af-rail')
-    expect(aside?.textContent).toContain('单用户 · 自托管')
+    expect(aside?.textContent).toContain('单用户 · Hub 本地')
     expect(w.element.querySelector('footer')).toBeNull()
   })
 
@@ -179,6 +183,122 @@ describe('App：外壳骨架', () => {
     反向验证：把 `<header><h2>{{ docTitle }}</h2></header>` 加回外壳模板 → 红
     （实测 `findAll('h1')` 仍为 1，所以要数的是 h1+h2 的全部标题）。
   */
+  it('左栏底部第二行：设备数 / Agent 数用真实数据，且版本号带 v 前缀', async () => {
+    stubFetch({
+      ...EMPTY_API,
+      '/api/devices': { body: [{ id: 'n_1' }, { id: 'n_2' }, { id: 'n_3' }] },
+      '/api/agents': { body: [{ id: 'a_1' }, { id: 'a_2' }] },
+    })
+    const w = mountApp('/')
+    await flush(w)
+
+    // 原型 `shell.js:149` 的形态是「3 台设备 · 6 个 Agent · v0.6.0」。
+    // **那三个数字是写死的假数据**，用户 2026-11-17 裁定「用真实数据」，
+    // 所以这里喂 3 台设备 / 2 个 Agent，断言它真的数了、而不是印一句常量。
+    //
+    // 反向验证：把 `loadRailCounts` 里的 `devices.value.length` 改成常量 3 →
+    // 数字仍对（巧合）；改成 `0` → 红。把 `v{{ appVersion }}` 的 `v` 删掉 → 红
+    // （`v9.9.9-test` 是 `test/setup.ts` 给的兜底值）。
+    const meta = w.element.querySelector<HTMLElement>('.af-rail__meta')
+    expect(meta).not.toBeNull()
+    const lines = Array.from(meta!.children).map((c) => c.textContent?.replace(/\s+/g, ' ').trim())
+    expect(lines[0]).toBe('单用户 · Hub 本地')
+    expect(lines[1]).toContain('3 台设备')
+    expect(lines[1]).toContain('2 个 Agent')
+    // 版本号带 `v` 前缀，与原型 `v0.6.0` 同形。
+    const mono = meta!.querySelector('.af-mono')
+    expect(mono?.textContent?.trim()).toBe('v9.9.9-test')
+  })
+
+  it('左栏底部第二行：计数读不到时整行不渲染（不写假数字）', async () => {
+    // 设备接口 500 → 该行整行消失，第一行仍在。
+    // **不许回落到「0 台设备」**：那是在说一句假话，而左栏是导航不是状态面板。
+    stubFetch({
+      ...EMPTY_API,
+      '/api/devices': { status: 500, body: { error: 'boom' } },
+    })
+    const w = mountApp('/')
+    await flush(w)
+
+    const meta = w.element.querySelector<HTMLElement>('.af-rail__meta')
+    expect(meta).not.toBeNull()
+    expect(meta!.textContent).toContain('单用户 · Hub 本地')
+    expect(meta!.textContent).not.toContain('台设备')
+    expect(meta!.querySelector('.af-mono')).toBeNull()
+  })
+
+  it('左栏底部的 line-height 是字面量 1.7（原型 app.css:104 刻意偏离全局 1.65）', () => {
+    const css = readRepoFile('packages/web/src/styles/prototype-shell.css')
+
+    // **这条只能断声明文本，量不出像素**：happy-dom 不做布局，实测拿不到
+    // 19.55px 与 18.975px 的差别；变异验证确认了这一点（把 1.7 改回
+    // `var(--p-lh-body)`，其余 40 条用例全绿）。所以退一步，直接钉住「这一处
+    // 写的是字面量 1.7」这个事实——它是用户 2026-11-17 报的「底部和原型不一致」
+    // 里唯一能静态看守的一条。
+    //
+    // 原型 `app.css:102-106`：
+    //   .af-rail__foot { ... font-size: var(--t-2xs); color: var(--fg-3);
+    //                    line-height: 1.7; }
+    // 而 `--lh-body` 是 1.65（原型 `tokens.css:27`），正文用的那个。这一处是
+    // 原型**唯一**刻意不跟全局行高走的地方，别「统一」回去。
+    const at = css.indexOf('\n.af-rail__foot {')
+    expect(at, '.af-rail__foot 的规则必须存在').toBeGreaterThan(-1)
+    const block = css.slice(css.indexOf('{', at) + 1, css.indexOf('}', at))
+
+    expect(block, '底部的行高必须是字面量 1.7').toContain('line-height: 1.7;')
+    expect(block, '不许改回全局的 --p-lh-body（1.65）').not.toContain('var(--p-lh-body)')
+  })
+
+  it('收起态：底部动作图标紧跟导航之后，不被 margin-top:auto 推到栏底', () => {
+    const css = readRepoFile('packages/web/src/styles/prototype-shell.css')
+
+    // 展开态 `.af-rail__foot` 的 `margin-top: auto` 是对的（原型 `app.css:103`
+    // 靠它把底部推到 224px 栏底）。但 56px 图标条里只有 7 个导航图标
+    // （y≈65..345），`auto` 会把两颗动作图标推到 y≈820/870，中间空出 ~475px
+    // ——视觉上像两段断开的 UI（2026-11-17 浏览器实测发现并修掉）。
+    //
+    // 这条只能断声明文本：happy-dom 不做布局，量不出 475px 的空隙。
+    // 实测数值（playwright，1440×900）：修前 footY=787 / lastNavBottom=345 →
+    // gap=442px；修后 footMarginTop='0px' / footY=505 / gap=0。
+    const at = css.indexOf("html[data-rail='off'] .af-rail__foot {")
+    expect(at, '图标条里的 .af-rail__foot 规则必须存在').toBeGreaterThan(-1)
+    const block = css.slice(css.indexOf('{', at) + 1, css.indexOf('}', at))
+    expect(block, '图标条里的底部必须 margin-top: 0（否则被推到栏底）').toContain('margin-top: 0')
+    expect(block, '不许留着 auto').not.toContain('margin-top: auto')
+  })
+
+  it('收起态：项目列表整块隐藏（否则留下看不见的、说不出名字的焦点陷阱）', async () => {
+    stubFetch({ ...EMPTY_API, '/api/projects': { body: [{ id: 'p_1', name: '示例项目' }] } })
+    const w = mountApp('/')
+    await flush(w)
+
+    // 收起态的两条规则必须成对存在：
+    //   ① `.af-rail__label { display: none }` —— 图标条没有文字
+    //   ② `.af-rail__list--projects { display: none }` —— 项目行整块消失
+    //
+    // **缺 ② 是一个无障碍缺陷**，不是视觉瑕疵：项目 `<a>` 的无障碍名来自
+    // 可见文字（它没有 `aria-label`），① 把文字吃掉之后，这些链接既看不见、
+    // 又没有名字，却仍然**可聚焦、占 40px 高**。实测（playwright，1440×900）：
+    // 修前收起态 `.af-rail__list a` 有 12 个，其中 5 个 `aria-label === null`，
+    // 且 7 个真图标之间有 179px 的空段（项目行占位）。
+    //
+    // 反向验证：删掉 ② 那条规则 → 本用例红。
+    const css = readRepoFile('packages/web/src/styles/prototype-shell.css')
+    const at = css.indexOf("html[data-rail='off'] .af-rail__list--projects {")
+    expect(at, '项目列表的收起态规则必须存在').toBeGreaterThan(-1)
+    const block = css.slice(css.indexOf('{', at) + 1, css.indexOf('}', at))
+    expect(block).toContain('display: none')
+
+    // 结构上也要对得上：项目列表挂了这个可区分的类名，非项目列表没挂。
+    const projectList = w.element.querySelector('.af-rail__list--projects')
+    expect(projectList, '项目列表必须带 .af-rail__list--projects').not.toBeNull()
+    const allLists = Array.from(w.element.querySelectorAll('.af-rail__list'))
+    expect(
+      allLists.filter((l) => l.classList.contains('af-rail__list--projects')).length,
+      '只有「项目」组那一列带这个类',
+    ).toBe(1)
+  })
+
   it('整页只有一个页面标题（外壳不再重复渲染 docTitle）', async () => {
     stubFetch(EMPTY_API)
     const w = mountApp('/')
@@ -600,78 +720,97 @@ describe('App：左栏几何与收起态', () => {
     expect(components).not.toContain('.af-app')
   })
 
-  it('收起态是整列滑出屏幕（原型的 html[data-rail] 机制），不是 52px 图标轨', () => {
+  it('收起态是 56px 图标条（用户 2026-11-17 裁定，有意偏离原型的「整列滑走」）', () => {
     const css = readRepoFile('packages/web/src/styles/prototype-shell.css')
-    // 剥注释再查「52px」：注释里写着「上一版是 52px 图标轨」这句账，不剥会误报。
-    const decls = css.replace(/\/\*[\s\S]*?\*\//g, '')
 
-    // 正面：内容区吃满 + 整列平移出去。这两条缺一条就是「点了没反应」。
+    // 正面：收起后左栏占 56px 网格轨道，**不位移、不隐藏**。
+    // 这三条一起锁住「图标条」这个形态：
+    //   · 轨道是 56px（不是 0）——左栏还在
+    //   · 没有 `translateX(-100%)`——没有滑出屏幕
+    //   · 没有 `visibility: hidden`——图标可点、可聚焦
     expect(cssRuleOf(css, "html[data-rail='off'] .af-shell")).toContain(
-      'grid-template-columns: 0 1fr',
+      'grid-template-columns: 56px 1fr',
     )
     const railBlock = cssRuleOf(css, "html[data-rail='off'] .af-rail")
     expect(railBlock, '收起态左栏规则必须存在').not.toBe('')
-    expect(railBlock).toContain('transform: translateX(-100%)')
+    expect(railBlock, '收起态不许整列滑出屏幕').not.toContain('translateX(-100%)')
+    expect(railBlock, '收起态不许把左栏藏起来（图标条必须可见可点）').not.toContain(
+      'visibility: hidden',
+    )
 
-    // 反向：不许再有「52px 图标轨」那一套（竖排名字、图标轨定宽）。
+    // 反向：上一版「52px 图标轨」那套自造做法仍然不许回来（竖排名字当图标）。
+    const decls = css.replace(/\/\*[\s\S]*?\*\//g, '')
     expect(decls).not.toContain('writing-mode: vertical-rl')
     expect(decls).not.toContain('52px')
   })
 
-  it('收起态：唤回按钮必须移出左栏子树，且仍可 Tab 到', async () => {
+  it('收起态：图标条常驻，7 个导航项各有可读的 aria-label 与一个 SVG 图标', async () => {
     stubFetch(EMPTY_API)
     const w = mountApp('/')
     await flush(w)
 
+    // **判据是「图标条里的每一项都还找得到、读得懂、点得着」**（2026-11-17 改）。
+    // 上一版断言的是「唤回胶囊 `.af-recallsplit` 在 `.af-rail` 子树之外」——
+    // 那条锁的是「整列滑走 + 浮一颗唤回按钮」的旧方案，而用户改成图标条之后
+    // 唤回按钮本身就不该存在了（顶部那颗开关常驻），旧断言会挡住新形态。
+    //
+    // 现在的三条反向守卫：
+    //   ① 唤回胶囊必须消失（否则它和图标条重复）
+    //   ② 剩下的按钮里不许再有 `position: fixed` 的悬浮唤回形态
+    //   ③ `main.af-main` 不许再靠 `padding-left` 给悬浮按钮让位
     const css = readRepoFile('packages/web/src/styles/prototype-shell.css')
-    // **判据是「不在 `.af-rail` 子树里」，不是「浮起来了」**（2026-11-17 改）。
-    // 上一版断言的是一条 `html[data-rail='off'] .af-rail__brand .af-navbtn`
-    // 规则含有 `position: fixed` + `visibility: visible`——规则确实写了，
-    // 可它锁的东西根本不成立：收起态的 `html[data-rail='off'] .af-rail
-    // { visibility: hidden }` 作用在**祖先**上，`position: fixed` 不脱离
-    // 可见性继承，祖先的 `hidden` 会把整棵子树裁掉。实测（playwright）：
-    // 收起后 `elementFromPoint` 命中不到那颗按钮，`page.click` 超时，
-    // 用户报「左侧栏收起后无法打开」。
-    // 所以这里改成断言**结构**：唤回入口用原型类 `.af-recallsplit`，
-    // 且它渲染在 `.af-rail` 之外。
-    const recall = cssRuleOf(css, "html[data-rail='off'] .af-recallsplit")
-    expect(recall, '收起态唤回入口必须由 html[data-rail=off] 触发显示').not.toBe('')
-    expect(recall, '收起态唤回入口必须显示出来（display: inline-flex）').toContain('inline-flex')
-    // 上一版那条「用 `position: fixed` 把品牌行里那颗按钮浮回来」的规则必须消失。
-    // 判据看**规则体**而不是 `cssRuleOf`：后者取 `indexOf('selector {')` 后的
-    // 第一段，那条规则被删掉之后会滑到别处匹配到不相干的声明（实测：匹配到
-    // `{ display: none;`），于是这条反向守卫会假红。也不看裸 `includes`：
-    // 本文件的注释里写着「不做 `.af-rail__brand .af-navbtn` 的悬浮形态」，
-    // 连注释一起命中。
-    // 判据：**不得有「收起态下把品牌行那颗按钮做成悬浮」的规则**。
-    // 但窄屏那条 `display: none` 是合法的（窄屏左栏根本不渲染，那颗开关
-    // 本来就该消失），所以用例把它排除在外。
-    const block = /html\[data-rail=['"]off['"]\]\s+\.af-rail__brand\s+\.af-navbtn\s*\{([^}]*)\}/.exec(css)
-    if (block) {
-      // 命中的只有可能是窄屏那条 `display: none`（紧邻 `@media (max-width: 900px)`）
-      const idx = css.indexOf(block[0])
-      const near = css.slice(Math.max(0, idx - 700), idx)
-      const isNarrow = near.includes('@media (max-width: 900px)')
-      expect(
-        isNarrow && block[1].includes('display: none'),
-        '「把左栏里的按钮浮回来」是行不通的做法（祖先的 visibility: hidden 会裁掉它），规则不许回来；'
-          + '窄屏那条 display:none 除外',
-      ).toBe(true)
+    expect(cssRuleOf(css, "html[data-rail='off'] .af-recallsplit")).toBe('')
+    expect(w.element.querySelector('.af-recallsplit')).toBeNull()
+
+    // 让路留白也必须消失：图标条自己占网格轨道，再叠 padding 就是凭空空一块。
+    const components = readRepoFile('packages/web/src/styles/components.css')
+    expect(cssRuleOf(components, "html[data-rail='off'] .af-main")).toBe('')
+
+    // 7 个导航项：各有一个 SVG 图标，且**无障碍名不依赖图标**。
+    // 收起态没有可见文字（`.af-rail__label` 被 `display: none`），所以
+    // `aria-label` 是这一项唯一的名字——缺了它，收起态的左栏对读屏就是 7 个空链接。
+    const navLinks = Array.from(
+      w.element.querySelectorAll<HTMLAnchorElement>('.af-rail__list a[aria-label]'),
+    )
+    expect(navLinks.length, '导航项必须带 aria-label').toBe(7)
+    for (const a of navLinks) {
+      expect(a.getAttribute('aria-label')?.trim(), 'aria-label 不许为空').toBeTruthy()
+      const svg = a.querySelector('svg')
+      expect(svg, `「${a.getAttribute('aria-label')}」必须有一个 SVG 图标`).not.toBeNull()
+      // 图标纯装饰：名字由链接的 aria-label 提供，SVG 不能再被读一遍。
+      expect(svg?.getAttribute('aria-hidden')).toBe('true')
     }
 
-    const rail = w.element.querySelector('.af-rail')
-    const recallBtn = w.element.querySelector('.af-recallsplit')
-    expect(recallBtn, '页面上必须有唤回入口').not.toBeNull()
-    expect(
-      rail?.contains(recallBtn as Node) ?? false,
-      '唤回入口不得在 .af-rail 子树里——祖先的 visibility: hidden 会连它一起裁掉',
-    ).toBe(false)
-    expect(isTabbable(recallBtn as Element)).toBe(true)
-
-    // 展开态那颗开关仍在品牌行里（它负责「收起」，与被移出去的唤回入口分工不同）。
+    // 展开态那颗开关仍在品牌行里：图标条里它是「展开」的唯一入口（不能删）。
     const btn = w.element.querySelector<HTMLElement>('.af-rail__brand .af-navbtn')
     expect(btn, '品牌行里必须有那颗开关').not.toBeNull()
     expect(isTabbable(btn as Element)).toBe(true)
+  })
+
+  it('`.af-shell` 只有两个网格子元素（左栏 + 主区），主区不许被挤到第二行', async () => {
+    stubFetch(EMPTY_API)
+    const w = mountApp('/')
+    await flush(w)
+
+    // 用户 2026-11-17 报「左侧栏底部的和原型不一致」，查下去发现更严重的一条：
+    // 删 `.af-recallsplit` 的 CSS 时漏删了 `App.vue` 的 `<button>`，它成了
+    // `.af-shell` 的**第三个**网格子元素，抢走第 2 格，于是 `main.af-main`
+    // 掉到第 2 行、宽度只剩左栏那么宽。实测（playwright）：
+    //   · 残留按钮 {x:224, y:0, w:1216, h:458}
+    //   · main.af-main {x:0, y:458, w:224, h:442}
+    //   · gridTemplateRows = '458.25px 441.75px'
+    // happy-dom 不做布局，量不出 rect，所以这里断**结构**：网格子元素正好两个，
+    // 且第二个是 `main.af-main`。多一个子元素就会被挤到下一行，这是同一条缺陷。
+    const shell = w.element.querySelector('.af-shell')
+    expect(shell).not.toBeNull()
+    const kids = Array.from(shell!.children)
+    expect(
+      kids.length,
+      `.af-shell 必须恰好两个网格子元素，实测 ${kids.length} 个：${kids.map((k) => k.tagName.toLowerCase() + '.' + k.className).join(', ')}`,
+    ).toBe(2)
+    expect(kids[0].tagName.toLowerCase()).toBe('aside')
+    expect(kids[1].tagName.toLowerCase()).toBe('main')
+    expect(kids[1].className).toContain('af-main')
   })
 
   it('收起态不该有可拖动的横向滚动条（用户反馈 2026-10-28）', () => {

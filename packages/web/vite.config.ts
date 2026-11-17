@@ -1,14 +1,30 @@
 import { fileURLToPath, URL } from 'node:url'
+import { readFileSync } from 'node:fs'
 
 import vue from '@vitejs/plugin-vue'
 import { defineConfig } from 'vite'
 
 import { devProxy } from './dev-proxy.config'
 
+/** `package.json` 的版本号，供下面的 `define` 注入（见那里的注释）。 */
+const pkg = JSON.parse(readFileSync(fileURLToPath(new URL('./package.json', import.meta.url)), 'utf8')) as {
+  version: string
+}
+
 // 四个门禁共享同一份配置：`vite build` 与 `vitest run` 都读它，
 // 避免「构建能过、测试跑不起来」这种只在门禁上才暴露的分裂。
 export default defineConfig({
   plugins: [vue()],
+  // 左栏底部要显示版本号（「v0.8.0」那种）。**构建期替换成字面量**，而不是
+  // 运行时请求 `/version`：那一行必须离线也画得出来，多一个请求就多一种它空着
+  // 的情形。值取自 `package.json` 的 `version`——单一真相源，发版只改一处。
+  //
+  // 注意：`vite build` 与 `vitest` 都读这份 config，但 **`vitest` 不会执行
+  // `define` 的替换**（它走自己的 transform），所以 `test/setup.ts` 里另有一份
+  // 兜底赋值。两处要一起改，测试 `App.test.ts` 看守着这件事。
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

@@ -108,4 +108,136 @@ describe('四套主题逐值对照原型', () => {
     const accs = THEMES.map((t) => norm(vars(readRepoFile(`packages/web/src/styles/theme-${t}.css`)).get('--p-acc')!))
     expect(new Set(accs).size).toBe(4)
   })
+
+  /* ── 改名守卫：`var(--p-*)` 的每一个被引用的名字都必须真有定义 ──────────
+     为什么需要这条：`--inset` → `--p-inset-c`、`--add` → `--p-add-ink-c`、
+     `--del` → `--p-del-ink-c` 是**有意改名**（原型的裸名加 `-c` 后缀，
+     表示「这一层是颜色」）。CSS 里引用一个不存在的自定义属性**不会报错**，
+     它只是让那条声明静默失效 —— 颜色退回继承值，看起来「有点不对」但查不出来。
+     2026-11-17 步骤7 验收专门点了这一条：改名本身合理，但没有断言看守。
+
+     **定义可以在两处之一**，因为令牌分两层：
+       · 颜色令牌（`--p-bg` / `--p-inset-c` / `--p-acc` …）→ 四份主题文件，逐套不同
+       · 非颜色令牌（`--p-s1` 间距 / `--p-t-sm` 字号 / `--p-r-sm` 圆角 /
+         `--p-dur` 动效 / `--p-row` 行高 …）→ `tokens.css` 的映射层，四套共用
+     所以判据是「**在这两处的并集里能找到定义**」，而不是「必须在主题文件里」——
+     后者会把间距字号误判成漏定义（第一版就是这么红的）。 */
+  it('CSS 里引用的每个 --p-* 都在主题文件或 tokens.css 里有定义（改名不会静默失效）', () => {
+    const defined = new Set<string>()
+    for (const t of THEMES) {
+      for (const k of vars(readRepoFile(`packages/web/src/styles/theme-${t}.css`)).keys()) {
+        if (k.startsWith('--p-')) defined.add(k)
+      }
+    }
+    // 非颜色令牌的落点：tokens.css 的 `--p-* : var(--af-*)` 映射层
+    for (const k of vars(readRepoFile('packages/web/src/styles/tokens.css')).keys()) {
+      if (k.startsWith('--p-')) defined.add(k)
+    }
+    expect(defined.size, '一张 --p-* 都没读到，路径或解析有问题').toBeGreaterThan(0)
+
+    // 扫全部样式表 + SFC 的 <style> 块，收集 `var(--p-...)` 的引用。
+    // **主题文件本身也要扫**：三个改名变量的全部引用都写在主题文件的
+    // `--af-*: var(--p-*)` 转发行里。第一版漏了这四个文件，于是「在主题里
+    // 把 --p-inset-c 拼成 --p-inset-typo」这种错当场漏网（变异 M-A 实测）。
+    const cssFiles = [
+      ...THEMES.map((t) => `packages/web/src/styles/theme-${t}.css`),
+      'packages/web/src/styles/components.css',
+      'packages/web/src/styles/prototype-shell.css',
+      'packages/web/src/styles/tokens.css',
+      'packages/web/src/styles/index.css',
+      'packages/web/src/pages/SettingsPage.vue',
+      'packages/web/src/pages/LoginPage.vue',
+      'packages/web/src/pages/SetupPage.vue',
+    ]
+    const referenced = new Map<string, string[]>()
+    for (const f of cssFiles) {
+      const css = readRepoFile(f).replace(/\/\*[\s\S]*?\*\//g, '')
+      for (const m of css.matchAll(/var\(\s*(--p-[a-z0-9-]+)/g)) {
+        const name = m[1]
+        if (!referenced.has(name)) referenced.set(name, [])
+        const owners = referenced.get(name)!
+        if (!owners.includes(f)) owners.push(f)
+      }
+    }
+    expect(referenced.size, '一个 var(--p-*) 都没扫到，正则或文件清单有问题').toBeGreaterThan(0)
+
+    const orphans = [...referenced.keys()].filter((n) => !defined.has(n)).sort()
+    const detail = orphans.map((n) => `${n}（引用于 ${referenced.get(n)!.join(' / ')}）`).join('\n')
+    expect(orphans, `这些 --p-* 被引用但主题文件与 tokens.css 都没有定义，会静默失效：\n${detail}`).toEqual([])
+  })
+
+  /* ── 设置页的四张主题预览卡：12 个硬编码色必须与主题文件同步 ──────────
+     为什么这几处**必须**硬编码、不能用 `var(--p-*)`：预览卡要显示**另外三套**
+     配色的样子，而 `--p-bg` 在当前页面只解析成「正在用的那一套」。变量在这里
+     天然做不到，所以硬编码是对的。但硬编码的代价是**会与主题文件漂移** ——
+     改了 `theme-warm.css` 的 `--p-bg` 而忘了改预览卡，卡片就会显示一个
+     已经不存在的颜色，而且不会报错、只是「看着有点旧」。
+     这条用例就是那个同步断言（2026-11-17 步骤4 F-4）：三列色值分别取自
+     该主题的 `--p-bg`（页面底） / `--p-surf-2`（卡片条） / `--p-fg`（文字线）。 */
+  it('设置页主题预览卡的 12 个色值与四份主题文件逐一对齐', () => {
+    const settings = readRepoFile('packages/web/src/pages/SettingsPage.vue')
+
+    /** `.af-theme__prev` / `__pv-bar` / `__pv-line` 分别对应的主题变量。 */
+    const SLOTS = [
+      ['af-theme__prev', '--p-bg'],
+      ['af-theme__pv-bar', '--p-surf-2'],
+      ['af-theme__pv-line', '--p-fg'],
+    ] as const
+
+    const drift: string[] = []
+    for (const theme of THEMES) {
+      const themeVars = vars(readRepoFile(`packages/web/src/styles/theme-${theme}.css`))
+      for (const [cls, varName] of SLOTS) {
+        // 找 `[data-theme-pick='<theme>'] .<cls> { background: #xxx; }`
+        const re = new RegExp(
+          `\\[data-theme-pick=['"]${theme}['"]\\]\\s*\\.${cls}\\s*\\{[^}]*background:\\s*([^;}]+)`,
+        )
+        const m = settings.match(re)
+        if (!m) {
+          drift.push(`设置页缺少 [data-theme-pick='${theme}'] .${cls} 的 background`)
+          continue
+        }
+        const hardcoded = norm(m[1])
+        const fromTheme = norm(themeVars.get(varName) ?? '<未定义>')
+        if (hardcoded !== fromTheme) {
+          drift.push(`${theme} .${cls}：设置页写 ${hardcoded}，而 theme-${theme}.css 的 ${varName} 是 ${fromTheme}`)
+        }
+      }
+    }
+    expect(drift, `预览卡与主题文件已漂移：\n${drift.join('\n')}`).toEqual([])
+  })
+
+  /* 三个改名变量的正向守卫 */
+  it('三个有意改名的颜色变量都存在且有引用（-c 后缀不是笔误）', () => {
+    const rename = ['--p-inset-c', '--p-add-ink-c', '--p-del-ink-c'] as const
+
+    for (const name of rename) {
+      // ① 四份主题都必须定义它（颜色逐套不同，缺一份就是那套会失效）
+      for (const t of THEMES) {
+        const css = readRepoFile(`packages/web/src/styles/theme-${t}.css`)
+        const defs = vars(css)
+        expect(defs.has(name), `theme-${t}.css 缺 ${name}`).toBe(true)
+
+        // ② **在同一个主题文件里**必须被 `var()` 引用，否则是那套主题的死变量。
+        // 判据必须逐文件做：第一版把四份主题拼成一个大字符串再数引用，
+        // 于是「只在 warm 里把两处引用全断掉」被另外三份的引用顶住了
+        // （变异 M-D* 实测漏网）。每份主题自洽才是真正的不变式。
+        // 也必须数 `var(--name)` 而不是数 `--name` 子串：定义行自己就含这个
+        // 子串，「定义了却没人用」会被定义行满足（变异 M-D 实测漏网）。
+        const refs = css.match(new RegExp(`var\\(\\s*${name}\\s*\\)`, 'g')) ?? []
+        expect(refs.length, `theme-${t}.css 里 ${name} 定义了却没有 var() 引用（死变量）`).toBeGreaterThan(0)
+      }
+    }
+
+    // ③ 旧名字（无 -c 后缀）不许再被任何地方引用
+    const everywhere = [
+      ...THEMES.map((t) => readRepoFile(`packages/web/src/styles/theme-${t}.css`)),
+      readRepoFile('packages/web/src/styles/components.css'),
+      readRepoFile('packages/web/src/styles/prototype-shell.css'),
+    ].join('\n')
+    for (const stale of ['--p-inset', '--p-add', '--p-del']) {
+      const refs = everywhere.match(new RegExp(`var\\(\\s*${stale}\\s*\\)`, 'g')) ?? []
+      expect(refs.length, `旧名 ${stale} 仍被 var() 引用，应已改名为带 -c 后缀`).toBe(0)
+    }
+  })
 })

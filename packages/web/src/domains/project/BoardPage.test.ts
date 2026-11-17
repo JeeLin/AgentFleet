@@ -116,7 +116,7 @@ describe('BoardPage：地址里没有项目 id', () => {
 })
 
 describe('BoardPage：两个请求都成功', () => {
-  it('六列都在，且列名与顺序照原型六态', async () => {
+  it('六列都在，且列名与顺序按用户裁定（失败在完成之前）', async () => {
     stubFetch({
       '/api/projects/p_1': { body: project() },
       '/api/projects': { body: [project()] },
@@ -131,19 +131,21 @@ describe('BoardPage：两个请求都成功', () => {
     for (const title of ['待办', '排队中', '执行中', '待验收', '已完成', '失败']) {
       expect(text, `缺列「${title}」`).toContain(title)
     }
-    // 顺序也是判据，而且**顺序照原型**：`done` 在 `failed` 之前
-    // （`prototype/board.html:95-111`）。旧版本这里断的是「失败在完成之前」，
-    // 那与本里程碑的规格和原型都相反，已按原型改掉——见 `BoardPage.vue`
-    // 头注释「六列的顺序照原型」一节的理由。
+    // 顺序也是判据。**这次是故意不照原型**：用户 2026-11-17 裁定
+    // 「失败要排到完成前面」，理由是完成列看过就走、失败列还要处置。
+    // 原型 `prototype/board.html:95-111` 是 `… done / failed`（失败最后），
+    // 我们改成 `… failed / done`。旧版本这条断的正是「done 在 failed 之前」，
+    // 已按新裁定反过来——见 `BoardPage.vue` 头注释「六列的顺序」一节。
     //
     // 另：整板无任务时页面只渲染一条空态（规格测试标准 3），所以这一条的
     // 夹具必须给至少一个任务，否则连 `.af-board` 都不在。
-    // 列名类的选择器也按原型改（`.af-col__name`，`prototype/board.html:62`）。
+    // 列名类的选择器按原型（`.af-col__name`，`prototype/board.html:62`）。
     const titles = Array.from(w.element.querySelectorAll('.af-col__name')).map(
       (e) => e.textContent ?? '',
     )
-    expect(titles).toEqual(['待办', '排队中', '执行中', '待验收', '已完成', '失败'])
-    expect(titles.indexOf('已完成')).toBeLessThan(titles.indexOf('失败'))
+    expect(titles).toEqual(['待办', '排队中', '执行中', '待验收', '失败', '已完成'])
+    // 反向守卫：失败必须在完成**之前**，别让它被改回最后一列。
+    expect(titles.indexOf('失败')).toBeLessThan(titles.indexOf('已完成'))
   })
 })
 
@@ -362,10 +364,11 @@ function sixTasks(): Task[] {
 }
 
 describe('BoardPage（v0.8.0）：六列的列名、顺序与文案', () => {
-  it('renders_six_columns_in_prototype_order：列头文本数组严格等于原型六态', async () => {
-    // 判红方式：`failed` 放回第 4 列（`done` 之前）→ 这条立刻红。
-    // 那正是 `BoardPage.vue` 旧注释要求的顺序，本轮按 `prototype/board.html:59-111`
-    // 改掉：状态机的列序 = 六态的自然生命周期，失败在最后。
+  it('renders_six_columns_in_user_ruled_order：列头顺序 = 失败在完成之前', async () => {
+    // 判红方式：把 `done` / `failed` 换回原型顺序（失败最后）→ 这条立刻红。
+    // **有意偏离原型**：`prototype/board.html:59-111` 是 `… review / done / failed`，
+    // 用户 2026-11-17 裁定「失败要排到完成前面」（完成的一般都不会再看，
+    // 失败的还要处置）。理由写在 `BoardPage.vue` 头注释「六列的顺序」一节。
     stubBoard(sixTasks())
     const w = mountAt('p_1')
     await flushUntilSettled(w)
@@ -373,19 +376,21 @@ describe('BoardPage（v0.8.0）：六列的列名、顺序与文案', () => {
     const titles = Array.from(w.element.querySelectorAll('.af-col__name')).map(
       (e) => e.textContent ?? '',
     )
-    expect(titles).toEqual(['待办', '排队中', '执行中', '待验收', '已完成', '失败'])
+    expect(titles).toEqual(['待办', '排队中', '执行中', '待验收', '失败', '已完成'])
   })
 
   it('column_labels_come_from_the_state_table：列头文案与 STATES[k].label 逐项相等', async () => {
     // 判红方式：页面里硬写中文字面量、与词表不一致 → 红。
     // 这里断的是**逐键相等**，不是「出现过某个词」——后者在页面硬写一份
     // 恰好同名的字面量时也绿，那正是本条要防的「第二份词表」。
+    // 键数组随用户 2026-11-17 的裁定改为失败在完成之前（与 `BoardPage.vue`
+    // 的 `COLUMNS` 同序）。
     stubBoard(sixTasks())
     const w = mountAt('p_1')
     await flushUntilSettled(w)
 
     const cols = Array.from(w.element.querySelectorAll('.af-col'))
-    const keys = ['pending', 'queued', 'running', 'review', 'done', 'failed']
+    const keys = ['pending', 'queued', 'running', 'review', 'failed', 'done']
     expect(cols).toHaveLength(keys.length)
     keys.forEach((key, i) => {
       const head = cols[i]?.querySelector('.af-col__name')?.textContent ?? ''
