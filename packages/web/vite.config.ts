@@ -57,4 +57,7 @@ export default defineConfig({
     allowedHosts: true,
     proxy: devProxy,
   },
+  // **不要在这里加 `test` 键**：vitest 读的是 `vitest.config.ts`（同目录），
+  // 本文件里的 `test` 段从来不会被读取——v0.8.1 G18 最初就把覆盖率阈值写在
+  // 这里，实测阈值静默不生效、`82.56%` 的行覆盖率照样 `EXIT=0`。
 })

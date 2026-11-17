@@ -137,6 +137,17 @@ run = """
 cd packages/web && bun run test
 """
 
+# 前端覆盖率门禁。**与 Rust 的 `cov-gate` 是两条不同的线**：
+# `cov-gate` 是 `cargo llvm-cov --fail-under-lines 98`（只覆盖 crates/），
+# 这条覆盖 packages/web。阈值 96% 取自 2026-11-18 的实测基线 96.38%，
+# 作用是防劣化，不是追 98%——前端从来没有到过 98%。
+# 阈值本身写在 packages/web/vitest.config.ts 的 `coverage.thresholds`。
+[tasks.web-cov-gate]
+description = "前端覆盖率门禁：行覆盖率 ≥96%（实测基线 96.38%）"
+run = """
+cd packages/web && bun run test -- --coverage
+"""
+
 [tasks.web-build]
 description = "前端构建（vite build）"
 run = """
@@ -144,8 +155,8 @@ cd packages/web && bun run build
 """
 
 [tasks.web-ci]
-description = "前端三道门禁 = web-check + web-test + web-build"
-depends = ["web-check", "web-test", "web-build"]
+description = "前端四道门禁 = web-check + web-test + web-cov-gate + web-build"
+depends = ["web-check", "web-test", "web-cov-gate", "web-build"]
 
 [tasks.build]
 description = "生产构建：先编译前端，再构建 release 二进制（Hub 内嵌 dist/）"
