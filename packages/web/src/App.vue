@@ -336,8 +336,28 @@ const currentProjectId = computed(() => route.value.params.id ?? '')
  * 取值仍是 `open` / `collapsed`（测试锁着这个契约），但它不再写成节点的
  * `data-rail` 属性：原型把状态放在 **`<html data-rail="off">`** 上，
  * 由 `html[data-rail="off"] .af-shell` 把整列滑出去（见下面的 `watch`）。
+ *
+ * ── 落盘（v0.8.1 G10）──────────────────────────────────────────────
+ * 这个值是**用户的显示偏好**，不是会话内的临时状态：换一页、刷一次就回到
+ * `open` 时，用户每翻一页都要重新收一次。所以 `rail` 初值从 `localStorage`
+ * 读，改动时写回（见文件末尾的 `watch`）。
+ *
+ * **读要有兜底**：`localStorage` 可能不可用（隐私模式、被策略禁掉）——
+ * 读失败当作 `open`，写失败静默忽略。这条偏好丢了不影响任何功能，
+ * 不值得为它弹错。
  */
-const rail = ref<'open' | 'collapsed'>('open')
+const RAIL_KEY = 'af-rail'
+
+/** 读回用户上次的侧栏偏好。任何异常都退化成 `open`（缺省态）。 */
+function readRailPref(): 'open' | 'collapsed' {
+  try {
+    return localStorage.getItem(RAIL_KEY) === 'collapsed' ? 'collapsed' : 'open'
+  } catch {
+    return 'open'
+  }
+}
+
+const rail = ref<'open' | 'collapsed'>(readRailPref())
 
 /**
  * 会话页里左栏被自动收起。唯一写入者是下面那个路由 `watch`。
@@ -407,6 +427,29 @@ watch(
   },
   { immediate: true },
 )
+
+/**
+ * 把用户的侧栏偏好写回 `localStorage`（G10）。
+ *
+ * **监听的是 `rail` 而不是 `effectiveRail`**：`effectiveRail` 里混着
+ * 「会话页自动收起」——那是**这一页**的呈现，不是用户的意愿。
+ *
+ * **如实说明这条区分的强度**：在当前所有走得到的路径上，两种写法写出的值
+ * 是**同一个**（实测过：`watch` 默认不是 `immediate`，所以挂载在会话页时
+ * 谁也不触发；用户在会话页点一次开关时 `effectiveRail` 也变成 `open`）。
+ * 也就是说这条不是「现在的 bug」，是**在挑更不容易出错的写法**：
+ * `rail` 的语义就是「用户要什么」（见上面的注释），拿它落盘在定义上就对；
+ * 一旦将来有人在挂载期读一次 `effectiveRail`，以可见态落盘就会把
+ * 「这一页临时收起」变成永久偏好。测试网**判不出**这个差别（没有可观察的
+ * 差异），所以这里不能写成「测试会拦」。
+ */
+watch(rail, (state) => {
+  try {
+    localStorage.setItem(RAIL_KEY, state)
+  } catch {
+    /* 隐私模式 / 策略禁用：这条偏好丢了不影响任何功能，静默忽略。 */
+  }
+})
 
 /** 一条导航项是否当前页。 */
 function isCurrent(match: readonly string[]): boolean {
@@ -587,13 +630,23 @@ onMounted(() => {
     focusSearch,
   })
   stopRouter = startRouter()
-  // 左栏「项目」组那一列。与总览页同一个端点（`listProjects`），只是这里
-  // 不显示失败态（见 `loadRailProjects` 的注释）。
-  void loadRailProjects()
-  // 左栏底部第二行的「N 台设备 · M 个 Agent」。**只加载一次**，不跟着路由刷新：
-  // 它是「这台 Hub 上有多少东西」的背景数字，不是某个页面的实时状态；滚动导航
-  // 时反复拉两个列表端点既浪费也会让那行数字跳。
-  void loadRailCounts()
+  /* ── 认证页**不拉业务数据**（v0.8.1 G12）──────────────────────────────
+     登录页上还没登录，`/api/projects` / `/api/agents` / `/api/devices` 三个
+     请求必然 401，控制台留下三条 error，而左栏在那时根本不渲染（认证页不带
+     外壳）。判据用现成的 `isAuthPage`（`AUTH_ROUTES`），不另写一遍
+     `name === 'login'`——加第三个认证页时那种写法会漏。
+
+     用 `if` 而不是提前 `return`：下面 `redirectLegacy()` 与首屏聚焦与是否
+     登录无关，必须照跑（旧地址的书签也该被送去它的去处）。 */
+  if (!isAuthPage.value) {
+    // 左栏「项目」组那一列。与总览页同一个端点（`listProjects`），只是这里
+    // 不显示失败态（见 `loadRailProjects` 的注释）。
+    void loadRailProjects()
+    // 左栏底部第二行的「N 台设备 · M 个 Agent」。**只加载一次**，不跟着路由刷新：
+    // 它是「这台 Hub 上有多少东西」的背景数字，不是某个页面的实时状态；滚动导航
+    // 时反复拉两个列表端点既浪费也会让那行数字跳。
+    void loadRailCounts()
+  }
   // 首屏落在一条已删除的旧地址上（书签、外部链接）：换成它的去处。
   // 必须在 `startRouter` 之后——`navigate` 会改历史记录，先起监听再改，
   // 顺序反了会让这次 `replaceState` 发生在监听装好之前（本身无害，但
