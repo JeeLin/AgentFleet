@@ -2683,11 +2683,23 @@ describe('git 面板：历史分段', () => {
 describe('会话页顶部三层：tab 条 → 标题行 → 状态行（v0.5.0）', () => {
   it('tab 条是页面最上面那一块（在标题行之前，不是夹在页头与正文之间）', async () => {
     const { w } = await mountWorkbench()
-    // `.af-wb` **就是**页面根元素，不是它的后代——`querySelector` 查不到自己，
-    // 直接读根的 children 才是这三块 chrome 的真实顺序。
-    const wb = w.element
-    expect(wb.classList.contains('af-wb'), '页面根就是 .af-wb').toBe(true)
-    const kids = Array.from(wb.children)
+    // 页面根现在是原型的 `.af-body.af-body--fill`（`session.html:37`），
+    // `.af-wb` 是它里面的那一层工作台容器——三块 chrome 的真实顺序要读
+    // **工作台那一层**的 children。
+    //
+    // 断言用 `querySelector` 而不是 `w.element`：`mountIn` 把组件挂进一个
+    // host `div`（`test/mount.ts` 的 `attachTo`），`w.element` 是那个 host，
+    // 页面自己的根 div 在它**里面**——拿 `w.element` 去问 classList 会永远
+    // 是 false，而这条会以「骨架没改」的名义红掉。
+    const body = w.element.querySelector<HTMLElement>('.af-body')
+    expect(body, '页面根必须是原型的 .af-body').not.toBeNull()
+    expect(
+      body?.classList.contains('af-body--fill'),
+      '工作台吃满剩余高度，要 .af-body--fill',
+    ).toBe(true)
+    const wb = body?.querySelector<HTMLElement>('.af-wb')
+    expect(wb, '工作台容器 .af-wb 必须在').not.toBeNull()
+    const kids = Array.from((wb as HTMLElement).children)
     const tabIdx = kids.findIndex((el) => el.classList.contains('af-tabbar'))
     const headIdx = kids.findIndex((el) => el.classList.contains('af-wb__head'))
     expect(tabIdx, 'tab 条必须在').toBeGreaterThanOrEqual(0)

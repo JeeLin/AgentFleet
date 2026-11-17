@@ -409,7 +409,35 @@ function backToBoard(): void {
 </script>
 
 <template>
-  <div class="af-page af-taskd">
+  <!-- 页头是 `.af-body` 的**兄弟**，不是它的子节点：原型 `task.html:20` 的
+       `header.af-head` 排在 `:25` 的 `div.af-body` 之前，8 个原型页无一例外。
+       嵌进去的后果是 `.af-body--pad` 的内边距把页头挤成内缩，且 `.af-body` 是
+       `overflow:auto` 那一层，滚动时页头会跟着滚走。
+       `af-taskd` 留在内容层上——它是这一页的样式命名空间，不是骨架。 -->
+  <PageHead v-if="task">
+    <div>
+      <h1 class="af-head__title">
+        {{ task.title }}
+        <StateBadge :state="task.state" />
+        <span
+          v-if="task.needs_manual_acceptance"
+          class="af-taskd__tag"
+          data-tag="manual"
+          title="这个任务没有判定码，跑完不会自动判定，必须由人看"
+        >
+          需人工验收
+        </span>
+      </h1>
+      <p class="af-head__sub">
+        {{ stateLabel }} · 第 {{ task.version }} 版 · 更新于 {{ relativeTime(task.updated_at, now) }}
+      </p>
+    </div>
+    <template #actions>
+      <button type="button" class="af-btn af-btn--ghost" @click="backToBoard">← 看板</button>
+    </template>
+  </PageHead>
+
+  <div class="af-body af-taskd">
     <!-- 参数缺失：直接说缺什么，**一个请求都不发**（发了会打到 `/api/tasks/`）。 -->
     <EmptyState
       v-if="missingId"
@@ -444,30 +472,6 @@ function backToBoard(): void {
     <p v-else-if="loadState === 'loading'" class="af-muted">正在读取任务…</p>
 
     <template v-else-if="task">
-      <!-- 页头：返回看板 + 标题 + 状态胶囊 + 需人工验收标签 -->
-      <PageHead>
-        <div>
-          <h1 class="af-head__title">
-            {{ task.title }}
-            <StateBadge :state="task.state" />
-            <span
-              v-if="task.needs_manual_acceptance"
-              class="af-taskd__tag"
-              data-tag="manual"
-              title="这个任务没有判定码，跑完不会自动判定，必须由人看"
-            >
-              需人工验收
-            </span>
-          </h1>
-          <p class="af-head__sub">
-            {{ stateLabel }} · 第 {{ task.version }} 版 · 更新于 {{ relativeTime(task.updated_at, now) }}
-          </p>
-        </div>
-        <template #actions>
-          <button type="button" class="af-btn af-btn--ghost" @click="backToBoard">← 看板</button>
-        </template>
-      </PageHead>
-
       <!-- 写失败：**留在本页**（见文件头「写失败与读失败分开」）。 -->
       <p v-if="actionFailure" class="af-form__error" role="alert" data-alert="write">
         {{ actionFailure }}

@@ -13,6 +13,7 @@
 import { computed, onMounted, ref } from 'vue'
 
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
+import PageHead from '@/domains/shared/components/PageHead.vue'
 import { listProjects, unarchiveProject, type Project } from '@/domains/project/api'
 import { ApiError, describeReadFailure } from '@/shared/http'
 import { relativeTime } from '@/shared/format'
@@ -79,18 +80,36 @@ onMounted(load)
 </script>
 
 <template>
-  <section class="af-page">
-    <header class="af-page__head">
-      <h1 class="af-page__title">已归档的项目</h1>
-      <div class="af-page__actions">
-        <button type="button" class="af-btn" @click="navigate('/')">回总览</button>
-      </div>
-    </header>
+  <!-- 页面骨架照原型 `archived.html:14-20`：页头是 `header.af-head`
+       （返回总览 + 标题 + 右侧动作），内容在 `.af-body` 里。上一版是自造的
+       `.af-page` / `.af-page__head` / `.af-page__title` / `.af-page__actions`
+       —— 那一族规则在 v0.8.1 子任务 2 已随类名删除，于是这一页没有页头几何。
+       现在改用共享的 `PageHead`（其余 4 页同一写法）。 -->
+  <PageHead>
+    <button type="button" class="af-btn af-btn--ghost" @click="navigate('/')">
+      ← 总览
+    </button>
+    <h1 class="af-head__title">已归档的项目</h1>
+    <template #actions>
+      <button type="button" class="af-btn" @click="navigate('/')">回总览</button>
+    </template>
+  </PageHead>
 
-    <p class="af-muted">
-      归档不删除任何东西：执行记录、轨迹、管家总结都还在，随时可以取消归档。
-    </p>
+  <div class="af-body">
+    <!-- 原型 `archived.html:26` 的说明条：`af-filters`（`app.css:136`）就是
+         12 个页面用来写「这一页的条件 / 前提」的那一条。
+         **「归档不删除任何东西」这句话一个字都不能省**：它是产品承诺，而且
+         `ArchivedPage.test.ts` 钉着这句原文（它必须在页面上，不能只在空态里）。 -->
+    <div class="af-filters">
+      <span class="af-filters__k">归档不是删除</span>
+      <span class="af-2xs af-dim">
+        归档不删除任何东西：执行记录、轨迹、管家总结都还在，随时可以取消归档。
+      </span>
+    </div>
 
+    <!-- 原型 `archived.html:34` 的内容层：带内边距的一列（原型的
+         `padding:20px 20px 64px` 是内联样式，实现侧落成 scoped 规则）。 -->
+    <div class="af-arch__body">
     <p v-if="loading" class="af-muted">正在读取…</p>
 
     <EmptyState
@@ -175,10 +194,16 @@ onMounted(load)
         </table>
       </div>
     </section>
-  </section>
+    </div>
+  </div>
 </template>
 
 <style scoped>
+/* 内容层：原型 `archived.html:34` 的 `padding:20px 20px 64px` 是内联样式，
+   实现侧落成这一条；`.af-body` 自己只负责滚动（`app.css:132`），不带内边距。 */
+.af-arch__body {
+  padding: var(--p-s6) var(--p-s6) var(--p-s8);
+}
 /* 两段解释性文案与列表之间的距离。只服务本页，不进 `components.css`。 */
 .af-arch__explain {
   margin-top: var(--af-space-6);

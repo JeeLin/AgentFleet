@@ -123,7 +123,12 @@ function openProject(projectId: string): void {
 </script>
 
 <template>
-  <div class="af-page af-devd">
+  <!-- 页面骨架照原型 `devices.html`（设备详情是那一页的详情分区，没有独立页头）：
+       `header.af-head` 由共享的 `PageHead` 渲染，整页内容在 `.af-body` 里。
+       上一版根容器是自造的 `.af-page`（规则已随 v0.8.1 子任务 2 删除），
+       `.af-devd` 只是这一页的局部样式命名空间（后代选择器要用它）。
+       `.af-body` 是原型里承载滚动的那一层（`app.css:132`）。 -->
+  <div class="af-body af-devd">
     <PageHead>
       <div>
         <h1 class="af-head__title">
@@ -146,6 +151,9 @@ function openProject(projectId: string): void {
       </template>
     </PageHead>
 
+    <!-- 原型 `devices.html:24` 的内容层：`.af-body` 里这一层自己带内边距。
+         没有它时内容贴着页头那条分隔线，四条 region 之间也没有外边距。 -->
+    <div class="af-devd__body">
     <div v-if="error" class="af-inline-error" role="alert">
       {{ error }}
       <button class="af-btn af-btn--sm" type="button" @click="load">重试</button>
@@ -318,10 +326,21 @@ function openProject(projectId: string): void {
         </div>
       </section>
     </template>
+    </div>
   </div>
 </template>
 
 <style scoped>
+/* 内容层的内边距与分隔：原型每一页都在 `.af-body` 里放一层带内边距的容器
+   （`devices.html:24` 的 `padding:20px 20px 64px`）；`.af-body` 自己只负责
+   滚动，不带内边距（`app.css:132`）。四条 `.af-region` 之间的间距也落在
+   这一层：上一版它们靠着 `.af-page` 的 flex gap，而那个类已随规则删除。 */
+.af-devd__body {
+  padding: var(--p-s6) var(--p-s6) var(--p-s8);
+  display: flex;
+  flex-direction: column;
+  gap: var(--p-s4);
+}
 .af-devd__binds {
   list-style: none;
   margin: 0;

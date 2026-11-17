@@ -38,6 +38,7 @@
 import { computed, onMounted, ref } from 'vue'
 
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
+import PageHead from '@/domains/shared/components/PageHead.vue'
 import {
   archiveProject,
   changeProjectShape,
@@ -214,20 +215,25 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="af-page">
-    <div class="af-page__head">
-      <button
-        type="button"
-        class="af-btn af-btn--ghost"
-        @click="navigate(`/project/${encodeURIComponent(projectId)}/board`)"
-      >
-        ← 回看板
-      </button>
-      <h1 class="af-page__title">项目设置</h1>
-      <span v-if="project" class="af-badge">{{ project.name }}</span>
-      <span v-if="project" class="af-badge">{{ describeShape(project.shape) }}</span>
-      <span v-if="archived" class="af-badge af-badge--warn">已归档</span>
-      <span class="af-head__spacer"></span>
+  <!-- 页面骨架照原型 `project-settings.html:14-24`：页头是 `header.af-head`
+       （返回按钮 + 标题 + 两个徽标 + 右侧「绑定与配额」），内容在 `.af-body` 里。
+       上一版是自造的 `.af-page` / `.af-page__head` / `.af-page__title` ——
+       那一族规则在 v0.8.1 子任务 2 已随类名删除。这里改用共享的 `PageHead`
+       （其余 4 页同一写法），标题/副标题换成原型的 `.af-head__title`。
+       根容器给 `.af-body`：原型里承载滚动的是它（`app.css:132`）。 -->
+  <PageHead>
+    <button
+      type="button"
+      class="af-btn af-btn--ghost"
+      @click="navigate(`/project/${encodeURIComponent(projectId)}/board`)"
+    >
+      ← 回看板
+    </button>
+    <h1 class="af-head__title">项目设置</h1>
+    <span v-if="project" class="af-badge">{{ project.name }}</span>
+    <span v-if="project" class="af-badge">{{ describeShape(project.shape) }}</span>
+    <span v-if="archived" class="af-badge af-badge--warn">已归档</span>
+    <template #actions>
       <button
         type="button"
         class="af-btn af-btn--ghost"
@@ -235,8 +241,14 @@ onMounted(load)
       >
         绑定与配额
       </button>
-    </div>
+    </template>
+  </PageHead>
 
+  <div class="af-body">
+    <!-- 原型 `project-settings.html:24` 的内容层：`.af-body` 里的这一层同时
+         带内边距与 960px 限宽（原型的 `padding:20px 20px 64px;max-width:960px`
+         是内联样式，实现侧走 scoped 规则，见文件尾）。 -->
+    <div class="af-pset__body">
     <p v-if="loading" class="af-muted">正在读取项目…</p>
 
     <EmptyState v-else-if="failure" glyph="⚠" title="打不开这个项目" :text="failure">
@@ -362,10 +374,10 @@ onMounted(load)
               升级后 Hub 会真实建仓并接管代码，这一步不可撤销
             </span>
           </div>
-          <p v-else-if="project.shape === 'central'" class="af-pset__xs" style="margin: 0">
+          <p v-else-if="project.shape === 'central'" class="af-pset__xs">
             已经是中心式，没有可升的下一档。
           </p>
-          <p v-else class="af-pset__xs" style="margin: 0">
+          <p v-else class="af-pset__xs">
             镜像式不支持变更形态：它的代码来源是上游，换形态要先决定上游还跟不跟。
           </p>
 
@@ -506,7 +518,7 @@ onMounted(load)
           <table class="af-table">
             <tbody>
               <tr>
-                <td class="af-pset__cell" style="width: 38%">正在跑的执行</td>
+                <td class="af-pset__cell af-pset__cell--first">正在跑的执行</td>
                 <td class="af-pset__cell"><b>不打断</b>，跑完才归档，结果照常进待验收</td>
               </tr>
               <tr>
@@ -546,17 +558,30 @@ onMounted(load)
               看已归档的项目
             </button>
           </div>
-          <p class="af-pset__xs" style="margin: 0">
+          <p class="af-pset__xs">
             没有「删除」。项目是 Hub 的真相源，删掉会让已合入的历史、失败归因、成本记录一起消失。
             失败归因和排障都要靠它 —— 一个跑了十次失败的项目，比一个干净的空项目有价值。
           </p>
         </div>
       </section>
     </template>
+    </div>
   </div>
 </template>
 
 <style scoped>
+/* 内容层：原型 `project-settings.html:24` 的 `padding:20px 20px 64px;max-width:960px`
+   是内联样式，实现侧不写内联，落成这一条。**限宽 960px 不是随手取的**：
+   这一页几乎全是「档 / 策略」对照表，主区吃满 1400px 时每行只有几个字，
+   读起来要来回扫视；原型也是这么定的。 */
+.af-pset__body {
+  padding: var(--p-s6) var(--p-s6) var(--p-s8);
+  max-width: 960px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--p-s5);
+}
+
 /* ---------------------------------------------------------------------------
    本页的局部样式。
 
@@ -575,8 +600,11 @@ onMounted(load)
   gap: var(--af-space-4);
 }
 
-/* 小字。字号取自 token，不写字面值——暗/亮与四套主题下都要跟得上。 */
+/* 小字。字号取自 token，不写字面值——暗/亮与四套主题下都要跟得上。
+   `margin: 0` 在这里给死：这三处原本各自在模板里写 `style="margin: 0"`，
+   而它们是**同一类段落**（区块内的短说明），该长的样子本来就一样。 */
 .af-pset__xs {
+  margin: 0;
   font-size: var(--af-text-xs);
   color: var(--af-fg-secondary);
   line-height: var(--af-leading-base);
@@ -586,6 +614,11 @@ onMounted(load)
 .af-pset__cell {
   font-size: var(--af-text-xs);
   line-height: var(--af-leading-snug);
+}
+/* 归档表第一列（对象名）固定窄一点：右侧是结论长句，让左边占满会把长句挤成
+   一条细柱。原型写的是内联 `width:38%`，实现侧落成 scoped 规则。 */
+.af-pset__cell--first {
+  width: 38%;
 }
 
 /* 引导段落（区块内第一段说明）。 */

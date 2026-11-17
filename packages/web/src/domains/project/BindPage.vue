@@ -207,26 +207,33 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="af-page">
-    <PageHead>
-      <button type="button" class="af-btn af-btn--ghost" @click="navigate('/')">
-        ← 回总览
+  <!-- 页面骨架照原型 `project-bind.html:14-22`：页头是 `header.af-head`
+       （上一步 + 标题 + 两个徽标 + 右侧「完成，进看板」），内容在 `.af-body` 里。
+       上一版根容器是自造的 `.af-page` —— 那一族规则在 v0.8.1 子任务 2 已随类名
+       删除，于是这一页的内容既没有内边距也没有与页头分开的层级。 -->
+  <PageHead>
+    <button type="button" class="af-btn af-btn--ghost" @click="navigate('/')">
+      ← 回总览
+    </button>
+    <h1 class="af-head__title">绑定设备</h1>
+    <span v-if="project" class="af-badge">{{ project.name }}</span>
+    <span v-if="isolated" class="af-badge af-badge--warn">隔离式</span>
+    <template #actions>
+      <button
+        type="button"
+        class="af-btn af-btn--primary"
+        :disabled="saving"
+        @click="save"
+      >
+        {{ saving ? '正在保存…' : '完成，进看板' }}
       </button>
-      <h1 class="af-head__title">绑定设备</h1>
-      <span v-if="project" class="af-badge">{{ project.name }}</span>
-      <span v-if="isolated" class="af-badge af-badge--warn">隔离式</span>
-      <template #actions>
-        <button
-          type="button"
-          class="af-btn af-btn--primary"
-          :disabled="saving"
-          @click="save"
-        >
-          {{ saving ? '正在保存…' : '完成，进看板' }}
-        </button>
-      </template>
-    </PageHead>
+    </template>
+  </PageHead>
 
+  <div class="af-body">
+    <!-- 原型 `project-bind.html:24` 的内容层：带内边距的一列（原型的
+         `padding:20px 20px 64px` 是内联样式，实现侧落成 scoped 规则）。 -->
+    <div class="af-bind__body">
     <p v-if="loading" class="af-muted">正在读取项目与设备…</p>
 
     <EmptyState v-else-if="failure" glyph="⚠" title="打不开这个项目" :text="failure">
@@ -519,10 +526,21 @@ onMounted(load)
         <span class="af-muted">绑好之后，这个项目就能派活了</span>
       </div>
     </template>
+    </div>
   </div>
 </template>
 
 <style scoped>
+/* 内容层：原型 `project-bind.html:24` 的 `padding:20px 20px 64px` 是内联样式，
+   实现侧落成这一条；`.af-body` 自己只负责滚动（`app.css:132`），不带内边距。
+   一列纵向排：五个 `.af-region` 之间的间距原来靠自造 `.af-page` 的 flex gap，
+   那个类已随规则删除，所以间距改由这一层承担。 */
+.af-bind__body {
+  padding: var(--p-s6) var(--p-s6) var(--p-s8);
+  display: flex;
+  flex-direction: column;
+  gap: var(--p-s4);
+}
 /* 「任务怎么跑」那张说明表。用 dl 而不是 table：它是术语与解释，
    不是可以排序比较的数据。 */
 .af-bind__kv {

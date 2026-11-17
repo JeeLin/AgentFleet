@@ -2567,7 +2567,18 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="af-page--flush af-wb">
+  <!-- 页面骨架照原型 `session.html:14-37`：页头是 `header.af-head`（`.af-head__title`
+       + 状态胶囊），`.af-filters` 说明「这个会话绑在哪」，内容在
+       `.af-body.af-body--fill` 里（工作台吃满剩余高度、内部各自滚动）。
+       上一版根容器是自造的 `.af-page--flush`，那一族规则在 v0.8.1 子任务 2 已随
+       类名删除——所以这一页此前既没有 `.af-body` 的滚动语义，`.af-wb` 的
+       `height: 100%` 也失去了「填满主区」的依据（主区是 flex 列，子项要给
+       `flex: 1`）。
+       **根容器只有 `af-body` 两层**，不带 `af-wb`：`af-body` 是骨架、`af-wb` 是
+       这一页的样式命名空间，两者是两个元素（见下面正文开头那段注释）。早先把
+       `af-wb` 也写在根上，会让 `.af-wb` 嵌套自己、scoped 里的 `flex:1 1 auto`
+       作用两层，工作台在加载态与正文态下高度不一致。 -->
+  <div class="af-body af-body--fill">
     <!-- 加载 / 读失败：不画一个空工作台，空工作台看起来像「这个会话没有内容」 -->
     <div v-if="loading" class="af-wb__placeholder">
       <div class="af-skeleton af-skeleton--line"></div>
@@ -2596,7 +2607,14 @@ onBeforeUnmount(() => {
       </button>
     </EmptyState>
 
-    <template v-else>
+    <!--
+      正文再包一层 `.af-wb`（`session.html:37` 的 `.workbench`）：`af-body` 是
+      骨架、`af-wb` 是这一页的样式命名空间，两者本来就该是**两个**元素。
+      早先我把它们写在同一个 div 上，于是 `.af-wb` 的子节点顺序里混进了加载
+      骨架 / 空态三兄弟——测试要读「tab 条是工作台的第一块」，一个混着空态的
+      容器答不了这个问题。
+    -->
+    <div v-else class="af-wb">
       <!--
         顶部三层（v0.5.0，对齐 opencode）：tab 条 → 标题行 → 状态行。
 
@@ -2620,7 +2638,7 @@ onBeforeUnmount(() => {
       />
 
       <div class="af-wb__head">
-        <h1 class="af-wb__title">
+        <h1 class="af-head__title">
           {{ title }}
           <StateBadge :state="ended ? 'ended' : 'active'" />
         </h1>
@@ -2944,11 +2962,21 @@ onBeforeUnmount(() => {
         @close="closeTraj"
         @more="onTrajMore"
       />
-    </template>
+    </div>
   </div>
 </template>
 
 <style scoped>
+/* `.af-wb` 的 `height: 100%` 只有在**父级有确定高度**时才算得出来。上一版
+   父级是自造的 `.af-page--flush`；现在是原型的 `.af-body--fill`（它是主区这个
+   flex 列里的 `flex: 1`，有确定高度）。这里补一条 `flex: 1 1 auto` 让工作台
+   在 `.af-body` 里也吃满：`height: 100%` 在 flex 子项上不如 `flex` 稳，
+   父级被内容撑高时它会跟着变。两者不冲突（`.af-body--fill` 是
+   `display: flex; flex-direction: column`，这一层就是那个列里的唯一子项）。 */
+.af-wb {
+  flex: 1 1 auto;
+  min-height: 0;
+}
 .af-wb__placeholder {
   display: flex;
   flex-direction: column;

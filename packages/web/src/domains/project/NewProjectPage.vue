@@ -15,6 +15,7 @@
 
 import { ref } from 'vue'
 
+import PageHead from '@/domains/shared/components/PageHead.vue'
 import { createProject } from '@/domains/project/api'
 import { ApiError } from '@/shared/http'
 import { SHAPE_LABELS } from '@/shared/projectShape'
@@ -100,11 +101,23 @@ async function submit(): Promise<void> {
 </script>
 
 <template>
-  <section class="af-page">
-    <header class="af-page__head">
-      <h1 class="af-page__title">新建项目</h1>
-    </header>
+  <!-- 页面骨架照原型 `project-new.html:14-21`：页头是 `header.af-head`
+       （返回总览 + 标题 + 副标题 + 右侧「下一步」），内容在 `.af-body` 里。
+       上一版是自造的 `.af-page` / `.af-page__head` / `.af-page__title` ——
+       那一族规则在 v0.8.1 子任务 2 已随类名删除，于是这一页没有页头几何。
+       页头改用共享的 `PageHead`（其余 4 页同一写法）。 -->
+  <PageHead>
+    <button type="button" class="af-btn af-btn--ghost" @click="navigate('/')">
+      ← 总览
+    </button>
+    <h1 class="af-head__title">新建项目</h1>
+    <span class="af-head__sub">第一步：选形态</span>
+  </PageHead>
 
+  <div class="af-body">
+    <!-- 原型 `project-new.html:24` 的内容层：带内边距的一列（原型的
+         `padding:20px 20px 64px` 是内联样式，实现侧落成 scoped 规则）。 -->
+    <div class="af-new__body">
     <form class="af-form" @submit.prevent="submit">
       <label class="af-field">
         <span class="af-field__label">项目名</span>
@@ -155,5 +168,14 @@ async function submit(): Promise<void> {
         </button>
       </div>
     </form>
-  </section>
+    </div>
+  </div>
 </template>
+
+<style scoped>
+/* 内容层：原型 `project-new.html:24` 的 `padding:20px 20px 64px` 是内联样式，
+   实现侧落成这一条；`.af-body` 自己只负责滚动（`app.css:132`），不带内边距。 */
+.af-new__body {
+  padding: var(--p-s6) var(--p-s6) var(--p-s8);
+}
+</style>

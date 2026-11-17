@@ -228,3 +228,33 @@ describe('ArchivedPage：原型的两段解释文案', () => {
     expect(w.element.querySelectorAll('.af-arch__explain')).toHaveLength(2)
   })
 })
+
+/* ===========================================================================
+   v0.8.1 子任务 7：页面骨架与原型逐层对齐（`prototype/archived.html`）
+   ---------------------------------------------------------------------------
+   只量**结构**，不量外观。守的是「根是不是原型那两层的容器」：上一版根是
+   自造的 `.af-page`，那一族类在子任务 2 已随类名删除，于是样式表里没有任何
+   规则命中它——模板「看起来是页面」，实际是一张没有滚动语义的裸页面。
+   外观（内边距、分隔）在 `.af-arch__body` 的 scoped 规则里，这里不重复量。
+
+   为什么用 `querySelector` 而不是 `w.element.classList`：`mountIn` 走
+   `attachTo`，`w.element` 是**挂载点**那个 host `div`（`class=""`），页面自己
+   的根在它里面。拿挂载点问类名永远是 false，这条会以「骨架没改」误红。
+   =========================================================================== */
+
+describe('ArchivedPage（v0.8.1）：骨架与原型 archived.html 对齐', () => {
+  it('page_root_uses_af_body：整页一个 .af-body，页头是共享 PageHead 的 .af-head', async () => {
+    stubFetch({ [LIST]: { body: [] } })
+    const w = mountPage()
+    await flush(w)
+
+    // 原型 `archived.html:14-20`：`header.af-head` 与 `.af-body` 是两个兄弟。
+    // 判据取「整页只有一个」——将来谁在 `.af-body` 里再包一层它，这一条会红在
+    // 「多个」而不是静默取第一个通过。
+    const bodies = Array.from(w.element.querySelectorAll('.af-body'))
+    expect(bodies, '整页只该有一个 .af-body（页面内容区）').toHaveLength(1)
+    // 页头若退回自造的类名，`.af-head` 的几何与内边距一条都不生效。
+    expect(w.element.querySelectorAll('.af-head'), '页头必须是原型的 .af-head').toHaveLength(1)
+    expect(bodies[0]?.classList.contains('af-head'), '页头不能塞在 .af-body 里面').toBe(false)
+  })
+})

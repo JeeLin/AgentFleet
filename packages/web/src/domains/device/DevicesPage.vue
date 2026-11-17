@@ -27,6 +27,7 @@ import { computed, onMounted, ref } from 'vue'
 
 import AgentCatalog from '@/domains/agent/AgentCatalog.vue'
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
+import PageHead from '@/domains/shared/components/PageHead.vue'
 import DeviceTable from '@/domains/device/DeviceTable.vue'
 import type { DeviceSummary } from '@/domains/device/api'
 import {
@@ -250,20 +251,36 @@ async function remove(device: DeviceSummary): Promise<void> {
 </script>
 
 <template>
-  <div class="af-page">
-    <div class="af-page__head">
-      <div>
-        <h1 class="af-page__title">设备</h1>
-        <p class="af-page__sub">
-          每台设备一条 WebSocket 主动外联，Hub 不需要任何到设备的入站端口。
-          状态只看心跳：45 秒内没心跳但连接刚断是「重连中」，超过 45 秒判「离线」。
-          终端与文件是<b>会话内</b>的面板——这一页没有打开它们的入口。
-        </p>
-      </div>
-      <span class="af-spacer"></span>
+  <!-- 页面骨架照原型 `devices.html:14-23`：`header.af-head` 是一整幅页头，
+       内容在它下面的 `.af-body` 里。上一版是自造的 `.af-page` +
+       `.af-page__head` —— 那一族规则在 v0.8.1 子任务 2 已随类名删除，于是这一页
+       变成一张没有页头几何的裸页面。页头用共享的 `PageHead`（与另外 3 页同一
+       写法），主标题/副标题照原型是 `.af-head__title` / `.af-head__sub`。
+       根容器给 `.af-body`：它才是原型里承载滚动的那一层（`app.css:132`），
+       少了它长列表会把整页顶出一条滚动条、页头跟着滚出视野。 -->
+  <PageHead>
+    <h1 class="af-head__title">设备</h1>
+    <span class="af-head__sub">管理面 · 管的是机器的配置与健康</span>
+    <template #actions>
       <button class="af-btn af-btn--sm" type="button" :disabled="loading" @click="refreshCurrent">
         刷新
       </button>
+    </template>
+  </PageHead>
+
+  <div class="af-body">
+    <div class="af-devpage__body af-stack">
+    <!-- 原型 `devices.html:26-34` 的说明条（`af-callout`）：讲清「这一页不是什么」。
+         **「终端与文件是会话内的面板——这一页没有打开它们的入口」这句必须留着**：
+         它既是原型那块 callout 的等价内容，也是 `DevicesPage.test.ts` 钉着的
+         一句承诺（「这一页没有打开终端 / 文件的入口」）。 -->
+    <div class="af-callout">
+      <span class="af-callout__k">这一页不是「做事」的入口</span>
+      <span>
+        每台设备一条 WebSocket 主动外联，Hub 不需要任何到设备的入站端口。
+        状态只看心跳：45 秒内没心跳但连接刚断是「重连中」，超过 45 秒判「离线」。
+        终端与文件是<b>会话内</b>的面板——这一页没有打开它们的入口。
+      </span>
     </div>
 
     <!-- 分段条：设备 / Agent。**用 tablist 语义**，因为它在两套内容之间切换
@@ -290,7 +307,7 @@ async function remove(device: DeviceSummary): Promise<void> {
         Agent 目录
       </button>
       <span class="af-spacer"></span>
-      <span class="af-t-mute" style="font-size: var(--af-text-sm)">
+      <span class="af-t-mute af-2xs">
         这两块看的是同一批机器：设备说它在不在线，目录说它上面装了什么
       </span>
     </div>
@@ -303,11 +320,11 @@ async function remove(device: DeviceSummary): Promise<void> {
 
     <template v-else>
       <div class="af-row gap-4 af-dev-summary">
-        <span class="af-t-mute"><span class="af-dot" style="color: var(--af-ok)"></span> 在线 {{ online.length }}</span>
-        <span class="af-t-mute"><span class="af-dot" style="color: var(--af-warn)"></span> 重连中 {{ reconnecting.length }}</span>
-        <span class="af-t-mute"><span class="af-dot" style="color: var(--af-danger)"></span> 离线 {{ offline.length }}</span>
+        <span class="af-t-mute"><span class="af-dot af-dev-summary__dot--ok"></span> 在线 {{ online.length }}</span>
+        <span class="af-t-mute"><span class="af-dot af-dev-summary__dot--warn"></span> 重连中 {{ reconnecting.length }}</span>
+        <span class="af-t-mute"><span class="af-dot af-dev-summary__dot--danger"></span> 离线 {{ offline.length }}</span>
         <span class="af-spacer"></span>
-        <span class="af-t-mute af-t-num" style="font-size: var(--af-text-sm)">共 {{ devices.length }} 台</span>
+        <span class="af-t-mute af-t-num af-2xs">共 {{ devices.length }} 台</span>
       </div>
 
       <div v-if="error" class="af-inline-error" role="alert">
@@ -473,10 +490,19 @@ async function remove(device: DeviceSummary): Promise<void> {
         </section>
       </template>
     </template>
+    </div>
   </div>
 </template>
 
 <style scoped>
+/* 原型 `devices.html:24`：`.af-body` 里那一层同时带 `padding:20px 20px 64px`
+   和 `af-stack`（`display:flex; flex-direction:column; gap:16px`）。**两样都要**：
+   只给 padding 的话，说明条与下面的分段条之间没有任何间距——原型不是那个样子，
+   横向留白对、纵向挤在一起。padding 写到样式表里（原型是内联，实现侧不写内联），
+   `af-stack` 直接复用原型已移植的类（`prototype-shell.css:506`）。 */
+.af-devpage__body {
+  padding: var(--p-s6) var(--p-s6) var(--p-s8);
+}
 .af-seg {
   margin-bottom: var(--af-space-5);
   align-items: center;
@@ -486,6 +512,14 @@ async function remove(device: DeviceSummary): Promise<void> {
   margin-bottom: var(--af-space-5);
   font-size: var(--af-text-sm);
 }
+/* 摘要带上的三个状态点。**颜色取自语义令牌，不写在模板的内联样式里**：
+   内联 `style="color: var(--af-ok)"` 与 token 分叉时没有测试会红，
+   而主题（四套）切换时它跟着 token 走才是对的。
+   `.af-dot` 底色是 `currentColor`（`components.css:279`），所以这里改的是
+   **文字色**——与原来那三条内联样式同一个机制，只是挪进了样式表。 */
+.af-dev-summary__dot--ok { color: var(--af-ok); }
+.af-dev-summary__dot--warn { color: var(--af-warn); }
+.af-dev-summary__dot--danger { color: var(--af-danger); }
 /* 下载行：下拉框按内容宽度、按钮按内容宽度，别让 Select 的 `width: 100%`
    把按钮挤到第二行。这条只作用于本页的这个控件，不动全局 `.af-select`。 */
 .af-cli-dl {
