@@ -51,9 +51,45 @@ packages/
 ### 门禁（已有）
 
 门禁是**一回事**：本地 `mise run ci`、产线 `release.yml` 的 `gate` job 跑的是同一串：
-check → fmt → lint → test → **cov-gate**（行覆盖率 ≥98%）→ web-ci（= web-check / web-test / web-build）。
+check → fmt → lint → test → **cov-gate**（Rust 行覆盖率 ≥98%）→ web-ci（= web-check / web-test / web-cov-gate / web-build）。
 工具链版本只写在 `mise.toml` 的 `[tools]` 一处，workflow 从那里读——
 覆盖率数值跨工具链不可比，版本写两处迟早只改一处。
+
+**两条覆盖率线不要混**（v0.8.1 G18 之前一直混着）：
+
+| 任务 | 工具 | 范围 | 阈值 |
+|------|------|------|------|
+| `cov-gate` | `cargo llvm-cov` | `crates/`（Rust） | 行 **98%** |
+| `web-cov-gate` | `vitest --coverage`（v8） | `packages/web/src` | 行 **96%** |
+
+前端从来没有 98%，此前也没有任何覆盖率门禁（`@vitest/coverage-v8` 连装都没装）。
+`web-cov-gate` 的 96% 是 2026-11-18 的**实测基线** 96.38% 向下取整，
+作用是防劣化，不是宣称已达标。阈值写在 `packages/web/vitest.config.ts` 的
+`coverage.thresholds`——**不要写进 `vite.config.ts`**，那里的 `test` 段 vitest
+根本不读（G18 最初就写在那儿，82.56% 的行覆盖率照样 `EXIT=0`，实测才发现）。
+
+### 比「用例总数」时，比的是**集合**不是数
+
+里程碑与报告里反复出现「开工前记 N 条，完成后 ≥ N 条」「零删除、零跳过」这类判据。
+它是**假门禁**：删 9 条再加 9 条，总数一分不变，覆盖的东西已经换了一批。
+
+用 `scripts/test-set-diff.sh` 按**用例全名集合**做差：
+
+```bash
+# 开工前记一份基线
+scripts/test-set-diff.sh snapshot /tmp/base.txt
+
+# 改完之后比：基线的每一条是否还在
+scripts/test-set-diff.sh compare /tmp/base.txt
+```
+
+判据是**基线 ⊆ 当前**。少一条就逐条打印完整用例名（`describe` 链 + `it` 标题）
+并 `exit 1`；新增用例不判红（那才是正常开发）。重命名会被算成「旧的没了」，
+是有意的——重命名时要顺带确认新名字确实覆盖同一件事。
+
+实现上用 `vitest --reporter=json` 取 `fullName`，按**字节序**排序后 `LC_ALL=C comm`。
+不要换成 `localeCompare` 或裸 `sort`：`comm` 要严格字节序，不一致时会打印
+`file is not in sorted order` 并可能漏判。
 
 **覆盖率口径在 v0.7.2 改过一次，原因与代价都要记住**：原口径是「未覆盖行集合
 == 例外登记集合」（`coverage-exceptions.txt` 676 条 + 就地 `// coverage: excluded`
