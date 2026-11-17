@@ -26,7 +26,6 @@
 import { computed, onMounted, ref } from 'vue'
 
 import AgentCatalog from '@/domains/agent/AgentCatalog.vue'
-import EmptyState from '@/domains/shared/components/EmptyState.vue'
 import PageHead from '@/domains/shared/components/PageHead.vue'
 import DeviceTable from '@/domains/device/DeviceTable.vue'
 import type { DeviceSummary } from '@/domains/device/api'
@@ -270,18 +269,16 @@ async function remove(device: DeviceSummary): Promise<void> {
 
   <div class="af-body">
     <div class="af-devpage__body af-stack">
-    <!-- 原型 `devices.html:26-34` 的说明条（`af-callout`）：讲清「这一页不是什么」。
-         **「终端与文件是会话内的面板——这一页没有打开它们的入口」这句必须留着**：
-         它既是原型那块 callout 的等价内容，也是 `DevicesPage.test.ts` 钉着的
-         一句承诺（「这一页没有打开终端 / 文件的入口」）。 -->
-    <div class="af-callout">
-      <span class="af-callout__k">这一页不是「做事」的入口</span>
-      <span>
-        每台设备一条 WebSocket 主动外联，Hub 不需要任何到设备的入站端口。
-        状态只看心跳：45 秒内没心跳但连接刚断是「重连中」，超过 45 秒判「离线」。
-        终端与文件是<b>会话内</b>的面板——这一页没有打开它们的入口。
-      </span>
-    </div>
+    <!-- 这段说明条**不再占首屏**（v0.8.1 子任务 13）。原来它是页面最上面一块
+         通栏 callout，三段散文、横铺 1130px——用户打开「设备」第一眼看到的是
+         一篇讲心跳判定的说明书，而不是机器列表。
+
+         其中三条事实仍然必须有去处，各自挪到了说它的地方：
+           ·「每台设备一条 WebSocket 主动外联」→ 搬进下面的 `.af-dev-summary` 行。
+           ·「45 秒心跳 / 重连中 / 离线」→ 搬进设备表 `.af-region__head` 的 note。
+           ·「终端与文件是**会话内**的面板——这一页没有打开它们的入口」→ 这句是
+             `DevicesPage.test.ts` 钉着的一句承诺，**必须在页面上可读**，不是注释。
+             它现在作为 `.af-dev-summary` 里的一枚说明排在同一行。 -->
 
     <!-- 分段条：设备 / Agent。**用 tablist 语义**，因为它在两套内容之间切换
          而不是跳页；`aria-selected` 让屏幕阅读器知道当前在哪个分段。 -->
@@ -327,6 +324,17 @@ async function remove(device: DeviceSummary): Promise<void> {
         <span class="af-t-mute af-t-num af-2xs">共 {{ devices.length }} 台</span>
       </div>
 
+      <!-- 原来首屏那块三段式说明条压缩成的**一行事实**（v0.8.1 子任务 13）。
+           三条内容一条不少，只是不再各占三行：
+             ·「WebSocket 主动外联，不需要入站端口」——为什么 Hub 不用开端口；
+             ·「终端与文件是**会话内**的面板——这一页没有打开它们的入口」——
+               `DevicesPage.test.ts` 钉着的承诺，必须在页面上可读。
+           测度收紧到 `--af-measure`，不再横铺 1130px。 -->
+      <p class="af-dev-summary__note">
+        每台设备一条 WebSocket 主动外联，Hub 不需要任何到设备的入站端口。
+        终端与文件是<b>会话内</b>的面板——这一页没有打开它们的入口。
+      </p>
+
       <div v-if="error" class="af-inline-error" role="alert">
         {{ error }}
         <button class="af-btn af-btn--sm" type="button" @click="load">重试</button>
@@ -342,54 +350,65 @@ async function remove(device: DeviceSummary): Promise<void> {
         <div v-for="i in 4" :key="i" class="af-skeleton af-skeleton--row"></div>
       </div>
 
-      <EmptyState
-        v-else-if="devices.length === 0"
-        glyph="▣"
-        title="还没有设备接入"
-        text="在设备上跑一条命令就会出现在这里：afcli run &lt;hub-url&gt;。首次启动会自动注册并生成密钥对，Hub 只存指纹。"
-      >
-        <!-- 上面那句「在设备上跑 afcli run」有个前提：那台设备上得**先有**
-             afcli。离线/内网环境里够不到 GitHub，那段话就成了一句空话——
-             所以这里给它一条实际的路。
-
-             平台是**下拉框**而不是「按浏览器自动决定」：用户常常要给另一台
-             架构不同的机器准备 afcli（Windows 上给 Linux 服务器备一份、x86
-             Mac 上装 Apple Silicon 版），只按浏览器推断时没有任何入口能改。
-             选项来自 `DOWNLOAD_PLATFORM_OPTIONS`，与后端闭集一一对应。 -->
-        <div class="af-row gap-2 af-cli-dl">
-          <label class="af-field__label" for="af-cli-platform">设备平台</label>
-          <select
-            id="af-cli-platform"
-            v-model="downloadPlatformKey"
-            class="af-select af-cli-dl__select"
-          >
-            <!-- 空值是「猜不到平台」时的落点。它必须是一个**真的选项**，
-                 否则 `<select>` 会把第一项（Windows x64）当默认值显示出来，
-                 用户看到的是一个自己没选过的平台。 -->
-            <option value="">请选择平台</option>
-            <option
-              v-for="opt in DOWNLOAD_PLATFORM_OPTIONS"
-              :key="`${opt.os}/${opt.arch}`"
-              :value="`${opt.os}/${opt.arch}`"
-            >
-              {{ opt.label }}
-            </option>
-          </select>
-          <button
-            class="af-btn af-btn--sm"
-            type="button"
-            :disabled="downloadState === 'busy' || selectedPlatform === null"
-            :title="selectedPlatform === null ? '请先选择要下载的平台' : undefined"
-            @click="downloadCli"
-          >
-            {{ downloadState === 'busy' ? '正在准备下载…' : '下载 afcli' }}
-          </button>
+      <!-- 空态 v0.8.1 子任务 13：**不再用居中的大虚线框**，改成一块有头有体的
+           面板。理由：0 台设备时原空态是「242px 高的居中块 + 一句 48ch 宽的
+           说明 + 内容只占左边一条」，看起来像加载失败；而这里其实有两件具体
+           事要做（跑 afcli、下 afcli），所以它该长得像「待办清单」而不是
+           「错误页」。`compact` 不适合这里——compact 是横排一行，装不下
+           平台下拉框 + 下载按钮。 -->
+      <section v-else-if="devices.length === 0" class="af-panel af-dev-empty" aria-label="还没有设备接入">
+        <div class="af-panel__head">
+          <h2 class="af-panel__title">还没有设备接入</h2>
+          <span class="af-spacer"></span>
+          <span class="af-region__note">首次启动会自动注册并生成密钥对，Hub 只存指纹</span>
         </div>
-        <!-- 失败一律**行内红字**，不弹 alert：alert 会阻断整页、且只能显示一句
-             没法指到具体控件的话；这里紧挨着下载按钮，用户看得见自己在哪一步失败的。 -->
-        <p v-if="downloadError" class="af-field__error" role="alert">{{ downloadError }}</p>
-        <p v-else-if="selectedPlatform === null" class="af-field__hint">请选择平台</p>
-      </EmptyState>
+        <div class="af-panel__body af-dev-empty__body">
+          <p>
+            在设备上跑一条命令就会出现在这里：<code class="af-mono">afcli run &lt;hub-url&gt;</code>。
+          </p>
+          <!-- 上面那句「在设备上跑 afcli run」有个前提：那台设备上得**先有**
+               afcli。离线/内网环境里够不到 GitHub，那段话就成了一句空话——
+               所以这里给它一条实际的路。
+
+               平台是**下拉框**而不是「按浏览器自动决定」：用户常常要给另一台
+               架构不同的机器准备 afcli（Windows 上给 Linux 服务器备一份、x86
+               Mac 上装 Apple Silicon 版），只按浏览器推断时没有任何入口能改。
+               选项来自 `DOWNLOAD_PLATFORM_OPTIONS`，与后端闭集一一对应。 -->
+          <div class="af-row gap-2 af-cli-dl">
+            <label class="af-field__label" for="af-cli-platform">设备平台</label>
+            <select
+              id="af-cli-platform"
+              v-model="downloadPlatformKey"
+              class="af-select af-cli-dl__select"
+            >
+              <!-- 空值是「猜不到平台」时的落点。它必须是一个**真的选项**，
+                   否则 `<select>` 会把第一项（Windows x64）当默认值显示出来，
+                   用户看到的是一个自己没选过的平台。 -->
+              <option value="">请选择平台</option>
+              <option
+                v-for="opt in DOWNLOAD_PLATFORM_OPTIONS"
+                :key="`${opt.os}/${opt.arch}`"
+                :value="`${opt.os}/${opt.arch}`"
+              >
+                {{ opt.label }}
+              </option>
+            </select>
+            <button
+              class="af-btn af-btn--sm"
+              type="button"
+              :disabled="downloadState === 'busy' || selectedPlatform === null"
+              :title="selectedPlatform === null ? '请先选择要下载的平台' : undefined"
+              @click="downloadCli"
+            >
+              {{ downloadState === 'busy' ? '正在准备下载…' : '下载 afcli' }}
+            </button>
+          </div>
+          <!-- 失败一律**行内红字**，不弹 alert：alert 会阻断整页、且只能显示一句
+               没法指到具体控件的话；这里紧挨着下载按钮，用户看得见自己在哪一步失败的。 -->
+          <p v-if="downloadError" class="af-field__error" role="alert">{{ downloadError }}</p>
+          <p v-else-if="selectedPlatform === null" class="af-field__hint">请选择平台</p>
+        </div>
+      </section>
 
       <template v-else>
         <!-- 原型 `prototype/devices.html:36-107`：设备表是一个 `.af-region`，

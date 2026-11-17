@@ -94,19 +94,46 @@ describe('NewProjectPage：空名', () => {
 })
 
 describe('NewProjectPage：建成功', () => {
-  it('跳到新项目的看板，且用 replaceState（后退不回表单）', async () => {
-    stubFetch({ '/api/projects': { body: CREATED } })
+  /* **本条在 v0.8.1 子任务 13 改写**（原「跳到新项目的看板，且用 replaceState」）。
+     原来建项目成功就直接跳看板；现在成功先进第二步（选设备与目录），
+     用户在那里「绑定并进入看板」或「跳过」才跳。所以这条拆成两半：
+     ① 建成功后**停在原地、进第二步**（不再跳走）；
+     ② 第二步点「跳过」后跳到看板，且用的是 `replace`（后退不回表单）。
+     `replace` 的原理由一字未变：用 `push` 的话，用户建完按「后退」会回到
+     那张已提交过的表单，再点一次「创建」就多出一个同名项目。 */
+  it('建成功后停在第二步（选设备与目录），不直接跳看板', async () => {
+    stubFetch({ '/api/projects': { body: CREATED }, '/api/devices': { body: [] } })
     const w = mountAtNew()
     await flush(w)
 
     const before = history.length
     await submitWith(w, '内部指标台')
 
+    // 还留在新建页——第二步是同页的，不是另一个地址。
+    expect(route.value.name).toBe('projects-new')
+    expect(history.length).toBe(before)
+    // 第二步的入口按钮在，并且第一步的表单已经收起。
+    expect(w.text()).toContain('选设备与目录')
+    expect(w.find('form').exists()).toBe(false)
+  })
+
+  it('第二步点「跳过」才去看板，且用 replaceState（后退不回表单）', async () => {
+    // 设备列表为空 → 第二步渲染「还没有设备接入」空态，那个空态里就有「先去看板」。
+    stubFetch({ '/api/projects': { body: CREATED }, '/api/devices': { body: [] } })
+    const w = mountAtNew()
+    await flush(w)
+    await submitWith(w, '内部指标台')
+
+    const before = history.length
+    // `button:has-text()` 不是 CSS 选择器，vt-dom 的选择器引擎不认；
+    // 用 findAll 后按文本挑，与用户点那颗按钮等价。
+    const skip = w.findAll('button').find((b) => b.text().includes('先去看板'))
+    expect(skip, '第二步空态里应有「先去看板」').toBeTruthy()
+    await skip!.trigger('click')
+    await flush(w)
+
     expect(route.value.name).toBe('board')
     expect(route.value.params.id).toBe('p_9')
-    // `replace` 而不是 `push`：历史栈不该变长，否则用户按「后退」会回到
-    // 这张已经提交过的表单，再点一次「创建」就多出一个同名项目。
-    // 反向验证：把 `NewProjectPage.vue` 的 `{ replace: true }` 删掉，这条会红。
     expect(history.length).toBe(before)
   })
 
@@ -202,7 +229,18 @@ describe('NewProjectPage：提交中', () => {
     const gate = new Promise<void>((r) => {
       release = r
     })
-    globalThis.fetch = (async () => {
+    /* **按路径分开应答**（v0.8.1 子任务 13）：这个桩原来对所有请求都回项目体，
+       现在提交成功会进第二步、进而请 `/api/devices`，设备列表拿到一个对象
+       会让 `devices.length` 变 `undefined`。所以设备请求直接回 `[]`。 */
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      const path = new URL(raw, 'http://hub.local').pathname
+      if (path.startsWith('/api/devices')) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
       await gate
       return new Response(
         JSON.stringify({
@@ -222,7 +260,13 @@ describe('NewProjectPage：提交中', () => {
 
     await w.find('input[type="text"]').setValue('内部指标台')
     await w.find('form').trigger('submit')
-    await flush(w)
+
+    /* **不能先 `flush(w)` 再看按钮**：这个桩故意卡在 `gate` 上，而 `flush` 只
+       等若干个 tick——请求还悬着时表单仍在，按钮该是禁用态。原用例先 flush
+       再看，改成两步之后第二步会把表单换掉，于是 `button[type="submit"]`
+       取不到。这里只推进一个 tick，让 `submitting` 反映到 DOM 上。 */
+    await w.vm.$nextTick()
+    await settle(1)
 
     const btn = w.find('button[type="submit"]')
     expect(btn.text()).toContain('正在创建…')

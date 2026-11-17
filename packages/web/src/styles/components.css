@@ -120,19 +120,12 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
   overflow: auto; background: var(--p-bg); min-width: 0; min-height: 0;
 }
 
-/* 左栏收起后，页头要给左下那颗唤回按钮让出位置（原型 `app.css:1284` 的窄屏
-   那段同一手法：`padding-left: calc(var(--navbtn) + var(--s3) + var(--s2))`）。
-   这里复用**同一个算式**，因为收起态与窄屏是同一件事：左上角浮着一颗 40px 的
-   圆钮，页头文字不能压在它下面。
-
-   上一版没有这条，于是收起后 `.af-main` 的 `padding-left` 是 0，页头文字离
-   视口左边只剩 `.af-head` 自己的 24px——用户 2026-11-17 报的「收起后页面紧紧
-   贴着页面左侧边框」就是它。原型收起态本来是 `0 1fr`（内容真的吃满），但原型
-   的唤回按钮在**左下角**、不与页头抢位；我们的按钮在左上，所以必须让位。
-   只加在 `.af-main` 上而不是 `.af-head`：整列内容一起右移，页头与正文才对齐。 */
-html[data-rail='off'] .af-main {
-  padding-left: calc(var(--af-navbtn) + var(--p-s3) + var(--p-s2));
-}
+/* **`html[data-rail='off'] .af-main` 的让路留白已删除（2026-11-17）**：
+   它是给「收起后浮在左上角的那颗唤回胶囊」让位的。收起态改成 **56px 图标条**
+   （用户裁定，见 `prototype-shell.css` §2）之后，左栏自己占着网格的第一条轨道，
+   主区从 56px 之后开始——再叠一层 `padding-left` 会让正文离图标条凭空多 60px，
+   正是用户说的「收起后页面紧紧贴着……不，是空一块」。图标条自己在网格里占位，
+   这才是「收起」而不是「让路」。 */
 .af-spacer { flex: 1 1 auto; }
 
 /* ===========================================================================
@@ -157,6 +150,12 @@ html[data-rail='off'] .af-main {
   text-transform: uppercase; letter-spacing: var(--af-tracking-label);
 }
 .af-t-mute { color: var(--af-fg-tertiary); }
+/* 字号工具类：模板里出现过 `style="font-size: var(--af-text-2xs)"` 这类内联写法
+   （`LoginPrompt` 的 Esc 提示、`App.vue` 键位帮助的说明句），内联样式一律不收
+   （对齐门禁口径：样式表能管的不写进模板）。只补实际用到的那两档，
+   不预先铺满六档——没用的类名同样是负担。 */
+.af-t-2xs { font-size: var(--af-text-2xs); }
+.af-t-sm { font-size: var(--af-text-sm); }
 /* 键位提示：模板里恒与 `.af-t-mute` 连用（`class="af-t-mute af-keyhint"`），
    所以这里只定字号、颜色归那边。此前新建页与会话列表页各存一份，改字号
    要改两处——第二次改的那天必然只改一处。 */
@@ -274,23 +273,6 @@ html[data-rail='off'] .af-main {
 }
 .af-check:disabled { opacity: 0.5; pointer-events: none; }
 
-/* Switch：滑块轨道是控件本体 → 边界 ≥3:1 */
-.af-switch {
-  appearance: none; width: 30px; height: 16px; flex: 0 0 30px;
-  background: var(--af-surface-3); border: 1px solid var(--af-border-strong);
-  border-radius: var(--af-radius-full); cursor: pointer; position: relative;
-  transition: background-color var(--af-dur-instant) linear, border-color var(--af-dur-instant) linear;
-}
-.af-switch::after {
-  content: ''; position: absolute; left: 2px; top: 1px;
-  width: 10px; height: 10px; border-radius: var(--af-radius-full);
-  background: var(--af-fg-tertiary);
-  transition: transform var(--af-dur-instant) var(--af-ease-out), background-color var(--af-dur-instant) linear;
-}
-.af-switch:checked { background: var(--af-accent-bg); border-color: var(--af-accent); }
-.af-switch:checked::after { transform: translateX(14px); background: var(--af-accent); }
-.af-switch:disabled { opacity: 0.5; pointer-events: none; }
-
 /* ===========================================================================
    5. StatusDot / State / Badge
    -------------------------------------------------------------------------
@@ -350,16 +332,27 @@ html[data-rail='off'] .af-main {
    =========================================================================== */
 .af-panel {
   display: flex; flex-direction: column; min-height: 0;
-  background: var(--af-surface-1); border: 1px solid var(--af-border-default);
-  border-radius: var(--af-radius-md); overflow: hidden;
+  /* 底色/描边/圆角走主题消费层（`--p-*`）：它们是配色，必须随四套主题切换。
+     原来写的是 `--af-surface-1` / `--af-border-default`（上一轮自造的配色名，
+     虽已转发到 `--p-*`，但新代码直接写消费层，少一层间接）。 */
+  background: var(--p-surf-1); border: 1px solid var(--p-line-2);
+  border-radius: var(--p-r-md); overflow: hidden;
 }
 .af-panel__head {
   display: flex; align-items: center; gap: var(--af-space-3);
-  height: var(--af-row-compact); padding: 0 var(--af-space-4);
-  background: var(--af-surface-2); border-bottom: 1px solid var(--af-border-subtle);
+  /* 原来固定 `--af-row-compact`（26px）：17px 标题 + 行高 1.5 约 25.5px，
+     再加 padding 就溢出。改成最小高度，让内容自己决定（见下方标题档位的改动）。 */
+  min-height: var(--af-row-regular); padding: 0 var(--af-space-4);
+  background: var(--p-surf-2); border-bottom: 1px solid var(--p-line);
   flex: 0 0 auto;
 }
-.af-panel__title { font-size: var(--af-text-md); font-weight: var(--af-weight-medium); color: var(--af-fg-primary); }
+.af-panel__title {
+  /* card 档（17px）+ semibold + strong：字号与明度一起抬，才压得住 14.5px
+     正文（见 tokens.css §6b）。原值是 `--af-text-md` + medium + `--af-fg-primary`，
+     与正文同档同色，扫视时标题和内容是一层。 */
+  font-size: var(--af-text-card); font-weight: var(--af-weight-semibold);
+  color: var(--p-fg-strong); line-height: var(--af-leading-snug);
+}
 .af-panel__body { flex: 1 1 auto; overflow: auto; min-height: 0; }
 .af-panel__state {
   padding: var(--af-space-4); font-size: var(--af-text-sm); color: var(--af-fg-tertiary);
@@ -552,14 +545,39 @@ html[data-rail='off'] .af-main {
    分工：空状态 = 「这里本来该有东西但没有」；骨架 = 「正在加载」。
    两者必须一眼能区分，否则用户分不清「等一等」和「没有了」。
    =========================================================================== */
+/* 空态。**默认形态是居中的「页面整体为空」**，纵向留白收敛到 32px（原 40px）：
+   实测空态在内容区里出现时，40px 上下留白 + 居中三段文字会把整页撑成
+   「什么都没有」，和错误态长得几乎一样（用户 2026-11-17：「页面很差」）。
+   内容区里的空态应改用 `compact` 形态（见下）。 */
 .af-empty {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: var(--af-space-3); padding: var(--af-space-12) var(--af-space-8); text-align: center;
+  gap: var(--af-space-3); padding: var(--af-space-11) var(--af-space-8); text-align: center;
 }
 .af-empty__glyph { font-size: var(--af-text-3xl); color: var(--af-fg-disabled); }
 .af-empty__title { font-size: var(--af-text-md); color: var(--af-fg-primary); font-weight: var(--af-weight-medium); }
 .af-empty__text { font-size: var(--af-text-sm); color: var(--af-fg-tertiary); line-height: var(--af-leading-base); max-width: 44ch; }
 .af-empty__actions { display: flex; gap: var(--af-space-3); margin-top: var(--af-space-2); }
+
+/* 横排紧凑形态：字形在左、文字在右、动作在末尾。
+   **为什么不居中**：居中的大块是在说「这个页面没有内容」；横排的一行是在说
+   「这里现在是空的，点这里开始」——同样的事实，后者不会让人以为出错了。 */
+.af-empty--compact {
+  flex-direction: row; align-items: center; justify-content: flex-start;
+  gap: var(--p-s4); padding: var(--p-s4) var(--p-s5); text-align: left;
+  background: var(--p-surf-1); border: 1px solid var(--p-line-2);
+  border-radius: var(--p-r-md);
+}
+.af-empty--compact .af-empty__glyph {
+  font-size: var(--af-text-xl); color: var(--p-fg-3); flex: 0 0 auto;
+}
+.af-empty--compact .af-empty__main { min-width: 0; flex: 1 1 auto; }
+.af-empty--compact .af-empty__title {
+  font-size: var(--af-text-md); color: var(--p-fg); font-weight: var(--af-weight-medium);
+}
+/* 说明一行放不下就折，但测度收紧，避免在 1216px 宽里拖成一条长线。 */
+.af-empty--compact .af-empty__text { max-width: var(--af-measure); margin: 2px 0 0; }
+/* 动作推到最右；`margin-top: 0` 抵消默认形态那条间距。 */
+.af-empty--compact .af-empty__actions { margin-top: 0; flex: 0 0 auto; }
 
 .af-skeleton {
   background: linear-gradient(90deg, var(--af-surface-2) 0%, var(--af-surface-3) 50%, var(--af-surface-2) 100%);
@@ -682,6 +700,14 @@ kbd, .kbd {
     var(--af-surface-0);
 }
 .af-auth__box { width: min(400px, 100%); display: flex; flex-direction: column; gap: var(--af-space-6); }
+/* 首次 setup 页比登录页多两段说明 + 一张表单，400px 装不下（要横向滚动）。
+   这一条就是 `.af-auth--setup` 的全部作用——它此前是个**没有任何规则的死类**，
+   而页面上靠 `style="width: min(560px, 100%)"` 内联实现同一个意图。
+   内联样式改走这里：样式表能管到的东西不该写在模板里（对齐门禁也是这条口径）。 */
+.af-auth--setup .af-auth__box { width: min(560px, 100%); }
+/* 页头副标题与标题之间比全局默认更松一档：`.af-auth__sub` 全局 `margin: 0`，
+   而这两页的副标题要紧跟在 h1 后面、又不贴着。原先靠两处内联 `margin-top` 实现。 */
+.af-auth__sub--spaced { margin-top: var(--af-space-3); }
 .af-auth__brand { display: flex; align-items: center; gap: var(--af-space-3); }
 /* 品牌方块直接用原型的 `.af-rail__mark`（`prototype/assets/app.css:67-73`，26px 方块 +
    `--r-sm` 圆角 + `--acc-bg`/`--acc-line`），不另造 `.af-auth__mark`——原型没有登录页，
@@ -690,7 +716,15 @@ kbd, .kbd {
    伪元素的内容对读屏与「页面里有没有这两个字」的断言都不存在。 */
 .af-auth__title { font-size: var(--af-text-3xl); font-weight: var(--af-weight-semibold); margin: 0; letter-spacing: -0.02em; }
 .af-auth__sub { color: var(--af-fg-secondary); font-size: var(--af-text-md); line-height: var(--af-leading-base); margin: 0; }
-.af-auth__foot { font-size: var(--af-text-sm); color: var(--af-fg-tertiary); line-height: var(--af-leading-base); text-align: center; }
+/* 登录页与初始化页共用这一个「页脚」块：两页的 scoped 里曾各写一份**逐字相同**的
+   布局（`display:flex; flex-direction:column; gap: --af-space-3` + `p { margin:0 }`），
+   改一处忘另一处就会两页不一致。布局归这里（它是两页共同的骨架），
+   各页 scoped 只留自己独有的排版（例如 `code` 的高亮）。 */
+.af-auth__foot {
+  display: flex; flex-direction: column; gap: var(--af-space-3);
+  font-size: var(--af-text-sm); color: var(--af-fg-tertiary); line-height: var(--af-leading-base); text-align: center;
+}
+.af-auth__foot p { margin: 0; }
 
 /* 密码强度条：四级，用 aria-live 播报（不只靠颜色） */
 .pw-meter { display: flex; gap: 2px; height: 3px; }
@@ -1253,98 +1287,6 @@ kbd, .kbd {
 /* 色点里的文字是给读屏与 hover 用的（`theme_color` 原文），视觉上不显示。 */
 .af-projectlist__dot { font-size: 0; color: transparent; overflow: hidden; }
 
-/* ---- 项目切换器（看板页头） -------------------------------------------- */
-
-/* **项目名本身就是按钮**，点开是菜单（见 `prototype/board.html` 的 `.af-switch`）。
-   为什么不用 `<select>`：切换项目是这一页最常做的动作之一，而 `<select>`
-   在选中之前不显示候选、选中之后只显示一个名字；项目名带状态点与形态标签
-   时也塞不进一个 option。为什么不用横向平铺：项目一多会挤掉右侧那一排动作
-   按钮，而左栏收起来之后这个控件要能在手机宽度下独立成立。 */
-.af-switch { position: relative; display: flex; align-items: center; }
-
-.af-switch__btn {
-  display: inline-flex; align-items: center; gap: var(--af-space-2);
-  padding: var(--af-space-1) var(--af-space-2) var(--af-space-1) var(--af-space-1);
-  margin-left: calc(-1 * var(--af-space-1));
-  background: transparent; border: 1px solid transparent; border-radius: var(--af-radius-sm);
-  color: inherit; font: inherit; cursor: pointer;
-}
-.af-switch__btn:hover { background: var(--af-surface-2); border-color: var(--af-border-default); }
-.af-switch__btn[aria-expanded='true'] {
-  background: var(--af-surface-2); border-color: var(--af-border-strong);
-}
-.af-switch__title { margin: 0; }
-
-/* ---- `.af-head__title`：浮层 / 内联块里的块标题 ------------------------ */
-
-/* **这个名字是原型的，规则此前一条都没有**（v0.8.0 子任务 13 收口时发现）。
- * `prototype/assets/app.css:125` 定义过它（那一份是「顶栏标题」：18px + 600 +
- * 不换行），而生产样式表里从来没有 —— 于是 `BoardPage.vue` 两处
- * （`:334` 看板页头的项目名、`:461` 新建任务对话框的标题）拿到的都是
- * **浏览器默认的 h1/h2 尺寸**：34px / 24px、`font-weight: 700`、
- * 自带 `line-height`。视觉结果是「项目名比页面标题大一圈」，
- * 而这既不是原型的意图，也不是任何一处 token 的档位。
- *
- * 为什么**不**直接把原型那份 18px（= `--af-text-lg`）搬过来：原型那份描述的是
- * 「顶栏标题」，而这两个调用点一个是看板页头里的**项目名**（与 `.af-switch__title`
- * 同元素，应当跟页面标题同档）、一个是**对话框标题**（与 `.af-panel__title` 同档）。
- * 两处的正确档位都是 `--af-text-lg` / 600，但正确的**家**不是「照抄原型」。
- *
- * 所以这条规则定成「块标题」而不是「顶栏标题」：字号唯一一档 `--af-text-lg`、
- * 字重 600、不换行，**四边都不给**（margin / padding 由所在块给——
- * 页头与对话框的内边距差了 `space-4` 与 `space-5` 两档，写死在这里就错一处）。
- * 要页面级的 h1 请让页面自己给（页面外壳那一族已删除，各页面按原型的
- * `.af-head` 骨架自持标题）；这个类只服务于「已经在一个块里」的标题。
- *
- * 调用点：`BoardPage`（2 处）。**没有扩到别的页面**：多一个调用点就等于
- * 多一套标题规则。 */
-.af-head__title {
-  margin: 0; font-size: var(--af-text-lg); font-weight: var(--af-weight-semibold);
-  white-space: nowrap; line-height: var(--af-leading-snug);
-}
-
-/* 向下小箭头：用边框画，不依赖字体字形（字体缺这个字形时会变成一个方块）。 */
-.af-switch__chev {
-  width: 0; height: 0;
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
-  border-top: 5px solid var(--af-fg-tertiary);
-  transition: transform 160ms var(--af-ease-out);
-}
-.af-switch__btn[aria-expanded='true'] .af-switch__chev { transform: rotate(180deg); }
-
-.af-switch__menu {
-  position: absolute; left: 0; top: calc(100% + var(--af-space-2)); z-index: 80;
-  min-width: 268px;
-  background: var(--af-surface-1);
-  border: 1px solid var(--af-border-strong);
-  border-radius: var(--af-radius-md);
-  box-shadow: var(--af-shadow-3);
-  padding: var(--af-space-2);
-  display: none; flex-direction: column; gap: 1px;
-}
-.af-switch[data-open='true'] .af-switch__menu { display: flex; }
-
-.af-switch__item {
-  display: flex; align-items: center; gap: var(--af-space-2);
-  padding: var(--af-space-2) var(--af-space-3);
-  border-radius: var(--af-radius-sm);
-  font-size: var(--af-text-sm); color: var(--af-fg-primary);
-  text-decoration: none;
-  background: transparent; border: 0; width: 100%; text-align: left;
-  font-family: inherit; cursor: pointer;
-}
-.af-switch__item:hover { background: var(--af-surface-3); color: var(--af-fg-primary); }
-/* 当前项目：不只靠底色区分，前面加一个「当前」标签——**状态不能只靠颜色**。 */
-.af-switch__item[aria-current='true'] {
-  background: var(--af-surface-2); font-weight: var(--af-weight-semibold);
-}
-.af-switch__item[aria-current='true'] .af-switch__shape::before {
-  content: '当前 · ';
-  color: var(--af-fg-tertiary); font-weight: var(--af-weight-regular);
-}
-.af-switch__label { flex: 1; min-width: 0; }
-.af-switch__shape { font-size: var(--af-text-xs); color: var(--af-fg-tertiary); font-weight: var(--af-weight-regular); }
 
 /* ---- 项目内导航（看板 / 时间线 / 绑定 / 设置） ------------------------- */
 
@@ -1365,7 +1307,7 @@ kbd, .kbd {
    本文件**不再定义看板几何**（2026-11-17 删除）。上一版这里有一整族自造的
    `.af-board__col*`（列 / 列头 / 列体 / 列名 / 说明句 / 计数徽标，9 条规则）
    外加一份 `.af-board` 几何，而模板早已迁到原型的 `.af-col*`
-   （`BoardPage.vue:478`）→ 那一族 `grep -rc` 实测**模板零引用**，是死代码。
+   （`BoardPage.vue:481`）→ 那一族 `grep -rc` 实测**模板零引用**，是死代码。
    更糟的是它那份 `.af-board` 会与原型版抢同一个选择器：原型几何当时被放在
    `prototype-shell.css` 的变体类 `.af-board--proto` 里（模板零引用），于是
    页面命中的是这里的上一版几何——缺 `height: 100%` / `min-height: 0`、
@@ -1479,12 +1421,69 @@ kbd, .kbd {
 }
 .af-region__title {
   margin: 0;
-  font-size: var(--af-text-sm); font-weight: var(--af-weight-semibold); color: var(--af-fg-primary);
+  /* **必须高于正文**：原来是 `--af-text-sm`（13.5px），比正文 14.5px **还小**
+     ——项目名是这一块最重要的一行，却比卡片里的说明字更小，扫视时抓不到。
+     改用 card 档（17px）+ strong 前景，与 `.af-panel__title` 同一级。 */
+  font-size: var(--af-text-card); font-weight: var(--af-weight-semibold);
+  color: var(--p-fg-strong); line-height: var(--af-leading-snug);
   display: flex; align-items: center; gap: var(--af-space-2);
 }
 .af-region__note { font-size: var(--af-text-xs); color: var(--af-fg-tertiary); }
 .af-region__body { padding: var(--af-space-4); min-height: 0; }
 .af-region__body--flush { padding: 0; }
+
+/* ---- 面板分区的补充（头 / 体 / 脚）------------------------------------- */
+
+/* **为什么扩 `.af-panel` 而不新造一个卡片类**（用户 2026-11-17：「现在的页面
+   很差」）：原来的容器只有 padding、没有分区，标题、正文、动作全挤在同一块，
+   长段落在 1216px 宽里横向铺满，读起来是「一坨」。
+
+   **这里踩过一次坑，记下来**：第一版我新写了一个 `.af-card` 容器，结果
+   `prototype-shell.css:376` 早就有 `.af-card`（看板里那张**任务卡**，可点、
+   `cursor: pointer`）。那份文件后导入，同选择器全量覆盖——我写的那 20 行
+   从头到尾没生效过，正是本里程碑 F-2 修掉的同一种 bug。所以改用既有
+   `.af-panel` 家族扩展，**不再造第五套容器**。
+
+   三段分区不强制都在：只有 head + body 也成立，`.af-panel__foot` 可省。 */
+.af-panel__foot {
+  display: flex; align-items: center; gap: var(--p-s3); flex-wrap: wrap;
+  padding: var(--p-s3) var(--p-s5);
+  border-top: 1px solid var(--p-line);
+  background: var(--p-surf-2);
+  font-size: var(--af-text-sm); color: var(--p-fg-2);
+  flex: 0 0 auto;
+}
+/* 面板标题的层级已在上面 `.af-panel__title` 本体里改好、head 的行高也已在
+   `.af-panel__head` 本体里改好（不在这里二次覆盖——同一选择器在一个文件里
+   定义两次，后者静默生效，是没人读到的隐藏规则）。下面只补段落测度。 */
+/* 正文段落收窄到可读测度，但**不给 `.af-panel__body` 整体加**——里面可能有
+   表格/看板需要全宽。 */
+.af-panel__body > p { max-width: var(--af-measure); }
+.af-panel__body > p + p { margin-top: var(--p-s3); }
+
+/* ---- 设备页：一行摘要说明 + 空态面板（v0.8.1 子任务 13）---------------- */
+
+/* 原来首屏那块三段式 `.af-callout` 压成的一行事实。测度收紧到 `--af-measure`：
+   原来它横铺 1130px，一行近百字，读不完。字号降到 `--af-text-sm`（辅助档），
+   因为它现在是元信息而不是页面主张。 */
+.af-dev-summary__note {
+  margin: 0; max-width: var(--af-measure);
+  font-size: var(--af-text-sm); color: var(--p-fg-2);
+  line-height: var(--af-leading-base);
+}
+
+/* 0 台设备时的面板：body 里的「跑一条命令」与下载控件分成两段，中间留一口气。
+   **不收窄 body**（里面有 select + button 一行，需要宽度），只收窄段落。 */
+.af-dev-empty {
+  /* 空态面板不要顶着页头，也不要铺满整页高度——它是一块「从这里开始」的
+     邀请，不是页面主体。上边距与它上面的说明行分开，避免粘连。 */
+  margin-top: var(--p-s2);
+}
+.af-dev-empty__body {
+  display: flex; flex-direction: column; gap: var(--p-s3);
+  padding: var(--p-s5);
+}
+.af-dev-empty__body > p { margin: 0; max-width: var(--af-measure); }
 
 /* ---- 提示条 ------------------------------------------------------------ */
 
@@ -1543,8 +1542,12 @@ kbd, .kbd {
 /* 标题单行省略 + `title` 全文（原型 `board.js:184-253` 的同一条口径）：
    看板的价值是扫一眼看全，两三个字折行会让六列一起垮掉。 */
 .af-taskcard__title {
-  font-size: var(--af-text-sm); font-weight: var(--af-weight-medium);
-  line-height: var(--af-leading-base); color: var(--af-fg-primary);
+  /* 任务卡标题是这张卡里最该被读到的一行，不能比正文小（原 13.5px < 正文
+     14.5px，扫视时标题和元信息糊在一起）。用 card 档的下一级 `--af-text-md`
+     而不是直接跳到 17px：任务卡是看板列里的窄卡（列宽约 200px），17px 会让
+     标题只放得下四五个字。同档靠 semibold + strong 前景拉开层级。 */
+  font-size: var(--af-text-md); font-weight: var(--af-weight-semibold);
+  line-height: var(--af-leading-snug); color: var(--p-fg-strong);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 

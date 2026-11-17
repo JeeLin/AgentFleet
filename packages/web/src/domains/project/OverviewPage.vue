@@ -322,37 +322,35 @@ onMounted(load)
 
   <div class="af-body">
     <div class="af-ov__wrap af-stack">
-      <!-- 原型 `:26-32` 的提示条。**这一句解释的是页面结构本身**：为什么第一屏
-           是项目而不是设备清单。没有它的话，「管理面」被挪到页面最下面这件事
-           看起来像是排错了顺序。 -->
-      <div class="af-callout af-callout--info">
-        <span class="af-callout__k">这一页为什么是「按项目分」</span>
-        <span>
-          AgentFleet 的主轴是项目。设备是拿来干活的，不是拿来日常浏览的。
-          所以这里先给你「哪个项目卡住了」，设备健康退到管理面里去。
-        </span>
-      </div>
+      <!-- 这里原本有一块 `.af-callout--info`「这一页为什么是按项目分」，是一段
+           40 余字的自辩散文。**已按用户 2026-11-17「现在的页面很差」裁定移除**：
+           那是写给评审看的论证，不是给用户看的界面——用户每天打开这一页，
+           第一眼看到的不该是议论文。页面结构本身已经说明了这件事：
+           项目在上、管理面在下，自上而下的阅读顺序就是答案。
+           论证留在代码里（本文件的文件头注释），不留在屏幕上。 -->
 
       <p v-if="loading" class="af-muted">正在读取项目…</p>
 
       <EmptyState
         v-else-if="failure"
+        compact
         glyph="⚠"
         title="读取项目失败"
         :text="failure"
       >
-        <button type="button" class="af-btn" @click="load">重试</button>
+        <button type="button" class="af-btn af-btn--sm" @click="load">重试</button>
       </EmptyState>
 
       <EmptyState
         v-else-if="!hasProjects"
+        compact
         glyph="◈"
         title="还没有项目"
-        text="项目是这里的起点：每个项目有自己的仓库、自己的看板，任务挂在项目下面。先建一个。"
+        text="项目是这里的起点：每个项目有自己的仓库、自己的看板，任务挂在项目下面。"
       >
         <button
           type="button"
-          class="af-btn af-btn--primary"
+          class="af-btn af-btn--primary af-btn--sm"
           @click="navigate('/projects/new')"
         >
           新建项目

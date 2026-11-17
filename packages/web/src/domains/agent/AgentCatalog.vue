@@ -93,18 +93,17 @@ function openDetail(name: string): void {
 
 <template>
   <div class="af-catalog">
-    <!-- 空态也要说清「为什么空」，否则验收时会被当成「做了但永远空」 -->
+    <!-- 「取决于设备装了什么」这块说明（v0.8.1 子任务 13 压成一行）。
+         原文是两段共 90 余字，占满首屏；两条事实都保留，但改成一行交代——
+         用户扫一眼就够，不必在还没看到任何 Agent 之前先读两段说明。
+         **仍是 `.af-stage-note` 卡片形态**（`components.test.ts` 钉着它与
+         `ConvFlow.vue` 那份不是逐字重复：这里是四边描边 + 圆角的一张卡）。 -->
     <div class="af-stage-note" role="note">
       <span class="af-badge af-badge--warn">取决于设备装了什么</span>
       <div class="af-stage-note__body">
         <p>
-          各设备探测本机装了哪些 agent 并随心跳上报，所以这里<b>不再必然为空</b>：
-          设备上装了 opencode，这里就会多一行。
-          <b>探测不到就是空</b>——设备不会编造一个清单，Hub 也不会。
-        </p>
-        <p class="af-t-mute">
-          安装入口 <b>不在这里</b>：agent 由你自己在设备上装，Hub 只下发启动配置，
-          <b>从不往设备写可执行文件</b>。
+          设备探测本机装了哪些 agent 并随心跳上报，探测不到就是空——设备和 Hub 都不会编造。
+          安装入口<b>不在这里</b>：agent 由你自己装，Hub 只下发启动配置，从不往设备写可执行文件。
         </p>
       </div>
     </div>
@@ -120,6 +119,7 @@ function openDetail(name: string): void {
 
     <EmptyState
       v-else-if="agents.length === 0"
+      compact
       glyph="☰"
       title="还没有设备上报 agent"
       :text="`${devices.length} 台设备里没有任何一台上报 agent。设备上装一个（例如 opencode）后，它会在下次心跳里出现。探测不到就是空，设备和 Hub 都不会编造。`"
@@ -146,6 +146,10 @@ function openDetail(name: string): void {
         </h2>
         <span class="af-region__note">
           可用 {{ usable.length }} · 不可用 {{ agents.length - usable.length }}
+          <!-- 「装 Agent 不归产品管」这句原来是首屏一整块通栏 callout，现在
+               作为这行说明的一部分（v0.8.1 子任务 13）：读者正是在这里准备
+               找「安装」入口，这时候告诉他「装在设备上、Hub 只扫描」最有效。 -->
+          · Agent 装在设备上，由你自己装；Hub 只扫描与保存启动配置，不代装
         </span>
       </div>
       <div class="af-roster">
@@ -207,8 +211,10 @@ function openDetail(name: string): void {
   display: flex;
   align-items: flex-start;
   gap: var(--af-space-4);
-  padding: var(--af-space-4) var(--af-space-5);
-  margin-bottom: var(--af-space-8);
+  padding: var(--af-space-3) var(--af-space-5);
+  /* 原来 `--af-space-8`（32px）的下外边距：这块现在只有一行，32px 的空隙会把
+     它推成「一个独立章节」而不是「列表上方的一句提醒」。 */
+  margin-bottom: var(--af-space-5);
   background: var(--af-surface-1);
   border: 1px solid var(--af-border-default);
   border-left: 2px solid var(--af-warn);
@@ -220,6 +226,8 @@ function openDetail(name: string): void {
   gap: var(--af-space-2);
   font-size: var(--af-text-md);
   line-height: var(--af-leading-base);
+  /* 一行说明也不许横铺满 1216px（v0.8.1 子任务 13）。 */
+  max-width: var(--af-measure);
   color: var(--af-fg-secondary);
 }
 .af-stage-note__body p {

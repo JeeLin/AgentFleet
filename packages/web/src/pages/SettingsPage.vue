@@ -563,6 +563,9 @@ function onToggleFollowOS(): void {
   margin: 0 0 var(--af-space-3);
   font-size: var(--af-text-sm);
   line-height: var(--af-leading-base);
+  /* **不再单独限宽**：本页内容层 `.af-settings__stack` 已经是 960px 的阅读栏，
+     段落再套一层 `--af-measure` 会窄成半幅、右边留一条无用的空白（实测过）。
+     需要限宽的是「没有外层栏目」的页面，例如 Agent 目录与设备页。 */
 }
 .af-settings__p--tight {
   margin-bottom: 0;

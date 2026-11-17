@@ -97,16 +97,11 @@ const CAPABILITIES: readonly CapabilityRow[] = [
   <div class="af-body">
     <div class="af-agentpage__stack">
 
-    <!-- 原型 `:26-32` 的提示条：「装 Agent 这件事不归产品管」。
-         它不是装饰——这一页最容易引起的误读是「这里能装 agent」，
-         而真实形态是「你自己在设备上装，Hub 只扫描」。 -->
-    <div class="af-callout af-callout--info af-agentpage__lead">
-      <span class="af-callout__k">装 Agent 这件事不归产品管</span>
-      <span>
-        Agent 运行时装在设备上，由你自己装。Hub 只做两件事：扫描设备上有什么，
-        和保存启动配置。它不会代装，也不会替 Agent 决定能干什么。
-      </span>
-    </div>
+    <!-- 这里原本是一块通栏 `.af-callout--info`「装 Agent 这件事不归产品管」，
+         三段散文占满首屏（v0.8.1 子任务 13 移除）。它要防的误读是真的——
+         「这里能装 agent」——但防它的正确位置是**「设备上的 Agent」那块的标题旁**，
+         不是页头下面。那句话现在作为 `AgentCatalog` 分区的 note 出现，
+         读者在准备找「安装」按钮时正好看见它。 -->
 
     <!-- ① 设备上的 Agent（原型 `:36`）。
          标题归 `AgentCatalog` 自己写：它要按真数据算出「N 台设备上的 M 个 Agent」
@@ -205,9 +200,6 @@ const CAPABILITIES: readonly CapabilityRow[] = [
   gap: var(--p-s3);
 }
 
-.af-agentpage__lead {
-  margin-bottom: var(--af-space-6);
-}
 .af-agentpage__region {
   margin-top: var(--af-space-6);
 }
@@ -215,6 +207,9 @@ const CAPABILITIES: readonly CapabilityRow[] = [
   margin: 0 0 var(--af-space-3);
   font-size: var(--af-text-md);
   line-height: var(--af-leading-base);
+  /* 长说明段落收窄到可读测度（v0.8.1 子任务 13）：原来横铺满 1216px，
+     四十余字一行，读到一半就丢行。 */
+  max-width: var(--af-measure);
 }
 .af-agentpage__p:last-child {
   margin-bottom: 0;

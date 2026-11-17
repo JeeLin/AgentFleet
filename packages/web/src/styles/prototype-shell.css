@@ -139,81 +139,132 @@
 }
 .af-rail__label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* 底部（原型 `app.css:102-106`）：`margin-top: auto` 把它推到左栏底边，
+   `padding: 12px 16px`、`11.5px`、`--p-fg-3`、`line-height: 1.7`。
+
+   **`line-height` 必须是字面量 1.7，不能写 `var(--p-lh-body)`**：原型这一条
+   写死 1.7（`--lh-body` 是 1.65，全局正文用的那个），实测行高分别是 19.55px
+   与 18.975px——差 0.575px 就是用户报的「底部和原型不一致」之一。
+   这是原型在**这一处**刻意偏离全局行高的唯一地方，不要「统一」回去。 */
 .af-rail__foot {
   margin-top: auto; padding: var(--p-s3) var(--p-s4);
   border-top: 1px solid var(--p-line);
-  font-size: var(--p-t-2xs); color: var(--p-fg-3); line-height: var(--p-lh-body);
+  font-size: var(--p-t-2xs); color: var(--p-fg-3); line-height: 1.7;
 }
-/* 底部状态那几行（Hub 状态 / 单用户 · 自托管 / 键位提示）。原型 `.af-rail__foot`
-   只有这几行文本；实现侧多了两个整站动作按钮（见下面 `.af-rail__actions`）。 */
-.af-rail__status { display: flex; flex-direction: column; gap: var(--p-s1); }
-.af-rail__status > span { display: flex; align-items: center; gap: var(--p-s2); }
-.af-rail__status .af-dot { background: var(--p-done); }
-/* 键位提示：允许折行。224px 里三个 `<kbd>` 加文字一行放不下，挤成一条横向
-   溢出会在 `.af-rail` 上长出一条滚动条（原型 app.css 的 rail 是 `overflow-y`）。 */
-.af-rail__keys {
-  display: flex; align-items: center; gap: var(--p-s1); flex-wrap: wrap;
-  font-size: var(--p-t-2xs);
-}
+/* 原型那两行（「单用户 · Hub 本地」/「N 台设备 · M 个 Agent · vX.Y.Z」）。
+   原型用 `<br>` 分行，这里用一个 flex 列——同样的两行，但第二行可以按
+   `v-if` 整行不渲染（计数读不到时），`<br>` 做不到。 */
+.af-rail__meta { display: flex; flex-direction: column; }
 /* 帮助与退出登录：原型没有全局顶栏，这两个入口搬到这里（**只搬位置，
-   不删功能**）。一行两个，放不下就折行。 */
+   不删功能**）。一行两个，放不下就折行。排在两行文本下方。
+   **键位提示那排已删**（用户 2026-11-17）：「`g` 跳转」「`^B` 侧栏」只是
+   说明文字、点了没反应，摆在常驻的左栏里白占两行高度，还把真正的两个按钮
+   往下挤。原型底部也只有两行文本，没有第三块。 */
 .af-rail__actions { display: flex; align-items: center; gap: var(--p-s1); flex-wrap: wrap; margin-top: var(--p-s2); }
 
-/* ── 左栏收起态（原型 app.css:1212-1227）─────────────────────────────
-   桌面收起：整列滑出，内容区吃满。状态存在 `<html data-rail="off">`，
-   而**不是**节点上的一套 52px 图标轨几何（那是自造层，已删除）。
+/* ── 左栏收起态：56px 图标条（**有意偏离原型**，用户 2026-11-17 裁定）─────
+   原型桌面收起是「整列滑走」（`app.css:1216-1227` 的 `grid-template-columns: 0 1fr`
+   + `translateX(-100%)` + `visibility: hidden`），并在同一段注释里明确**反对**
+   图标条——理由很实在：「13 个导航项里只有 3 个项目色点是有形状的，其余 9 项是
+   抽象概念……48px 里只能写汉字首字，「设备」和「设置」都变成「设」，并排两个
+   「设」——那个方案当场就不成立。」
 
-   属性写在 `<html>` 上而不是外壳节点上，是因为下面这两条选择器以 `html` 为根；
-   写在别处就一条都不生效，症状是「点了收起没反应」。 */
-html[data-rail='off'] .af-shell { grid-template-columns: 0 1fr; }
-/* `visibility: hidden` 与 `transform` 是两件事，缺一不可：
-   `transform` 只把盒子挪出屏幕，盒子仍然**可点**——左栏内容会拦在视口左边缘
-   外面（宽 0 的网格轨里），焦点也还停在里面。`visibility: hidden` 才让它真的
-   不可见且不可聚焦。**代价**：`hidden` 作用在整个 `.af-rail` 子树上，而
-   「收起后浮在左上角的唤回按钮」如果还在这棵树里，就会被祖先一起裁掉——
-   这正是 v0.8.1 那条用户反馈（收起后点不回去）。所以唤回按钮已经移出
-   `.af-rail`（见 `App.vue` 的 `.af-recallsplit`，与原型同在 `.af-shell` 之外）。 */
+   用户看了整列滑走的效果后裁定改成图标条，并且**方案就是绕开这条理由**：
+   不用汉字首字，每个导航项画一套可区分的 SVG 线框图标（`shared/navIcons.ts`，
+   形状选择依据写在那张表里）。所以这里不是「实现 bug 修复」，是**用户对原型
+   方针的修改**：原型关心的是「收起省下的宽度正文也用不上」，用户关心的是
+   「收起后还想点得到导航」。
+
+   状态仍然存在 `<html data-rail="off">`（不改成节点上的类），因为开关按钮与
+   外壳网格分处两棵子树；换根就要两处同时改，多一个失配点。 */
+html[data-rail='off'] .af-shell { grid-template-columns: 56px 1fr; }
+
+/* 左栏保留可见、不位移，只是窄成 56px。`padding` 归零：图标条里每一行都是
+   居中的方形热区，横向留白由 `a` 自己给（下一条）。 */
 html[data-rail='off'] .af-rail {
-  transform: translateX(-100%);
-  visibility: hidden;
-  border-right: none;
+  overflow-x: hidden;
 }
 
-/* ── 收起后的唤回按钮（原型 app.css:1229-1260 的 `.af-recallsplit`）───
-   原型的位置是 **左下角**（`left: var(--s3); bottom: var(--s3)`），一颗
-   「三横线 + 箭头」的胶囊。实现只落左半那颗三横线——右半是原型的
-   「全部页面清单」（16 页平铺的评审索引），那是原型的可达性工具，本里程碑
-   不落地（见 `docs/design-system.md` 的页面清单条目），所以不做一颗点了
-   没反应的假按钮。
+/* 收起态要消失的东西：品牌两行文字、组标题（「全站 / 项目 / 收件箱 / 管理面」
+   四个字，56px 里放不下）、组标题旁的「+」、**项目列表整块**（项目名是自由
+   文本，没有可画的图标；收起态回项目靠「总览」图标）、底部的两行文本、
+   以及底部两个按钮的文字（图标保留）。 */
+html[data-rail='off'] .af-rail__titleblock,
+html[data-rail='off'] .af-rail__group,
+html[data-rail='off'] .af-rail__meta,
+html[data-rail='off'] .af-rail__btnlabel { display: none; }
 
-   按钮本身复用原型的 `.af-navbtn__bars` 图标，容器用原型类名
-   `.af-recallsplit`（全站唯一唤回入口，`html[data-rail='off']` 时才显示）。
-   **它必须不在 `.af-rail` 子树里**——祖先的 `visibility: hidden` 会连它一起裁掉。 */
-.af-recallsplit {
-  position: fixed; left: var(--p-s3); bottom: var(--p-s3); z-index: 95;
-  display: none; align-items: stretch;
-  background: var(--p-pop);
-  border: 1px solid var(--p-line-3);
-  border-radius: var(--p-r-full);
-  box-shadow: var(--p-sh-2);
-  overflow: hidden;
+/* 品牌行（图标条）：`AF` 方块与收起开关**竖排**、各自居中。
+   展开态它们是横排的（`AF | AgentFleet / self-hosted | 开关`），但 56px 里
+   横排放不下 26px 方块 + 40px 开关——实测 `mark.x = -5`（被挤出左边界）、
+   `btn.x = 21`，两块**叠在一起**。竖排后各占一行，互不遮挡。 */
+html[data-rail='off'] .af-rail__brand {
+  flex-direction: column;
+  justify-content: center;
+  padding: var(--p-s3) 0;
+  gap: var(--p-s2);
 }
-html[data-rail='off'] .af-recallsplit { display: inline-flex; }
-.af-recallsplit__rail {
-  display: inline-flex; align-items: center; justify-content: center;
-  min-height: var(--af-navbtn); padding: 0 var(--p-s3);
-  background: transparent; border: none; color: var(--p-fg-2);
-  border-radius: var(--p-r-full);
-  cursor: pointer; font: inherit;
+/* 收起按钮在图标条里单独占一行、居中——它必须一直可点（否则收起来就展不开了）。 */
+html[data-rail='off'] .af-rail__brand .af-navbtn { margin-left: 0; }
+
+/* 图标本身：颜色跟 `currentColor` 走（链接的 `--p-fg-2` → hover 的
+   `--p-fg-strong`），所以四套主题下自动对。展开态图标也走这一条，
+   `flex: 0 0 auto` 保证长项目名不会把它压扁。 */
+.af-navicon { flex: 0 0 auto; display: block; }
+
+/* 收起态：列表项压成一列 40px 方形热区，图标居中，文字整块不渲染。
+   `.af-rail__list` 的 `padding: 0 var(--p-s2)` 要收掉，否则 56px 减去两侧
+   `--p-s2` 只剩不到 40px 的点击宽度。 */
+html[data-rail='off'] .af-rail__list { padding: 0 var(--p-s1); }
+/* **项目列表在图标条里整块隐藏**（用户 2026-11-17 裁定「项目列表隐藏」）。
+   项目名是自由文本（`AgentFleet` / `内部指标台` / `客户现场`…），画不出可区分的
+   图标，而且数量不定——塞进 56px 只能是「首字」，正是原型 `app.css:1212-1227`
+   反对图标条的那条理由。收起态回项目靠「总览」图标。
+
+   **这不只是视觉问题**：不隐藏的话，那 5 个项目 `<a>` 的文字被上一条
+   `display: none` 吃掉了（它们没有 `aria-label`，无障碍名来自可见文字），
+   于是留下 5 个**看不见、说不出名字、但仍占 40px 高**的可聚焦空链接。
+   实测（playwright）：收起态 `.af-rail__list a` 有 12 个，其中 5 个
+   `aria-label === null`——正是项目行。 */
+html[data-rail='off'] .af-rail__list--projects { display: none; }
+html[data-rail='off'] .af-rail__list a {
+  justify-content: center;
+  gap: 0;
+  padding: 0;
+  min-height: 40px;
 }
-.af-recallsplit__rail:hover { background: var(--p-surf-3); color: var(--p-fg-strong); }
-.af-recallsplit__rail:active { background: var(--p-surf-4); }
+html[data-rail='off'] .af-rail__label { display: none; }
+/* 当前项的整圈内描边在 40px 方块里会贴着图标，改成只为可见焦点服务的
+   `aria-current` 底色（`inset` 描边保留在展开态）。 */
+html[data-rail='off'] .af-rail__list a[aria-current='page'] { box-shadow: none; }
+
+/* 收起态底部：两个动作变成图标按钮，居中排一列。`.af-rail__actions` 展开态是
+   横排 + `flex-wrap`，56px 里必须折成竖排，否则「键位」「退出」两颗会横着挤。 */
+/* 图标条里的底部：`margin-top: auto` **必须归零**。
+   展开态它是对的——原型 `app.css:103` 就是靠它把底部推到 224px 栏的底边。
+   但 56px 图标条里，导航只有 7 个图标（y≈65..345），`auto` 会把两颗动作图标
+   推到底部（实测 y≈820/870），中间空出 ~475px，看起来像两段断开的 UI。
+   图标条是「一列图标」，不是「上导航 + 下页脚」，所以让它们紧跟导航之后。 */
+html[data-rail='off'] .af-rail__foot { padding: var(--p-s3) 0; margin-top: 0; }
+html[data-rail='off'] .af-rail__actions {
+  flex-direction: column; flex-wrap: nowrap; align-items: center;
+  margin-top: 0; gap: var(--p-s2);
+}
+html[data-rail='off'] .af-rail__actions .af-btn {
+  width: 40px; min-width: 40px; height: 40px;
+  padding: 0; justify-content: center;
+}
+
+/* 原型 app.css:1115-1141 的 `.af-navbtn`：收起态它不再是「唤回入口」，
+   而是常驻在图标条顶部的开关，所以去掉原型那条「滑出后重新定位」的
+   绝对定位需求（原型里它由 `.af-recallsplit` 兜底，本里程碑已删除）。 */
 
 /* ── 导航开关（原型 app.css:1115-1141）────────────────────────────────
-   为什么收起是「整体滑走」而不是缩成图标条：导航项里只有 3 个项目色点是有
-   形状的，其余是抽象概念（设备 / Agent / 设置）。48px 里只能写汉字首字，
-   「设备」和「设置」都变成「设」，并排两个「设」——那个方案当场就不成立。
-   而正文本来就限宽，「收起」只为一件事：读长内容时把注意力让出来。 */
+   收起形态是**56px 常驻图标条**，不是原型的「整列滑走」：用户 2026-11-17
+   裁定「先做成正常的收起左侧栏，然后显示图标吧」＋「画一套 SVG 图标」，
+   绕过了原型那段「48px 里只能写汉字首字、『设备』和『设置』都变成『设』」
+   的理由——不用汉字首字，改画一套可区分的 SVG 线框图标（见 `navIcons.ts`）。
+   这是对原型的有意偏离，理由记在这里，别让下一个人改回去。 */
 .af-navbtn {
   display: inline-flex; align-items: center; justify-content: center;
   gap: var(--p-s2);
@@ -246,13 +297,24 @@ html[data-rail='off'] .af-recallsplit { display: inline-flex; }
 .af-head {
   display: flex; align-items: center; gap: var(--p-s3);
   padding: 0 var(--p-s6);
-  min-height: var(--af-head-h); flex: 0 0 auto;
+  /* 页头高度**钉死 56px**（不是 min-height）：左栏品牌行也是 56px，两条水平线
+     要对得上。把 min-height 改成 height 是因为 display 档（22px）的行高
+     36.3px 会把 min-height:56px 的内容盒顶到 61px——实测过，左栏那条线就
+     错开 5px。固定高度 + `line-height: 1` 让标题在自己的盒内垂直居中。 */
+  height: var(--af-head-h); flex: 0 0 auto;
   border-bottom: 1px solid var(--p-line-2);
   background: var(--p-bg);
 }
 .af-head__title {
-  font-size: var(--p-t-lg); font-weight: var(--af-weight-semibold);
+  /* 用 display 档（22px）而不是原来的 `--p-t-lg`（18px）：实测 18px 压不住
+     14.5px 正文，扫视时标题与正文是一层（见 tokens.css §6b 的取值理由）。
+     字重 semibold + `--p-fg-strong` 与字号差**一起**拉开层级。 */
+  font-size: var(--af-text-display); font-weight: var(--af-weight-semibold);
   white-space: nowrap; margin: 0; color: var(--p-fg-strong);
+  /* `line-height: 1` 而不是继承 1.65：22px × 1.65 = 36.3px 会把 56px 的
+     固定页头撑破（实测 61px）。标题是单行短语，不需要正文行高。 */
+  line-height: 1;
+  letter-spacing: -0.01em; /* 22px 下 Inter 默认字距偏松，收一点更像标题 */
 }
 .af-head__sub { font-size: var(--p-t-xs); color: var(--p-fg-3); white-space: nowrap; }
 .af-head__spacer { margin-left: auto; }
@@ -365,7 +427,17 @@ html[data-rail='off'] .af-recallsplit { display: inline-flex; }
 
 .af-board {
   display: grid; grid-auto-flow: column;
-  grid-auto-columns: minmax(236px, 1fr);
+  /* **六列必须在一屏里同时可见**（v0.8.1 子任务 13，用户：「你这页面都不满」）。
+     原型是 `minmax(236px, 1fr)`：6 × 236 + 5 × 8 间距 + 两侧 padding = 1516px，
+     而内容区只有 1216px → 实测 `scrollWidth 1516 / clientWidth 1216`，
+     **第 6 列被裁在视口外**，得横向滚动才能看见「完成」。看板的价值就是
+     「一眼看到任务从哪流到哪」，藏一列等于藏了半张板子。
+
+     改成 `minmax(0, 1fr)`：六列等分可用宽度（1216 - 40 padding - 40 gap
+     ≈ 每列 189px）。列内卡片标题本来就是 `text-overflow: ellipsis`，收窄
+     只是多省略几个字，不会破版。窗口再窄时仍走下面 720px 的媒体查询
+     （那时才允许横向滚动 / 单列堆叠）。 */
+  grid-auto-columns: minmax(0, 1fr);
   gap: var(--p-s3);
   padding: var(--p-s4) var(--p-s5) var(--p-s5);
   height: 100%; min-height: 0; overflow-x: auto;
@@ -395,7 +467,14 @@ html[data-rail='off'] .af-recallsplit { display: inline-flex; }
 .af-col[data-state='done']    .af-col__head { border-top-color: var(--p-done); }
 .af-col[data-state='failed']  .af-col__head { border-top-color: var(--p-failed); }
 
-.af-col__name { font-size: var(--p-t-xs); font-weight: var(--af-weight-semibold); color: var(--p-fg-strong); }
+/* 列名是这一列的脸面，必须比卡片里的正文更醒目。原来是 `--p-t-xs`（12.5px），
+   比正文 14.5px **还小**——六列标题读起来像元信息（v0.8.1 子任务 13 提到
+   card 档 17px）。列宽约 190px，17px 放得下「待交付」「进行中」这类两三个字，
+   实在放不下会换行，不会溢出（`.af-col__head` 是 flex + 允许换行）。 */
+.af-col__name {
+  font-size: var(--af-text-card); font-weight: var(--af-weight-semibold);
+  color: var(--p-fg-strong); line-height: var(--af-leading-snug);
+}
 .af-col__count {
   margin-left: auto;
   font-size: var(--p-t-2xs); font-weight: var(--af-weight-semibold); color: var(--p-fg-2);
@@ -587,6 +666,14 @@ a.af-meter:hover { background: var(--p-surf-2); text-decoration: none; }
    此前是**裸的**（无边框、无阴影、无定位）。
    =========================================================================== */
 
+/* **项目名本身就是按钮**，点开是菜单（见 `prototype/board.html` 的 `.af-switch`）。
+   为什么不用 `<select>`：切换项目是这一页最常做的动作之一，而 `<select>`
+   在选中之前不显示候选、选中之后只显示一个名字；项目名带状态点与形态标签
+   时也塞不进一个 option。为什么不用横向平铺：项目一多会挤掉右侧那一排动作
+   按钮，而左栏收起来之后这个控件要能在手机宽度下独立成立。
+
+   **`.af-switch*` 只有这一份**（2026-11-17）：`components.css` 里那套 `--af-*`
+   的同名规则已删——两份并存时后者永远覆盖前者，改一份不生效，等于埋了个陷阱。 */
 .af-switch { position: relative; display: flex; align-items: center; }
 .af-switch__btn {
   display: inline-flex; align-items: center; gap: var(--p-s3);
@@ -626,6 +713,12 @@ a.af-meter:hover { background: var(--p-surf-2); text-decoration: none; }
   border-radius: var(--p-r-sm);
   font-size: var(--p-t-sm); color: var(--p-fg);
   text-decoration: none;
+  /* 菜单项里有 `<button>`（「全部项目」那一条，见 `BoardPage.vue`），
+     所以按钮原生装饰必须清掉，否则它跟旁边的 `<a>` 长得不一样：
+     灰底、边框、内容居左/居中、系统字体、默认光标。原型里这一项也是
+     `<button>`（`prototype/board.html` 的项目菜单），同样带着这套复位。 */
+  background: transparent; border: 0; width: 100%; text-align: left;
+  font-family: inherit; cursor: pointer;
 }
 .af-switch__item:hover { background: var(--p-surf-3); color: var(--p-fg-strong); text-decoration: none; }
 /* 当前项目：不只靠底色区分，前面加一个「当前」标签 —— 状态不能只靠颜色。 */
@@ -649,11 +742,13 @@ a.af-meter:hover { background: var(--p-surf-2); text-decoration: none; }
    10. 空状态 / 时间线 / 进度（原型 app.css:490-527、675-685）
    =========================================================================== */
 
-.af-empty {
-  display: flex; flex-direction: column; align-items: center; gap: var(--p-s2);
-  padding: var(--p-s6) var(--p-s4); text-align: center;
-  color: var(--p-fg-3); font-size: var(--p-t-xs); line-height: var(--p-lh-body);
-}
+/* ---- 空态 ------------------------------------------------------------- */
+
+/* **唯一真相源在 `components.css`**（本文件是后导入的，同选择器会覆盖它——
+   实测 v0.8.1 子任务 12 之前这里还有一份 `.af-empty { padding: 24px 16px }`
+   把 components.css 那份盖掉了，空态渲染成 242px 高的大块，空库时整页
+   看起来像加载失败）。本节只剩「原型有、实现未移植」的 `.af-empty__shape`
+   ——它是原型空态里的虚线小方块，保留给将来用；`.af-empty` 本体不在此定义。 */
 .af-empty__shape {
   width: 18px; height: 18px; border-radius: var(--p-r-xs);
   border: 1.5px dashed var(--p-line-4);

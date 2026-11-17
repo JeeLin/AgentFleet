@@ -33,7 +33,12 @@ describe('AgentCatalog：渲染', () => {
     await flush(w)
 
     const note = w.element.querySelector('[role="note"]')
-    expect(note?.textContent).toContain('不再必然为空')
+    /* **本条第一句在 v0.8.1 子任务 13 改写过**：原文断言「不再必然为空」——
+       那是原横幅里的一句自辩（整块两段共 90 余字，占满首屏），已按用户
+       「现在的页面很差」裁定压成一行。它要守的真正意思还在：这块横幅说的是
+       「列表取决于设备装了什么」。所以断言改成钉这句，另外两条产品边界
+       原样保留（探测不到就是空 / Hub 从不往设备写可执行文件）。 */
+    expect(note?.textContent).toContain('取决于设备装了什么')
     expect(note?.textContent).toContain('探测不到就是空')
     // 产品边界：Hub 从不往设备写可执行文件（M2 撤销了「安装」这件事）
     expect(note?.textContent).toContain('从不往设备写可执行文件')

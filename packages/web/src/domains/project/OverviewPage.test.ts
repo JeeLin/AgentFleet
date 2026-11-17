@@ -407,15 +407,22 @@ describe('OverviewPage：四行摘要（两行真数据 + 两行显式空态）'
  * **判红方式**：删掉其中任一块，对应用例立刻红。
  */
 describe('OverviewPage：原型要求的 4 块结构', () => {
-  it('提示条解释「这一页为什么是按项目分」', async () => {
+  /* **这条用例在 v0.8.1 子任务 13 被改写**（原「提示条解释『这一页为什么是按项目分』」）。
+     原来它断言页面上有一块 `.af-callout--info` 写着「设备是拿来干活的」——
+     那是**自辩式说明**，用户 2026-11-17 裁定「现在的页面很差」后已从页面移除。
+     保留原断言会让「把议论文塞回首屏」永远是绿的，所以改成反向守卫：
+     首屏不许有解释页面结构本身的散文块，结构靠布局自己说清。 */
+  it('首屏没有「解释本页为什么这么设计」的自辩说明块', async () => {
     stubFetch({ '/api/projects': { body: [] } })
     const w = mountAtRoot()
     await flush(w)
 
-    const callout = w.element.querySelector('.af-callout--info')?.textContent ?? ''
-    expect(callout).toContain('这一页为什么是「按项目分」')
-    // 这句话要回答的是「设备为什么退到管理面」，不是一句排版说明。
-    expect(callout).toContain('设备是拿来干活的')
+    const body = w.element.querySelector('.af-body')
+    expect(body, '.af-body 必须存在').not.toBeNull()
+    const text = body?.textContent ?? ''
+    // 这两句是原提示条的标志性措辞，任何一句回来都说明议论文又进了首屏。
+    expect(text).not.toContain('这一页为什么是')
+    expect(text).not.toContain('设备是拿来干活的')
   })
 
   it('已归档默认折叠，且写明归档可逆', async () => {

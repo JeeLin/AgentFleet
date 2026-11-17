@@ -16,20 +16,24 @@
    而列还是同一批。所以切换器**读真项目**（`GET /api/projects`），切换后
    整页重新按新项目加载。
 
-   ── 六列的顺序照原型 ─────────────────────────────────────────────
-   `pending(待办) / queued(排队中) / running(执行中) / review(待验收) /
-   done(已完成) / failed(失败)`（`prototype/board.html:59-111`、
-   `assets/board.js:176-179` 的 `STATE_NAMES`）。
+   ── 六列的顺序：**有意偏离原型**（用户裁定 2026-11-17） ─────────────
+   实现：`pending(待办) / queued(排队中) / running(执行中) / review(待验收) /
+   failed(失败) / done(已完成)`。
 
-   **「失败」在最后一列**，不是「完成」之前。旧版本这里写的是「失败排在
-   完成前，因为失败需要处置、排最后会被滚出视野」——那是 v0.7.0 的猜测，
-   原型不是这么排的，而且它混淆了两件事：
+   原型是 `… review / done / failed`（`prototype/board.html:59-111`、
+   `assets/board.js:176-179` 的 `STATE_NAMES`），**失败在最后一列**。
+   用户 2026-11-17 裁定把「失败」挪到「完成」**前面**，原话：
 
-     状态机的列序（六态的自然生命周期）  ≠  需要处置的提示
+     「失败是不是放在完成左边，完成的一般都不会再看」
 
-   后者的正确位置是**页头的「等你决定」计数**（原型 `prototype/index.html:50`
-   的项目卡上有这个数；`board.html` 本身**没有**它——看板页只有六列）。不是把失败列
-   搬到中间。把失败插在完成之前反而会让「完成」这个终点看起来在板子中间。
+   这个理由站得住：**完成列是终点**，人看一眼就走了、不会回头再翻；
+   而**失败列需要处置**（重试 / 关掉 / 看原因），埋在横向滚动的最右边
+   会被吃掉。所以这里是**故意不照原型**，不是搬漏了——别再改回去。
+
+   曾经的反面论证（v0.7.0 写的「失败排在完成前是猜测」，以及紧随其后
+   「把失败插在完成之前会让完成这个终点看起来在板子中间」）：前半句已被
+   这次裁定推翻；后半句仍然成立，但用户认为「失败更容易被滚出视野」的代价
+   更大，故取失败优先。**六列的相对顺序其余部分不变**，只有 failed 换了位置。
 
    两列被去掉：`todo` 从来不是任务态（旧代码里的占位键）；`cancelled` 也不
    是——v0.8.0 的任务六态里没有「已取消」，**主动放弃 = 失败处置的「关掉」**
@@ -86,8 +90,10 @@ const COLUMNS = [
   { key: 'queued', hint: '已排队，等设备腾出来' },
   { key: 'running', hint: '正在设备上执行' },
   { key: 'review', hint: '跑完了，等你看过改动再定' },
-  { key: 'done', hint: '已合入主干' },
+  /* failed 在 done **前面**：用户 2026-11-17 裁定（「完成的一般都不会再看」，
+     而失败的还要处置）。有意偏离原型，理由见文件头「六列的顺序」那一节。 */
   { key: 'failed', hint: '失败的任务停在这里，不会自动回待办' },
+  { key: 'done', hint: '已合入主干' },
 ] as const satisfies readonly { key: TaskStateWire; hint: string }[]
 
 /** 列头文案的唯一来源（见文件头最后一节）。 */
@@ -458,22 +464,30 @@ async function submitCreate(): Promise<void> {
       <!-- 整板空 ≠ 六列各空：**列照渲染**（`prototype/assets/board.js:347`：
            「空着的列本身是信息」——用户要能看见这块板子有六站），但列内不再
            各写一句「这一列还没有任务」。六条「空」并排会让人以为六个独立问题，
-           而真相是「一块空板子」。所以整板空时只多一条横幅。 -->
+           而真相是「一块空板子」。所以整板空时只多一条横幅。
+
+           **v0.8.1 子任务 13：这块横幅从 254px 的居中大框改成一行**
+           （实测原来是 1216×254，把 844px 高的看板挤掉三成）。它只是板上方
+           的一句提示 + 一个动作，不该比板子本身更抢眼。`compact` 就是横排一行。 -->
       <EmptyState
         v-if="boardEmpty"
+        compact
         glyph="▢"
         title="这个项目还没有任务"
         text="新建一个任务，它会出现在待办列；跑起来之后会自动往前流。"
       >
-        <button type="button" class="af-btn af-btn--primary" @click="openDialog">新建任务</button>
+        <button type="button" class="af-btn af-btn--primary af-btn--sm" @click="openDialog">新建任务</button>
       </EmptyState>
 
       <!-- 看板：结构与原型 `board.html:58-113` 逐层对应——
            `.af-board` 是六列的网格，每列 `section.af-col[data-state]`，列头
            `.af-col__head`（形状 + 列名 + 计数），列体 `.af-col__body`。
-           这几个类在 `prototype-shell.css` §5（`.af-board--proto` / `.af-col*`）
-           与 `components.css`（`.af-board`）里都已有规则，本页不再造第二套
-           `af-board__col*` 类名（v0.8.1：自造层删除，不留别名）。 -->
+           这几个类只在 `prototype-shell.css` §5（`.af-board` / `.af-col*`）里
+           有规则，那是唯一真相源；`components.css` 不再定义任何 `.af-board*`
+           （v0.8.1 删掉了自造层）。本页不再造第二套 `af-board__col*` 类名。
+           **注意这里写的是 `.af-board`，不是 `.af-board--proto`**：后者是上一版
+           那个「模板零引用」的变体类，已随自造层一起删除（见
+           `prototype-shell.css` §5 的改名说明）。 -->
       <div class="af-board">
         <section v-for="col in COLUMNS" :key="col.key" class="af-col" :data-state="col.key">
           <div class="af-col__head">
