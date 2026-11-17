@@ -61,8 +61,16 @@ body {
   color: var(--p-fg);
   font-family: var(--af-font-sans);
   font-size: var(--af-text-md);
-  line-height: var(--af-leading-snug);
-  -webkit-font-smoothing: antialiased;
+  /* 行高取原型 `body` 的那一档：`prototype/assets/app.css:17` 用
+     `line-height: var(--lh-body)`（1.65），对应本仓的 `--af-leading-base`。
+     上一版写的是 `--af-leading-snug`（1.5）——13.5px 文案下每行少 2.2px 的
+     呼吸，和原型逐屏对照时「看着更挤」的那部分就来自这里。 */
+  line-height: var(--af-leading-base);
+  /* 这里**刻意不写** `-webkit-font-smoothing: antialiased`。原型同一位置也
+     刻意不写，并留了缘由（`prototype/assets/app.css:18-20`）：它会把字形从
+     次像素抗锯齿切到灰度抗锯齿，深底上笔画被削细一圈，**正文看着发虚、发灰**。
+     上一版逐字复现了被警告的那条，用户 2026-11-17 报「页面字体有点发虚」。
+     深色界面里这条是反效果，不是美化——四个主题里两个是深色（neutral/warm）。 */
   /* 终端里选字要能选出来，但 UI  chrome 上的误选很烦 */
   -webkit-user-select: none;
   user-select: none;
