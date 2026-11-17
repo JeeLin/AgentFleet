@@ -126,7 +126,13 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
    主区从 56px 之后开始——再叠一层 `padding-left` 会让正文离图标条凭空多 60px，
    正是用户说的「收起后页面紧紧贴着……不，是空一块」。图标条自己在网格里占位，
    这才是「收起」而不是「让路」。 */
-.af-spacer { flex: 1 1 auto; }
+/* **`.af-spacer` / `.af-row` 不在本文件定义**（v0.8.1 第3轮精简）：两条都已在
+   `prototype-shell.css:614,617` 定义，而那份文件后导入、同特异性全量覆盖——
+   本文件曾各留了一份（`flex: 1 1 auto` / 不换行 + 6px gap），**从没生效过**。
+   实测证实：`af-row gap-2 af-seg` 的 `gap` 是 4px（`.af-seg` 的 scoped 规则），
+   `af-dev-summary` 是 12px（`.af-dev-summary` 的 scoped 规则），`.af-spacer` 的
+   `flex-basis` 是 `0%`——全是别处的规则，本文件那两条一条也没落到元素上。
+   这正是本里程碑 F-2 的同型 bug（同名选择器跨文件重名，后者静默取胜）。 */
 
 /* ===========================================================================
    2. 布局原语
@@ -139,23 +145,25 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
    `.af-head` + `.af-body`，逐页迁移归子任务 4 / 9；在那之前各页面用
    本节的原语自己拼（`.af-col` / `.af-stack`）。
    =========================================================================== */
-.af-col { display: flex; flex-direction: column; }
-.af-col.gap-1 { gap: var(--af-space-1); } .af-col.gap-2 { gap: var(--af-space-2); }
-.af-col.gap-3 { gap: var(--af-space-3); } .af-col.gap-4 { gap: var(--af-space-4); }
-.af-col.gap-5 { gap: var(--af-space-5); } .af-col.gap-6 { gap: var(--af-space-6); }
-.af-col.gap-7 { gap: var(--af-space-7); } .af-col.gap-8 { gap: var(--af-space-8); }
-.af-row { display: flex; align-items: center; gap: var(--af-space-3); }
+/* **布局原语不再是 `.af-col`，也不再在本文件定义**（v0.8.1 第3轮）：
+   这里原来叫 `.af-col`，与 `prototype-shell.css` 的**看板列**（`--p-surf-1` 底 +
+   描边 + 圆角 + `overflow: hidden`）同名。后者后导入、同特异性全量覆盖，于是
+   登录页 / setup 页 / 新建会话页 / 登录过期弹层里那些「竖排一列」的容器全都
+   莫名其妙长了卡片描边和底色——登录页实测 `.af-col` 的计算样式是
+   `background: rgb(36,35,32)` + `1px` 描边 + `8px` 圆角，而它本该只是一个
+   `display: flex` 的竖排容器。这是本轮「同名选择器跨文件重名」的第四例，也是
+   最难看出来的一例：它不报错、不消失，只是**多长出一圈边框**。
+   竖排原语改用 `.af-stack`（`prototype-shell.css` 已有，语义一致）；本文件
+   不再定义任何 `.af-stack*`，四个调用点已同步改名。看板列继续用 `.af-col`。 */
 .af-t-label {
   font-size: var(--af-text-sm); color: var(--af-fg-tertiary);
   text-transform: uppercase; letter-spacing: var(--af-tracking-label);
 }
 .af-t-mute { color: var(--af-fg-tertiary); }
-/* 字号工具类：模板里出现过 `style="font-size: var(--af-text-2xs)"` 这类内联写法
-   （`LoginPrompt` 的 Esc 提示、`App.vue` 键位帮助的说明句），内联样式一律不收
-   （对齐门禁口径：样式表能管的不写进模板）。只补实际用到的那两档，
-   不预先铺满六档——没用的类名同样是负担。 */
-.af-t-2xs { font-size: var(--af-text-2xs); }
-.af-t-sm { font-size: var(--af-text-sm); }
+/* 字号工具类**不在这里重复造**：字号档位在 `prototype-shell.css` §6 已有一整套
+   （`.af-xs` / `.af-2xs`），键位提示句另有 `.af-keyhint`。本文件曾补过
+   `.af-t-2xs` / `.af-t-sm` 两条，与那两处逐值重复（`--p-t-2xs` 就是
+   `var(--af-text-2xs)`）——同一个档位两个名字，改一处另一处不跟。只留颜色类。 */
 /* 键位提示：模板里恒与 `.af-t-mute` 连用（`class="af-t-mute af-keyhint"`），
    所以这里只定字号、颜色归那边。此前新建页与会话列表页各存一份，改字号
    要改两处——第二次改的那天必然只改一处。 */
@@ -241,7 +249,20 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
   width: 100%; background: var(--af-surface-2); color: var(--af-fg-primary);
   border: 1px solid var(--af-border-default); border-radius: var(--af-radius-sm);
   font-family: inherit; font-size: var(--af-text-sm);
-  padding: var(--af-space-2) var(--af-space-3); height: var(--af-row-compact);
+  /* **垂直内边距归零 + `line-height` 显式写死**（v0.8.1 第3轮，用户报
+     「所有选择器 展示的选中项 文字都下沉超过下面的框了」）：
+     原来这里是 `padding: var(--af-space-2) var(--af-space-3)` +
+     `height: var(--af-row-compact)`（26px）。`--af-space-2` = **4px**，上下各 4px
+     加上 1px 边框 = 内容盒只剩 **16px**；而 13.5px 字在 `line-height: normal`
+     下实测文字盒 **18px**（settings 页的 `select`，playwright 量
+     `textH 18 / innerH 16`）——文字比盒子高 2px，于是那一行被顶下去、露出下边框
+     之外，正是用户看到的现象。**`<select>` 最明显**：浏览器用它自己的原生控件
+     绘制选中项，不走 CSS 的行盒居中，所以别的控件勉强能靠居中遮住，select 遮不住。
+     改成：`height` 保留 26px（按钮行高一致，`design-system.md:222`），垂直内边距
+     归零、由 `line-height` 自己撑满内容盒——`26 - 2(边框) = 24px` 的行高容纳
+     13.5px 文字绰绰有余，且 `line-height` 显式取值后 select 的基线也确定了。 */
+  padding: 0 var(--af-space-3); height: var(--af-row-compact);
+  line-height: calc(var(--af-row-compact) - 2px);
   transition: border-color var(--af-dur-instant) linear;
 }
 .af-input::placeholder, .af-textarea::placeholder { color: var(--af-fg-disabled); }
@@ -249,7 +270,11 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 .af-input:disabled, .af-select:disabled, .af-textarea:disabled {
   background: var(--af-surface-1); color: var(--af-fg-disabled); cursor: not-allowed;
 }
-.af-textarea { height: auto; min-height: 64px; resize: vertical; line-height: var(--af-leading-snug); }
+.af-textarea {
+  height: auto; min-height: 64px; resize: vertical;
+  /* textarea 是多行的，不能背 `line-height: calc(row - 2px)` 那条单行值。 */
+  line-height: var(--af-leading-snug); padding: var(--af-space-2) var(--af-space-3);
+}
 .af-input--invalid, .af-input[aria-invalid='true'] { border-color: var(--af-danger); }
 
 .af-field { display: flex; flex-direction: column; gap: var(--af-space-2); }
@@ -517,16 +542,29 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
   background: var(--af-scrim); display: flex; align-items: flex-start; justify-content: center;
   padding: var(--af-space-12) var(--af-space-10); overflow: auto;
 }
+/* **弹层自己滚，不靠遮罩滚**（v0.8.1 第3轮）。原来只有 `.af-help` 带
+   `overflow: auto`，而它是 `align-items: flex-start` 的 flex 容器——内容一高，
+   盒子就被撑出视口底边（实测 1280×720 下 `.af-help__box` 高 985px、底边落在
+   y=1025，而视口只有 720px），键位表现在有 60+ 行，底部几组要滚页面才看得全，
+   而遮罩的滚动条又窄又不显眼。改成 `.af-help__box` 自己做 `max-height` +
+   `overflow: auto`，标题行 `flex: 0 0 auto` 钉在顶部：键位表在框内滚动，
+   「键位」这个标题和关掉它的 ✕ 一直看得见。 */
 .af-help__box {
-  width: min(680px, 100%); background: var(--af-surface-2);
+  width: min(680px, 100%); max-height: 100%;
+  display: flex; flex-direction: column;
+  background: var(--af-surface-2);
   border: 1px solid var(--af-border-default); border-radius: var(--af-radius-lg);
   box-shadow: var(--af-shadow-3);
 }
 .af-help__head {
   display: flex; align-items: center; gap: var(--af-space-3);
   padding: var(--af-space-4) var(--af-space-5); border-bottom: 1px solid var(--af-border-default);
+  flex: 0 0 auto;
 }
-.af-help__body { padding: var(--af-space-5); display: grid; gap: var(--af-space-6); }
+.af-help__body {
+  padding: var(--af-space-5); display: grid; gap: var(--af-space-6);
+  overflow: auto; min-height: 0;
+}
 .help__gh {
   display: flex; align-items: baseline; gap: var(--af-space-3);
   font-size: var(--af-text-sm); text-transform: uppercase;
@@ -1432,7 +1470,7 @@ kbd, .kbd {
 .af-region__body { padding: var(--af-space-4); min-height: 0; }
 .af-region__body--flush { padding: 0; }
 
-/* ---- 面板分区的补充（头 / 体 / 脚）------------------------------------- */
+/* ---- 面板分区的补充（头 / 体）----------------------------------------- */
 
 /* **为什么扩 `.af-panel` 而不新造一个卡片类**（用户 2026-11-17：「现在的页面
    很差」）：原来的容器只有 padding、没有分区，标题、正文、动作全挤在同一块，
@@ -1444,15 +1482,7 @@ kbd, .kbd {
    从头到尾没生效过，正是本里程碑 F-2 修掉的同一种 bug。所以改用既有
    `.af-panel` 家族扩展，**不再造第五套容器**。
 
-   三段分区不强制都在：只有 head + body 也成立，`.af-panel__foot` 可省。 */
-.af-panel__foot {
-  display: flex; align-items: center; gap: var(--p-s3); flex-wrap: wrap;
-  padding: var(--p-s3) var(--p-s5);
-  border-top: 1px solid var(--p-line);
-  background: var(--p-surf-2);
-  font-size: var(--af-text-sm); color: var(--p-fg-2);
-  flex: 0 0 auto;
-}
+   **三段分区不强制都在**：只有 head + body 也成立。 */
 /* 面板标题的层级已在上面 `.af-panel__title` 本体里改好、head 的行高也已在
    `.af-panel__head` 本体里改好（不在这里二次覆盖——同一选择器在一个文件里
    定义两次，后者静默生效，是没人读到的隐藏规则）。下面只补段落测度。 */

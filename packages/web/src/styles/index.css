@@ -18,9 +18,9 @@
    所以顺序反过来会让「补漏版」盖掉「原型版」——那正是上一轮 18% 类名
    重合率的来源。
 
-   三份文件都是 grep 校验过的单一真相源：变量数与 `design-system.md` §1
-   的「136 个变量」、组件节数与 §3 的「23 节」由 `keynav.test.ts` 断言，
-   原型对齐度由 `styles/prototype-parity.test.ts` 按类名清单断言。
+   三份文件都是 grep 校验过的单一真相源：变量数与 `design-system.md` §2
+   的「（64 个变量）」、组件节数与 §3 的「23 节」由 `shared/keynav.test.ts`
+   断言，原型对齐度由 `styles/prototype-parity.test.ts` 按类名清单断言。
    =========================================================================== */
 
 @import './tokens.css';

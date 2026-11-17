@@ -238,8 +238,6 @@ html[data-rail='off'] .af-rail__label { display: none; }
    `aria-current` 底色（`inset` 描边保留在展开态）。 */
 html[data-rail='off'] .af-rail__list a[aria-current='page'] { box-shadow: none; }
 
-/* 收起态底部：两个动作变成图标按钮，居中排一列。`.af-rail__actions` 展开态是
-   横排 + `flex-wrap`，56px 里必须折成竖排，否则「键位」「退出」两颗会横着挤。 */
 /* 图标条里的底部：`margin-top: auto` **必须归零**。
    展开态它是对的——原型 `app.css:103` 就是靠它把底部推到 224px 栏的底边。
    但 56px 图标条里，导航只有 7 个图标（y≈65..345），`auto` 会把两颗动作图标
@@ -254,10 +252,6 @@ html[data-rail='off'] .af-rail__actions .af-btn {
   width: 40px; min-width: 40px; height: 40px;
   padding: 0; justify-content: center;
 }
-
-/* 原型 app.css:1115-1141 的 `.af-navbtn`：收起态它不再是「唤回入口」，
-   而是常驻在图标条顶部的开关，所以去掉原型那条「滑出后重新定位」的
-   绝对定位需求（原型里它由 `.af-recallsplit` 兜底，本里程碑已删除）。 */
 
 /* ── 导航开关（原型 app.css:1115-1141）────────────────────────────────
    收起形态是**56px 常驻图标条**，不是原型的「整列滑走」：用户 2026-11-17
@@ -469,11 +463,13 @@ html[data-rail='off'] .af-rail__actions .af-btn {
 
 /* 列名是这一列的脸面，必须比卡片里的正文更醒目。原来是 `--p-t-xs`（12.5px），
    比正文 14.5px **还小**——六列标题读起来像元信息（v0.8.1 子任务 13 提到
-   card 档 17px）。列宽约 190px，17px 放得下「待交付」「进行中」这类两三个字，
-   实在放不下会换行，不会溢出（`.af-col__head` 是 flex + 允许换行）。 */
+   card 档 17px）。列宽实测约 186px（六列挤进 1216px 内容区），17px 下
+   「待验收」「已完成」这类三字标题放得下；再长就**省略**，不换行——
+   `.af-col__head` 是单行 flex（`nowrap`），换行会把六列列头撑成参差不齐。 */
 .af-col__name {
   font-size: var(--af-text-card); font-weight: var(--af-weight-semibold);
   color: var(--p-fg-strong); line-height: var(--af-leading-snug);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .af-col__count {
   margin-left: auto;
@@ -747,12 +743,9 @@ a.af-meter:hover { background: var(--p-surf-2); text-decoration: none; }
 /* **唯一真相源在 `components.css`**（本文件是后导入的，同选择器会覆盖它——
    实测 v0.8.1 子任务 12 之前这里还有一份 `.af-empty { padding: 24px 16px }`
    把 components.css 那份盖掉了，空态渲染成 242px 高的大块，空库时整页
-   看起来像加载失败）。本节只剩「原型有、实现未移植」的 `.af-empty__shape`
-   ——它是原型空态里的虚线小方块，保留给将来用；`.af-empty` 本体不在此定义。 */
-.af-empty__shape {
-  width: 18px; height: 18px; border-radius: var(--p-r-xs);
-  border: 1.5px dashed var(--p-line-4);
-}
+   看起来像加载失败）。所以 `.af-empty` 本体**不在本文件定义**。
+   本节此前还有一条 `.af-empty__shape`（原型空态的虚线小方块），零模板消费者，
+   已随第3轮精简删除——需要时从原型 `app.css:490-527` 取回。 */
 
 .af-bar { height: 5px; border-radius: var(--p-r-full); background: var(--p-surf-4); overflow: hidden; }
 .af-bar__fill { height: 100%; border-radius: var(--p-r-full); background: var(--p-acc); }

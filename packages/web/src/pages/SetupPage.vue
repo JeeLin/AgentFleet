@@ -143,7 +143,7 @@ const PW_HINT_ID = 'setup-pw-hint'
 
 <template>
   <main class="af-auth af-auth--setup" tabindex="-1">
-    <div class="af-auth__box" style="width: min(560px, 100%)">
+    <div class="af-auth__box">
       <div class="af-auth__brand">
         <span class="af-rail__mark" aria-hidden="true">AF</span>
         <span class="af-t-label">AGENTFLEET · 首次 setup</span>
@@ -151,7 +151,7 @@ const PW_HINT_ID = 'setup-pw-hint'
 
       <div>
         <h1 class="af-auth__title">完成首次配置</h1>
-        <p class="af-auth__sub" style="margin-top: var(--af-space-3)">
+        <p class="af-auth__sub af-auth__sub--spaced">
           Hub 现在停在<b>未初始化</b>状态：除了 setup 本身，所有接口都会回
           403 <code>hub_not_initialized</code>。设好密码之后它才进入正常模式。
         </p>
@@ -166,7 +166,7 @@ const PW_HINT_ID = 'setup-pw-hint'
 
       <template v-else>
         <form novalidate @submit.prevent="submit">
-          <div class="af-col gap-6">
+          <div class="af-stack af-setup__stack">
             <!-- ① token 在机器上，不在浏览器里 -->
             <section class="af-field" aria-labelledby="h-token">
               <h2 id="h-token" class="af-field__label">① 在运行 Hub 的机器上取 setup token</h2>
@@ -319,6 +319,11 @@ const PW_HINT_ID = 'setup-pw-hint'
 </template>
 
 <style scoped>
+/* 竖排间距：原来靠 `.af-col.gap-6`（6 档），那个原语与看板列 `.af-col`
+   同名、被后者覆盖，已改名 `.af-stack`；`.af-stack` 自带的默认 `gap` 是
+   `--p-s4`(16px)，不合此处需要的 12px。所以间距**由本页自己声明**，不依赖
+   一个已经被删掉的工具类。 */
+.af-setup__stack { gap: 12px; }
 /* setup 与 login 一样是认证页，但不复用 400px 的窄列：它有一串要照抄的
    命令与路径，窄列会把它们折行——命令折行是复制的第一杀手。
    宽度在模板上按 `min(560px, 100%)` 覆盖，这里只管其余形状。 */
@@ -380,14 +385,6 @@ const PW_HINT_ID = 'setup-pw-hint'
 }
 .af-auth__note--danger .af-auth__note-title {
   color: var(--af-danger-fg);
-}
-.af-auth__foot {
-  display: flex;
-  flex-direction: column;
-  gap: var(--af-space-3);
-}
-.af-auth__foot p {
-  margin: 0;
 }
 .af-auth__state {
   color: var(--af-warn-fg);

@@ -257,7 +257,7 @@ async function submit(): Promise<void> {
     </EmptyState>
 
     <div v-else class="af-picker">
-      <div class="af-col gap-8">
+      <div class="af-stack af-newsession__stack">
         <!-- ① 设备 -->
         <section aria-labelledby="h-dev">
           <div class="af-row gap-4 af-sechead">
@@ -461,6 +461,11 @@ async function submit(): Promise<void> {
 </template>
 
 <style scoped>
+/* 竖排间距：原来靠 `.af-col.gap-8`（8 档），那个原语与看板列 `.af-col`
+   同名、被后者覆盖，已改名 `.af-stack`；`.af-stack` 自带的默认 `gap` 是
+   `--p-s4`(16px)，不合此处需要的 16px。所以间距**由本页自己声明**，不依赖
+   一个已经被删掉的工具类。 */
+.af-newsession__stack { gap: 16px; }
 /* 内容层：原型每一页在 `.af-body` 里放一层带内边距的容器（`index.html:23`
    是内联 `padding:20px 20px 64px`）。静态内联样式被 `prototype-parity`
    门禁禁止，落成这一层——与另外 12 页同一写法。 */

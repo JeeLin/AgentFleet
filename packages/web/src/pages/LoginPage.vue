@@ -93,7 +93,7 @@ const ERR_ID = 'login-error'
 
       <div>
         <h1 class="af-auth__title">登录</h1>
-        <p class="af-auth__sub" style="margin-top: var(--af-space-3)">
+        <p class="af-auth__sub af-auth__sub--spaced">
           单用户自托管。密码由首次 setup 设置，<b>不通过邮箱找回</b>——
           忘了就得能登上运行 Hub 的那台机器。
         </p>
@@ -112,7 +112,7 @@ const ERR_ID = 'login-error'
       </div>
 
       <form novalidate @submit.prevent="submit">
-        <div class="af-col gap-5">
+        <div class="af-stack af-login__stack">
           <div class="af-field">
             <label class="af-field__label" for="password">密码</label>
             <input
@@ -168,6 +168,11 @@ const ERR_ID = 'login-error'
 </template>
 
 <style scoped>
+/* 竖排间距：原来靠 `.af-col.gap-5`（5 档），那个原语与看板列 `.af-col`
+   同名、被后者覆盖，已改名 `.af-stack`；`.af-stack` 自带的默认 `gap` 是
+   `--p-s4`(16px)，不合此处需要的 10px。所以间距**由本页自己声明**，不依赖
+   一个已经被删掉的工具类。 */
+.af-login__stack { gap: 10px; }
 /* 认证页的唯一布局来自 `components.css` §18 的 `.af-auth`；这里只校正它
    没覆盖的两处：提交按钮占满一列、以及「下一步」告警块的语义色。 */
 .af-auth__submit {
@@ -200,14 +205,8 @@ const ERR_ID = 'login-error'
   color: var(--af-warn-fg);
   font-weight: var(--af-weight-medium);
 }
-.af-auth__foot {
-  display: flex;
-  flex-direction: column;
-  gap: var(--af-space-3);
-}
-.af-auth__foot p {
-  margin: 0;
-}
+/* `.af-auth__foot` 的布局（flex 纵向 + gap）在 `components.css` 里，两页共用；
+   这里只留登录页独有的 `code` 高亮。 */
 .af-auth__foot code {
   font-family: var(--af-font-mono);
   color: var(--af-fg-secondary);
