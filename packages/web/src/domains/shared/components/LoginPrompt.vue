@@ -253,9 +253,10 @@ onBeforeUnmount(() => {
 <style scoped>
 /* 竖排间距：原来靠 `.af-col.gap-5`（5 档），那个原语与看板列 `.af-col`
    同名、被后者覆盖，已改名 `.af-stack`；`.af-stack` 自带的默认 `gap` 是
-   `--p-s4`(16px)，不合此处需要的 10px。所以间距**由本页自己声明**，不依赖
-   一个已经被删掉的工具类。 */
-.af-loginprompt__stack { gap: 10px; }
+   `--p-s4`(16px)，比此处要的 5 档窄。所以间距**由本页自己声明**，用
+   `var(--af-space-5)`（10px）——与改前 `.af-col.gap-5` 同值，但不写裸数字，
+   免得 token 改了这里不跟。 */
+.af-loginprompt__stack { gap: var(--af-space-5); }
 /* 布局全部复用 `components.css` §11 的 `.af-scrim` / `.af-modal` 与
    §4 的 `.af-input` / `.af-field`——这里一条新皮肤都不造，只把模态收窄一档：
    460px 而不是 560px，因为这个框里只有一个密码格，宽了只会显得空。

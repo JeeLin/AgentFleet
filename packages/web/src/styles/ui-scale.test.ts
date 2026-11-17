@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { readRepoFile } from '@/test/css'
+import { classNamesIn, parseCssRules, propValue, ruleFor } from '@/test/css-scan'
+
+import { readdirSync, readFileSync } from 'node:fs'
+import { resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 /* ===========================================================================
    子任务 12 的门禁：层级阶梯 + 卡片分区
@@ -21,6 +26,28 @@ function tokenPx(css: string, name: string): number {
   const m = new RegExp(`--${name}:\\s*(\\d+(?:\\.\\d+)?)px`).exec(css)
   if (!m) throw new Error(`token --${name} 未找到或以非 px 定义`)
   return Number(m[1])
+}
+
+/**
+ * 全仓 `.vue` 里出现某类名（或任意片段）的文件路径列表。
+ *
+ * **不钉单文件**：把「谁消费了这类」写死成一个路径，改天消费者挪到别的页面，
+ * 守卫就会指着一个无辜的文件报错（v0.8.1 第4轮的 `.af-panel__foot` 就是这样）。
+ */
+function vueFilesUsing(needle: string): string[] {
+  const webRoot = fileURLToPath(new URL('../..', import.meta.url))
+  const hits: string[] = []
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = resolve(dir, entry.name)
+      if (entry.isDirectory()) walk(full)
+      else if (entry.name.endsWith('.vue') && readFileSync(full, 'utf-8').includes(needle)) {
+        hits.push(full.slice(webRoot.length).split(sep).join('/'))
+      }
+    }
+  }
+  walk(resolve(webRoot, 'src'))
+  return hits.sort()
 }
 
 describe('层级阶梯（子任务 12）', () => {
@@ -93,9 +120,9 @@ describe('面板三分区（子任务 12）', () => {
 
   /* **这条守的是一个真实回潮（v0.8.1 第3轮）**：为了把两处内联 `font-size`
      收进样式表，`components.css` 补了 `.af-t-2xs` / `.af-t-sm` 两条——而
-     `prototype-shell.css:612-613` 的 `.af-xs` / `.af-2xs` 早就在做同一件事
-     （`--p-t-2xs` 就是 `var(--af-text-2xs)`），键位提示句另有 `.af-keyhint`。
-     于是同一档字号有两个名字，改一处另一处不跟。**判据**：每条声明
+     `prototype-shell.css` 的 `.af-xs`（`:608`）/ `.af-2xs`（`:609`）早就在做
+     同一件事（`--p-t-2xs` 就是 `var(--af-text-2xs)`），键位提示句另有
+     `.af-keyhint`。于是同一档字号有两个名字，改一处另一处不跟。**判据**：每条声明
      `font-size: var(<字号令牌>)` 的规则，其取值令牌不许被第二条规则重复消费
      （同一 token 只许一个工具类）。豁免：组件本体类（`*__title` / `*card*`
      这类）不在此列——它们是组件的一部分，不是通用工具类。 */
@@ -145,11 +172,16 @@ describe('面板三分区（子任务 12）', () => {
 
   /* **反向守卫：`.af-panel__foot` 不得只以规则形式回来**。它被删是因为没人用；
      如果哪天又需要，必须同时有模板消费者（下面那条「新加的类必须在模板里出现」
-     会把「只加规则不加消费者」判红）。 */
+     会把「只加规则不加消费者」判红）。
+
+     **消费者扫全仓 `.vue`，不钉某个文件**（v0.8.1 第4轮）：初版把消费者固定成
+     `DevicesPage.vue`，而那一页 0 处 `af-panel__foot`——真有人按注释把规则加回来、
+     消费者写进别的页面，这条会判红却把原因指向 `DevicesPage`，等于给下一个人
+     一条错误线索。 */
   it('.af-panel__foot 要么不定义，要么必须在模板里被用到', () => {
-    if (!css.includes('.af-panel__foot {')) return
-    const consumers = readRepoFile('packages/web/src/domains/device/DevicesPage.vue')
-    expect(consumers, '.af-panel__foot 定义了但没有任何消费者').toContain('af-panel__foot')
+    if (!css.includes('.af-panel__foot')) return
+    const users = vueFilesUsing('af-panel__foot')
+    expect(users, '.af-panel__foot 定义了但全仓没有一个 .vue 消费者').not.toEqual([])
   })
 
   it('面板标题用 card 档 + strong 前景（字号与明度一起抬）', () => {
@@ -200,24 +232,26 @@ describe('面板三分区（子任务 12）', () => {
   /* **往上一条的缺口补网（v0.8.1 第3轮）**：上一条只钉了 4 个白名单类，于是
      `.af-row` 与 `.af-spacer` 这两条**跨文件重名**在网外活了整轮——两份都在，
      `components.css` 那份（`flex: 1 1 auto` / 不换行 + 6px gap）从来是死的。
-     这里改成**全量求交集**：两份样式表的顶层类选择器不许有任何交集。
-     真要两边都有，就必须先合并到一处，而不是靠导入顺序决定谁赢。 */
-  it('两份样式表的顶层类选择器没有任何交集（后导入者不得静默取胜）', () => {
+     这里改成**全量求交集**：两份样式表的类选择器不许有任何交集。
+     真要两边都有，就必须先合并到一处，而不是靠导入顺序决定谁赢。
+
+     **第4轮换成结构扫描**：初版按行跑 `^\.cls\s*\{`，只看行首单类 + 同行开括号，
+     五种真实形态全部漏检，且每条都变异验证过（加回规则后仍 18/18 绿）：
+     ① `@media` 里缩进两格的规则；② 逗号组 `.a, .b { … }`；③ 逗号组里**后一个**
+     类 `.x, .af-col { … }`；④ `.af-col` 与 `{` 不在同一行；⑤ 伪类 `.af-col:hover`。
+     一次**真实的**漏网就是 ③——`.af-kv__k, .af-kv dt {` 让 `.af-kv__k` 的跨文件
+     重名（`components.css` 的死副本）整轮没被看见。现在改用 `parseCssRules`
+     （剥注释 → 花括号配对 → 逗号切分 → 取类名），五种形态一律覆盖。
+     「整个复合选择器是一个类」才算——`.af-drawer .af-msg` 这种**有意的局部覆盖**
+     不算重名，`.af-msg { … }` 与 `.af-msg { … }` 才算法。
+     **没有媒体条件豁免**：初版曾给「两边都在 `@media` 里」开一道口子，变异实测
+     漏网（同一断点下双方各写一份 `.af-probe` 仍判绿）。当时唯一的真实命中是
+     `.af-board`，而它根本是条死规则（`grid-template-columns` 对
+     `grid-auto-flow: column` 的容器无效），已直接删掉——不留豁免。 */
+  it('两份样式表的选择器没有任何交集（后导入者不得静默取胜）', () => {
     const shell = readRepoFile('packages/web/src/styles/prototype-shell.css')
-    /* **必须同时认单行与多行规则**：第一版只匹配 `^\\.cls\\s*{$`（多行形态），
-       于是 `.af-row { display: flex; ... }` 这种单行规则被漏掉——变异实测
-       （把 `.af-row` 加回 `components.css`）当场漏网，本条仍判绿。 */
-    const topLevel = (src: string): Set<string> => {
-      const out = new Set<string>()
-      const stripped = src.replace(/\/\*[\s\S]*?\*\//g, '')
-      for (const line of stripped.split('\n')) {
-        const m = /^(\.[a-z][a-z0-9_-]*)\s*\{/.exec(line)
-        if (m) out.add(m[1])
-      }
-      return out
-    }
-    const a = topLevel(css)
-    const b = topLevel(shell)
+    const a = classNamesIn(css, { wholeSubject: true })
+    const b = classNamesIn(shell, { wholeSubject: true })
     const both = [...a].filter((s) => b.has(s)).sort()
     expect(both, `同时定义在两个文件里（后导入的 prototype-shell.css 会全覆盖）：${both.join(', ')}`)
       .toEqual([])
@@ -254,22 +288,114 @@ describe('表单控件行盒（第3轮）', () => {
   it('输入/选择控件的内容盒装得下文字（不再顶出下边框）', () => {
     const block = cssBlockOf(css, '.af-input, .af-select, .af-textarea')
     expect(block, '取不到 .af-input, .af-select, .af-textarea 规则体').not.toBe('')
-    // 这一组共用一条规则，所以取的是组里第一条选择器的声明体。
-    const rowCompact = pxOf('af-row-compact')
-    const fontSize = pxOf('af-text-sm')
-    const border = 1 // `border: 1px solid`
-    /* 垂直 padding 必须为 0：只要它非零，内容盒就被吃掉一块，而这正是 bug 成因。
-       （零值 + 显式 line-height 是修法；见规则上方的注释。） */
-    const pad = /padding:\s*0\s+var\(--af-space-3\)/.test(block)
-    expect(pad, '垂直 padding 必须为 0，否则内容盒被吃掉、文字顶出边框').toBe(true)
+    /* **取全部命中该组的规则，不只第一条**：初版只 `ruleFor`（首个精确匹配），
+       于是「事后又加一条 `.af-input, .af-select, .af-textarea { … }` 把这组
+       改坏」的写法（`max-height: 16px` / `border: 2px`）完全看不见——
+       变异实测两条都判绿。CSS 里后者胜，所以对每个**被声明的属性**取
+       「所有命中规则里的最后一条」才是真实生效值。 */
+    const group = parseCssRules(css).filter((r) => r.selector.replace(/\s+/g, ' ').trim() === '.af-input, .af-select, .af-textarea')
+    expect(group.length, '找不到 .af-input, .af-select, .af-textarea 那条规则').toBeGreaterThan(0)
+    /** 属性在整组里的生效值：最后一条声明了它的规则胜。 */
+    const effective = (property: string): string | undefined => {
+      let val: string | undefined
+      for (const r of group) val = propValue(r, property) ?? val
+      return val
+    }
+
+    /* **取值一律从规则体里解析，不用字面量正则**（v0.8.1 第4轮）：初版断言的是
+       「规则文本里出现 `padding: 0 var(--af-space-3)` 这个字面串」，而算术用的
+       `border = 1` 是硬编码。于是三种「用户报的 bug 回来了」的写法全部判绿：
+       ① 加 `max-height: 16px`（内容盒剩 16px，装不下 18px 文字）；
+       ② `.af-select { line-height: normal }`（唯一有效的修法被撤销）；
+       ③ 边框改成 2px（内容盒 26−4=22，公式仍按 1px 算）。
+       现在 height / padding-top / padding-bottom / border-width 四个真实取值
+       都从声明体里读，再算内容盒。 */
+    const px = (value: string | undefined, what: string): number => {
+      if (value === undefined) throw new Error(`${what} 未声明——规则必须有它`)
+      const got = /^(-?\d+(?:\.\d+)?)(px)?$/.exec(value.trim())
+      if (got) return Number(got[1]) // 单位可省，仅对 0 合法（`padding: 0`）
+      const tok = /^var\(--([a-z0-9-]+)\)$/.exec(value.trim())
+      if (tok) return pxOf(tok[1])
+      throw new Error(`${what} 的取值 ${value} 既不是 px 也不是单层 var(token)，需要人来看`)
+    }
+
+    const height = px(effective('height'), 'height')
+    const padParts = (effective('padding') ?? '').trim().split(/\s+/)
+    // `padding: <top> <right> <bottom> <left>`；1～3 个值时按 CSS 简写规则还原。
+    const padTop = px(padParts[0] ?? '', 'padding-top')
+    const padBottom = px(padParts[2] ?? padParts[0] ?? '', 'padding-bottom')
+    const borderParts = (effective('border') ?? '').trim().split(/\s+/)
+    const borderWidth = px(borderParts[0], 'border-width')
+    /* 边框宽被调大不会让「文字装不下」，但会让内容盒矮 2px——它和 padding
+       是同一个坑的两种写法（初版把 `border = 1` 硬编码，所以 `border: 2px`
+       判绿）。这里直接钉住「与设计系统的 1px 发丝线一致」，而不是让它
+       悄悄吃掉内容盒。 */
+    expect(borderWidth, '边框必须是 1px 发丝线（2px 会再吃掉 2px 内容盒）').toBe(1)
+    expect(padTop, '垂直 padding 必须为 0，否则内容盒被吃掉、文字顶出边框').toBe(0)
+    expect(padBottom, '垂直 padding 必须为 0，否则内容盒被吃掉、文字顶出边框').toBe(0)
+    /* 分写的 `padding-top` / `padding-bottom` 同样吃掉内容盒——简写被覆盖时
+       真实生效的是它们，必须一并读（`effective('padding')` 只看简写会漏）。 */
+    const padTopLong = effective('padding-top')
+    const padBottomLong = effective('padding-bottom')
+    if (padTopLong !== undefined) expect(px(padTopLong, 'padding-top'), 'padding-top 必须为 0').toBe(0)
+    if (padBottomLong !== undefined)
+      expect(px(padBottomLong, 'padding-bottom'), 'padding-bottom 必须为 0').toBe(0)
+
+    /* `max-height` 不得把内容盒压回「装不下文字」——这正是第一类漏网形态。 */
+    const maxHeight = effective('max-height')
+    const cap = maxHeight === undefined ? Infinity : px(maxHeight, 'max-height')
+    expect(cap, `max-height ${cap}px 把行盒压得比 height 还矮`).toBeGreaterThanOrEqual(height)
+
     // 显式 line-height：calc(row - 2px)，不能是 normal。
-    expect(block, 'line-height 必须显式取值（normal 会让文字盒超出内容盒）')
-      .toContain('line-height: calc(var(--af-row-compact) - 2px)')
-    // 算术：内容盒 = height - 上下边框；文字盒按 normal 实测比 1.333 估。
-    const innerH = rowCompact - border * 2
+    expect(effective('line-height'), 'line-height 必须显式取值（normal 会让文字盒超出内容盒）')
+      .toBe('calc(var(--af-row-compact) - 2px)')
+
+    const fontSize = pxOf('af-text-sm')
+    const innerH = Math.min(height, cap) - borderWidth * 2 - padTop - padBottom
+    /* 文字盒高度按 `line-height: normal` 的实测比 **1.333** 取（13.5px → 18px，
+       Chromium 实测，见规则上方注释）。这个比值的出处是 playwright 量的
+       墨迹盒，不用「× 1.5 更保守」——那样会把 `border: 2px`（内容盒 22px，
+       文字 18px）判成合规，而它其实是把内容盒吃掉了 2px、离 bug 只差一点。
+       换字体栈后这个比值可能变；真要改用 token 驱动的 `--af-leading-snug`
+       时，必须同时在活 Hub 上复量一次，别只改这里。 */
     const textH = Math.ceil(fontSize * 1.333)
-    expect(innerH, `内容盒 ${innerH}px 装不下 ${fontSize}px 文字（约 ${textH}px）`)
+    expect(innerH, `内容盒 ${innerH}px 装不下 ${fontSize}px 文字（按 normal 实测约 ${textH}px）`)
       .toBeGreaterThanOrEqual(textH)
+  })
+
+  /* **`.af-select` 不得在别的规则里覆写共用的 `line-height`**：`<select>` 的选中项
+     由浏览器原生控件绘制，`line-height` 在 Chrome 里对它**完全无效**（实测 computed
+     恒为 `normal`），真正的修法是「垂直 padding 归零 + `height` 撑满」。所以任何
+     想靠单写 `.af-select { line-height: … }` 去修的改动都是误解，必须判红——初版
+     没有这条反向断言，把 `line-height` 改回 `normal` 仍全绿。
+     **排除共用那条组规则**（`.af-input, .af-select, .af-textarea`）：那里写
+     `line-height` 是为了 input / textarea 的兄弟控件，select 只是同组列出。 */
+  it('.af-select 不得单独覆写 line-height', () => {
+    const SHARED = '.af-input, .af-select, .af-textarea'
+    const own = parseCssRules(css).filter(
+      (r) =>
+        r.selector.split(',').some((s) => s.trim() === '.af-select') &&
+        r.selector.replace(/\s+/g, ' ').trim() !== SHARED,
+    )
+    const offenders = own
+      .filter((r) => propValue(r, 'line-height') !== undefined)
+      .map((r) => `${r.selector} → line-height: ${propValue(r, 'line-height')}`)
+    expect(offenders, `select 的原生渲染不吃 line-height，别在这里设：${offenders.join('; ')}`)
+      .toEqual([])
+  })
+
+  /* **`.af-head` 必须是 `min-height`，不是 `height`**（v0.8.1 第4轮，用户报
+     「af-head__title 超到页面顶部外」）。定高 56px + `align-items: center` 时，
+     标题 + 副标题的包裹列一旦超过 56px，超出量被**上下均分**，上半截（实测
+     5.8px）落到视口外——`/settings` 与 `/agents` 就是这样，标题 `top = -6.3px`。
+     `min-height` 让页头自己长高，标题永远在视口内。
+     **同时守住「别退回定高」**：有人看到「页头要和左栏对齐」就可能再改回
+     `height`，那会把这个 bug 原样带回来。 */
+  it('.af-head 用 min-height（定高时标题会被顶出视口）', () => {
+    const head = ruleFor(parseCssRules(readRepoFile('packages/web/src/styles/prototype-shell.css')), '.af-head')
+    expect(head, '找不到 .af-head 规则').toBeDefined()
+    expect(propValue(head!, 'min-height'), '.af-head 缺 min-height').toBe('var(--af-head-h)')
+    expect(propValue(head!, 'height'), '.af-head 不得用定高 height——那会让标题被顶出视口').toBeUndefined()
   })
 
   it('textarea 不吃单行 line-height（多行控件要换行）', () => {

@@ -127,7 +127,9 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
    正是用户说的「收起后页面紧紧贴着……不，是空一块」。图标条自己在网格里占位，
    这才是「收起」而不是「让路」。 */
 /* **`.af-spacer` / `.af-row` 不在本文件定义**（v0.8.1 第3轮精简）：两条都已在
-   `prototype-shell.css:614,617` 定义，而那份文件后导入、同特异性全量覆盖——
+   `prototype-shell.css` 定义（同一段排版小工具，按选择器名查 `.af-row {` /
+   `.af-spacer {` 即是；**不写行号**——行号会随上面的注释增长而漂移），
+   而那份文件后导入、同特异性全量覆盖——
    本文件曾各留了一份（`flex: 1 1 auto` / 不换行 + 6px gap），**从没生效过**。
    实测证实：`af-row gap-2 af-seg` 的 `gap` 是 4px（`.af-seg` 的 scoped 规则），
    `af-dev-summary` 是 12px（`.af-dev-summary` 的 scoped 规则），`.af-spacer` 的
@@ -153,15 +155,17 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
    `background: rgb(36,35,32)` + `1px` 描边 + `8px` 圆角，而它本该只是一个
    `display: flex` 的竖排容器。这是本轮「同名选择器跨文件重名」的第四例，也是
    最难看出来的一例：它不报错、不消失，只是**多长出一圈边框**。
-   竖排原语改用 `.af-stack`（`prototype-shell.css` 已有，语义一致）；本文件
-   不再定义任何 `.af-stack*`，四个调用点已同步改名。看板列继续用 `.af-col`。 */
+   竖排原语改用 `.af-stack`——它的唯一定义在 `prototype-shell.css`（`.af-stack {`）
+   （`display: flex; flex-direction: column; gap: var(--p-s4)`），**本文件不定义
+   竖排原语**，四个调用点已同步改名。看板列继续用 `.af-col`。 */
 .af-t-label {
   font-size: var(--af-text-sm); color: var(--af-fg-tertiary);
   text-transform: uppercase; letter-spacing: var(--af-tracking-label);
 }
 .af-t-mute { color: var(--af-fg-tertiary); }
-/* 字号工具类**不在这里重复造**：字号档位在 `prototype-shell.css` §6 已有一整套
-   （`.af-xs` / `.af-2xs`），键位提示句另有 `.af-keyhint`。本文件曾补过
+/* 字号工具类**不在这里重复造**：字号档位在 `prototype-shell.css` 已有一整套
+   （`.af-xs` = `--p-t-xs` 12.5px、`.af-2xs` = `--p-t-2xs` 11.5px），键位提示句另有
+   `.af-keyhint`。本文件曾补过
    `.af-t-2xs` / `.af-t-sm` 两条，与那两处逐值重复（`--p-t-2xs` 就是
    `var(--af-text-2xs)`）——同一个档位两个名字，改一处另一处不跟。只留颜色类。 */
 /* 键位提示：模板里恒与 `.af-t-mute` 连用（`class="af-t-mute af-keyhint"`），
@@ -1399,10 +1403,9 @@ kbd, .kbd {
 .af-shapecard__flow { font-size: var(--af-text-sm); color: var(--af-fg-secondary); font-family: var(--af-font-mono); }
 .af-shapecard__hint { font-size: var(--af-text-sm); color: var(--af-fg-tertiary); line-height: var(--af-leading-base); }
 
-/* 窄屏：三列折成一列，看板改成纵向堆叠（横向滚动的六列在手机上没法用）。 */
+/* 窄屏：三列折成一列。看板的窄屏覆盖在 `prototype-shell.css` §11。 */
 @media (max-width: 900px) {
   .af-shapecards { grid-template-columns: 1fr; }
-  .af-board { grid-template-columns: 1fr; overflow-x: visible; }
 }
 
 /* ---- 骨架页（`SkeletonPage.vue`） -------------------------------------- */
@@ -1628,8 +1631,12 @@ kbd, .kbd {
   gap: var(--af-space-2) var(--af-space-4);
   font-size: var(--af-text-sm); margin: var(--af-space-3) 0 var(--af-space-4);
 }
-.af-kv__k { color: var(--af-fg-tertiary); font-size: var(--af-text-xs); padding-top: 1px; }
-.af-kv__v { color: var(--af-fg-secondary); overflow-wrap: anywhere; }
+/* `.af-kv__k` / `.af-kv__v` **不在本文件定义**：键值对的三个类（`.af-kv` /
+   `__k` / `__v`）只在 `prototype-shell.css` 的 §8b 有一份（按选择器名查
+   `.af-kv {` / `.af-kv__k` / `.af-kv__v`），
+   那份后导入、同特异性全覆盖。这里原先还留着一份 `__k` / `__v` 的死副本
+   （`color` / `font-size` / `padding-top` 三个值都与壳侧不同），**从没生效过**——
+   v0.8.1 第4轮删掉。下次要改键值对样式，只改壳侧那一处。 */
 
 /* 动作行：允许折行——五个动作在窄栏里必须还能全部看见
    （里程碑 §4「少任何一个动作都要写明去向」）。 */

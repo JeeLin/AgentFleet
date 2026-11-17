@@ -291,11 +291,16 @@ html[data-rail='off'] .af-rail__actions .af-btn {
 .af-head {
   display: flex; align-items: center; gap: var(--p-s3);
   padding: 0 var(--p-s6);
-  /* 页头高度**钉死 56px**（不是 min-height）：左栏品牌行也是 56px，两条水平线
-     要对得上。把 min-height 改成 height 是因为 display 档（22px）的行高
-     36.3px 会把 min-height:56px 的内容盒顶到 61px——实测过，左栏那条线就
-     错开 5px。固定高度 + `line-height: 1` 让标题在自己的盒内垂直居中。 */
-  height: var(--af-head-h); flex: 0 0 auto;
+  /* 页头高度：**至少** `--af-head-h`（56px），与左栏品牌行对齐。这里用
+     `min-height` 而不是 `height`——早期用 `min-height` 时出过问题，是因为
+     `.af-head__title` 当时没有自己的 `line-height: 1`：22px × 1.65 = 36.3px
+     的行高把 56px 的内容盒顶到 61px，左栏那条线就错开 5px。现在标题、
+     副标题、包裹列三处的行高都收紧了，1~2 行内容自然落在 56px 内。
+     **必须允许它长高**：当某页的标题 + 副标题真的超过 56px 时，定高 +
+     `align-items: center` 会把超出量**上下均分**、上半截落到视口外——
+     用户报的「`.af-head__title` 超到页面顶部外」就是这么来的。
+     `min-height` 下页头自己长到需要的高度，标题永远看得见。 */
+  min-height: var(--af-head-h); flex: 0 0 auto;
   border-bottom: 1px solid var(--p-line-2);
   background: var(--p-bg);
 }
@@ -311,6 +316,23 @@ html[data-rail='off'] .af-rail__actions .af-btn {
   letter-spacing: -0.01em; /* 22px 下 Inter 默认字距偏松，收一点更像标题 */
 }
 .af-head__sub { font-size: var(--p-t-xs); color: var(--p-fg-3); white-space: nowrap; }
+
+/* **页头默认槽里的包裹 div**（`<PageHead><div><h1/><p/></div></PageHead>`）：
+   标题 + 副标题竖排的那一列。它是 `PageHead` 文档里记录过的合法写法
+   （副标题是一整句说明时要落在标题下面）。这里只定**收缩行为**，不钉高度：
+   `.af-head` 现在是 `min-height`，这一列比 56px 高时页头自己长高——
+   标题永远在视口内（用户报的「标题超到页面顶部外」就是定高 +
+   `align-items: center` 均分溢出造成的）。 */
+.af-head > div {
+  display: flex; flex-direction: column; justify-content: center;
+  gap: var(--p-s1); min-width: 0;
+}
+/* 包裹 div 里的副标题：单行 + 省略号。页头是扫视用的，长说明该由
+   `.af-body` 承载；这里不换行，免得同样的文案在三页里长成三种高度。 */
+.af-head > div .af-head__sub {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  line-height: var(--af-leading-snug); min-width: 0;
+}
 .af-head__spacer { margin-left: auto; }
 
 /* 页头用在 `.af-body--pad` 里面时（看板页）：`.af-head` 原本是「贴顶、底部有线、
@@ -417,7 +439,14 @@ html[data-rail='off'] .af-rail__actions .af-btn {
    变体类，页面实际吃的是自造那份：缺 `height: 100%` / `min-height: 0`、
    `align-items: start` → 板子只占内容区上部约三分之一、六列高度各不相同。
    用户报「af-board 为什么不铺满下面的页面」。自造那份已删，本节的规则
-   直接用原型类名，全仓只有这一处 `.af-board` 定义。 */
+   直接用原型类名，**全仓只有这一处 `.af-board` 定义**。
+
+   核对记录（v0.8.1 第4轮）：`components.css` 里原本还有一条
+   `@media (max-width: 900px) { .af-board { grid-template-columns: 1fr } }`，
+   但本文件用的是 `grid-auto-flow: column` + `grid-auto-columns`，
+   `grid-template-columns` 对它**不起作用**——那是条从不生效的死规则，已删。
+   窄屏看板仍靠本文件 §11 的 `.af-board { grid-auto-columns: 86% }`（横向可滑）。
+   =========================================================================== */
 
 .af-board {
   display: grid; grid-auto-flow: column;
@@ -463,7 +492,9 @@ html[data-rail='off'] .af-rail__actions .af-btn {
 
 /* 列名是这一列的脸面，必须比卡片里的正文更醒目。原来是 `--p-t-xs`（12.5px），
    比正文 14.5px **还小**——六列标题读起来像元信息（v0.8.1 子任务 13 提到
-   card 档 17px）。列宽实测约 186px（六列挤进 1216px 内容区），17px 下
+   card 档 17px）。列宽约 189px（(1216 - 40 padding - 40 gap) / 6，与上面
+   `grid-auto-columns` 那段用同一个算式；此前这里写 186px，与同文件另一处
+   自相矛盾），17px 下
    「待验收」「已完成」这类三字标题放得下；再长就**省略**，不换行——
    `.af-col__head` 是单行 flex（`nowrap`），换行会把六列列头撑成参差不齐。 */
 .af-col__name {
@@ -577,8 +608,8 @@ a.af-meter:hover { background: var(--p-surf-2); text-decoration: none; }
 /* ===========================================================================
    8b. 通用件与键值对（原型 app.css:168-185、464-468）
    -------------------------------------------------------------------------
-   为什么要搬到这里来：`.af-kv` / `.af-kv__k` / `.af-kv__v` **只在
-   `DevicesPage.vue` 的 scoped 块里定义过一次**，而模板里还有 4 个别的页面
+   为什么要搬到这里来：`.af-kv` / `.af-kv__k` / `.af-kv__v` 原来**只**在
+   `DevicesPage.vue` 的 scoped 块里定义过一次，而模板里还有 4 个别的页面
    在用它们（`DeviceDetailPage` / `ProjectTaskPage` / `BindPage` /
    `ProjectSettingsPage`）。scoped 样式不外泄，于是那 4 处的键值对退化成
    「一个接一个的裸 span」——没有两列网格，标签与值全挤在一行。
@@ -859,7 +890,7 @@ a.af-meter:hover { background: var(--p-surf-2); text-decoration: none; }
   flex: 0 0 auto;
 }
 
-/* 抽屉里的消息行**不能**直接重定义 `.af-msg`：那个类在 `components.css:764`
+/* 抽屉里的消息行**不能**直接重定义 `.af-msg`：那个类在 `components.css`（`.af-msg {`）
    已经是会话页的聊天气泡（内边距 + 边框 + 底色的卡片），而本文件在它**之后**
    加载——写一条裸 `.af-msg__body { font-size: … }` 会静默改掉会话页的字号与
    行高，两处都读得通、谁也不报错。所以抽屉自己带作用域。 */

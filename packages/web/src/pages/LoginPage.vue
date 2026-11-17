@@ -128,7 +128,7 @@ const ERR_ID = 'login-error'
               @input="failure = null"
             />
             <span :id="HINT_ID" class="af-field__hint">
-              Hub 只监听回环地址；远程访问请自己套 TLS 反代，别把明文密码发到公网上。
+              这个密码是这台 Hub 的唯一凭据，请用只有你知道的强口令。
             </span>
             <!-- 可重试的那一类：就地呈现，不弹窗（§4.7） -->
             <span
@@ -170,9 +170,10 @@ const ERR_ID = 'login-error'
 <style scoped>
 /* 竖排间距：原来靠 `.af-col.gap-5`（5 档），那个原语与看板列 `.af-col`
    同名、被后者覆盖，已改名 `.af-stack`；`.af-stack` 自带的默认 `gap` 是
-   `--p-s4`(16px)，不合此处需要的 10px。所以间距**由本页自己声明**，不依赖
-   一个已经被删掉的工具类。 */
-.af-login__stack { gap: 10px; }
+   `--p-s4`(16px)，比此处要的 5 档窄。所以间距**由本页自己声明**，用
+   `var(--af-space-5)`（10px）——与改前 `.af-col.gap-5` 同值，但不写裸数字，
+   免得 token 改了这里不跟。 */
+.af-login__stack { gap: var(--af-space-5); }
 /* 认证页的唯一布局来自 `components.css` §18 的 `.af-auth`；这里只校正它
    没覆盖的两处：提交按钮占满一列、以及「下一步」告警块的语义色。 */
 .af-auth__submit {

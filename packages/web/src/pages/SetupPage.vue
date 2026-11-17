@@ -321,9 +321,10 @@ const PW_HINT_ID = 'setup-pw-hint'
 <style scoped>
 /* 竖排间距：原来靠 `.af-col.gap-6`（6 档），那个原语与看板列 `.af-col`
    同名、被后者覆盖，已改名 `.af-stack`；`.af-stack` 自带的默认 `gap` 是
-   `--p-s4`(16px)，不合此处需要的 12px。所以间距**由本页自己声明**，不依赖
-   一个已经被删掉的工具类。 */
-.af-setup__stack { gap: 12px; }
+   `--p-s4`(16px)，比此处要的 6 档窄。所以间距**由本页自己声明**，用
+   `var(--af-space-6)`（12px）——与改前 `.af-col.gap-6` 同值，但不写裸数字，
+   免得 token 改了这里不跟。 */
+.af-setup__stack { gap: var(--af-space-6); }
 /* setup 与 login 一样是认证页，但不复用 400px 的窄列：它有一串要照抄的
    命令与路径，窄列会把它们折行——命令折行是复制的第一杀手。
    宽度在模板上按 `min(560px, 100%)` 覆盖，这里只管其余形状。 */

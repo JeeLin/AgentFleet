@@ -463,9 +463,10 @@ async function submit(): Promise<void> {
 <style scoped>
 /* 竖排间距：原来靠 `.af-col.gap-8`（8 档），那个原语与看板列 `.af-col`
    同名、被后者覆盖，已改名 `.af-stack`；`.af-stack` 自带的默认 `gap` 是
-   `--p-s4`(16px)，不合此处需要的 16px。所以间距**由本页自己声明**，不依赖
-   一个已经被删掉的工具类。 */
-.af-newsession__stack { gap: 16px; }
+   `--p-s4`(16px)，比此处要的 8 档窄。所以间距**由本页自己声明**，用
+   `var(--af-space-8)`（16px）——与改前 `.af-col.gap-8` 同值，但不写裸数字，
+   免得 token 改了这里不跟。 */
+.af-newsession__stack { gap: var(--af-space-8); }
 /* 内容层：原型每一页在 `.af-body` 里放一层带内边距的容器（`index.html:23`
    是内联 `padding:20px 20px 64px`）。静态内联样式被 `prototype-parity`
    门禁禁止，落成这一层——与另外 12 页同一写法。 */

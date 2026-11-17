@@ -1,0 +1,77 @@
+/* ===========================================================================
+   `css-scan.ts` 的自测（v0.8.1 第4轮）
+   ---------------------------------------------------------------------------
+   这些夹具直接来自一次**变异实测**：`ui-scale.test.ts` 初版的两条守卫按行跑
+   正则，下面每种书写形态都实测漏网（加回规则后 18/18 仍判绿）。把每种形态
+   钉成一条用例，守卫才不会在下次「顺手改写」时又悄悄失去覆盖。
+   =========================================================================== */
+import { describe, expect, it } from 'vitest'
+
+import { classNamesIn, classNamesInRule, parseCssRules, propValue, ruleFor } from '@/test/css-scan'
+
+describe('parseCssRules / classNamesIn', () => {
+  it('单行规则', () => {
+    expect([...classNamesIn('.af-a { color: red; }')]).toEqual(['.af-a'])
+  })
+
+  it('多行规则（. 与 { 不在同一行）', () => {
+    expect([...classNamesIn('.af-a\n{ color: red; }')]).toEqual(['.af-a'])
+  })
+
+  it('逗号组：每个类都算', () => {
+    expect([...classNamesIn('.af-a, .af-b { color: red; }')].sort()).toEqual(['.af-a', '.af-b'])
+  })
+
+  it('@media 内缩进的规则同样扫得到', () => {
+    const css = '@media (max-width: 900px) {\n  .af-a { color: red; }\n}'
+    expect([...classNamesIn(css)]).toEqual(['.af-a'])
+  })
+
+  it('嵌套 @media 的 at-rule 链被记录', () => {
+    const css = '@media (max-width: 900px) { .af-a { color: red; } }'
+    const [rule] = parseCssRules(css)
+    expect(rule.atRules).toEqual(['@media (max-width: 900px)'])
+    expect(rule.selector).toBe('.af-a')
+  })
+
+  it('伪类 / 属性选择器算同一个类（wholeSubject）', () => {
+    for (const sel of ['.af-a:hover', '.af-a[data-open=\'true\']', '.af-a::before']) {
+      const css = `${sel} { color: red; }`
+      const rule = parseCssRules(css)[0]
+      expect(classNamesInRule(rule), sel).toEqual(['.af-a'])
+    }
+  })
+
+  it('后代 / 子代 / 兄弟组合**不算**「定义了这个类」', () => {
+    for (const sel of ['.af-x .af-a', '.af-x > .af-a', '.af-x + .af-a', '.af-x ~ .af-a']) {
+      const css = `${sel} { color: red; }`
+      expect([...classNamesIn(css, { wholeSubject: true })], sel).toEqual([])
+    }
+  })
+
+  it('注释里的类名不算', () => {
+    const css = '/* .af-ghost { color: red; } */ .af-real { color: red; }'
+    expect([...classNamesIn(css)]).toEqual(['.af-real'])
+  })
+
+  it('花括号不平衡会抛（而不是静默截断）', () => {
+    expect(() => parseCssRules('.af-a { color: red;')).toThrow(/不平衡/)
+  })
+
+  it('propValue 取最后一条同名声明（CSS 后者胜）', () => {
+    const [rule] = parseCssRules('.af-a { padding: 0; padding: 4px 8px; }')
+    expect(propValue(rule, 'padding')).toBe('4px 8px')
+  })
+
+  it('propValue 区分「没写」与「写了 0」', () => {
+    const [rule] = parseCssRules('.af-a { padding: 0; }')
+    expect(propValue(rule, 'padding')).toBe('0')
+    expect(propValue(rule, 'margin')).toBeUndefined()
+  })
+
+  it('ruleFor 只认选择器文本完全相等（逗号组整体）', () => {
+    const rules = parseCssRules('.af-a, .af-b { color: red; } .af-a { color: blue; }')
+    expect(ruleFor(rules, '.af-a, .af-b')?.body).toContain('red')
+    expect(ruleFor(rules, '.af-a')?.body).toContain('blue')
+  })
+})
