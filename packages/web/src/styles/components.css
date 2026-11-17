@@ -1339,82 +1339,18 @@ kbd, .kbd {
 .af-projectnav__item:hover { background: var(--af-surface-2); color: var(--af-fg-primary); }
 .af-projectnav__item:focus-visible { outline: 2px solid var(--af-border-focus); outline-offset: 1px; }
 
-/* ---- 看板：六列 -------------------------------------------------------- */
-
-/* 六列横向排开。**列不收缩**：任务列被挤窄会让卡片里的标题变成两三个字
-   一行，而看板的价值就在于扫一眼能看全。容器横向滚动。
-
-   列宽下限 **236px 与原型一致**（`prototype/assets/app.css:372` 的
-   `grid-auto-columns: minmax(236px, 1fr)`）。上一版写 180px，比原型窄 56px
-   —— 同一张卡片在原型里一行放得下，在实现里折成两行。 */
-.af-board {
-  display: grid; grid-template-columns: repeat(6, minmax(236px, 1fr));
-  gap: var(--p-s3); align-items: start;
-  overflow-x: auto; padding-bottom: var(--p-s3);
-}
-.af-board__col {
-  display: flex; flex-direction: column; gap: var(--p-s2);
-  background: var(--p-surf-1); border: 1px solid var(--p-line-2);
-  border-radius: var(--p-r-md); padding: 0;
-  min-height: 220px; overflow: hidden;
-}
-/* 列头：原型 `.af-col__head`（`app.css:387-393`）是一条**贴着列顶的横带**，
-   带 2px 状态色带、底部一条细线，左右 12px 内边距，而不是列内的一块内容。
-   下面 `.af-board__colhead` 的 `padding` 就来自这里——上一版列头是裸的一行
-   flex，所以六列顶端没有任何状态标记。 */
-.af-board__colhead {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: var(--p-s2);
-  padding: var(--p-s3);
-  border-top: 2px solid var(--p-line-3);
-  border-bottom: 1px solid var(--p-line-2);
-  flex: 0 0 auto;
-}
-/* 六态的顶部色带：这里与 `prototype-shell.css` §5 是同一件事的两个落点——
-   看板页用的是 `.af-board__col[data-state]`，原型用的是 `.af-col[data-state]`。
-   两处都必须有，否则「原型对齐但页面没生效」或反之。 */
-.af-board__col[data-state='pending'] .af-board__colhead { border-top-color: var(--p-pending); }
-.af-board__col[data-state='queued']  .af-board__colhead { border-top-color: var(--p-queued); }
-.af-board__col[data-state='running'] .af-board__colhead { border-top-color: var(--p-running); }
-.af-board__col[data-state='review']  .af-board__colhead { border-top-color: var(--p-review); }
-.af-board__col[data-state='done']    .af-board__colhead { border-top-color: var(--p-done); }
-.af-board__col[data-state='failed']  .af-board__colhead { border-top-color: var(--p-failed); }
-
-/* 列体的内边距与卡片间距（原型 `.af-col__body`：`padding: 8px`、`gap: 8px`）。
-   `.af-board__colbody` 是卡片列表的容器——上一版没有它，卡片直接排在
-   有 16px padding 的列里，于是列头与卡片左边不对齐。 */
-.af-board__colbody {
-  padding: var(--p-s2);
-  display: flex; flex-direction: column; gap: var(--p-s2);
-  overflow-y: auto; min-height: 0; flex: 1;
-}
-.af-board__coltitle {
-  margin: 0; font-size: var(--p-t-xs); font-weight: var(--af-weight-semibold);
-  color: var(--p-fg-strong); letter-spacing: normal;
-}
-/* 列的说明句（「失败的任务停在这里，不会自动回待办」）。它是**列语义的一部分**，
-   不是装饰：六态的名字对第一次见到的人不足以说明「为什么失败要单独一列」。 */
-.af-board__hint {
-  margin: 0; font-size: var(--af-text-xs); color: var(--af-fg-tertiary);
-  line-height: var(--af-leading-snug);
-}
-/* 列里的空态要**小一号**：六列并排时，与整页空态同尺寸会把看板撑成六块大留白，
-   用户会以为加载失败。 */
-.af-board__col .af-empty { padding: var(--af-space-6) var(--af-space-2); }
-.af-board__col .af-empty__glyph { font-size: var(--af-text-xl); }
-.af-board__col .af-empty__text { font-size: var(--af-text-xs); }
-
-/* 列头计数徽标（原型 `board.html:63` 的 `.af-col__count`）。
-   为什么要有这个数：一列里有没有东西，扫「0」比扫一片空更快；
-   它同时是 `aria-label`（「3 张」）的可见对应物——只给读屏不给眼睛，
-   明眼用户还是得自己数。 */
-.af-board__count {
-  display: inline-flex; align-items: center; justify-content: center;
-  min-width: 20px; height: 20px; padding: 0 var(--af-space-2);
-  border-radius: var(--af-radius-full);
-  background: var(--af-surface-3); color: var(--af-fg-secondary);
-  font-size: var(--af-text-2xs); font-variant-numeric: tabular-nums;
-}
+/* ---- 看板 --------------------------------------------------------------
+   本文件**不再定义看板几何**（2026-11-17 删除）。上一版这里有一整族自造的
+   `.af-board__col*`（列 / 列头 / 列体 / 列名 / 说明句 / 计数徽标，9 条规则）
+   外加一份 `.af-board` 几何，而模板早已迁到原型的 `.af-col*`
+   （`BoardPage.vue:478`）→ 那一族 `grep -rc` 实测**模板零引用**，是死代码。
+   更糟的是它那份 `.af-board` 会与原型版抢同一个选择器：原型几何当时被放在
+   `prototype-shell.css` 的变体类 `.af-board--proto` 里（模板零引用），于是
+   页面命中的是这里的上一版几何——缺 `height: 100%` / `min-height: 0`、
+   `align-items: start`，症状是「板子只占上面一条、下面一大片空、六列高低不齐」
+   （见里程碑 Bugs 表那条用户反馈）。
+   现在看板的唯一真相源是 `prototype-shell.css` §5（`.af-board` / `.af-col*`），
+   本文件不再出现任何 `.af-board*` 规则。 */
 
 /* ---- 新建项目：形态选择卡 ---------------------------------------------- */
 

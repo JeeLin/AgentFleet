@@ -330,9 +330,16 @@ html[data-rail='off'] .af-rail__brand .af-navbtn {
      · 列宽原型 `minmax(236px, 1fr)`，实现写 180px —— 卡片标题更容易折行
      · 列头原型有 `border-top: 2px solid` 的**状态色带**，实现没有
      · 空列原型用 `::after` 画一块虚线框写「这一列是空的」，实现只有空态组件
-   =========================================================================== */
 
-.af-board--proto {
+   ── 类名就是原型那个 `.af-board`，**不是变体**（2026-11-17 改回） ──────
+   本节原先叫 `.af-board--proto`，而 `components.css` 里另有一份 `.af-board`
+   （上一版自造几何）。模板用的是后者，所以原型几何进了一个**模板零引用**的
+   变体类，页面实际吃的是自造那份：缺 `height: 100%` / `min-height: 0`、
+   `align-items: start` → 板子只占内容区上部约三分之一、六列高度各不相同。
+   用户报「af-board 为什么不铺满下面的页面」。自造那份已删，本节的规则
+   直接用原型类名，全仓只有这一处 `.af-board` 定义。 */
+
+.af-board {
   display: grid; grid-auto-flow: column;
   grid-auto-columns: minmax(236px, 1fr);
   gap: var(--p-s3);
@@ -766,5 +773,5 @@ a.af-meter:hover { background: var(--p-surf-2); text-decoration: none; }
   .af-head { padding: 0 var(--p-s4); }
   .af-meters { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: var(--p-s3) var(--p-s3) 0; }
   .af-meters .af-meter:nth-child(3) { border-left: none; }
-  .af-board--proto { grid-auto-columns: 86%; padding: var(--p-s3); }
+  .af-board { grid-auto-columns: 86%; padding: var(--p-s3); }
 }
