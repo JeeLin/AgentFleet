@@ -1469,6 +1469,13 @@ kbd, .kbd {
 
 /* ---- 骨架页（`SkeletonPage.vue`） -------------------------------------- */
 
+/* 内容层的内边距。原型每一页都在 `.af-body` 里放一层带内边距的容器
+   （`index.html:23` 是内联 `padding:20px 20px 64px`）；静态内联样式被
+   `prototype-parity` 门禁禁止，所以落成这一层——与另外 12 页同一写法。 */
+.af-skeletonpage__pad {
+  padding: var(--p-s5) var(--p-s5) var(--p-s8);
+}
+
 /* 骨架页的身体：一块虚线框，**明说这是预留位置**而不是加载中。虚线在任何
    主题下都与实线卡片不同，且不依赖颜色（灰度打印也区分得出）。 */
 .af-skeletonpage__note {

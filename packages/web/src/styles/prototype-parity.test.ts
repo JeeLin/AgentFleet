@@ -523,12 +523,34 @@ const ROUTED_PAGES = [
   ...DELIVERED_PAGES,
   'packages/web/src/domains/agent/AgentCatalogPage.vue',
   'packages/web/src/domains/agent/AgentDetailPage.vue',
+  'packages/web/src/pages/SettingsPage.vue',
 ] as const
+
+/**
+ * 不在 `App.vue` 的 `PAGES` 里、但**同样要守骨架判据**的外壳组件 / 页面。
+ *
+ * - `SkeletonPage.vue`：10 个占位页都由它渲染。它退回 `.af-page` 就等于
+ *   10 页一起退回——2026-11-17 实测它当时确实是 `section.af-page` +
+ *   `.af-page__head` / `__title`，即 10 个占位页全是裸 `<h1>`，而它们
+ *   「不在对齐范围」，所以没有任何门禁看得见。
+ * - `NewSessionPage.vue`：当前没有路由（新形态下会话必须先有项目，
+ *   `/sessions/new` 在 `LEGACY_PATHS` 里落到总览），但它是
+ *   `docs/design-system.md:1706` 登记的新建会话落点，实现是完整的。
+ *
+ * 这两条与 `ROUTED_PAGES` 分开列：`ROUTED_PAGES` 要参与「与 App.vue 对齐」
+ * 的集合比较，而这两个组件本来就不在路由表里，混进去会让那条比较恒红。
+ * 它们各自有一条「文件还在、且仍有骨架类」的守卫。
+ */
+const NON_ROUTED_SHELL_PAGES = [
+  'packages/web/src/domains/shared/components/SkeletonPage.vue',
+  'packages/web/src/domains/session/NewSessionPage.vue',
+] as const
+
+/** 骨架判据的全部对象：路由页面 + 非路由外壳。两条循环都用这一份。 */
+const SHELL_PAGES = [...ROUTED_PAGES, ...NON_ROUTED_SHELL_PAGES] as const
 
 /** `App.vue` 里可达、但**故意不在**骨架门禁范围内的页面 → 理由。 */
 const OUT_OF_SCOPE_PAGES: Record<string, string> = {
-  'packages/web/src/pages/SettingsPage.vue':
-    '分段式设置页（v0.8.1 子任务 11 交付）：`.af-settings` 两栏，没有 .af-body 骨架',
   'packages/web/src/domains/project/ExecutionPage.vue': 'SkeletonPage 占位（归 v0.8.2）',
   'packages/web/src/domains/project/ReplayPage.vue': 'SkeletonPage 占位（归 v0.8.2）',
   'packages/web/src/domains/project/TimelinePage.vue': 'SkeletonPage 占位（归 v0.8.2）',
@@ -572,7 +594,7 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
     ).toEqual([])
   })
 
-  it('10 个已交付页面每个都出现 af-body 或 af-head', () => {
+  it('范围内每一页都真的用原型的骨架类（af-body / af-head）', () => {
     /**
      * 尚未迁移的页面 → 负责迁移的子任务。
      *
@@ -645,7 +667,7 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
      */
     const stillPending: string[] = []
     const migratedButListed: string[] = []
-    for (const page of ROUTED_PAGES) {
+    for (const page of SHELL_PAGES) {
       const src = readRepoFile(page)
       const classes = staticClassesOfTemplate(src)
       const listed = page in TODO_OVERVIEW
@@ -718,7 +740,7 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
      */
     const HEAD_AT = [/<PageHead[\s>]/g, /<header[^>]*\bclass="[^"]*\baf-head\b[^"]*"/g]
     const nested: string[] = []
-    for (const page of ROUTED_PAGES) {
+    for (const page of SHELL_PAGES) {
       const tpl = templateOf(readRepoFile(page))
       const bodyAt = tpl.search(/class="[^"]*\baf-body\b/)
       if (bodyAt < 0) continue // 缺 af-body 由上面那条用例负责，这里不重复报
@@ -801,7 +823,7 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
     }
   })
 
-  it('10 个页面模板里不许有内联样式（style="）', () => {
+  it('范围内每一页的模板里都不许有静态内联样式（style="）', () => {
     /**
      * 残留内联样式 → 由哪个子任务清掉。
      *

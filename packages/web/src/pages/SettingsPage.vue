@@ -41,6 +41,7 @@
 import { onMounted, ref } from 'vue'
 
 import { navigate } from '@/router'
+import PageHead from '@/domains/shared/components/PageHead.vue'
 import {
   DEFAULT_THEME,
   currentTheme,
@@ -248,18 +249,28 @@ function onToggleFollowOS(): void {
 </script>
 
 <template>
-  <div class="af-page af-settings">
-    <div class="af-page__head">
-      <div>
-        <h1 class="af-page__title">设置</h1>
-        <p class="af-page__sub">
-          M2 范围。这一页先定结构：<b>没有任何一项现在能改</b>，每个控件都是禁用的，
-          旁边写明 M2 时会做什么。列在这里是因为导航需要知道它存在，不是为了先画一个假表单。
-        </p>
-      </div>
-      <span class="af-spacer"></span>
-      <span class="af-badge af-badge--off">M2 起可改</span>
+  <!-- 页面骨架照原型 `settings.html:15-26`：`header.af-head` 是 `.af-body` 的
+       兄弟，内容在 `.af-body` 里（那一页的 `.af-body` 内是一层内联
+       `padding:20px 20px 64px` 的 `.af-stack`，静态内联样式被门禁禁止，
+       落成下面的 `.af-settings__stack`）。上一版是自造的
+       `.af-page` / `.af-page__head` / `.af-page__title` / `.af-page__sub`
+       ——那一族规则已随 v0.8.1 子任务 2 的类名删除，于是这一页（子任务 11
+       交付的配色设置页）一直是**没有页头几何的裸页面**。 -->
+  <PageHead>
+    <div>
+      <h1 class="af-head__title">设置</h1>
+      <p class="af-head__sub">
+        M2 范围。这一页先定结构：<b>没有任何一项现在能改</b>，每个控件都是禁用的，
+        旁边写明 M2 时会做什么。列在这里是因为导航需要知道它存在，不是为了先画一个假表单。
+      </p>
     </div>
+    <template #actions>
+      <span class="af-badge af-badge--off">M2 起可改</span>
+    </template>
+  </PageHead>
+
+  <div class="af-body">
+    <div class="af-settings__stack">
 
     <!-- ① 合并权（原型 `:29-77`） -->
     <section class="af-region af-settings__region" aria-label="合并权">
@@ -523,12 +534,20 @@ function onToggleFollowOS(): void {
         承诺一件本阶段做不到的事。
       </p>
     </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.af-settings {
-  max-width: 900px;
+/* 内容层：原型 `settings.html:26` 是一层内联 `padding:20px 20px 64px` 的
+   `.af-stack`（`gap: var(--s4)`），并带 `max-width:960px`。
+   静态内联样式被 `prototype-parity` 门禁禁止，落成这一层。 */
+.af-settings__stack {
+  padding: var(--p-s5) var(--p-s5) var(--p-s8);
+  display: flex;
+  flex-direction: column;
+  gap: var(--p-s4);
+  max-width: 960px;
 }
 /* 五个分区之间的竖向节奏。**不写进 `components.css`**：那里是页面外壳的
    契约，这些间距只属于本页的分区堆叠。 */

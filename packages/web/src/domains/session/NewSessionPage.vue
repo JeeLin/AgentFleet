@@ -30,6 +30,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
+import PageHead from '@/domains/shared/components/PageHead.vue'
 import StateBadge from '@/domains/shared/components/StateBadge.vue'
 import type { AgentSummary } from '@/domains/agent/api'
 import type { DeviceSummary } from '@/domains/device/api'
@@ -213,18 +214,29 @@ async function submit(): Promise<void> {
 </script>
 
 <template>
-  <div class="af-page af-wizard">
-    <div class="af-page__head">
-      <div>
-        <h1 class="af-page__title">新建会话</h1>
-        <p class="af-page__sub">
-          选设备 → 选 agent → 选路径。路径是<b>创建期的一次性输入，建立后只读</b>——
-          换路径就是换一个会话。这个页面没有任何「打开工作区」的入口。
-        </p>
-      </div>
-      <span class="af-spacer"></span>
-      <button class="af-btn af-btn--sm" type="button" :disabled="loading" @click="load">刷新</button>
+  <!-- 骨架照原型页面同形：`header.af-head`（`PageHead` 渲染）与 `.af-body` 是
+       兄弟。上一版是自造的 `.af-page` / `.af-page__head` / `.af-page__title`
+       / `.af-page__sub`——那一族规则已随 v0.8.1 子任务 2 的类名删除。
+
+       **这一页当前没有路由**（`/sessions/new` 在 `LEGACY_PATHS` 里落到总览，
+       见 `router.ts`：新形态下会话必须先有项目，旧地址里没有项目 id）。它仍
+       按原型形状留着，因为 `docs/design-system.md:816` / `:1706` 把它登记为
+       「新建会话」的落点，等可达入口接上时不必重做外壳。 -->
+  <PageHead>
+    <div>
+      <h1 class="af-head__title">新建会话</h1>
+      <p class="af-head__sub">
+        选设备 → 选 agent → 选路径。路径是<b>创建期的一次性输入，建立后只读</b>——
+        换路径就是换一个会话。这个页面没有任何「打开工作区」的入口。
+      </p>
     </div>
+    <template #actions>
+      <button class="af-btn af-btn--sm" type="button" :disabled="loading" @click="load">刷新</button>
+    </template>
+  </PageHead>
+
+  <div class="af-body">
+    <div class="af-wizard"><div class="af-wizard__stack">
 
     <div v-if="loadError" class="af-inline-error" role="alert">
       {{ loadError }}
@@ -443,10 +455,18 @@ async function submit(): Promise<void> {
         </p>
       </aside>
     </div>
+    </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
+/* 内容层：原型每一页在 `.af-body` 里放一层带内边距的容器（`index.html:23`
+   是内联 `padding:20px 20px 64px`）。静态内联样式被 `prototype-parity`
+   门禁禁止，落成这一层——与另外 12 页同一写法。 */
+.af-wizard__stack {
+  padding: var(--p-s5) var(--p-s5) var(--p-s8);
+}
 .af-wizard {
   max-width: 1080px;
 }

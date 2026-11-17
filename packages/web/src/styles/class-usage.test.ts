@@ -108,38 +108,19 @@ describe('模板里的 af-* 类名都有定义（`.af-head__title` 那次漏定�
   const NO_RULE_BY_DESIGN = new Map<string, string>([
     // ① 纯钩子
     ['af-card', '卡片钩子：外观来自同一元素上的 `af-taskcard` / `af-catalog__card` 等具体类'],
-    /*
-      页面外壳那一族（`.af-page` / `__head` / `__title` / `__actions` / `__sub` /
-      `__subtitle` / `--flush` / `__section`）的规则已随类名一起删除（v0.8.1
-      子任务 2）：它们在原型 `prototype/assets/app.css` 里命中 0，是实现自造的
-      第二套页面设计。但**页面模板还留着它们**——逐页换成原型的
-      `.af-head` + `.af-body` 骨架归子任务 6/8/9。
-
-      v0.8.1 子任务 4 只迁了**共享页头**（`PageHead.vue` + 它的 4 个调用点
-      `AgentDetailPage` / `DeviceDetailPage` / `ProjectTaskPage` / `BindPage`）。
-      那 4 页里 `af-page__title` 已换成原型的 `.af-head__title`
-      （`app.css:125`）、`af-page__sub` 已换成 `.af-head__sub`（`app.css:129`），
-      `af-page__head` 与 `af-page__actions` 由 `PageHead` 渲染的
-      `header.af-head` + `.af-head__spacer` 取代。
-
-      **这一族仍然一条都不能从下面删**：另外 9 个页面模板还在用它们
-      （`af-page__head` 9 处、`af-page__sub` 4 处、`af-page__title` 9 处……），
-      删掉任何一条都会立刻变成正向门禁的 9+ 条假红灯。整块归子任务 6/8/9。
-    */
-    ['af-page', '页面根容器：规则已删，骨架迁到 `.af-head` + `.af-body`（子任务 6/8/9）'],
-    ['af-page--flush', '同上：无内边距的页面根变体（`SessionPage`），迁到 `.af-body--fill`'],
-    ['af-page__head', '页面页头：迁到原型的 `.af-head`（`PageHead` 已迁，其余 9 页归子任务 6/8/9）'],
-    ['af-page__title', '页面 h1：迁到原型的 `.af-head__title`（`PageHead` 的 4 个调用点已迁完，其余归 6/8/9）'],
-    ['af-page__actions', '页头右侧动作：迁到 `.af-head` 里的 `.af-btn` + `.af-head__spacer`'],
-    ['af-page__sub', '页面副标题：迁到原型的 `.af-head__sub`（`PageHead` 的 4 个调用点已迁完，其余归 6/8/9）'],
-    ['af-page__subtitle', '页内分区标题：迁到原型的 `.af-region__title`'],
+    // 页面外壳那一族（`.af-page` / `__head` / `__title` / `__actions` / `__sub` /
+    // `__subtitle` / `--flush`）的豁免在 v0.8.1 子任务 10 已**整块删除**：
+    // 那一族在原型 `prototype/assets/app.css` 里命中 0，是实现自造的第二套页面
+    // 设计；随着 12 个页面 + 骨架页组件全部迁到 `.af-head` + `.af-body`，模板侧
+    // 实测已 **0 处**使用（2026-11-17，按 `class="..."` 静态属性统计）。
+    // 留着豁免就是对门禁的静默关闭——所以连同上一条「只在还没迁移时成立」的
+    // 守卫一起删了，改成下面那条**反向**守卫：这一族不许再用、也不许再定义。
     ['af-catalog', '`AgentCatalog` 的根标记类：后代选择器 `.af-catalog .af-catalog__x` 里已包含它'],
     ['af-agd', '`AgentDetailPage` 的根标记类：同上，`.af-agd .af-agd__x`'],
     ['af-devd', '`DeviceDetailPage` 的根标记类：同上'],
     ['af-taskd', '`ProjectTaskPage` 的根标记类：同上'],
     ['af-acceptancepanel', '`AcceptancePanel` 的根标记类：外观全部走 `.af-region` + `.af-acceptancepanel__x`'],
     ['af-failurepanel', '`FailurePanel` 的根标记类：同上'],
-    ['af-skeletonpage', '`SkeletonPage` 的根标记类：外观走 `.af-skeletonpage__x`'],
     ['af-devpage__detail', '`DevicesPage` 的设备详情分区钩子：与 `af-region` 一起用，外观全部来自 `.af-region`'],
     ['af-auth--setup', '`SetupPage` 的 `af-auth` 变体钩子：当前与 `af-auth` 同观感，保留是为了将来真要分叉时有地方加'],
     ['af-auth__note--info', '`af-auth__note` 的语义变体：说明性提示与错误提示目前同观感，靠 `role="alert"` 区分对读屏的语义'],
@@ -154,20 +135,6 @@ describe('模板里的 af-* 类名都有定义（`.af-head__title` 那次漏定�
     // 自造的 `.af-ov__fold`）。v0.8.1 子任务 6 已把总览页换成原型的
     // `details.af-fold` 结构，这三条在 `prototype-shell.css:449-469` 有真规则，
     // 豁免随之删除——留着就是给已定义的类再开一个静默通道。
-  ])
-
-  /** 只有「页面外壳那一族待迁移」才允许整族豁免——它们是子任务 6/8/9 的账。 */
-  const MIGRATION_EXEMPT = new Set([
-    'af-page',
-    'af-page--flush',
-    'af-page__head',
-    'af-page__title',
-    'af-page__actions',
-    'af-page__sub',
-    'af-page__subtitle',
-    // `af-page__section` 不在此列：它唯一的调用点在总览页，v0.8.1 子任务 6 换
-    // 成原型的 `.af-region` 之后模板里已经 0 处使用，豁免与
-    // `NO_RULE_BY_DESIGN` 那一条一起删掉了。
   ])
 
   it('没有任何页面在用「样式表里不存在的类」', () => {
@@ -199,36 +166,55 @@ describe('模板里的 af-* 类名都有定义（`.af-head__title` 那次漏定�
   })
 
   /*
-    「整族豁免」不许变成永久后门。
+    自造的页面外壳那一族**不许回来**。
 
-    页面外壳那一族是**待迁移**的账，不是「本来就不该有规则」。迁移完成的
-    信号是：样式表里重新定义了它（那说明有人把自造层又加回来了）或模板里
-    已经没人用了（那说明迁移做完了，豁免该删）。
+    这一族（`.af-page` / `__head` / `__title` / `__actions` / `__sub` /
+    `__subtitle` / `--flush` / `__section`）在原型 `prototype/assets/app.css`
+    里命中 0，是实现自造的第二套页面设计，用户 2026-11-16 裁定「以原型为准，
+    现在的前端代码我很不满意」——实现侧自造的类名层一律删除，不迁移、不保留
+    别名。
 
-    两种情形都要红，于是这份名单只能说一件事：「还没迁完」。
+    v0.8.1 全部 12 个页面 + 骨架页组件迁完之后，模板侧实测 0 处使用，于是原先
+    的「整族豁免」(`MIGRATION_EXEMPT`) 与它的「只在还没迁移时成立」守卫一起删了。
+    豁免没了，这条门禁就得靠下面这条反向用例守住**回潮**：要么有人重新在模板里
+    写这些类，要么有人把规则加回样式表，两条都判红。
 
-    子任务 4 迁的是**共享页头**（`PageHead.vue` + 4 个调用点），页面根容器与
-    另外 9 个页面的页头仍是自造那一套，所以这份名单**一条都没减**。配套的
-    迁移不变量在 `PageHead.test.ts` 里钉着（那 4 页的页头块里不许再出现
-    `af-page__*`），不靠这里删条目来表达。
+    `af-page__subtitle` 也在名单里：`BoardPage` 曾用它标页内分区标题，现在用原型
+    的 `.af-region__title`。
   */
-  it('页面外壳那一族的豁免只在「还没迁移」时成立', () => {
-    const stillUsed = [...MIGRATION_EXEMPT].filter((name) =>
-      [...VUE_SRC.values()].some((src) => staticClasses(src).includes(name)),
-    )
-    for (const name of MIGRATION_EXEMPT) {
-      expect(
-        isDefined(name),
-        `样式表里又重新定义了 .${name} —— 自造层不许回来（用户 2026-11-16 裁定「以原型为准」）`,
-      ).toBe(false)
+  it('自造的页面外壳类不许回到模板或样式表里（用户裁定「以原型为准」）', () => {
+    const BANNED = [
+      'af-page',
+      'af-page--flush',
+      'af-page__head',
+      'af-page__title',
+      'af-page__actions',
+      'af-page__sub',
+      'af-page__subtitle',
+      'af-page__section',
+    ]
+    // ① 模板里不许再写（静态 class 属性）。
+    const inTemplates: string[] = []
+    for (const [file, src] of VUE_SRC) {
+      const used = staticClasses(src)
+      for (const name of BANNED) if (used.includes(name)) inTemplates.push(`${file}: .${name}`)
     }
-    // 一份都没人用了 = 迁移完成：那时这个豁免集合必须整个删掉。
     expect(
-      stillUsed.length,
-      [
-        '页面外壳那一族已经没人用了（迁移完成），请把 MIGRATION_EXEMPT 与',
-        'NO_RULE_BY_DESIGN 里对应的 8 条一起删掉——豁免留着就是对门禁的静默关闭。',
-      ].join('\n'),
-    ).toBeGreaterThan(0)
+      inTemplates,
+      `这些模板又用上了自造的页面外壳类（应改用 .af-head / .af-body / .af-region）：\n${inTemplates.join('\n')}`,
+    ).toEqual([])
+
+    // ② 样式表里不许再定义。
+    const redefined = BANNED.filter((name) => isDefined(name))
+    expect(
+      redefined,
+      `样式表里重新定义了自造外壳类：${redefined.join(', ')}——自造层不许回来`,
+    ).toEqual([])
+
+    // 判定本身有效：这条守卫必须能区分「名单里的」与「真实在用的」。
+    // 拿一个确实有规则的类当正例，否则 `staticClasses` / `isDefined` 若双双
+    // 失效（一个恒返回空、一个恒返回 false），上面两条断言会在空集合上恒真。
+    expect(staticClasses(VUE_SRC.get('packages/web/src/App.vue') ?? '')).toContain('af-shell')
+    expect(isDefined('af-shell')).toBe(true)
   })
 })

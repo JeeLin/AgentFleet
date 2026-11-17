@@ -16,6 +16,8 @@
    形状，抄 19 遍必然漂移（有一页忘了写版本号，用户就会以为它坏了）。
    =========================================================================== */
 
+import PageHead from '@/domains/shared/components/PageHead.vue'
+
 withDefaults(
   defineProps<{
     /** 页面标题，与 `prototype/` 对应页一致。 */
@@ -32,22 +34,36 @@ withDefaults(
 </script>
 
 <template>
-  <section class="af-page af-skeletonpage">
-    <header class="af-page__head">
-      <h1 class="af-page__title">{{ title }}</h1>
+  <!-- 骨架页也要用原型的页面骨架（`header.af-head` + `div.af-body` 两块并排），
+       否则它渲染出来的页头没有几何：上一版用的是自造的 `.af-page` /
+       `.af-page__head` / `.af-page__title`，而那一族规则已随 v0.8.1 子任务 2
+       的类名删除，于是 **10 个占位页**（执行监控 / 回放 / 时间线 / 定时 / 收件箱 /
+       动态 / 管家 / 三个设置子页）一直是一行没有样式的裸 `<h1>`。
+       它们不在「10 个已交付页面」的清单里，门禁扫不到；2026-11-17 子任务 10
+       逐页扫 `af-page` 残留时抓到。
+
+       两段根节点：与另外 12 个页面同一形状（`PageHead` 与 `.af-body` 是兄弟）。
+       骨架页不接收透传 attrs，多根不会触发 fallthrough 警告。 -->
+  <PageHead>
+    <div>
+      <h1 class="af-head__title">{{ title }}</h1>
       <p class="af-skeletonpage__note">
         本页在 <strong>{{ version }}</strong> 开放。设计稿见
         <code>{{ prototype }}</code>。
       </p>
-    </header>
-
-    <div class="af-skeletonpage__body">
-      <slot>
-        <ul v-if="items.length" class="af-skeletonpage__list">
-          <li v-for="item in items" :key="item">{{ item }}</li>
-        </ul>
-        <p v-else class="af-skeletonpage__empty">这一页还没有可显示的内容。</p>
-      </slot>
     </div>
-  </section>
+  </PageHead>
+
+  <div class="af-body">
+    <div class="af-skeletonpage__pad">
+      <div class="af-skeletonpage__body">
+        <slot>
+          <ul v-if="items.length" class="af-skeletonpage__list">
+            <li v-for="item in items" :key="item">{{ item }}</li>
+          </ul>
+          <p v-else class="af-skeletonpage__empty">这一页还没有可显示的内容。</p>
+        </slot>
+      </div>
+    </div>
+  </div>
 </template>
