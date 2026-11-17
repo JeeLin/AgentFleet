@@ -234,6 +234,29 @@ function switchTo(id: string): void {
   navigate(`/project/${encodeURIComponent(id)}/board`)
 }
 
+/* ---- 列顶的六态形状 ---------------------------------------------------- */
+
+/**
+ * 状态 → 原型的形状类（`prototype/assets/app.css:235-260`）。
+ *
+ * **形状是颜色之外的第二重编码**：排队色与失败色的亮度很接近（原型在同一段
+ * 注释里写了这一点），只靠色带分不出来。原型的列头结构是
+ * `.af-shape.af-shape--<state>` + `.af-col__name` + `.af-col__count`
+ * （`prototype/board.html:61-63`），这里照抄。
+ *
+ * 用 `satisfies Record<TaskStateWire, string>` 而不是拼字符串：键漏一个就是
+ * 编译错误，而不是「某一列少了形状、要肉眼比六张截图才发现」。
+ * 这三个类都已在 `prototype-shell.css` §7（`.af-shape`）有定义，不新增样式。
+ */
+const SHAPE_CLASS = {
+  pending: 'af-shape--pending',
+  queued: 'af-shape--queued',
+  running: 'af-shape--running',
+  review: 'af-shape--review',
+  done: 'af-shape--done',
+  failed: 'af-shape--failed',
+} as const satisfies Record<TaskStateWire, string>
+
 /* ---- 点卡片 ------------------------------------------------------------ */
 
 /**
@@ -328,12 +351,22 @@ async function submitCreate(): Promise<void> {
 </script>
 
 <template>
-  <!-- 页面骨架照原型 `board.html:38-56`：
-         `.af-body.af-body--pad` 包住整页内容，页头是 `.af-head` 那一行。
-       上一版是 `.af-page`（`max-width:1400px; margin:0 auto` 的居中单栏），
-       原型是「外壳里吃满宽度的主区」——两者的第一眼差别就在这里。 -->
-  <div class="af-body af-body--pad">
-    <header class="af-head af-head--page">
+  <!-- 页面骨架照原型 `board.html:15-114`，只有两层：页头 `.af-head` +
+        内容区 `.af-body.af-body--fill`。
+        上一版是 `.af-page`（`max-width:1400px; margin:0 auto` 的居中单栏），
+        原型是「外壳里吃满宽度的主区」——两者的第一眼差别就在这里。
+        内容区用 `--fill` 而不是 `--pad`：原型的页头**不在**内容区里，两块是
+        `.af-main` 下的兄弟；而且 `--fill`（`display:flex; flex-direction:column;
+        overflow:hidden`，`prototype/assets/app.css:134`）才是让 `.af-board`
+        吃满剩余高度、六列各自内部滚动的那一档。
+
+        **页头必须是 `.af-body` 的兄弟，不能嵌在里面**（`prototype/board.html:29`
+        的 `header.af-head` 在 `:57` 的 `div.af-body` 之前，8 个原型页无一例外）。
+        嵌进去的后果：`.af-body--pad` 的 `padding: var(--s6)` 会把页头挤成内缩，
+        而 `.af-body` 又是 `overflow:auto` 的那一层——滚动时页头跟着滚走。
+        所以这里是两个兄弟节点，靠外层 `.af-main`（`display:flex;
+        flex-direction:column`，`app.css:113`）竖排。 -->
+  <header class="af-head">
       <div class="af-switch" :data-open="menuOpen ? 'true' : 'false'">
         <button
           type="button"
@@ -389,8 +422,9 @@ async function submitCreate(): Promise<void> {
            不做自动轮询（见脚本里的理由），所以要有一个手动的口子。 -->
       <button type="button" class="af-btn" @click="refresh">刷新</button>
       <button type="button" class="af-btn af-btn--primary" @click="openDialog">新建任务</button>
-    </header>
+  </header>
 
+  <div class="af-body af-body--fill">
     <!-- 播报「已刷新」：按钮按下去要有一个能听见的回应，否则读屏用户不知道按到了没有。 -->
     <p v-if="refreshed" class="af-muted" role="status" aria-live="polite">已刷新</p>
 
@@ -409,7 +443,13 @@ async function submitCreate(): Promise<void> {
     </EmptyState>
 
     <template v-else>
-      <h2 class="af-page__subtitle">{{ project?.name ?? '看板' }}</h2>
+      <!-- 分区标题：`af-page__subtitle` 是实现自造的那一族（`af-page*`），原型
+           `app.css` 里命中 0 条规则；对应位是 `.af-region__title`（v0.8.1
+           子任务 2 的裁定：自造类名一律删，不留别名）。删掉后这个 `h2` 会退回
+           浏览器默认尺寸，比页头 h1 还大一圈，所以同时补上 `af-head__sub`
+           （`app.css:129`，原型里「同一块内容的小一号标题」），本页的可见文案
+           与 `role="heading"` 层级都不变。 -->
+      <h2 class="af-head__sub">{{ project?.name ?? '看板' }}</h2>
 
       <!-- 写失败（含「重读任务失败」）单独一条，看板留在下面：写失败时把整页
            换成错误态，用户会以为任务没了。 -->
@@ -428,26 +468,38 @@ async function submitCreate(): Promise<void> {
         <button type="button" class="af-btn af-btn--primary" @click="openDialog">新建任务</button>
       </EmptyState>
 
+      <!-- 看板：结构与原型 `board.html:58-113` 逐层对应——
+           `.af-board` 是六列的网格，每列 `section.af-col[data-state]`，列头
+           `.af-col__head`（形状 + 列名 + 计数），列体 `.af-col__body`。
+           这几个类在 `prototype-shell.css` §5（`.af-board--proto` / `.af-col*`）
+           与 `components.css`（`.af-board`）里都已有规则，本页不再造第二套
+           `af-board__col*` 类名（v0.8.1：自造层删除，不留别名）。 -->
       <div class="af-board">
-        <section
-          v-for="col in COLUMNS"
-          :key="col.key"
-          class="af-board__col"
-          :data-state="col.key"
-        >
-          <header class="af-board__colhead">
-            <h3 class="af-board__coltitle">{{ labelOf(col.key) }}</h3>
+        <section v-for="col in COLUMNS" :key="col.key" class="af-col" :data-state="col.key">
+          <div class="af-col__head">
+            <!-- 形状先于列名：扫视时先靠形状分出六态（见脚本里 `SHAPE_CLASS`
+                 的理由）。`aria-hidden` 照原型——列名本身已经把状态说清了。 -->
+            <span class="af-shape" :class="SHAPE_CLASS[col.key]" aria-hidden="true"></span>
+            <h3 class="af-col__name">{{ labelOf(col.key) }}</h3>
             <!-- 计数 = 当前数组长度，不做「+3 更多」折叠（原型没有）。 -->
-            <span class="af-board__count" :aria-label="`${byState(col.key).length} 张`">
+            <span class="af-col__count" :aria-label="`${byState(col.key).length} 张`">
               {{ byState(col.key).length }}
             </span>
-          </header>
-          <p class="af-board__hint">{{ col.hint }}</p>
+          </div>
 
-          <!-- 列体：卡片都排在这一层里，内边距与卡片间距来自 `.af-board__colbody`
-               （原型 `.af-col__body`：`padding:8px; gap:8px`）。上一版卡片直接
-               排在列里，所以列头的左边与卡片左边差 16px。 -->
-          <div class="af-board__colbody">
+          <!-- 列的说明句（「失败的任务停在这里，不会自动回待办」）是实现多出来的
+               一段文案，原型列头只有上面三样。它排在 `.af-col__head` 与
+               `.af-col__body` **之间**，是 `.af-col`（flex column）的直接子元素：
+               不进 `.af-col__head`——否则会挤在列名与计数之间、把
+               `margin-left:auto` 的计数推歪；也不进 `.af-col__body`——那是
+               `padding:8px; gap:8px` 的卡片容器，混进一段说明会让首个卡片的
+               上边距与其余不一致。 -->
+          <p class="af-col__note">{{ col.hint }}</p>
+
+          <!-- 列体：卡片都排在这一层里，内边距与卡片间距来自 `.af-col__body`
+               （原型 `app.css:409-413`：`padding:8px; gap:8px`）。上一版卡片
+               直接排在列里，所以列头的左边与卡片左边差 16px。 -->
+          <div class="af-col__body">
             <TaskCard
               v-for="t in byState(col.key)"
               :key="t.id"
@@ -553,3 +605,25 @@ async function submitCreate(): Promise<void> {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* 列头下面那句列说明（`col.hint`）。
+   ---------------------------------------------------------------------------
+   原型 `board.html:60-64` 的列头只有「形状 / 列名 / 计数」三样，没有这句说明，
+   所以它没有原型类名可挂——原来的 `.af-board__hint` 是随自造层一起删掉的
+   （v0.8.1：自造类不留别名）。这句文案本身是**列语义的一部分**（六态的名字
+   对第一次见到的人不足以说明「为什么失败要单独一列」），不是装饰，所以保留
+   文案，把它的样式收进本页的 scoped 样式：只有一个使用者，放进全局表会让它
+   变成第二个看板壳层。
+
+   两侧内边距取 `--p-s3`（12px）与 `.af-col__head` 的左右内边距对齐（原型
+   `app.css:389`），上面不加顶距：`.af-col__head` 自带底边线，再垫一段空白会
+   让列头和它的说明分成两块。 */
+.af-col__note {
+  margin: 0;
+  padding: var(--p-s2) var(--p-s3) 0;
+  font-size: var(--p-t-2xs);
+  color: var(--p-fg-3);
+  line-height: var(--af-leading-snug);
+}
+</style>

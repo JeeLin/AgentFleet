@@ -138,7 +138,8 @@ describe('BoardPage：两个请求都成功', () => {
     //
     // 另：整板无任务时页面只渲染一条空态（规格测试标准 3），所以这一条的
     // 夹具必须给至少一个任务，否则连 `.af-board` 都不在。
-    const titles = Array.from(w.element.querySelectorAll('.af-board__coltitle')).map(
+    // 列名类的选择器也按原型改（`.af-col__name`，`prototype/board.html:62`）。
+    const titles = Array.from(w.element.querySelectorAll('.af-col__name')).map(
       (e) => e.textContent ?? '',
     )
     expect(titles).toEqual(['待办', '排队中', '执行中', '待验收', '已完成', '失败'])
@@ -369,7 +370,7 @@ describe('BoardPage（v0.8.0）：六列的列名、顺序与文案', () => {
     const w = mountAt('p_1')
     await flushUntilSettled(w)
 
-    const titles = Array.from(w.element.querySelectorAll('.af-board__coltitle')).map(
+    const titles = Array.from(w.element.querySelectorAll('.af-col__name')).map(
       (e) => e.textContent ?? '',
     )
     expect(titles).toEqual(['待办', '排队中', '执行中', '待验收', '已完成', '失败'])
@@ -383,11 +384,11 @@ describe('BoardPage（v0.8.0）：六列的列名、顺序与文案', () => {
     const w = mountAt('p_1')
     await flushUntilSettled(w)
 
-    const cols = Array.from(w.element.querySelectorAll('.af-board__col'))
+    const cols = Array.from(w.element.querySelectorAll('.af-col'))
     const keys = ['pending', 'queued', 'running', 'review', 'done', 'failed']
     expect(cols).toHaveLength(keys.length)
     keys.forEach((key, i) => {
-      const head = cols[i]?.querySelector('.af-board__coltitle')?.textContent ?? ''
+      const head = cols[i]?.querySelector('.af-col__name')?.textContent ?? ''
       expect(head, `第 ${i + 1} 列的列头不是词表里的 ${key}`).toBe(
         STATES[key as TaskStateWire].label,
       )
@@ -412,7 +413,7 @@ describe('BoardPage（v0.8.0）：分组与脏数据', () => {
     expect(text).toContain('这个项目还没有任务')
     expect(text, '整板空时不该再出现六条列内空态').not.toContain('这一列还没有任务')
     // 六列仍在：原型 board.js:347 的「空列不隐藏」对整板空同样成立。
-    expect(w.element.querySelectorAll(".af-board__col")).toHaveLength(6)
+    expect(w.element.querySelectorAll('.af-col')).toHaveLength(6)
     // 整板空态里也要有新建入口（空态必须给出路）。
     expect(text).toContain('新建任务')
   })
@@ -423,13 +424,13 @@ describe('BoardPage（v0.8.0）：分组与脏数据', () => {
     const w = mountAt('p_1')
     await flushUntilSettled(w)
 
-    const cols = Array.from(w.element.querySelectorAll('.af-board__col'))
+    const cols = Array.from(w.element.querySelectorAll('.af-col'))
     expect(cols).toHaveLength(6)
     for (const col of cols) {
       expect(col.querySelectorAll('.af-taskcard')).toHaveLength(1)
     }
     // 计数徽标也要是 1（不是恒 0，也不是「N 张」的字面量）。
-    for (const count of Array.from(w.element.querySelectorAll('.af-board__count'))) {
+    for (const count of Array.from(w.element.querySelectorAll('.af-col__count'))) {
       expect(count.textContent?.trim()).toBe('1')
     }
   })
@@ -596,5 +597,87 @@ describe('BoardPage（v0.8.0）：时钟、跳转、错误与新建对话框', (
     // 填描述 → enabled
     await modal.find('.af-textarea').setValue('构建时间肉眼可感地变短')
     expect(submitBtn().attributes('disabled')).toBeUndefined()
+  })
+})
+
+/* ===========================================================================
+   v0.8.1 子任务 7：页面骨架与原型逐层对齐（`prototype/board.html`）
+   ---------------------------------------------------------------------------
+   这一节只量**结构**，不量外观：外观在样式表里（`prototype-shell.css` §5、
+   `components.css` 的 `.af-board`），这里量的是「模板有没有照原型搭出那几层」。
+
+   判红方式（三条各自）：
+     · 根容器不给 `af-body--fill` → 第一条红（内容区不是「吃满剩余高度、
+       列内各自滚动」的那一档，六列会跟着整页滚）；
+     · 列数写成 5 或 7、某列少了列头或列体（例如把 `.af-col__body` 省成裸
+       `div`）→ 第二条红；
+     · `data-state` 拼错 / 漏一个 / 重复一个 → 第三条红。
+
+   为什么按**类名**量而不是按标签量：原型自己就是靠这几个类承载外观
+   （`app.css:370-413`），类名对不上时样式表里的规则一条都不会生效，
+   而带 `<section>` / `<div>` 的「看起来像」的模板照样能骗过肉眼审查。
+   =========================================================================== */
+
+describe('BoardPage（v0.8.1）：骨架与原型 board.html 对齐', () => {
+  it('page_root_uses_af_body_fill：根元素带 af-body 与 af-body--fill', async () => {
+    // 原型 `board.html:57`：`<div class="af-body af-body--fill">`。
+    // 上一版是 `af-body af-body--pad`（内容区自己带 24px 内边距），
+    // 差别是 `.af-body--fill` 的 `overflow:hidden` + 列内滚动。
+    //
+    // ⚠️ 不能用 `w.element`：本仓 `@vue/test-utils` 的 `w.element` 就是那个带
+    // `data-v-app` 的**挂载点本身**（`class=""`），`w.html()` 的输出又以模板
+    // 注释开头（本页根节点前就有一条）。所以按类名在渲染结果里取：整页只该有
+    // 一个 `.af-body`，它就是组件根——这也是「根元素」这个词唯一能落地的判据。
+    // （断言写成 toHaveLength(1)：将来若有人在页头里再包一层 `.af-body`，
+    // 这一条会红在「多个」，而不是静默取第一个通过。）
+    stubBoard(sixTasks())
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const bodies = Array.from(w.element.querySelectorAll('.af-body'))
+    expect(bodies, '整页只该有一个 .af-body（页面内容区）').toHaveLength(1)
+    const body = bodies[0]
+    expect(body?.classList.contains('af-body--fill'), '原型 board.html:57 是 .af-body--fill').toBe(
+      true,
+    )
+    // 页头与内容区是**兄弟**（原型 `.af-main` 里只有 `.af-head` + `.af-body`）
+    // 而不是「页头包在 `.af-body` 里」——包住的话 `overflow:hidden` 的
+    // `--fill` 就管不到看板，六列会跟着整页滚。
+    // 判据用渲染结果里两个类都在：`w.element` 是挂载点那层空容器，
+    // 往上一层已经出了组件，量不到兄弟关系。
+    const rendered = w.element.innerHTML
+    expect(rendered.includes('af-head')).toBe(true)
+    // 反向验证：挂载点那层空容器**没有**这些类——拿错层必须判红。
+    expect(w.element.classList.contains('af-body--fill')).toBe(false)
+  })
+
+  it('six_columns_are_section_af_col：六列且各有且仅有一个列头与列体', async () => {
+    stubBoard(sixTasks())
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const cols = Array.from(w.element.querySelectorAll('.af-col'))
+    expect(cols).toHaveLength(6)
+    for (const col of cols) {
+      expect(col.tagName, '原型的列是 section（board.html:59）').toBe('SECTION')
+      // `querySelectorAll(...).length === 1`：多一个或少一个都红——多一个
+      // 说明有人又造了第二套列头/列体，少一个说明 `.af-col__body` 的
+      // `padding:8px; gap:8px`（app.css:409-413）无处可落。
+      expect(col.querySelectorAll('.af-col__head')).toHaveLength(1)
+      expect(col.querySelectorAll('.af-col__body')).toHaveLength(1)
+    }
+  })
+
+  it('data_state_covers_the_six_states：六列 data-state 的集合等于六态', async () => {
+    stubBoard(sixTasks())
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const states = Array.from(w.element.querySelectorAll('.af-col')).map(
+      (e) => e.getAttribute('data-state') ?? '',
+    )
+    // 集合相等（不是数组相等）：顺序由上一条用例钉着，这里钉的是
+    // 「有没有某一个态被两个列共用 / 漏掉」——那会让六条顶部色带少一条。
+    expect(new Set(states)).toEqual(new Set(['pending', 'queued', 'running', 'review', 'done', 'failed']))
   })
 })
