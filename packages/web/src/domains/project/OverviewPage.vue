@@ -21,6 +21,17 @@
        的空态并说明归属**，不画假句子——一个写着「2 小时前合入了…」的假摘要
        在验收时会被当成真数据。
 
+   ── 「正在跑」只说条数，不说设备名 ─────────────────────────────────
+   原型 `index.html:42` 是「3 个执行 · device-a / device-b / device-c」。实现
+   拿不到设备名：`ExecutionView`（`crates/hub-server/src/routes/tasks.rs:144`）
+   九个字段里没有 `device_id`，它只在库里有 `binding_id`。曾经前端 `Execution`
+   类型里写了一个可选 `device_id`，单测喂夹具所以一直是绿的，对着活 Hub 才
+   发现那个字段根本不发（2026-11-17）。**不编一个「device-a」充当它**——真名
+   与假名在页面上长得一样，验收只会记住「这一行有设备名」。
+
+   要把设备名补上，改的是后端契约（`ExecutionView` 带 `device_id`），
+   已记入 `docs/BUGS.md`。
+
    ── 一处与原型的有意偏离（两个动作按钮） ────────────────────────────
    原型 `index.html:55-58` 是「看板 / 执行监控」。执行监控页
    （`ExecutionPage.vue`）现在是骨架页，且要看执行必须带 `execId`——从总览
@@ -28,7 +39,7 @@
    等执行监控落地后换回来（记在里程碑 Bugs 表）。
    =========================================================================== */
 
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
 import PageHead from '@/domains/shared/components/PageHead.vue'
@@ -39,6 +50,7 @@ import {
 } from '@/domains/project/api'
 import { listProjectTasks, type Task } from '@/domains/project/taskApi'
 import { describeReadFailure } from '@/shared/http'
+import { handleLayerKeydown, pop, push } from '@/shared/focus'
 import { SHAPE_LABELS } from '@/shared/projectShape'
 import { navigate } from '@/router'
 
@@ -62,8 +74,6 @@ const hasProjects = computed(() => projects.value.length > 0)
 interface ProjectSummary {
   /** `running` 的任务数。 */
   running: number
-  /** 正在跑的执行落在哪些设备上（去重；没上报就不写）。 */
-  runningDevices: string[]
   /** `failed` 的任务数——「失败待处置」。 */
   failed: number
   /** `review` 的任务数——「待验收」。 */
@@ -82,15 +92,16 @@ function summaryOf(id: string): ProjectSummary | undefined {
 
 function summarize(tasks: Task[], bindings: number): ProjectSummary {
   const runningTasks = tasks.filter((t) => t.state === 'running')
-  const devices = new Set<string>()
-  for (const t of runningTasks) {
-    for (const e of t.executions ?? []) {
-      if (e.device_id) devices.add(e.device_id)
-    }
-  }
+  // 执行条数按**执行**数，不按任务数：一个任务重试过一次就有两条执行，
+  // 说「1 个执行进行中」而实际是 2 条，会让「等你决定」的计数逻辑看起来自洽、
+  // 实际对不上（失败重派是真会发生的路径）。
+  const runningExecutions = runningTasks.reduce(
+    (n, t) => n + (t.executions ?? []).filter((e) => e.state === 'running').length,
+    0,
+  )
   return {
-    running: runningTasks.length,
-    runningDevices: [...devices],
+    // 有执行记录时按执行数算；列表端点对没跑过的任务给空数组，那时退化成任务数。
+    running: runningExecutions > 0 ? runningExecutions : runningTasks.length,
     failed: tasks.filter((t) => t.state === 'failed').length,
     review: tasks.filter((t) => t.state === 'review').length,
     bindings,
@@ -112,7 +123,6 @@ async function loadSummaries(list: Project[]): Promise<void> {
           p.id,
           {
             running: 0,
-            runningDevices: [],
             failed: 0,
             review: 0,
             bindings: null,
@@ -209,20 +219,66 @@ const MANAGE_ENTRIES = [
    =========================================================================== */
 const butlerOpen = ref(false)
 const drawerEl = ref<HTMLElement | null>(null)
-const closeEl = ref<HTMLButtonElement | null>(null)
+const fabEl = ref<HTMLButtonElement | null>(null)
+let pushed = false
 
-async function toggleButler(): Promise<void> {
-  butlerOpen.value = !butlerOpen.value
+/**
+ * 开合走**全站的焦点栈**（`shared/focus.ts`），不是自己写一套。
+ *
+ * 曾经这里只有 `toggleButler` 里的一句 `closeEl.value?.focus()` 加模板上的
+ * `@keydown.esc`。两个后果都是实测出来的（2026-11-17，playwright 对着活 Hub）：
+ *
+ *   ① **Esc 关不掉**——键位挂在 `<aside>` 上，而焦点在「关闭」按钮里，事件确实
+ *      会冒到 aside……但只要焦点不在抽屉内（例如用户点了一下页面），一次 Esc
+ *      什么也不发生。判据放错地方，只在「刚好 Tab 到里面」时有效。
+ *   ② **背后没有 inert**——抽屉开着时 Tab 仍能走进整页，读屏也照样读得到
+ *      后面那些区域，那不是一个覆盖层该有的行为。
+ *
+ * `push` 一次解决两件事：背后 inert + 首焦点；`pop` 负责还焦点给 fab。
+ * `handleLayerKeydown` 只在**本层是栈顶**时才响应 Esc，所以将来在抽屉上再盖
+ * 一层（确认框之类）时，一次 Esc 不会把两层一起关掉。
+ */
+function openButler(): void {
+  butlerOpen.value = true
+  void nextTick(() => {
+    const el = drawerEl.value
+    if (!el || pushed) return
+    push(el, { opener: fabEl.value })
+    pushed = true
+    document.addEventListener('keydown', onKeydown)
+  })
+}
+
+function closeButler(): void {
   if (!butlerOpen.value) return
-  await nextTick()
-  closeEl.value?.focus()
+  butlerOpen.value = false
+  const el = drawerEl.value
+  if (pushed && el) {
+    pushed = false
+    document.removeEventListener('keydown', onKeydown)
+    pop(el)
+  }
 }
 
-async function closeButler(): Promise<void> {
-  butlerOpen.value = false
-  await nextTick()
-  drawerEl.value?.blur()
+function toggleButler(): void {
+  if (butlerOpen.value) closeButler()
+  else openButler()
 }
+
+function onKeydown(e: KeyboardEvent): void {
+  const el = drawerEl.value
+  if (!el) return
+  handleLayerKeydown(e, el, closeButler)
+}
+
+onBeforeUnmount(() => {
+  // 组件卸载时监听得摘掉：留着会让下一个页面的 Esc 被这个已卸载的抽屉接走。
+  document.removeEventListener('keydown', onKeydown)
+  if (pushed && drawerEl.value) {
+    pushed = false
+    pop(drawerEl.value)
+  }
+})
 
 async function load(): Promise<void> {
   loading.value = true
@@ -349,9 +405,7 @@ onMounted(load)
                 v-else-if="(summaryOf(p.id)?.running ?? 0) > 0"
                 class="af-xs"
               >
-                {{ summaryOf(p.id)?.running }} 个执行进行中<template
-                  v-if="(summaryOf(p.id)?.runningDevices.length ?? 0) > 0"
-                > · {{ summaryOf(p.id)?.runningDevices.join(' / ') }}</template>
+                {{ summaryOf(p.id)?.running }} 个执行进行中
               </span>
               <span v-else class="af-xs af-dim">没有在跑的执行</span>
             </div>
@@ -463,23 +517,41 @@ onMounted(load)
     </div>
   </div>
 
-  <!-- 管家抽屉壳（`index.html:161-199`）。`aria-hidden` 跟着状态走：
-       面板收起时它在 DOM 里但不可见，读屏与 Tab 都不该进去。 -->
-  <aside
-    ref="drawerEl"
-    class="af-drawer"
-    :class="{ 'af-drawer--open': butlerOpen }"
-    :aria-hidden="butlerOpen ? 'false' : 'true'"
-    aria-label="管家"
-    @keydown.esc="closeButler"
-  >
+  <!-- 管家抽屉壳 + 悬浮按钮（`index.html:161-199`）。`aria-hidden` 跟着状态走：
+       面板收起时它在 DOM 里但不可见，读屏与 Tab 都不该进去。
+
+       **必须 Teleport 到 body，且与 fab 同装在一个容器里**，两条理由都是实测的
+       （2026-11-17 对着活 Hub）：
+
+       ① `focus.push` 的 `inertOthers` 只把「body 的直接子节点里、不含浮层容器的
+          那几个」置 inert。抽屉留在页面模板里时，它所在的子树就是整页——于是
+          「背后全部 inert」退化成「一个都没 inert」，抽屉开着照样能 Tab 进背后的
+          项目卡片。`App.vue` 的键位帮助面板为同一条理由 Teleport。
+       ② fab 单留在页面里时，抽屉一开它就跟着那一整棵子树被 inert 掉：原型里
+          这个按钮此刻写着「收起」，而用户点不动它。所以 fab 与抽屉同属一个浮层
+          容器，入栈的是这个容器本身。
+
+       这个包装元素**故意不带类名**：它只为了给 `push()` 一个共同的宿主，
+       而 `.af-drawer` / `.af-fab` 都是 `position: fixed`（原型 `app.css:532` /
+       `:560`，无 transform 祖先），所以这层 div 不参与布局、不改几何。
+       给它起个 `af-butler` 之类的名字等于凭空再加一层自造类名——那正是
+       v0.8.1 在删的东西（`class-usage` 门禁会当场判红）。 -->
+  <Teleport to="body">
+    <div>
+      <aside
+        ref="drawerEl"
+        class="af-drawer"
+        :class="{ 'af-drawer--open': butlerOpen }"
+        :aria-hidden="butlerOpen ? 'false' : 'true'"
+        aria-label="管家"
+        tabindex="-1"
+      >
     <div class="af-drawer__head">
       <div>
         <h2 class="af-drawer__title">管家</h2>
         <div class="af-drawer__sub">总览页的管家只看全局；要对某个项目说话，进那个项目</div>
       </div>
       <button
-        ref="closeEl"
         type="button"
         class="af-btn af-btn--ghost af-drawer__close"
         aria-label="关闭管家面板"
@@ -513,18 +585,24 @@ onMounted(load)
       />
       <button class="af-btn af-btn--primary" type="button" disabled>发送</button>
     </div>
-  </aside>
+      </aside>
 
-  <button
-    class="af-fab"
-    type="button"
-    aria-haspopup="true"
-    :aria-expanded="butlerOpen ? 'true' : 'false'"
-    @click="toggleButler"
-  >
-    <span class="af-fab__mark" aria-hidden="true">管</span>
-    <span>{{ butlerOpen ? '收起' : '管家' }}</span>
-  </button>
+      <!-- fab 与抽屉同属这个浮层容器（理由见上面那段的 ②）。它**始终在**
+           （原型用两个 `<a>` 互斥显示 `af-fab--off` / `af-fab--on`），靠
+           `aria-expanded` 与文字表达状态——藏掉再显示会让键盘焦点无处可回。 -->
+      <button
+        ref="fabEl"
+        class="af-fab"
+        type="button"
+        aria-haspopup="true"
+        :aria-expanded="butlerOpen ? 'true' : 'false'"
+        @click="toggleButler"
+      >
+        <span class="af-fab__mark" aria-hidden="true">管</span>
+        <span>{{ butlerOpen ? '收起' : '管家' }}</span>
+      </button>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>

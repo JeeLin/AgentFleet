@@ -73,8 +73,18 @@ export interface Execution {
   state: string
   base_commit: string | null
   agent_id: string | null
-  /** 设备名。`null` = 这条执行还没被派到设备上（或设备已删除）。 */
-  device_id?: string | null
+  /**
+   * **没有 `device_id`**：这里曾写着一个可选字段，但 Hub 从不发它。
+   *
+   * `routes/tasks.rs:144` 的 `ExecutionView` 九个字段里没有设备——它在库里有
+   * `binding_id`（`hub-storage/execution.rs:178`），却没进响应体。加个可选字段
+   * 顶不上：前端 `e.device_id` 永远是 `undefined`，页面上那一行「跑在哪台机器」
+   * 于是永远不渲染，而类型检查与单测都不会响（2026-11-17 对着活 Hub 实测发现）。
+   *
+   * 真要让这一行有值，得在 `ExecutionView` 里带上 `device_id`（`binding` 表
+   * 一跳可得），那是后端契约变更，见 `docs/BUGS.md` 的对应条目——**不是**把
+   * 字段在类型里补回来就能解决的。
+   */
   failure_kind: FailureKind | string | null
   reason: string | null
   evidence: string | null

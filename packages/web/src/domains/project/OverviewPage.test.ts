@@ -17,6 +17,7 @@ import OverviewPage from '@/domains/project/OverviewPage.vue'
 import type { Project, ProjectBinding } from '@/domains/project/api'
 import type { Execution, Task } from '@/domains/project/taskTypes'
 import { mountIn } from '@/test/mount'
+import { readRepoFile } from '@/test/css'
 import { settle, stubFetch } from '@/test/http'
 import { navigate, route } from '@/router'
 
@@ -71,13 +72,20 @@ function task(over: Partial<Task> = {}): Task {
   }
 }
 
-function execution(deviceId: string, over: Partial<Execution> = {}): Execution {
+/**
+ * 一条执行记录。
+ *
+ * **夹具只给 Hub 真会发的字段**：`ExecutionView`（`routes/tasks.rs:144`）是
+ * `id/state/base_commit/agent_id/failure_kind/reason/evidence/started_at/ended_at`，
+ * 没有设备。夹具里多塞一个字段，页面就能读到一个真链路上不存在的值，而两边
+ * 测试各自绿——2026-11-17 就是这么发现「正在跑 · device-a」从来没显示过的。
+ */
+function execution(id: string, over: Partial<Execution> = {}): Execution {
   return {
-    id: `exe_${deviceId}`,
+    id,
     state: 'running',
     base_commit: null,
     agent_id: 'claude-code',
-    device_id: deviceId,
     failure_kind: null,
     reason: null,
     evidence: null,
@@ -315,7 +323,7 @@ describe('OverviewPage：四行摘要（两行真数据 + 两行显式空态）'
       '/api/projects/p_1/tasks': {
         body: {
           tasks: [
-            task({ id: 't1', state: 'running', executions: [execution('device-a')] }),
+            task({ id: 't1', state: 'running', executions: [execution('exe_1')] }),
             task({ id: 't2', state: 'failed' }),
             task({ id: 't3', state: 'review' }),
             // 两个 pending：让「失败」与「待办」的条数**不相等**。相等时把
@@ -333,12 +341,42 @@ describe('OverviewPage：四行摘要（两行真数据 + 两行显式空态）'
 
     const root = w.element
     expect(root.querySelector('[data-row="running"]')?.textContent).toContain('1 个执行进行中')
-    // 设备名来自执行记录，不是任务的 id——这是「跑在哪」的唯一来源。
-    expect(root.querySelector('[data-row="running"]')?.textContent).toContain('device-a')
     const decide = root.querySelector('[data-row="decide"]')?.textContent ?? ''
     expect(decide).toContain('1 个失败待处置')
     expect(decide).toContain('1 张待验收')
     expect(root.querySelector('.af-region__note')?.textContent).toContain('2 台已绑定')
+  })
+
+  it('「正在跑」不许写出设备名——Hub 根本不发那个字段', async () => {
+    // 这一段是**对着活 Hub 实测出来的**（2026-11-17）：`ExecutionView`
+    // （`crates/hub-server/src/routes/tasks.rs:144`）九个字段里没有
+    // `device_id`，所以 `e.device_id` 恒为 `undefined`。曾经的夹具自己造了
+    // 这个字段，于是「device-a」在单测里显示得好好的，真链路上那一行永远是
+    // 「1 个执行进行中」——两边各测各的，中间那段没人验。
+    //
+    // 判据分两半：① 页面不出现任何设备 id 形状的串；② `Execution` 类型里
+    // 不再声明 `device_id`（声明了就等于给下一次「读一个不存在的字段」发许可）。
+    stubFetch({
+      '/api/projects': { body: [project({ id: 'p_1' })] },
+      '/api/projects/p_1/tasks': {
+        body: { tasks: [task({ id: 't1', state: 'running', executions: [execution('exe_1')] })] },
+      },
+      '/api/projects/p_1/bindings': { body: [binding('n_1')] },
+    })
+    const w = mountAtRoot()
+    await flush(w)
+
+    const running = w.element.querySelector('[data-row="running"]')?.textContent ?? ''
+    expect(running).toContain('1 个执行进行中')
+    expect(running).not.toContain('n_1')
+
+    const src = readRepoFile('packages/web/src/domains/project/taskTypes.ts')
+    const execBlock = /export interface Execution \{[\s\S]*?\n\}/.exec(src)?.[0] ?? ''
+    expect(execBlock, 'Execution 接口还在').not.toBe('')
+    // 剥注释再判：留着一段「这里没有 device_id」的说明是**要的**（防下一个人
+    // 又补回来），但它不该被同一条断言当成违规。
+    const code = execBlock.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
+    expect(code, 'Hub 不发 device_id，类型里就不许声明它').not.toMatch(/\bdevice_id\b/)
   })
 
   it('摘要读不到时写「读不到」，不把失败写成 0', async () => {
@@ -441,12 +479,15 @@ describe('OverviewPage：管家抽屉壳', () => {
     const w = mountAtRoot()
     await flush(w)
 
-    const drawer = w.element.querySelector('.af-drawer')
+    // 抽屉 Teleport 到 body（理由见 OverviewPage.vue 的模板注释），所以从
+    // `document` 上取，`w.element` 里没有它。
+    const drawer = document.querySelector('.af-drawer')
     expect(drawer, '抽屉壳必须在 DOM 里（收起时靠 aria-hidden 退场）').not.toBeNull()
     expect(drawer?.getAttribute('aria-hidden')).toBe('true')
     expect(drawer?.classList.contains('af-drawer--open')).toBe(false)
 
-    const fab = w.element.querySelector('.af-fab') as HTMLElement | null
+    // fab 也在 Teleport 出去的浮层容器里（与抽屉同属一层），所以同样从 document 取。
+    const fab = document.querySelector<HTMLElement>('.af-fab')
     expect(fab?.getAttribute('aria-expanded')).toBe('false')
     fab?.click()
     await flush(w)
@@ -463,34 +504,87 @@ describe('OverviewPage：管家抽屉壳', () => {
     const w = mountAtRoot()
     await flush(w)
 
-    const drawerText = w.element.querySelector('.af-drawer')?.textContent ?? ''
+    const drawerText = document.querySelector('.af-drawer')?.textContent ?? ''
     expect(drawerText).toContain('v0.9.0')
     // 原型 `:170-174` 是「今天三件事：…」——那是假数据，这一版不许出现。
     expect(drawerText).not.toContain('今天三件事')
     // 输入框与发送按钮必须禁用：能打字却发不出去比看不见更糟。
-    const input = w.element.querySelector<HTMLInputElement>('.af-drawer__compose .af-input')
+    const input = document.querySelector<HTMLInputElement>('.af-drawer__compose .af-input')
     expect(input?.disabled).toBe(true)
-    const send = w.element.querySelector<HTMLButtonElement>('.af-drawer__compose .af-btn')
+    const send = document.querySelector<HTMLButtonElement>('.af-drawer__compose .af-btn')
     expect(send?.disabled).toBe(true)
   })
 
-  it('Esc 关掉抽屉，且焦点不回落到已卸载的节点', async () => {
+  it('Esc 关掉抽屉——键位挂在 document 上，焦点在页面别处时也要生效', async () => {
+    // 这一段是对着活 Hub 实测出来的（2026-11-17）：早先键位是模板上的
+    // `@keydown.esc`，挂在 `<aside>` 上。**事件从 aside 里冒上来时它有效**，
+    // 于是「dispatch 到 drawer 上」这一种写法从头到尾都是绿的；但用户点了一下
+    // 页面别处之后，Esc 一次什么也不发生。判据要压在**事件源不在抽屉里**。
     stubFetch({ '/api/projects': { body: [] } })
     const w = mountAtRoot()
     await flush(w)
 
-    const fab = w.element.querySelector('.af-fab') as HTMLElement | null
+    // fab 也在 Teleport 出去的浮层容器里（与抽屉同属一层），所以同样从 document 取。
+    const fab = document.querySelector<HTMLElement>('.af-fab')
     fab?.click()
     await flush(w)
 
-    const drawer = w.element.querySelector('.af-drawer') as HTMLElement | null
+    const drawer = document.querySelector<HTMLElement>('.af-drawer')
     expect(drawer?.classList.contains('af-drawer--open')).toBe(true)
-    // 键位挂在 aside 上（`@keydown.esc`），所以事件要从里面冒上来。
-    drawer?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+
+    // 焦点挪到抽屉之外，再按键：这条路是旧实现死掉的那条。
+    ;(document.body as HTMLElement).focus()
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     await flush(w)
 
     expect(drawer?.classList.contains('af-drawer--open')).toBe(false)
     expect(drawer?.getAttribute('aria-hidden')).toBe('true')
     expect(fab?.getAttribute('aria-expanded')).toBe('false')
+    // 还焦点给打开者：焦点落在已收起（`visibility: hidden`）的抽屉里等于丢掉。
+    expect(document.activeElement).toBe(fab)
+  })
+
+  it('抽屉开着时背后是 inert，关掉后解除——覆盖层不能让人 Tab 进整页', async () => {
+    stubFetch({ '/api/projects': { body: [] } })
+    const w = mountAtRoot()
+    await flush(w)
+
+    const host = w.element.parentElement ?? document.body
+    // fab 也在 Teleport 出去的浮层容器里（与抽屉同属一层），所以同样从 document 取。
+    const fab = document.querySelector<HTMLElement>('.af-fab')
+    fab?.click()
+    await flush(w)
+
+    // `push()` 把除容器外的 body 子节点全设 inert；装着本页的那个节点就在其中。
+    expect((host as HTMLElement).inert, '抽屉开着时背后必须 inert').toBe(true)
+    expect(host.getAttribute('aria-hidden')).toBe('true')
+
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flush(w)
+
+    expect((host as HTMLElement).inert, '关掉后必须解掉 inert').toBe(false)
+    expect(host.hasAttribute('aria-hidden')).toBe(false)
+  })
+
+  it('卸载时摘掉 document 上的 keydown——不然下一个页面的 Esc 被它接走', async () => {
+    stubFetch({ '/api/projects': { body: [] } })
+    const w = mountAtRoot()
+    await flush(w)
+
+    // fab 也在 Teleport 出去的浮层容器里（与抽屉同属一层），所以同样从 document 取。
+    const fab = document.querySelector<HTMLElement>('.af-fab')
+    fab?.click()
+    await flush(w)
+    const drawer = document.querySelector<HTMLElement>('.af-drawer')
+    expect(drawer?.classList.contains('af-drawer--open')).toBe(true)
+
+    // 卸载时抽屉还开着：这是最容易被漏掉的那条路（用户按浏览器后退离开页面）。
+    const host = w.element.parentElement ?? document.body
+    w.unmount()
+    await flush(w)
+
+    expect((host as HTMLElement).inert, '卸载后不能把留着的 inert 带走').toBe(false)
+    // 再按一次 Esc 不该抛错、也不该有残留监听处理它。
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
   })
 })

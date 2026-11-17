@@ -32,7 +32,6 @@ function execution(over: Partial<Execution> = {}): Execution {
     state: 'succeeded',
     base_commit: 'abc1234def5678',
     agent_id: 'claude',
-    device_id: 'device-a',
     failure_kind: null,
     reason: null,
     evidence: null,

@@ -710,6 +710,19 @@ a.af-meter:hover { background: var(--p-surf-2); text-decoration: none; }
 }
 .af-drawer--open { transform: translateX(0); visibility: visible; }
 
+/* 开的那 220ms 里 `visibility` 必须**立刻**变成 `visible`，只在关的时候才延后。
+   ---------------------------------------------------------------------------
+   原型（`app.css:560-566`）两侧都是 `visibility 220ms`，因为它用 `:target`
+   开合、从不搬焦点；我们把焦点搬进抽屉（`shared/focus.ts` 的 `push`），于是
+   这个延后变成一个真缺陷：`--open` 与 `focus()` 在同一个 tick 发生，那一刻
+   `visibility` 还是 `hidden`，对隐藏元素调 `focus()` 不生效，键盘用户按 fab
+   之后焦点仍留在 fab 上（2026-11-17 playwright 实测：`focus()` 被调了，但
+   `document.activeElement` 还是 `.af-fab`）。
+   所以这里覆盖 `transition`：进 → `visibility 0s`（立刻可见），出 → 沿用基础
+   规则里的 `220ms`（滑出动画照旧）。这条覆盖是**为可达性付的代价**，不是
+   视觉偏离：两个状态下最终的计算样式与原型一致。 */
+.af-drawer--open { transition: transform 220ms var(--p-ease), visibility 0s; }
+
 .af-drawer__head {
   display: flex; align-items: flex-start; gap: var(--p-s3);
   padding: var(--p-s4); border-bottom: 1px solid var(--p-line-2); flex: 0 0 auto;
