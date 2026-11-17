@@ -4,6 +4,7 @@ import SessionPage from '@/domains/session/SessionPage.vue'
 import { device, mountIn, session } from '@/test/mount'
 import { settle, stubFetch } from '@/test/http'
 import { cssRuleOf, readRepoFile } from '@/test/css'
+import { stripCssAndLineComments } from '@/test/css-scan'
 import { STORAGE_KEY, type TabMeta } from '@/shared/tabs'
 import { SPLIT_MIN } from '@/shared/split'
 import { PANEL_ORDER } from '@/shared/panel'
@@ -2772,10 +2773,9 @@ describe('分栏：只有左右一条，且每个 tab 各自保留自己的比�
     // 判据**不能**是「源码里出现过 splitV 这个词」——注释里提到它就是红的，
     // 而注释恰恰是解释「为什么不这么做」的地方。所以只剥掉注释看代码：
     // 真正的判据是「渲染路径上只有一个百分比坐标」。
-    const src = readRepoFile('packages/web/src/domains/session/SessionPage.vue')
-      .replace(/<!--[\s\S]*?-->/g, '')
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/^\s*\/\/.*$/gm, '')
+    const src = stripCssAndLineComments(
+      readRepoFile('packages/web/src/domains/session/SessionPage.vue').replace(/<!--[\s\S]*?-->/g, ''),
+    )
     expect(/\bsplitV\b/.test(src), '不该有第二个分栏坐标').toBe(false)
     expect(/\bVSPLIT_/.test(src), '不该有纵向分栏常量').toBe(false)
   })

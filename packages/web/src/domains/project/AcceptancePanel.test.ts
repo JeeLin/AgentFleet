@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest'
 
 import AcceptancePanel, { CRITERIA_TEXT } from '@/domains/project/AcceptancePanel.vue'
 import type { Task } from '@/domains/project/taskTypes'
+import { stripCssAndLineComments } from '@/test/css-scan'
 import { mountIn } from '@/test/mount'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -238,14 +239,7 @@ describe('AcceptancePanel：组件纪律（源码级）', () => {
   it('不发请求、不持定时器、不读 Date.now()', () => {
     // 判红方式：在组件里加一次 fetch / 一个 setInterval / 一个 Date.now() → 红。
     const raw = readFileSync(resolve(HERE, 'AcceptancePanel.vue'), 'utf-8')
-    const code = raw
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .split('\n')
-      .map((line) => {
-        const at = line.indexOf('//')
-        return at >= 0 ? line.slice(0, at) : line
-      })
-      .join('\n')
+    const code = stripCssAndLineComments(raw)
     expect(code.match(/fetch|request\(|https?:/g) ?? []).toHaveLength(0)
     expect(code.match(/setInterval|setTimeout/g) ?? []).toHaveLength(0)
     expect(code.match(/Date\.now\(\)/g) ?? []).toHaveLength(0)

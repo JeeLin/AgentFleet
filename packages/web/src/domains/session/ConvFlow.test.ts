@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import ConvFlow, { type ConvExecRequest } from '@/domains/session/ConvFlow.vue'
 import type { TrajectoryEvent } from '@/domains/session/api'
 import { cssRuleOf, readRepoFile } from '@/test/css'
+import { stripCssComments } from '@/test/css-scan'
 import { mountIn } from '@/test/mount'
 
 function mount(props: Partial<Record<string, unknown>> = {}) {
@@ -613,7 +614,7 @@ describe('ConvFlow：轨迹入口', () => {
 describe('ConvFlow：阶段横幅与 AgentCatalog 的同名块形状不同（不许按「逐字重复」合并）', () => {
   /** 剥掉注释：注释里写着属性名与值，不剥掉的话删光声明断言照样绿。 */
   function ruleOf(file: string, selector: string): string {
-    const src = readRepoFile(file).replace(/\/\*[\s\S]*?\*\//g, '')
+    const src = stripCssComments(readRepoFile(file))
     const body = cssRuleOf(src, selector)
     expect(body, `${file} 的 ${selector} 规则必须存在`).toBeTruthy()
     return body
@@ -646,7 +647,7 @@ describe('ConvFlow：输入区的行能在窄列里收缩', () => {
   function declarationsOf(selector: string): string {
     const rule = cssRuleOf(CSS, selector)
     expect(rule, `${selector} 规则必须存在`).toBeTruthy()
-    return rule.replace(/\/\*[\s\S]*?\*\//g, '')
+    return stripCssComments(rule)
   }
 
   // happy-dom 不做排版、vitest 也不注入样式，`getComputedStyle` 读不到——只能读样式源。

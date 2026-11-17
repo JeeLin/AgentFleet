@@ -7,6 +7,7 @@ import { matchRoute, route } from '@/router'
 import { device, mountIn, session } from '@/test/mount'
 import { settle, stubFetch } from '@/test/http'
 import { cssRuleOf, readRepoFile } from '@/test/css'
+import { stripCssComments } from '@/test/css-scan'
 
 async function flush(w: ReturnType<typeof mountIn>): Promise<void> {
   for (let i = 0; i < 8; i++) {
@@ -739,7 +740,7 @@ describe('App：左栏几何与收起态', () => {
     )
 
     // 反向：上一版「52px 图标轨」那套自造做法仍然不许回来（竖排名字当图标）。
-    const decls = css.replace(/\/\*[\s\S]*?\*\//g, '')
+    const decls = stripCssComments(css)
     expect(decls).not.toContain('writing-mode: vertical-rl')
     expect(decls).not.toContain('52px')
   })
@@ -829,7 +830,7 @@ describe('App：左栏几何与收起态', () => {
     //
     // **必须剥掉注释再断言**：直接 `toContain('overflow-x: hidden')` 时，
     // 把那条声明删掉用例照样绿——解释为什么需要它的散文里就有这串字。
-    const decls = block.replace(/\/\*[\s\S]*?\*\//g, '')
+    const decls = stripCssComments(block)
     expect(decls, 'overflow-x 必须显式收掉').toContain('overflow-x: hidden')
 
     // 网格项默认 `min-width: auto`：内容比轨道宽时它会把左栏顶宽。

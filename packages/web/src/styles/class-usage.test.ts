@@ -26,6 +26,8 @@ import { join, relative } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
+import { stripCssComments } from '@/test/css-scan'
+
 const SRC = join(process.cwd(), 'src')
 const REPO = join(SRC, '..', '..', '..')
 
@@ -57,10 +59,8 @@ function styleBlock(vue: string): string {
   return [...vue.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)].map((m) => m[1]).join('\n')
 }
 
-/** 剥注释：CSS 注释里也写着类名（解释「为什么」），不剥会把定义数算错。 */
-function stripCssComments(css: string): string {
-  return css.replace(/\/\*[\s\S]*?\*\//g, '')
-}
+/* 剥注释的实现在 `@/test/css-scan`。理由不变：CSS 注释里也写着类名
+   （解释「为什么」），不剥会把定义数算错。 */
 
 const VUE = vueFiles(SRC)
 const VUE_SRC = new Map(VUE.map((f) => [f, readFileSync(join(REPO, f), 'utf-8')]))

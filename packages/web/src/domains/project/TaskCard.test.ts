@@ -18,6 +18,7 @@ import { describe, expect, it } from 'vitest'
 
 import TaskCard, { FAILURE_TEXT, formatElapsed } from '@/domains/project/TaskCard.vue'
 import type { Execution, FailureKind, Task } from '@/domains/project/taskTypes'
+import { stripCssAndLineComments } from '@/test/css-scan'
 import { mountIn } from '@/test/mount'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -83,26 +84,9 @@ function textOf(w: { element: HTMLElement }): string {
   return w.element.textContent ?? ''
 }
 
-/**
- * 剥掉组件源码里的注释（`//` 与 `/* … *\/` 两种）。
- *
- * 源码级断言（不许 `Date.now()` / 不许 `setInterval`）看的是**代码**，
- * 不是注释——注释里写「本组件不读 Date.now」当然会命中那串字符，
- * 若把注释也算进去，这条门就变成「别在注释里提它」，与约束本身无关。
- *
- * 只做行级粗剥：这些断言的目标串不会出现在字符串字面量里（组件不发请求、
- * 不拼这些词），所以不需要一个真正的词法器。
- */
-function stripComments(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .split('\n')
-    .map((line) => {
-      const at = line.indexOf('//')
-      return at >= 0 ? line.slice(0, at) : line
-    })
-    .join('\n')
-}
+/* 剥注释的实现在 `@/test/css-scan` 的 `stripCssAndLineComments`。
+   源码级断言（不许 `Date.now()` / 不许 `setInterval`）看的是**代码**，不是注释——
+   注释里写「本组件不读 Date.now」当然会命中那串字符。 */
 
 describe('formatElapsed：把毫秒翻成人话，且绝不产出百分比', () => {
   it('秒 / 分 / 时 / 天 四档都给人话', () => {
@@ -267,19 +251,19 @@ describe('TaskCard：组件纪律（源码级）', () => {
     // 断言前先按行剥掉注释：源码里**说明**「不许出现 Date.now()」的注释
     // 本身当然含这串字符。不剥的话这条门只能靠「别写那句注释」才能绿——
     // 那是让注释替实现背锅，正是要避免的那种假绿。
-    const code = stripComments(readFileSync(resolve(HERE, 'TaskCard.vue'), 'utf-8'))
+    const code = stripCssAndLineComments(readFileSync(resolve(HERE, 'TaskCard.vue'), 'utf-8'))
     expect(code.match(/Date\.now\(\)/g) ?? []).toHaveLength(0)
   })
 
   it('不发请求（fetch / request( / http 出现次数为 0）', () => {
     // 判红方式：在组件里发一次请求 → 红。
-    const code = stripComments(readFileSync(resolve(HERE, 'TaskCard.vue'), 'utf-8'))
+    const code = stripCssAndLineComments(readFileSync(resolve(HERE, 'TaskCard.vue'), 'utf-8'))
     expect(code.match(/fetch|request\(|https?:/g) ?? []).toHaveLength(0)
   })
 
   it('不持定时器（setInterval / setTimeout 出现次数为 0）', () => {
     // 判红方式：加一个自动刷新的 setInterval → 红。
-    const code = stripComments(readFileSync(resolve(HERE, 'TaskCard.vue'), 'utf-8'))
+    const code = stripCssAndLineComments(readFileSync(resolve(HERE, 'TaskCard.vue'), 'utf-8'))
     expect(code.match(/setInterval|setTimeout/g) ?? []).toHaveLength(0)
   })
 

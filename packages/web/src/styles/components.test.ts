@@ -23,6 +23,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { readRepoFile } from '@/test/css'
+import { stripCssComments } from '@/test/css-scan'
 
 /**
  * 可能有这些规则的全部文件：全局表 + 用到它们的组件 / 页面。
@@ -47,10 +48,8 @@ const OWNED = [
   'packages/web/src/domains/session/SessionPage.vue',
 ]
 
-/** 剥掉 `/* *\/` 注释，只留真正的 CSS。 */
-function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, '')
-}
+/* 剥注释用 `css-scan.ts` 的那一份：本文件原先内联同一行正则，
+   于是「样式表怎么剥注释」这件事在仓库里有 16 份各自为政的副本。 */
 
 /** 归一化：空白折叠成一个空格，缩进 / 换行差异不算「不同」。 */
 function norm(text: string): string {
@@ -69,7 +68,7 @@ function countRule(rule: string): number {
   for (const file of OWNED) {
     // 干草堆同样要归一化：同一条规则在全局表里是一行、在组件的 scoped 块里
     // 是每行一条声明（缩进也不同），两边都折叠成一行才数得出来。
-    const css = norm(stripComments(readRepoFile(file)))
+    const css = norm(stripCssComments(readRepoFile(file)))
     let from = 0
     for (;;) {
       const at = css.indexOf(needle, from)
@@ -83,7 +82,7 @@ function countRule(rule: string): number {
 
 /** 这条规则是否住在全局表里（而不是住在某一个组件的 scoped 块里）。 */
 function inSharedSheet(rule: string): boolean {
-  const css = norm(stripComments(readRepoFile('packages/web/src/styles/components.css')))
+  const css = norm(stripCssComments(readRepoFile('packages/web/src/styles/components.css')))
   return css.includes(norm(rule))
 }
 
@@ -123,8 +122,8 @@ describe('一条规则只有一个家（跨受管文件数次数，toContain 看
    * 「贴在流上的一条」悄悄变成「第二张卡片」，而六条断言一条都不红。
    */
   it('.af-stage-note 的两份不是逐字重复（合并前必须先定变体）', () => {
-    const catalog = stripComments(readRepoFile('packages/web/src/domains/agent/AgentCatalog.vue'))
-    const flow = stripComments(readRepoFile('packages/web/src/domains/session/ConvFlow.vue'))
+    const catalog = stripCssComments(readRepoFile('packages/web/src/domains/agent/AgentCatalog.vue'))
+    const flow = stripCssComments(readRepoFile('packages/web/src/domains/session/ConvFlow.vue'))
     expect(catalog).toMatch(/\.af-stage-note\s*\{[^}]*border-radius/)
     expect(catalog).toMatch(/\.af-stage-note__body\s*\{[^}]*--af-text-md/)
     expect(flow).toMatch(/\.af-stage-note\s*\{[^}]*border-bottom/)
@@ -154,7 +153,7 @@ describe('页面级布局的规模（文件头「两族合计 ≤30 条规则」
   const PAGE_LAYOUT = ['.af-auth', '.af-wb']
 
   it('两族合计不超过 30 条规则（超了就该拆组件，不是继续往页面壳里堆）', () => {
-    const css = stripComments(readRepoFile('packages/web/src/styles/components.css'))
+    const css = stripCssComments(readRepoFile('packages/web/src/styles/components.css'))
     let total = 0
     for (const prefix of PAGE_LAYOUT) {
       const escaped = prefix.replace('.', '\\.')

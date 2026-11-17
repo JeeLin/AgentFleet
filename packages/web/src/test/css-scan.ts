@@ -24,6 +24,27 @@ export function stripCssComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, '')
 }
 
+/**
+ * 同时剥掉 CSS 注释与 `//` 行注释——**读 `.vue` / `.ts` 源码时用这一件**。
+ *
+ * 为什么不能只用 {@link stripCssComments}：`.vue` 的 `<style scoped>` 里没有
+ * `//` 注释，但 `<script setup>` 里有，而「组件纪律」那类用例（不许 `fetch`、
+ * 不许 `setInterval`）要扫整份 `.vue`——注释里说明这条纪律本身就会写着那些字样，
+ * 不剥行注释就会自己把自己判红。
+ *
+ * 行注释的识别是**逐行**的：`line.indexOf('//')` 之后一切舍弃。这对本仓够用
+ * （没有把 `//` 放在字符串里的写法），不需要真正的词法器。
+ */
+export function stripCssAndLineComments(src: string): string {
+  return stripCssComments(src)
+    .split('\n')
+    .map((line) => {
+      const at = line.indexOf('//')
+      return at >= 0 ? line.slice(0, at) : line
+    })
+    .join('\n')
+}
+
 export interface CssRule {
   /** 完整选择器文本（已去首尾空白、保留逗号），如 `.a, .b:hover`。 */
   selector: string

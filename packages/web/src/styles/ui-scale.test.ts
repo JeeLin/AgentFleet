@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { readRepoFile } from '@/test/css'
-import { classNamesIn, parseCssRules, propValue, ruleFor } from '@/test/css-scan'
+import { classNamesIn, parseCssRules, propValue, ruleFor, stripCssComments } from '@/test/css-scan'
 
 import { readdirSync, readFileSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
@@ -139,7 +139,7 @@ describe('面板三分区（子任务 12）', () => {
     const COMPONENT_OWNED = /^\.af-state__/
     const users = new Map<string, string[]>()
     for (const css of cssFiles) {
-      const stripped = css.replace(/\/\*[\s\S]*?\*\//g, '')
+      const stripped = stripCssComments(css)
       for (const m of stripped.matchAll(/(?:^|\n)(\.[a-z][a-z0-9_-]*)\s*\{([^}]*)\}/g)) {
         const sel = m[1]
         const body = m[2].trim()
@@ -204,17 +204,32 @@ describe('面板三分区（子任务 12）', () => {
      `.af-panel__foot` 同文件两次、`.af-panel__head` 同文件两次），每次都是
      靠肉眼看出来，没有网。这里补上网：`components.css` 里顶层选择器
      （行首、到 `{` 为止）不许重复出现。 */
-  it('components.css 里没有重复定义的顶层选择器', () => {
-    const seen = new Map()
-    const dups = []
-    for (const line of css.split('\n')) {
-      const m = /^(\.[a-z][a-z0-9_-]*(?:[^{]*?))\s*\{\s*$/.exec(line.trimEnd())
-      if (!m) continue
-      const sel = m[1].trim()
-      if (seen.has(sel)) dups.push(sel)
-      else seen.set(sel, true)
+  it('components.css 里没有「后者静默全量覆盖前者」的重复选择器', () => {
+    /* 按**结构**统计而不是按行：`parseCssRules` 已剥注释、按花括号配对，
+       多行选择器、逗号组、`@media` 里的规则都在同一条口径下。
+       （初版按行只认「行首单类 + 同行 `{` 结尾」，漏掉了 `.af-projectlist__dot
+       { font-size: 0; … }` 这种**声明体写在同一行**的形态。）
+
+       **判的是「静默全量覆盖」，不是「选择器出现两次」**：同一条选择器拆成
+       几条互补的规则（几何一条、视觉一条）是**有意**的，只要前一条声明的
+       属性没有被后一条全部重写，就没有内容丢失。只有当后一条重写了前一条的
+       某个属性时，前一条的那条声明才是死的——那才是这条守卫要抓的东西。 */
+    const declaredBefore = new Map<string, string[]>()
+    const overridden: string[] = []
+    for (const rule of parseCssRules(css)) {
+      // 只统计**顶层**规则（不在任何 at-rule 里）：`@media` 内重写是合法覆盖。
+      if (rule.atRules.length > 0) continue
+      const sel = rule.selector.replace(/\s+/g, ' ').trim()
+      const props = [...rule.body.matchAll(/(?:^|;)\s*([a-z-]+)\s*:/g)].map((m) => m[1])
+      const prev = declaredBefore.get(sel) ?? []
+      for (const p of props) {
+        if (prev.includes(p)) overridden.push(`${sel} 的 ${p}`)
+      }
+      declaredBefore.set(sel, [...prev, ...props])
     }
-    expect(dups, `重复定义（后者会静默覆盖前者）：${dups.join(', ')}`).toEqual([])
+    expect(overridden, `后一条规则重写了前一条已声明的属性（前者是死声明）：${overridden.join(', ')}`).toEqual(
+      [],
+    )
   })
 
   /* **这条守的是一个真踩过的坑**：第一版我新写了 `.af-card` 当容器，
@@ -232,28 +247,114 @@ describe('面板三分区（子任务 12）', () => {
   /* **往上一条的缺口补网（v0.8.1 第3轮）**：上一条只钉了 4 个白名单类，于是
      `.af-row` 与 `.af-spacer` 这两条**跨文件重名**在网外活了整轮——两份都在，
      `components.css` 那份（`flex: 1 1 auto` / 不换行 + 6px gap）从来是死的。
-     这里改成**全量求交集**：两份样式表的类选择器不许有任何交集。
-     真要两边都有，就必须先合并到一处，而不是靠导入顺序决定谁赢。
+     这里改成**全量求交集**，分两档口径：
+
+     **严格口径**（`wholeSubject: true`）必须为**空**：`components.css` 与
+     `prototype-shell.css` 不许有同名类的「全量定义」。后导入的
+     `prototype-shell.css` 会整条覆盖前者，靠导入顺序决定谁赢是缺陷。
+
+     **宽松口径**（`wholeSubject: false`，连后代选择器里的类也算）允许重叠，
+     但**命中必须全部落在下面的白名单内**。宽松口径回答的是另一个问题：
+     「这个类名是否同时出现在两份样式表里」——`.af-drawer .af-msg` 这种
+     有意的局部覆盖也算命中，所以它天然不可能是空集。
+     **这一步是语法规则，不是语义判断**：守卫读不出「这个重叠是善意的还是
+     事故」，它只认「选择器结构」这一条语法性质——`.af-drawer .af-msg`
+     是后代选择器，`.af-msg { … }` 是单类定义。所以「有意覆盖」不能靠
+     语言解释，只能写成**可枚举的数据**（下表）：新增一处重叠就必须往表里
+     加一行并写清理由，漏加即红。
 
      **第4轮换成结构扫描**：初版按行跑 `^\.cls\s*\{`，只看行首单类 + 同行开括号，
-     五种真实形态全部漏检，且每条都变异验证过（加回规则后仍 18/18 绿）：
+     五种真实形态全部漏检，且每条都变异验证过（加回规则后本文件全绿、一条不红）：
      ① `@media` 里缩进两格的规则；② 逗号组 `.a, .b { … }`；③ 逗号组里**后一个**
      类 `.x, .af-col { … }`；④ `.af-col` 与 `{` 不在同一行；⑤ 伪类 `.af-col:hover`。
      一次**真实的**漏网就是 ③——`.af-kv__k, .af-kv dt {` 让 `.af-kv__k` 的跨文件
      重名（`components.css` 的死副本）整轮没被看见。现在改用 `parseCssRules`
      （剥注释 → 花括号配对 → 逗号切分 → 取类名），五种形态一律覆盖。
-     「整个复合选择器是一个类」才算——`.af-drawer .af-msg` 这种**有意的局部覆盖**
-     不算重名，`.af-msg { … }` 与 `.af-msg { … }` 才算法。
      **没有媒体条件豁免**：初版曾给「两边都在 `@media` 里」开一道口子，变异实测
-     漏网（同一断点下双方各写一份 `.af-probe` 仍判绿）。当时唯一的真实命中是
-     `.af-board`，而它根本是条死规则（`grid-template-columns` 对
-     `grid-auto-flow: column` 的容器无效），已直接删掉——不留豁免。 */
-  it('两份样式表的选择器没有任何交集（后导入者不得静默取胜）', () => {
+     漏网（同一断点下双方各写一份 `.af-probe` 仍判绿）。命中一律按上面的白名单判。
+
+     **守卫没有能力判死活**：它只数「类名在两处出现」。一条规则是否真的生效、
+     某个声明是否是死代码，要逐条声明在浏览器里量（`.af-board` 的
+     `overflow-x: visible` 就是这样被误删过一次）——那是实测的事，不是本守卫的结论。 */
+
+  /* 宽松口径允许的重叠。**每一项都是「有意的局部覆盖」**，不是全量重定义：
+     prototype-shell.css 那边一律带前缀（`.af-drawer` / `html[data-rail='off']`
+     / `.af-region--warn`），只在特定作用域里改几个声明。 */
+  const LOOSE_OVERLAP_ALLOWLIST: Array<{ cls: string; why: string }> = [
+    {
+      cls: '.af-btn',
+      why: 'shell 只有 `html[data-rail=\'off\'] .af-rail__actions .af-btn`：收起左栏时收窄动作区按钮，桌面定义仍在 components.css。',
+    },
+    {
+      cls: '.af-msg',
+      why: 'shell 只有 `.af-drawer .af-msg`：抽屉里消息行用 2px gap 的紧凑排版，会话页的定义不动。',
+    },
+    {
+      cls: '.af-msg__body',
+      why: 'shell 只有 `.af-drawer .af-msg__body`：抽屉字号降到 sm，会话页正文档不变。',
+    },
+    {
+      cls: '.af-msg__who',
+      why: 'shell 只有 `.af-drawer .af-msg__who`：抽屉署名行字号降到 2xs。',
+    },
+    {
+      cls: '.af-region__head',
+      why: 'shell 只有 `.af-region--warn .af-region__head`：warning 变体换底色，基底来自 components.css。',
+    },
+  ]
+
+  it('两份样式表不许有同名类的全量定义（严格口径为空）', () => {
     const shell = readRepoFile('packages/web/src/styles/prototype-shell.css')
     const a = classNamesIn(css, { wholeSubject: true })
     const b = classNamesIn(shell, { wholeSubject: true })
     const both = [...a].filter((s) => b.has(s)).sort()
     expect(both, `同时定义在两个文件里（后导入的 prototype-shell.css 会全覆盖）：${both.join(', ')}`)
+      .toEqual([])
+  })
+
+  /* **宽松口径的命中必须全部在白名单内**：白名单外的命中说明新增了一处
+     「类名同时出现在两份样式表」，要么合并到一处，要么在这里写清为什么
+     它是善意的局部覆盖。 */
+  it('宽松口径的跨文件重叠全部落在白名单内', () => {
+    const shell = readRepoFile('packages/web/src/styles/prototype-shell.css')
+    const a = classNamesIn(css, { wholeSubject: false })
+    const b = classNamesIn(shell, { wholeSubject: false })
+    const both = [...a].filter((s) => b.has(s)).sort()
+    const allowed = new Set(LOOSE_OVERLAP_ALLOWLIST.map((e) => e.cls))
+    const unexpected = both.filter((s) => !allowed.has(s))
+    expect(
+      unexpected,
+      `新增的跨文件重叠，未登记为有意的局部覆盖：${unexpected.join(', ')}`,
+    ).toEqual([])
+    /* 反向：白名单里的每一项都**仍然**是真实重叠。类被删/改名后留着一条
+       幽灵白名单，下一个人就会以为这里还有一处要照顾。 */
+    const stale = [...allowed].filter((s) => !both.includes(s)).sort()
+    expect(stale, `白名单条目已不再是真实重叠（类被删或改名）：${stale.join(', ')}`).toEqual([])
+    /* 白名单每条都必须带理由——空理由等于没有解释。 */
+    const noReason = LOOSE_OVERLAP_ALLOWLIST.filter((e) => e.why.trim().length < 10).map((e) => e.cls)
+    expect(noReason, `白名单条目缺理由：${noReason.join(', ')}`).toEqual([])
+  })
+
+  /* 白名单必须逐条可解释：断言每条理由提到的前缀确实出现在 shell 里那条规则上。
+     只测「命中数 == 5」是规模断言，不证明重叠是善意的。 */
+  it('白名单里的每条理由都对应 shell 里一条带作用域的规则', () => {
+    const shell = readRepoFile('packages/web/src/styles/prototype-shell.css')
+    const rules = parseCssRules(shell)
+    const SCOPED = /^(?:html\[[^\]]*\]|\.[a-z][a-z0-9_-]*(?:--[a-z0-9_-]+)?)\s+/
+    const unscoped: string[] = []
+    for (const entry of LOOSE_OVERLAP_ALLOWLIST) {
+      const hits = rules.filter((r) =>
+        r.selector.split(',').some((part) => new RegExp(`\\${entry.cls}(?![a-zA-Z0-9_-])`).test(part.trim())),
+      )
+      if (hits.length === 0) unscoped.push(`${entry.cls}: 在 shell 里找不到规则`)
+      for (const r of hits) {
+        for (const part of r.selector.split(',')) {
+          if (!new RegExp(`\\${entry.cls}(?![a-zA-Z0-9_-])`).test(part)) continue
+          if (!SCOPED.test(part.trim())) unscoped.push(`${entry.cls}: "${part.trim()}" 不是带作用域的覆盖`)
+        }
+      }
+    }
+    expect(unscoped, `白名单声称「有意的局部覆盖」，但 shell 里是裸定义：${unscoped.join('; ')}`)
       .toEqual([])
   })
 })
@@ -399,14 +500,14 @@ describe('表单控件行盒（第3轮）', () => {
   })
 
   it('textarea 不吃单行 line-height（多行控件要换行）', () => {
-    /* `cssBlockOf` 用 `indexOf`，`.af-textarea {` 会先命中共用那条组的声明体
-       （`.af-input, .af-select, .af-textarea {`），所以这里按**行首**自己定位。 */
-    const lines = css.split('\n')
-    const at = lines.findIndex((l) => l.trimEnd() === '.af-textarea {')
-    expect(at, '.af-textarea 没有独立规则').toBeGreaterThanOrEqual(0)
-    const block = lines.slice(at, at + 6).join('\n')
-    expect(block).toContain('--af-leading-snug')
-    expect(block).not.toContain('calc(var(--af-row-compact)')
+    /* 用 `ruleFor` 按选择器文本定位，而不是按行 `indexOf`：
+       共用组 `.af-input, .af-select, .af-textarea {` 也含有 `.af-textarea`
+       这串字，按子串找会命中错的规则体。`ruleFor` 要求选择器**完全相等**。 */
+    const rule = ruleFor(parseCssRules(css), '.af-textarea')
+    expect(rule, '.af-textarea 没有独立规则').toBeDefined()
+    const body = stripCssComments(rule!.body)
+    expect(body).toContain('--af-leading-snug')
+    expect(body).not.toContain('calc(var(--af-row-compact)')
   })
 })
 

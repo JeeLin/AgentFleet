@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest'
 
 import FailurePanel, { FAILURE_DIAGNOSIS } from '@/domains/project/FailurePanel.vue'
 import type { Execution, FailureKind, Task } from '@/domains/project/taskTypes'
+import { stripCssAndLineComments } from '@/test/css-scan'
 import { mountIn } from '@/test/mount'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -278,14 +279,7 @@ describe('FailurePanel：组件纪律（源码级）', () => {
     // 判红方式：在组件里加一次 fetch / 一个 setInterval / 一个 Date.now() → 红。
     // 剥掉注释再断言：注释里说明这条纪律本身含有这些字样。
     const raw = readFileSync(resolve(HERE, 'FailurePanel.vue'), 'utf-8')
-    const code = raw
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .split('\n')
-      .map((line) => {
-        const at = line.indexOf('//')
-        return at >= 0 ? line.slice(0, at) : line
-      })
-      .join('\n')
+    const code = stripCssAndLineComments(raw)
     expect(code.match(/fetch|request\(|https?:/g) ?? []).toHaveLength(0)
     expect(code.match(/setInterval|setTimeout/g) ?? []).toHaveLength(0)
     expect(code.match(/Date\.now\(\)/g) ?? []).toHaveLength(0)

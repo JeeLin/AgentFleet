@@ -18,6 +18,7 @@ import type { Project, ProjectBinding } from '@/domains/project/api'
 import type { Execution, Task } from '@/domains/project/taskTypes'
 import { mountIn } from '@/test/mount'
 import { readRepoFile } from '@/test/css'
+import { stripCssAndLineComments } from '@/test/css-scan'
 import { settle, stubFetch } from '@/test/http'
 import { navigate, route } from '@/router'
 
@@ -375,7 +376,7 @@ describe('OverviewPage：四行摘要（两行真数据 + 两行显式空态）'
     expect(execBlock, 'Execution 接口还在').not.toBe('')
     // 剥注释再判：留着一段「这里没有 device_id」的说明是**要的**（防下一个人
     // 又补回来），但它不该被同一条断言当成违规。
-    const code = execBlock.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
+    const code = stripCssAndLineComments(execBlock)
     expect(code, 'Hub 不发 device_id，类型里就不许声明它').not.toMatch(/\bdevice_id\b/)
   })
 

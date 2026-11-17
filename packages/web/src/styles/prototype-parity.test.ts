@@ -28,6 +28,8 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { stripCssComments as stripComments } from '@/test/css-scan'
+
 import { describe, expect, it } from 'vitest'
 
 import { readRepoFile } from '@/test/css'
@@ -63,10 +65,8 @@ const VARS_ALL = `${TOKENS_CSS}\n${THEME_CSS}`
  */
 const IMPL_ALL = `${COMPONENTS_CSS}\n${IMPL_CSS}`
 
-/** 剥掉 CSS 注释：注释里写着类名与属性值，不剥会让断言在「删光声明只留注释」时照样绿。 */
-function stripComments(css: string): string {
-  return css.replace(/\/\*[\s\S]*?\*\//g, '')
-}
+/* 剥注释的实现在 `@/test/css-scan`（本文件原先内联了同一行正则的第 N 份副本）。
+   理由不变：注释里写着类名与属性值，不剥会让断言在「删光声明只留注释」时照样绿。 */
 
 /** 某个选择器在样式源里的声明体（取第一次出现）。缺了返回空串。 */
 function ruleBody(css: string, selector: string): string {
@@ -80,8 +80,6 @@ function ruleBody(css: string, selector: string): string {
 }
 
 /** 源里定义过的全部顶层类名（`^\.af-…`）。 */
-
-/** 源里定义过的全部顶层类名（`^\\.af-…`）。 */
 function classesIn(css: string): Set<string> {
   const out = new Set<string>()
   for (const m of stripComments(css).matchAll(/^\.([a-z][a-z0-9_-]*)/gm)) out.add(m[1])

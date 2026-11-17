@@ -10,6 +10,8 @@
    =========================================================================== */
 import { describe, expect, it } from 'vitest'
 
+import { stripCssComments } from '@/test/css-scan'
+
 import { readRepoFile } from '@/test/css'
 
 const THEMES = ['neutral', 'warm', 'paper', 'cream'] as const
@@ -18,7 +20,7 @@ const THEMES = ['neutral', 'warm', 'paper', 'cream'] as const
 function vars(css: string): Map<string, string> {
   const out = new Map<string, string>()
   // 去掉注释，否则注释里的 `--bg: #fff` 之类会被当成定义
-  const stripped = css.replace(/\/\*[\s\S]*?\*\//g, '')
+  const stripped = stripCssComments(css)
   for (const m of stripped.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;}]+)/g)) {
     out.set(m[1], m[2].trim())
   }
@@ -38,6 +40,52 @@ const NAME_MAP: Record<string, string> = {
 
 function implName(proto: string): string {
   return NAME_MAP[proto] ?? `--p-${proto.slice(2)}`
+}
+
+/**
+ * **有意不跟随原型的变量**：这里列的每一条都是「实现比原型更严格」的改动，
+ * 不是搬运走样，所以不参与逐值比对——但也不许静默放过，下面单独断言它的值。
+ *
+ * 为什么需要这份表：逐值比对的不变式是「实现 == 原型」，而原型是只读的参照基准
+ * （`prototype/` 下文件头自称「最低一处 4.53:1」）。当实现的取值必须**比原型更严**
+ * 时，不变式与事实就冲突了。此时的正确动作不是放宽比对（那会让真正的搬运错误
+ * 一起漏网），而是把这一条从「通用比对」里摘出来、升级成一条**更具体的断言**：
+ * 值必须是这个，并且必须真的达标。摘出来的代价是「多一条要维护的期望值」，
+ * 换来的是「这条例外永远带着它的理由与数值」。
+ *
+ * `--p-fg-3` 为什么离开原型：原型的 `--fg-3` 在四套主题里全部低于 WCAG AA
+ * 4.5:1（实测 3.40 / 2.67 / 2.70 / 3.69），而它被当作**真实文字色**在用
+ * （`.af-head__sub`、`th`、`.af-field__hint`、`.af-rail__status`、
+ * `.af-settings__p`…）。原型那边还留着「装饰 仅用于非文字元素与占位」的
+ * 旧注释，与实际用途不符。所以实现在四套主题里都换成达标值，色相不动、
+ * 只调亮度。**这条不是「值恰好变了」，是「辅助文字必须读得清」。**
+ */
+const INTENTIONAL_DEVIATIONS: Record<string, { value: string; why: string }> = {
+  '--p-fg-3': {
+    value: 'per-theme',
+    why: '原型的 --fg-3 四套全部低于 WCAG AA 4.5:1，而它被当文字色用（页头副标题 / 表头 / 字段提示）。',
+  },
+}
+
+/** 四套主题 `--p-fg-3` 的达标值（期望值写死在这里，不从实现里再算一遍）。 */
+const FG3_TARGETS = {
+  neutral: '#828991',
+  warm: '#8c887d',
+  paper: '#616972',
+  cream: '#6c6758',
+} as const
+
+/** WCAG 2.x 相对亮度与对比度。 */
+function relLuminance(hex: string): number {
+  const v = hex.replace('#', '').toLowerCase()
+  const channels = [0, 2, 4].map((i) => parseInt(v.slice(i, i + 2), 16) / 255)
+  const [r, g, b] = channels.map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4))
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+function contrastRatio(a: string, b: string): number {
+  const [hi, lo] = [relLuminance(a), relLuminance(b)].sort((x, y) => y - x)
+  return (hi + 0.05) / (lo + 0.05)
 }
 
 /** 归一空白：`rgba(8,10,13,0.62)` 与 `rgba(8, 10, 13, 0.62)` 视为同值。 */
@@ -78,6 +126,9 @@ describe('四套主题逐值对照原型', () => {
           missing.push(`${p} → ${i}`)
           continue
         }
+        // 有意的偏离不走逐值比对，由下面那条专门的用例负责（它断言得比这里更细：
+        // 不只判「等于某个值」，还判「那个值真的达到 WCAG AA」）。
+        if (INTENTIONAL_DEVIATIONS[i]) continue
         // --dot-* 在原型里是 var(--acc) 之类，实现是 var(--p-acc)——同一回事。
         // **只对原型侧做改名归一**：实现侧已经是 `--p-*`，再走一遍 implName
         // 会变成 `--p-p-acc`（这个 bug 被本测试自己抓出来过）。
@@ -89,6 +140,34 @@ describe('四套主题逐值对照原型', () => {
       expect(differing, `theme-${theme} 取值不一致：\n${differing.join('\n')}`).toEqual([])
     })
   }
+
+  /* 有意偏离原型的变量：值必须是定下的那个，**并且**它必须真的达标。
+     只断言「等于 #828991」是记不住理由的——下一个人看到实现与原型不一致，
+     会以为是搬错了。这条用例带着理由和数值一起守着。
+     **不从实现里再算期望值**：期望是设计决定的十六进制，写在 FG3_TARGETS。 */
+  it('--p-fg-3 四套都不跟随原型，且必须达到 WCAG AA 4.5:1（辅助文字读得清）', () => {
+    const entries = Object.keys(INTENTIONAL_DEVIATIONS).map((name) => ({ name, ...INTENTIONAL_DEVIATIONS[name] }))
+    expect(entries.length, '有意偏离表空了，这条守卫会恒真').toBeGreaterThan(0)
+
+    const failures: string[] = []
+    for (const theme of THEMES) {
+      const impl = vars(readRepoFile(`packages/web/src/styles/theme-${theme}.css`))
+      const actual = norm(impl.get('--p-fg-3')!)
+      const expected = FG3_TARGETS[theme]
+      if (actual !== expected) failures.push(`theme-${theme} 的 --p-fg-3 是 ${actual}，定下的是 ${expected}`)
+
+      const bg = norm(impl.get('--p-bg')!)
+      const fg2 = norm(impl.get('--p-fg-2')!)
+      const ratio = contrastRatio(expected, bg)
+      const ratioFg2 = contrastRatio(fg2, bg)
+      if (ratio < 4.5) failures.push(`theme-${theme} 的 --p-fg-3 对页面底只有 ${ratio.toFixed(2)}:1（< 4.5）`)
+      // 三级层次不能塌：--p-fg-3 必须仍明显弱于 --p-fg-2。
+      if (!(ratioFg2 > ratio)) {
+        failures.push(`theme-${theme} 的 --p-fg-3（${ratio.toFixed(2)}:1）不弱于 --p-fg-2（${ratioFg2.toFixed(2)}:1）`)
+      }
+    }
+    expect(failures, `--p-fg-3 未达标注解：\n${failures.join('\n')}`).toEqual([])
+  })
 
   it('四份实现的变量名集合完全一致（可切换的前提）', () => {
     const sets = THEMES.map((t) => [...vars(readRepoFile(`packages/web/src/styles/theme-${t}.css`)).keys()].sort())
@@ -151,7 +230,7 @@ describe('四套主题逐值对照原型', () => {
     ]
     const referenced = new Map<string, string[]>()
     for (const f of cssFiles) {
-      const css = readRepoFile(f).replace(/\/\*[\s\S]*?\*\//g, '')
+      const css = stripCssComments(readRepoFile(f))
       for (const m of css.matchAll(/var\(\s*(--p-[a-z0-9-]+)/g)) {
         const name = m[1]
         if (!referenced.has(name)) referenced.set(name, [])
