@@ -127,7 +127,7 @@ html[data-theme="neutral"], :root {
   --af-fg-strong: var(--p-fg-strong);
   --af-fg-secondary: var(--p-fg-2);
   --af-fg-tertiary: var(--p-fg-3);
-  /* 原型没有 muted 这个级别：它本就是 tertiary 的兼容别名（见 tokens.css §2） */
+  /* 原型没有 muted 这个级别：它本就是 tertiary 的兼容别名（两者同取 `--p-fg-3`） */
   --af-fg-muted: var(--p-fg-3);
   /* 原型没有 disabled：取 fg-3（装饰级）。禁用控件的文字本就该弱到不抢眼，
      且 WCAG 对禁用态豁免对比度要求，取最弱一档语义上最贴近。 */

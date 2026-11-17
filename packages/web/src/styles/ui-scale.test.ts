@@ -120,8 +120,8 @@ describe('面板三分区（子任务 12）', () => {
 
   /* **这条守的是一个真实回潮（v0.8.1 第3轮）**：为了把两处内联 `font-size`
      收进样式表，`components.css` 补了 `.af-t-2xs` / `.af-t-sm` 两条——而
-     `prototype-shell.css` 的 `.af-xs`（`:608`）/ `.af-2xs`（`:609`）早就在做
-     同一件事（`--p-t-2xs` 就是 `var(--af-text-2xs)`），键位提示句另有
+     `prototype-shell.css` 的 `.af-xs` / `.af-2xs` 早就在做同一件事
+     （`--p-t-2xs` 就是 `var(--af-text-2xs)`），键位提示句另有
      `.af-keyhint`。于是同一档字号有两个名字，改一处另一处不跟。**判据**：每条声明
      `font-size: var(<字号令牌>)` 的规则，其取值令牌不许被第二条规则重复消费
      （同一 token 只许一个工具类）。豁免：组件本体类（`*__title` / `*card*`

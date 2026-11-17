@@ -108,13 +108,16 @@ describe('模板里的 af-* 类名都有定义（`.af-head__title` 那次漏定�
   const NO_RULE_BY_DESIGN = new Map<string, string>([
     // ① 纯钩子
     ['af-card', '卡片钩子：外观来自同一元素上的 `af-taskcard` / `af-catalog__card` 等具体类'],
-    // 页面外壳那一族（`.af-page` / `__head` / `__title` / `__actions` / `__sub` /
-    // `__subtitle` / `--flush`）的豁免在 v0.8.1 子任务 10 已**整块删除**：
-    // 那一族在原型 `prototype/assets/app.css` 里命中 0，是实现自造的第二套页面
-    // 设计；随着 12 个页面 + 骨架页组件全部迁到 `.af-head` + `.af-body`，模板侧
-    // 实测已 **0 处**使用（2026-11-17，按 `class="..."` 静态属性统计）。
-    // 留着豁免就是对门禁的静默关闭——所以连同上一条「只在还没迁移时成立」的
-    // 守卫一起删了，改成下面那条**反向**守卫：这一族不许再用、也不许再定义。
+
+    // ── ① 续：根标记类（外观全部由后代选择器或同一元素上的具体类承担）─────────
+    // 说明：下面这一族的豁免在 v0.8.1 子任务 10 曾整块涉及，但「页面外壳那一族」
+    // （`.af-page` / `__head` / `__title` / `__actions` / `__sub` / `__subtitle` /
+    // `--flush`）的豁免已**整块删除**：那一族在原型
+    // `prototype/assets/app.css` 里命中 0，是实现自造的第二套页面设计；随着
+    // 12 个页面 + 骨架页组件全部迁到 `.af-head` + `.af-body`，模板侧实测已
+    // **0 处**使用（2026-11-17，按 `class="..."` 静态属性统计）。留着豁免就是
+    // 对门禁的静默关闭——所以连同上一条「只在还没迁移时成立」的守卫一起删了，
+    // 另有一条**反向**守卫：这一族不许再用、也不许再定义。
     ['af-catalog', '`AgentCatalog` 的根标记类：后代选择器 `.af-catalog .af-catalog__x` 里已包含它'],
     ['af-agd', '`AgentDetailPage` 的根标记类：同上，`.af-agd .af-agd__x`'],
     ['af-devd', '`DeviceDetailPage` 的根标记类：同上'],

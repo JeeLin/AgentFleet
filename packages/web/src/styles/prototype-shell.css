@@ -314,8 +314,11 @@ html[data-rail='off'] .af-rail__actions .af-btn {
      字重 semibold + `--p-fg-strong` 与字号差**一起**拉开层级。 */
   font-size: var(--af-text-display); font-weight: var(--af-weight-semibold);
   white-space: nowrap; margin: 0; color: var(--p-fg-strong);
-  /* `line-height: 1` 而不是继承 1.65：22px × 1.65 = 36.3px 会把 56px 的
-     固定页头撑破（实测 61px）。标题是单行短语，不需要正文行高。 */
+  /* `line-height: 1` 而不是继承 1.65：22px × 1.65 = 36.3px 会把页头内容盒
+     撑到 61px（单行标题实测），比标题自己的 22px 高 14px——`.af-head` 与
+     左栏品牌行的对齐就多出这 14px 的偏差。页头是 `min-height`（允许长高），
+     所以这里不是「防止溢出」，而是**让单行标题自己占 22px**，好让 56px 的
+     最小高由呼吸空间而不是标题行高来填充。 */
   line-height: 1;
   letter-spacing: -0.01em; /* 22px 下 Inter 默认字距偏松，收一点更像标题 */
 }
@@ -695,9 +698,9 @@ a.af-meter:hover { background: var(--p-surf-2); text-decoration: none; }
 /* ===========================================================================
    9. 项目切换器（原型 app.css:1341-1429）
    -------------------------------------------------------------------------
-   看板页头里那个「项目名本身就是按钮」的切换器。`BoardPage.vue` 已用
-   `.af-switch` 系列类名，但样式表里只有 `.af-switch` 一条——所以下拉菜单
-   此前是**裸的**（无边框、无阴影、无定位）。
+   看板页头里那个「项目名本身就是按钮」的切换器。`BoardPage.vue` 用的是
+   `.af-switch` 系列类名；本节包含它的**全部**规则——按钮本体、下拉定位、
+   菜单项与焦点态，不再有「只有一条」的缺口。
    =========================================================================== */
 
 /* **项目名本身就是按钮**，点开是菜单（见 `prototype/board.html` 的 `.af-switch`）。
