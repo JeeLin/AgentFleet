@@ -291,14 +291,18 @@ html[data-rail='off'] .af-rail__actions .af-btn {
 .af-head {
   display: flex; align-items: center; gap: var(--p-s3);
   padding: 0 var(--p-s6);
-  /* 页头高度：**至少** `--af-head-h`（56px），与左栏品牌行对齐。这里用
-     `min-height` 而不是 `height`——早期用 `min-height` 时出过问题，是因为
-     `.af-head__title` 当时没有自己的 `line-height: 1`：22px × 1.65 = 36.3px
-     的行高把 56px 的内容盒顶到 61px，左栏那条线就错开 5px。现在标题、
-     副标题、包裹列三处的行高都收紧了，1~2 行内容自然落在 56px 内。
-     **必须允许它长高**：当某页的标题 + 副标题真的超过 56px 时，定高 +
-     `align-items: center` 会把超出量**上下均分**、上半截落到视口外——
-     用户报的「`.af-head__title` 超到页面顶部外」就是这么来的。
+  /* 页头高度：**至少** `--af-head-h`（56px）。这里用 `min-height` 而不是
+     `height`——早期 `.af-head__title` 没有自己的 `line-height: 1`，
+     22px × 1.65 = 36.3px 的行高把内容盒顶到 61px，左栏那条线就错开 5px。
+     现在标题、副标题、包裹列三处的行高都收紧了：单行 = 22（标题）+ 18.75
+     （`--af-leading-snug` 1.5 × 12.5px 副标题）+ 4（gap `--p-s1`）= **44.75px**，
+     落在 56px 内，「与左栏品牌行对齐」只在**单行**时成立。
+     两行是 22 + 18.75 × 2 + 4 = **63.5px**，超过 56px——这时页头靠
+     `min-height` 自己长高（对齐让位给「标题完整可见」，不是定高再裁）。
+     **必须允许它长高**：`/settings`、`/agents` 的包裹列实测就是 **67.6px**。
+     若换成定高 + `align-items: center`，超出的 11.6px 会被**上下均分**、
+     上半截（5.8px）落到视口外——用户报的「`.af-head__title` 超到页面顶部外」
+     （实测 `title top = -6.3px`）就是这么来的。
      `min-height` 下页头自己长到需要的高度，标题永远看得见。 */
   min-height: var(--af-head-h); flex: 0 0 auto;
   border-bottom: 1px solid var(--p-line-2);
@@ -441,11 +445,14 @@ html[data-rail='off'] .af-rail__actions .af-btn {
    用户报「af-board 为什么不铺满下面的页面」。自造那份已删，本节的规则
    直接用原型类名，**全仓只有这一处 `.af-board` 定义**。
 
-   核对记录（v0.8.1 第4轮）：`components.css` 里原本还有一条
-   `@media (max-width: 900px) { .af-board { grid-template-columns: 1fr } }`，
-   但本文件用的是 `grid-auto-flow: column` + `grid-auto-columns`，
-   `grid-template-columns` 对它**不起作用**——那是条从不生效的死规则，已删。
-   窄屏看板仍靠本文件 §11 的 `.af-board { grid-auto-columns: 86% }`（横向可滑）。
+  核对记录（v0.8.1 第4轮起，第5轮更正）：`components.css` 里原本还有一条
+  `@media (max-width: 900px) { .af-board { grid-template-columns: 1fr; overflow-x: visible } }`。
+  其中 `grid-template-columns: 1fr` 对 `grid-auto-flow: column` 的容器确实无效，
+  **但同一条规则里的 `overflow-x: visible` 有效且必需**：它撤掉本体那条
+  `overflow-x: auto`，让窄屏改由页面滚动而不是板内横滚。第4轮把整条规则当死代码
+  删了，820px 下实测退回 `overflow-x: auto`（`scrollWidth 4191 / clientWidth 820`）。
+  **一条规则里有一个声明无效，不代表整条规则都该删**：要逐条声明判，不按规则判。
+  这条覆写现在住在本文件 §11，与 `grid-auto-columns: 86%` 同一条规则。
    =========================================================================== */
 
 .af-board {
@@ -916,5 +923,10 @@ a.af-meter:hover { background: var(--p-surf-2); text-decoration: none; }
   .af-head { padding: 0 var(--p-s4); }
   .af-meters { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: var(--p-s3) var(--p-s3) 0; }
   .af-meters .af-meter:nth-child(3) { border-left: none; }
-  .af-board { grid-auto-columns: 86%; padding: var(--p-s3); }
+  /* 窄屏取消**板内**横滚，改由页面整体滚：上面那条 `grid-auto-columns: 86%`
+     让每列占满视口宽度的 86%，板子本身不再溢出，`.af-board` 本体（§5）的
+     `overflow-x: auto` 必须在这里被撤掉——否则那个 auto 会自己变成滚容器，
+     与页面滚动抢手势。实测（820×900）computed `overflow-x: visible`；
+     断点以上（1000×900）仍是 `auto`。 */
+  .af-board { grid-auto-columns: 86%; padding: var(--p-s3); overflow-x: visible; }
 }
