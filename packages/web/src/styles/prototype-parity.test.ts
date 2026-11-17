@@ -499,6 +499,48 @@ const INLINE_STYLE_SCOPE = [
   'packages/web/src/domains/shared/components/PageHead.vue',
 ] as const
 
+/**
+ * 骨架类门禁的扫描范围：**本里程碑已交付的页面 + 两个 `App.vue` 已经渲染、
+ * 但不在原「10 页」清单里的真页面**（`/agents`、`/agents/:name`）。
+ *
+ * 为什么后面两个要补进来（2026-11-17 子任务 10 逐页扫残留时发现）：`/agents`
+ * 与 `/agents/:name` 是 v0.7.0 的一级导航项，用户早就点得到，而 `AgentCatalogPage`
+ * 当时还挂着自造的 `section.af-page`（`.af-page__head` / `__title`）——那一族
+ * 规则已随子任务 2 的类名删除，也就是**一张没有页头几何的裸页面**，长期没人
+ * 发现，因为门禁只扫文档里那 10 个文件名。
+ *
+ * **这份清单仍然不是「App.vue 的所有页面」**：其余路由是 `SkeletonPage` 占位
+ * （`ExecutionPage` / `ReplayPage` / `TimelinePage` / `ProjectSchedulesPage` /
+ * `InboxPage` / `ActivityPage` / `ButlerPage` 与三个设置子页），它们归各自
+ * 里程碑；`SettingsPage` 是 v0.8.1 子任务 11 已交付的一页，但它有自己的分段
+ * 布局、没有 `.af-body` 骨架，登记在下面的 `HEAD_DESIGN_OVERRIDE` 语义之外
+ * （它连页头都由分段自己给），故不在本清单。
+ *
+ * 下面另有一条用例把这份清单与 `App.vue` 的 `PAGES` 逐项对照，并在页面上出现
+ * **新的非骨架页**时提示「这里有一页门禁没覆盖」——范围漂移不会静默发生。
+ */
+const ROUTED_PAGES = [
+  ...DELIVERED_PAGES,
+  'packages/web/src/domains/agent/AgentCatalogPage.vue',
+  'packages/web/src/domains/agent/AgentDetailPage.vue',
+] as const
+
+/** `App.vue` 里可达、但**故意不在**骨架门禁范围内的页面 → 理由。 */
+const OUT_OF_SCOPE_PAGES: Record<string, string> = {
+  'packages/web/src/pages/SettingsPage.vue':
+    '分段式设置页（v0.8.1 子任务 11 交付）：`.af-settings` 两栏，没有 .af-body 骨架',
+  'packages/web/src/domains/project/ExecutionPage.vue': 'SkeletonPage 占位（归 v0.8.2）',
+  'packages/web/src/domains/project/ReplayPage.vue': 'SkeletonPage 占位（归 v0.8.2）',
+  'packages/web/src/domains/project/TimelinePage.vue': 'SkeletonPage 占位（归 v0.8.2）',
+  'packages/web/src/domains/project/ProjectSchedulesPage.vue': 'SkeletonPage 占位（归 v0.8.2）',
+  'packages/web/src/domains/inbox/InboxPage.vue': 'SkeletonPage 占位（归 v0.8.0 之后的里程碑）',
+  'packages/web/src/domains/inbox/ActivityPage.vue': 'SkeletonPage 占位',
+  'packages/web/src/domains/butler/ButlerPage.vue': 'SkeletonPage 占位（归 v0.9.0）',
+  'packages/web/src/pages/SkillsSettingsPage.vue': 'SkeletonPage 占位',
+  'packages/web/src/pages/IntegrationsSettingsPage.vue': 'SkeletonPage 占位',
+  'packages/web/src/pages/NotificationsSettingsPage.vue': 'SkeletonPage 占位',
+}
+
 /** 模板里出现的**静态**类名（`class="…"` / `class='…'`），`:class` 不算。 */
 function staticClassesOfTemplate(vueSource: string): Set<string> {
   const out = new Set<string>()
@@ -603,7 +645,7 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
      */
     const stillPending: string[] = []
     const migratedButListed: string[] = []
-    for (const page of DELIVERED_PAGES) {
+    for (const page of ROUTED_PAGES) {
       const src = readRepoFile(page)
       const classes = staticClassesOfTemplate(src)
       const listed = page in TODO_OVERVIEW
@@ -676,7 +718,7 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
      */
     const HEAD_AT = [/<PageHead[\s>]/g, /<header[^>]*\bclass="[^"]*\baf-head\b[^"]*"/g]
     const nested: string[] = []
-    for (const page of DELIVERED_PAGES) {
+    for (const page of ROUTED_PAGES) {
       const tpl = templateOf(readRepoFile(page))
       const bodyAt = tpl.search(/class="[^"]*\baf-body\b/)
       if (bodyAt < 0) continue // 缺 af-body 由上面那条用例负责，这里不重复报
@@ -707,6 +749,56 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
     }
     expect(judge(ok), '平级且在前 → 通过').toBe(true)
     expect(judge(bad), '嵌在 .af-body 里 → 必须判红').toBe(false)
+  })
+
+  it('骨架类门禁的页面清单与 App.vue 的路由表对齐（漏页或过时即红）', () => {
+    /**
+     * 上面两条「骨架 / 内联样式」门禁的**范围**就是这份 `ROUTED_PAGES`。
+     * 范围写错时它们不会红——它们只是扫得少一点，看起来一样绿。`/agents`
+     * 挂着一层死掉的 `.af-page` 却长期没被发现，正是这个形状：清单是按文档里
+     * 那句「10 个已交付页面」抄的，而不是按「用户能打开哪些页面」派的。
+     *
+     * 判据：`App.vue` 的 `PAGES` 里每个非认证页，要么在 `ROUTED_PAGES` 里、
+     * 要么在 `OUT_OF_SCOPE_PAGES` 里给出理由。两个都不在 → 红（有人加了新页面
+     * 而门禁没覆盖）。反过来，清单里挂着 `PAGES` 已经不再渲染的页面 → 红。
+     */
+    const app = readRepoFile('packages/web/src/App.vue')
+    const imports = new Map<string, string>()
+    for (const m of app.matchAll(/^import (\w+) from '@\/(.+\.vue)'/gm)) {
+      imports.set(m[1] as string, `packages/web/src/${m[2]}`)
+    }
+    const map = /const PAGES[^{]*\{([\s\S]*?)\n\}/.exec(app)?.[1] ?? ''
+    expect(map, 'App.vue 里的 PAGES 映射还在').not.toBe('')
+
+    // 认证页是全屏单页（`/login` / `/setup`），本来就没有 `.af-shell` 外壳。
+    const AUTH_ONLY = new Set(['LoginPage', 'SetupPage'])
+    const routed = new Set<string>()
+    for (const m of map.matchAll(/:\s*(\w+)\b/g)) {
+      const comp = m[1] as string
+      if (AUTH_ONLY.has(comp)) continue
+      const file = imports.get(comp)
+      expect(file, `PAGES 里引用的 ${comp} 必须有 import`).toBeTruthy()
+      routed.add(file as string)
+    }
+    expect(routed.size, '解析出的页面数不能是 0（否则下面的集合比较恒真）').toBeGreaterThan(15)
+
+    const covered = new Set<string>([...ROUTED_PAGES, ...Object.keys(OUT_OF_SCOPE_PAGES)])
+    const uncovered = [...routed].filter((f) => !covered.has(f)).sort()
+    const stale = [...covered].filter((f) => !routed.has(f)).sort()
+    expect(
+      uncovered,
+      [
+        '这些页面在 App.vue 里可达，但两条骨架门禁都扫不到它们。',
+        '要么加进 `ROUTED_PAGES`（它是真页面），要么加进 `OUT_OF_SCOPE_PAGES`（写明理由）：',
+        ...uncovered,
+      ].join('\n'),
+    ).toEqual([])
+    expect(stale, `清单里有 App.vue 不再渲染的页面（范围已过时）：\n${stale.join('\n')}`).toEqual([])
+
+    // 声明了「不在范围内」的页面，理由不能是空的——空理由等于没声明。
+    for (const [page, why] of Object.entries(OUT_OF_SCOPE_PAGES)) {
+      expect(why.trim().length, `${page} 的排除理由不能为空`).toBeGreaterThan(4)
+    }
   })
 
   it('10 个页面模板里不许有内联样式（style="）', () => {

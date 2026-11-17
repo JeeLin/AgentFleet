@@ -36,6 +36,7 @@
    =========================================================================== */
 
 import AgentCatalog from '@/domains/agent/AgentCatalog.vue'
+import PageHead from '@/domains/shared/components/PageHead.vue'
 
 /**
  * 「能力由任务授予」那张表。**照 `prototype/agents.html:126-147` 逐行搬**，
@@ -78,13 +79,23 @@ const CAPABILITIES: readonly CapabilityRow[] = [
 </script>
 
 <template>
-  <section class="af-page">
-    <header class="af-page__head">
-      <h1 class="af-page__title">Agent</h1>
-      <p class="af-muted">
-        各设备上装了哪些 agent、哪些跑不起来。Hub 不代装，只扫描与读写启动配置。
+  <!-- 页面骨架照原型 `agents.html:15-23`：`header.af-head` 是 `.af-body` 的
+       兄弟，内容在 `.af-body` 里。上一版是自造的 `.af-page` / `.af-page__head`
+       / `.af-page__title`——那一族规则已随 v0.8.1 子任务 2 的类名删除，于是
+       这一页是一张没有页头几何的裸页面（`class-usage` 门禁只扫 10 个已交付
+       页面，`/agents` 不在其中，所以一直没被发现；2026-11-17 子任务 10 逐页
+       扫 `af-page` 残留时抓到）。 -->
+  <PageHead>
+    <div>
+      <h1 class="af-head__title">Agent</h1>
+      <p class="af-head__sub">
+        管理面 · 各设备上装了哪些 agent、哪些跑不起来。Hub 不代装，只扫描与读写启动配置。
       </p>
-    </header>
+    </div>
+  </PageHead>
+
+  <div class="af-body">
+    <div class="af-agentpage__stack">
 
     <!-- 原型 `:26-32` 的提示条：「装 Agent 这件事不归产品管」。
          它不是装饰——这一页最容易引起的误读是「这里能装 agent」，
@@ -177,12 +188,23 @@ const CAPABILITIES: readonly CapabilityRow[] = [
         </p>
       </div>
     </section>
-  </section>
+    </div>
+  </div>
 </template>
 
 <style scoped>
 /* 提示条与分区的竖向间隔。**不写进 `components.css`**：那是全站契约，
    这里的间距只服务本页的阅读节奏（页内 4 块，块间要留白）。 */
+/* 内容层的内边距与块间距：原型 `agents.html:25` 是内联
+   `padding:20px 20px 64px` 加 `af-stack`（12px gap）。静态内联样式被
+   `prototype-parity` 门禁禁止，所以落成这一层 —— 与另外 9 页同一写法。 */
+.af-agentpage__stack {
+  padding: var(--p-s5) var(--p-s5) var(--p-s8);
+  display: flex;
+  flex-direction: column;
+  gap: var(--p-s3);
+}
+
 .af-agentpage__lead {
   margin-bottom: var(--af-space-6);
 }

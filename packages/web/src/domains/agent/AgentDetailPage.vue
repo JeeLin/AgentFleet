@@ -95,8 +95,14 @@ function openDevice(nodeId: string): void {
 </script>
 
 <template>
-  <div class="af-page af-agd">
-    <PageHead>
+  <!-- `header.af-head`（`PageHead` 渲染）是 `.af-body` 的**兄弟**。上一版外面还
+       套着一层自造的 `.af-page af-agd`——`.af-page` 的规则已随 v0.8.1 子任务 2
+       的类名删除，那层 div 于是只剩 `.af-agd` 这个局部命名空间在起作用；
+       但它把页头与内容一起塞进了一个没有 `overflow` 的块里，页头失去了
+       「滚动时留在原处」的性质（`prototype/agents.html:15` 与 `:23` 是两块并排）。
+       这一页不在 10 个已交付页面的门禁清单里（`/agents/:name` 是 v0.7.0 的
+       新一级路由），所以一直没被扫到。 -->
+  <PageHead>
       <div>
         <h1 class="af-head__title">
           {{ agentName }}
@@ -120,6 +126,8 @@ function openDevice(nodeId: string): void {
       </template>
     </PageHead>
 
+  <div class="af-body af-agd">
+    <div class="af-agd__stack">
     <div v-if="error" class="af-inline-error" role="alert">
       {{ error }}
       <button class="af-btn af-btn--sm" type="button" @click="load">重试</button>
@@ -249,10 +257,21 @@ function openDevice(nodeId: string): void {
         </div>
       </section>
     </template>
+    </div>
   </div>
 </template>
 
 <style scoped>
+/* 内容层的内边距：原型 `agents.html:25` 是内联 `padding:20px 20px 64px`。
+   静态内联样式被门禁禁止，落成这一层——与另外 9 页同一写法。
+   `.af-agd` 现在挂在**内容层**上（原来是外层 div），后代选择器照旧生效。 */
+.af-agd__stack {
+  padding: var(--p-s5) var(--p-s5) var(--p-s8);
+  display: flex;
+  flex-direction: column;
+  gap: var(--p-s3);
+}
+
 .af-agd__rate {
   display: flex;
   align-items: baseline;
