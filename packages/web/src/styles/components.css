@@ -119,6 +119,20 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
   display: flex; flex-direction: column; position: relative;
   overflow: auto; background: var(--p-bg); min-width: 0; min-height: 0;
 }
+
+/* 左栏收起后，页头要给左下那颗唤回按钮让出位置（原型 `app.css:1284` 的窄屏
+   那段同一手法：`padding-left: calc(var(--navbtn) + var(--s3) + var(--s2))`）。
+   这里复用**同一个算式**，因为收起态与窄屏是同一件事：左上角浮着一颗 40px 的
+   圆钮，页头文字不能压在它下面。
+
+   上一版没有这条，于是收起后 `.af-main` 的 `padding-left` 是 0，页头文字离
+   视口左边只剩 `.af-head` 自己的 24px——用户 2026-11-17 报的「收起后页面紧紧
+   贴着页面左侧边框」就是它。原型收起态本来是 `0 1fr`（内容真的吃满），但原型
+   的唤回按钮在**左下角**、不与页头抢位；我们的按钮在左上，所以必须让位。
+   只加在 `.af-main` 上而不是 `.af-head`：整列内容一起右移，页头与正文才对齐。 */
+html[data-rail='off'] .af-main {
+  padding-left: calc(var(--af-navbtn) + var(--p-s3) + var(--p-s2));
+}
 .af-spacer { flex: 1 1 auto; }
 
 /* ===========================================================================

@@ -704,6 +704,28 @@ watch(
       </div>
     </aside>
 
+    <!-- 收起后的唤回入口（原型 `app.css:1229-1260` 的 `.af-recallsplit`）。
+         **必须在 `.af-rail` 外面**：收起态那条规则是
+         `html[data-rail='off'] .af-rail { visibility: hidden }`，`hidden` 作用在
+         整棵子树上，`position: fixed` 也逃不掉——上一版把按钮留在品牌行里，于是
+         收起后 `elementFromPoint` 命中不到它，点不回展开（用户 2026-11-17 报的
+         「左侧栏收起后无法打开」）。原型同样把它放在 `.af-shell` 之外。
+
+         左半那颗三横线就是原型的 `.af-recallsplit__rail`；原型的右半是「全部
+         页面清单」，本里程碑不落地，所以不做一颗点了没反应的假按钮。 -->
+    <button
+      class="af-recallsplit"
+      type="button"
+      aria-label="展开导航"
+      title="展开导航"
+      :aria-expanded="effectiveRail === 'open'"
+      @click="toggleRail"
+    >
+      <span class="af-recallsplit__rail">
+        <span class="af-navbtn__bars" aria-hidden="true"><span></span><span></span><span></span></span>
+      </span>
+    </button>
+
     <main class="af-main" tabindex="-1">
       <component :is="page" v-if="page" :key="pageKey" />
       <EmptyState

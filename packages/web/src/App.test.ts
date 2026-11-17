@@ -618,19 +618,57 @@ describe('App：左栏几何与收起态', () => {
     expect(decls).not.toContain('52px')
   })
 
-  it('收起态：唤回按钮留在原地（悬浮形态），且仍可 Tab 到', async () => {
+  it('收起态：唤回按钮必须移出左栏子树，且仍可 Tab 到', async () => {
     stubFetch(EMPTY_API)
     const w = mountApp('/')
     await flush(w)
 
     const css = readRepoFile('packages/web/src/styles/prototype-shell.css')
-    // 左栏整列 `visibility: hidden` 之后，唤回按钮必须自己浮回来。
-    const recall = cssRuleOf(css, "html[data-rail='off'] .af-rail__brand .af-navbtn")
-    expect(recall, '收起态唤回按钮规则必须存在').not.toBe('')
-    expect(recall).toContain('position: fixed')
-    expect(recall).toContain('visibility: visible')
+    // **判据是「不在 `.af-rail` 子树里」，不是「浮起来了」**（2026-11-17 改）。
+    // 上一版断言的是一条 `html[data-rail='off'] .af-rail__brand .af-navbtn`
+    // 规则含有 `position: fixed` + `visibility: visible`——规则确实写了，
+    // 可它锁的东西根本不成立：收起态的 `html[data-rail='off'] .af-rail
+    // { visibility: hidden }` 作用在**祖先**上，`position: fixed` 不脱离
+    // 可见性继承，祖先的 `hidden` 会把整棵子树裁掉。实测（playwright）：
+    // 收起后 `elementFromPoint` 命中不到那颗按钮，`page.click` 超时，
+    // 用户报「左侧栏收起后无法打开」。
+    // 所以这里改成断言**结构**：唤回入口用原型类 `.af-recallsplit`，
+    // 且它渲染在 `.af-rail` 之外。
+    const recall = cssRuleOf(css, "html[data-rail='off'] .af-recallsplit")
+    expect(recall, '收起态唤回入口必须由 html[data-rail=off] 触发显示').not.toBe('')
+    expect(recall, '收起态唤回入口必须显示出来（display: inline-flex）').toContain('inline-flex')
+    // 上一版那条「用 `position: fixed` 把品牌行里那颗按钮浮回来」的规则必须消失。
+    // 判据看**规则体**而不是 `cssRuleOf`：后者取 `indexOf('selector {')` 后的
+    // 第一段，那条规则被删掉之后会滑到别处匹配到不相干的声明（实测：匹配到
+    // `{ display: none;`），于是这条反向守卫会假红。也不看裸 `includes`：
+    // 本文件的注释里写着「不做 `.af-rail__brand .af-navbtn` 的悬浮形态」，
+    // 连注释一起命中。
+    // 判据：**不得有「收起态下把品牌行那颗按钮做成悬浮」的规则**。
+    // 但窄屏那条 `display: none` 是合法的（窄屏左栏根本不渲染，那颗开关
+    // 本来就该消失），所以用例把它排除在外。
+    const block = /html\[data-rail=['"]off['"]\]\s+\.af-rail__brand\s+\.af-navbtn\s*\{([^}]*)\}/.exec(css)
+    if (block) {
+      // 命中的只有可能是窄屏那条 `display: none`（紧邻 `@media (max-width: 900px)`）
+      const idx = css.indexOf(block[0])
+      const near = css.slice(Math.max(0, idx - 700), idx)
+      const isNarrow = near.includes('@media (max-width: 900px)')
+      expect(
+        isNarrow && block[1].includes('display: none'),
+        '「把左栏里的按钮浮回来」是行不通的做法（祖先的 visibility: hidden 会裁掉它），规则不许回来；'
+          + '窄屏那条 display:none 除外',
+      ).toBe(true)
+    }
 
-    // 「浮回来」不是只画出来的：按钮本身仍是品牌行里那颗可聚焦的 button。
+    const rail = w.element.querySelector('.af-rail')
+    const recallBtn = w.element.querySelector('.af-recallsplit')
+    expect(recallBtn, '页面上必须有唤回入口').not.toBeNull()
+    expect(
+      rail?.contains(recallBtn as Node) ?? false,
+      '唤回入口不得在 .af-rail 子树里——祖先的 visibility: hidden 会连它一起裁掉',
+    ).toBe(false)
+    expect(isTabbable(recallBtn as Element)).toBe(true)
+
+    // 展开态那颗开关仍在品牌行里（它负责「收起」，与被移出去的唤回入口分工不同）。
     const btn = w.element.querySelector<HTMLElement>('.af-rail__brand .af-navbtn')
     expect(btn, '品牌行里必须有那颗开关').not.toBeNull()
     expect(isTabbable(btn as Element)).toBe(true)
