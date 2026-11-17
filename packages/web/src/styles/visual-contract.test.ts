@@ -182,6 +182,109 @@ const CONTRACT: ContractRow[] = [
       '**具体色值不断言**：另一个 lane 正在改 --p-fg-3，只钉「引用了它」这一条语义',
   },
 
+  /* ---- 页头里的「标题 + 副标题」包裹 div（G3：本轮新增的两条规则）----
+     ---------------------------------------------------------------------
+     这两条规则支撑 `PageHead.vue` 文档写明的**合法写法**：3 个页面的副标题
+     是一整句 20-40 字说明，排在标题右边会把标题挤到换行，所以那几页在默认槽
+     里放一个包住「标题 + 副标题」的 `<div>`，副标题落到标题下面。此时
+     `PageHead` 的槽位结构与类名不变，**排版由这两条选择器决定**。
+
+     **G3 说的就是它们没有守卫**：删掉整套 `.af-head > div` 规则，页面不会报错，
+     只是三页的页头各自塌成一种高度——正是用户报过的那个 bug 的形状。
+     实测两页确认规则在工作：`/devices/probe-device` 与 `/agents/probe-agent`
+     页头都是 **70.75px**（标题 22 + 副标题 18.75 × 2 行 + gap 4 = 67.75，含边框），
+     而单行页 `/project/…/bind` 是 **56px**。 */
+  {
+    file: SHELL,
+    selector: '.af-head > div',
+    prop: 'display',
+    expect: 'flex',
+    measured:
+      '/devices/probe-device 与 /agents/probe-agent · 1440×900 · 包裹 div 实测 computed flex；' +
+      '两页页头高都是 70.75px（副标题换到标题下面后的自然高度）',
+  },
+  {
+    file: SHELL,
+    selector: '.af-head > div',
+    prop: 'flex-direction',
+    expect: 'column',
+    measured:
+      '/devices/probe-device · 1440×900 · 实测 computed column——**这一条就是「副标题落到' +
+      '标题下面」**，改成 row 就退回原型那种「副标题在标题右边」的排版，长说明会把标题挤到换行',
+  },
+  {
+    file: SHELL,
+    selector: '.af-head > div',
+    prop: 'justify-content',
+    expect: 'center',
+    measured:
+      '/devices/probe-device · 1440×900 · 实测 computed center。配合 `.af-head` 的 56px ' +
+      'min-height：单行时包裹列在 56px 里垂直居中，两行时长高到 70.75px',
+  },
+  {
+    file: SHELL,
+    selector: '.af-head > div',
+    prop: 'gap',
+    expect: 'var(--p-s1)',
+    measured: '/devices/probe-device · 1440×900 · 实测 computed gap 4px（= --p-s1）',
+    computed: '4px',
+  },
+  {
+    /* `min-width: 0` 不是装饰：flex 项默认 `min-width: auto`，标题 + 副标题
+       都是 `nowrap`，没有这一条时包裹列会被内容顶宽、把页头撑出横向溢出。 */
+    file: SHELL,
+    selector: '.af-head > div',
+    prop: 'min-width',
+    expect: '0',
+    measured:
+      '/devices/probe-device · 1440×900 · 实测 computed 0px。去掉它，nowrap 的副标题会把' +
+      '包裹列顶宽、页头横向溢出（flex 项默认 min-width: auto）',
+    computed: '0px',
+  },
+  {
+    file: SHELL,
+    selector: '.af-head > div .af-head__sub',
+    prop: 'white-space',
+    expect: 'nowrap',
+    measured:
+      '/devices/probe-device 与 /agents/probe-agent · 1440×900 · 实测 computed nowrap。' +
+      '页头是扫视用的，长说明该由 `.af-body` 承载',
+  },
+  {
+    file: SHELL,
+    selector: '.af-head > div .af-head__sub',
+    prop: 'overflow',
+    expect: 'hidden',
+    measured:
+      '/devices/probe-device · 1440×900 · 实测 computed hidden——配合 `text-overflow: ellipsis` ' +
+      '才出省略号；少了它长文案直接溢出去而不是截断',
+  },
+  {
+    file: SHELL,
+    selector: '.af-head > div .af-head__sub',
+    prop: 'text-overflow',
+    expect: 'ellipsis',
+    measured: '/devices/probe-device · 1440×900 · 实测 computed ellipsis',
+  },
+  {
+    file: SHELL,
+    selector: '.af-head > div .af-head__sub',
+    prop: 'line-height',
+    expect: 'var(--af-leading-snug)',
+    measured:
+      '/devices/probe-device · 1440×900 · 实测 computed 18.75px（= 12.5 × 1.5）。' +
+      '这个数是页头高度算术的一半：两行副标题 37.5px + 标题 22 + gap 4 = 63.5',
+    computed: '18.75px',
+  },
+  {
+    file: SHELL,
+    selector: '.af-head > div .af-head__sub',
+    prop: 'min-width',
+    expect: '0',
+    measured: '/devices/probe-device · 1440×900 · 实测 computed 0px（同上：允许收窄才出省略号）',
+    computed: '0px',
+  },
+
   /* ---- 左栏品牌方块 `.af-rail__mark` -------------------------------- */
   {
     file: SHELL,
