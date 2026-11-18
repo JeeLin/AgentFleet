@@ -844,7 +844,7 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
      * 「我在哪几个会话里」，标题行答「这个是哪个」，状态行答「绑在哪台设备、
      * 哪个目录、哪个 agent」。挤成一行时窄屏下路径会把设备名挤没，而两者说的
      * 不是同一件事（`SessionPage.test.ts` 三条用例钉着这个分层）。所以它用
-     * 自己的 `.af-wb__head`（`components.css:758`，有独立的 padding / 背景 /
+     * 自己的 `.af-wb__head`（`components.css:770`，有独立的 padding / 背景 /
      * 发丝线），不套 `.af-head`——这不是漏做，是**不做**。
      */
     const HEAD_DESIGN_OVERRIDE: Record<string, string> = {

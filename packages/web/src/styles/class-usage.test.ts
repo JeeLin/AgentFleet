@@ -26,7 +26,7 @@ import { join, relative } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { stripCssComments } from '@/test/css-scan'
+import { classNamesIn, stripCssComments } from '@/test/css-scan'
 
 const SRC = join(process.cwd(), 'src')
 const REPO = join(SRC, '..', '..', '..')
@@ -267,5 +267,190 @@ describe('模板里的 af-* 类名都有定义（`.af-head__title` 那次漏定�
     ).toEqual([])
     // 判定有效：拿一个真实存在的类当正例，防止 isDefined 恒 false 时恒真。
     expect(isDefined('af-shell')).toBe(true)
+  })
+})
+
+/* ===========================================================================
+   反向断言（v0.8.1 第5轮 4c F7 / G82）：**定义了但零消费**的类。
+   ---------------------------------------------------------------------------
+   原有 4 条 `it` 全是「模板用了但样式表里没有」这个方向——那是「缺定义」。
+   反方向（孤儿规则）此前**没有任何守卫**：4c 实测新增 `.af-head__note-probe`
+   等从未被任何 `.vue` 使用的类，111 条样式守卫全绿。CSS 是按需匹配的，
+   孤儿规则不报错、不影响渲染，只会越积越多——第5轮 4a 一口气清出
+   71 个零消费类就是证据。
+
+   判据刻意保守（与正向一致：宁可漏判不误报）：
+     · 只收「类名作为**主体**出现在选择器里」的定义（`classNamesIn(css, { wholeSubject: true })`
+       的口径——`.af-card:focus-visible` 算定义了 `af-card`，`.af-empty--compact .af-empty__text`
+       只算定义了后者的**祖先链**，不算单独定义）；
+     · 消费侧扫「静态 class 属性」+「`:class` 对象/字符串字面量里的 `af-*`」，
+       与动态拼接同样保守处理；
+     · 豁免表**每条写理由**。
+
+   4c 的处置警告：`.af-projectlist__dot` 与 `.af-drawer--open` **不可删**
+   ——前者属性互补（`[data-color]` 变体族，4a S5 实证两块规则不是覆盖关系），
+   后者是动态绑定。白名单必须显式含它们，否则这条守卫会把要保留的类
+   误判成孤儿。
+   =========================================================================== */
+describe('样式表里定义了 af-* 类但模板零消费（孤儿规则，反向）', () => {
+  /* ── 消费侧的三种形态 ─────────────────────────────────────────────
+     1. 静态 `class="af-a af-b"`：直接切开取词。
+     2. `:class` 对象字面量的 key（`{ 'af-drawer--open': x }`）：静态可见。
+     3. **模板字符串拼接**（`` `af-badge--${row.tone}` ``）：只有前缀可见，
+        后缀来自数据。第四种「只被 .ts 测试夹具 / querySelector 消费」的，
+        扫描看不见，走 ORPHAN_OK 显式豁免。
+
+     第 3 种是这轮我自己踩的坑：初版只扫 1 和 2，于是 `af-badge--accent`
+     被报成孤儿——而它的消费者写的是 `` `af-badge--${row.tone}` ``，
+     `CAPABILITIES` 里 tone 只有 ok/danger/info，accent 确实无人用。
+     **结论：既不能只按前缀放过（那会让整族 8 个变体都免检，其中 7 个是死的），
+     也不能只认字面量（会误报）。** 做法是「前缀放过 + 后缀必须落在
+     该文件里真实出现的字面量集合里」，见下面 dynamicSuffixes。 */
+  function consumedClasses(): Set<string> {
+    const out = new Set<string>()
+    for (const src of VUE_SRC.values()) {
+      // ① 静态 class="..."
+      for (const m of src.matchAll(/class="([^"]*)"/g)) {
+        if (m[1].includes('${') || m[1].includes('{{')) continue
+        for (const name of m[1].split(/\s+/)) if (name.startsWith('af-')) out.add(name)
+      }
+      // ② :class 对象字面量的 key
+      for (const m of src.matchAll(/'(\s*af-[a-zA-Z0-9_-]+\s*)'/g)) out.add(m[1].trim())
+    }
+    return out
+  }
+
+  /** `` `af-prefix--${expr}` `` 里前缀 → 该 `expr` 取值域里出现过的字面量的**类名后缀集合**。
+   *
+   *  取值域取得保守：整个文件里所有字符串字面量（`tone: 'ok' | 'danger'` 的
+   *  类型注解、`tone: 'danger'` 的数据都在里面）。宁可放过一个死变体，
+   *  也不误报一个活变体——与正向守卫同一口径。 */
+  function dynamicSuffixes(): Map<string, Set<string>> {
+    const out = new Map<string, Set<string>>()
+    for (const src of VUE_SRC.values()) {
+      const lits = new Set<string>()
+      for (const m of src.matchAll(/'([a-zA-Z0-9_-]+)'/g)) lits.add(m[1])
+      for (const m of src.matchAll(/`(af-[a-zA-Z0-9_-]*?[\w-]*)-\$\{/g)) {
+        const prefix = m[1]
+        if (!out.has(prefix)) out.set(prefix, new Set())
+        for (const lit of lits) out.get(prefix)!.add(lit)
+      }
+    }
+    return out
+  }
+
+  /** 定义侧：以类为主体出现在选择器里的 af-* 名（wholeSubject 口径）。
+   *  **只扫三份完整样式表**，不扫 `.vue` 的 `<style>` 块——后者是逐文件拼接的
+   *  片段，可能有 `@media` 之类的上下文残缺，`parseCssRules` 会抛
+   *  「花括号不平衡」。正向守卫判「有定义」时用整份 ALL_CSS（宽松、
+   *  宁可漏判），反向判「孤儿」时必须结构化解析（严格、可疑即报），
+   *  两者口径不同是刻意的。 */
+  function definedClasses(): Set<string> {
+    const out = new Set<string>()
+    for (const css of STYLE_SHEETS) {
+      const text = stripCssComments(readFileSync(join(REPO, css), 'utf-8'))
+      for (const cls of classNamesIn(text, { wholeSubject: true })) {
+        if (cls.startsWith('.af-')) out.add(cls.slice(1))
+      }
+    }
+    return out
+  }
+
+  /** 一个类名是否被消费：字面量命中，或落在某个 `` `prefix-${expr}` `` 的取值域里。 */
+  function isConsumed(name: string, consumed: Set<string>, dyn: Map<string, Set<string>>): boolean {
+    if (consumed.has(name)) return true
+    for (const [prefix, suffixes] of dyn) {
+      if (!name.startsWith(`${prefix}-`)) continue
+      if (suffixes.has(name.slice(prefix.length + 1))) return true
+    }
+    return false
+  }
+
+  /* 扫描看不见的消费者，逐条写理由。**不许写「暂未使用」**——那等于给孤儿开后门，
+     第5轮 4a 清出的 71 个零消费类全是这么攒起来的。 */
+  const ORPHAN_OK = new Map<string, string>([
+    [
+      'af-projectlist__dot',
+      '`[data-color]` 变体族（blue/green/purple/orange/gray 五条 + 尺寸一条，'
+        + '属性互补不是覆盖，4a S5 实证）。**页面暂未渲染它**，但它是「形态 + 语义色」'
+        + '这套配色的唯一实现；删了等要用时得把这组令牌映射整套重写。'
+        + '4c 处置明确点名：不可删。',
+    ],
+    [
+      'af-head--page',
+      '`src/test/sfc.test.ts` 的夹具用它造一个「页头」形态，经 sfc 编译后断言样式生效——'
+        + '消费发生在测试夹具里，`.vue` 静态扫描看不见。',
+    ],
+    [
+      'af-body--pad',
+      '`BoardPage.test.ts` 断言「看板页的根**不该**带这一类」（内容区自己带内边距会把页头挤成内缩），'
+        + '同时三处注释按名引用它解释为什么改用 `.af-head` + `.af-body`。'
+        + '删了规则，那些注释与那条断言就失去指涉对象。',
+    ],
+    /* ── 状态色带：整族保留（用户 v0.8.1 第5轮裁定）─────────────────────
+       下面 6 条与**有**消费的 `af-tag--review` / `af-tag--failed`（OverviewPage.vue:426/430）
+       是同一族：原型 `app.css:215-231` 为看板六列各定义了一组
+       color / background / border-color，共 8 个变体。
+       它们不是「零消费的死代码」，而是**一张完整的状态 → 配色映射表**：
+       删掉其中任一格，将来要看板显示该状态的标签，就得把三组语义令牌
+       （`--p-<state>` / `-bg` / `-line`）重新推一遍，而推错不会报错，只会「颜色不对」。
+       与 4c 点名**不可删**的 `af-projectlist__dot`（`[data-color]` 变体族）同一性质。
+
+       为什么不写成「暂未使用」：那种理由等于给孤儿开后门——4a 清出的 71 个零消费类
+       全是这么攒起来的。这里的理由是「该族已在服役，此格是它的既定成员」，
+       可以被证伪：若哪天 `review`/`failed` 也不再有消费者，整族就该一起删，
+       这条豁免随之失效（见下面「同族必须仍有消费者」那条自检）。 */
+    ...['pending', 'queued', 'running', 'done', 'butler', 'warn'].map(
+      (st): [string, string] => [
+        `af-tag--${st}`,
+        '看板状态色带的一员（同族 review/failed 在 OverviewPage 服役），'
+          + '原型 app.css:215-231 定义的完整映射表，删一格就要重推三组语义令牌',
+      ],
+    ),
+  ])
+
+  it('样式表里定义的 af-* 类都有消费者（模板 / :class 字面量 / 动态前缀 / 显式豁免）', () => {
+    const consumed = consumedClasses()
+    const dyn = dynamicSuffixes()
+    const orphans = [...definedClasses()].filter((c) => !isConsumed(c, consumed, dyn) && !ORPHAN_OK.has(c))
+    expect(
+      orphans,
+      `这些 af-* 类定义了但全仓 .vue 零消费：\n${orphans.join('\n')}\n`
+        + '删掉规则（死代码），或把消费者补上，或在 ORPHAN_OK 里写明理由。',
+    ).toEqual([])
+  })
+
+  it('判定本身有效：动态前缀、字面量、真孤儿三者判对方向', () => {
+    /* 自检（与正向的「判定本身有效」同构）。三条缺一不可：
+       · `af-drawer--open` 走 :class 字面量——证明形态 ② 没坏；
+       · 定义侧能扫到 `af-projectlist__dot`——证明解析器没空转；
+       · 动态前缀判定**区分同前缀下的活变体与死变体**——这是本轮最容易写错的一处：
+         `af-badge--ok` 必须判「被消费」（`tone: 'ok'` 在文件里），
+         而 `af-badge--accent` 必须判「没被消费」（取值域里没有 accent）。
+         若只按前缀放过，accent 会被放走；若只认字面量，ok 会被误报。 */
+    const consumed = consumedClasses()
+    const dyn = dynamicSuffixes()
+    expect(consumed.has('af-drawer--open'), 'af-drawer--open 经 :class 字面量被消费——扫描必须看见它').toBe(true)
+    expect(definedClasses().has('af-projectlist__dot'), '定义侧必须扫到 af-projectlist__dot').toBe(true)
+    expect(isConsumed('af-badge--ok', consumed, dyn), 'af-badge--ok 落在 `af-badge--${tone}` 的取值域里').toBe(true)
+    expect(
+      isConsumed('af-badge--accent', consumed, dyn),
+      'af-badge--accent 不在取值域里（tone 只有 ok/danger/info）——必须判为未消费，否则整族都免检',
+    ).toBe(false)
+  })
+
+  it('状态色带的豁免前提仍在：同族 review / failed 必须还有真实消费者', () => {
+    /* ORPHAN_OK 里 6 条 `af-tag--*` 的理由是「同族在服役，此格是既定成员」。
+       这个理由**可以被证伪**——一旦 review/failed 也不再被任何模板用到，
+       整族就退化成纯死代码，那 6 条豁免就失去依据，应该一起删。
+       这条用例把那个前提钉住：没有它，豁免理由是没法被检验的一句话。 */
+    const consumed = consumedClasses()
+    const dyn = dynamicSuffixes()
+    for (const live of ['af-tag--review', 'af-tag--failed']) {
+      expect(
+        isConsumed(live, consumed, dyn),
+        `状态色带的前提破了：${live} 已无消费者，ORPHAN_OK 里那 6 条 af-tag--* 的豁免理由不再成立，应当整族删除`,
+      ).toBe(true)
+    }
   })
 })

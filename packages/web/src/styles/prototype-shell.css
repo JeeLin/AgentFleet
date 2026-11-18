@@ -588,19 +588,6 @@ html[data-rail='off'] .af-rail__actions .af-btn {
   overflow-y: auto; min-height: 0; flex: 1;
 }
 
-/* 空的列：不能什么都不显示 —— 空着本身是信息，但要让人分清
-   「这个项目没有失败」和「失败被筛掉了」。app.css:1413-1424。 */
-.af-col--empty .af-col__body::after {
-  content: '这一列是空的';
-  display: block;
-  padding: var(--p-s4) var(--p-s2);
-  font-size: var(--p-t-2xs);
-  color: var(--p-fg-3);
-  text-align: center;
-  border: 1px dashed var(--p-line-2);
-  border-radius: var(--p-r-sm);
-}
-
 /* ===========================================================================
    6–7. 摘要读数带 / 双栏 —— **两节已删除**（v0.8.1 第5轮，G54 + G56）
    -------------------------------------------------------------------------
@@ -794,12 +781,6 @@ html[data-rail='off'] .af-rail__actions .af-btn {
 }
 .af-switch__label { flex: 1; min-width: 0; }
 .af-switch__shape { font-size: var(--p-t-2xs); color: var(--p-fg-3); font-weight: var(--af-weight-regular); }
-.af-switch__item--add {
-  margin-top: var(--p-s2); padding-top: var(--p-s3);
-  border-top: 1px solid var(--p-line-2);
-  border-radius: 0 0 var(--p-r-sm) var(--p-r-sm);
-  color: var(--p-fg-2); font-size: var(--p-t-xs);
-}
 
 /* ===========================================================================
    10. 空状态 / 时间线 / 进度（原型 app.css:490-527、675-685）
@@ -871,13 +852,6 @@ html[data-rail='off'] .af-rail__actions .af-btn {
   background: var(--p-butler-bg); border: 1px solid var(--p-butler-line);
   display: grid; place-items: center;
   color: var(--p-butler); font-size: var(--p-t-2xs); font-weight: var(--af-weight-bold);
-}
-/* 角标：写清「几条、什么事」，不然待确认会被藏进按钮里 */
-.af-fab__badge {
-  display: inline-flex; align-items: center; gap: var(--p-s1);
-  font-size: var(--p-t-2xs); font-weight: var(--af-weight-semibold);
-  padding: 1px var(--p-s2); border-radius: var(--p-r-full);
-  background: var(--p-warn-bg); border: 1px solid var(--p-warn-line); color: var(--p-warn);
 }
 
 .af-drawer {

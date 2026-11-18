@@ -324,7 +324,7 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
   /* textarea 是多行的，不能背 `line-height: calc(row - 2px)` 那条单行值。 */
   line-height: var(--af-leading-snug); padding: var(--af-space-2) var(--af-space-3);
 }
-.af-input--invalid, .af-input[aria-invalid='true'] { border-color: var(--af-danger); }
+.af-input[aria-invalid='true'] { border-color: var(--af-danger); }
 
 .af-field { display: flex; flex-direction: column; gap: var(--af-space-2); }
 .af-field__label { font-size: var(--af-text-sm); color: var(--af-fg-secondary); }
@@ -379,7 +379,6 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
   border-radius: var(--af-radius-sm); border: 1px solid var(--af-border-subtle);
   font-size: var(--af-text-sm); color: var(--af-fg-tertiary); white-space: nowrap;
 }
-.af-badge--accent { background: var(--af-accent-bg); border-color: var(--af-accent-line); color: var(--af-accent-fg); }
 .af-badge--ok { background: var(--af-ok-bg); border-color: var(--af-ok-line); color: var(--af-ok-fg); }
 .af-badge--warn { background: var(--af-warn-bg); border-color: var(--af-warn-line); color: var(--af-warn-fg); }
 .af-badge--danger { background: var(--af-danger-bg); border-color: var(--af-danger-line); color: var(--af-danger-fg); }
@@ -683,7 +682,6 @@ kbd, .kbd {
   width: 2px; height: 28px; background: var(--af-border-strong);
   border-radius: var(--af-radius-full);
 }
-.af-track__cap { display: block; width: 2px; height: 6px; background: var(--af-accent); border-radius: var(--af-radius-full); }
 
 /* ===========================================================================
    16. 只读遮罩 / 17. 退避走带 —— **两节已删除**（v0.8.1 第5轮，G54）
@@ -778,10 +776,6 @@ kbd, .kbd {
      任何一处换成别的底色，视线都会读成「这里开始是另一个模块」。 */
   min-width: 0;
 }
-.af-wb__title {
-  font-size: var(--af-text-lg); font-weight: var(--af-weight-medium);
-  margin: 0; display: flex; align-items: center; gap: var(--af-space-3);
-}
 /* 状态行（v0.5.0）：设备 · 路径（锁定）· agent · 开始时间，比页头矮一档。
    **为什么不复用 .af-wb__meta**：那是页头里的行内组，与标题同一行；这里是
    独立的一整行，行高、内边距、底边都归自己。复用会让两处互相牵制。 */
@@ -825,11 +819,6 @@ kbd, .kbd {
 
 /* 对话流 */
 .af-flow { flex: 1 1 auto; overflow: auto; padding: var(--af-space-5); display: flex; flex-direction: column; gap: var(--af-space-5); }
-.af-flow__day {
-  align-self: center; font-size: var(--af-text-2xs); color: var(--af-fg-tertiary);
-  background: var(--af-surface-2); border-radius: var(--af-radius-full);
-  padding: var(--af-space-1) var(--af-space-3);
-}
 .af-msg { display: flex; flex-direction: column; gap: var(--af-space-2); max-width: 76ch; }
 .af-msg__who {
   display: flex; align-items: center; gap: var(--af-space-2);
@@ -954,11 +943,7 @@ kbd, .kbd {
   color: var(--af-term-fg); white-space: pre-wrap; word-break: break-word;
 }
 .af-term__line { min-height: 1.35em; }
-.af-term__prompt { color: var(--af-term-ansi-cyan); }
-.af-term__err { color: var(--af-term-ansi-red); }
 .af-term__dim { color: var(--af-term-ansi-bright-black); }
-.af-term__ok  { color: var(--af-term-ansi-green); }
-.af-term__warn { color: var(--af-term-ansi-yellow); }
 
 /* 文件树面板内嵌版 */
 .af-fpane { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
@@ -971,14 +956,6 @@ kbd, .kbd {
 .af-fpane__crumbs b { color: var(--af-fg-secondary); font-weight: var(--af-weight-regular); }
 .af-fpane__crumbs [data-oob='true'] { color: var(--af-danger-fg); }
 .af-fpane__body { flex: 1 1 auto; overflow: auto; min-height: 0; }
-.af-fpane__preview {
-  flex: 0 0 40%; overflow: auto; padding: var(--af-space-3) var(--af-space-4);
-  background: var(--af-inset); border-top: 1px solid var(--af-border-subtle);
-  font-family: var(--af-font-mono); font-size: var(--af-text-md);
-  line-height: var(--af-leading-tight); color: var(--af-fg-secondary);
-  white-space: pre;
-}
-.af-fpane__preview .ln { color: var(--af-fg-disabled); user-select: none; }
 
 /* diff 的**实现**是 `GitDiff.vue` 的 `.af-gdiff__*` 类（住在该组件的 scoped
    块里）。这里曾有一份 `.af-diff` / `__row` / `__sign` 的全局副本，**整族零
@@ -1247,17 +1224,7 @@ kbd, .kbd {
 .af-projectlist__row:last-child { border-bottom: 0; }
 .af-projectlist__row:hover { background: var(--af-surface-2); }
 
-/* 整行是**一个按钮**，不是「名字是链接、其余是文字」：点行里任何地方都该进去。
-   左侧对齐、占满剩余空间，把形态与色点推到右边。 */
-.af-projectlist__link {
-  flex: 1 1 auto; display: flex; flex-direction: column; gap: var(--af-space-1);
-  align-items: flex-start; text-align: left;
-  padding: 0; border: 0; background: none; cursor: pointer;
-  font-family: inherit; color: inherit;
-}
-.af-projectlist__link:focus-visible { outline: 2px solid var(--af-border-focus); outline-offset: 2px; border-radius: var(--af-radius-sm); }
 .af-projectlist__name { font-size: var(--af-text-md); font-weight: var(--af-weight-medium); color: var(--af-fg-primary); }
-.af-projectlist__hint { font-size: var(--af-text-sm); color: var(--af-fg-tertiary); }
 
 /* 形态名。**宽度固定**：三个中文词长短不同，不固定的话右侧色点会跟着左右跳。 */
 .af-projectlist__shape {
