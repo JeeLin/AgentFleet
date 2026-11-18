@@ -337,7 +337,7 @@ git 内建它、排除清单读取它、D9 的论证指向它。
 三个 op：`worktree.create` / `worktree.remove` / `worktree.disk_usage`。
 
 **`plan_cleanup` 是纯函数**：给策略 + 目录清单 → 返回「删哪些、留哪些」。
-它不碰盘，所以 18 条清理用例全是纯数据比对，不需要真建目录树。
+它不碰盘，所以 18 个清理用例全是纯数据比对，不需要真建目录树。
 
 **`CACHE_DIRS`**（10 项，含 `node_modules` / `target` / `.venv`）里的东西
 `remove_products` **一律保留**——那是缓存，删了下次要重新下载。删除时

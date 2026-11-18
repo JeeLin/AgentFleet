@@ -2296,7 +2296,7 @@ describe('git 面板：status 与 diff', () => {
   it('有改动时头部徽标写「N 个改动」，与文件条数一致；干净时没有这个徽标', async () => {
     // 这个徽标（`data-git-dirty`）是全仓最后一个零断言的 git 锚点：把
     // `v-if="clean === false"` 改成恒 false、或把 `files.length` 写成常量，
-    // 770 条测试曾经全绿。判据取「文案里的数字 == 文件条数」，不写死 3——
+    // 整套测试曾经全绿。判据取「文案里的数字 == 文件条数」，不写死 3——
     // 写死数字的话，将来改样本仍绿而徽标可能已经算错。
     const { w } = await mountWorkbench()
     await interact(w)
@@ -2737,8 +2737,8 @@ describe('git 面板：历史分段', () => {
   it('点第二个文件时，右栏给的是「正在读取这一份 diff」而不是把上一份当结论', async () => {
     // 守两处 `:stale`（`GitPanel.vue` 的 `reading !== null` /
     // `logReading !== null`）。它是「这份 diff 是上一份、新请求还在飞」的
-    // 唯一显式提示——此前 `grep stale` 在测试里 0 命中，改成 `false` 全量
-    // 772 条照样绿。
+    // 唯一显式提示——此前 `grep stale` 在测试里 0 命中，改成 `false` 整套
+    // 用例照样绿。
     //
     // 路径要真的**换一个文件**：同一个文件再点一次会被 `reading` 判据挡在
     // 外面（页面自己不清），测不到这份提示。
@@ -2819,7 +2819,7 @@ describe('git 面板：历史分段', () => {
 
   it('刷新按钮再问一次 status（那条 0 覆盖的 emit 通路）', async () => {
     // 守 `GitPanel.vue` 的 `@click="emit('refresh')"`。改坏它（改成 `undefined`）
-    // 时全量 772 条照样绿——说明此前没人在看这条通路。
+    // 时整套用例照样全绿——说明此前没人在看这条通路。
     const { w, fetchMock } = await mountWorkbench()
     await interact(w)
     const src = FakeEventSource.instances[0]
@@ -2844,7 +2844,7 @@ describe('git 面板：历史分段', () => {
   })
 
   it('分段条上按左右方向键能换分段（`onSegKey` 的通路）', async () => {
-    // 守 `onSegKey`：改坏它（首行插 `return`）时全量 772 条照样绿。
+    // 守 `onSegKey`：改坏它（首行插 `return`）时整套用例照样全绿。
     // `role="tablist"` 写了就得让方向键能用，否则屏幕阅读器报「无反应」。
     const { w, fetchMock } = await mountWorkbench()
     await interact(w)
@@ -2954,7 +2954,7 @@ describe('git 面板：历史分段', () => {
     // **这条用例守不住那 7 行清理，如实记在这里**：非仓库时模板里那 7 个
     // 字段一个都渲染不出来——`GitPanel` 的「不是 git 仓库」块是
     // `v-if="notARepo"`，内容区整块在 `v-else` 里。实测把 7 行清理整段删掉，
-    // 本文件 784 条用例全绿（含本用例）。所以下面那两条「非仓库下不该有
+    // 本文件整套用例全绿（含本用例）。所以下面那两条「非仓库下不该有
     // diff 正文 / 文件行」**在删掉清理后同样成立**——它们查不到东西是因为
     // 内容区被 `v-if` 换掉了，不是因为清理生效了，对清理本身零检测力。
     //

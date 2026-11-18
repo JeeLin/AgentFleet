@@ -203,7 +203,7 @@ describe('ProjectSettingsPage：写操作', () => {
     // 这种真实竞态：本页仍以为自己是 isolated，点下去被拒。
     //
     // **这条用例是补上来的**：反向验证时删掉 `shape_transition_refused` 分支，
-    // 18 条测试全绿——说明那时没有任何断言在看这个分支。只回「升级失败
+    // 18 条本文件的用例全绿——说明那时没有任何断言在看这个分支。只回「升级失败
     // （shape_transition_refused）」等于把码抛给用户，他不知道是方向反了
     // 还是重复提交，会一直重试。
     stubFetch({

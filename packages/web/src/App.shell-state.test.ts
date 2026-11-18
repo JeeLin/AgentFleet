@@ -201,7 +201,7 @@ describe('G12：认证页不发业务请求', () => {
     G12 的门禁是一个谓词（`if (!isAuthPage.value)`），而「只测两个代表点」对
     **把谓词收窄**这类变异是瞎的：把 `!isAuthPage.value` 收窄成
     `!isAuthPage.value && route.value.name !== 'devices'`（设备页不再拉左栏
-    数据）曾经 48 条用例全绿。上面的「挂在 / 时照常拉」抓不到它——它只钉了
+    数据）曾经整套用例全绿。上面的「挂在 / 时照常拉」抓不到它——它只钉了
     一个路由。
 
     判红方式（实测）：在 `App.vue` 的 `if (!isAuthPage.value)` 后面加上

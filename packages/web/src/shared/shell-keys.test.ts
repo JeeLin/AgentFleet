@@ -102,7 +102,7 @@ describe('shell-keys：g 序列', () => {
      **导航用例（v0.8.1 第5轮 4c F6 / G81）**：在此之前没有任何用例断言
      `g s` / `g d` / `g a` / `g ,` 真的导航到了**正确的地址**。4c 实测——把
      `nav()` 改成直接 `return true`（不调 `bindings.navigate`）、把 `nav:overview`
-     的 handler 改成 `return true`，54 条相关用例全绿、全量 1376 也全绿。
+     的 handler 改成 `return true`，相关用例全绿、整套用例也全绿。
      也就是说「按 `g s` 跳总览」这个功能坏了没人知道。
 
      判据与上面四组相同：**按了什么键 → navigate 收到哪个地址**。
@@ -180,7 +180,7 @@ describe('shell-keys：g 序列', () => {
    `shell-keys.test.ts` 只有上面 3 条，全在测 `g` 序列，于是四个处理器
    **一行都没被执行过**——把 `help:toggle` 的处理器改成恒早返（`?` 永久失效）
    或把 `rail:toggle` 的 `toggleRail()` 改成 `openHelp()`（⌃B 打开帮助而不是
-   收左栏），整套 363 条用例照样全绿。
+   收左栏），整套用例照样全绿。
 
    判据一律是**「按了什么键 → 调了哪个回调」**，而不是「回调被调用过」：
    四个动作共享同一个 `bindings` 槽位，只断言 `toHaveBeenCalled()` 的话，
