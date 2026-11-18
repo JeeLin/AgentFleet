@@ -231,14 +231,21 @@ describe('G41 —— 源码里的 file:line 引用必须能被回读命中', () 
     expect(probe('prototype-shell.css', codeAt + 1), '有内容的行必须放行').toBeNull()
 
     /* **第三种形态：纯闭合标签行**（本次新增的启发式）。造不出来就从真实的
-       `prototype-shell.css` 里找——找不到说明前提变了，要立刻知道。 */
+       `prototype-shell.css` 里找——找不到说明前提变了，要立刻知道。
+       **必须用断言而不是 `if`**：原写法 `if (closingAt >= 0) { expect(...) }`
+       在该文件恰好没有纯闭合行时整段静默跳过、用例仍绿，与上面两档
+       （`:221` / `:226` 都有前置 `expect`）不一致。那是 G79 刚修的同一类病
+       「自检本身什么都没测」在这一档的残留。 */
     const closingAt = css.findIndex((l) => isClosingOnly(l))
-    if (closingAt >= 0) {
-      expect(
-        probe('prototype-shell.css', closingAt + 1),
-        '只指向纯闭合符号的行必须被判红（行号大概率是区间终点算错）',
-      ).toBe('闭合标签行')
-    }
+    expect(
+      closingAt,
+      'prototype-shell.css 里已找不到「整行只有一个闭合符号」的行，第三档自检前提变了——'
+        + '要么把这条用例改掉，要么换一份夹具',
+    ).toBeGreaterThanOrEqual(0)
+    expect(
+      probe('prototype-shell.css', closingAt + 1),
+      '只指向纯闭合符号的行必须被判红（行号大概率是区间终点算错）',
+    ).toBe('闭合标签行')
   })
 
   /* **判据自检的第二道**：`checkRef` 必须真的被两条用例共用。4c 的原始变异

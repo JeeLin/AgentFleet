@@ -376,12 +376,17 @@ describe('面板三分区（子任务 12）', () => {
     expect(block).toContain('--af-text-card')
     /* 门面名与真身名二选一，**但不许是别的颜色**。
        为什么允许 `--af-fg-strong`：G92 裁定「原型在用 → 补消费者」。原型
-       `--fg-strong` 在 `app.css` 被用 33 次，而实现这 15 处一直直接写
+       `--fg-strong` 在 `app.css` 被用 33 次，而实现这 17 处一直直接写
        `var(--p-fg-strong)` 绕过 `--af-*` 门面层，于是 `--af-fg-strong`
-       成了一个定义了、却零消费者的孤儿。补上消费者之后，门面层才真的
+       成了一个定义了、却零消费者的条目。补上消费者之后，门面层才真的
        在服役——**这条断言的意图是「标题要 strong 前景」，两个名字指向同一个
        真身，强度不变**。写成 `toContain` 单个名字会把「实现该走哪一层」
-       这个不该由本用例决定的事钉死，反过来也挡不住有人换成 `--p-fg-2`。 */
+       这个不该由本用例决定的事钉死（`--af-fg-strong` 时会**误红**）。
+       **判据强度没有放宽**：正则里 `-fg-strong` 是紧接 `fg` 的字面，
+       `--p-fg-2` / `--af-fg-2` / `--p-fg` / 写死色值仍然全部判红。
+       （这句话原写作「反过来也挡不住有人换成 `--p-fg-2`」——实测是错的，
+       新正则**挡得住**；注释如实陈述判据能力，才不会被下一个人当成
+       「这里有个洞」去补一条更松的断言。） */
     expect(block).toMatch(/--(?:af|p)-fg-strong/)
     expect(block).toContain('--af-weight-semibold')
   })
@@ -724,12 +729,15 @@ describe('面板三分区（子任务 12）', () => {
        拼错读进了空串。所以把规模下限钉在这里。 */
     expect(a.size, 'components.css 一个「单类整个主体」的类都没扫出来').toBeGreaterThan(100)
     expect(b.size, 'prototype-shell.css 一个「单类整个主体」的类都没扫出来').toBeGreaterThan(50)
-    /* 再补一个**已知真重叠**的正例：`.af-region__title` 在 shell 的
-       `.af-region--warn`（已删，见下）之外，仍以「shell 只在后代里引用」的
-       形式出现在两边。没有这条，「扫描器瞎了 → 交集空 → 断言绿」的死法就
-       没人拦。正例取自**宽松口径**（它数的是「类名同时出现在两份样式表」，
-       包括后代选择器里的命中），且点名一个**不在严格交集里**的类——
-       严格口径为空是**期望行为**，不能拿它当正例。 */
+    /* 再补一个**已知真重叠**的正例。没有这条，「扫描器瞎了 → 交集空 →
+       断言绿」的死法就没人拦。正例取自**宽松口径**（它数的是「类名同时
+       出现在两份样式表」，包括后代选择器里的命中），且点名一个**不在严格
+       交集里**的类——严格口径为空是**期望行为**，不能拿它当正例。
+       **正例是 `.af-btn`（见 :744）**：shell 的收起态覆盖里确实有它。
+       原注释在这里写「正例：`.af-region__title`」，但 `.af-region*` 规则
+       只在 `components.css`（shell 里 0 条，第6轮查 git 历史确认从未移植），
+       所以那个名字根本不在 shell 里定义——正例是假的，只是断言那行写的是
+       `.af-btn` 才没出事。已改正。 */
     const looseA = classNamesIn(css, { wholeSubject: false })
     const looseB = classNamesIn(shell, { wholeSubject: false })
     const looseBoth = [...looseA].filter((s) => looseB.has(s)).sort()

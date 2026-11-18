@@ -421,7 +421,7 @@ function goBoard(): void {
 }
 .af-new__steplabel { font-size: var(--af-text-sm); color: var(--p-fg-2); }
 .af-new__step[data-current='true'] .af-new__steplabel {
-  color: var(--p-fg-strong); font-weight: var(--af-weight-medium);
+  color: var(--af-fg-strong); font-weight: var(--af-weight-medium);
 }
 .af-new__steps-line {
   flex: 0 0 auto; width: 40px; height: 1px; background: var(--p-line-3);
@@ -453,7 +453,7 @@ function goBoard(): void {
 }
 .af-new__device:focus-within { outline: 2px solid var(--af-border-focus); outline-offset: 2px; }
 .af-new__device-name {
-  font-size: var(--af-text-md); font-weight: var(--af-weight-medium); color: var(--p-fg-strong);
+  font-size: var(--af-text-md); font-weight: var(--af-weight-medium); color: var(--af-fg-strong);
 }
 .af-new__device-meta { font-size: var(--af-text-sm); color: var(--p-fg-2); }
 </style>
