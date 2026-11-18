@@ -96,6 +96,81 @@ describe('shell-keys：g 序列', () => {
     expect(traj).toHaveBeenCalledTimes(1)
     expect(second.defaultPrevented).toBe(true)
   })
+
+
+  /* =========================================================================
+     **导航用例（v0.8.1 第5轮 4c F6 / G81）**：在此之前没有任何用例断言
+     `g s` / `g d` / `g a` / `g ,` 真的导航到了**正确的地址**。4c 实测——把
+     `nav()` 改成直接 `return true`（不调 `bindings.navigate`）、把 `nav:overview`
+     的 handler 改成 `return true`，54 条相关用例全绿、全量 1376 也全绿。
+     也就是说「按 `g s` 跳总览」这个功能坏了没人知道。
+
+     判据与上面四组相同：**按了什么键 → navigate 收到哪个地址**。
+     `toHaveBeenCalledWith` 是关键——只断言 `toHaveBeenCalled()` 的话，
+     「g s 导航去了 /devices」照样绿。
+     ========================================================================= */
+  it('g s → navigate("/")（总览；v0.7.0 起会话轴改成项目轴）', () => {
+    const b = withBindings()
+    pressOn(document.body, 'g')
+    pressOn(document.body, 's')
+    expect(b.navigate).toHaveBeenCalledTimes(1)
+    expect(b.navigate).toHaveBeenCalledWith('/')
+  })
+
+  it('g d → navigate("/devices")', () => {
+    const b = withBindings()
+    pressOn(document.body, 'g')
+    pressOn(document.body, 'd')
+    expect(b.navigate).toHaveBeenCalledTimes(1)
+    expect(b.navigate).toHaveBeenCalledWith('/devices')
+  })
+
+  it('g a → navigate("/agents")', () => {
+    const b = withBindings()
+    pressOn(document.body, 'g')
+    pressOn(document.body, 'a')
+    expect(b.navigate).toHaveBeenCalledTimes(1)
+    expect(b.navigate).toHaveBeenCalledWith('/agents')
+  })
+
+  it('g , → navigate("/settings")（与 g s 的地址不能互换）', () => {
+    const b = withBindings()
+    pressOn(document.body, 'g')
+    pressOn(document.body, ',')
+    expect(b.navigate).toHaveBeenCalledTimes(1)
+    expect(b.navigate).toHaveBeenCalledWith('/settings')
+  })
+
+  it('四个导航键两两不混淆（g s 不会跳去 devices 等）', () => {
+    const seq: Array<[string, string]> = [
+      ['s', '/'],
+      ['d', '/devices'],
+      ['a', '/agents'],
+      [',', '/settings'],
+    ]
+    for (const [second, path] of seq) {
+      const b = withBindings()
+      pressOn(document.body, 'g')
+      pressOn(document.body, second)
+      expect(b.navigate, `g ${second} 应导航到 ${path}`).toHaveBeenCalledWith(path)
+      expect(b.navigate, `g ${second} 不应导航到别处`).toHaveBeenCalledTimes(1)
+    }
+  })
+
+  it('g 序列超时（1.5s）后第二键不再触发导航', () => {
+    /* 用 vi.useFakeTimers 钉住时间。没有这条的话，「把超时改成 0」这类
+       变异不会被抓——而那会让 g s 必须在一帧内按完。 */
+    vi.useFakeTimers()
+    try {
+      const b = withBindings()
+      pressOn(document.body, 'g')
+      vi.advanceTimersByTime(1600)
+      pressOn(document.body, 's')
+      expect(b.navigate, '超时后 g s 不应触发导航').not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
 /* ===========================================================================
