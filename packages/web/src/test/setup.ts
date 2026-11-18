@@ -19,7 +19,7 @@
 
     注意本文件只做这两件事：`offsetParent` 在 happy-dom 里恒不为 `null`，
     所以可见性判据一律用 `getComputedStyle().display` 与 `[hidden]`
-    （见 focus.ts / listbox.ts 的 `isVisible`）。
+    （见 `focus.ts:45` 的 `isVisible`；listbox.ts 只是它的调用方）。
    =========================================================================== */
 
 import { beforeEach } from 'vitest'

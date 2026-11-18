@@ -24,7 +24,7 @@
    之类的兄弟字段不必破坏既有调用方。
 
    ── PATCH 的约束四列是「双层 Option」 ────────────────────────────────
-   `PatchTaskBody` 里四个约束字段是 `Option<Option<T>>`（`routes/tasks.rs:208-221`）：
+   `PatchTaskBody` 里四个约束字段是 `Option<Option<T>>`（`routes/tasks.rs:216-232`）：
 
      键缺失      → 不改
      显式 null   → 清成「不限」（`NULL`）
@@ -73,7 +73,7 @@ export const CRITERIA_CODES = [
 ] as const
 
 /**
- * 建任务的请求体（`CreateTaskBody`，`routes/tasks.rs:176-185`）。
+ * 建任务的请求体（`CreateTaskBody`，`routes/tasks.rs:184-192`）。
  *
  * `done_when` **必填**：后端缺这个键会直接 400（连「怎么算完成」都没写的
  * 任务建出来只会空转）。四条约数**全可选**，没给的列写 `NULL`（= 不限）——
@@ -91,7 +91,7 @@ export interface CreateTaskBody {
 }
 
 /**
- * 改任务的请求体（`PatchTaskBody`，`routes/tasks.rs:208-224`）。
+ * 改任务的请求体（`PatchTaskBody`，`routes/tasks.rs:216-232`）。
  *
  * 约束四列是 `T | null` 而不是 `T | undefined` 的双层语义，见文件头。
  * `expected_version` 是可选的 CAS 前置条件：给出且与服务端不符 → 409

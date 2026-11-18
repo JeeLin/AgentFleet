@@ -31,7 +31,7 @@
    `git checkout` 必然失败，而「看起来像真 ref」比一个空格外危险。
 
    ── 状态胶囊与看板列头同一张表 ──────────────────────────────────
-   文案一律读 `shared/state.ts` 的 `STATES[key].label`（`BoardPage.vue:91-93`
+   文案一律读 `shared/state.ts` 的 `STATES[key].label`（`BoardPage.vue:108-109`
    就是这么做的）。规格原文希望从 `taskApi.ts` 导出 `STATE_LABELS`，但那份
    映射早就在 `state.ts`，`taskApi.ts` 再导出一份就是第二个真相源——看板写
    「待验收」而详情写「review」正是这条要防的事。

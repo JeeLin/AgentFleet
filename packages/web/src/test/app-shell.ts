@@ -3,8 +3,8 @@
    ---------------------------------------------------------------------------
    这两条文件测的是**同一个组件**（`App.vue`），而它们的脚手架曾经是三份手写：
 
-     · `flush`      —— `for i<8 { $nextTick; settle(1) }`，两份**逐字相同**
-       （`App.shell-state.test.ts:17-22` ≡ `App.test.ts:12-17`）；
+     · `flush`      —— `for i<8 { $nextTick; settle(1) }`，两份曾**逐字相同**，
+       合并后只剩这一份（`test/app-shell.ts:44-48`）；
      · `mountApp`   —— `history.replaceState` + `route.value = matchRoute` +
        `mountIn(App)`，两份逐字相同；
      · `EMPTY_API`  —— 同一张空桩表，两份逐字相同；
@@ -109,8 +109,13 @@ export const EMPTY_SHELL_API: Record<string, { body: unknown }> = {
   '/api/agents': { body: [] },
 }
 
-/** 一个记录调用的 `fetch` 桩（`stubFetch` / `vi.fn` 的返回都满足）。 */
-type FetchMock = { mock: { calls: Array<[unknown, unknown]> } }
+/** 一个记录调用的 `fetch` 桩（`stubFetch` / `vi.fn` 的返回都满足）。
+ *
+ *  `calls` 写成 `unknown[][]` 而不是元组 `[unknown, unknown][]`：`vi.fn()` 的
+ *  `mock.calls` 类型是 `any[][]`，元组类型会让 `calledUrls(fetchMock)` 在
+ *  每个测试文件里都报 TS2345（G88 接入真实消费者时实测 vue-tsc 3 处报错）。
+ *  这两个 helper 只按下标取 `[0]` / `[1]`，用不到元组的长度保证。 */
+type FetchMock = { mock: { calls: unknown[][] } }
 
 /** 这个桩收到过的**全部请求 URL**（字符串形态）。 */
 export function calledUrls(fetchMock: FetchMock): string[] {

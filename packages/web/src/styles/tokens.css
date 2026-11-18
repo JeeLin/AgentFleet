@@ -122,7 +122,7 @@
   --af-text-display: 22px; /* 页标题（`.af-head__title`），配 --p-fg-strong + semibold */
   --af-text-card:    17px; /* 卡片/区块标题，配 --p-fg-strong + semibold */
 
-  /* 可读测度复用既有的 `--af-measure`（§7b，`:177`，68ch）——**不在这里重复定义**：
+  /* 可读测度复用既有的 `--af-measure`（§7b，`:178`，68ch）——**不在这里重复定义**：
      同名 token 在 `:root` 里定义两次，后者静默生效，是一条没人读到的隐藏规则
      （`keynav.test.ts` 的「每个 token 只在 :root 里定义一次」专门守这条，
      本子任务第一版就踩中了：我新加了一个 `--af-measure: 68ch`，与既有那条重名）。 */
