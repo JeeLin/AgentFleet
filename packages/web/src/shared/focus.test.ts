@@ -67,6 +67,34 @@ describe('focus stack', () => {
     expect(document.activeElement).toBe(s['close'])
   })
 
+  /* 回归：内层 `role="dialog"` 带 `tabindex="-1"` 时，不能把它当首焦点。
+     第 6 轮 4d 在活浏览器上抓到真实现象——新建任务对话框连按 10 次 Tab，
+     `输入(空) → SELECT → TEXTAREA → BUTTON → 输入(空)` 循环，「标题」框
+     从未出现。根因是 `container.querySelector(FOCUSABLE)` 取文档序第一个
+     匹配，而 `FOCUSABLE` 含 `[tabindex]`，内层 `.af-modal[tabindex="-1"]`
+     排在所有输入框之前。这个结构是对话框惯例，所以不是 BoardPage 独有。 */
+  it('容器内层带 tabindex="-1" 的对话框不会抢走首焦点', () => {
+    document.body.innerHTML = `
+      <button id="opener">打开</button>
+      <div id="scrim">
+        <div id="modal" role="dialog" aria-modal="true" tabindex="-1">
+          <input id="title" type="text" />
+          <select id="criteria"><option value="">不设</option></select>
+        </div>
+      </div>
+    `
+    const scrim = document.getElementById('scrim') as HTMLElement
+    const title = document.getElementById('title') as HTMLElement
+    const modal = document.getElementById('modal') as HTMLElement
+    // 前提自检：内层对话框确实带 tabindex="-1"（不在 Tab 序列里）
+    expect(modal.tabIndex, '夹具前提变了：内层应是 tabindex="-1"').toBe(-1)
+    push(scrim)
+    expect(
+      document.activeElement,
+      '首焦点必须落在「标题」输入框，而不是 tabindex="-1" 的对话框容器',
+    ).toBe(title)
+  })
+
   it('push 优先挑 data-autofocus', () => {
     const s = scaffold()
     const autofocused = document.createElement('button')

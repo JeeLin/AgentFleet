@@ -99,9 +99,20 @@ export function push(container: HTMLElement, opts: PushOptions = {}): HTMLElemen
   // 是这里的不变量，不依赖 pop 的对偶实现正确。
   inertOthers(null, false)
   inertOthers(container, true)
+  /* 挑首焦点：`data-autofocus` → 真正能 Tab 到的元素 → 容器自己。
+     **不能直接拿 FOCUSABLE 的第一个**：它含 `[tabindex]`，而对话框/抽屉的
+     惯例是给内层 `role="dialog"` 挂 `tabindex="-1"` 让脚本能聚焦它。那种
+     元素的 `tabIndex === -1`，**不在** Tab 序列里；把它当首焦点会让 Tab
+     从它的下一个元素起算，于是它前面的第一个真实输入框被整个跳过。
+     第 6 轮 4d 在活浏览器上抓到：新建任务对话框 Tab 十步的序列是
+     `INPUT(空) → SELECT → TEXTAREA → BUTTON → INPUT(空)` 循环，**「标题」
+     输入框从未出现**——因为首焦点落在了内层 `.af-modal`（`tabindex="-1"`）上。
+     判据用 `el.tabIndex >= 0`：原生可聚焦元素（input/button/a[href]…）默认
+     已是 0，`tabindex="-1"` 才是 -1。 */
+  const candidates = [...container.querySelectorAll<HTMLElement>(FOCUSABLE)]
   const first =
     container.querySelector<HTMLElement>(AUTOFOCUS) ??
-    container.querySelector<HTMLElement>(FOCUSABLE)
+    candidates.find((el) => el.tabIndex >= 0)
   if (first) first.focus()
   else if (container.hasAttribute('tabindex')) container.focus()
   return container
