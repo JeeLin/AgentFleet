@@ -603,6 +603,150 @@ describe('BoardPage（v0.8.0）：时钟、跳转、错误与新建对话框', (
     await modal.find('.af-textarea').setValue('构建时间肉眼可感地变短')
     expect(submitBtn().attributes('disabled')).toBeUndefined()
   })
+
+  /**
+   * 打开页头那个「新建任务」对话框。
+   *
+   * **按文案取，不按位置取**：整板空时页面上有两个「新建任务」（页头一个、
+   * 空态横幅里一个），按位置取第一个会在将来有人调换页头顺序时静默指向
+   * 另一个按钮——那时这条用例仍然绿，但它测的已经不是「页头入口」了。
+   */
+  type Wrapper = Awaited<ReturnType<typeof mountAt>>
+  type Finder = ReturnType<Wrapper['find']>
+  async function openDialog(w: Wrapper): Promise<Finder> {
+    const openers = w.findAll('.af-btn').filter((b) => (b.text() ?? '').trim() === '新建任务')
+    expect(openers.length, '页面上要有「新建任务」入口').toBeGreaterThan(0)
+    await openers[0]?.trigger('click')
+    await flushUntilSettled(w)
+    const modal = w.find('.af-modal')
+    expect(modal.exists(), '对话框要打开').toBe(true)
+    return modal
+  }
+
+  /** 提交按钮：脚里那一个（`创建` / `正在创建…`），按位置取最后一个。 */
+  function submitOf(modal: Finder): Finder {
+    return modal.findAll('.af-btn').at(-1) as Finder
+  }
+
+  it('create_dialog_open_and_cancel：打开是空表单，取消后对话框消失', async () => {
+    // 判红方式：把 `openDialog` 里那几行清空删掉 → 「上次输入还留在表单里」
+    // 这条红（用户第二次打开会看到上一轮的标题，以为已经填好了）。
+    stubBoard([])
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const modal = await openDialog(w)
+    // 打开时三处输入都是空的——不清的话上一次的草稿会留在里面。
+    expect((modal.find('.af-input').element as HTMLInputElement).value).toBe('')
+    expect((modal.find('.af-textarea').element as HTMLTextAreaElement).value).toBe('')
+    // 选「不设判定码」当场就要说清「需人工验收」（否则用户跑完才发现要自己盯）。
+    expect(modal.text()).toContain('需人工验收')
+
+    const cancel = modal.findAll('.af-btn').find((b) => (b.text() ?? '').trim() === '取消')
+    expect(cancel, '对话框要有取消').toBeTruthy()
+    await cancel?.trigger('click')
+    expect(w.find('.af-modal').exists(), '取消后对话框应当消失').toBe(false)
+  })
+
+  it('create_dialog_submits_and_reloads：POST 到 /api/projects/p_1/tasks，成功后关闭并重拉列表', async () => {
+    // 判红方式（三处，缺一则这条就白写）：
+    //  · 请求体不按 `CreateTaskBody` 拼（例如把判定码塞在 `title` 里、
+    //    或把 `description` 当成任务描述）→ 红在 `sent` 的逐字段断言上；
+    //  · 成功后**本地插入**一张卡而不重拉 → 红在「列表被重新请求过」；
+    //  · 成功后不关对话框 → 红在 `af-modal` 还在。
+    let reads = 0
+    const fetchMock = stubFetch({
+      // 读与写共用这条路径：第 1 次是页面加载的 GET（空板子），之后是 POST 的
+      // 201 与重拉列表的 GET。按调用次数分派，才能同时守住「写回的是 201」
+      // 与「写完又读了一次」——写死成同一条响应的话，后一个断言恒真。
+      '/api/projects/p_1/tasks': () => {
+        reads += 1
+        if (reads === 1) return { body: { tasks: [] as Task[] } }
+        const init = fetchMock.mock.calls.at(-1)?.[1] as RequestInit | undefined
+        if (init?.method === 'POST') {
+          return { status: 201, body: { task: task({ id: 'tsk_new', title: '把构建时间降到 60s 内' }) } }
+        }
+        return { body: { tasks: [task({ id: 'tsk_new', title: '把构建时间降到 60s 内' })] } }
+      },
+      '/api/projects/p_1': { body: project() },
+      '/api/projects': { body: [project()] },
+    })
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const modal = await openDialog(w)
+    await modal.find('.af-input').setValue('  把构建时间降到 60s 内  ')
+    await modal.find('.af-select').setValue('build_passes')
+    await modal.find('.af-textarea').setValue('构建时间肉眼可感地变短')
+    // 选了判定码 → 「需人工验收」的提示应当消失（它是「不设判定码」的派生结果）。
+    expect(modal.text()).not.toContain('需人工验收')
+
+    const callsBefore = fetchMock.mock.calls.filter((c) => String(c[0]).includes('/tasks')).length
+    expect(callsBefore, '加载时应当已经读过一次任务列表').toBe(1)
+    await submitOf(modal).trigger('click')
+    await flushUntilSettled(w)
+
+    const postCall = fetchMock.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === 'POST')
+    expect(postCall, '提交必须发一个 POST').toBeTruthy()
+    expect(String(postCall?.[0]), 'POST 要打到当前项目的任务端点').toContain('/api/projects/p_1/tasks')
+
+    // 请求体逐字段断：`title` 去空白；`done_when` 两个字段都按 `DoneWhen` 给。
+    const sent = JSON.parse(String((postCall?.[1] as RequestInit).body))
+    expect(sent).toEqual({
+      title: '把构建时间降到 60s 内',
+      done_when: { criteria: 'build_passes', description: '构建时间肉眼可感地变短' },
+    })
+
+    // 成功之后：对话框关掉、列表被**重新拉过**（不本地插入）。
+    expect(w.find('.af-modal').exists(), '建成功后对话框要关掉').toBe(false)
+    const listCalls = fetchMock.mock.calls.filter(
+      (c) =>
+        String(c[0]).includes('/api/projects/p_1/tasks') &&
+        (c[1] as RequestInit | undefined)?.method === 'GET',
+    ).length
+    // 加载时一拉（1）+ 建成功后重拉（1）：**恰好两次**。断「≥1」的话，
+    // 「本地插入、根本不重拉」也能蒙过去（加载那一次就够 1 了）。
+    expect(listCalls, '建成功后要重拉任务列表（不使用本地插入的卡）').toBe(2)
+    // 重拉回来的卡在板上（用的是后端那一份，而不是请求体拼的）。
+    expect(w.element.textContent).toContain('把构建时间降到 60s 内')
+  })
+
+  it('create_dialog_keeps_the_form_open_and_shows_the_code：建失败留在对话框并报错误码', async () => {
+    // 判红方式：`catch` 里把 `dialogOpen.value = false`（或什么都不做只吞掉）
+    // → 用户填的内容连同对话框一起消失，或者完全没有反馈。
+    stubFetch({
+      '/api/projects/p_1/tasks': (() => {
+        // 读请求与写请求共用这条路径：GET 给空列表，POST 给 400。
+        let reads = 0
+        return () => {
+          reads += 1
+          return reads === 1
+            ? { body: { tasks: [] } }
+            : { status: 400, body: { error: 'invalid_criteria' } }
+        }
+      })(),
+      '/api/projects/p_1': { body: project() },
+      '/api/projects': { body: [project()] },
+    })
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const modal = await openDialog(w)
+    await modal.find('.af-input').setValue('一个没有判定码的任务')
+    await modal.find('.af-textarea').setValue('跑完我来看')
+    await submitOf(modal).trigger('click')
+    await flushUntilSettled(w)
+
+    const stillThere = w.find('.af-modal')
+    expect(stillThere.exists(), '建失败不能把用户填的内容一起关掉').toBe(true)
+    // 文案里要带**后端的错误码**，而不是一句笼统的「失败了」——否则用户拿不到
+    // 任何可报告、可搜索的信息（`ApiError.code` 是唯一稳定可读的那一栏）。
+    expect(stillThere.text()).toContain('invalid_criteria')
+    expect(stillThere.find('.af-form__error').exists(), '错误要挂在 form 里（role=alert）').toBe(true)
+    // 提交按钮回到可点状态：`creating` 必须在 `finally` 里复位，否则一次失败之后
+    // 用户修好输入也点不动了。
+    expect(submitOf(stillThere).attributes('disabled')).toBeUndefined()
+  })
 })
 
 /* ===========================================================================

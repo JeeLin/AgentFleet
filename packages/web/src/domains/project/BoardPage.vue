@@ -72,7 +72,7 @@ const projectId = computed(() => route.value.params.id ?? '')
 
 const project = ref<Project | null>(null)
 const all = ref<Project[]>([])
-const tasks = ref<Task[]>([])
+const tasks = ref<Task[] | null>(null)
 const loading = ref(true)
 /** 读失败（项目或任务）。整页进错误态——没有数据时让用户看到半份更糟。 */
 const failure = ref('')
@@ -110,11 +110,17 @@ function labelOf(key: TaskStateWire): string {
  * ——脏数据不该让整个看板白屏（`describeStatus` 对未知态同一条口径）。
  */
 function byState(key: TaskStateWire): Task[] {
-  return tasks.value.filter((t) => t.state === key)
+  return (tasks.value ?? []).filter((t) => t.state === key)
 }
 
 /** 整板无任务。与「某一列为空」是两件事，空态文案也不同。 */
-const boardEmpty = computed(() => tasks.value.length === 0)
+const boardEmpty = computed(() => (tasks.value ?? []).length === 0)
+
+/**
+ * `load()` 的轮次令牌：只用来判断「这次回来的结果还是不是当前的」。
+ * 见 `load()` 里那段注释（换项目时上一轮仍在飞）。
+ */
+let loadToken = 0
 
 /**
  * 卡片要的「最近一次执行」。
@@ -171,21 +177,29 @@ async function load(): Promise<void> {
     loading.value = false
     return
   }
+  // 换项目时 `watch` 会再跑一次 `load`，而上一轮那次可能还在飞：它回来时
+  // `projectId` 已经换了，于是把**旧项目**的任务写进新项目的板子（症状是
+  // 「切过去先闪一下上一个项目的卡」，也可能是「读到一半 `tasks` 还是 null
+  // 就被渲染」）。所以每次进来领一个令牌，回来时对不上就整份丢掉——
+  // 连 `loading` 也不许动，那会把新一轮的 loading 提前关掉。
+  const token = ++loadToken
   loading.value = true
   failure.value = ''
   actionFailure.value = ''
   try {
     // 三个请求并行：切换器要整份项目列表，主区要当前项目，看板要任务。
     const [p, list, ts] = await Promise.all([getProject(id), listProjects(), listProjectTasks(id)])
+    if (token !== loadToken) return
     project.value = p
     all.value = list
     tasks.value = ts
   } catch (e) {
+    if (token !== loadToken) return
     project.value = null
     tasks.value = []
     failure.value = describeReadFailure(e, '项目')
   } finally {
-    loading.value = false
+    if (token === loadToken) loading.value = false
   }
 }
 
@@ -434,7 +448,15 @@ async function submitCreate(): Promise<void> {
     <!-- 播报「已刷新」：按钮按下去要有一个能听见的回应，否则读屏用户不知道按到了没有。 -->
     <p v-if="refreshed" class="af-muted" role="status" aria-live="polite">已刷新</p>
 
-    <p v-if="loading" class="af-muted">正在读取项目…</p>
+    <!-- 三个分支**互斥**：`loading` 一句 / 读失败 / 读到数据。写成「一句 loading
+         加一块内容」会让两块同时在树上（`loading` 那句与 44 行板子并存）。
+
+         第二条判据是 `tasks !== null`：`tasks` 在首屏那次请求回来之前是 `null`
+         （不是 `[]`），板子只在**真的读到**之后才渲染——「还没读到」与「读到了
+         空的」是两件事，只有后者才该说「这个项目还没有任务」。 -->
+    <template v-if="loading">
+      <p class="af-muted">正在读取项目…</p>
+    </template>
 
     <!-- 读失败 → 整页错误态 + 重试。**不画空板子**：空板子会说「这个项目还没有
          任务」，而真相是没读到（规格 §7 后端流程 2：「不把错误吞成空数组」）。 -->
@@ -448,7 +470,7 @@ async function submitCreate(): Promise<void> {
       <button type="button" class="af-btn" @click="navigate('/')">回总览</button>
     </EmptyState>
 
-    <template v-else>
+    <template v-else-if="tasks !== null">
       <!-- 分区标题：`af-page__subtitle` 是实现自造的那一族（`af-page*`），原型
            `app.css` 里命中 0 条规则；对应位是 `.af-region__title`（v0.8.1
            子任务 2 的裁定：自造类名一律删，不留别名）。删掉后这个 `h2` 会退回

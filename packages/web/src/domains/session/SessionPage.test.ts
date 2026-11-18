@@ -260,6 +260,46 @@ function reqOf(sent: Array<Record<string, unknown>>, op: string): Record<string,
   return r
 }
 
+/** 一次 fetch 调用的两个可断言字段：路径（不带 query）与真实发出的方法。 */
+interface HttpCall {
+  url: string
+  method: string
+  /** 请求体（JSON 能解就是对象，否则原文）。没有 body 时为 `undefined`。 */
+  body: unknown
+}
+
+/**
+ * `fetch` 的调用清单，**带方法与请求体**。
+ *
+ * 为什么要有它：`expect(fetchMock).toHaveBeenCalled()` 只证明「发过至少一个
+ * 请求」，而一个页面在挂载时总会拉 `/api/sessions` 与 `/api/devices`——于是
+ * 那条断言在**页面根本没发目标请求**时也是绿的。要证明「用户这一下真的发出
+ * 了那一个请求」，必须逐条看路径 + 方法（+ 需要时看请求体）。
+ */
+function httpCallsOf(fetchMock: ReturnType<typeof stubFetch>): HttpCall[] {
+  return fetchMock.mock.calls.map(([url, init]) => {
+    const raw = (init as RequestInit | undefined)?.body
+    let body: unknown = undefined
+    if (typeof raw === 'string') {
+      try {
+        body = JSON.parse(raw)
+      } catch {
+        body = raw
+      }
+    }
+    return {
+      url: new URL(String(url), 'http://hub.local').pathname,
+      method: ((init as RequestInit | undefined)?.method ?? 'GET').toUpperCase(),
+      body,
+    }
+  })
+}
+
+/** 清单里某条路径的调用（按出现顺序）。没有就是空数组——调用方自己断长度。 */
+function callsTo(calls: HttpCall[], path: string): HttpCall[] {
+  return calls.filter((c) => c.url === path)
+}
+
 /**
  * 当前显示的是哪个工具。
  *
@@ -317,6 +357,23 @@ async function touchFiles(w: ReturnType<typeof mountIn>): Promise<void> {
   if (!tree) throw new Error('files panel body not rendered')
   tree.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
   await flush(w)
+}
+
+/**
+ * 在文件树的一行上**按 ⏎**。
+ *
+ * 树的行不是 `@click` 绑的（`FilesPanel` 的文件头写了：行是 listbox 的行，
+ * 由 `attach(..., { rowEnter: true })` 的键盘处理器统一分派），鼠标点一下
+ * 什么都不会发生是设计如此。所以这里必须走真按键，`row.click()` 会静默地
+ * 什么都不做——症状是「页面回调看起来没接线」，而真相是测试按错了地方。
+ */
+async function enterRow(w: ReturnType<typeof mountIn>, path: string): Promise<HTMLElement> {
+  const row = w.element.querySelector<HTMLElement>(`[data-row][data-path="${path}"]`)
+  if (!row) throw new Error(`树里没有 ${path} 这一行`)
+  row.focus()
+  row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+  await flush(w)
+  return row
 }
 
 /**
@@ -440,8 +497,22 @@ describe('工作台：结构与默认值', () => {
     await flush(w)
 
     expect(w.element.querySelector<HTMLElement>('.af-wb__banner')?.textContent).toContain('不会再建立通道')
-    expect((w.element.querySelector<HTMLButtonElement>('.af-wb__head button') as HTMLButtonElement).disabled).toBe(true)
-    expect(fetchMock).toHaveBeenCalled()
+    const openBtn = w.element.querySelector<HTMLButtonElement>('[data-open-panel]')
+    expect(openBtn, '页面头那个「打开面板」按钮要在').not.toBeNull()
+    expect(openBtn!.disabled, '已结束的会话：入口必须禁用').toBe(true)
+    // 原判据是 `expect(fetchMock).toHaveBeenCalled()`——它只证明「发过请求」，
+    // 而页面挂载时本来就拉 `/api/sessions` 与 `/api/devices`，所以**哪怕这条
+    // 用例要守的那件事全坏了它也是绿的**。改成逐条钉「读的是哪两个端点、
+    // 方法是 GET」，并明确钉住**不该发出的那一个**：已结束的会话不该再建通道。
+    const calls = httpCallsOf(fetchMock)
+    expect(callsTo(calls, '/api/sessions').map((c) => c.method), '要读会话列表（GET）').toEqual(['GET'])
+    expect(callsTo(calls, '/api/devices').map((c) => c.method), '要读设备列表（GET）').toEqual(['GET'])
+    expect(
+      callsTo(calls, '/api/channels'),
+      '已结束的会话不该建任何通道——建了就是一条永远不会有帧的死通道',
+    ).toHaveLength(0)
+    // 也不该发起对话 / 轨迹之类的请求（它们都要一条活通道才成立）。
+    expect(calls.map((c) => c.url).filter((u) => u.includes('/conversation'))).toEqual([])
   })
 })
 
@@ -819,7 +890,162 @@ describe('面板正文是 13b / 13c 的真组件，不是 13a 的占位', () => 
     expect(w.element.querySelector('[data-write-error]')).toBeNull()
   })
 
-  it('会话结束时飞着的保存必须复位 saving，否则保存按钮永久禁用', async () => {
+  /* ------------------------------------------------------------------------
+     文件面板的三个页面级回调：`filesGoto` / `filesOpen` / `filesRevert`
+     （`SessionPage.vue:2114-2154`）。
+     ------------------------------------------------------------------------
+     它们都在页面里、都不发请求（状态改动由 `watch` 之后的面板自己去列），
+     所以判据只能是**面板上看到的东西**：面包屑少了一层、越界节点给了解释、
+     撤销之后那块红字消失。三条各自的反向验证写在用例里。
+     --------------------------------------------------------------------- */
+
+  it('filesGoto：点第 1 层面包屑 → cwd 收成一层（面包屑是唯一判据）', async () => {
+    // 判红方式：把 `filesGoto` 的 `ws.cwd = ws.cwd.slice(0, depth)` 删掉
+    // → 面包屑不变，这条红在「还停在下两层」。
+    //
+    // 为什么判据只能是**面包屑**：树的 `rows` 由**折叠状态**决定，不跟 cwd 走
+    // （切目录不重置 `expanded`），所以「树上有哪些行」证明不了 cwd 换没换。
+    // 而 `FilesPanel` 的 ⏎ 在目录行上是「展开 / 收起」，能进 cwd 的只有
+    // 面包屑（另一个入口是 link / other / unknown / 越界行的 `filesOpen`，
+    // 见下一条用例）。
+    const { w, src } = await mountWorkbench()
+    await openFiles(w)
+    await touchFiles(w)
+    await frame(w, src(), {
+      op: 'list',
+      path: '',
+      entries: [{ name: 'src', kind: 'dir', size: 0, mtime_ms: null }],
+      total: 1,
+      truncated: false,
+    })
+
+    const crumbs = (): number => w.element.querySelectorAll('[data-crumb-depth]').length
+    expect(crumbs(), '刚进面板时只有工作区根那一层').toBe(1)
+
+    // 怎么把 cwd 走到 `['src']`：由设备回一帧 `read` 不行——那是文件；靠
+    // 面包屑只能往回。所以这里直接借 `filesOpen` 的那条**不越界**分支：
+    // 一个 kind 为 `other` 的节点按一次 ⏎ 就进它。
+    await frame(w, src(), {
+      op: 'list',
+      path: '',
+      entries: [{ name: 'src', kind: 'other', size: 0, mtime_ms: null }],
+      total: 1,
+      truncated: false,
+    })
+    await enterRow(w, 'src')
+    expect(crumbs(), 'filesOpen 进 src：面包屑多一层').toBe(2)
+    expect(w.element.querySelector('[data-nav-error]'), '不越界不该报越界').toBeNull()
+
+    // 再往里一层：`src/lib`。
+    await frame(w, src(), {
+      op: 'list',
+      path: 'src',
+      entries: [{ name: 'lib', kind: 'other', size: 0, mtime_ms: null }],
+      total: 1,
+      truncated: false,
+    })
+    await enterRow(w, 'src/lib')
+    expect(crumbs(), '进 src/lib 后是三层面包屑').toBe(3)
+
+    // ★ 点第 1 层（depth=1 → `src`）：cwd 收成 `['src']`。
+    await w.element.querySelector<HTMLElement>('[data-crumb-depth="1"]')!.click()
+    await flush(w)
+    expect(crumbs(), '点第 1 层要退回 src，不能停在 src/lib').toBe(2)
+    expect(w.element.querySelector('[data-crumb-depth="2"]'), '第 2 层不该还在').toBeNull()
+    // 点根（depth=0）回到工作区根。
+    await w.element.querySelector<HTMLElement>('[data-crumb-depth="0"]')!.click()
+    await flush(w)
+    expect(crumbs(), '点根回到 0 层').toBe(1)
+  })
+
+  it('filesOpen：`..` / 绝对路径节点点了给解释（path_outside_root），不进它、不列它', async () => {
+    // 判红方式：把 `filesOpen` 里那个 `if (isOutsideSeg(last))` 分支删掉
+    // → 越界节点会被当成普通目录去列（`ws.cwd = seg` + `fileList`），
+    // 界面停在原来的层**且没有任何解释**；这条红在「越界要说出来」。
+    //
+    // 为什么必须给解释（§7.4 ①）：隐藏它比显示它更让人不安。
+    const { w, src, fetchMock } = await mountWorkbench()
+    await openFiles(w)
+    await touchFiles(w)
+    await frame(w, src(), {
+      op: 'list',
+      path: '',
+      entries: [
+        { name: '..', kind: 'dir', size: 0, mtime_ms: null },
+        { name: '/etc', kind: 'dir', size: 0, mtime_ms: null },
+        { name: 'src', kind: 'dir', size: 0, mtime_ms: null },
+      ],
+      total: 3,
+      truncated: false,
+    })
+
+    // 越界节点在树上是标出来的（`data-outside`），可点。
+    const outsideRows = Array.from(w.element.querySelectorAll<HTMLElement>('[data-row][data-outside="true"]'))
+    expect(outsideRows.map((r) => r.dataset.path).sort(), '`..` 与绝对路径都要标成越界').toEqual([
+      '..',
+      '/etc',
+    ])
+
+    const sendsBefore = sentBodies(fetchMock).length
+    await enterRow(w, '..')
+
+    const err = w.element.querySelector<HTMLElement>('[data-nav-error]')
+    expect(err, '越界节点点了要有一条解释').not.toBeNull()
+    expect(err?.textContent).toContain('跨出了工作区')
+    // 面板上**不**印错误码（那是给日志与报告看的，用户不需要），所以这里只
+    // 断文案；码本身在下面用「不发 list」这条间接钉住。
+    expect(w.element.querySelector('[data-nav-error] [aria-label="关闭这条越界说明"]')).not.toBeNull()
+    // **不发 list 请求**：越界目录去列它只会换回另一条错误，而且真判据在设备侧。
+    expect(sentBodies(fetchMock).length, '越界节点不该触发一次 list').toBe(sendsBefore)
+    // 也不许悄悄把 cwd 换掉：面包屑仍是根那一层。
+    expect(w.element.querySelectorAll('[data-crumb-depth]').length).toBe(1)
+  })
+
+  it('filesRevert：撤销把写错态清掉（`@revert` 真的接线了）', async () => {
+    // 判红方式（实测）：把 `filesRevert` 的函数体整段删掉 → 「撤销之后那块红字
+    // 要消失」红。这条用例守的是**页面回调确实接到了 `FilesPanel` 的
+    // `@revert`**（`SessionPage.vue` 模板里那一行）。
+    //
+    // **它守不住「只清这一个文件」**：`writeError` 是单例
+    // （`FilesError | null`），一次只有一个文件有红字，所以「无条件清」与
+    // 「按路径清」在现有数据形状下不可区分——实测把判据放宽成
+    // `if (ws) ws.writeError = null` 之后这条用例仍是绿的。这一点如实记在
+    // `LANE-REPORT.md` 的 G36「未修与原因」里，不假称它守住了。
+    const { w, src } = await mountWorkbench()
+    await openFiles(w)
+    await touchFiles(w)
+
+    await frame(w, src(), {
+      op: 'read',
+      path: 'a.txt',
+      size: 2,
+      kind: 'text',
+      truncated: false,
+      text: 'ab',
+    })
+    await flush(w)
+    const area = w.element.querySelector<HTMLTextAreaElement>('.af-files__edit')
+    if (!area) throw new Error('no editor')
+    area.value = 'abc'
+    area.dispatchEvent(new Event('input'))
+    await flush(w)
+    w.element.querySelector<HTMLButtonElement>('[data-save]')?.click()
+    await flush(w)
+    await frame(w, src(), { op: 'write', path: 'a.txt', ok: false, reason: '磁盘满了' })
+    expect(w.element.querySelector('[data-write-error]')?.textContent).toContain('磁盘满了')
+    expect(w.element.querySelector('[data-tab-dirty]'), '改过之后是脏的').not.toBeNull()
+
+    // 撤销 → 编辑区回到原文，④ 那块红字随之消失（留着会被读成「撤销失败」）。
+    const revert = w.element.querySelector<HTMLButtonElement>('[data-revert]')
+    expect(revert, '文本预览要有「撤销」').not.toBeNull()
+    revert!.click()
+    await flush(w)
+
+    expect(w.element.querySelector('[data-write-error]'), '撤销之后那块红字要消失').toBeNull()
+    expect(w.element.querySelector('[data-tab-dirty]'), '撤销之后不再是脏的').toBeNull()
+  })
+
+    it('会话结束时飞着的保存必须复位 saving，否则保存按钮永久禁用', async () => {
     const { w, src } = await mountWorkbench()
     await openFiles(w)
     await touchFiles(w)
@@ -1520,6 +1746,156 @@ describe('轨迹抽屉：打开即读，读到就画', () => {
   })
 })
 
+/* ===========================================================================
+   「加载更多」：`onTrajMore`（`SessionPage.vue:1162-1184`）
+   ---------------------------------------------------------------------------
+   这一段的判据只能看**发出去的 `after=`**与**拼完之后的列表**：
+     · 游标必须是「最后一条的物理 id」，不是 `events.length`（我已有几条）——
+       中途有新事件写进来时这两个数不是一个意思，用后者会重读一段或跳过一段；
+     · 拼回来的事件要按 `id` 去重——重连后 Hub 可能把已读过的那一页再给一次，
+       不去重就会把同一条画两遍；
+     · 失败不能把「加载更多」变成静默无反应。
+   =========================================================================== */
+
+/** 一条轨迹事件的桩（字段照 `trajectory_event`）。 */
+function ev(id: number) {
+  return {
+    id,
+    seq: id,
+    kind: 'agent_message_chunk',
+    payload: `{"content":[{"type":"text","text":"e${id}"}]}`,
+    duration_ms: null,
+    duration_source: 'none',
+    created_at: `unix:${id}`,
+  }
+}
+
+/**
+ * 一个**第一页满页**的会话：`getTrajectory` 按 `events.length >= limit(200)`
+ * 判 `hasMore`，所以第一页必须给满 200 条，抽屉里才会长出「加载更多」。
+ * 用 `id = 1000 + i` 是为了让「游标用了第几条」与「游标用了哪个 id」一眼可分。
+ */
+async function mountWithFullPage(): Promise<Ctx> {
+  const firstPage = Array.from({ length: 200 }, (_, i) => ev(1000 + i))
+  const fetchMock = stubFetch({
+    '/api/sessions': { body: WITH_AGENT },
+    '/api/devices': { body: DEVICES },
+    '/api/sessions/s_1/conversation': {
+      status: 201,
+      body: { channel_id: 'ch-acp', node_id: 'n_1', session_id: 's_1' },
+    },
+    '/api/channels/ch-acp': { empty: true },
+    '/api/channels/ch-acp/send': { empty: true },
+    '/api/sessions/s_1/trajectory': (() => {
+      let reads = 0
+      return () => {
+        reads += 1
+        // 第一页给满 200（→ hasMore）；第二页给 2 条，其中**第 1 条是上一页
+        // 已经给过的 1199**——那正是「重连后重读同一页」的缩影。
+        return reads === 1
+          ? { body: { events: firstPage, gaps: [], incomplete: false } }
+          : { body: { events: [ev(1199), ev(1200), ev(1201)], gaps: [], incomplete: false } }
+      }
+    })(),
+  })
+  sessionStorage.setItem(STORAGE_KEY, JSON.stringify([TWO_TABS[0]]))
+  window.history.replaceState(null, '', '/project/p_1/session/s_1')
+  route.value = matchRoute('/project/p_1/session/s_1')
+  const w = mountIn(SessionPage)
+  await flush(w)
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 't', bubbles: true, cancelable: true }))
+  await flush(w)
+  return { w, fetchMock, posts: () => 0, deletes: () => [], src: () => FakeEventSource.instances[0] }
+}
+
+/** 所有 `GET .../trajectory` 的完整 URL（带 query）。 */
+function trajUrls(fetchMock: ReturnType<typeof stubFetch>): string[] {
+  return fetchMock.mock.calls
+    .filter(([u]) => new URL(String(u), 'http://hub.local').pathname === '/api/sessions/s_1/trajectory')
+    .map(([u]) => String(u))
+}
+
+describe('轨迹抽屉：加载更多（onTrajMore）', () => {
+  it('游标用**最后一条的 id**，不是「我有几条」；拼回来的按 id 去重', async () => {
+    const { w, fetchMock } = await mountWithFullPage()
+
+    expect(document.querySelectorAll('[data-traj-row]').length, '第一页 200 条都要画出来').toBe(200)
+    const more = document.querySelector<HTMLElement>('[data-traj-more]')
+    expect(more, '第一页满页时要有「加载更多」').not.toBeNull()
+
+    await more!.click()
+    await flush(w)
+
+    const urls = trajUrls(fetchMock)
+    expect(urls.length, `实际请求：${urls.join(', ')}`).toBe(2)
+    // ★ 核心判据：`after=1199`（最后一条的物理 id）而不是 `after=200`（条数）。
+    // 改成 `ws.events.length` 会得到 200 —— 而 200 在真库里是另一条事件，
+    // 症状是「点加载更多之后中间一段永远看不到」。
+    expect(urls[1], '游标必须是最后一条事件的物理 id').toContain('after=1199')
+
+    // 第二页给回 3 条，其中 1199 是重复的 → 列表只该多 2 条（202 行）。
+    const rows = document.querySelectorAll('[data-traj-row]')
+    expect(rows.length, '重复的 id 不能画两遍').toBe(202)
+    // 去重是按 id 去的，不是按位置截断：新那两条要在末尾。
+    const ids = Array.from(rows).map((r) => r.querySelector('.af-traj__seq')?.textContent)
+    expect(ids.at(-1)).toBe('1201')
+    expect(new Set(ids).size, '列表里不该有重复的 seq').toBe(202)
+  })
+
+  it('取失败要说出来（trajError），不是静默无反应', async () => {
+    // 判红方式：把 `onTrajMore` 的 `catch` 段删掉（错误吞掉）→ 这条红在
+    // 「读不到轨迹」不出现上：用户点了一次「加载更多」，什么也没发生。
+    const firstPage = Array.from({ length: 200 }, (_, i) => ev(1000 + i))
+    const fetchMock = stubFetch({})
+    // 手工装：第一页 200 条、第二页 500。
+    let reads = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = new URL(String(input), 'http://hub.local').pathname
+        const json = (status: number, body: unknown) =>
+          new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
+        if (path === '/api/sessions') return json(200, WITH_AGENT)
+        if (path === '/api/devices') return json(200, DEVICES)
+        if (path === '/api/sessions/s_1/trajectory') {
+          reads += 1
+          return reads === 1
+            ? json(200, { events: firstPage, gaps: [], incomplete: false })
+            : json(500, { error: 'internal' })
+        }
+        if (path === '/api/sessions/s_1/conversation') return json(201, { channel_id: 'ch-acp', node_id: 'n_1', session_id: 's_1' })
+        return new Response(null, { status: 204 })
+      }),
+    )
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify([TWO_TABS[0]]))
+    window.history.replaceState(null, '', '/project/p_1/session/s_1')
+    route.value = matchRoute('/project/p_1/session/s_1')
+    const w = mountIn(SessionPage)
+    await flush(w)
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 't', bubbles: true, cancelable: true }))
+    await flush(w)
+
+    await document.querySelector<HTMLElement>('[data-traj-more]')!.click()
+    await flush(w)
+
+    expect(reads, '应当真的发出了第二页请求').toBe(2)
+    const drawer = document.querySelector<HTMLElement>('[data-traj]')
+    expect(drawer?.textContent, '取失败必须在抽屉里说出来').toContain('读不到轨迹')
+    expect(drawer?.textContent, '要把病因带上（不是一句笼统的失败）').toContain('轨迹')
+    // 「加载更多」回到可点（`trajLoading` 在 finally 里复位），否则用户没法重试。
+    const more = document.querySelector<HTMLButtonElement>('[data-traj-more]')
+    if (more) {
+      expect(more.disabled, '失败后按钮要回到可点，让用户能重试').toBe(false)
+    } else {
+      // 另一种同样合法的收尾：错误态下抽屉不再留这个按钮（`v-if="!error"` 的
+      // 那一支），用户改用 Esc 关掉重开。**两种都不能是「按钮还在但 disabled」**
+      // ——那是最糟的一种：看不出失败，也点不动。
+      expect(drawer?.querySelector('[data-traj-more][disabled]')).toBeNull()
+    }
+    void fetchMock
+  })
+})
+
 describe('停止按钮：真的有前端链路（不是只画了个按钮）', () => {
   /**
    * 判据必须是**发出去的请求**，不是「按钮存在」或「点了没抛错」。
@@ -1885,7 +2261,17 @@ describe('git 面板：status 与 diff', () => {
     // 状态码**不翻译**：`M` / `A` / `??` 是 git 用户的共同词汇。
     const codes = rows.map((r) => r.querySelector('.af-git__code')?.textContent)
     expect(codes).toEqual([' M', 'A ', '??'])
-    expect(fetchMock).toHaveBeenCalled()
+    // 原判据是 `expect(fetchMock).toHaveBeenCalled()`：页面挂载时必然拉过
+    // `/api/sessions`，所以它**在 git 通道根本没发请求时也是绿的**。
+    // 改钉「用户碰面板之后，真的往通道上发了一帧 `{"op":"status"}`」：
+    // 路径、方法、请求体三样都具体，才配叫「status 回帧走到了界面上」。
+    const calls = httpCallsOf(fetchMock)
+    const channelPosts = calls.filter((c) => c.url === '/api/channels' && c.method === 'POST')
+    expect(channelPosts, '碰面板要建一条 git 通道').toHaveLength(1)
+    const sent = sentBodies(fetchMock)
+    const ask = reqOf(sent, 'status')
+    // git 的 status 不带 path（`git.rs` 的契约：`op` 一个字段就够）。
+    expect(ask).toEqual({ op: 'status' })
   })
 
   it('clean:true 显示「没有未提交的改动」，不是空列表', async () => {

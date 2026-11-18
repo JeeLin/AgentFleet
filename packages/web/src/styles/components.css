@@ -1427,11 +1427,15 @@ kbd, .kbd {
   padding: var(--p-s5) var(--p-s5) var(--p-s8);
 }
 
-/* 骨架页的身体：一块虚线框，**明说这是预留位置**而不是加载中。虚线在任何
-   主题下都与实线卡片不同，且不依赖颜色（灰度打印也区分得出）。 */
+/* 骨架页头里的说明句：现在它是 `.af-head` 的**直接子项**（G66：默认槽不再
+   包 `<div>`），页头是单行 flex 条——说明句必须与 `.af-head__sub` 同一几何
+   才不会把页头撑成两行：单行 + 省略号 + 顶距 0（横排条里的竖向 gap 由
+   `.af-head` 的 `gap` 给，自己再加 margin 只会把条撑高）。颜色仍是次级：
+   它说明的是「这页什么时候有」，层级低于标题。 */
 .af-skeletonpage__note {
-  margin: var(--af-space-2) 0 0; font-size: var(--af-text-sm);
-  color: var(--af-fg-secondary); line-height: var(--af-leading-base);
+  margin: 0; font-size: var(--p-t-xs);
+  color: var(--p-fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  line-height: var(--af-leading-snug);
 }
 .af-skeletonpage__note code {
   font-family: var(--af-font-mono); font-size: var(--af-text-xs);
