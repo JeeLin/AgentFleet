@@ -29,19 +29,28 @@
             提示把它从表里移除——**登记不是永久豁免**，一旦它重新服役，
             这条豁免就该消失。
 
-    ── 数字为什么是 34 而不是一开始说的 27（这段是判据演进史，别删）──
-    · 20 → **27**：第一版扫描把**注释里的 token 名**当消费者（见下节），
-      剥掉注释后多出 7 个；
-    · 27 → **34（+8）**：第 6 轮 4b 指出「消费」口径过宽——`--x: var(--y)`
-      这种**定义右侧**的 `var()` 也被算成「y 被消费」。收紧后多出 8 个
-      `THEME_SOURCE_SLOTS`（真身槽位：`--p-fg-strong` / `--p-sh-1/2` /
-      `--p-scrim` / `--p-inset-c` / `--p-add-ink-c` / `--p-del-ink-c` /
-      `--af-space-13`）。它们此前一直靠别人的定义右侧「假装有消费者」。
+    ── 数字为什么是 34（判据演进史，每一步都可复算，别删）──────────────
+    三个数都由「同一套 `sourceFiles()` + 只改消费判据这一项」复算得出
+    （第 6 轮 4a 指出我原先写的 20 / 27 两个数**任何一种口径都复算不出来**，
+    已按复算结果改正）：
+
+    · **17** —— 不剥注释、不排除定义右侧的朴素扫描；
+    · **26（+9）** —— 剥掉注释：注释里提到 token 名**不是**消费者（见下节，
+      `--af-text-lg` 就是被一句散文注释「引用」的）；
+    · **34（+8）** —— 再排除「定义右侧的 `var()`」：`--x: var(--y)` 里的
+      `var(--y)` 是在给 `x` 赋值，不代表 `y` 被谁读过。这一步多出 8 个
+      曾被「假装有消费者」的名字——7 个 `THEME_SOURCE_SLOTS` 真身槽位
+      （`--p-fg-strong` / `--p-sh-1` / `--p-sh-2` / `--p-scrim` /
+      `--p-inset-c` / `--p-add-ink-c` / `--p-del-ink-c`）**加分列的**
+      `PROTOTYPE_SCALE_BRIDGES`（`--af-space-13`，见 ⑤ 组头：它是纯档位，
+      不能混进「四套主题各一套」的真身组）。
+
     · `--af-fg-strong`（补了 17 处消费者）在 `RETIRED_ORPHANS`，不计入 34。
     所以现在：**34 条登记 + 1 条退役**。
 
     ── 判据为什么必须「剥注释后再扫」────────────────────────────────────
-   这是本轮我自己踩的坑：初版用朴素正则扫 `var(--x)`，得到 20 个孤儿；
+   这是本轮我自己踩的坑：初版用朴素正则扫 `var(--x)`，得到 **17** 个孤儿（见
+   上面的复算，原先这里写的「20 个」是记错的口径，任何判据都复算不出 20）；
    实际上 `--af-text-lg` 唯一被「引用」的地方是 `tokens.css:115` 的一句
    散文注释——`也不取 15px：与 --af-text-lg 撞档`。把它当消费者，
    就漏掉了它其实是孤儿。所以本文件**先 `stripCssAndLineComments`**
@@ -169,6 +178,22 @@ function consumedProps(): Set<string> {
    就不重复写 N 遍。 */
 type OrphanReason = { why: string; kin: string }
 
+/* ⑤ **原型槽位的纯档位**：只有 1 个名字，但**不能并入 ④**——
+   ④ 的判据是「四套主题各一套字面值」（实测 7 个成员在主题里各出现 4 次），
+   而 `--af-space-13` 在四套主题里出现 **0 次**（它只在 `tokens.css` 定义一次）。
+   第 6 轮 4a 抓到这条归组矛盾：组头说「四套主题各一套」，组员却是纯档位。
+   单列一组，是为了让组头的判据真正成立。 */
+const PROTOTYPE_SCALE_BRIDGES: Record<string, OrphanReason> = {
+  '--af-space-13': {
+    why:
+      '**纯档位，但被转发**：56px，原型间距第 8 档 `--s8: 56px` 的精确映射（`--p-s8: var(--af-space-13)`）。'
+      + '它自己零直读，而 `--p-s8` 有 12 次直读——**这是「档位 → 原型槽位」的桥**，'
+      + '删了 `--p-s8` 就断链。与 `--af-space-14`（72px，原型无对应档）不同：'
+      + '13 有原型出处（`prototype/assets/tokens.css:33`）。',
+    kin: '--af-space-1..12（在役）、--p-s8（12 次直读）',
+  },
+}
+
 /* ④ **真身槽位**：它们是被 `--af-*` 门面层**转发出去**的那一端，自身没有规则
    直接读。第 6 轮 4b 指出「消费」口径过宽（把定义右侧的 `var()` 也算消费）后，
    收紧判据才暴露出来——**它们之前一直是靠别人的定义右侧「假装有消费者」**。
@@ -222,14 +247,6 @@ const THEME_SOURCE_SLOTS: Record<string, OrphanReason> = {
       '**真身槽位**：阴影第二档字面值（`0 6px 18px rgba(0,0,0,0.38)`，四套各一份），'
       + '被 `--af-shadow-2` 转发。零直读原因与保留理由同 `--p-sh-1`。',
     kin: '--af-shadow-2、--af-shadow-3（在役）',
-  },
-  '--af-space-13': {
-    why:
-      '**纯档位，但被转发**：56px，原型间距第 8 档 `--s8: 56px` 的精确映射（`--p-s8: var(--af-space-13)`）。'
-      + '它自己零直读，而 `--p-s8` 有 12 次直读——**这是「档位 → 原型槽位」的桥**，'
-      + '删了 `--p-s8` 就断链。与 `--af-space-14`（72px，原型无对应档）不同：'
-      + '13 有原型出处（`prototype/assets/tokens.css:33`）。',
-    kin: '--af-space-1..12（在役）、--p-s8（12 次直读）',
   },
 }
 
@@ -357,7 +374,9 @@ const PROTOTYPE_ALIAS_LAYER: Record<string, OrphanReason> = {
     why:
       '原型 `--mono`（`prototype/assets/tokens.css:18`，原型 `app.css` 用 11 次）的传名，'
       + '`-c` 后缀是「避免与 `--af-*` 撞名」的既有约定。`SIZING_ALIASES` 要求存在。'
-      + '实现里等宽一律写 `--af-font-mono`（在役 10 次），这层代理因此跑了空车。',
+      + '实现里等宽一律写 `--af-font-mono`（全仓 `var()` 引用 **15 处**：`components.css` 6、'
+      + '`prototype-shell.css` 2，另 6 个 `.vue` 各 1-2 处——不含 `tokens.css:357` 这条'
+      + '定义右侧，也不含 2 处注释提及），这层代理因此跑了空车。',
     kin: '--p-sans（同组）',
   },
 }
@@ -418,7 +437,8 @@ const IMPLEMENT_ONLY_TIERS: Record<string, OrphanReason> = {
       + '被 `visual-contract.test.ts:712` 钉住值（`=== "240ms"`），reduce-motion 块里'
       + '覆写为 `0ms` 也被钉住——**它是那条「三档时长都归零」断言的对象**。'
       + '零消费的原因：抽屉实际写 `transition: transform 220ms`（裸值，'
-      + '`prototype-shell.css:866`），是「该用而没用」。',
+      + '`.af-drawer` 规则里的 `transition: transform 220ms`，`.af-drawer--open` 同值），'
+      + '是「该用而没用」。',
     kin: '--af-dur-{instant,fast}（在役 2 档）',
   },
   '--af-add-ink-strong': {
@@ -471,6 +491,7 @@ const DECLARED_ORPHANS = new Map<string, OrphanReason>([
   ...Object.entries(PROTOTYPE_ALIAS_LAYER),
   ...Object.entries(IMPLEMENT_ONLY_TIERS),
   ...Object.entries(THEME_SOURCE_SLOTS),
+  ...Object.entries(PROTOTYPE_SCALE_BRIDGES),
 ])
 
 /* ── 已退役的孤儿：曾经零消费者、后来补上了消费者 ────────────────────────

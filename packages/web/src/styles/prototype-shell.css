@@ -437,16 +437,25 @@ html[data-rail='off'] .af-rail__actions .af-btn {
 /* ===========================================================================
    3. 区域容器（原型 app.css:262-290）——**本节没有规则，只有这段说明**
 
-   为什么留一段空节：`components.css` §21（:1369-1395）已经实现了
-   `.af-region` 一族，但那一版是「补漏」写的：它把 `--af-border-default`
-   当作边框色，而原型用 `--line-2`（更淡的一档）。高信息密度下一条更重的
-   边会把区域切碎。
+   为什么留一段空节：`components.css` §21（`:1369-1395` 那六条）已经实现了
+   `.af-region` 一族。本节的说明曾写「它把 `--af-border-default` 当作边框色，
+   而原型用 `--line-2`（更淡的一档），这里要覆盖成淡一档」——**这句话两头
+   都错**（第6轮复核）：
+
+     · `--af-border-default` **就是** `var(--p-line-2)`——四套主题里逐条如此
+       （`theme-neutral` / `theme-warm` / `theme-paper` / `theme-cream` 各自
+       一行 `--af-border-default: var(--p-line-2)`）。所以实现的边框色与原型
+       `border: 1px solid var(--line-2)` **本来就一致**，不存在「更重一档」，
+       也就没有需要覆盖的东西。`.af-region__head` 的 `border-bottom` 同理。
+     · 「高信息密度下一条更重的边会把区域切碎」这个论断因此**没有事实基础**
+       ——它描述的是一个不存在的差异。
 
    **这里从来没有「原型版」**——第6轮设计审查查了 git 历史（`git show
    bb0169d^`），本文件只出现过 `.af-region--warn` 变体，基础 `.af-region`
-   从未移植过来。所以下面这段说明此前一直在描述一个不存在的东西，
-   `index.css:16-19` 的「补漏版会盖掉原型版」也是基于同一个误会的假风险。
-   **要收这两处边框色，必须改 `components.css:1371`，不是在这里加规则。**
+   从未移植过来。所以上文一直在描述一个不存在的东西，
+   `index.css` 里那句「补漏版会盖掉原型版」也是基于同一个误会的假风险。
+   **今后要给 `.af-region` 加覆写，必须改 `components.css` 那六条，
+   不是在这里加规则。**
 
    本节此前还有两条 `.af-region--warn`（warning 变体的边框与头部底色），
    **零模板消费者**（`grep -rn 'af-region--warn' packages/web/src/domains
@@ -488,7 +497,7 @@ html[data-rail='off'] .af-rail__actions .af-btn {
 /* ===========================================================================
    5. 看板（原型 app.css:368-413）
    -------------------------------------------------------------------------
-   差异要点（本轮逐条对照出来的）：
+   差异要点（第5轮记录，第6轮订正了前两条——原文的 180px 与「状态色带没有」都已过期）：
      · 列宽：原型 `minmax(236px, 1fr)`，实现**已经不再适用**——见下面
        `.af-board` 规则处的完整演进史（236px 下限会让第 6 列被裁在视口外，
        现行方案是「六列一屏 + 列名不截断」的折中）。原文这里写的「实现写
@@ -833,7 +842,7 @@ html[data-rail='off'] .af-rail__actions .af-btn {
 }
 
 /* 区域头那个小圆点的三个装饰色（原型 app.css:347-349）。
-   `.af-dot` 自己是 `background: currentColor`（components.css:279），没有这三条
+   `.af-dot` 自己是 `background: currentColor`（`components.css` 里那条 `.af-dot` 规则），没有这三条
    时「项目 A / B / C」的点全是同一个前景色——区分度归零。 */
 .dot-a { background: var(--p-dot-a); }
 .dot-b { background: var(--p-dot-b); }

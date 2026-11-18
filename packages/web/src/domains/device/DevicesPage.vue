@@ -518,7 +518,8 @@ async function remove(device: DeviceSummary): Promise<void> {
    和 `af-stack`（`display:flex; flex-direction:column; gap:16px`）。**两样都要**：
    只给 padding 的话，说明条与下面的分段条之间没有任何间距——原型不是那个样子，
    横向留白对、纵向挤在一起。padding 写到样式表里（原型是内联，实现侧不写内联），
-   `af-stack` 直接复用原型已移植的类（`prototype-shell.css:679`）。 */
+   `af-stack` 直接复用原型已移植的类（`prototype-shell.css` 里那条
+   `.af-stack { ... }` 规则；不写行号，行号改一次就漂一次）。 */
 .af-devpage__body {
   padding: var(--p-s6) var(--p-s6) var(--p-s8);
 }
