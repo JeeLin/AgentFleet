@@ -65,7 +65,7 @@ import { STATES } from '@/shared/state'
 import { describeShape } from '@/shared/projectShape'
 import { parseStamp } from '@/shared/format'
 import { ApiError, describeReadFailure } from '@/shared/http'
-import { focusRouteTarget, setRouteFocusTarget } from '@/shared/focus'
+import { focusRouteTarget, handleLayerKeydown, pop, push, setRouteFocusTarget } from '@/shared/focus'
 import { navigate, route } from '@/router'
 
 /** 当前项目 id，从地址读——地址栏是真相源。 */
@@ -326,6 +326,10 @@ function openTask(id: string): void {
  * 显示「此任务需人工验收」，用户在下拉里就已经知道自己选了什么。
  */
 const dialogOpen = ref(false)
+/** 对话框根（`af-scrim`）。焦点栈要它：`push` 在它内部找第一个可聚焦元素。 */
+const modalEl = ref<HTMLElement | null>(null)
+/** 打开对话框的那颗按钮。关框后焦点还给它——这是 `push({opener})` 的入参。 */
+let lastOpener: HTMLElement | null = null
 const draftTitle = ref('')
 /** `''` = 不设判定码（后端收 `criteria: null`）。 */
 const draftCriteria = ref('')
@@ -352,17 +356,86 @@ const canSubmit = computed(
   () => trimmedTitle.value.length > 0 && !doneWhenEmpty.value && !creating.value,
 )
 
+/* ── 对话框的浮层语义（焦点栈 / Esc / Tab / 点遮罩）──────────────────
+   **这一节是 v0.8.1 第5轮 4d 验收补上的**，原先这个对话框只有
+   `v-if="dialogOpen"` + `role="dialog" aria-modal="true"`——三件「看起来
+   像模态」的装饰，但没有一样真的生效。实测（playwright / 键盘）：
+     · Esc 不关框：本文件根本没绑 `keydown`；
+     · Tab 能一路逃出框，落到 `<body>`，框背后的看板还在 tab 序列里；
+     · 点遮罩不关框：`af-scrim` 上没有点击处理；
+     · 点「取消」后焦点回到 `<body>`，键盘用户失去位置。
+   `aria-modal="true"` 在背后没设 `inert` 时是**假的**——读屏照样能念到
+   看板内容。而 `focus.ts` 早就把这几件事都实现了（`push` 负责背后 inert
+   与首焦点、`pop` 负责还焦点、`handleLayerKeydown` 管 Esc/Tab），
+   全仓另外 5 个浮层（`LoginPrompt` / `TrajDrawer` / `OverviewPage` 抽屉 /
+   `SessionPage` dock）都在用，只有这里漏了。这就是「同一范式漏一处」，
+   不是新设计——所以照 `LoginPrompt.vue` 的接线抄，不另造一套。 */
+
+/** 这一层是否已经入栈。防重复 `push`（重渲染不该再入一次栈）。 */
+let pushed = false
+
+function openLayer(): void {
+  const el = modalEl.value
+  if (!el || pushed) return
+  // 传 `opener`：这个框**是**用户点「新建任务」点出来的，关掉后焦点该回到
+  // 那颗按钮上（`LoginPrompt` 不传是因为 401 没有触发元素）。
+  push(el, { opener: lastOpener })
+  pushed = true
+  document.addEventListener('keydown', onLayerKeydown)
+}
+
+function closeLayer(): void {
+  const el = modalEl.value
+  if (!el || !pushed) return
+  pushed = false
+  document.removeEventListener('keydown', onLayerKeydown)
+  pop(el)
+}
+
+/** Esc / Tab。判据（本层是栈顶吗、输入法选字中吗）都在 `handleLayerKeydown` 里。 */
+function onLayerKeydown(e: KeyboardEvent): void {
+  const el = modalEl.value
+  if (!el) return
+  handleLayerKeydown(e, el, closeDialog)
+}
+
+/** 点遮罩：只有点在遮罩自己上才算（点在框里不该关）。 */
+function onScrim(e: MouseEvent): void {
+  if (e.target === e.currentTarget) closeDialog()
+}
+
 function openDialog(): void {
   draftTitle.value = ''
   draftCriteria.value = ''
   draftDescription.value = ''
   createFailure.value = ''
+  // 记下触发元素再开框：`push` 自己也读 `activeElement`，但这里显式传更稳
+  // （点击事件与 Vue 的 patch 之间有异步空隙）。
+  lastOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null
   dialogOpen.value = true
 }
 
+/** 关框。**四条路都走这里**（取消 / Esc / 点遮罩 / 提交成功后），
+    所以「出栈 + 还焦点」只有一条实现。 */
 function closeDialog(): void {
+  closeLayer()
   dialogOpen.value = false
 }
+
+/* `dialogOpen` 一变就入栈/出栈。用 `watch` 而不是在 `openDialog` 里直接
+   `openLayer()`：`modalEl` 是 `v-if` 渲染出来的，`openDialog` 返回时 DOM
+   还不存在，`push` 会拿到 `null`。`flush: 'post'` 保证在 DOM 更新之后跑，
+   `modalEl.value` 那时才有值。 */
+watch(dialogOpen, (open) => {
+  if (open) openLayer()
+  else closeLayer()
+}, { flush: 'post' })
+
+/* 组件卸载时若还开着，必须摘监听并出栈——否则 `document` 上留一个指向已
+   卸载组件的闭包，下一次 Esc 会调到一个不存在的框上。 */
+onUnmounted(() => {
+  if (pushed) closeLayer()
+})
 
 async function submitCreate(): Promise<void> {
   if (!canSubmit.value) return
@@ -588,84 +661,104 @@ async function submitCreate(): Promise<void> {
          已在 `components.css` §22）：本子任务不许新增 `--af-*` token，也不该
          为了一个对话框再造一套卡面排版。卡片此时尚未变「可点」，所以这里用
          `<div>` 而不是 `<button>`（`TaskCard` 的根才是按钮）。
-         这是一个真模态（提交期间不该点背后的看板），不是内联表单。 -->
-    <div v-if="dialogOpen" class="af-scrim">
-      <div class="af-modal" role="dialog" aria-modal="true" aria-label="新建任务">
-        <div class="af-modal__head">
-          <h2 class="af-head__title">新建任务</h2>
-        </div>
-        <div class="af-modal__body">
-          <div class="af-form">
-            <label class="af-field">
-              <span class="af-field__label">标题</span>
-              <input
-                id="af-newtask-title"
-                v-model="draftTitle"
-                class="af-input"
-                type="text"
-                placeholder="一句话说清要做什么"
-              />
-            </label>
+         这是一个真模态（提交期间不该点背后的看板），不是内联表单。
 
-            <div class="af-field">
-              <label class="af-field__label" for="af-newtask-criteria">判定码</label>
-              <select id="af-newtask-criteria" v-model="draftCriteria" class="af-select">
-                <option value="">不设判定码</option>
-                <option v-for="c in CRITERIA_CODES" :key="c.code" :value="c.code">
-                  {{ c.label }}
-                </option>
-              </select>
-              <!-- 选「不设判定码」= 跑完不会自动判定 = 必须由人验收。当场说清，
-                   别等跑完了才发现要自己盯着。 -->
-              <span v-if="needsManualAcceptance" class="af-field__hint">
-                不设判定码 → 此任务需人工验收。
+         **必须 `Teleport to="body"`**（v0.8.1 第5轮 4d 实测）。理由与
+         `OverviewPage.vue:521-527` 那条一字不差：`focus.push` 的 `inertOthers`
+         只把「body 直接子节点里、不含浮层容器的那几个」置 inert。`#app` 是
+         body 的**唯一**子节点，对话框留在里面时容器就包含在 `#app` 里，于是
+         「背后全部 inert」退化成「一个都没 inert」——实测开框后 `#app.inert`
+         仍是 `false`，脚本能直接把焦点抢到左栏链接上（`behindStealsFocus:
+         true`）。Teleport 到 body 后浮层自成第三个子节点，`#app` 才会真的
+         被 inert（管家抽屉正是这么做的，实测 `appInert: true` /
+         抢焦点失败）。
+         `.af-scrim` 是 `position: fixed; inset: 0`（`components.css:518`），
+         所以挂到 body 下视觉零变化。 -->
+    <Teleport to="body">
+      <div v-if="dialogOpen" ref="modalEl" class="af-scrim" @click="onScrim">
+        <div
+          class="af-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-label="新建任务"
+          tabindex="-1"
+        >
+          <div class="af-modal__head">
+            <h2 class="af-head__title">新建任务</h2>
+          </div>
+          <div class="af-modal__body">
+            <div class="af-form">
+              <label class="af-field">
+                <span class="af-field__label">标题</span>
+                <input
+                  id="af-newtask-title"
+                  v-model="draftTitle"
+                  class="af-input"
+                  type="text"
+                  placeholder="一句话说清要做什么"
+                />
+              </label>
+
+              <div class="af-field">
+                <label class="af-field__label" for="af-newtask-criteria">判定码</label>
+                <select id="af-newtask-criteria" v-model="draftCriteria" class="af-select">
+                  <option value="">不设判定码</option>
+                  <option v-for="c in CRITERIA_CODES" :key="c.code" :value="c.code">
+                    {{ c.label }}
+                  </option>
+                </select>
+                <!-- 选「不设判定码」= 跑完不会自动判定 = 必须由人验收。当场说清，
+                     别等跑完了才发现要自己盯着。 -->
+                <span v-if="needsManualAcceptance" class="af-field__hint">
+                  不设判定码 → 此任务需人工验收。
+                </span>
+              </div>
+
+              <div class="af-field">
+                <label class="af-field__label" for="af-newtask-desc">描述</label>
+                <textarea
+                  id="af-newtask-desc"
+                  v-model="draftDescription"
+                  class="af-textarea"
+                  rows="3"
+                  placeholder="怎么才算跑通？"
+                ></textarea>
+              </div>
+
+              <p v-if="doneWhenEmpty" class="af-field__hint">
+                至少要有判定码或描述——两者都空的任务建出来只会空转。
+              </p>
+              <p v-if="createFailure" class="af-form__error" role="alert">{{ createFailure }}</p>
+            </div>
+
+            <!-- 预览：用户在下拉里选的那几条，最后会长成看板上的什么样。
+                 预览的文本一律来自输入框（不含任何我们替他编的值）。 -->
+            <div class="af-card af-taskcard" aria-label="预览">
+              <span class="af-taskcard__title">
+                {{ trimmedTitle === '' ? '（还没写标题）' : trimmedTitle }}
+              </span>
+              <span class="af-taskcard__status">
+                <StateBadge state="pending" />
+              </span>
+              <span class="af-taskcard__why">
+                {{ draftCriteria === '' ? '判定：无判定码，跑完由人验收' : `判定：${draftCriteria}` }}
               </span>
             </div>
-
-            <div class="af-field">
-              <label class="af-field__label" for="af-newtask-desc">描述</label>
-              <textarea
-                id="af-newtask-desc"
-                v-model="draftDescription"
-                class="af-textarea"
-                rows="3"
-                placeholder="怎么才算跑通？"
-              ></textarea>
-            </div>
-
-            <p v-if="doneWhenEmpty" class="af-field__hint">
-              至少要有判定码或描述——两者都空的任务建出来只会空转。
-            </p>
-            <p v-if="createFailure" class="af-form__error" role="alert">{{ createFailure }}</p>
           </div>
-
-          <!-- 预览：用户在下拉里选的那几条，最后会长成看板上的什么样。
-               预览的文本一律来自输入框（不含任何我们替他编的值）。 -->
-          <div class="af-card af-taskcard" aria-label="预览">
-            <span class="af-taskcard__title">
-              {{ trimmedTitle === '' ? '（还没写标题）' : trimmedTitle }}
-            </span>
-            <span class="af-taskcard__status">
-              <StateBadge state="pending" />
-            </span>
-            <span class="af-taskcard__why">
-              {{ draftCriteria === '' ? '判定：无判定码，跑完由人验收' : `判定：${draftCriteria}` }}
-            </span>
+          <div class="af-modal__foot">
+            <button type="button" class="af-btn af-btn--ghost" @click="closeDialog">取消</button>
+            <button
+              type="button"
+              class="af-btn af-btn--primary"
+              :disabled="!canSubmit"
+              @click="submitCreate"
+            >
+              {{ creating ? '正在创建…' : '创建' }}
+            </button>
           </div>
-        </div>
-        <div class="af-modal__foot">
-          <button type="button" class="af-btn af-btn--ghost" @click="closeDialog">取消</button>
-          <button
-            type="button"
-            class="af-btn af-btn--primary"
-            :disabled="!canSubmit"
-            @click="submitCreate"
-          >
-            {{ creating ? '正在创建…' : '创建' }}
-          </button>
         </div>
       </div>
-    </div>
+    </Teleport>
   </div>
 </template>
 

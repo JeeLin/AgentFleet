@@ -13,6 +13,8 @@
 
 import { describe, expect, it, vi } from 'vitest'
 
+import { DOMWrapper } from '@vue/test-utils'
+
 import BoardPage from '@/domains/project/BoardPage.vue'
 import type { Project } from '@/domains/project/api'
 import type { Task, TaskStateWire } from '@/domains/project/taskTypes'
@@ -590,8 +592,7 @@ describe('BoardPage（v0.8.0）：时钟、跳转、错误与新建对话框', (
     await openers[0]?.trigger('click')
     await flushUntilSettled(w)
 
-    const modal = w.find('.af-modal')
-    expect(modal.exists(), '对话框要打开').toBe(true)
+    const modal = modalOf()
 
     /** 提交按钮：脚里那个 `创建`（按钮文案会变成「正在创建…」，所以按**位置**取最后一个）。 */
     function submitBtn(): ReturnType<typeof w.find> {
@@ -620,14 +621,38 @@ describe('BoardPage（v0.8.0）：时钟、跳转、错误与新建对话框', (
    */
   type Wrapper = Awaited<ReturnType<typeof mountAt>>
   type Finder = ReturnType<Wrapper['find']>
+
+  /**
+   * 从 `document.body` 里取对话框。
+   *
+   * **不能 `w.find('.af-modal')`**：v0.8.1 第5轮 4d 把对话框 `Teleport to="body"`
+   * 了（理由见 `BoardPage.vue` 那段注释——不 Teleport 的话 `#app` 是 body 的
+   * 唯一子节点，`focus.push` 的 `inertOthers` 会把「背后全部 inert」退化成
+   * 「一个都没 inert」，模态框是假的）。Teleport 出去之后它就不再是 `w.element`
+   * 的后代，`w.find` 找不到。查 `document.body` 才是它的真实落点。
+   *
+   * 用 `DOMWrapper` 包一层，是为了让下面那些 `find` / `findAll` / `text` /
+   * `trigger` 的写法与别处一致——直接对 `HTMLElement` 写得另起一套。
+   */
+  function modalOf(): Finder {
+    const el = document.body.querySelector('.af-modal')
+    expect(el, '对话框要挂在 body 下（Teleport）').not.toBeNull()
+    return new DOMWrapper(el as HTMLElement) as unknown as Finder
+  }
+
   async function openDialog(w: Wrapper): Promise<Finder> {
     const openers = w.findAll('.af-btn').filter((b) => (b.text() ?? '').trim() === '新建任务')
     expect(openers.length, '页面上要有「新建任务」入口').toBeGreaterThan(0)
     await openers[0]?.trigger('click')
     await flushUntilSettled(w)
-    const modal = w.find('.af-modal')
-    expect(modal.exists(), '对话框要打开').toBe(true)
-    return modal
+    /* 忘了 Teleport 时这条给出真正的原因，而不是让上面那行报「对话框要打开」
+       （那会让人去查 `v-if`）。同时它也是「背后会不会 inert」的代理判据：
+       `.af-modal` 一旦落回页面子树，`inertOthers` 就豁免整个 `#app`。 */
+    expect(
+      w.find('.af-modal').exists(),
+      '对话框不该留在页面子树里：必须 Teleport 到 body，否则背后不会 inert，模态是假的',
+    ).toBe(false)
+    return modalOf()
   }
 
   /** 提交按钮：脚里那一个（`创建` / `正在创建…`），按位置取最后一个。 */
@@ -652,7 +677,7 @@ describe('BoardPage（v0.8.0）：时钟、跳转、错误与新建对话框', (
     const cancel = modal.findAll('.af-btn').find((b) => (b.text() ?? '').trim() === '取消')
     expect(cancel, '对话框要有取消').toBeTruthy()
     await cancel?.trigger('click')
-    expect(w.find('.af-modal').exists(), '取消后对话框应当消失').toBe(false)
+    expect(document.body.querySelector('.af-modal'), '取消后对话框应当消失').toBeNull()
   })
 
   it('create_dialog_submits_and_reloads：POST 到 /api/projects/p_1/tasks，成功后关闭并重拉列表', async () => {
@@ -705,7 +730,7 @@ describe('BoardPage（v0.8.0）：时钟、跳转、错误与新建对话框', (
     })
 
     // 成功之后：对话框关掉、列表被**重新拉过**（不本地插入）。
-    expect(w.find('.af-modal').exists(), '建成功后对话框要关掉').toBe(false)
+    expect(document.body.querySelector('.af-modal'), '建成功后对话框要关掉').toBeNull()
     const listCalls = fetchMock.mock.calls.filter(
       (c) =>
         String(c[0]).includes('/api/projects/p_1/tasks') &&
@@ -744,7 +769,7 @@ describe('BoardPage（v0.8.0）：时钟、跳转、错误与新建对话框', (
     await submitOf(modal).trigger('click')
     await flushUntilSettled(w)
 
-    const stillThere = w.find('.af-modal')
+    const stillThere = modalOf()
     expect(stillThere.exists(), '建失败不能把用户填的内容一起关掉').toBe(true)
     // 文案里要带**后端的错误码**，而不是一句笼统的「失败了」——否则用户拿不到
     // 任何可报告、可搜索的信息（`ApiError.code` 是唯一稳定可读的那一栏）。
