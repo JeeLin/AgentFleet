@@ -1,12 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import {
+  clearRouteFocusTarget,
   depth,
   focusMain,
+  focusRouteTarget,
   focusablesIn,
+  hasRouteFocusTarget,
   pop,
   push,
   resetForTest,
+  setRouteFocusTarget,
   topContainer,
   trapTab,
 } from './focus'
@@ -347,5 +351,149 @@ describe('focusMain', () => {
   it('没有 main 时返回 null，不抛', () => {
     document.body.innerHTML = '<div>没有 main</div>'
     expect(focusMain()).toBeNull()
+  })
+})
+/* ===========================================================================
+   G65：换页后的焦点落点（第5轮唯一那条真实的键盘可访问性缺陷）
+   ---------------------------------------------------------------------------
+   症状（第3轮验收实测，`step7-acceptance.md` 发现 #2）：看板里点一张卡（或聚焦
+   卡片按 ⏎）进任务详情后 `document.activeElement` 是 `MAIN.af-main`
+   （`tabindex="-1"`），第一次 Tab 落到页头那颗「← 看板」；按 Back 回看板，
+   焦点也不回那张卡。键盘用户每进出一个任务都得从头 Tab 一遍整页。
+
+   成因：换页后落焦点只有「交回 main」一条路（`focusMain`），它分不出
+   「用户从哪儿来」。
+
+   这一组钉的是新语义的三档优先级：
+     ① 登记了来源（`setRouteFocusTarget`）→ **让出**这一次，谁都不聚焦；
+     ② 没有登记、但有「上一站」带 `data-id` → 回到新 DOM 里的同名元素；
+     ③ 都没有 → `main`（逐字等于旧的 `focusMain`，`router.test.ts` 钉着它）。
+   =========================================================================== */
+describe('G65 focusRouteTarget：换页后的焦点落点', () => {
+  beforeEach(() => {
+    resetForTest()
+    document.body.innerHTML = ''
+  })
+
+  afterEach(() => {
+    resetForTest()
+    document.body.innerHTML = ''
+  })
+
+  /** 外壳 + 当前页。`main.af-main[tabindex="-1"]` 是 `App.vue` 的真实形状。 */
+  function shell(inner: string): HTMLElement {
+    document.body.innerHTML = `<main class="af-main" tabindex="-1">${inner}</main>`
+    return document.querySelector('main.af-main') as HTMLElement
+  }
+
+  it('没有登记来源时落到 main，并给 h1 补 tabindex="-1"（旧语义不变）', () => {
+    const main = shell('<h1>设备</h1>')
+    expect(focusRouteTarget()).toBe(main)
+    expect(document.activeElement).toBe(main)
+    expect(main.querySelector('h1')?.getAttribute('tabindex')).toBe('-1')
+  })
+
+  it('没有 main 时返回 null，不抛', () => {
+    document.body.innerHTML = '<div>没有 main</div>'
+    expect(focusRouteTarget()).toBeNull()
+  })
+
+  it('登记了来源 → 这一次调用**让出焦点**，且让出只欠一次', () => {
+    // 只看返回值会被「让出」掩盖：这条要证明的是**焦点没被夺走**。
+    shell('<h1>设备</h1>')
+    const card = document.createElement('button')
+    card.setAttribute('data-id', 'tsk_1')
+    document.body.append(card)
+    card.focus()
+
+    setRouteFocusTarget(card)
+    expect(hasRouteFocusTarget()).toBe(true)
+    // 「让出」的含义：谁都没被聚焦，`navigate()` 的微任务拿到 null，
+    // 于是焦点没从用户刚点的那张卡上被夺走。
+    expect(focusRouteTarget()).toBeNull()
+    expect(document.activeElement, '焦点仍在卡片上，没被抢到 main').toBe(card)
+    // 让出只欠一次：第二次调用就真的落焦点了——按「上一站」的 data-id
+    // 找回那张卡（它还在 DOM 里），而不是丢给 `main`。
+    expect(hasRouteFocusTarget()).toBe(false)
+    expect(focusRouteTarget()).toBe(card)
+  })
+
+  it('卡片路径的真实顺序：登记 → 让出 → 页面把焦点放到自己的标题', () => {
+    // openTask 登记 → navigate → router 微任务调 focusRouteTarget（让出）→
+    // 详情页数据到了、h1 渲染出来 → 详情页自己 `h1.focus()`。
+    const main = shell('<h1 tabindex="-1" data-id="tsk_1">把构建时间降到 60s 内</h1>')
+    const h1 = main.querySelector('h1') as HTMLElement
+    const card = document.createElement('button')
+    document.body.append(card)
+    card.focus()
+
+    setRouteFocusTarget(card)
+    expect(focusRouteTarget(), 'router 的微任务应让出').toBeNull()
+    expect(document.activeElement, '还停在卡片上').toBe(card)
+
+    // 详情页落自己的标题（`ProjectTaskPage.vue` 里就是这一句）。
+    h1.focus()
+    expect(document.activeElement).toBe(h1)
+    expect(h1.getAttribute('tabindex'), '可编程聚焦的前提').toBe('-1')
+  })
+
+  it('Back 场景：上一站带 data-id → 回到新 DOM 里的同名卡片', () => {
+    // 详情页：h1 带任务 id。
+    const detail = shell('<h1 tabindex="-1" data-id="tsk_1">任务标题</h1>')
+    const detailH1 = detail.querySelector('h1') as HTMLElement
+    // 「上一站」由 `setRouteFocusTarget` 记（点卡片时登记的就是那张卡，
+    // 它同样带 data-id）——这里用它模拟「上一站是带 id 的元素」。
+    setRouteFocusTarget(detailH1)
+    focusRouteTarget() // 消费掉「让出」，落点交给页面
+    detailH1.focus()
+
+    // Back 回看板：整页换了一份 DOM，卡片带同一个 data-id。
+    shell(
+      '<p class="af-muted">内部指标台</p>' +
+        '<button class="af-taskcard" data-id="tsk_1">把构建时间降到 60s 内</button>' +
+        '<button class="af-taskcard" data-id="tsk_2">另一张卡</button>',
+    )
+    const got = focusRouteTarget()
+    expect(got?.getAttribute('data-id'), '应回到同一张卡').toBe('tsk_1')
+    expect(got?.tagName).toBe('BUTTON')
+    expect(document.activeElement).toBe(got)
+  })
+
+  it('回到列表时目标已经不在了（卡片被删）→ 退到 main，不抛', () => {
+    const main = shell('<div>看板</div>')
+    const gone = document.createElement('button')
+    gone.setAttribute('data-id', 'tsk_9')
+    document.body.append(gone)
+    setRouteFocusTarget(gone)
+    focusRouteTarget()
+    gone.remove()
+
+    expect(() => focusRouteTarget()).not.toThrow()
+    expect(document.activeElement).toBe(main)
+  })
+
+  it('`data-id` 里带引号也不会让 querySelector 抛（落焦点抛 = 键盘用户丢了）', () => {
+    const main = shell('<div>看板</div>')
+    const weird = document.createElement('button')
+    weird.setAttribute('data-id', 'a"b')
+    document.body.append(weird)
+    setRouteFocusTarget(weird)
+    focusRouteTarget()
+    weird.remove()
+    expect(() => focusRouteTarget()).not.toThrow()
+    expect(document.activeElement).toBe(main)
+  })
+
+  it('clearRouteFocusTarget 把两处记录都清掉', () => {
+    const main = shell('<h1>标题</h1>')
+    const card = document.createElement('button')
+    card.setAttribute('data-id', 'tsk_1')
+    document.body.append(card)
+    setRouteFocusTarget(card)
+    expect(hasRouteFocusTarget()).toBe(true)
+    clearRouteFocusTarget()
+    expect(hasRouteFocusTarget()).toBe(false)
+    // 清空之后：既没有 sticky，也没有「上一站」→ 第 ③ 档。
+    expect(focusRouteTarget()).toBe(main)
   })
 })

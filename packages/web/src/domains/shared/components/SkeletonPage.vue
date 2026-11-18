@@ -35,6 +35,11 @@ withDefaults(
 
 <template>
   <!-- 骨架页也要用原型的页面骨架（`header.af-head` + `div.af-body` 两块并排），
+       G66（实测，`/tmp/pw/geom2.mjs` @ 1280px）：改前默认槽里那层 `<div>` 让
+       说明句跟着标题**竖排**（`itemLeft == h1Left`，说明句在标题下面那一行、
+       item 字号 13.5px 与 `.af-head__sub` 的 12.5px 不一致）；改后 h1 与说明句
+       是 `.af-head` 的直接 flex 子项，说明句横排在标题右侧（`/devices` 同款
+       几何），页头高度同为 56px、标题不被裁剪。
        否则它渲染出来的页头没有几何：上一版用的是自造的 `.af-page` /
        `.af-page__head` / `.af-page__title`，而那一族规则已随 v0.8.1 子任务 2
        的类名删除，于是 **10 个占位页**（执行监控 / 回放 / 时间线 / 定时 / 收件箱 /
@@ -42,16 +47,22 @@ withDefaults(
        它们不在「10 个已交付页面」的清单里，门禁扫不到；2026-11-17 子任务 10
        逐页扫 `af-page` 残留时抓到。
 
+       **默认槽里不再包那层 `<div>`**：`.af-head` 是 `display: flex;
+       align-items: center` 的单行条，包一层 div 会得到一列（`.af-head > div`
+       是 `flex-direction: column; min-width: 0`），标题被居中对齐压进这一列、
+       说明句被竖着排在它下面——页头变成两行高，而其它 12 个页面的页头都是
+       单行（h1 与副标题横排）。去掉包裹层之后 `h1` + `p` 直接是 `.af-head` 的
+       flex 子项，几何与普通页一致（`tokens.test` / `skeleton-pages.test` 的
+       门禁底座不变，几何由 playwright 脚本实测，见 LANE-REPORT 的 G66）。
+
        两段根节点：与另外 12 个页面同一形状（`PageHead` 与 `.af-body` 是兄弟）。
        骨架页不接收透传 attrs，多根不会触发 fallthrough 警告。 -->
   <PageHead>
-    <div>
-      <h1 class="af-head__title">{{ title }}</h1>
-      <p class="af-skeletonpage__note">
-        本页在 <strong>{{ version }}</strong> 开放。设计稿见
-        <code>{{ prototype }}</code>。
-      </p>
-    </div>
+    <h1 class="af-head__title">{{ title }}</h1>
+    <p class="af-skeletonpage__note">
+      本页在 <strong>{{ version }}</strong> 开放。设计稿见
+      <code>{{ prototype }}</code>。
+    </p>
   </PageHead>
 
   <div class="af-body">

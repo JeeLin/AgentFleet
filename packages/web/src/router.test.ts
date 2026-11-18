@@ -367,3 +367,96 @@ describe('ROUTES 与 PAGES 的键集一致', () => {
     expect(keys.slice().sort()).toEqual(wanted.slice().sort())
   })
 })
+
+/* ===========================================================================
+   `PAGE_TITLE` 的键集必须与 `RouteName` 闭集一致（v0.8.1 第4轮，G37/G38）
+   ---------------------------------------------------------------------------
+   **守的是一个真实漏了两轮的缺陷**：`page-titles.ts` 的表漏了
+   `device-detail` / `agent-detail` 两条，而 `pageTitle()` 对表外名字
+   `?? name` 原样返回，于是这两个页面的浏览器标题退化成
+   `"agent-detail · AgentFleet"`——中文界面里唯一一处英文标题。
+
+   为什么一直没被发现：本文件原本唯一的「双向对比」是 `ROUTES` ↔
+   `App.vue` 的 `PAGES`（上面那条），**与本表无关**；而 `page-titles.ts`
+   `:53-55` 的注释却把「表是否覆盖全部路由」的判据指向「`router.test.ts`
+   的双向对比」——指向了一条不存在的守卫。注释说谎比没有注释更糟。
+
+   **读源码而不是 import**：`PAGE_TITLE` 只导出 `Readonly<Record<string,
+   string>>`，类型上丢掉键的字面量信息，`as const` 也不在它身上；而且这条
+   守卫要抓的正是「键写漏了」，`Object.keys` 读出来的就是漏掉之后的集合，
+   拿它自己跟自己对永远相等。所以只能抠源码。与上面 `PAGES` 那条同一手法。
+   =========================================================================== */
+describe('PAGE_TITLE 与 RouteName 的键集一致', () => {
+  /* **判据以 `RouteName` 闭集为准，不是以 `ROUTES` 为准**：`not-found` 是
+     `RouteName` 的成员（`router.ts:81`），但没有对应的 `ROUTES` 条目——它由
+     `matchRoute()` 兜底返回（`router.ts:229`）。所以表里有它是对的。
+
+     但本文件又没法 `import type { RouteName }` 把联合体变成运行时集合，
+     于是取「`ROUTES` 的全部名字 + `not-found`」。**这是手写的一处覆盖**，
+     故下面同时守 `not-found` 确实在 `RouteName` 联合体源码里出现——否则
+     哪天 `not-found` 被改名，这条豁免会静默变成一个假白名单。 */
+  const NOT_FOUND = 'not-found'
+  const routeNames = (): string[] => [...ROUTES.map((r) => r.name), NOT_FOUND]
+
+  it('`not-found` 确实是 `RouteName` 的成员（豁免的前提成立）', () => {
+    const src = readRepoFile('packages/web/src/router.ts')
+    const union = src.match(/export type RouteName\s*=([\s\S]*?)\n\n/)
+    expect(union, 'router.ts 里找不到 `export type RouteName = ...`').not.toBeNull()
+    expect(
+      (union as RegExpMatchArray)[1].includes(`'${NOT_FOUND}'`),
+      `RouteName 里已经没有 '${NOT_FOUND}'，本文件的豁免要同步删掉`,
+    ).toBe(true)
+  })
+
+  it('每一条路由都有一个中文页名，且不多不少', () => {
+    const src = readRepoFile('packages/web/src/shared/page-titles.ts')
+    const block = src.match(/export const PAGE_TITLE[^=]*=\s*\{([\s\S]*?)\n\}/)
+    expect(block, 'page-titles.ts 里找不到 `export const PAGE_TITLE = { ... }`').not.toBeNull()
+
+    const keys = [...(block as RegExpMatchArray)[1].matchAll(/^\s*(?:'([^']+)'|(\w+))\s*:/gm)].map(
+      (m) => m[1] ?? m[2],
+    )
+    const wanted = routeNames()
+    const missing = wanted.filter((n) => !keys.includes(n)).sort()
+    const extra = keys.filter((n) => !wanted.includes(n)).sort()
+    expect(missing, `这些路由没有中文页名（浏览器标题会显示英文路由名）：${missing.join(', ')}`)
+      .toEqual([])
+    expect(extra, `这些页名不对应任何路由：${extra.join(', ')}`).toEqual([])
+    expect(keys.length, '键数与路由数不等').toBe(wanted.length)
+  })
+
+  /* **纯 ASCII 页名的白名单**：`agents` 的页名是品牌名「Agent」，产品文案就
+     这么叫（侧栏、帮助面板、`h1` 全都是「Agent」），强行加中文反而更差。
+     白名单是**逐条论证**的：每一味都写清为什么不该有中文，而不是「跑不过就加」。 */
+  const ASCII_BY_DESIGN: Readonly<Record<string, string>> = {
+    agents: '品牌名「Agent」：侧栏/帮助面板/h1 全站都这么叫，是产品名不是翻译',
+  }
+
+  it('页名都是非空中文，不是把路由名抄一遍', () => {
+    const src = readRepoFile('packages/web/src/shared/page-titles.ts')
+    const block = src.match(/export const PAGE_TITLE[^=]*=\s*\{([\s\S]*?)\n\}/) as RegExpMatchArray
+    const pairs = [...block[1].matchAll(/^\s*(?:'([^']+)'|(\w+))\s*:\s*'([^']*)'/gm)].map((m) => ({
+      key: m[1] ?? m[2],
+      val: m[3],
+    }))
+    expect(pairs.length, '一个页名都没解析出来').toBeGreaterThan(20)
+    for (const { key, val } of pairs) {
+      expect(val.trim(), `${key} 的页名是空的`).not.toBe('')
+      expect(val, `${key} 的页名还是路由名本身（等于没翻译）`).not.toBe(key)
+      if (key in ASCII_BY_DESIGN) {
+        // 白名单里的项仍然要满足「非空且不等于路由名」（上面两条已判）。
+        expect(val, `${key} 在白名单里，但页名不该含中文`).not.toMatch(/[\u4e00-\u9fa5]/)
+        continue
+      }
+      expect(/[\u4e00-\u9fa5]/.test(val), `${key} 的页名「${val}」不含中文`).toBe(true)
+    }
+  })
+
+  it('纯 ASCII 页名白名单没有过期项', () => {
+    const src = readRepoFile('packages/web/src/shared/page-titles.ts')
+    const block = src.match(/export const PAGE_TITLE[^=]*=\s*\{([\s\S]*?)\n\}/) as RegExpMatchArray
+    const keys = [...block[1].matchAll(/^\s*(?:'([^']+)'|(\w+))\s*:/gm)].map((m) => m[1] ?? m[2])
+    const stale = Object.keys(ASCII_BY_DESIGN).filter((k) => !keys.includes(k))
+    expect(stale, `白名单里这些键已不在表中，请删掉：${stale.join(', ')}`).toEqual([])
+  })
+})

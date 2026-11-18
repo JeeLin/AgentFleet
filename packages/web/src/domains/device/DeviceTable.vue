@@ -294,6 +294,13 @@ function createSessionReason(device: DeviceSummary): string {
   text-underline-offset: 2px;
   max-width: 100%;
 }
+/* `min-width: 0` 是这一格的**行为契约**，不是样式偏好：flex 子项默认
+   `min-width: auto`，长设备名不会收缩、会把整列撑宽去挤别的列；置 0 才让
+   `.af-truncate` 的省略号真正起作用。v0.8.1 第5轮 G49 之前这里还挂着一条
+   `__name` 子块的同名规则——**模板里没有任何元素带那个类**（只有这张 `td`
+   与 `button.af-dev-name__link`），它是一条死规则，而且 `DeviceTable.test.ts`
+   用正则把它钉住了，等于测试在保护死代码。现在那条规则已删，本条的
+   `min-width: 0` 是唯一真相源。 */
 .af-dev-name {
   display: flex;
   align-items: center;
@@ -304,11 +311,6 @@ function createSessionReason(device: DeviceSummary): string {
 .af-dev-id {
   font-size: var(--af-text-2xs);
   letter-spacing: 0.01em;
-}
-/* flex 子项默认 min-width:auto，长名字不会收缩、会把整列撑宽去挤别的列。
-   置 0 才让 .af-truncate 的省略号真正起作用。 */
-.af-dev-name__name {
-  min-width: 0;
 }
 .af-caps {
   display: flex;

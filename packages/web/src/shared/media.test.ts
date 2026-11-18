@@ -82,10 +82,11 @@ describe('media：断点只有一处字面量', () => {
 
     ── 扫描范围：`src/` 下全部 `.vue`，按文件名（basename）比对 ──────────
     为什么是「全 `src/` 递归」而不是只扫 `pages/`：`.vue` 不只长在 `pages/` 下，
-    `src/App.vue` 与 `src/components/*.vue` 同样是样式落点。只扫 `pages/`
-    仍然漏得掉「在 `App.vue` 里新增一处」。为什么按 basename 而不按相对路径：
-    断言要钉的是「哪几个文件含这个断点」，路径前缀只会让期望值随目录搬迁而无谓地红，
-    而那与断点分布无关。
+     `src/App.vue` 与 `src/domains/` 下各级 `.vue` 同样是样式落点（本仓没有
+    `src/components/` 这个目录；组件都按域放在 `src/domains/<域>/` 下）。
+    只扫 `pages/` 仍然漏得掉「在 `App.vue` 里新增一处」。为什么按 basename
+    而不按相对路径：断言要钉的是「哪几个文件含这个断点」，路径前缀只会让期望值
+    随目录搬迁而无谓地红，而那与断点分布无关。
 
     ⚠️ 扫描集合是**按 `.vue` 后缀**筛出来的：`src/domains/session/SessionPage.test.ts` 里也
     有这个字面量，但它不是 `.vue`，不在集合内——这是预期的，测试文件不该算作

@@ -184,11 +184,6 @@ export function cancelConversation(sessionId: string): Promise<void> {
   )
 }
 
-/** API 的会话态 → 页面态。`running` 在页面上是「运行中」（`active`）。 */
-export function pageSessionState(state: SessionSummary['state']): 'active' | 'ended' {
-  return state === 'running' ? 'active' : 'ended'
-}
-
 /**
  * 建会话失败的可读理由。
  *

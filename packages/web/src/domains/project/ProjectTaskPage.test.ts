@@ -19,6 +19,7 @@ import { describe, expect, it, vi } from 'vitest'
 import ProjectTaskPage from '@/domains/project/ProjectTaskPage.vue'
 import type { Execution, Task } from '@/domains/project/taskTypes'
 import { mountIn } from '@/test/mount'
+import { clearRouteFocusTarget, setRouteFocusTarget } from '@/shared/focus'
 import { settle, stubFetch } from '@/test/http'
 import { navigate } from '@/router'
 
@@ -840,5 +841,73 @@ describe('ProjectTaskPage：时钟', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+/* ===========================================================================
+   G65：从看板点卡片进来，焦点落在任务标题上（不是 MAIN.af-main）
+   ---------------------------------------------------------------------------
+   第3轮验收实测的缺陷：卡片 click / ⏎ 进任务详情后
+   `document.activeElement === MAIN.af-main`，第一次 Tab 落在页头那颗
+   「← 看板」上。这一组钉住修复后的落点：**任务标题 `h1`**（带
+   `tabindex="-1"`，所以 ⇧Tab 回标题也成立）。
+
+   反向验证：把 `ProjectTaskPage.vue` 里那个 `watch(() => task.value, …)` 整段
+   删掉 → 「焦点落在标题上」那条红（落点退回 `main`）。
+   =========================================================================== */
+describe('G65：点卡片进来后焦点落在任务标题上', () => {
+  it('登记了来源 → 焦点落到 h1 上，不是 main', async () => {
+    stubFetch({ '/api/tasks/task_1': detail(task()) })
+    // 模拟 `BoardPage.openTask`：先登记来源卡片，再跳转。
+    const card = document.createElement('button')
+    card.setAttribute('data-id', 'task_1')
+    document.body.append(card)
+    setRouteFocusTarget(card)
+
+    const w = mountAt('task_1')
+    await flushUntilSettled(w)
+
+    const h1 = w.element.querySelector('h1')
+    expect(h1, '详情页必须有标题').not.toBeNull()
+    expect(document.activeElement, '焦点应落在任务标题上').toBe(h1)
+    expect(h1?.getAttribute('tabindex'), '可编程聚焦的前提').toBe('-1')
+    // 反向：绝不是那个无条件的 main 落点。
+    expect(document.activeElement).not.toBe(document.querySelector('main, .af-main'))
+    clearRouteFocusTarget()
+  })
+
+  it('直接输地址进来（没有登记来源）也会落到标题上——标题是这一页的起点', async () => {
+    // 修复前：这条路径落到 `main`。修复后**也**落到标题：落点是「本页的
+    // 第一个可读单元」这件事与「从哪儿来」无关，而从 `main` 起步时第一次
+    // Tab 还是会先撞上页头的「← 看板」。
+    //
+    // 注意这条不是「第一条的复制」：第一条**登记了来源**（走让出那一档），
+    // 这一条**完全不登记**——它证明落标题不依赖 sticky 状态。
+    clearRouteFocusTarget()
+    stubFetch({ '/api/tasks/task_1': detail(task()) })
+    const w = mountAt('task_1')
+    await flushUntilSettled(w)
+    expect(document.activeElement).toBe(w.element.querySelector('h1'))
+  })
+
+  it('h1 带 data-id=任务 id，返回看板时靠它找回同一张卡', async () => {
+    stubFetch({ '/api/tasks/task_1': detail(task({ id: 'task_1' })) })
+    const w = mountAt('task_1')
+    await flushUntilSettled(w)
+    expect(w.element.querySelector('h1')?.getAttribute('data-id')).toBe('task_1')
+    clearRouteFocusTarget()
+  })
+
+  it('取不到任务（404）时不抢焦点：没有标题可落，页面给空态', async () => {
+    stubFetch({ '/api/tasks/task_1': { status: 404, body: { error: 'task_not_found' } } })
+    const card = document.createElement('button')
+    card.setAttribute('data-id', 'task_1')
+    document.body.append(card)
+    setRouteFocusTarget(card)
+    // 登记了但页面没有 h1 可落——不该抛，也不该把焦点留在已卸载的卡片上。
+    const w = mountAt('task_1')
+    await flushUntilSettled(w)
+    expect(w.element.textContent).toContain('任务不存在或已删除')
+    clearRouteFocusTarget()
   })
 })

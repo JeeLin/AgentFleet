@@ -28,7 +28,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { stripCssComments as stripComments } from '@/test/css-scan'
+import { parseCssRules, propValue, ruleFor, stripCssComments as stripComments } from '@/test/css-scan'
 
 import { describe, expect, it } from 'vitest'
 
@@ -146,11 +146,16 @@ describe('外壳骨架类与原型对齐', () => {
 
   it('布局常量在 tokens.css 里有定义，且值与原型一致', () => {
     // 原型 `tokens.css:38-39`：--rail-w: 224px; --head-h: 56px;
+    /* **「原型可读」只断言一次，放在循环外**（v0.8.1 第5轮，G34）：原来这句
+       `expect(PROTOTYPE_CSS.length).toBeGreaterThan(0)` 写在 for 里，于是它
+       被重复执行两次、也把「原型文件读到了」这件事伪装成「每一项都验过了」。
+       它是一条**前置条件**（读不到原型 → 后面的比对全是空转），
+       该在进入比对之前断一次；放进循环只会让失败信息指向最后一项。 */
+    expect(PROTOTYPE_CSS.length, '原型样式表没读到——下面每一项比对都会是空转').toBeGreaterThan(0)
     for (const [name, protoValue] of [
       ['--af-rail-w', '224px'],
       ['--af-head-h', '56px'],
     ] as const) {
-      expect(PROTOTYPE_CSS.length).toBeGreaterThan(0) // 原型可读
       const decl = new RegExp(`${name}\\s*:\\s*([^;]+);`).exec(stripComments(TOKENS_CSS))
       expect(decl, `tokens.css 缺少 ${name}——原型布局常量没有落地`).not.toBeNull()
       expect((decl as RegExpExecArray)[1].trim()).toBe(protoValue)
@@ -229,7 +234,7 @@ describe('关键规则的取值来源与原型一致', () => {
       impl,
       [
         '.af-btn 没有取标准行高。',
-        'design-system.md:222 规定 row-regular(32px) 用于按钮，row-compact(26px) 用于表格。',
+        'design-system.md:324 规定 row-regular(32px) 用于按钮，row-compact(26px) 用于表格。',
         '上一轮这里写的是 compact 行高，比原型矮 6px。',
       ].join('\n'),
     ).toMatch(/min-height:\s*var\(--p-row\)|min-height:\s*var\(--af-row-regular\)/)
@@ -269,6 +274,57 @@ describe('关键规则的取值来源与原型一致', () => {
     }
   })
 
+  it('看板列宽下限不得低到截断列名（G70）', () => {
+    /* **上一条测试看不到真正的列宽**（v0.8.1 第5轮 G70 发现）：它在
+       `COMPONENTS_CSS` 里找 `grid-template-columns: repeat(6, minmax(...))`，
+       而看板的列宽定义根本不在这里——`.af-board` 用的是
+       `grid-auto-columns: minmax(Npx, 1fr)`，落在 `prototype-shell.css`。
+       于是上一条命中 0 次、循环体一次都没跑，等于恒绿。这正是 G41 那类
+       「守卫看着在守、其实在空转」的洞，别再往上一条加判据了。
+
+       这里的判据是**实测得到的硬约束**：列头 = 形状 12 + gap 8 + 列名 + gap 8
+       + 计数 20 + 两侧 padding 16。列名最长是「排队中 / 执行中 / 待验收 /
+       已完成」三个 17px 全角字，实测 `scrollWidth 51`，所以列头放得下列名
+       需要 ~115px。1024 视口下列宽压到 116.7px 时列名被截成「排队…」
+       （`scrollWidth 51 / clientWidth 44`，实测），**116.7 是断裂点**。
+
+       取 150px 作下限（不是 116.7）：断言要留余量给滚动条宽度、`--p-s*`
+       间距微调、以及将来列头加一个图标这类改动，否则任何一点风吹草动都得
+       重新改这个数字。而 150px 仍远高于断裂点，真被压回去时一定会红。 */
+    const rules = parseCssRules(IMPL_CSS)
+    const board = ruleFor(rules, '.af-board')
+    expect(board, 'prototype-shell.css 里没有 .af-board 规则').toBeDefined()
+
+    const raw = propValue(board!, 'grid-auto-columns')
+    expect(raw, '.af-board 没写 grid-auto-columns——列宽会退回 auto，六列等宽而不可控').toBeDefined()
+
+    const m = /minmax\((\d+)(?:px)?\s*,\s*1fr\)/.exec(raw!)
+    expect(m, `.af-board 的 grid-auto-columns 应形如 minmax(Npx, 1fr)，实际是 \`${raw}\``).not.toBeNull()
+
+    const floor = Number(m![1])
+    expect(
+      floor,
+      `看板列宽下限 ${floor}px 低于列名不截断的实测断裂点(~117px)：`
+        + '列头装不下「排队中」三个 17px 全角字，六列里有四列的名字会被截成「排队…」。'
+        + '列名是看板唯一的导航语言，宁可横向滚动也不许截断。',
+    ).toBeGreaterThanOrEqual(150)
+
+    /* 窄屏必须留一条「抬下限 + 横向滚动」的断点。没有它的话，1100px 以下
+       六列会被继续压缩到截断列名——那正是 G70 的原症状。 */
+    const narrow = rules.filter(
+      (r) => r.selector.trim() === '.af-board' && r.atRules.some((a) => a.includes('max-width')),
+    )
+    expect(narrow.length, '没有窄屏断点重设 .af-board 列宽：1100px 以下六列会被压到截断列名').toBeGreaterThan(0)
+    const narrowFloors = narrow
+      .map((r) => /minmax\((\d+)px/.exec(propValue(r, 'grid-auto-columns') ?? ''))
+      .filter((x): x is RegExpExecArray => x !== null)
+      .map((x) => Number(x[1]))
+    expect(narrowFloors.length, '窄屏断点里的 .af-board 没有 minmax(Npx, ...) 下限').toBeGreaterThan(0)
+    for (const f of narrowFloors) {
+      expect(f, `窄屏断点的列宽下限 ${f}px 没有比桌面下限 ${floor}px 大——那就等于没抬`).toBeGreaterThan(floor)
+    }
+  })
+
   it('总览页那一组原型类必须在实现里有真规则（不止类名出现）', () => {
     /**
      * 这一条的由来（2026-11-17 变异验证实测）：`class-usage.test.ts` 只查
@@ -303,6 +359,144 @@ describe('关键规则的取值来源与原型一致', () => {
     }
     // 反向守卫：`ruleBody()` 对不存在的选择器必须返回空串，否则上面全是恒真。
     expect(ruleBody(clean, '.af-definitely-not-a-rule'), '判据本身要能判「没有」').toBe('')
+  })
+
+  it('页头的副标题不许带 UA 默认 margin（G75：`<p>` 会把页头顶到 70.8px）', () => {
+    /* **这条守的是一个「写了 h1 却忘了 p」的漏项**（v0.8.1 第5轮 4d 验收 F5）。
+
+       实测（playwright，1440×900）：`/agents` 与 `/settings` 的页头是 **70.8px**，
+       而契约 `--af-head-h` 是 56px，左栏那条线跟着错位 14.8px。同一份
+       `.af-head` 规则在 `/devices` 上是 56px，差别只在结构：
+         · `/devices`：`<h1 class="af-head__title">设备</h1>` +
+           `<span class="af-head__sub">…</span>` —— 平铺兄弟（原型写法）；
+         · `/agents`：`<div><h1 class="af-head__title">Agent</h1>` +
+           `<p class="af-head__sub">…</p></div>` —— 包裹列（`PageHead` 文档里
+           记录过的合法写法，副标题是一整句说明时用）。
+
+       病根是 **`<p>` 带 UA 默认的 `margin: 1em`**：正文 12.5px 字号下上下各
+       12.5px，包裹列实测 **69.8px**，而它自己的内容只有
+       「22（标题）+ 4（gap）+ 18.75（副标题）= 44.8px」——多出来的 25px 全是
+       margin。`.af-head__title` 那条规则写了 `margin: 0`，`.af-head__sub`
+       那条**漏了**：同一条规则的两半，一半写了另一半没写。
+
+       清零后实测：三页页头全部 **56px**，包裹列 44.8px（与 `.af-head` 注释里
+       算的 44.75px 一致）。
+
+       判据只钉「`margin` 归零」而不是钉 56px：渲染高度在 CSS 里算不出来
+       （要排版引擎），而这条漏项的可检测形态就是「`.af-head__sub` 没有
+       `margin: 0`」。 */
+    const rules = parseCssRules(IMPL_CSS)
+    const sub = ruleFor(rules, '.af-head__sub')
+    expect(sub, 'prototype-shell.css 里没有 .af-head__sub 规则').toBeDefined()
+
+    const margin = propValue(sub!, 'margin')
+    expect(
+      margin,
+      [
+        '`.af-head__sub` 没有 `margin: 0`。',
+        '它在实现里有 `<span>`（原型写法）与 `<p>`（`PageHead` 的包裹列写法）两副面孔，',
+        '而 `<p>` 带 UA 默认的 `margin: 1em`：12.5px 字号下上下各 12.5px，',
+        '包裹列被撑到 69.8px、页头 70.8px（实测 /agents 与 /settings），',
+        '比 `--af-head-h` 的 56px 高 14.8px，左栏那条线跟着错位。',
+        '`.af-head__title` 那边写了 `margin: 0`，这里是同一条规则的另一半。',
+      ].join('\n'),
+    ).toBe('0')
+
+    /* 包裹列本身也钉一条：它必须是「竖排 + 4px gap」，不能是 `display: block`。
+       换回 block 时标题与副标题的间距会退回 25px（margin 又回来了）。 */
+    const wrap = ruleFor(rules, '.af-head > div')
+    expect(wrap, '没有 `.af-head > div` 规则：`PageHead` 的包裹列写法没有样式').toBeDefined()
+    expect(propValue(wrap!, 'flex-direction'), '包裹列必须竖排（标题在上、副标题在下）').toBe(
+      'column',
+    )
+  })
+
+  it('左栏品牌行的高度必须等于页头高度（G64：每一页的两条水平线要对齐）', () => {
+    /* **这条守的是一条视觉上极显眼、但没有任何门禁看得见的错位**（G64）。
+       左栏品牌行与主区页头是同一水平带上的两条 `border-bottom`：只要两者
+       高度不等，**每一页**上那两条线就差一截，整页看着「不齐」。
+
+       实测过的两种形态（1440×900，playwright）：
+         · 修复前展开态：品牌行 80.84px vs 页头 56px → delta **24.84px**；
+         · 修复前收起态：品牌行 **99px**（`AF` 方块与开关被排成两行）→ delta 43px。
+
+       成因是「`min-height` 只管下限，内容撑高照样超」：
+         · 展开态：`padding: 16px` 上下 + 两行文字继承 `line-height: 23.925px`
+           （两行吃 48px）→ 远超 56；
+         · 收起态：`flex-direction: column` 让 26 + 8 + 40 = 74 加 padding 成 99。
+
+       CSS 里算不出「最终渲染高度」（要排版引擎），所以这里守**三条能一起
+       保证它的结构约束**，缺一条都会让高度失控：
+         ① 品牌行 `min-height` 绑定 `--af-head-h`（与页头同一个槽位，不是又一个 56px）；
+         ② 垂直 padding 不能是 `--p-s4` 那档（16px 上下 = 32px，56 里装不下内容）；
+         ③ 收起态不许把品牌行改成 `column`（那是最容易「为了塞下而换方向」的改法，
+            实测换完 99px）。 */
+    const rules = parseCssRules(IMPL_CSS)
+    const brand = ruleFor(rules, '.af-rail__brand')
+    expect(brand, 'prototype-shell.css 里没有 .af-rail__brand 规则').toBeDefined()
+
+    const minHeight = propValue(brand!, 'min-height')
+    expect(
+      minHeight,
+      `品牌行的 min-height 是 \`${minHeight}\`，应绑定 \`var(--af-head-h)\`。`
+        + '页头用的就是这个变量——品牌行另写一个数字，两边迟早漂开（G64）。',
+    ).toBe('var(--af-head-h)')
+
+    const padding = propValue(brand!, 'padding') ?? ''
+    expect(
+      padding,
+      `品牌行的 padding 是 \`${padding}\`。垂直方向用 \`--p-s4\`(16px、上下共 32px)时，`
+        + '56px 的壳里只剩 24px 给内容，两行文字必然把它顶到 ~81px——'
+        + '实测 80.84 vs 页头 56，delta 24.84（G64）。垂直内边距应收到 `--p-s1` 一档。',
+    ).not.toMatch(/^var\(--p-s4\)\s+var\(--p-s4\)$|^var\(--p-s4\)$/)
+
+    /* 收起态：**不许是 column**。这一条特意写成「找收起态的品牌行规则」而不是
+       匹配全文，因为 `html[data-rail='off']` 前缀只在收起态生效。 */
+    const collapsed = rules.filter(
+      (r) => r.selector.includes(".af-rail__brand") && r.selector.includes('data-rail'),
+    )
+    expect(collapsed.length, '没有收起态（html[data-rail=off]）的品牌行规则').toBeGreaterThan(0)
+    for (const r of collapsed) {
+      const dir = propValue(r, 'flex-direction')
+      expect(
+        dir,
+        `收起态把品牌行改成了 \`flex-direction: ${dir}\`——竖排后 26 + gap + 40 塞不进 56px，`
+          + '实测撑到 99px，比页头高 43px（G64）。'
+          + '56px 里的正确做法是把两块缩小、横向 padding 归零（22 + 4 + 28 = 54 ≤ 56）。',
+      ).not.toBe('column')
+    }
+
+    /* ④ **`.af-rail__titleblock` 的 `line-height` 必须是 1.25**（v0.8.1 第5轮
+       4c F1 / G76）。上面三条守的是「品牌行外壳」，而 G64 真正改掉的**机制**是
+       标题块的行高：`AF` 与 `AgentFleet` 两行若继承正文的 23.925px，两行就吃
+       48px，56px 的壳里塞不下——这正是 80.84px 的来源。
+       4c 变异实测：把 1.25 改回 1.65（G64 核心修复整体回退），**全量 1376 条
+       全绿**。也就是说这条修复此前只活在代码里，没有任何东西挡着它被改回去。 */
+    const titleblock = ruleFor(rules, '.af-rail__titleblock')
+    expect(titleblock, 'prototype-shell.css 里没有 .af-rail__titleblock 规则').toBeDefined()
+    const lh = propValue(titleblock!, 'line-height')
+    expect(
+      lh,
+      `\`.af-rail__titleblock\` 的 line-height 是 \`${lh}\`，必须是 \`1.25\`。`
+        + '这是 G64 的核心修复：标题块里 `AF` 与 `AgentFleet` 两行继承正文的 23.925px '
+        + '就要吃 48px，56px 的品牌行装不下，实测撑到 80.84px（比页头高 24.84px）。',
+    ).toBe('1.25')
+
+    /* ⑤ **`.af-panel__head` 的 `min-height` 必须取自常规档**（v0.8.1 第5轮
+       4c F1 / G76 第二半）。`components.css:406-408` 的注释自己讲了这段历史：
+       原来固定 `--af-row-compact`（26px），17px 标题 + 行高 1.5 约 25.5px，再加
+       padding 就溢出，于是改成常规档。4c 变异实测：把它换回 26px，**全量全绿** ——
+       也就是说这条判断只写在注释里。 */
+    const panelHead = ruleFor(parseCssRules(COMPONENTS_CSS), '.af-panel__head')
+    expect(panelHead, 'components.css 里没有 .af-panel__head 规则').toBeDefined()
+    const panelMinH = propValue(panelHead!, 'min-height')
+    expect(
+      panelMinH,
+      `\`.af-panel__head\` 的 min-height 是 \`${panelMinH}\`，必须取自常规档`
+        + '（`var(--af-row-regular)` 或别名 `var(--p-row)`）。紧凑档 26px 装不下 '
+        + '17px 标题 + 行高 1.5（约 25.5px），再加 padding 就溢出——components.css:406 '
+        + ' 的注释记着这段历史，但此前没有任何守卫。',
+    ).toMatch(/var\(--af-row-regular\)|var\(--p-row\)/)
   })
 
   it('动效时长取标准档而非「瞬时」档', () => {
@@ -542,9 +736,25 @@ const ROUTED_PAGES = [
  *   10 页一起退回——2026-11-17 实测它当时确实是 `section.af-page` +
  *   `.af-page__head` / `__title`，即 10 个占位页全是裸 `<h1>`，而它们
  *   「不在对齐范围」，所以没有任何门禁看得见。
- * - `NewSessionPage.vue`：当前没有路由（新形态下会话必须先有项目，
- *   `/sessions/new` 在 `LEGACY_PATHS` 里落到总览），但它是
- *   `docs/design-system.md:1706` 登记的新建会话落点，实现是完整的。
+ * - `NewSessionPage.vue`：**当前没有路由、也没有任何调用点**（新形态下会话必须
+ *   先有项目，`/sessions/new` 在 `router.ts:190` 的 `LEGACY_PATHS` 里落到总览；
+ *   设备页的「用它开会话」走 `DevicesPage.createSession`，它自己也不发请求），
+ *   唯一加载它的只有它自己那份 `NewSessionPage.test.ts`。
+ *   留着它是因为 `docs/design-system.md:1806`（§9 实现索引的「新建会话」一行）
+ *   仍把 `domains/session/NewSessionPage.vue` 登记为新建会话的落点——这是规范
+ *   层面登记的落点，不是本里程碑可达的入口。也就是说：**它暂时只是一份按规范
+ *   保留的落点**，「实现是完整的」这句话不成立（一份没有调用点的组件，
+ *   完整性无从验证）。等真的接上路由或调用点时，把它移进 `ROUTED_PAGES`
+ *   （或在 `OUT_OF_SCOPE_PAGES` 里写清为什么它不守骨架判据）。
+ *
+ *   > 上一版这里写的是「`docs/design-system.md:1706` 登记的新建会话落点，
+ *   > 实现是完整的」。两处都过期了：`:1706` 本身是**空行**（它夹在 §8.2 的
+ *   > 两段正文之间，所以那句引述连指向哪段都说不清），真正的映射行在
+ *   > **`:1806`**；而「实现是完整的」在零调用点的前提下是一句无法核实的断言。
+ *   >
+ *   > 这两个行号都**会随文档增删平移**（本轮删了 5 个组件节，整张 §9 索引表
+ *   > 下移了 6 行，`:1800` 就从「新建会话」变成了「§3 组件样式」）。所以别把
+ *   > 它们当稳定标识：回读时以「行内容是否说得通」为准，行号只是找它的起点。
  *
  * 这两条与 `ROUTED_PAGES` 分开列：`ROUTED_PAGES` 要参与「与 App.vue 对齐」
  * 的集合比较，而这两个组件本来就不在路由表里，混进去会让那条比较恒红。
@@ -628,13 +838,13 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
      * 页头**有意**不复刻原型单行 `.af-head` 的页面：理由必须具体到「为什么这里
      * 单行装不下」，不能写成「先这样」。
      *
-     * `SessionPage`：原型的 `header.af-head`（`session.html:14`）是一行
+     * `SessionPage`：原型的 `header.af-head`（`session.html:15`）是一行
      * 「← 项目 / 会话 / 进行中 / 执行监控 / 任务 #1042」。会话页在 v0.5.0 起是
      * **三层 chrome**（tab 条 → 标题行 → 状态行），每一层的语义不同：tab 条答
      * 「我在哪几个会话里」，标题行答「这个是哪个」，状态行答「绑在哪台设备、
      * 哪个目录、哪个 agent」。挤成一行时窄屏下路径会把设备名挤没，而两者说的
      * 不是同一件事（`SessionPage.test.ts` 三条用例钉着这个分层）。所以它用
-     * 自己的 `.af-wb__head`（`components.css:703`，有独立的 padding / 背景 /
+     * 自己的 `.af-wb__head`（`components.css:758`，有独立的 padding / 背景 /
      * 发丝线），不套 `.af-head`——这不是漏做，是**不做**。
      */
     const HEAD_DESIGN_OVERRIDE: Record<string, string> = {
@@ -652,7 +862,7 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
      * 还是被删掉的 `af-page`——`ProjectTaskPage.vue`（`af-page af-taskd`）
      * 挂着 TODO 却一直绿，正是这么漏的。这个判据等于永远为真，必须改。
      *
-     * **也不能只看根节点**：`App.vue:707` 已经渲染了 `<main class="af-main">`
+     * **也不能只看根节点**：`App.vue:884` 已经渲染了 `<main class="af-main">`
      * （外壳的唯一根，带 `tabindex="-1"` 供 `focusMain()` 用），页面再包一层
      * `main.af-main` 就是嵌套 `<main>`——非法 HTML，且 `querySelector` 会先命中
      * 外层那个空的。所以页面根节点**不该**是 `af-main`，而是它里面的内容。
@@ -843,7 +1053,7 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
      *     '<div :style="x">'     → 旧 1 / 新 0   ← 旧判据的假阳性
      *     '<div v-bind:style="x">' → 旧 1 / 新 0
      *
-     * `SessionPage.vue:2723` 的唯一一处正是 `:style="activeWs?.dock ? …"`
+     * `SessionPage.vue:2724` 的唯一一处正是 `:style="activeWs?.dock ? …"`
      * ——那是**动态绑定**（宽度随分栏拖拽变，值在运行期才算得出来），
      * 它不能被"清掉"，所以旧判据下那一行是**永远清不掉的死账**。
      * 判据改为 `/(?<!:)style="/g`：只认静态 `style="`。

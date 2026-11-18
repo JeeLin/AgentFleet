@@ -158,7 +158,17 @@ function isTabMeta(v: unknown): v is TabMeta {
     typeof t.id === 'string' &&
     typeof t.title === 'string' &&
     typeof t.path === 'string' &&
-    typeof t.nodeId === 'string'
+    /* **`nodeId` 允许 `null`**（v0.8.1 第5轮 4b 实测）。它是 `string | null`，
+       见 `TabMeta` 那条字段注释：「`null` = 这台设备已被删除」。原先这里写的是
+       `typeof t.nodeId === 'string'`，于是**设备已被删除的那个 tab 存进去、
+       读回来时被这里判成「形状不对」丢掉**——`loadTabs` 用 `.filter()` 把它
+       静默剔除，用户刷新一次页面，那个 tab 就凭空消失了，而它承载的
+       `baseRev` / `baseRevStatus`（注释明写「随 tab 持久化」）也一起没了。
+       `SessionPage.test.ts:3661` 那条用例的注释其实早就把这层自白了
+       （「`isTabMeta` 要求 `nodeId` 是字符串，而设备已删的会话 `nodeId` 是
+       `null`，那份 seed 会被丢弃」），但它选择走 `metaOf` 绕开，于是这个洞
+       一直没人补。判据改成「字符串或 `null`」，与类型定义逐字对齐。 */
+    (typeof t.nodeId === 'string' || t.nodeId === null)
   )
 }
 
@@ -192,7 +202,9 @@ export function normalizeTabMeta(v: unknown): TabMeta | null {
     id: t.id as string,
     title: t.title as string,
     path: t.path as string,
-    nodeId: t.nodeId as string,
+    /* `isTabMeta` 已保证它是 `string | null`，这里如实透传——写 `as string`
+       会把 `null`（设备已被删除）硬断言成字符串，类型上从此看不见那一态。 */
+    nodeId: t.nodeId as string | null,
     baseRev: typeof t.baseRev === 'string' ? t.baseRev : null,
     baseRevStatus,
   }

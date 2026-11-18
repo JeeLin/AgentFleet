@@ -4,7 +4,9 @@
    ---------------------------------------------------------------------------
    布局：左栏 + 主区（`prototype/index.html:12` 的 `.af-shell`）。原型**没有全局
    顶栏**，也没有全局状态条——页头 `.af-head` 属于页面自己。左栏分四组：
-   全站 / 项目 / 收件箱 / 管理面（与 `prototype/assets/shell.js:19-49` 的 `NAV` 同构）。
+   全站 / 项目 / 收件箱 / 管理面——那是**简化自**原型 `shell.js:17-46` 的 5 组
+   `NAV`（合并了「通知」、去掉了「项目」常量组），逐组差异见 `NAV_GROUPS`
+   上方那张对照表。
 
    ── 这个文件负责的三件事 ─────────────────────────────────────────
    ① 左栏的 chrome；② 键位帮助面板（`?` 由 `KEYS` 渲染，不手写）；
@@ -37,7 +39,7 @@ import type { NavIconKey } from '@/shared/navIcons'
 import { listProjects, type Project } from '@/domains/project/api'
 import { listDevices } from '@/domains/device/api'
 import { listAgents } from '@/domains/agent/api'
-import { pop, push, topContainer, trapTab } from '@/shared/focus'
+import { focusRouteTarget, pop, push, topContainer, trapTab } from '@/shared/focus'
 import { SCOPE_LABEL, KEYS, hintOf, missingActs, onHandlersChanged } from '@/shared/keynav'
 import { logout } from '@/shared/auth'
 import { setNotInitializedHandler } from '@/shared/http'
@@ -169,14 +171,23 @@ const isAuthPage = computed(() => AUTH_ROUTES.has(route.value.name))
 /* ------------------------------------------------------------------ 左栏 */
 
 /**
- * 一级导航。**分组与原型 `prototype/assets/shell.js:19-49` 的 `NAV` 同构**：
- * 全站 / 项目 / 收件箱 / 管理面（+ 项目列表）。
+ * 一级导航。**简化自原型 `prototype/assets/shell.js:17-46` 的 `NAV`**——原型是
+ * 5 组（`shell.js:17` 全站 / `:23` 项目 / `:26` 收件箱 / `:30` 管理面 /
+ * `:42` 通知），这里是 **3 组静态分组**：
+ *
+ * | 原型组 | 实现 | 差异 |
+ * |---|---|---|
+ * | 全站 | `全站` | 照搬（总览 / 已归档） |
+ * | 项目 | `项目` | **不是常量组**：条目由 `railProjects` 渲染（见 `railTemplate` 下方的 `ul.af-rail__list--projects`），组标题只为挂那颗「+」而存在 |
+ * | 收件箱 | `收件箱` | 照搬（待决策 / 动态） |
+ * | 管理面 | `管理面` | 原型 6 项去掉 **技能与 MCP / 定时任务 / 外部来源** 三项——它们是项目内路由（见下表），另有入口 |
+ * | 通知 | — | **合并进「管理面」与「收件箱」**：通知出口落在 `/settings/notifications`（管理面「设置」这一项的 `match` 里），IM 里的管家落在 `/butler` |
  *
  * 标签与键位提示都从 `keynav.ts` / `page-titles.ts` 读：手抄一份的话，改了
  * 键位表而忘了改这里，侧栏就会显示一个按了没反应的键（症状与「改了 `PREFIX`
  * 而侧栏没跟着变」完全一样）。
  *
- * # 为什么分组是这四组
+ * # 为什么分组是这三组
  *
  * 原型把「你在哪」与「你去哪」分成两层：组标题是层级语言，列表项是入口。
  * - **全站**：总览是「做事」的入口；已归档是「找得回来」的那个门。
@@ -188,67 +199,90 @@ const isAuthPage = computed(() => AUTH_ROUTES.has(route.value.name))
  *
  * # 项目内页面不进左栏
  *
- * 看板 / 任务 / 执行 / 绑定 / 项目设置**不是「地方」，是「在某个项目里」**。
+ * `router.ts:129-140` 共 **7 条**项目内路由，全部**不是「地方」而是「在某个
+ * 项目里」**：看板 / 任务 / 执行 / 复盘 / 时间线 / 会话 / 项目设置。
  * 它们从某个项目的条目点进去（条目高亮由 `isCurrentProject` 判断）。
- * `新建项目` 是**动作**，挂在「项目」组标题右侧的 `.af-rail__add` 上。
+ * 另外三条与项目内有亲缘、但走的是别的入口：`新建项目` 是**动作**（挂在
+ * 「项目」组标题右侧的 `.af-rail__add` 上，不是列表项）、`绑定设备` 与
+ * `定时任务` 由项目页头 / 项目设置里的项目内导航进入。
+ *
+ * **图标挂在这里的 `icon` 字段上**（`NavIconKey`）：它曾经是一张按键名映射的
+ * 独立表 `NAV_ICON`，7 条全是 `键: 键` 的恒等映射，且模板用
+ * `NAV_ICON[item.match[0]] ?? 'overview'` 兜底——表漏一项就静默画成「总览」
+ * 的图标。挂在 items 上之后类型系统就是守卫：漏写 `icon` 是编译错误。
  */
 const NAV_GROUPS = [
   {
     title: '全站',
     items: [
-      { to: '/', label: pageTitle('overview'), act: 'nav:overview', match: ['overview'] },
+      { to: '/', label: pageTitle('overview'), act: 'nav:overview', match: ['overview'], icon: 'overview' },
       {
         to: '/projects/archived',
         label: pageTitle('projects-archived'),
         act: '',
         match: ['projects-archived'],
+        icon: 'archived',
       },
     ],
   },
   {
     title: '收件箱',
     items: [
-      { to: '/inbox', label: pageTitle('inbox'), act: '', match: ['inbox'] },
-      { to: '/inbox/activity', label: pageTitle('inbox-activity'), act: '', match: ['inbox-activity'] },
+      { to: '/inbox', label: pageTitle('inbox'), act: '', match: ['inbox'], icon: 'inbox' },
+      {
+        to: '/inbox/activity',
+        label: pageTitle('inbox-activity'),
+        act: '',
+        match: ['inbox-activity'],
+        icon: 'activity',
+      },
     ],
   },
   {
     title: '管理面',
     items: [
-      { to: '/devices', label: pageTitle('devices'), act: 'nav:devices', match: ['devices', 'device-detail'] },
-      { to: '/agents', label: pageTitle('agents'), act: 'nav:agents', match: ['agents', 'agent-detail'] },
+      {
+        to: '/devices',
+        label: pageTitle('devices'),
+        act: 'nav:devices',
+        match: ['devices', 'device-detail'],
+        icon: 'devices',
+      },
+      { to: '/agents', label: pageTitle('agents'), act: 'nav:agents', match: ['agents', 'agent-detail'], icon: 'agents' },
       {
         to: '/settings',
         label: pageTitle('settings'),
         act: 'nav:settings',
         match: ['settings', 'settings-skills', 'settings-integrations', 'settings-notifications'],
+        icon: 'settings',
       },
     ],
   },
-] as const
+] as const satisfies readonly NavGroup[]
 
 /** 左栏的全部分组标题（含「项目」）。断言「4 组」时用的是这一份。 */
 const RAIL_GROUPS = ['全站', '项目', '收件箱', '管理面'] as const
 
 /**
- * 导航项 → 图标键。以 `match[0]` 为键（每个导航项的第一个 match 值唯一）。
- *
- * **为什么是单独一张表而不是塞进 `NAV_GROUPS`**：`NAV_GROUPS` 是原型
- * `shell.js` 的 `NAV` 同构，加字段会让它对不齐原型；图标是本里程碑新增的
- * 表现层概念（原型没有图标条），放在一起会让人以为原型也有。
+ * 一个导航项。`icon` 是**必填**的：模板只读它，不再有「查不到就用总览」的
+ * 静默兜底（那会把「漏配一个图标」变成「设备页显示总览图标」这种没人报的
+ * 缺陷）。
  */
-const NAV_ICON: Record<string, NavIconKey> = {
-  overview: 'overview',
-  'projects-archived': 'archived',
-  inbox: 'inbox',
-  'inbox-activity': 'activity',
-  devices: 'devices',
-  agents: 'agents',
-  settings: 'settings',
+interface NavItem {
+  readonly to: string
+  readonly label: string
+  readonly act: string
+  readonly match: readonly string[]
+  readonly icon: NavIconKey
+}
+
+interface NavGroup {
+  readonly title: string
+  readonly items: readonly NavItem[]
 }
 
 /** 一个分组里的导航项。分组名不在这张表里时返回空数组（模板不自己判）。 */
-function navItemsOf(title: string): readonly { to: string; label: string; act: string; match: readonly string[] }[] {
+function navItemsOf(title: string): readonly NavItem[] {
   return NAV_GROUPS.find((g) => g.title === title)?.items ?? []
 }
 
@@ -652,8 +686,10 @@ onMounted(() => {
   // 顺序反了会让这次 `replaceState` 发生在监听装好之前（本身无害，但
   // 「先装监听再改状态」是更不容易出错的那个顺序）。
   redirectLegacy()
-  // 首屏：换页的 watch 不会为初始值触发，所以这里显式落一次
-  void nextTick(() => document.querySelector<HTMLElement>('main[tabindex="-1"]')?.focus())
+  // 首屏：换页的 watch 不会为初始值触发，所以这里显式落一次。
+  // 与 watch 走同一个判据（`focusRouteTarget()`），不再单独手写「找 main」——
+  // 两处各写一份时，改了一处另一处会静默保持旧行为（G65 的成因正是这种重复）。
+  void nextTick(() => focusRouteTarget())
 })
 
 onBeforeUnmount(() => {
@@ -665,11 +701,19 @@ onBeforeUnmount(() => {
 })
 
 /**
- * 换页后把焦点给 `main`（§4.3）。
+ * 换页后的焦点落点（§4.3）。
  *
- * `navigate()` 里已经调用过一次 `focusMain()`，这里再跟一次是为了覆盖
+ * `navigate()` 里已经调用过一次 `focusRouteTarget()`，这里再跟一次是为了覆盖
  * `popstate` 与「同一路径不同参数」的情形：两种情况都不经过 `navigate` 的
  * 那次调用，而焦点必须落在新内容上。
+ *
+ * **落点不再无条件写死 `main`**（v0.8.1 第5轮 G65）：这里原先是手抄了一份
+ * `focusMain` 的焦点块，于是「从看板卡片进入任务详情」也会被抢到 `<main>`，
+ * 键盘用户的上下文当场丢掉（首 Tab 落在「← 看板」而不是任务标题，浏览器
+ * 返回也不回卡片）。现在统一走 `focus.ts` 的 `focusRouteTarget()`：
+ * 有明确来源元素时**让出**（由详情页落标题、由看板落回来源卡片），
+ * 其余情形仍落 `main`——与 `router.test.ts` / `App.test.ts` 钉住的旧语义一致。
+ * 落点判据只有一处实现（`focus.ts`），不再在 App 里抄第二份。
  */
 watch(
   () => route.value.path,
@@ -677,13 +721,7 @@ watch(
     // 点了一个已删除旧地址的链接（`interceptLink` 走 `navigate`，不整页刷新）：
     // 换成去处。`replace` 的理由见 `redirectLegacy` 上方。
     redirectLegacy()
-    void nextTick(() => {
-      const main = document.querySelector<HTMLElement>('main.af-main[tabindex="-1"]')
-      if (!main) return
-      const h1 = main.querySelector('h1')
-      if (h1 && !h1.hasAttribute('tabindex')) h1.setAttribute('tabindex', '-1')
-      main.focus()
-    })
+    void nextTick(() => focusRouteTarget())
   },
 )
 
@@ -744,7 +782,9 @@ watch(
         </button>
       </div>
 
-      <!-- 分组：全站 / 项目 / 收件箱 / 管理面（与原型 `shell.js:19-49` 的 `NAV` 同构）。
+      <!-- 分组：全站 / 项目 / 收件箱 / 管理面（**简化自**原型
+           `shell.js:17-46` 的 5 组 NAV，合并了「通知」、去掉了「项目」常量组——
+           见 `NAV_GROUPS` 上方那张对照表）。
            `RAIL_GROUPS` 决定顺序，不是模板顺序——「项目」组在中间：项目是主轴，
            而它的数据是异步拿到的。 -->
       <template v-for="group in RAIL_GROUPS" :key="group">
@@ -786,7 +826,7 @@ watch(
                    `title`（tooltip）。展开态图标在文字左边，两种状态用同一个
                    节点——不按状态渲染两份 DOM，否则 `aria-label` 与可见文字
                    会在两种状态间打架。 -->
-              <NavIcon :name="NAV_ICON[item.match[0]] ?? 'overview'" />
+              <NavIcon :name="item.icon" />
               <span class="af-rail__label">{{ item.label }}</span>
             </a>
           </li>

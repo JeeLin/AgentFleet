@@ -2567,7 +2567,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <!-- 页面骨架照原型 `session.html:14-37`：页头是 `header.af-head`（`.af-head__title`
+  <!-- 页面骨架照原型 `session.html:15-39`：页头是 `header.af-head`（`.af-head__title`
        + 状态胶囊），`.af-filters` 说明「这个会话绑在哪」，内容在
        `.af-body.af-body--fill` 里（工作台吃满剩余高度、内部各自滚动）。
        上一版根容器是自造的 `.af-page--flush`，那一族规则在 v0.8.1 子任务 2 已随

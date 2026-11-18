@@ -10,7 +10,7 @@
    =========================================================================== */
 import { describe, expect, it } from 'vitest'
 
-import { stripCssComments } from '@/test/css-scan'
+import { customPropsIn, stripCssComments } from '@/test/css-scan'
 
 import { readRepoFile } from '@/test/css'
 
@@ -55,22 +55,32 @@ function implName(proto: string): string {
  *
  * `--p-fg-3` 为什么离开原型：原型的 `--fg-3` 在四套主题里全部低于 WCAG AA
  * 4.5:1（实测 3.40 / 2.67 / 2.70 / 3.69），而它被当作**真实文字色**在用
- * （`.af-head__sub`、`th`、`.af-field__hint`、`.af-rail__status`、
- * `.af-settings__p`…）。原型那边还留着「装饰 仅用于非文字元素与占位」的
- * 旧注释，与实际用途不符。所以实现在四套主题里都换成达标值，色相不动、
- * 只调亮度。**这条不是「值恰好变了」，是「辅助文字必须读得清」。**
+ * （`.af-head__sub`、`th`、`.af-field__hint`…）。原型那边还留着「装饰 仅用于
+ * 非文字元素与占位」的旧注释，与实际用途不符。所以实现在四套主题里都换成
+ * 达标值，色相不动、只调亮度。**这条不是「值恰好变了」，是「辅助文字必须读得清」。**
+ *
+ * （v0.8.1 第5轮，G48：这条例由原本把 `.af-rail__status` 也列成 `--p-fg-3`
+ * 的消费者之一，而全仓 `.af-rail__status` 命中 0——它是个**死类名**，写在
+ * 理由里等于让下一个人以为那里有一条要照顾的文字。名单只留真实消费者。）
  */
 const INTENTIONAL_DEVIATIONS: Record<string, { value: string; why: string }> = {
   '--p-fg-3': {
     value: 'per-theme',
     why: '原型的 --fg-3 四套全部低于 WCAG AA 4.5:1，而它被当文字色用（页头副标题 / 表头 / 字段提示）。',
   },
+  '--p-fg-2': {
+    value: 'per-theme',
+    why: 'v0.8.1 第5轮 G71/G73：--p-fg-3 为达 AA 而提亮后，warm/neutral 的 fg-2 与它只剩 1.16x/1.20x，'
+      + '两级视觉上塌成一级；paper/cream 则是 fg-2 与 fg-3 本就只差 1.09x/1.12x。'
+      + '故四套的 --p-fg-2 一并调整，使「次要 vs 三级」级差 ≥ 1.25x。'
+      + '（--p-fg-2 是次要文字，本身在调之前就达标，改它纯粹是为了保住梯子。）',
+  },
 }
 
 /** 四套主题 `--p-fg-3` 的达标值（期望值写死在这里，不从实现里再算一遍）。 */
 const FG3_TARGETS = {
-  neutral: '#828991',
-  warm: '#8c887d',
+  neutral: '#969da5',
+  warm: '#9d998e',
   paper: '#616972',
   cream: '#6c6758',
 } as const
@@ -161,19 +171,70 @@ describe('四套主题逐值对照原型', () => {
       const ratio = contrastRatio(expected, bg)
       const ratioFg2 = contrastRatio(fg2, bg)
       if (ratio < 4.5) failures.push(`theme-${theme} 的 --p-fg-3 对页面底只有 ${ratio.toFixed(2)}:1（< 4.5）`)
-      // 三级层次不能塌：--p-fg-3 必须仍明显弱于 --p-fg-2。
-      if (!(ratioFg2 > ratio)) {
-        failures.push(`theme-${theme} 的 --p-fg-3（${ratio.toFixed(2)}:1）不弱于 --p-fg-2（${ratioFg2.toFixed(2)}:1）`)
+      /* **页面底不是唯一的落点**（v0.8.1 第5轮 G71）：这一条原先只量 `--p-bg`，
+         于是 warm / neutral 判绿，而 fg-3 在更亮的 surf-1 / surf-2 / surf-3 上
+         只有 4.44 / 4.06 / 3.68 与 4.37 / 3.98 / 3.56——全部不达 AA。三级文字
+         用在看板列（surf-1）、卡片（surf-2）、卡片悬停（surf-3）上，那些层才是
+         它真实的背景。只量页面底，等于把最难的那三层藏起来。
+         `contrast.test.ts` 有同一判据的完整版（含 G72/G73），这里保留一份
+         紧挨着取值守卫，让「改了这个十六进制」与「它是否达标」在同一个文件里。 */
+      for (const surf of ['--p-surf-1', '--p-surf-2', '--p-surf-3'] as const) {
+        const surface = impl.get(surf)
+        if (!surface?.startsWith('#')) continue
+        const r = contrastRatio(expected, norm(surface))
+        if (r < 4.5) failures.push(`theme-${theme} 的 --p-fg-3 对 ${surf} 只有 ${r.toFixed(2)}:1（< 4.5）`)
+      }
+      /* 三级层次不能塌，而且要**分得出来**（v0.8.1 第5轮 G73）：原先只要求
+         `ratioFg2 > ratio`，于是 paper 的 1.09x、cream 的 1.12x 都能过——两级
+         在视觉上已经是同一级，文档却还写着「三级文字梯子」。1.25x 取四套修好
+         后的实测最低值（paper 1.25x / cream 1.27x / warm 1.30x / neutral 1.31x）。 */
+      const MIN_RAMP = 1.25
+      if (ratioFg2 / ratio < MIN_RAMP) {
+        failures.push(
+          `theme-${theme} 的 --p-fg-3（${ratio.toFixed(2)}:1）与 --p-fg-2（${ratioFg2.toFixed(2)}:1）`
+            + `只差 ${(ratioFg2 / ratio).toFixed(2)}x（< ${MIN_RAMP}x），两级塌成一级`,
+        )
       }
     }
     expect(failures, `--p-fg-3 未达标注解：\n${failures.join('\n')}`).toEqual([])
   })
 
+  /* `--p-fg-2` 也进了「有意偏离表」（G73 为保住梯子而调整），于是它跳过了逐值
+     比对。跳过比对就必须有别的守卫接住，否则这个变量从此无人看管——那正是
+     「有意偏离」这个机制最容易被误用的地方：它本意是带着理由偏离，不是把变量
+     移出守卫。这条钉住四套的确切值，改了就红。 */
+  it('--p-fg-2 四套的确切值（G73 有意偏离原型，值写死在这里）', () => {
+    const FG2_TARGETS = {
+      neutral: '#adb4bd',
+      warm: '#b4afa4',
+      paper: '#535a64',
+      cream: '#5d574c',
+    } as const
+    const failures: string[] = []
+    for (const theme of THEMES) {
+      const impl = vars(readRepoFile(`packages/web/src/styles/theme-${theme}.css`))
+      const actual = norm(impl.get('--p-fg-2')!)
+      if (actual !== FG2_TARGETS[theme]) {
+        failures.push(`theme-${theme} 的 --p-fg-2 是 ${actual}，定下的是 ${FG2_TARGETS[theme]}`)
+      }
+    }
+    expect(failures, `--p-fg-2 值不符：\n${failures.join('\n')}`).toEqual([])
+  })
+
   it('四份实现的变量名集合完全一致（可切换的前提）', () => {
-    const sets = THEMES.map((t) => [...vars(readRepoFile(`packages/web/src/styles/theme-${t}.css`)).keys()].sort())
+    /* **用 `customPropsIn` 而不是 `vars()`**（v0.8.1 第5轮，G62）：`vars()` 是
+       「整份文本跑 `(--x)\s*:` 正则」，于是**注释里**写的 `--af-x: #abc`（解释
+       某条取值为什么这样写时的自然写法）会被当成一次真实定义，`var(--x)` 里的
+       引用也会被算进名字集合。判「这一份定义了哪些变量」必须看**规则体的左侧**，
+       否则一份主题只要在注释里提过某个名字，集合比对就替它遮住了真正漏掉的定义。
+       `vars()` 那条「取某个变量的值」的用例维持原样——它要的是值，不是名字集合。 */
+    const sets = THEMES.map((t) => [...customPropsIn(readRepoFile(`packages/web/src/styles/theme-${t}.css`))].sort())
     for (let i = 1; i < sets.length; i++) {
       expect(sets[i], `${THEMES[i]} 与 ${THEMES[0]} 的变量名集合不同`).toEqual(sets[0])
     }
+    /* 反向：集合不能空。空的集合之间当然「完全一致」——那正是这条守卫最可能的
+       假绿形态（解析器坏了、或正则改成只认 `--p-x:` 的拼写）。 */
+    expect(sets[0].length, '四份主题一个自定义属性都没解析出来').toBeGreaterThan(10)
   })
 
   it('默认主题 neutral 的页面底就是原型那个值，不是上一轮自造的那个', () => {

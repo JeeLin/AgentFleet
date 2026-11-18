@@ -202,11 +202,11 @@ function goBoard(): void {
 </script>
 
 <template>
-  <!-- 页面骨架照原型 `project-new.html:14-21`：页头是 `header.af-head`
-       （返回总览 + 标题 + 副标题 + 右侧「下一步」），内容在 `.af-body` 里。
+  <!-- 页面骨架照原型 `project-new.html:15-23`：页头是 `header.af-head`（`:15-21`）
+       （返回总览 + 标题 + 副标题 + 右侧「下一步」），内容在 `.af-body`（`:23`）里。
        上一版是自造的 `.af-page` / `.af-page__head` / `.af-page__title` ——
        那一族规则在 v0.8.1 子任务 2 已随类名删除，于是这一页没有页头几何。
-       页头改用共享的 `PageHead`（其余 4 页同一写法）。 -->
+       页头改用共享的 `PageHead`（所有已对齐页面的同一写法）。 -->
   <PageHead>
     <button type="button" class="af-btn af-btn--ghost" @click="navigate('/')">
       ← 总览

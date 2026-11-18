@@ -1,40 +1,29 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import App from '@/App.vue'
 import { KEYS, actCount } from '@/shared/keynav'
 import { depth, isTabbable } from '@/shared/focus'
-import { matchRoute, route } from '@/router'
 import { device, mountIn, session } from '@/test/mount'
-import { settle, stubFetch } from '@/test/http'
+import { stubFetch } from '@/test/http'
 import { cssRuleOf, readRepoFile } from '@/test/css'
 import { stripCssComments } from '@/test/css-scan'
-
-async function flush(w: ReturnType<typeof mountIn>): Promise<void> {
-  for (let i = 0; i < 8; i++) {
-    await w.vm.$nextTick()
-    await settle(1)
-  }
-}
-
-/** 挂外壳。路由是模块级状态，所以每条用例先把它摆到该在的页面。 */
-function mountApp(path: string) {
-  window.history.replaceState(null, '', path)
-  route.value = matchRoute(path)
-  return mountIn(App)
-}
-
-const EMPTY_API = {
-  '/api/sessions': { body: [] },
-  '/api/devices': { body: [] },
-  '/api/agents': { body: [] },
-}
+import {
+  EMPTY_SHELL_API as EMPTY_API,
+  clickRailToggle,
+  flushShell as flush,
+  goTo,
+  mountShell as mountApp,
+  railOf,
+} from '@/test/app-shell'
 
 describe('App：外壳骨架', () => {
-  // 一级导航按**原型** `shell.js:19-49` 的 `NAV` 分四组：全站 / 项目 / 收件箱 / 管理面。
+  // 一级导航**简化自**原型 `shell.js:17-46` 的 5 组 NAV，实现是四组：全站 / 项目 /
+  // 收件箱 / 管理面（原型多一组「通知」、且「项目」组是常量）。逐组差异见
+  // `App.vue` 的 `NAV_GROUPS` 上方那张对照表。
   // 「项目」组里每项是一个项目（数据来自 `listProjects()`，与总览页同一个端点）。
-  // 项目内页面（看板 / 任务 / 绑定 / 设置）**不进左栏**——它们从某个项目点进去。
+  // 七个项目内页面（看板 / 任务 / 执行 / 复盘 / 时间线 / 会话 / 项目设置，
+  // `router.ts:129-140`）**不进左栏**——它们从某个项目点进去。
   // `新建项目` 是**动作**而不是地方，挂在「项目」组标题右侧的 `.af-rail__add` 上。
-  it('左栏是原型的四组（全站 / 项目 / 收件箱 / 管理面），组内项数对得上', async () => {
+  it('左栏是四组（全站 / 项目 / 收件箱 / 管理面），组内项数对得上', async () => {
     stubFetch({ ...EMPTY_API, '/api/projects': { body: [{ id: 'p_1', name: '示例项目' }] } })
     const w = mountApp('/')
     await flush(w)
@@ -85,6 +74,43 @@ describe('App：外壳骨架', () => {
       el.textContent?.trim(),
     )
     expect(current).toEqual(['设备'])
+  })
+
+  /*
+    七个项目内页面**不进左栏**，而这不是「少画几个链接」——它是导航的语义边界：
+    左栏是「你可以在哪些地方之间跳」，项目内页面只能从某个项目进去（否则
+    「看板」这一项会让用户以为它属于某个跟他无关的项目）。
+
+    `router.ts:129-140` 的项目内路由共 7 条，`App.vue` 的 `NAV_GROUPS` 注释里
+    逐个列了名字。这条用例把「注释里那份清单」与「左栏实际渲染」对上：
+    每条项目内路由的 `match[0]` 都不许出现在左栏任何链接的 `aria-current`
+    判定里（也就是不许有任何一项把项目内路由算成「当前页」）。
+
+    判红方式：往 `NAV_GROUPS` 的任一 `match` 里塞一个项目内路由名
+    （例如给「全站」加 `board`）→ 挂到 `/project/x/board` 时左栏会有一项亮起，
+    本用例红在「项目内路由不许在左栏高亮」。
+  */
+  it('项目内页面不进左栏：挂在看板页时左栏没有任何一项是当前页', async () => {
+    stubFetch({
+      ...EMPTY_API,
+      '/api/projects': { body: [{ id: 'p_1', name: '示例项目' }] },
+      '/api/projects/p_1': { body: { id: 'p_1', name: '示例项目', shape: 'central' } },
+      '/api/projects/p_1/tasks': { body: { tasks: [] } },
+    })
+    const w = mountApp('/project/p_1/board')
+    await flush(w)
+
+    const rail = w.element.querySelector<HTMLElement>('aside.af-rail')
+    expect(rail, '左栏必须存在').not.toBeNull()
+    // 「项目」组里那个项目的链接按 `isCurrentProject` 标 `aria-current`（那是对的：
+    // 左栏该一直指着你在的项目）。所以判据限定在**静态分组的列表**里。
+    const staticItems = Array.from(rail!.querySelectorAll('.af-rail__list:not(.af-rail__list--projects) a'))
+    expect(staticItems.length, '静态分组里应当有 7 个链接').toBe(7)
+    const litOnes = staticItems.filter((a) => a.getAttribute('aria-current') === 'page')
+    expect(
+      litOnes.map((a) => a.textContent?.trim()),
+      '看板是项目内页面，静态分组里不该有一项亮起',
+    ).toEqual([])
   })
 
   it('导航项是真 <a href>：中键 / ⌘ 点击能走浏览器自己的路径', async () => {
@@ -714,10 +740,7 @@ describe('App：左栏几何与收起态', () => {
     expect(body).not.toContain('44px 208px')
     // 自造的那套网格已经没了：外壳的几何**只能**有一条定义。
     // 剥注释再查——两边的注释里都写着 `.af-app`（解释它被删掉的理由）。
-    const components = readRepoFile('packages/web/src/styles/components.css').replace(
-      /\/\*[\s\S]*?\*\//g,
-      '',
-    )
+    const components = stripCssComments(readRepoFile('packages/web/src/styles/components.css'))
     expect(components).not.toContain('.af-app')
   })
 
@@ -781,6 +804,43 @@ describe('App：左栏几何与收起态', () => {
       // 图标纯装饰：名字由链接的 aria-label 提供，SVG 不能再被读一遍。
       expect(svg?.getAttribute('aria-hidden')).toBe('true')
     }
+
+    /*
+      每一张图标都必须是**自己那一张**，不是一堆「总览」。
+
+      上一版这里只断言「有一个 `<svg>`」——于是所有导航项都画成总览的图标
+      （`NAV_ICON` 漏一项时的静默兜底就是这个形态）也全绿。判据取的是 SVG
+      画出来的路径数据，与 `NAV_ICON_PATHS[item.icon]` 逐项相等。
+
+      判红方式（实测）：把「设备」项的 `icon: 'devices'` 改成 `'overview'` →
+      本用例红在「设备画成了总览那个图标」。
+    */
+    const rendered = navLinks.map((a) => ({
+      label: a.getAttribute('aria-label') ?? '',
+      // 每张图标的路径拼起来就是它的形状指纹（`NavIcon` 一个 path 一条 `d`）。
+      d: Array.from(a.querySelectorAll('svg path')).map((p) => p.getAttribute('d') ?? ''),
+    }))
+    const { NAV_ICON_PATHS } = await import('@/shared/navIcons')
+    const iconOf: Record<string, keyof typeof NAV_ICON_PATHS> = {
+      总览: 'overview',
+      已归档的项目: 'archived',
+      收件箱: 'inbox',
+      动态: 'activity',
+      设备: 'devices',
+      Agent: 'agents',
+      设置: 'settings',
+    }
+    for (const { label, d } of rendered) {
+      const key = iconOf[label]
+      expect(key, `导航项「${label}」在用例里没有登记图标键`).toBeTruthy()
+      expect(d, `导航项「${label}」画成了别的图标（期望 ${String(key)} 的形状）`).toEqual([
+        ...NAV_ICON_PATHS[key as keyof typeof NAV_ICON_PATHS],
+      ])
+    }
+    // 7 张图标两两不同：撞形是「形状不可辨」那条用户裁定的直接违反。
+    expect(new Set(rendered.map((r) => r.d.join('|'))).size, '图标形状必须两两不同').toBe(
+      rendered.length,
+    )
 
     // 展开态那颗开关仍在品牌行里：图标条里它是「展开」的唯一入口（不能删）。
     const btn = w.element.querySelector<HTMLElement>('.af-rail__brand .af-navbtn')
@@ -848,31 +908,14 @@ describe('App：会话页自动收起侧栏（v0.5.0）', () => {
   }
 
   /*
-    读收起态**必须读全局 `document.documentElement`，不能读 `w.element`**。
-
-    v0.8.1 起收起态落在原型的位置：`<html data-rail="off">`
-    （`prototype/assets/shell.js` 的 `applyRail`，`app.css:1212-1227` 的选择器
-    以 `html` 为根）。两个取值：
-      · 展开 → **属性不存在**（原型 `delete dataset.rail`，展开是缺省态）
-      · 收起 → `'off'`
-    把它归一成 `open` / `collapsed` 再断言，用例读起来仍是「侧栏开没开」。
+    读收起态**必须读全局 `document.documentElement`，不能读 `w.element`**：
+    见 `@/test/app-shell` 的 `railOf()`（收起态落在
+    `<html data-rail="off">`，两个取值归一成 `open` / `collapsed`）。
   */
-  function railOf(): 'open' | 'collapsed' {
-    return document.documentElement.dataset.rail === 'off' ? 'collapsed' : 'open'
-  }
 
   /** 点左栏品牌行那颗开关。**每次都重新查**，不复用上一次拿到的节点。 */
-  async function clickTopbarRail(w: ReturnType<typeof mountIn>): Promise<void> {
-    const btn = w.element.querySelector<HTMLElement>('.af-rail button[aria-label="折叠 / 展开侧栏"]')
-    if (!btn) throw new Error('no rail toggle in rail')
-    btn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await flush(w)
-  }
-
-  /** 换页。路由是模块级 `shallowRef`，测试直接写它就是「导航」。 */
-  function go(path: string): void {
-    window.history.replaceState(null, '', path)
-    route.value = matchRoute(path)
+  async function clickTopbarRail(w: ReturnType<typeof mountApp>): Promise<void> {
+    await clickRailToggle(w)
   }
 
   it('进会话页收起侧栏，离开后回到进入前的值', async () => {
@@ -881,11 +924,11 @@ describe('App：会话页自动收起侧栏（v0.5.0）', () => {
     await flush(w)
     expect(railOf(), '列表页不该收侧栏').toBe('open')
 
-    go('/project/p_1/session/s_1')
+    goTo('/project/p_1/session/s_1')
     await flush(w)
     expect(railOf(), '会话页必须收起').toBe('collapsed')
 
-    go('/devices')
+    goTo('/devices')
     await flush(w)
     expect(railOf(), '离开会话页要还回去').toBe('open')
   })
@@ -917,7 +960,7 @@ describe('App：会话页自动收起侧栏（v0.5.0）', () => {
     expect(railOf(), '列表页开着').toBe('open')
 
     // ② 进会话：自动收起
-    go('/project/p_1/session/s_1')
+    goTo('/project/p_1/session/s_1')
     await flush(w)
     expect(railOf(), '会话页必须收起').toBe('collapsed')
 
@@ -930,7 +973,7 @@ describe('App：会话页自动收起侧栏（v0.5.0）', () => {
     expect(railOf(), '再点一次收起').toBe('collapsed')
 
     // ⑤ 离开会话：保持用户最后一次的选择（他刚在会话里收起了侧栏）
-    go('/devices')
+    goTo('/devices')
     await flush(w)
     expect(railOf(), '拨动即用户意图，离开会话不撤销它').toBe('collapsed')
 
@@ -954,7 +997,7 @@ describe('App：会话页自动收起侧栏（v0.5.0）', () => {
     await clickTopbarRail(w)
     expect(railOf(), '用户自己收起').toBe('collapsed')
 
-    go('/project/p_1/session/s_1')
+    goTo('/project/p_1/session/s_1')
     await flush(w)
     expect(railOf(), '会话页收起').toBe('collapsed')
 
@@ -965,7 +1008,7 @@ describe('App：会话页自动收起侧栏（v0.5.0）', () => {
     // 离开会话页：用户最后的选择是 open，就保持 open。
     // （这条与上一条合起来钉住「离开时不写缺省值」：无条件置 open 会让
     //  上一条的第⑥步之前的 collapsed 断言红；无条件置 collapsed 会让这里红。）
-    go('/devices')
+    goTo('/devices')
     await flush(w)
     expect(railOf(), '保持用户最后一次的选择').toBe('open')
   })

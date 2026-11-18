@@ -4,7 +4,7 @@
    顺序有约束，不能调换：
 
      1. tokens     —— 全部变量定义在一个 `:root` 里，必须先于任何用它的规则
-     2. components —— 23 节组件契约，每条规则只引用变量，不定义变量
+     2. components —— 18 节组件契约，每条规则只引用变量，不定义变量
      3. prototype-shell —— 原型 `app.css` 的「外壳 + 页面骨架」逐条移植
 
    `main.ts` 只 import 这一个文件，组件不各自 import 子文件——
@@ -19,8 +19,11 @@
    重合率的来源。
 
    三份文件都是 grep 校验过的单一真相源：变量数与 `design-system.md` §2
-   的「（64 个变量）」、组件节数与 §3 的「23 节」由 `shared/keynav.test.ts`
+   的「（62 个变量）」、组件节数与 §3 的「18 节」由 `shared/keynav.test.ts`
    断言，原型对齐度由 `styles/prototype-parity.test.ts` 按类名清单断言。
+   （v0.8.1 第5轮：`--af-z-toast` / `--af-z-palette` 随死代码删除，64 → 62；
+   components.css 删掉 §7 Tabs / §10 Toast / §13 Tooltip / §16 只读遮罩 /
+   §17 退避走带五个整族零消费的节，23 → 18 节。）
    =========================================================================== */
 
 @import './tokens.css';

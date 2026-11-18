@@ -14,6 +14,10 @@
    `http.ts` 把 401 一律算作 session 过期，会把「密码错」变成死循环）。
    =========================================================================== */
 
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import { defineComponent, h, ref } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -588,5 +592,40 @@ describe('LoginPrompt：无障碍', () => {
     await flush(w)
 
     expect(prompt().querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(true)
+  })
+})
+
+/* ===========================================================================
+   注释里的模块路径必须是真路径（v0.8.1 第5轮 G47）
+   ---------------------------------------------------------------------------
+   文件头两处曾写「登录请求走 `lib/auth.ts` 的 `postLogin`」「文案一律来自
+   `lib/auth.ts` 的 `describeLoginFailure`」——`packages/web/src/lib/` 里只有
+   `dev-proxy.test.ts`，**没有 `auth.ts`**；真实模块是 `@/shared/auth`（同文件
+   的 import 就是它）。第二处还拿「同 `LoginPage.vue` 文件头」当锚点，而那边
+   文件头里没有这段论述——两个空指针都在注释里，TypeScript 看不见。
+
+   这是一条**源码级**断言（不是 DOM 断言）：注释是给下一个维护者读的，写错
+   一个不存在的路径，读者会去找那个文件，找不到，然后开始怀疑整段论证。
+   =========================================================================== */
+describe('LoginPrompt 的注释（G47）', () => {
+  const src = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), './LoginPrompt.vue'),
+    'utf8',
+  )
+
+  it('不再把认证模块写成不存在的 `lib/auth.ts`', () => {
+    expect(src, '`src/lib/auth.ts` 不存在，真实模块是 @/shared/auth').not.toContain('lib/auth.ts')
+  })
+
+  it('提到的认证模块路径与真实 import 一致（`shared/auth`）', () => {
+    // 判据取**恰好这条 import**：它证明 `shared/auth` 是本文件真正依赖的模块，
+    // 于是注释里写 `shared/auth.ts` 才不是又一次手抄。
+    expect(src).toMatch(/from '@\/shared\/auth'/)
+    expect(src).toContain('`shared/auth.ts` 的 `postLogin`')
+    expect(src).toContain('`shared/auth.ts` 的 `describeLoginFailure`')
+  })
+
+  it('不再拿 `LoginPage.vue` 文件头当锚点（那里没有这段论述）', () => {
+    expect(src).not.toContain('同 `LoginPage.vue` 文件头')
   })
 })

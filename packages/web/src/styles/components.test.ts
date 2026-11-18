@@ -28,9 +28,11 @@ import { stripCssComments } from '@/test/css-scan'
 /**
  * 可能有这些规则的全部文件：全局表 + 用到它们的组件 / 页面。
  *
- * 只列**本里程碑归属范围内**的 .vue——`ConvFlow.vue` 不在其中（见
- * `src/components/ConvFlow.vue` 的 `.af-stage-note` 待办），所以不接受
- * 「把某个文件从这份名单里删掉」当作通过方式。
+ * 只列**本里程碑归属范围内**的 .vue。`.af-stage-note` 一份在
+ * `domains/session/ConvFlow.vue`、一份在 `domains/agent/AgentCatalog.vue`，
+ * 两份不是逐字重复，由本文件下方那条用例（`it` 在第 126 行）单独钉着，所以这两个文件
+ * 不必靠这份名单兜底。即便如此也不接受「把某个文件从这份名单里删掉」当作
+ * 通过方式。
  *
  * **名单本身就是门禁的边界**：`countRule` 只遍历这里，所以漏掉一个文件等于
  * 那条规则在它身上完全不受管——而症状是数出来变**小**，不会变红。这份名单

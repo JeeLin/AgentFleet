@@ -53,7 +53,7 @@
    `TaskCard.test.ts` 有一条源码级断言守着）。
    =========================================================================== */
 
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
 import StateBadge from '@/domains/shared/components/StateBadge.vue'
@@ -65,6 +65,14 @@ import { STATES } from '@/shared/state'
 import { describeShape } from '@/shared/projectShape'
 import { parseStamp } from '@/shared/format'
 import { ApiError, describeReadFailure } from '@/shared/http'
+import {
+  focusRouteTarget,
+  handleLayerKeydown,
+  lastRouteFocusId,
+  pop,
+  push,
+  setRouteFocusTarget,
+} from '@/shared/focus'
 import { navigate, route } from '@/router'
 
 /** 当前项目 id，从地址读——地址栏是真相源。 */
@@ -72,7 +80,7 @@ const projectId = computed(() => route.value.params.id ?? '')
 
 const project = ref<Project | null>(null)
 const all = ref<Project[]>([])
-const tasks = ref<Task[]>([])
+const tasks = ref<Task[] | null>(null)
 const loading = ref(true)
 /** 读失败（项目或任务）。整页进错误态——没有数据时让用户看到半份更糟。 */
 const failure = ref('')
@@ -110,11 +118,17 @@ function labelOf(key: TaskStateWire): string {
  * ——脏数据不该让整个看板白屏（`describeStatus` 对未知态同一条口径）。
  */
 function byState(key: TaskStateWire): Task[] {
-  return tasks.value.filter((t) => t.state === key)
+  return (tasks.value ?? []).filter((t) => t.state === key)
 }
 
 /** 整板无任务。与「某一列为空」是两件事，空态文案也不同。 */
-const boardEmpty = computed(() => tasks.value.length === 0)
+const boardEmpty = computed(() => (tasks.value ?? []).length === 0)
+
+/**
+ * `load()` 的轮次令牌：只用来判断「这次回来的结果还是不是当前的」。
+ * 见 `load()` 里那段注释（换项目时上一轮仍在飞）。
+ */
+let loadToken = 0
 
 /**
  * 卡片要的「最近一次执行」。
@@ -171,32 +185,64 @@ async function load(): Promise<void> {
     loading.value = false
     return
   }
+  // 换项目时 `watch` 会再跑一次 `load`，而上一轮那次可能还在飞：它回来时
+  // `projectId` 已经换了，于是把**旧项目**的任务写进新项目的板子（症状是
+  // 「切过去先闪一下上一个项目的卡」，也可能是「读到一半 `tasks` 还是 null
+  // 就被渲染」）。所以每次进来领一个令牌，回来时对不上就整份丢掉——
+  // 连 `loading` 也不许动，那会把新一轮的 loading 提前关掉。
+  const token = ++loadToken
   loading.value = true
   failure.value = ''
   actionFailure.value = ''
   try {
     // 三个请求并行：切换器要整份项目列表，主区要当前项目，看板要任务。
     const [p, list, ts] = await Promise.all([getProject(id), listProjects(), listProjectTasks(id)])
+    if (token !== loadToken) return
     project.value = p
     all.value = list
     tasks.value = ts
   } catch (e) {
+    if (token !== loadToken) return
     project.value = null
     tasks.value = []
     failure.value = describeReadFailure(e, '项目')
   } finally {
-    loading.value = false
+    if (token === loadToken) {
+      loading.value = false
+      /* 数据到齐后补一次「返回来源卡片」的焦点（见 `restoreSourceFocus`）。
+         只有真的有待找回的目标时才做，否则会抢当页自己的首焦点。 */
+      void restoreSourceFocus()
+    }
   }
 }
 
-// 换项目时重载：`:id` 变了就是不同项目，不能沿用上一份数据。
-watch(projectId, load)
-onMounted(() => {
-  clock = setInterval(() => {
-    now.value = Date.now()
-  }, 1000)
-  void load()
-})
+  // 换项目时重载：`:id` 变了就是不同项目，不能沿用上一份数据。
+  watch(projectId, load)
+  onMounted(() => {
+    clock = setInterval(() => {
+      now.value = Date.now()
+    }, 1000)
+    void load()
+  })
+
+/* 从任务详情**返回**看板：把焦点还给刚才那张卡（v0.8.1 第5轮 G65）。
+
+   **必须在数据到齐之后补一次**（第5轮 4b 实测）。原先只在 `onMounted` 里
+   调一次，而那时 `load()` 还没发出去——卡片一张都没渲染，`focusRouteTarget`
+   找不到目标就退到 `main`（它的注释当时把这写成「等价于旧行为，不会更坏」，
+   实际上它**静默地**什么都没做）。实测鼠标路径：点卡 → 详情 → 点「← 看板」
+   → 焦点落在 `main`，`dataId: null`；键盘路径碰巧对，因为那时详情页的 `h1`
+   带着 `data-id` 且渲染更早。这条 bug 因此藏了三轮。
+
+   判据用 `lastRouteFocusId()`：只有「上一次落地带着 `data-id`」（即用户是从
+   某张卡/某一行进来的）才补这一次。换项目、直接打开看板时它是 `null`，
+   不抢当页自己的首焦点。`await nextTick()` 让 `v-for` 把卡片真的挂上去。 */
+async function restoreSourceFocus(): Promise<void> {
+  if (lastRouteFocusId() === null) return
+  await nextTick()
+  // 再等一帧：`focusRouteTarget` 按 `data-id` 找，卡片此时必须在 DOM 里。
+  requestAnimationFrame(() => focusRouteTarget())
+}
 // 卸载必须清：不清就是每次进出看板多一个每秒跑一次的定时器。
 onUnmounted(() => {
   if (clock !== null) {
@@ -274,8 +320,28 @@ const SHAPE_CLASS = {
  *
  * 卡片上**没有其他可点区域**：本轮不做拖拽换列——拖拽要 6×6 的合法边判断，
  * 做错就是把非法转移画成合法。
+ *
+ * ── 为什么先登记 `setRouteFocusTarget`（v0.8.1 第5轮 G65） ──────────
+ * 不登记的话，换页后焦点由 `focusRouteTarget()` 落到 `main[tabindex="-1"]`，
+ * 键盘用户得重新 Tab 一遍整页才够得着「← 看板」。登记之后下一次落焦点让给
+ * 「页面自己落标题」这一档——**焦点交给任务详情的 `h1`（任务标题）**，
+ * 那才是用户刚点开的东西。清理由 `focusRouteTarget()` 负责，这里只管登记。
  */
-function openTask(id: string): void {
+function openTask(id: string, event?: Event): void {
+  /* 记下发起导航的那张卡：返回看板时 `focusRouteTarget()` 按 `data-id` 找回
+     同一张卡。
+
+     **必须取 `event.currentTarget`，不能用 `document.activeElement`**
+     （v0.8.1 第5轮 4b 实测）。Chrome 里鼠标点 `<button>` **不会**把它设为
+     `activeElement`——那是 Safari/Firefox 的行为。所以鼠标用户点卡进详情、
+     再点「← 看板」回来时，`activeElement` 是 `<body>`，登记到的是 `null`，
+     焦点落到 `main` 而不是原卡（实测 `afterBack: {tag:"MAIN", dataId:null}`）。
+     键盘用户（Tab 到卡上按 Enter）碰巧是对的，因为那时按钮确实有焦点——
+     这正是这条 bug 藏了三轮的原因：`BoardPage.test.ts:906` 的用例手动
+     `card!.focus()` 之后才点，把鼠标路径盖住了。
+     `currentTarget` 在两种路径下都是那张卡本身。 */
+  const source = (event?.currentTarget ?? document.activeElement) as HTMLElement | null
+  setRouteFocusTarget(source instanceof HTMLElement ? source : null)
   navigate(`/project/${encodeURIComponent(projectId.value)}/task/${encodeURIComponent(id)}`)
 }
 
@@ -295,6 +361,10 @@ function openTask(id: string): void {
  * 显示「此任务需人工验收」，用户在下拉里就已经知道自己选了什么。
  */
 const dialogOpen = ref(false)
+/** 对话框根（`af-scrim`）。焦点栈要它：`push` 在它内部找第一个可聚焦元素。 */
+const modalEl = ref<HTMLElement | null>(null)
+/** 打开对话框的那颗按钮。关框后焦点还给它——这是 `push({opener})` 的入参。 */
+let lastOpener: HTMLElement | null = null
 const draftTitle = ref('')
 /** `''` = 不设判定码（后端收 `criteria: null`）。 */
 const draftCriteria = ref('')
@@ -321,17 +391,86 @@ const canSubmit = computed(
   () => trimmedTitle.value.length > 0 && !doneWhenEmpty.value && !creating.value,
 )
 
+/* ── 对话框的浮层语义（焦点栈 / Esc / Tab / 点遮罩）──────────────────
+   **这一节是 v0.8.1 第5轮 4d 验收补上的**，原先这个对话框只有
+   `v-if="dialogOpen"` + `role="dialog" aria-modal="true"`——三件「看起来
+   像模态」的装饰，但没有一样真的生效。实测（playwright / 键盘）：
+     · Esc 不关框：本文件根本没绑 `keydown`；
+     · Tab 能一路逃出框，落到 `<body>`，框背后的看板还在 tab 序列里；
+     · 点遮罩不关框：`af-scrim` 上没有点击处理；
+     · 点「取消」后焦点回到 `<body>`，键盘用户失去位置。
+   `aria-modal="true"` 在背后没设 `inert` 时是**假的**——读屏照样能念到
+   看板内容。而 `focus.ts` 早就把这几件事都实现了（`push` 负责背后 inert
+   与首焦点、`pop` 负责还焦点、`handleLayerKeydown` 管 Esc/Tab），
+   全仓另外 5 个浮层（`LoginPrompt` / `TrajDrawer` / `OverviewPage` 抽屉 /
+   `SessionPage` dock）都在用，只有这里漏了。这就是「同一范式漏一处」，
+   不是新设计——所以照 `LoginPrompt.vue` 的接线抄，不另造一套。 */
+
+/** 这一层是否已经入栈。防重复 `push`（重渲染不该再入一次栈）。 */
+let pushed = false
+
+function openLayer(): void {
+  const el = modalEl.value
+  if (!el || pushed) return
+  // 传 `opener`：这个框**是**用户点「新建任务」点出来的，关掉后焦点该回到
+  // 那颗按钮上（`LoginPrompt` 不传是因为 401 没有触发元素）。
+  push(el, { opener: lastOpener })
+  pushed = true
+  document.addEventListener('keydown', onLayerKeydown)
+}
+
+function closeLayer(): void {
+  const el = modalEl.value
+  if (!el || !pushed) return
+  pushed = false
+  document.removeEventListener('keydown', onLayerKeydown)
+  pop(el)
+}
+
+/** Esc / Tab。判据（本层是栈顶吗、输入法选字中吗）都在 `handleLayerKeydown` 里。 */
+function onLayerKeydown(e: KeyboardEvent): void {
+  const el = modalEl.value
+  if (!el) return
+  handleLayerKeydown(e, el, closeDialog)
+}
+
+/** 点遮罩：只有点在遮罩自己上才算（点在框里不该关）。 */
+function onScrim(e: MouseEvent): void {
+  if (e.target === e.currentTarget) closeDialog()
+}
+
 function openDialog(): void {
   draftTitle.value = ''
   draftCriteria.value = ''
   draftDescription.value = ''
   createFailure.value = ''
+  // 记下触发元素再开框：`push` 自己也读 `activeElement`，但这里显式传更稳
+  // （点击事件与 Vue 的 patch 之间有异步空隙）。
+  lastOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null
   dialogOpen.value = true
 }
 
+/** 关框。**四条路都走这里**（取消 / Esc / 点遮罩 / 提交成功后），
+    所以「出栈 + 还焦点」只有一条实现。 */
 function closeDialog(): void {
+  closeLayer()
   dialogOpen.value = false
 }
+
+/* `dialogOpen` 一变就入栈/出栈。用 `watch` 而不是在 `openDialog` 里直接
+   `openLayer()`：`modalEl` 是 `v-if` 渲染出来的，`openDialog` 返回时 DOM
+   还不存在，`push` 会拿到 `null`。`flush: 'post'` 保证在 DOM 更新之后跑，
+   `modalEl.value` 那时才有值。 */
+watch(dialogOpen, (open) => {
+  if (open) openLayer()
+  else closeLayer()
+}, { flush: 'post' })
+
+/* 组件卸载时若还开着，必须摘监听并出栈——否则 `document` 上留一个指向已
+   卸载组件的闭包，下一次 Esc 会调到一个不存在的框上。 */
+onUnmounted(() => {
+  if (pushed) closeLayer()
+})
 
 async function submitCreate(): Promise<void> {
   if (!canSubmit.value) return
@@ -434,7 +573,15 @@ async function submitCreate(): Promise<void> {
     <!-- 播报「已刷新」：按钮按下去要有一个能听见的回应，否则读屏用户不知道按到了没有。 -->
     <p v-if="refreshed" class="af-muted" role="status" aria-live="polite">已刷新</p>
 
-    <p v-if="loading" class="af-muted">正在读取项目…</p>
+    <!-- 三个分支**互斥**：`loading` 一句 / 读失败 / 读到数据。写成「一句 loading
+         加一块内容」会让两块同时在树上（`loading` 那句与 44 行板子并存）。
+
+         第二条判据是 `tasks !== null`：`tasks` 在首屏那次请求回来之前是 `null`
+         （不是 `[]`），板子只在**真的读到**之后才渲染——「还没读到」与「读到了
+         空的」是两件事，只有后者才该说「这个项目还没有任务」。 -->
+    <template v-if="loading">
+      <p class="af-muted">正在读取项目…</p>
+    </template>
 
     <!-- 读失败 → 整页错误态 + 重试。**不画空板子**：空板子会说「这个项目还没有
          任务」，而真相是没读到（规格 §7 后端流程 2：「不把错误吞成空数组」）。 -->
@@ -449,13 +596,23 @@ async function submitCreate(): Promise<void> {
     </EmptyState>
 
     <template v-else>
-      <!-- 分区标题：`af-page__subtitle` 是实现自造的那一族（`af-page*`），原型
-           `app.css` 里命中 0 条规则；对应位是 `.af-region__title`（v0.8.1
-           子任务 2 的裁定：自造类名一律删，不留别名）。删掉后这个 `h2` 会退回
-           浏览器默认尺寸，比页头 h1 还大一圈，所以同时补上 `af-head__sub`
-           （`app.css:129`，原型里「同一块内容的小一号标题」），本页的可见文案
-           与 `role="heading"` 层级都不变。 -->
-      <h2 class="af-head__sub">{{ project?.name ?? '看板' }}</h2>
+      <!-- 分区标题（v0.8.1 第5轮 G69）：**不再是 `h2.af-head__sub`**。
+
+           历史：`af-page__subtitle` 是实现自造的那一族（`af-page*`），原型
+           `app.css` 里命中 0 条规则；v0.8.1 子任务 2 删自造类名时，为了不让
+           这个 `h2` 退回浏览器默认尺寸，顺手挂了 `.af-head__sub`。副作用是
+           **同一页出现两个 `.af-head__sub`**：页头那个（`.af-head` 里的副标题）
+           与这一个，而后者还是 `h2`——无障碍的标题结构检查因此报
+           「H1 + H2（文本与 H1 重复『…』）+ 6 个 H3 列标题」，且页头副标题的
+           20.63px 排版被这里重复消费一次。
+
+           现在的做法：降级为 `<p>` 并改挂**正文层**的 `.af-muted`
+           （`components.css:1291`，现役的「次要文字」档），与页头
+           `.af-head__sub` 彻底分开——页头的小号标题只属于页头，正文里不再造
+           第二个标题层级。文案与可见位置都不变；`.af-muted` 自带 12.5px 档，
+           视觉上仍是「比正文小一号的说明」。`aria-hidden="true"` 不挂：
+           项目名对读屏用户也有意义，`<p>` 不是标题，重复播报的隐患随之消失。 -->
+      <p class="af-muted af-board__sub">{{ project?.name ?? '看板' }}</p>
 
       <!-- 写失败（含「重读任务失败」）单独一条，看板留在下面：写失败时把整页
            换成错误态，用户会以为任务没了。 -->
@@ -539,84 +696,104 @@ async function submitCreate(): Promise<void> {
          已在 `components.css` §22）：本子任务不许新增 `--af-*` token，也不该
          为了一个对话框再造一套卡面排版。卡片此时尚未变「可点」，所以这里用
          `<div>` 而不是 `<button>`（`TaskCard` 的根才是按钮）。
-         这是一个真模态（提交期间不该点背后的看板），不是内联表单。 -->
-    <div v-if="dialogOpen" class="af-scrim">
-      <div class="af-modal" role="dialog" aria-modal="true" aria-label="新建任务">
-        <div class="af-modal__head">
-          <h2 class="af-head__title">新建任务</h2>
-        </div>
-        <div class="af-modal__body">
-          <div class="af-form">
-            <label class="af-field">
-              <span class="af-field__label">标题</span>
-              <input
-                id="af-newtask-title"
-                v-model="draftTitle"
-                class="af-input"
-                type="text"
-                placeholder="一句话说清要做什么"
-              />
-            </label>
+         这是一个真模态（提交期间不该点背后的看板），不是内联表单。
 
-            <div class="af-field">
-              <label class="af-field__label" for="af-newtask-criteria">判定码</label>
-              <select id="af-newtask-criteria" v-model="draftCriteria" class="af-select">
-                <option value="">不设判定码</option>
-                <option v-for="c in CRITERIA_CODES" :key="c.code" :value="c.code">
-                  {{ c.label }}
-                </option>
-              </select>
-              <!-- 选「不设判定码」= 跑完不会自动判定 = 必须由人验收。当场说清，
-                   别等跑完了才发现要自己盯着。 -->
-              <span v-if="needsManualAcceptance" class="af-field__hint">
-                不设判定码 → 此任务需人工验收。
+         **必须 `Teleport to="body"`**（v0.8.1 第5轮 4d 实测）。理由与
+         `OverviewPage.vue:521-527` 那条一字不差：`focus.push` 的 `inertOthers`
+         只把「body 直接子节点里、不含浮层容器的那几个」置 inert。`#app` 是
+         body 的**唯一**子节点，对话框留在里面时容器就包含在 `#app` 里，于是
+         「背后全部 inert」退化成「一个都没 inert」——实测开框后 `#app.inert`
+         仍是 `false`，脚本能直接把焦点抢到左栏链接上（`behindStealsFocus:
+         true`）。Teleport 到 body 后浮层自成第三个子节点，`#app` 才会真的
+         被 inert（管家抽屉正是这么做的，实测 `appInert: true` /
+         抢焦点失败）。
+         `.af-scrim` 是 `position: fixed; inset: 0`（`components.css:518`），
+         所以挂到 body 下视觉零变化。 -->
+    <Teleport to="body">
+      <div v-if="dialogOpen" ref="modalEl" class="af-scrim" @click="onScrim">
+        <div
+          class="af-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-label="新建任务"
+          tabindex="-1"
+        >
+          <div class="af-modal__head">
+            <h2 class="af-head__title">新建任务</h2>
+          </div>
+          <div class="af-modal__body">
+            <div class="af-form">
+              <label class="af-field">
+                <span class="af-field__label">标题</span>
+                <input
+                  id="af-newtask-title"
+                  v-model="draftTitle"
+                  class="af-input"
+                  type="text"
+                  placeholder="一句话说清要做什么"
+                />
+              </label>
+
+              <div class="af-field">
+                <label class="af-field__label" for="af-newtask-criteria">判定码</label>
+                <select id="af-newtask-criteria" v-model="draftCriteria" class="af-select">
+                  <option value="">不设判定码</option>
+                  <option v-for="c in CRITERIA_CODES" :key="c.code" :value="c.code">
+                    {{ c.label }}
+                  </option>
+                </select>
+                <!-- 选「不设判定码」= 跑完不会自动判定 = 必须由人验收。当场说清，
+                     别等跑完了才发现要自己盯着。 -->
+                <span v-if="needsManualAcceptance" class="af-field__hint">
+                  不设判定码 → 此任务需人工验收。
+                </span>
+              </div>
+
+              <div class="af-field">
+                <label class="af-field__label" for="af-newtask-desc">描述</label>
+                <textarea
+                  id="af-newtask-desc"
+                  v-model="draftDescription"
+                  class="af-textarea"
+                  rows="3"
+                  placeholder="怎么才算跑通？"
+                ></textarea>
+              </div>
+
+              <p v-if="doneWhenEmpty" class="af-field__hint">
+                至少要有判定码或描述——两者都空的任务建出来只会空转。
+              </p>
+              <p v-if="createFailure" class="af-form__error" role="alert">{{ createFailure }}</p>
+            </div>
+
+            <!-- 预览：用户在下拉里选的那几条，最后会长成看板上的什么样。
+                 预览的文本一律来自输入框（不含任何我们替他编的值）。 -->
+            <div class="af-card af-taskcard" aria-label="预览">
+              <span class="af-taskcard__title">
+                {{ trimmedTitle === '' ? '（还没写标题）' : trimmedTitle }}
+              </span>
+              <span class="af-taskcard__status">
+                <StateBadge state="pending" />
+              </span>
+              <span class="af-taskcard__why">
+                {{ draftCriteria === '' ? '判定：无判定码，跑完由人验收' : `判定：${draftCriteria}` }}
               </span>
             </div>
-
-            <div class="af-field">
-              <label class="af-field__label" for="af-newtask-desc">描述</label>
-              <textarea
-                id="af-newtask-desc"
-                v-model="draftDescription"
-                class="af-textarea"
-                rows="3"
-                placeholder="怎么才算跑通？"
-              ></textarea>
-            </div>
-
-            <p v-if="doneWhenEmpty" class="af-field__hint">
-              至少要有判定码或描述——两者都空的任务建出来只会空转。
-            </p>
-            <p v-if="createFailure" class="af-form__error" role="alert">{{ createFailure }}</p>
           </div>
-
-          <!-- 预览：用户在下拉里选的那几条，最后会长成看板上的什么样。
-               预览的文本一律来自输入框（不含任何我们替他编的值）。 -->
-          <div class="af-card af-taskcard" aria-label="预览">
-            <span class="af-taskcard__title">
-              {{ trimmedTitle === '' ? '（还没写标题）' : trimmedTitle }}
-            </span>
-            <span class="af-taskcard__status">
-              <StateBadge state="pending" />
-            </span>
-            <span class="af-taskcard__why">
-              {{ draftCriteria === '' ? '判定：无判定码，跑完由人验收' : `判定：${draftCriteria}` }}
-            </span>
+          <div class="af-modal__foot">
+            <button type="button" class="af-btn af-btn--ghost" @click="closeDialog">取消</button>
+            <button
+              type="button"
+              class="af-btn af-btn--primary"
+              :disabled="!canSubmit"
+              @click="submitCreate"
+            >
+              {{ creating ? '正在创建…' : '创建' }}
+            </button>
           </div>
-        </div>
-        <div class="af-modal__foot">
-          <button type="button" class="af-btn af-btn--ghost" @click="closeDialog">取消</button>
-          <button
-            type="button"
-            class="af-btn af-btn--primary"
-            :disabled="!canSubmit"
-            @click="submitCreate"
-          >
-            {{ creating ? '正在创建…' : '创建' }}
-          </button>
         </div>
       </div>
-    </div>
+    </Teleport>
   </div>
 </template>
 
@@ -633,6 +810,19 @@ async function submitCreate(): Promise<void> {
    两侧内边距取 `--p-s3`（12px）与 `.af-col__head` 的左右内边距对齐（原型
    `app.css:389`），上面不加顶距：`.af-col__head` 自带底边线，再垫一段空白会
    让列头和它的说明分成两块。 */
+/* 看板正文里的项目名那一行（v0.8.1 第5轮 G69）。
+   ---------------------------------------------------------------------------
+   它原来是 `<h2 class="af-head__sub">`——借页头的副标题类来压字号。现在降级为
+   `<p class="af-muted af-board__sub">`：标题层级归页头独占（一页一个
+   `.af-head__sub`），正文这行只保留「比正文小一号的说明」这个视觉意图。
+   `.af-muted` 给颜色与字号（`components.css:1291`），这里只补行高与
+   「别贴着上边」——`.af-body--fill` 是 `overflow:hidden` 的列容器，没有默认
+   段距。 */
+.af-board__sub {
+  margin: 0 0 var(--p-s2);
+  line-height: var(--af-leading-snug);
+}
+
 .af-col__note {
   margin: 0;
   padding: var(--p-s2) var(--p-s3) 0;

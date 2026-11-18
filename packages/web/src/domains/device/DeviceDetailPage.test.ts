@@ -269,7 +269,7 @@ describe('DeviceDetailPage（v0.8.1）：骨架与原型 devices.html 对齐', (
     const w = mountAt('n_1')
     await flush(w)
 
-    // 原型 `devices.html:14-23`：`header.af-head` 与 `.af-body` 是两个兄弟。
+    // 原型 `devices.html:15-23`：`header.af-head` 与 `.af-body` 是两个兄弟。
     // 判据取「整页只有一个」——将来谁在 `.af-body` 里再包一层它，这一条会红在
     // 「多个」而不是静默取第一个通过。
     const bodies = Array.from(w.element.querySelectorAll('.af-body'))

@@ -107,20 +107,14 @@ describe('KEYS 与设计文档一致（grep 校验，不靠人眼）', () => {
 
 
 describe('token / 组件数与设计文档一致', () => {
-  it('tokens.css 的变量数与 §2 的「（64 个变量）」一致', () => {
-    // v0.8.1 起颜色搬进 `theme-*.css`，`tokens.css` 只剩尺度/字体/动效/层级。
-    // 所以这个数从 136 降到 62——**不是丢东西**，是 74 条颜色定义换了住处。
-    // 子任务 12 又加了 `--af-text-display` / `--af-text-card` 两档字号，62 → 64。
-    // 这条门禁守的仍然是「文档写的数与文件里的定义行数必须相等」，
-    // 换了口径就得两边一起改，这正是它存在的意义。
-    const doc = readFileSync(DESIGN_DOC, 'utf-8')
-    const m = doc.match(/（(\d+) 个变量）/g)
-    expect(m, 'design-system.md §2 不再声明 token 变量数').not.toBeNull()
-    const declared = Number(/(\d+)/.exec(m?.[0] as string)?.[1])
-    const css = readFileSync(TOKENS_CSS, 'utf-8')
-    const actual = (css.match(/^\s*--af-[a-z0-9-]+:/gm) ?? []).length
-    expect(actual).toBe(declared)
-  })
+  /* 「tokens.css 的变量数与 §2 的『（N 个变量）』一致」那条**已搬到**
+     `src/styles/tokens.test.ts`（v0.8.1 第5轮）：它守的是
+     `packages/web/src/styles/tokens.css`，而文件原先住在 `src/shared/` 里——
+     只跑 `vitest run src/styles` 会漏掉它（本轮验证时真踩过：probe 在
+     `tokens.css` 里造第二个同值字号档，只跑 `src/styles` 判「漏网」，
+     跑全量才发现那条守卫是红的）。守卫与被守对象同域之后，
+     「改 styles 就跑 src/styles」重新成立。
+     数字的同步仍归设计文档那条线，本文件不再重复断言。 */
 
   it('四份主题文件各自定义的 --af-* 颜色变量数相同（否则切换会缺色）', () => {
     // 主题文件是颜色真相源。四份变量名必须齐平，否则切到某套时
@@ -139,14 +133,22 @@ describe('token / 组件数与设计文档一致', () => {
     expect(counts[0], '主题文件里一个 --af-* 颜色都没定义').toBeGreaterThan(0)
   })
 
-  it('components.css 的小节数与 §3 的「23 组组件（23 节）」一致', () => {
+  it('components.css 的小节数与 §3 的「18 组组件（18 节）」一致', () => {
     const doc = readFileSync(DESIGN_DOC, 'utf-8')
-    const m = doc.match(/（23 节/)
+    const m = doc.match(/（18 节/)
     expect(m, 'design-system.md §3 不再声明组件节数').not.toBeNull()
     const css = readFileSync(COMPONENTS_CSS, 'utf-8')
     // 小节标题是 `   3. Button` 这种「行首缩进 + 序号 + 点 + 标题」的形状。
-    const sections = (css.match(/^\s+\d+\.\s+\S/gm) ?? []).length
-    expect(sections).toBe(23)
+    /* **只数「还活着的节」**：v0.8.1 第5轮删掉了 5 个整族零消费的节（§7 Tabs /
+       §10 Toast / §13 Tooltip / §16 只读遮罩 / §17 退避走带），23 → 18。
+       删掉的节在原地留一条**墓碑注释**（标题后面带「本节已删除」），说明
+       「为什么没有它」和「要加回来时连带要补什么」——但它不算一节，否则
+       计数会把「删了多少」也数成组件，删得越多数字反而越大。
+       号也不回收（§7 / §10 / §13 / §16 / §17 留空）：回收会让文档、注释与
+       `prototype/` 对照表里的 `§n` 锚点全部错位。 */
+    const titles = css.match(/^\s+\d+\.\s+\S.*$/gm) ?? []
+    const sections = titles.filter((t) => !t.includes('本节已删除') && !t.includes('两节已删除')).length
+    expect(sections).toBe(18)
   })
 
   it('每个 token 只在 :root 里定义一次，重复出现的名字只在 reduce-motion 里覆写', () => {

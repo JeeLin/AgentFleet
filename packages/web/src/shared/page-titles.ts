@@ -17,7 +17,9 @@ export const PAGE_TITLE: Readonly<Record<string, string>> = {
   // ── 一级导航 ──────────────────────────────────────────────────────
   overview: '总览',
   devices: '设备',
+  'device-detail': '设备详情',
   agents: 'Agent',
+  'agent-detail': 'Agent 详情',
   settings: '设置',
   // ── 项目内 ────────────────────────────────────────────────────────
   board: '看板',
@@ -52,7 +54,11 @@ export const PAGE_TITLE: Readonly<Record<string, string>> = {
  *
  * **这里不写路由条数**：手写计数必然漂移（写下时是 23，加完两个详情路由
  * 就是 25 了，而没有任何东西会因此变红）。要核对「表是否覆盖全部路由」
- * 请跑 `router.test.ts` 的双向对比，它才是那条判据。
+ * 请跑 `router.test.ts` 的 **`PAGE_TITLE 的键集与 ROUTES 的名字集一致`**
+ * 那条用例——它真的比对了本表的键与 `ROUTES.map(r => r.name)`。
+ * （第4轮之前的注释在这里写「`router.test.ts` 的双向对比」，而那条对比
+ * 只比 `ROUTES` ↔ `App.vue` 的 `PAGES`，与本表无关，于是 `device-detail` /
+ * `agent-detail` 漏了两轮没人发现。）
  */
 export function pageTitle(name: string): string {
   return PAGE_TITLE[name] ?? name

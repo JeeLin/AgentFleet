@@ -7,7 +7,15 @@
    =========================================================================== */
 import { describe, expect, it } from 'vitest'
 
-import { classNamesIn, classNamesInRule, parseCssRules, propValue, ruleFor } from '@/test/css-scan'
+import {
+  classNamesIn,
+  classNamesInRule,
+  declarationsOf,
+  parseCssRules,
+  propValue,
+  ruleFor,
+  stripCssAndLineComments,
+} from '@/test/css-scan'
 
 describe('parseCssRules / classNamesIn', () => {
   it('单行规则', () => {
@@ -73,5 +81,78 @@ describe('parseCssRules / classNamesIn', () => {
     const rules = parseCssRules('.af-a, .af-b { color: red; } .af-a { color: blue; }')
     expect(ruleFor(rules, '.af-a, .af-b')?.body).toContain('red')
     expect(ruleFor(rules, '.af-a')?.body).toContain('blue')
+  })
+
+  /* `declarationsOf` 是 G57 实际指向的那个 export：它**没有外部消费者**，
+     只被同文件的 `propValue`（:167）调用，而且原先连一条测试都没有——
+     等于「零消费 + 零覆盖」，删掉它能全绿、写坏它也能全绿。
+     （G57 报告里同时点名的 `stripCssAndLineComments`「全仓 0 调用」已不成立：
+     `FailurePanel.test.ts` / `OverviewPage.test.ts` / `TaskCard.test.ts` 共 6 处在用，
+     而且它存在的理由——扫整份 `.vue` 时要连 `<script>` 里的 `//` 一起剥——
+     正是那几处的用法。所以那条只需订正记录，不必改代码。）
+
+     `propValue` 只喂它**单条**规则，于是「跨多条规则收集」这条唯一的差异
+     从未被走到；这里直接钉住它。 */
+  it('declarationsOf 跨多条规则收集，且保留每条各自的 selector', () => {
+    const rules = parseCssRules('.af-a { color: red } .af-b { color: blue; color: green }')
+    const hits = declarationsOf(rules, 'color')
+    expect(hits.map((h) => [h.selector, h.value])).toEqual([
+      ['.af-a', 'red'],
+      // 同名多次声明**两条都返回**（与 `propValue` 的「后者胜」不同）：
+      // 前者要的是「哪里写过」，后者要的是「最终生效的是哪个」。
+      ['.af-b', 'blue'],
+      ['.af-b', 'green'],
+    ])
+    expect(hits.every((h) => typeof h.rule.body === 'string'), '每条结果都带原规则').toBe(true)
+  })
+
+  /* 属性名必须**从声明开头或分号之后**起算。这条是在 G72 的守卫里实测踩到
+     的：`new RegExp('color:')` 会命中 `border-color:` 的尾巴，于是「主按钮
+     禁用态的字色」取到了边框色，算出一个漂亮但没有意义的对比度。 */
+  it('declarationsOf 不会把 `border-color` 当成 `color`', () => {
+    const rules = parseCssRules('.af-a { border-color: red; color: blue }')
+    expect(declarationsOf(rules, 'color').map((h) => h.value)).toEqual(['blue'])
+  })
+})
+
+describe('stripCssAndLineComments：字符串里的 `//` 不是注释', () => {
+  /* **这一组守的是「否定断言 + 丢内容的扫描器」这个组合**（v0.8.1 第5轮 4b
+     实测）。初版逐行 `line.indexOf('//')` 之后整行截断，注释里还写着「本仓没
+     有把 `//` 放在字符串里的写法」——实测这句是错的，`NewProjectPage.vue:65`
+     的 `url.startsWith('http://')` 就是。
+
+     危害不在「少剥了几个字符」，而在调用它的 6 处全是
+     `expect(code.match(/fetch/) ?? []).toHaveLength(0)` 这类**否定断言**：
+     截断让本该被看见的 `fetch` 隐形，守卫误判为通过。所以下面第三、四条不是
+     「顺便测一下」，它们是这个 bug 的真实形态。 */
+
+  it('`http://` 在字符串里时整行保留（生产代码里的真实写法）', () => {
+    const src = "if (url.startsWith('http://') || url.startsWith('ssh://')) { ok() }"
+    expect(stripCssAndLineComments(src)).toBe(src)
+  })
+
+  it('`http://` 在双引号与模板串里同样保留', () => {
+    const src = 'const a = "http://hub.local"; const b = `ws://x.y`'
+    expect(stripCssAndLineComments(src)).toBe(src)
+  })
+
+  it('**判红机制**：同行的 `fetch` 不许被 `http://` 截断吞掉（否定断言误判为通过）', () => {
+    // 正是初版会误判为绿的形状：`//` 一截，`void fetch(url)` 就消失了。
+    const src = "if (url.startsWith('http://')) { void fetch(url) }"
+    expect(stripCssAndLineComments(src), '整行里没有真注释，一个字都不该少').toBe(src)
+    expect(/fetch/.test(stripCssAndLineComments(src)), 'fetch 必须仍然扫得到').toBe(true)
+  })
+
+  it('转义引号不会让字符串提前收尾', () => {
+    const src = "const s = 'a\\'//b'; const t = real // 注释"
+    expect(stripCssAndLineComments(src).trimEnd()).toBe("const s = 'a\\'//b'; const t = real")
+  })
+
+  it('真正的行注释照旧剥掉，且保留换行（行号对得上）', () => {
+    const src = 'const a = 1 // 注释里有 fetch\nconst b = 2'
+    const out = stripCssAndLineComments(src)
+    expect(out).not.toContain('fetch')
+    expect(out.split('\n'), '行数不变').toHaveLength(2)
+    expect(out.split('\n')[1]).toBe('const b = 2')
   })
 })

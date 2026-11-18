@@ -13,12 +13,21 @@
 
 import { describe, expect, it, vi } from 'vitest'
 
+import { DOMWrapper } from '@vue/test-utils'
+
 import BoardPage from '@/domains/project/BoardPage.vue'
 import type { Project } from '@/domains/project/api'
 import type { Task, TaskStateWire } from '@/domains/project/taskTypes'
 import { STATES } from '@/shared/state'
 import { mountIn } from '@/test/mount'
 import { settle, stubFetch } from '@/test/http'
+import {
+  clearRouteFocusTarget,
+  focusRouteTarget,
+  hasRouteFocusTarget,
+  lastRouteFocusId,
+  setRouteFocusTarget,
+} from '@/shared/focus'
 import { navigate, route } from '@/router'
 
 /**
@@ -583,8 +592,7 @@ describe('BoardPage（v0.8.0）：时钟、跳转、错误与新建对话框', (
     await openers[0]?.trigger('click')
     await flushUntilSettled(w)
 
-    const modal = w.find('.af-modal')
-    expect(modal.exists(), '对话框要打开').toBe(true)
+    const modal = modalOf()
 
     /** 提交按钮：脚里那个 `创建`（按钮文案会变成「正在创建…」，所以按**位置**取最后一个）。 */
     function submitBtn(): ReturnType<typeof w.find> {
@@ -602,6 +610,174 @@ describe('BoardPage（v0.8.0）：时钟、跳转、错误与新建对话框', (
     // 填描述 → enabled
     await modal.find('.af-textarea').setValue('构建时间肉眼可感地变短')
     expect(submitBtn().attributes('disabled')).toBeUndefined()
+  })
+
+  /**
+   * 打开页头那个「新建任务」对话框。
+   *
+   * **按文案取，不按位置取**：整板空时页面上有两个「新建任务」（页头一个、
+   * 空态横幅里一个），按位置取第一个会在将来有人调换页头顺序时静默指向
+   * 另一个按钮——那时这条用例仍然绿，但它测的已经不是「页头入口」了。
+   */
+  type Wrapper = Awaited<ReturnType<typeof mountAt>>
+  type Finder = ReturnType<Wrapper['find']>
+
+  /**
+   * 从 `document.body` 里取对话框。
+   *
+   * **不能 `w.find('.af-modal')`**：v0.8.1 第5轮 4d 把对话框 `Teleport to="body"`
+   * 了（理由见 `BoardPage.vue` 那段注释——不 Teleport 的话 `#app` 是 body 的
+   * 唯一子节点，`focus.push` 的 `inertOthers` 会把「背后全部 inert」退化成
+   * 「一个都没 inert」，模态框是假的）。Teleport 出去之后它就不再是 `w.element`
+   * 的后代，`w.find` 找不到。查 `document.body` 才是它的真实落点。
+   *
+   * 用 `DOMWrapper` 包一层，是为了让下面那些 `find` / `findAll` / `text` /
+   * `trigger` 的写法与别处一致——直接对 `HTMLElement` 写得另起一套。
+   */
+  function modalOf(): Finder {
+    const el = document.body.querySelector('.af-modal')
+    expect(el, '对话框要挂在 body 下（Teleport）').not.toBeNull()
+    return new DOMWrapper(el as HTMLElement) as unknown as Finder
+  }
+
+  async function openDialog(w: Wrapper): Promise<Finder> {
+    const openers = w.findAll('.af-btn').filter((b) => (b.text() ?? '').trim() === '新建任务')
+    expect(openers.length, '页面上要有「新建任务」入口').toBeGreaterThan(0)
+    await openers[0]?.trigger('click')
+    await flushUntilSettled(w)
+    /* 忘了 Teleport 时这条给出真正的原因，而不是让上面那行报「对话框要打开」
+       （那会让人去查 `v-if`）。同时它也是「背后会不会 inert」的代理判据：
+       `.af-modal` 一旦落回页面子树，`inertOthers` 就豁免整个 `#app`。 */
+    expect(
+      w.find('.af-modal').exists(),
+      '对话框不该留在页面子树里：必须 Teleport 到 body，否则背后不会 inert，模态是假的',
+    ).toBe(false)
+    return modalOf()
+  }
+
+  /** 提交按钮：脚里那一个（`创建` / `正在创建…`），按位置取最后一个。 */
+  function submitOf(modal: Finder): Finder {
+    return modal.findAll('.af-btn').at(-1) as Finder
+  }
+
+  it('create_dialog_open_and_cancel：打开是空表单，取消后对话框消失', async () => {
+    // 判红方式：把 `openDialog` 里那几行清空删掉 → 「上次输入还留在表单里」
+    // 这条红（用户第二次打开会看到上一轮的标题，以为已经填好了）。
+    stubBoard([])
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const modal = await openDialog(w)
+    // 打开时三处输入都是空的——不清的话上一次的草稿会留在里面。
+    expect((modal.find('.af-input').element as HTMLInputElement).value).toBe('')
+    expect((modal.find('.af-textarea').element as HTMLTextAreaElement).value).toBe('')
+    // 选「不设判定码」当场就要说清「需人工验收」（否则用户跑完才发现要自己盯）。
+    expect(modal.text()).toContain('需人工验收')
+
+    const cancel = modal.findAll('.af-btn').find((b) => (b.text() ?? '').trim() === '取消')
+    expect(cancel, '对话框要有取消').toBeTruthy()
+    await cancel?.trigger('click')
+    expect(document.body.querySelector('.af-modal'), '取消后对话框应当消失').toBeNull()
+  })
+
+  it('create_dialog_submits_and_reloads：POST 到 /api/projects/p_1/tasks，成功后关闭并重拉列表', async () => {
+    // 判红方式（三处，缺一则这条就白写）：
+    //  · 请求体不按 `CreateTaskBody` 拼（例如把判定码塞在 `title` 里、
+    //    或把 `description` 当成任务描述）→ 红在 `sent` 的逐字段断言上；
+    //  · 成功后**本地插入**一张卡而不重拉 → 红在「列表被重新请求过」；
+    //  · 成功后不关对话框 → 红在 `af-modal` 还在。
+    let reads = 0
+    const fetchMock = stubFetch({
+      // 读与写共用这条路径：第 1 次是页面加载的 GET（空板子），之后是 POST 的
+      // 201 与重拉列表的 GET。按调用次数分派，才能同时守住「写回的是 201」
+      // 与「写完又读了一次」——写死成同一条响应的话，后一个断言恒真。
+      '/api/projects/p_1/tasks': () => {
+        reads += 1
+        if (reads === 1) return { body: { tasks: [] as Task[] } }
+        const init = fetchMock.mock.calls.at(-1)?.[1] as RequestInit | undefined
+        if (init?.method === 'POST') {
+          return { status: 201, body: { task: task({ id: 'tsk_new', title: '把构建时间降到 60s 内' }) } }
+        }
+        return { body: { tasks: [task({ id: 'tsk_new', title: '把构建时间降到 60s 内' })] } }
+      },
+      '/api/projects/p_1': { body: project() },
+      '/api/projects': { body: [project()] },
+    })
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const modal = await openDialog(w)
+    await modal.find('.af-input').setValue('  把构建时间降到 60s 内  ')
+    await modal.find('.af-select').setValue('build_passes')
+    await modal.find('.af-textarea').setValue('构建时间肉眼可感地变短')
+    // 选了判定码 → 「需人工验收」的提示应当消失（它是「不设判定码」的派生结果）。
+    expect(modal.text()).not.toContain('需人工验收')
+
+    const callsBefore = fetchMock.mock.calls.filter((c) => String(c[0]).includes('/tasks')).length
+    expect(callsBefore, '加载时应当已经读过一次任务列表').toBe(1)
+    await submitOf(modal).trigger('click')
+    await flushUntilSettled(w)
+
+    const postCall = fetchMock.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === 'POST')
+    expect(postCall, '提交必须发一个 POST').toBeTruthy()
+    expect(String(postCall?.[0]), 'POST 要打到当前项目的任务端点').toContain('/api/projects/p_1/tasks')
+
+    // 请求体逐字段断：`title` 去空白；`done_when` 两个字段都按 `DoneWhen` 给。
+    const sent = JSON.parse(String((postCall?.[1] as RequestInit).body))
+    expect(sent).toEqual({
+      title: '把构建时间降到 60s 内',
+      done_when: { criteria: 'build_passes', description: '构建时间肉眼可感地变短' },
+    })
+
+    // 成功之后：对话框关掉、列表被**重新拉过**（不本地插入）。
+    expect(document.body.querySelector('.af-modal'), '建成功后对话框要关掉').toBeNull()
+    const listCalls = fetchMock.mock.calls.filter(
+      (c) =>
+        String(c[0]).includes('/api/projects/p_1/tasks') &&
+        (c[1] as RequestInit | undefined)?.method === 'GET',
+    ).length
+    // 加载时一拉（1）+ 建成功后重拉（1）：**恰好两次**。断「≥1」的话，
+    // 「本地插入、根本不重拉」也能蒙过去（加载那一次就够 1 了）。
+    expect(listCalls, '建成功后要重拉任务列表（不使用本地插入的卡）').toBe(2)
+    // 重拉回来的卡在板上（用的是后端那一份，而不是请求体拼的）。
+    expect(w.element.textContent).toContain('把构建时间降到 60s 内')
+  })
+
+  it('create_dialog_keeps_the_form_open_and_shows_the_code：建失败留在对话框并报错误码', async () => {
+    // 判红方式：`catch` 里把 `dialogOpen.value = false`（或什么都不做只吞掉）
+    // → 用户填的内容连同对话框一起消失，或者完全没有反馈。
+    stubFetch({
+      '/api/projects/p_1/tasks': (() => {
+        // 读请求与写请求共用这条路径：GET 给空列表，POST 给 400。
+        let reads = 0
+        return () => {
+          reads += 1
+          return reads === 1
+            ? { body: { tasks: [] } }
+            : { status: 400, body: { error: 'invalid_criteria' } }
+        }
+      })(),
+      '/api/projects/p_1': { body: project() },
+      '/api/projects': { body: [project()] },
+    })
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const modal = await openDialog(w)
+    await modal.find('.af-input').setValue('一个没有判定码的任务')
+    await modal.find('.af-textarea').setValue('跑完我来看')
+    await submitOf(modal).trigger('click')
+    await flushUntilSettled(w)
+
+    const stillThere = modalOf()
+    expect(stillThere.exists(), '建失败不能把用户填的内容一起关掉').toBe(true)
+    // 文案里要带**后端的错误码**，而不是一句笼统的「失败了」——否则用户拿不到
+    // 任何可报告、可搜索的信息（`ApiError.code` 是唯一稳定可读的那一栏）。
+    expect(stillThere.text()).toContain('invalid_criteria')
+    expect(stillThere.find('.af-form__error').exists(), '错误要挂在 form 里（role=alert）').toBe(true)
+    // 提交按钮回到可点状态：`creating` 必须在 `finally` 里复位，否则一次失败之后
+    // 用户修好输入也点不动了。
+    expect(submitOf(stillThere).attributes('disabled')).toBeUndefined()
   })
 })
 
@@ -684,5 +860,189 @@ describe('BoardPage（v0.8.1）：骨架与原型 board.html 对齐', () => {
     // 集合相等（不是数组相等）：顺序由上一条用例钉着，这里钉的是
     // 「有没有某一个态被两个列共用 / 漏掉」——那会让六条顶部色带少一条。
     expect(new Set(states)).toEqual(new Set(['pending', 'queued', 'running', 'review', 'done', 'failed']))
+  })
+})
+
+/* ===========================================================================
+   G65：卡片是键盘可达的**入口**，不是「点完就丢焦点」的装饰
+   ---------------------------------------------------------------------------
+   第3轮验收实测：卡片 click / ⏎ 进任务详情后 `activeElement` 是
+   `MAIN.af-main`，Back 回看板焦点也不回那张卡。这一组钉两件事：
+     ① `openTask` 在 `navigate()` 之前**登记来源**（否则详情页没有落点可让）；
+     ② 卡片带 `data-id="任务 id"`（返回时按它找回同一张卡）。
+   返回后的「落到哪张卡」由 `focus.test.ts` 的三档用例与
+   `ProjectTaskPage.test.ts` 的详情落点用例覆盖；这里只钉看板这一侧的契约。
+   =========================================================================== */
+describe('G65：看板卡片的键盘路径', () => {
+  it('点卡片前先登记来源，导航后「让出 main」的标志仍等页面消费', async () => {
+    stubBoard([task({ id: 'tsk_1', state: 'pending', title: '把构建时间降到 60s 内' })])
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    // 干净起点：`mountAt` 里的 `navigate` 会落一次焦点，先复位。
+    clearRouteFocusTarget()
+    expect(hasRouteFocusTarget(), '复位后不该有残留').toBe(false)
+
+    const card = w.find('.af-taskcard')
+    expect(card.exists()).toBe(true)
+    await card.trigger('click')
+    await flushUntilSettled(w)
+
+    // 路由 `navigate()` 的微任务在这一页挂载期间就跑过了；若 `openTask`
+    // 没有登记，标志为假，详情页就没有「该让出」的依据。
+    // 判据：点完之后 `route` 已是任务页，而**卡片本身仍带着可找回的 id**。
+    expect(route.value.name).toBe('project-task')
+    expect(route.value.params.taskId).toBe('tsk_1')
+  })
+
+  it('每张卡带 data-id=任务 id（返回看板时靠它找回同一张卡）', async () => {
+    stubBoard([
+      task({ id: 'tsk_a', state: 'pending' }),
+      task({ id: 'tsk_b', state: 'running' }),
+    ])
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const ids = Array.from(w.element.querySelectorAll('.af-taskcard')).map((el) =>
+      el.getAttribute('data-id'),
+    )
+    expect(ids.sort()).toEqual(['tsk_a', 'tsk_b'])
+  })
+
+  it('openTask 把「上一站」记成被点的那张卡：Back 回来能落到同一张卡上', async () => {
+    // **必须走真实的点击路径**（`card.trigger('click')` → `openTask`），
+    // 不能自己调 `setRouteFocusTarget`：那样测的是测试自己，而不是
+    // `openTask` 里那句登记。反向验证过——把 `openTask` 里的
+    // `setRouteFocusTarget(...)` 删掉，下面「登记过」这条立刻红。
+    stubBoard([task({ id: 'tsk_a', state: 'pending' }), task({ id: 'tsk_b', state: 'running' })])
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    // `mountAt` 里的 `navigate()` 会消费掉早先的让出标志，先复位成干净起点。
+    clearRouteFocusTarget()
+
+    const card = w.element.querySelector<HTMLElement>('[data-id="tsk_b"]')
+    expect(card, '第二张卡存在').not.toBeNull()
+    card!.focus()
+    expect(document.activeElement, '前置：焦点在这张卡上').toBe(card)
+
+    await w.find('[data-id="tsk_b"]').trigger('click')
+    // 断言用 `lastRouteFocusId()` 而不是 `hasRouteFocusTarget()`：让出标志
+    // 会被 `navigate()` 的微任务立刻消费掉，`trigger('click')` 一 await 就
+    // 读不到了；「上一站」则要活到下一次换页，微任务之后仍然在。
+    // 删掉 `openTask` 里的 `setRouteFocusTarget(...)` 时这条会红。
+    expect(route.value.name, '已跳到任务详情').toBe('project-task')
+    expect(route.value.params.taskId).toBe('tsk_b')
+    expect(lastRouteFocusId(), 'openTask 必须把这张卡记成上一站').toBe('tsk_b')
+    await flushUntilSettled(w)
+
+    // ③ 模拟详情页把焦点放到标题后 Back 回看板：卡片重新渲染，焦点回到
+    //    同一张卡（`data-id` 是那条线索）。
+    clearRouteFocusTarget()
+    const back = w.element.querySelector<HTMLElement>('[data-id="tsk_b"]')
+    setRouteFocusTarget(back)
+    expect(focusRouteTarget(), '第一次是让出').toBeNull()
+    const restored = focusRouteTarget()
+    expect(restored?.getAttribute('data-id'), '应回到被点的那张卡').toBe('tsk_b')
+    expect(document.activeElement).toBe(back)
+    clearRouteFocusTarget()
+  })
+
+  /* ===========================================================================
+     G65 的**真实返回路径**（第5轮 4b 实测补的）
+     ---------------------------------------------------------------------------
+     上面那条用例手动 `card!.focus()` 之后才点，还手动 `setRouteFocusTarget`
+     来模拟返回——它把鼠标路径整个盖住了。实际缺陷：
+
+       · Chrome 里鼠标点 `<button>` **确实**会聚焦它（这点与 4b 的推断相反，
+         实测 `activeBefore: "BUTTON"`），所以 `document.activeElement` 那条
+         不是病根；
+       · 真正的病根是**时机**：`onMounted` 里调 `focusRouteTarget()` 时
+         `load()` 还没回来，看板一张卡都没渲染，`findByDataId` 什么也找不到，
+         退到 `main`。原注释把这一步写成「等价于旧行为，不会更坏」，但它
+         实际上是**静默失效**：用户在详情页点「← 看板」，焦点落在 `main`
+         而不是刚才那张卡。
+
+     所以这条用例钉的是「数据到齐之后必须补一次」。它不手动造焦点，而是
+     摆好「上一站」再挂载页面，看挂载 + 加载完成后焦点落在哪。 */
+  it('从详情返回：数据到齐后焦点回到来源卡片（不是 main）', async () => {
+    stubBoard([task({ id: 'tsk_a', state: 'pending' }), task({ id: 'tsk_b', state: 'running' })])
+    clearRouteFocusTarget()
+    /* 摆出「上一站是 tsk_b」：真实路径里这是详情页 `h1`（带 `data-id`）。
+       这里直接登记，因为本用例要测的是**看板恢复焦点**这一段，不是详情页
+       怎么写进去的那一段（那一段由上面那条用例守）。 */
+    const origin = document.createElement('h1')
+    origin.setAttribute('data-id', 'tsk_b')
+    document.body.appendChild(origin)
+    setRouteFocusTarget(origin)
+    /* **登记完就把它摘掉**——这是真实路径的形状：详情页的 `h1` 在离开详情页时
+       已经随组件卸载消失，回来时 DOM 里只有看板的卡片带那个 `data-id`。
+       不摘掉的话 `findByDataId` 会先把到这个 `h1`（它按文档顺序取第一个），
+       用例就变成「回到那个夹具」而不是「回到卡片」，测的东西偏了。 */
+    origin.remove()
+    // 让出标志会被挂载期间的 `navigate()` 消费掉；本用例关心的是「上一站」还在。
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+    /* `restoreSourceFocus()` 里 `await nextTick()` + `requestAnimationFrame`，
+       所以要多等一轮宏任务才看得到最终焦点。 */
+    await new Promise((r) => setTimeout(r, 60))
+
+    const target = w.element.querySelector('[data-id="tsk_b"]')
+    expect(target, '卡片已渲染').not.toBeNull()
+    expect(
+      document.activeElement,
+      [
+        '返回看板后焦点必须落在来源卡片上，不能是 main。',
+        '`onMounted` 里那一次 `focusRouteTarget()` 跑在 `load()` 之前，',
+        '那时卡片还没渲染，会静默退到 main——所以 `load()` 的 finally 里',
+        '必须补一次（`restoreSourceFocus`）。',
+      ].join('\n'),
+    ).toBe(target)
+    clearRouteFocusTarget()
+  })
+})
+
+/* ===========================================================================
+   G69：看板页只有一个页头副标题（正文那行不再是 `h2.af-head__sub`）
+   ---------------------------------------------------------------------------
+   第3轮验收的发现：`BoardPage.vue` 的正文顶部有一行
+   `<h2 class="af-head__sub">{{ project?.name }}</h2>`，它与页头 `PageHead` 里的
+   `.af-head__sub` **逐字重复**同一个项目名，而且它自己还是个 `h2`——于是这一页的
+   标题结构是「H1 + H2（文本与 H1 完全重复）+ 6 个 H3 列标题」。读屏用户按标题
+   跳转时会先听到两遍项目名，再听列名。
+
+   修法：正文那行降级为 `<p class="af-muted af-board__sub">`——文字不变、
+   位置不变，但**不再占一个标题层级**，`.af-head__sub` 回归页头独占。
+
+   这一组钉的判据是「数量」而不是「有没有」：将来谁在正文里再挂一个
+   `.af-head__sub`，红在「多个」上，而不是静默地给读屏用户多播一遍。
+   反向验证：把模板改回 `<h2 class="af-head__sub">` → 下面两条都红。
+   =========================================================================== */
+describe('G69：看板页的标题层级', () => {
+  it('正文不再有 `h2.af-head__sub`（本页页头也没有副标题，所以整页一个都没有）', async () => {
+    stubBoard([task({ id: 'tsk_1', state: 'pending' })])
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    // 本页的页头是手写的 `<header class="af-head">`：只有一个下拉按钮里的
+    // `h1.af-head__title`，**没有** `.af-head__sub`。所以修好之后整页
+    // `.af-head__sub` 的数目是 0——正文那个 `h2` 曾经是唯一的一个。
+    expect(
+      w.element.querySelectorAll('h2.af-head__sub').length,
+      '正文不该再造一个与 H1 重复的 h2',
+    ).toBe(0)
+    expect(w.element.querySelectorAll('.af-head__sub').length, '页头副标题类只属于页头').toBe(0)
+  })
+
+  it('正文那行项目名是 `<p>`，不是 `h2`（不占标题层级）', async () => {
+    stubBoard([task({ id: 'tsk_1', state: 'pending' })])
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const sub = w.element.querySelector('.af-board__sub')
+    expect(sub, '正文里保留那行项目名').not.toBeNull()
+    expect(sub?.tagName, '它是段落，不是标题').toBe('P')
+    // 反向：`h2` 一出现，标题跳转就会多停一站，且文本与 H1 重复。
+    expect(w.element.querySelectorAll('h2.af-head__sub').length).toBe(0)
   })
 })

@@ -164,6 +164,37 @@ describe('TabBar：当前工具可见', () => {
     expect(w.element.querySelector('[data-tab-tool]')).toBeNull()
   })
 
+  /* v0.8.1 第5轮 G59：图标那一格原来查三次同一张表
+     （`v-if="panelIcons[tab.id]"` + 两个 `panelIcons[tab.id]!`），靠两个非空断言
+     硬压类型。现在脚本里算一张派生表 `toolIcon`，模板只读它。这两条钉的是
+     **派生表的语义**：每个 tab 至多一个图标、图标与名字必须同源（不能出现
+     「名字说 Git、图标是终端」这种一遍查表一边查原表才会有的漂）。 */
+  it('多个 tab 各带自己的工具图标，且一个 tab 只有一个（没有重复渲染）', () => {
+    const w = mountBar('s_1', { s_1: 'git', s_2: 'terminal', s_3: null })
+    for (const id of ['s_1', 's_2', 's_3']) {
+      expect(
+        w.element.querySelectorAll(`[data-sid="${id}"] [data-tab-tool]`).length,
+        `${id} 的工具图标不该重复`,
+      ).toBe(id === 's_3' ? 0 : 1)
+    }
+    expect(w.element.querySelector('[data-sid="s_1"] [data-tab-tool]')?.textContent?.trim()).toBe('⑂')
+    expect(w.element.querySelector('[data-sid="s_2"] [data-tab-tool]')?.textContent?.trim()).toBe('▶')
+  })
+
+  it('同一个 tab 上「图标」与「title 里的工具名」来自同一次查表', () => {
+    // 反向验证（G59）：把模板里 `title` 那处换回 `panelIcons[tab.id]!`、图标那处
+    // 换成长写死的 `PANEL_ICON.git` → 这条红（title 说终端、图标是 ⑂）。
+    for (const [panel, icon, word] of [
+      ['git', '⑂', 'Git'],
+      ['terminal', '▶', '终端'],
+    ] as Array<[PanelName, string, string]>) {
+      const w = mountBar('s_1', { s_1: panel })
+      const tool = w.element.querySelector('[data-sid="s_1"] [data-tab-tool]')
+      expect(tool?.textContent?.trim(), `${panel} 的图标`).toBe(icon)
+      expect(tool?.getAttribute('title'), `${panel} 的名字`).toContain(word)
+    }
+  })
+
   it('面板数徽标已经没有了（恒为 1 的数字不该占这个位置）', () => {
     const w = mountBar('s_1', { s_1: 'git' })
     // 反向验证：把 TabBar 改回渲染 `{{ panelCounts[tab.id] }}` → 这条红
