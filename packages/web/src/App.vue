@@ -39,7 +39,7 @@ import type { NavIconKey } from '@/shared/navIcons'
 import { listProjects, type Project } from '@/domains/project/api'
 import { listDevices } from '@/domains/device/api'
 import { listAgents } from '@/domains/agent/api'
-import { pop, push, topContainer, trapTab } from '@/shared/focus'
+import { focusRouteTarget, pop, push, topContainer, trapTab } from '@/shared/focus'
 import { SCOPE_LABEL, KEYS, hintOf, missingActs, onHandlersChanged } from '@/shared/keynav'
 import { logout } from '@/shared/auth'
 import { setNotInitializedHandler } from '@/shared/http'
@@ -686,8 +686,10 @@ onMounted(() => {
   // 顺序反了会让这次 `replaceState` 发生在监听装好之前（本身无害，但
   // 「先装监听再改状态」是更不容易出错的那个顺序）。
   redirectLegacy()
-  // 首屏：换页的 watch 不会为初始值触发，所以这里显式落一次
-  void nextTick(() => document.querySelector<HTMLElement>('main[tabindex="-1"]')?.focus())
+  // 首屏：换页的 watch 不会为初始值触发，所以这里显式落一次。
+  // 与 watch 走同一个判据（`focusRouteTarget()`），不再单独手写「找 main」——
+  // 两处各写一份时，改了一处另一处会静默保持旧行为（G65 的成因正是这种重复）。
+  void nextTick(() => focusRouteTarget())
 })
 
 onBeforeUnmount(() => {
@@ -699,11 +701,19 @@ onBeforeUnmount(() => {
 })
 
 /**
- * 换页后把焦点给 `main`（§4.3）。
+ * 换页后的焦点落点（§4.3）。
  *
- * `navigate()` 里已经调用过一次 `focusMain()`，这里再跟一次是为了覆盖
+ * `navigate()` 里已经调用过一次 `focusRouteTarget()`，这里再跟一次是为了覆盖
  * `popstate` 与「同一路径不同参数」的情形：两种情况都不经过 `navigate` 的
  * 那次调用，而焦点必须落在新内容上。
+ *
+ * **落点不再无条件写死 `main`**（v0.8.1 第5轮 G65）：这里原先是手抄了一份
+ * `focusMain` 的焦点块，于是「从看板卡片进入任务详情」也会被抢到 `<main>`，
+ * 键盘用户的上下文当场丢掉（首 Tab 落在「← 看板」而不是任务标题，浏览器
+ * 返回也不回卡片）。现在统一走 `focus.ts` 的 `focusRouteTarget()`：
+ * 有明确来源元素时**让出**（由详情页落标题、由看板落回来源卡片），
+ * 其余情形仍落 `main`——与 `router.test.ts` / `App.test.ts` 钉住的旧语义一致。
+ * 落点判据只有一处实现（`focus.ts`），不再在 App 里抄第二份。
  */
 watch(
   () => route.value.path,
@@ -711,13 +721,7 @@ watch(
     // 点了一个已删除旧地址的链接（`interceptLink` 走 `navigate`，不整页刷新）：
     // 换成去处。`replace` 的理由见 `redirectLegacy` 上方。
     redirectLegacy()
-    void nextTick(() => {
-      const main = document.querySelector<HTMLElement>('main.af-main[tabindex="-1"]')
-      if (!main) return
-      const h1 = main.querySelector('h1')
-      if (h1 && !h1.hasAttribute('tabindex')) h1.setAttribute('tabindex', '-1')
-      main.focus()
-    })
+    void nextTick(() => focusRouteTarget())
   },
 )
 
