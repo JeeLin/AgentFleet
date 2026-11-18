@@ -79,6 +79,25 @@ function RULES_OWN(cls: string): Set<string> {
   return out
 }
 
+/* 取一条规则体里**每一条** `font-size` 声明（同名多次全收）。
+   `propValue` 只取末条——那对「最终生效值」是对的，但这里要问的是
+   「有没有任何一条写小了」，取末条恰好会漏掉前面那条（G78）。
+
+   **放在模块级而不是某个 describe 里**（v0.8.1 第5轮 G87）：两个 describe
+   都要用它——「标题字号下限」与「字号档别名」。当初写在前者内部，后者只能
+   自己另写一份「体内只有一条 font-size」的正则，于是多属性共存的工具类被
+   整条跳过（4c Y3 的逃逸口）。共用一份实现，两个判据就不会分叉。 */
+function fontSizeDeclsIn(rule: CssRule): string[] {
+  const out: string[] = []
+  for (const part of rule.body.split(';')) {
+    const at = part.indexOf(':')
+    if (at < 0) continue
+    if (part.slice(0, at).trim() !== 'font-size') continue
+    out.push(part.slice(at + 1).trim())
+  }
+  return out
+}
+
 describe('层级阶梯（子任务 12）', () => {
   const tokens = readRepoFile('packages/web/src/styles/tokens.css')
 
@@ -117,20 +136,6 @@ describe('层级阶梯（子任务 12）', () => {
      用了比正文更小的字号。实证两处——`.af-region__title` 原为 13.5px、
      `.af-panel__title` 原为 14.5px（与正文同档），都压不住内容。
      标题可以同大但要靠字重/明度区分，**绝不能更小**。 */
-  /* 取一条规则体里**每一条** `font-size` 声明（同名多次全收）。
-     `propValue` 只取末条——那对「最终生效值」是对的，但这里要问的是
-     「有没有任何一条写小了」，取末条恰好会漏掉前面那条（G78）。 */
-  function fontSizeDeclsIn(rule: CssRule): string[] {
-    const out: string[] = []
-    for (const part of rule.body.split(';')) {
-      const at = part.indexOf(':')
-      if (at < 0) continue
-      if (part.slice(0, at).trim() !== 'font-size') continue
-      out.push(part.slice(at + 1).trim())
-    }
-    return out
-  }
-
   it('任何 *__title / *__heading 的字号都不小于正文', () => {
     /* ── 这条守的是一类反复出现的缺陷 ────────────────────────────────────
        标题类（`*__title` / `*__heading`）用了比正文更小的字号。实证两处——
@@ -249,32 +254,84 @@ describe('面板三分区（子任务 12）', () => {
      `font-size: var(<字号令牌>)` 的规则，其取值令牌不许被第二条规则重复消费
      （同一 token 只许一个工具类）。豁免：组件本体类（`*__title` / `*card*`
      这类）不在此列——它们是组件的一部分，不是通用工具类。 */
+  /* **判据：显式列出「档位工具类」这个名字空间，不许同一 token 挂两个名字。**
+     -------------------------------------------------------------------------
+     这条守的是一个真实回潮（v0.8.1 第3轮）：为把两处内联 `font-size` 收进样式表，
+     `components.css` 补了 `.af-t-2xs` / `.af-t-sm`，而 `prototype-shell.css` 的
+     `.af-xs` / `.af-2xs` 早在做同一件事（`--p-t-2xs` 就是 `var(--af-text-2xs)`）。
+     同一档字号两个名字，改一处另一处不跟。
+
+     ── 为什么判据从「结构特征」改成「显式名单」（v0.8.1 第5轮 4c Y3）─────────
+     初版判据是「体内**只有**一条 `font-size` 的规则」（正则
+     `^font-size:\s*var\(…\);\s*$`）。它有两个毛病，恰好一漏一误：
+
+       · **漏**（Y3 的逃逸口）：`.af-x { font-size: var(--af-text-2xs);
+         letter-spacing: .04em; }` —— 顺手带一条别的属性，整条规则被跳过。
+         而「给字号档造别名」的真实写法正是这个形态。
+       · **误**：把判据放宽成「体内出现过该 token」之后（我试过），
+         `.af-btn` / `.af-input` / `.af-taskcard__*` 等 50 多个**组件本体类**
+         全部撞进来——它们当然会写 `font-size: var(--af-text-sm)`，
+         那不是「造别名」，那就是它自己的字号。初版之所以没炸，
+         是因为「只有一条声明」这个结构特征**碰巧**当了组件类的过滤器。
+
+     所以正确的判据不是「谁声明了这个 token」（组件与工具类都会），而是
+     **「谁是这个 token 的通用档位工具类」**——那是一个刻意维护的小名单：
+     类名本身就在描述档位（`.af-xs` / `.af-2xs` / `.af-t-label` / `.af-keyhint`）。
+     名单外的类即使字号相同也不参与（它们是组件，不是档位）。
+
+     新加一个档位工具类时，把它加进 `TIER_UTILITIES`：如果它复用了一个已被
+     占用的 token，这条会立刻报红；如果它真的需要新档位，那是新 token。 */
+  /* **只收「纯档位」工具类**：类名本身就在说字号（`.af-xs` = 12.5px 档、
+     `.af-2xs` = 11.5px 档），换个组件用也是这个意义。`components.css:179-183`
+     的注释把这个约定写死了：「字号工具类不在这里重复造……只留颜色类」。
+
+     **不收的是「带字体角色」的类**：`.af-t-label`（大写小标签）与
+     `.af-keyhint`（键位提示句）都取 `--af-text-sm`，但它们不是同一个角色的两个
+     名字——前者要 uppercase + tracking，后者是等宽键帽旁的说明句。
+     若把它们也放进名单，这条守卫会要求二者合并，那是错的方向：
+     合并后「大写标签」和「键位提示」就被绑死在同一个类上，将来一个要改档
+     就得连带另一个。《这是「档位」与「排版角色」的区别，见 AGENTS.md 维度 24：
+     类型与判据分叉。》 */
+  const TIER_UTILITIES = [
+    // `prototype-shell.css:662-663`：原型 app.css:170-185 的排版小工具，纯档位
+    '.af-xs',
+    '.af-2xs',
+  ]
+
   it('同一档字号令牌只许一个工具类消费（不许给字号档造别名）', () => {
     const cssFiles = [
       readRepoFile('packages/web/src/styles/components.css'),
       readRepoFile('packages/web/src/styles/prototype-shell.css'),
     ]
-    /* 只查「一个类名 + 一条 font-size」这种纯工具类规则：选择器以单类开头、
-       不含伪类/后代/属性，声明体里除了 font-size 只有空白或注释。
-       **组件本体类豁免**：`.af-state__glyph` 是 12px 状态字形的一部分
-       （与 `line-height: 1`、`[data-glyph]` 变体成组），不是通用的「字号阶梯」——
-       它碰巧取到 2xs 这个值，不代表它是一个可以复用的档位工具类。 */
-    const COMPONENT_OWNED = /^\.af-state__/
-    const users = new Map<string, string[]>()
+    /* 先把两个文件里所有规则的「单类选择器 → font-size token」收齐 */
+    const tokenOf = new Map<string, string[]>()
     for (const css of cssFiles) {
-      const stripped = stripCssComments(css)
-      for (const m of stripped.matchAll(/(?:^|\n)(\.[a-z][a-z0-9_-]*)\s*\{([^}]*)\}/g)) {
-        const sel = m[1]
-        const body = m[2].trim()
-        if (COMPONENT_OWNED.test(sel)) continue
-        const fs = /^font-size:\s*var\((--(?:af|p)-t(?:ext)?-[a-z0-9]+)\);\s*$/.exec(body)
-        if (!fs) continue
-        // 把 --p-* 别名还原到真正的字号令牌，否则 --p-t-2xs 与 --af-text-2xs 会被当成两档。
-        const raw = fs[1]
-        const alias = new RegExp(`${raw}:\\s*var\\((--[a-z0-9-]+)\\)`).exec(tokens)
-        const token = alias ? alias[1] : raw
-        users.set(token, [...(users.get(token) ?? []), sel])
+      for (const rule of parseCssRules(css)) {
+        const sel = rule.selector.replace(/\s+/g, ' ').trim()
+        if (!/^\.[a-z][a-z0-9_-]*$/.test(sel)) continue
+        for (const decl of fontSizeDeclsIn(rule)) {
+          const m = /^var\((--(?:af|p)-t(?:ext)?-[a-z0-9]+)\)$/.exec(decl.trim())
+          if (!m) continue
+          // 把 --p-* 别名还原到真正的字号令牌，否则 --p-t-2xs 与 --af-text-2xs 会被当成两档。
+          const raw = m[1]
+          const alias = new RegExp(`${raw}:\\s*var\\((--[a-z0-9-]+)\\)`).exec(tokens)
+          tokenOf.set(sel, [...(tokenOf.get(sel) ?? []), alias ? alias[1] : raw])
+        }
       }
+    }
+    /* 名单里每个工具类都必须真的存在、且真的只取一个档位——防止名单本身烂掉
+       （删了规则忘了删名单，或一个工具类同时取两档 = 它自己内部就在打架）。 */
+    const bad: string[] = []
+    for (const util of TIER_UTILITIES) {
+      const toks = tokenOf.get(util)
+      if (!toks) bad.push(`${util}：名单里登记了，但样式表里没有这条单类规则`)
+      else if (toks.length > 1) bad.push(`${util}：自己声明了 ${toks.length} 档字号（${toks.join(' / ')}）`)
+    }
+    expect(bad, `档位工具类名单与样式表不一致：${bad.join('; ')}`).toEqual([])
+
+    const users = new Map<string, string[]>()
+    for (const util of TIER_UTILITIES) {
+      for (const tok of tokenOf.get(util) ?? []) users.set(tok, [...(users.get(tok) ?? []), util])
     }
     const dupes = [...users.entries()]
       .filter(([, sels]) => sels.length > 1)
@@ -350,22 +407,91 @@ describe('面板三分区（子任务 12）', () => {
          某个属性时，前一条的那条声明才是死的——那才是这条守卫要抓的东西。 */
       const declaredBefore = new Map<string, string[]>()
       const overridden: string[] = []
+      /* **`@media` 里「同一选择器被写两次」也要看得见**（v0.8.1 第5轮 4c Y1）。
+         初版 `if (rule.atRules.length > 0) continue` 把媒体查询整块跳过，
+         理由是「`@media` 内重写是合法覆盖」——**覆盖**确实合法，但**同一媒体
+         条件里写两遍**不合法：后者静默吞掉前者的同名属性，与顶层那条是同一个
+         病，只是藏进了 at-rule 里。
+
+         我最初的修法比这更激进：把「`@media` 里出现顶层没有的属性」一律报红。
+         实测立刻炸出 4 处（`.af-git__split` 的小屏竖排、`.af-git__files` 的
+         `max-height`/`border-bottom`、`.af-rail__brand .af-navbtn` 的
+         `display: none`）——**它们全是正当的响应式覆盖**：小屏换布局本来就
+         要引入顶层没有的属性。那条路是错的，已否决。
+
+         现在按 at-rule 链分组：同一个 `atRules` 链下，同一选择器出现两次就是
+         真重复——这才是「写漏了一条，后者吞了」的形态。
+
+         ── **残余风险（已知局限，用户裁定接受）** ──────────────────────
+         「同一选择器被拆到**两个不同**断点里、各补一部分属性」仍然守不住：
+         它和合法的响应式覆盖在**语法上完全同形**（都是「@media 里出现顶层没有
+         的属性」），靠静态扫描分不开。4c Y1 描述的那个坏例
+         （`@media { .af-badge { min-width: 44px } }`）就是这样逃走的。
+         要真分开得把每个页面的实际布局宽度与 4 个断点一起建模——那是个会
+         自证的模型（模型算错时守卫照样绿），代价远大于收益。
+         补偿措施在下面那条「断点集合必须显式登记」：断点数量与取值是枚举的，
+         新增断点要写明理由，至少不让断点随手长出来。 */
+      const perContext = new Map<string, Map<string, string[]>>()
       for (const rule of parseCssRules(css)) {
-        // 只统计**顶层**规则（不在任何 at-rule 里）：`@media` 内重写是合法覆盖。
-        if (rule.atRules.length > 0) continue
         const sel = rule.selector.replace(/\s+/g, ' ').trim()
         const props = [...rule.body.matchAll(/(?:^|;)\s*([a-z-]+)\s*:/g)].map((m) => m[1])
+        if (rule.atRules.length > 0) {
+          const ctx = rule.atRules.join(' / ')
+          if (!perContext.has(ctx)) perContext.set(ctx, new Map())
+          const inCtx = perContext.get(ctx)!
+          const prev = inCtx.get(sel) ?? []
+          for (const p of props) {
+            if (prev.includes(p)) overridden.push(`${sel} 的 ${p}（同一条 ${ctx} 里写了两次）`)
+          }
+          inCtx.set(sel, [...prev, ...props])
+          continue
+        }
         const prev = declaredBefore.get(sel) ?? []
         for (const p of props) {
           if (prev.includes(p)) overridden.push(`${sel} 的 ${p}`)
         }
         declaredBefore.set(sel, [...prev, ...props])
       }
-      expect(overridden, `后一条规则重写了前一条已声明的属性（前者是死声明）：${overridden.join(', ')}`).toEqual(
-        [],
-      )
+      expect(
+        overridden,
+        `后一条规则重写了前一条已声明的属性（前者是死声明）：${overridden.join(', ')}`,
+      ).toEqual([])
     })
   }
+
+  /* **断点必须显式登记**（v0.8.1 第5轮 G87 的补偿措施）：上一条承认了
+     「同选择器拆到两个断点各补一半」守不住。能守的那一半是**断点本身**——
+     断点数量是枚举的，多一个就得在这里登记并写明理由。这样至少不会出现
+     「随手加一个 1337px 的断点，某条规则只在那里面改了一半」。 */
+  const BREAKPOINTS = new Set([
+    '(max-width: 720px)', // 会话工作台：Git 面板由左右分栏改上下堆叠
+    '(max-width: 900px)', // 外壳：左栏整个不渲染，靠底部面板；看板列回到单列
+    '(max-width: 1100px)', // 看板：六列挤在一屏时的列宽下限（G70）
+  ])
+
+  it('样式表里出现的媒体断点都在登记表里（新增断点要写明理由）', () => {
+    const found = new Set<string>()
+    for (const file of ['packages/web/src/styles/components.css', 'packages/web/src/styles/prototype-shell.css']) {
+      /* **用结构化解析器取 at-rule 链，不用正则扫原文**：初版写的是
+         `/@media\s*\(([^)]*\)?[^)]*)\)/g`，结果它跨过了注释和后面的整段规则，
+         把两千多字的注释与十几条规则一起当成「断点字符串」吃了进来
+         （AGENTS.md 维度 25 的反面：扫描器既不能丢内容，也不能吃错边界）。
+         `parseCssRules` 已经剥了注释、按花括号配对，`atRules` 就是准确的链。 */
+      for (const rule of parseCssRules(readRepoFile(file))) {
+        for (const at of rule.atRules) {
+          const m = /^@media\s+(.+)$/.exec(at.trim())
+          if (m) found.add(m[1].replace(/\s+/g, ' ').trim())
+        }
+      }
+    }
+    const unknown = [...found].filter((b) => !BREAKPOINTS.has(b))
+    expect(
+      unknown,
+      `出现了未登记的媒体断点：${unknown.join(', ')}——`
+        + '把它加进 BREAKPOINTS 并在这里写清它服务哪一处布局；'
+        + '断点随手长出来就会变成「一半规则在某个宽度改过、另一处没改」的来源',
+    ).toEqual([])
+  })
 
   /* **跨文件的「后者胜」也要看得见**（G24 的另一半）：`index.css` 的导入顺序
      是 tokens → components → prototype-shell → 4 份主题，**顺序本身**是一条
