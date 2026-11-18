@@ -2608,7 +2608,7 @@ onBeforeUnmount(() => {
     </EmptyState>
 
     <!--
-      正文再包一层 `.af-wb`（`session.html:37` 的 `.workbench`）：`af-body` 是
+      正文再包一层 `.af-wb`（`session.html:39` 的 `.workbench`）：`af-body` 是
       骨架、`af-wb` 是这一页的样式命名空间，两者本来就该是**两个**元素。
       早先我把它们写在同一个 div 上，于是 `.af-wb` 的子节点顺序里混进了加载
       骨架 / 空态三兄弟——测试要读「tab 条是工作台的第一块」，一个混着空态的

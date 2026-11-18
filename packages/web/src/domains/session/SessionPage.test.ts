@@ -3070,7 +3070,7 @@ describe('git 面板：历史分段', () => {
 describe('会话页顶部三层：tab 条 → 标题行 → 状态行（v0.5.0）', () => {
   it('tab 条是页面最上面那一块（在标题行之前，不是夹在页头与正文之间）', async () => {
     const { w } = await mountWorkbench()
-    // 页面根现在是原型的 `.af-body.af-body--fill`（`session.html:37`），
+    // 页面根现在是原型的 `.af-body.af-body--fill`（`session.html:39`），
     // `.af-wb` 是它里面的那一层工作台容器——三块 chrome 的真实顺序要读
     // **工作台那一层**的 children。
     //

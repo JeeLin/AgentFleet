@@ -92,6 +92,56 @@ function scannedFiles(): string[] {
   return out.filter((f) => resolve(f) !== resolve(self))
 }
 
+/* ===========================================================================
+   判据本体（v0.8.1 第5轮 G79）
+   ---------------------------------------------------------------------------
+   **为什么要抽成模块级函数**：初版的判据内联在 `it()` 里，而「判据自检」那条
+   用例**另写了一份 `probe()`**。两份实现意味着——掏空主判据后自检照旧绿，
+   自检测的不是被测对象。4c 实测：把主判据的空行判断改成 `else if (false)`、
+   把自检的 `probe` 掏空，anchors 依旧 `2 passed`。这正是「守卫不得自证」
+   （`AGENTS.md` 维度 23）的教科书形态。
+
+   现在两边调**同一个** `checkRef()`：
+
+      主判据：对每处引用调它，非 null 就计入 failures
+      自检：  构造「越界 / 空行 / 闭合标签行」三种形态，确认它各自返回对应码
+
+   掏空 `checkRef` 会让**两边同时**失守，而不是只丢一边。
+   =========================================================================== */
+
+/** 一条引用的判定结果。`null` = 放行。 */
+type RefVerdict = '越界' | '空行' | '闭合标签行' | null
+
+/** `</div>`、`}`、`)`、`};` 这类只有闭合符号的行：不可能是「那句话的出处」。 */
+function isClosingOnly(line: string): boolean {
+  return /^(?:<\/[a-zA-Z][\w-]*>|[})]+;?|\/?>|\];?)$/.test(line.trim())
+}
+
+/**
+ * 判定一处 `文件名:行号` 引用。定位不到 / 同名多个 → `null`（无法确定指向，不是漂移）。
+ *
+ * @param index `indexRepoFiles()` 的结果
+ * @param fileRef 被引用的文件名（**basename**，如 `prototype-shell.css`）
+ * @param num 被引用的行号（1-based）
+ */
+function checkRef(
+  index: Map<string, string[]>,
+  fileRef: string,
+  num: number,
+): RefVerdict {
+  const candidates = index.get(basename(fileRef))
+  if (!candidates || candidates.length !== 1) return null
+  const target = readFileSync(candidates[0], 'utf-8').split('\n')
+  if (num < 1 || num > target.length) return '越界'
+  const text = target[num - 1]
+  if (text.trim() === '') return '空行'
+  /* 只指向纯闭合标签行 → 十有八九是「区间终点算错」。这条是**廉价启发式**：
+     4c 实测「行内容必须含锚点关键词」会 208/246 误报，那条路已否决（见文件头
+     `:29-33`）；而「整行只有一个闭合符号」几乎不可能是有效出处。 */
+  if (isClosingOnly(text)) return '闭合标签行'
+  return null
+}
+
 describe('G41 —— 源码里的 file:line 引用必须能被回读命中', () => {
   /* 这些引用**故意**指向空行：它们是「那一行是空的，所以某句注释必然是错的」
      这类反向断言（见 `domains/project/prototype-anchors.test.ts:57-61`）。
@@ -119,27 +169,30 @@ describe('G41 —— 源码里的 file:line 引用必须能被回读命中', () 
         for (const m of line.matchAll(
           /([A-Za-z0-9_-][A-Za-z0-9_.-]*\.(?:md|css|vue|ts|html|js))[:：](\d+)/g,
         )) {
+          /* 判定逻辑**全在 `checkRef` 里**（G79）：这里只做「拿结果、决定放行否」，
+             不再自己解一遍行号——自检调的是同一个函数，掏空它两边一起失守。 */
           const candidates = index.get(m[1])
-          // 定位不到、或同名不止一个 → 无法确定指向，跳过（不是漂移）。
           if (!candidates || candidates.length !== 1) continue
           const num = Number(m[2])
-          const target = readFileSync(candidates[0], 'utf-8').split('\n')
           checked++
-          if (num < 1 || num > target.length) {
-            failures.push(
-              `${rel}:${idx + 1} 引用 \`${m[1]}:${num}\`，但该文件只有 ${target.length} 行`,
-            )
-          } else if (target[num - 1].trim() === '') {
-            // 「这一行是空行」本身就是某些守卫的断言对象，那是**正确**的引用。
-            if (EXPLICIT_BLANK_OK.test(window)) {
-              exempted++
-              continue
-            }
-            failures.push(
-              `${rel}:${idx + 1} 引用 \`${m[1]}:${num}\`，但那一行是空行——`
-                + '空行不可能是「那句话的出处」，行号已经漂了',
-            )
+          const verdict = checkRef(index, m[1], num)
+          if (verdict === null) continue
+          /* 「这一行是空行」本身就是某些守卫的断言对象，那是**正确**的引用。
+             **只有「空行」这一档**能靠文字豁免；「越界」「闭合标签行」不给豁免口子
+             ——它们没有一种正当理由能写出来。 */
+          if (verdict === '空行' && EXPLICIT_BLANK_OK.test(window)) {
+            exempted++
+            continue
           }
+          const target = readFileSync(candidates[0], 'utf-8').split('\n')
+          const why =
+            verdict === '越界'
+              ? `但该文件只有 ${target.length} 行`
+              : verdict === '空行'
+                ? '但那一行是空行——空行不可能是「那句话的出处」，行号已经漂了'
+                : '但那一行只有一个闭合符号（`</div>` / `}` / `)`）——不可能是「那句话的出处」，'
+                  + '行号大概率是区间终点算错'
+          failures.push(`${rel}:${idx + 1} 引用 \`${m[1]}:${num}\`，${why}`)
         }
       })
     }
@@ -155,34 +208,51 @@ describe('G41 —— 源码里的 file:line 引用必须能被回读命中', () 
   /* 判据自检：把「漂了」的两种形态各造一个，确认它们**会**被判红。
      没有这一条的话，上面那条在判据写错时会恒绿（`candidates` 恒为 undefined
      就不会 push 任何东西），而 `checked > 50` 也可能因为正则写宽了而满足。 */
-  it('判据自检：越界行号与空行引用都会被判红', () => {
+  it('判据自检：越界 / 空行 / 闭合标签行都会被判红（与主判据同一个函数）', () => {
+    /* **不另写一份 probe**（G79 的病根就在这）：直接调主判据用的 `checkRef`。
+       若有人把 `checkRef` 掏空返回 null，这条与上面那条会**同时**判红。 */
     const index = indexRepoFiles()
-    const probe = (ref: string): string | null => {
-      const m = /^(.+\.(?:md|css|vue|ts|html|js)):(\d+)$/.exec(ref)
-      if (!m) return null
-      const candidates = index.get(basename(m[1]))
-      if (!candidates || candidates.length !== 1) return null
-      const target = readFileSync(candidates[0], 'utf-8').split('\n')
-      const num = Number(m[2])
-      if (num < 1 || num > target.length) return '越界'
-      if (target[num - 1].trim() === '') return '空行'
-      return null
-    }
+    const probe = (fileRef: string, num: number): RefVerdict => checkRef(index, fileRef, num)
     /* 夹具用 `prototype-shell.css`：它在仓库里只有一份。
        **不能用 `tokens.css`**——`src/styles/tokens.css` 与
        `prototype/assets/tokens.css` 同名两份，按「同名必须唯一」的规则会被
        判据跳过，于是 `probe()` 返回 null，自检看起来「放行了」其实什么都没测。
        这条踩坑记录留在这里：给这条门禁写夹具时，先确认 basename 唯一。 */
-    expect(probe('prototype-shell.css:99999'), '越界必须被判红').toBe('越界')
+    expect(probe('prototype-shell.css', 99999), '越界必须被判红').toBe('越界')
 
     // 找一个真实存在的空行，用它的行号探一次
     const css = readFileSync(resolve(SRC, 'styles/prototype-shell.css'), 'utf-8').split('\n')
     const blankAt = css.findIndex((l) => l.trim() === '')
     expect(blankAt, 'prototype-shell.css 里找不到空行，夹具前提变了').toBeGreaterThanOrEqual(0)
-    expect(probe(`prototype-shell.css:${blankAt + 1}`), '空行引用必须被判红').toBe('空行')
+    expect(probe('prototype-shell.css', blankAt + 1), '空行引用必须被判红').toBe('空行')
 
     // 反向：一个真实有内容的行号必须放行
     const codeAt = css.findIndex((l) => l.trim() !== '')
-    expect(probe(`prototype-shell.css:${codeAt + 1}`), '有内容的行必须放行').toBeNull()
+    expect(probe('prototype-shell.css', codeAt + 1), '有内容的行必须放行').toBeNull()
+
+    /* **第三种形态：纯闭合标签行**（本次新增的启发式）。造不出来就从真实的
+       `prototype-shell.css` 里找——找不到说明前提变了，要立刻知道。 */
+    const closingAt = css.findIndex((l) => isClosingOnly(l))
+    if (closingAt >= 0) {
+      expect(
+        probe('prototype-shell.css', closingAt + 1),
+        '只指向纯闭合符号的行必须被判红（行号大概率是区间终点算错）',
+      ).toBe('闭合标签行')
+    }
+  })
+
+  /* **判据自检的第二道**：`checkRef` 必须真的被两条用例共用。4c 的原始变异
+     是「掏空主判据的自检、主判据照旧绿」——现在两边同一个函数，这条只是在
+     文档层面把它钉死：如果哪天有人又把它拆成两份，`checkRef` 的调用点会
+     少于 2 处，这条会响。用源码计数是最廉价且不依赖运行时的做法。 */
+  it('checkRef 必须被主判据与自检共同调用（不许拆回两份实现）', () => {
+    const src = readFileSync(fileURLToPath(import.meta.url), 'utf-8')
+    /* 统计**调用**（`checkRef(`），不数定义（`function checkRef(`）。 */
+    const calls = src.match(/[^\w.]checkRef\(/g) ?? []
+    expect(
+      calls.length,
+      '`checkRef` 的调用点少于 2 处——主判据与自检已拆成两份实现，'
+        + '自检将不再能证明主判据有效（这正是 G79 的病根）',
+    ).toBeGreaterThanOrEqual(2)
   })
 })
