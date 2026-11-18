@@ -112,7 +112,12 @@ export function push(container: HTMLElement, opts: PushOptions = {}): HTMLElemen
   const candidates = [...container.querySelectorAll<HTMLElement>(FOCUSABLE)]
   const first =
     container.querySelector<HTMLElement>(AUTOFOCUS) ??
-    candidates.find((el) => el.tabIndex >= 0)
+    /* 还要**可见**：`[hidden]` 里的按钮也是 `FOCUSABLE` 的匹配，但 `focus()`
+       对它无效——浏览器会把焦点留在原处（或落到 body），于是「首焦点」实际上
+       没进对话框。这是与 `tabIndex >= 0` 相邻的同一类缺陷（挑错了元素），
+       第 7 轮实测确认：`<div hidden><button></div><input>` 的结构下焦点停在
+       `hidden-btn`。`isVisible()` 本文件已有（Tab 陷阱用它），这里复用。 */
+    candidates.find((el) => el.tabIndex >= 0 && isVisible(el))
   if (first) first.focus()
   else if (container.hasAttribute('tabindex')) container.focus()
   return container

@@ -95,6 +95,33 @@ describe('focus stack', () => {
     ).toBe(title)
   })
 
+  /* 回归：`[hidden]` 里的控件同样是 `FOCUSABLE` 的匹配，但 `focus()` 对它无效，
+     焦点会留在原处——「首焦点」实际上没进对话框。与上面那条同属「挑错了元素」。
+     第 7 轮实测：`<div hidden><button></div><input>` 下焦点停在 hidden-btn。
+     既有缺陷（`82b3d91` 之前就这样），本里程碑内一并修。 */
+  it('push 不会把首焦点交给 [hidden] 里的控件', () => {
+    document.body.innerHTML = `
+      <button id="opener">打开</button>
+      <div id="layer">
+        <div hidden><button id="hidden-btn">隐藏</button></div>
+        <input id="real" type="text" />
+      </div>
+    `
+    const hiddenBtn = document.getElementById('hidden-btn') as HTMLElement
+    const real = document.getElementById('real') as HTMLElement
+    // 前提自检：hidden 里的按钮确实可聚焦，且排在真实输入框之前
+    expect(hiddenBtn.tabIndex, '夹具前提变了：hidden 里的按钮应仍是可聚焦元素').toBe(0)
+    expect(
+      hiddenBtn.compareDocumentPosition(real) & Node.DOCUMENT_POSITION_FOLLOWING,
+      '夹具前提变了：hidden 按钮应排在真实输入框之前，否则证明不了「跳过了它」',
+    ).toBeTruthy()
+    push(document.getElementById('layer') as HTMLElement)
+    expect(
+      document.activeElement,
+      '首焦点必须跳过 [hidden] 里的控件，落到真实输入框上',
+    ).toBe(real)
+  })
+
   it('push 优先挑 data-autofocus', () => {
     const s = scaffold()
     const autofocused = document.createElement('button')
