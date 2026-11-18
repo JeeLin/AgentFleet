@@ -109,7 +109,7 @@
   display: grid; place-items: center;
   color: var(--p-acc); font-size: var(--p-t-xs); font-weight: var(--af-weight-bold);
 }
-.af-rail__name { font-size: var(--p-t-sm); font-weight: var(--af-weight-semibold); color: var(--p-fg-strong); }
+.af-rail__name { font-size: var(--p-t-sm); font-weight: var(--af-weight-semibold); color: var(--af-fg-strong); }
 .af-rail__sub { font-size: var(--p-t-2xs); color: var(--p-fg-3); font-family: var(--af-font-mono); }
 
 /* 组标题：全大写小标签。写在 `components.css` 的注释里被删掉过，但**原型有**
@@ -149,10 +149,10 @@
   text-decoration: none;
   transition: background var(--p-dur) var(--p-ease), color var(--p-dur) var(--p-ease);
 }
-.af-rail__list a:hover { background: var(--p-surf-1); color: var(--p-fg-strong); }
+.af-rail__list a:hover { background: var(--p-surf-1); color: var(--af-fg-strong); }
 /* 当前项：底色 + 整圈内描边 + 中等字重（**不是**左边一条强调竖线）。 */
 .af-rail__list a[aria-current='page'] {
-  background: var(--p-surf-2); color: var(--p-fg-strong);
+  background: var(--p-surf-2); color: var(--af-fg-strong);
   font-weight: var(--af-weight-medium);
   box-shadow: inset 0 0 0 1px var(--p-line-2);
 }
@@ -256,7 +256,7 @@ html[data-rail='off'] .af-rail__brand .af-navbtn {
 html[data-rail='off'] .af-rail__brand .af-navbtn__bars { width: 13px; gap: 2.5px; }
 
 /* 图标本身：颜色跟 `currentColor` 走（链接的 `--p-fg-2` → hover 的
-   `--p-fg-strong`），所以四套主题下自动对。展开态图标也走这一条，
+   `--af-fg-strong`），所以四套主题下自动对。展开态图标也走这一条，
    `flex: 0 0 auto` 保证长项目名不会把它压扁。 */
 .af-navicon { flex: 0 0 auto; display: block; }
 
@@ -318,7 +318,7 @@ html[data-rail='off'] .af-rail__actions .af-btn {
   text-decoration: none; cursor: pointer;
   flex: 0 0 auto;
 }
-.af-navbtn:hover { background: var(--p-surf-2); color: var(--p-fg-strong); text-decoration: none; }
+.af-navbtn:hover { background: var(--p-surf-2); color: var(--af-fg-strong); text-decoration: none; }
 .af-navbtn:active { transform: translateY(1px); }
 /* 三条横线的图标：不依赖字体，任何主题下都画得出来 */
 .af-navbtn__bars {
@@ -359,9 +359,9 @@ html[data-rail='off'] .af-rail__actions .af-btn {
 .af-head__title {
   /* 用 display 档（22px）而不是原来的 `--p-t-lg`（18px）：实测 18px 压不住
      14.5px 正文，扫视时标题与正文是一层（见 tokens.css §6b 的取值理由）。
-     字重 semibold + `--p-fg-strong` 与字号差**一起**拉开层级。 */
+     字重 semibold + `--af-fg-strong` 与字号差**一起**拉开层级。 */
   font-size: var(--af-text-display); font-weight: var(--af-weight-semibold);
-  white-space: nowrap; margin: 0; color: var(--p-fg-strong);
+  white-space: nowrap; margin: 0; color: var(--af-fg-strong);
   /* `line-height: 1` 而不是继承 1.65：22px × 1.65 = 36.3px 会把页头内容盒
      撑到 61px（单行标题实测），比标题自己的 22px 高 14px——`.af-head` 与
      左栏品牌行的对齐就多出这 14px 的偏差。页头是 `min-height`（允许长高），
@@ -572,7 +572,7 @@ html[data-rail='off'] .af-rail__actions .af-btn {
    `.af-col__head` 是单行 flex（`nowrap`），换行会把六列列头撑成参差不齐。 */
 .af-col__name {
   font-size: var(--af-text-card); font-weight: var(--af-weight-semibold);
-  color: var(--p-fg-strong); line-height: var(--af-leading-snug);
+  color: var(--af-fg-strong); line-height: var(--af-leading-snug);
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .af-col__count {
@@ -623,7 +623,7 @@ html[data-rail='off'] .af-rail__actions .af-btn {
   display: inline-block;
 }
 .af-fold[open] > .af-fold__sum::before { transform: rotate(90deg); }
-.af-fold__sum:hover { color: var(--p-fg-strong); }
+.af-fold__sum:hover { color: var(--af-fg-strong); }
 .af-fold__body { padding: 0 var(--p-s4) var(--p-s4); }
 
 /* ===========================================================================
@@ -770,10 +770,10 @@ html[data-rail='off'] .af-rail__actions .af-btn {
   background: transparent; border: 0; width: 100%; text-align: left;
   font-family: inherit; cursor: pointer;
 }
-.af-switch__item:hover { background: var(--p-surf-3); color: var(--p-fg-strong); text-decoration: none; }
+.af-switch__item:hover { background: var(--p-surf-3); color: var(--af-fg-strong); text-decoration: none; }
 /* 当前项目：不只靠底色区分，前面加一个「当前」标签 —— 状态不能只靠颜色。 */
 .af-switch__item[aria-current='true'] {
-  background: var(--p-surf-2); color: var(--p-fg-strong); font-weight: var(--af-weight-semibold);
+  background: var(--p-surf-2); color: var(--af-fg-strong); font-weight: var(--af-weight-semibold);
 }
 .af-switch__item[aria-current='true'] .af-switch__shape::before {
   content: '当前 · ';
@@ -840,7 +840,7 @@ html[data-rail='off'] .af-rail__actions .af-btn {
   display: inline-flex; align-items: center; gap: var(--p-s2);
   min-height: 44px; padding: 0 var(--p-s4) 0 var(--p-s3);
   border: 1px solid var(--p-line-4); border-radius: var(--p-r-full);
-  background: var(--p-pop); color: var(--p-fg-strong);
+  background: var(--p-pop); color: var(--af-fg-strong);
   font: inherit; font-size: var(--p-t-sm); font-weight: var(--af-weight-medium);
   cursor: pointer; box-shadow: var(--p-sh-3); text-decoration: none;
   transition: background var(--p-dur) var(--p-ease), transform 120ms var(--p-ease);

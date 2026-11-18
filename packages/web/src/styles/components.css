@@ -227,7 +227,7 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
               border-color var(--p-dur) var(--p-ease),
               color var(--p-dur) var(--p-ease);
 }
-.af-btn:hover { background: var(--p-surf-3); border-color: var(--p-line-4); color: var(--p-fg-strong); }
+.af-btn:hover { background: var(--p-surf-3); border-color: var(--p-line-4); color: var(--af-fg-strong); }
 .af-btn:active { background: var(--p-surf-2); }
 .af-btn:disabled, .af-btn[aria-disabled='true'] {
   opacity: 0.5; pointer-events: none; color: var(--af-fg-disabled);
@@ -283,7 +283,7 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 .af-btn--danger:hover { background: var(--p-failed-bg); color: var(--p-failed); border-color: var(--p-failed); }
 
 .af-btn--ghost { background: transparent; border-color: transparent; color: var(--p-fg-2); }
-.af-btn--ghost:hover { background: var(--p-surf-2); color: var(--p-fg-strong); border-color: transparent; }
+.af-btn--ghost:hover { background: var(--p-surf-2); color: var(--af-fg-strong); border-color: transparent; }
 
 /* 分段控件：互斥选项，选中的那格必须比 hover 更亮（否则分不出） */
 .af-seg { display: inline-flex; background: var(--af-surface-2); border-radius: var(--af-radius-sm); padding: 1px; }
@@ -413,7 +413,7 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
      正文（见 tokens.css §6b）。原值是 `--af-text-md` + medium + `--af-fg-primary`，
      与正文同档同色，扫视时标题和内容是一层。 */
   font-size: var(--af-text-card); font-weight: var(--af-weight-semibold);
-  color: var(--p-fg-strong); line-height: var(--af-leading-snug);
+  color: var(--af-fg-strong); line-height: var(--af-leading-snug);
 }
 .af-panel__body { flex: 1 1 auto; overflow: auto; min-height: 0; }
 .af-panel__state {
@@ -1387,7 +1387,7 @@ kbd, .kbd {
      ——项目名是这一块最重要的一行，却比卡片里的说明字更小，扫视时抓不到。
      改用 card 档（17px）+ strong 前景，与 `.af-panel__title` 同一级。 */
   font-size: var(--af-text-card); font-weight: var(--af-weight-semibold);
-  color: var(--p-fg-strong); line-height: var(--af-leading-snug);
+  color: var(--af-fg-strong); line-height: var(--af-leading-snug);
   display: flex; align-items: center; gap: var(--af-space-2);
 }
 .af-region__note { font-size: var(--af-text-xs); color: var(--af-fg-tertiary); }
@@ -1505,7 +1505,7 @@ kbd, .kbd {
      而不是直接跳到 17px：任务卡是看板列里的窄卡（列宽约 200px），17px 会让
      标题只放得下四五个字。同档靠 semibold + strong 前景拉开层级。 */
   font-size: var(--af-text-md); font-weight: var(--af-weight-semibold);
-  line-height: var(--af-leading-snug); color: var(--p-fg-strong);
+  line-height: var(--af-leading-snug); color: var(--af-fg-strong);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 

@@ -374,7 +374,15 @@ describe('面板三分区（子任务 12）', () => {
   it('面板标题用 card 档 + strong 前景（字号与明度一起抬）', () => {
     const block = cssBlockOf(css, '.af-panel__title')
     expect(block).toContain('--af-text-card')
-    expect(block).toContain('--p-fg-strong')
+    /* 门面名与真身名二选一，**但不许是别的颜色**。
+       为什么允许 `--af-fg-strong`：G92 裁定「原型在用 → 补消费者」。原型
+       `--fg-strong` 在 `app.css` 被用 33 次，而实现这 15 处一直直接写
+       `var(--p-fg-strong)` 绕过 `--af-*` 门面层，于是 `--af-fg-strong`
+       成了一个定义了、却零消费者的孤儿。补上消费者之后，门面层才真的
+       在服役——**这条断言的意图是「标题要 strong 前景」，两个名字指向同一个
+       真身，强度不变**。写成 `toContain` 单个名字会把「实现该走哪一层」
+       这个不该由本用例决定的事钉死，反过来也挡不住有人换成 `--p-fg-2`。 */
+    expect(block).toMatch(/--(?:af|p)-fg-strong/)
     expect(block).toContain('--af-weight-semibold')
   })
 
