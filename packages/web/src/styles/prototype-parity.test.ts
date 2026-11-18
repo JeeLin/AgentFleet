@@ -28,7 +28,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { stripCssComments as stripComments } from '@/test/css-scan'
+import { parseCssRules, propValue, ruleFor, stripCssComments as stripComments } from '@/test/css-scan'
 
 import { describe, expect, it } from 'vitest'
 
@@ -271,6 +271,57 @@ describe('关键规则的取值来源与原型一致', () => {
         Number(w[1]),
         `看板列宽下限 ${w[1]}px 小于原型 236px：卡片标题会更早折行`,
       ).toBeGreaterThanOrEqual(236)
+    }
+  })
+
+  it('看板列宽下限不得低到截断列名（G70）', () => {
+    /* **上一条测试看不到真正的列宽**（v0.8.1 第5轮 G70 发现）：它在
+       `COMPONENTS_CSS` 里找 `grid-template-columns: repeat(6, minmax(...))`，
+       而看板的列宽定义根本不在这里——`.af-board` 用的是
+       `grid-auto-columns: minmax(Npx, 1fr)`，落在 `prototype-shell.css`。
+       于是上一条命中 0 次、循环体一次都没跑，等于恒绿。这正是 G41 那类
+       「守卫看着在守、其实在空转」的洞，别再往上一条加判据了。
+
+       这里的判据是**实测得到的硬约束**：列头 = 形状 12 + gap 8 + 列名 + gap 8
+       + 计数 20 + 两侧 padding 16。列名最长是「排队中 / 执行中 / 待验收 /
+       已完成」三个 17px 全角字，实测 `scrollWidth 51`，所以列头放得下列名
+       需要 ~115px。1024 视口下列宽压到 116.7px 时列名被截成「排队…」
+       （`scrollWidth 51 / clientWidth 44`，实测），**116.7 是断裂点**。
+
+       取 150px 作下限（不是 116.7）：断言要留余量给滚动条宽度、`--p-s*`
+       间距微调、以及将来列头加一个图标这类改动，否则任何一点风吹草动都得
+       重新改这个数字。而 150px 仍远高于断裂点，真被压回去时一定会红。 */
+    const rules = parseCssRules(IMPL_CSS)
+    const board = ruleFor(rules, '.af-board')
+    expect(board, 'prototype-shell.css 里没有 .af-board 规则').toBeDefined()
+
+    const raw = propValue(board!, 'grid-auto-columns')
+    expect(raw, '.af-board 没写 grid-auto-columns——列宽会退回 auto，六列等宽而不可控').toBeDefined()
+
+    const m = /minmax\((\d+)(?:px)?\s*,\s*1fr\)/.exec(raw!)
+    expect(m, `.af-board 的 grid-auto-columns 应形如 minmax(Npx, 1fr)，实际是 \`${raw}\``).not.toBeNull()
+
+    const floor = Number(m![1])
+    expect(
+      floor,
+      `看板列宽下限 ${floor}px 低于列名不截断的实测断裂点(~117px)：`
+        + '列头装不下「排队中」三个 17px 全角字，六列里有四列的名字会被截成「排队…」。'
+        + '列名是看板唯一的导航语言，宁可横向滚动也不许截断。',
+    ).toBeGreaterThanOrEqual(150)
+
+    /* 窄屏必须留一条「抬下限 + 横向滚动」的断点。没有它的话，1100px 以下
+       六列会被继续压缩到截断列名——那正是 G70 的原症状。 */
+    const narrow = rules.filter(
+      (r) => r.selector.trim() === '.af-board' && r.atRules.some((a) => a.includes('max-width')),
+    )
+    expect(narrow.length, '没有窄屏断点重设 .af-board 列宽：1100px 以下六列会被压到截断列名').toBeGreaterThan(0)
+    const narrowFloors = narrow
+      .map((r) => /minmax\((\d+)px/.exec(propValue(r, 'grid-auto-columns') ?? ''))
+      .filter((x): x is RegExpExecArray => x !== null)
+      .map((x) => Number(x[1]))
+    expect(narrowFloors.length, '窄屏断点里的 .af-board 没有 minmax(Npx, ...) 下限').toBeGreaterThan(0)
+    for (const f of narrowFloors) {
+      expect(f, `窄屏断点的列宽下限 ${f}px 没有比桌面下限 ${floor}px 大——那就等于没抬`).toBeGreaterThan(floor)
     }
   })
 
