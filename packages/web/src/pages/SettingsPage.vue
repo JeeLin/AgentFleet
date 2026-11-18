@@ -673,7 +673,7 @@ function onToggleFollowOS(): void {
 }
 /* 缩略图用**该套配色自己的色值**，不跟当前主题走——它存在的意义就是
    「显示别套配色的样子」。这是全站唯一允许写死色值的地方
-   （原型 `app.css:760-776` 的原话），值逐条照抄。 */
+   （原型 `app.css:761-776` 的原话），值逐条照抄。 */
 .af-theme__prev {
   display: flex;
   flex-direction: column;

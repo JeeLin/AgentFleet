@@ -262,7 +262,7 @@ function openDevice(nodeId: string): void {
 </template>
 
 <style scoped>
-/* 内容层的内边距：原型 `agents.html:25` 是内联 `padding:20px 20px 64px`。
+/* 内容层的内边距：原型 `agents.html:24` 是内联 `padding:20px 20px 64px`。
    静态内联样式被门禁禁止，落成这一层——与另外 9 页同一写法。
    `.af-agd` 现在挂在**内容层**上（原来是外层 div），后代选择器照旧生效。 */
 .af-agd__stack {

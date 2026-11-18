@@ -190,7 +190,7 @@ const CAPABILITIES: readonly CapabilityRow[] = [
 <style scoped>
 /* 提示条与分区的竖向间隔。**不写进 `components.css`**：那是全站契约，
    这里的间距只服务本页的阅读节奏（页内 4 块，块间要留白）。 */
-/* 内容层的内边距与块间距：原型 `agents.html:25` 是内联
+/* 内容层的内边距与块间距：原型 `agents.html:24` 是内联
    `padding:20px 20px 64px` 加 `af-stack`（12px gap）。静态内联样式被
    `prototype-parity` 门禁禁止，所以落成这一层 —— 与另外 9 页同一写法。 */
 .af-agentpage__stack {

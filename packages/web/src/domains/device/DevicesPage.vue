@@ -250,7 +250,7 @@ async function remove(device: DeviceSummary): Promise<void> {
 </script>
 
 <template>
-  <!-- 页面骨架照原型 `devices.html:14-23`：`header.af-head` 是一整幅页头，
+  <!-- 页面骨架照原型 `devices.html:15-23`：`header.af-head` 是一整幅页头，
        内容在它下面的 `.af-body` 里。上一版是自造的 `.af-page` +
        `.af-page__head` —— 那一族规则在 v0.8.1 子任务 2 已随类名删除，于是这一页
        变成一张没有页头几何的裸页面。页头用共享的 `PageHead`（与另外 3 页同一
@@ -534,7 +534,7 @@ async function remove(device: DeviceSummary): Promise<void> {
 /* 摘要带上的三个状态点。**颜色取自语义令牌，不写在模板的内联样式里**：
    内联 `style="color: var(--af-ok)"` 与 token 分叉时没有测试会红，
    而主题（四套）切换时它跟着 token 走才是对的。
-   `.af-dot` 底色是 `currentColor`（`components.css:279`），所以这里改的是
+   `.af-dot` 底色是 `currentColor`（`components.css:346`），所以这里改的是
    **文字色**——与原来那三条内联样式同一个机制，只是挪进了样式表。 */
 .af-dev-summary__dot--ok { color: var(--af-ok); }
 .af-dev-summary__dot--warn { color: var(--af-warn); }
