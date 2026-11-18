@@ -8,11 +8,13 @@ import { cssRuleOf, readRepoFile } from '@/test/css'
 import { stripCssComments } from '@/test/css-scan'
 import {
   EMPTY_SHELL_API as EMPTY_API,
+  calledUrls,
   clickRailToggle,
   flushShell as flush,
   goTo,
   mountShell as mountApp,
   railOf,
+  sentBodiesOf,
 } from '@/test/app-shell'
 
 describe('App：外壳骨架', () => {
@@ -565,7 +567,10 @@ describe('App：401 之后', () => {
     await flush(w)
 
     const shell = w.element.querySelector('.af-shell')
-    expect(fetchMock.mock.calls.map(([u]) => String(u))).toContain('/api/devices')
+    /* 用 harness 的 `calledUrls` 而不是就地 `mock.calls.map`（G88）：
+       这个函数原本零消费者、注释还在论证「为何该留」——真正该做的是让它
+       有消费者，而不是删掉它再让下一处继续就地重写一遍。 */
+    expect(calledUrls(fetchMock)).toContain('/api/devices')
 
     const box = document.querySelector<HTMLElement>('[data-loginprompt]')
     expect(box).not.toBeNull()
@@ -578,7 +583,7 @@ describe('App：401 之后', () => {
   })
 
   it('输对密码 → 关框并留在原页面（不导航、不刷新）', async () => {
-    stubFetch({
+    const fetchMock = stubFetch({
       ...EMPTY_API,
       '/api/devices': { status: 401, body: { error: 'session_expired' } },
       '/login': { body: { ok: true } },
@@ -599,6 +604,16 @@ describe('App：401 之后', () => {
     await flush(w)
 
     expect(document.querySelector('[data-loginprompt]')).toBeNull()
+    /* **发出去的口令就是用户输的那个**（G88）：此前这条只断言「框关了」——
+       而框关掉只要求 `/login` 回了 ok，哪怕发的是空串或别的字段名也照样绿。
+       用 harness 的 `sentBodiesOf` 按 URL 取出那次 POST 的 JSON 体。 */
+    const urls = calledUrls(fetchMock)
+    const bodies = sentBodiesOf(fetchMock)
+    const loginIdx = urls.findIndex((u) => u.includes('/login'))
+    expect(loginIdx, '提交后必须真的向 /login 发过请求').toBeGreaterThanOrEqual(0)
+    expect(bodies[loginIdx], '/login 的请求体必须是 JSON 对象').toMatchObject({
+      password: 'correct horse battery',
+    })
     // 「不导航」不是只看地址：外壳 DOM 必须是同一个实例
     expect(location.pathname).toBe('/devices')
     expect(w.element.querySelector('.af-shell')).toBe(before)
