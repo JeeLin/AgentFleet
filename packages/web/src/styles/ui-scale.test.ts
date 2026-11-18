@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { readRepoFile } from '@/test/css'
-import { classNamesIn, parseCssRules, propValue, ruleFor, stripCssComments } from '@/test/css-scan'
+import {
+  classNamesIn,
+  classNamesInRule,
+  parseCssRules,
+  propValue,
+  ruleFor,
+  stripCssComments,
+} from '@/test/css-scan'
 
 import { readdirSync, readFileSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
-import { fileURLToPath } from 'node:url'
 
 /* ===========================================================================
    子任务 12 的门禁：层级阶梯 + 卡片分区
@@ -33,9 +39,15 @@ function tokenPx(css: string, name: string): number {
  *
  * **不钉单文件**：把「谁消费了这类」写死成一个路径，改天消费者挪到别的页面，
  * 守卫就会指着一个无辜的文件报错（v0.8.1 第4轮的 `.af-panel__foot` 就是这样）。
+ *
+ * **根目录用 `process.cwd()` 而不是 `import.meta.url`**（v0.8.1 第5轮）：
+ * 本套用例在 `packages/web` 下跑，`cwd` 就是包根；而 `fileURLToPath(new URL(…,
+ * import.meta.url))` 在 vitest 的模块图里拿到的不是 `file:` URL，
+ * 实测抛 `TypeError: The URL must be of scheme file`——守卫自己先炸，
+ * 比不写还糟。
  */
 function vueFilesUsing(needle: string): string[] {
-  const webRoot = fileURLToPath(new URL('../..', import.meta.url))
+  const webRoot = resolve(process.cwd())
   const hits: string[] = []
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -48,6 +60,22 @@ function vueFilesUsing(needle: string): string[] {
   }
   walk(resolve(webRoot, 'src'))
   return hits.sort()
+}
+
+/**
+ * `components.css` 里「整个主体就是这一个类」的规则所声明的属性集合。
+ *
+ * 上一条守卫需要它来回答「`.af-taskcard` 现在还剩哪几条独有声明」——
+ * 刻意只认**单类整个主体**（`classNamesInRule` 那一级）：`.af-taskcard__title`
+ * 或 `.af-drawer .af-taskcard` 不是「给卡片本体定外观」，不该混进来。
+ */
+function RULES_OWN(cls: string): Set<string> {
+  const out = new Set<string>()
+  for (const rule of parseCssRules(readRepoFile('packages/web/src/styles/components.css'))) {
+    if (!classNamesInRule(rule).includes(cls)) continue
+    for (const m of stripCssComments(rule.body).matchAll(/(?:^|;)\s*([a-z-]+)\s*:/g)) out.add(m[1])
+  }
+  return out
 }
 
 describe('层级阶梯（子任务 12）', () => {
@@ -203,33 +231,174 @@ describe('面板三分区（子任务 12）', () => {
      静默生效。写这次重设计时我连续踩了三次（`.af-card` 跨文件重名、
      `.af-panel__foot` 同文件两次、`.af-panel__head` 同文件两次），每次都是
      靠肉眼看出来，没有网。这里补上网：`components.css` 里顶层选择器
-     （行首、到 `{` 为止）不许重复出现。 */
-  it('components.css 里没有「后者静默全量覆盖前者」的重复选择器', () => {
-    /* 按**结构**统计而不是按行：`parseCssRules` 已剥注释、按花括号配对，
-       多行选择器、逗号组、`@media` 里的规则都在同一条口径下。
-       （初版按行只认「行首单类 + 同行 `{` 结尾」，漏掉了 `.af-projectlist__dot
-       { font-size: 0; … }` 这种**声明体写在同一行**的形态。）
+     （行首、到 `{` 为止）不许重复出现。
+     **第5轮扩到三份样式表**（G24）：原来只守 `components.css`，于是
+     `prototype-shell.css`（后导入、赢面更大的那一份）与 `tokens.css`
+     （变量真相源）里的「后一条静默全量覆盖前一条」完全没网。 */
+  const DECLARED_FILES = [
+    'packages/web/src/styles/components.css',
+    'packages/web/src/styles/prototype-shell.css',
+    'packages/web/src/styles/tokens.css',
+  ] as const
 
-       **判的是「静默全量覆盖」，不是「选择器出现两次」**：同一条选择器拆成
-       几条互补的规则（几何一条、视觉一条）是**有意**的，只要前一条声明的
-       属性没有被后一条全部重写，就没有内容丢失。只有当后一条重写了前一条的
-       某个属性时，前一条的那条声明才是死的——那才是这条守卫要抓的东西。 */
-    const declaredBefore = new Map<string, string[]>()
-    const overridden: string[] = []
-    for (const rule of parseCssRules(css)) {
-      // 只统计**顶层**规则（不在任何 at-rule 里）：`@media` 内重写是合法覆盖。
-      if (rule.atRules.length > 0) continue
-      const sel = rule.selector.replace(/\s+/g, ' ').trim()
-      const props = [...rule.body.matchAll(/(?:^|;)\s*([a-z-]+)\s*:/g)].map((m) => m[1])
-      const prev = declaredBefore.get(sel) ?? []
-      for (const p of props) {
-        if (prev.includes(p)) overridden.push(`${sel} 的 ${p}`)
+  for (const file of DECLARED_FILES) {
+    it(`${file.replace('packages/web/src/styles/', '')} 里没有「后者静默全量覆盖前者」的重复选择器`, () => {
+      const css = readRepoFile(file)
+      /* 按**结构**统计而不是按行：`parseCssRules` 已剥注释、按花括号配对，
+         多行选择器、逗号组、`@media` 里的规则都在同一条口径下。
+         （初版按行只认「行首单类 + 同行 `{` 结尾」，漏掉了 `.af-projectlist__dot
+         { font-size: 0; … }` 这种**声明体写在同一行**的形态。）
+
+         **判的是「静默全量覆盖」，不是「选择器出现两次」**：同一条选择器拆成
+         几条互补的规则（几何一条、视觉一条）是**有意**的，只要前一条声明的
+         属性没有被后一条全部重写，就没有内容丢失。只有当后一条重写了前一条的
+         某个属性时，前一条的那条声明才是死的——那才是这条守卫要抓的东西。 */
+      const declaredBefore = new Map<string, string[]>()
+      const overridden: string[] = []
+      for (const rule of parseCssRules(css)) {
+        // 只统计**顶层**规则（不在任何 at-rule 里）：`@media` 内重写是合法覆盖。
+        if (rule.atRules.length > 0) continue
+        const sel = rule.selector.replace(/\s+/g, ' ').trim()
+        const props = [...rule.body.matchAll(/(?:^|;)\s*([a-z-]+)\s*:/g)].map((m) => m[1])
+        const prev = declaredBefore.get(sel) ?? []
+        for (const p of props) {
+          if (prev.includes(p)) overridden.push(`${sel} 的 ${p}`)
+        }
+        declaredBefore.set(sel, [...prev, ...props])
       }
-      declaredBefore.set(sel, [...prev, ...props])
-    }
-    expect(overridden, `后一条规则重写了前一条已声明的属性（前者是死声明）：${overridden.join(', ')}`).toEqual(
-      [],
+      expect(overridden, `后一条规则重写了前一条已声明的属性（前者是死声明）：${overridden.join(', ')}`).toEqual(
+        [],
+      )
+    })
+  }
+
+  /* **跨文件的「后者胜」也要看得见**（G24 的另一半）：`index.css` 的导入顺序
+     是 tokens → components → prototype-shell → 4 份主题，**顺序本身**是一条
+     没人读的隐藏规则（`index.css` 文件头就是这么写的）。两条判据：
+       ① 三个基座文件必须按这个次序出现——把 `components` 排到 `tokens` 之前，
+          `var()` 会先解析成空值；把 `prototype-shell` 排到 `components` 之前，
+          「原型搬取层」会被「补漏版」盖掉（上一轮 18% 类名重合率的来源）。
+       ② 主题四份必须排在最后且顺序固定：它们定义字面 `--p-*`，要压过
+          `tokens.css` 的同名 `var()` 映射层。 */
+  it('index.css 的导入顺序是 tokens → components → shell → 四份主题（顺序就是规则）', () => {
+    const index = readRepoFile('packages/web/src/styles/index.css')
+    const imports = [...index.matchAll(/@import\s+'\.\/([a-z-]+)\.css'/g)].map((m) => m[1])
+    expect(
+      imports,
+      'index.css 的 @import 顺序变了：后者会静默覆盖前者，且没有任何报错',
+    ).toEqual(['tokens', 'components', 'prototype-shell', 'theme-neutral', 'theme-warm', 'theme-paper', 'theme-cream'])
+    /* 反向：`main.ts` 不许绕过 index.css 直接导入子文件——那会让「谁先加载」
+       重新变成一条散落在各处的隐藏规则。 */
+    const main = readRepoFile('packages/web/src/main.ts')
+    expect(main, 'main.ts 必须只 import styles/index.css（不要各组件各自 import 子样式表）').not.toMatch(
+      /import\s+'\.\/styles\/(?:tokens|components|prototype-shell|theme-[a-z]+)\.css'/,
     )
+  })
+
+  /* **同一元素上的两个 `af-*` 类，不许一方把另一方全量盖掉**（v0.8.1 第5轮，
+     G40 的通用网）。实证：`TaskCard.vue:123` / `BoardPage.vue:595` 写的是
+     `class="af-card af-taskcard"`，而 `.af-card` 住在**后导入**的
+     `prototype-shell.css`、与 `.af-taskcard` 同为单类选择器、特异性相同——
+     于是 `components.css` 里那 14 条声明 **13 条从上线那天起就是死的**，
+     `:hover` / `:focus-visible` 也一起废掉。它不报错、不变红，
+     只能靠人看出来（这次是靠 G40 的报告看出来的）。
+
+     **判据**：从模板里取每个 `class="…"` 静态属性里出现的 af-* 类，两两成对；
+     若两份样式表里各有一条**单类整个主体**的规则（`classNamesInRule` 那一级），
+     且其中一条声明的属性被另一条**逐条重写**（cover = 前者的属性集合是后者的
+     子集），这一对就是「后者全量覆盖前者」。
+
+     **为什么可以按「主体全量」判、而不像同文件那条判「任一属性重写」**：
+     跨文件的赢家是**整条规则体**——后导入者不会只盖一个属性，它盖的是
+     同特异性的整个声明块。所以「前者的属性全在后者里」就等于「前者一句没生效」。
+
+     **白名单**只有一条：`af-card + af-taskcard`（`.af-taskcard` 现在只剩
+     `align-items: stretch`，`.af-card` 里没有它——这是**有意**的「基础类 +
+     一条独有微调」，不是遮蔽）。新增豁免必须在下面写清为什么那个组合成立。 */
+  const TWO_CLASS_OVERLAP_ALLOWLIST = new Set(['af-card + af-taskcard'])
+
+  it('同一元素上的两个 af-* 类不许一方全量覆盖另一方（`.af-card` / `.af-taskcard` 那次）', () => {
+    const a = classNamesIn(readRepoFile('packages/web/src/styles/components.css'), { wholeSubject: true })
+    const b = classNamesIn(readRepoFile('packages/web/src/styles/prototype-shell.css'), { wholeSubject: true })
+    /** 某类在**所有**样式表里那些「整个主体就是它」的规则的属性集合（并集）。 */
+    const propsOf = (cls: string): Set<string> => {
+      const out = new Set<string>()
+      for (const file of [
+        'packages/web/src/styles/components.css',
+        'packages/web/src/styles/prototype-shell.css',
+      ]) {
+        for (const rule of parseCssRules(readRepoFile(file))) {
+          if (!classNamesInRule(rule).includes(cls)) continue
+          for (const m of stripCssComments(rule.body).matchAll(/(?:^|;)\s*([a-z-]+)\s*:/g)) out.add(m[1])
+        }
+      }
+      return out
+    }
+
+    const covered: string[] = []
+    /** 模板里静态 `class="…"` 的扫描范围：`packages/web/src` 下的全部 `.vue`。
+        递归辅助与 `vueFilesUsing` 是同一套写法（cwd = `packages/web`）。 */
+    const walkVue = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = resolve(dir, entry.name)
+        if (entry.isDirectory()) walkVue(full)
+        else if (entry.name.endsWith('.vue')) {
+          const src = readFileSync(full, 'utf-8')
+          const file = full.slice(process.cwd().length + 1)
+          for (const m of src.matchAll(/class="([^"]*)"/g)) {
+            if (m[1].includes('${') || m[1].includes('{{')) continue
+            const afs = [...new Set(m[1].split(/\s+/).filter((c) => c.startsWith('af-')))]
+            for (const x of afs) {
+              for (const y of afs) {
+                if (x === y) continue
+                // 只在「两份样式表各有一份」时才谈得上跨文件覆盖。
+                const both = a.has(`.${x}`) && b.has(`.${y}`) && a.has(`.${y}`) && b.has(`.${x}`)
+                if (!both) continue
+                const px = propsOf(`.${x}`)
+                const py = propsOf(`.${y}`)
+                if (px.size === 0 || py.size === 0) continue
+                const xsCoveredByY = [...px].every((p) => py.has(p))
+                if (!xsCoveredByY) continue
+                const key = [`${x} + ${y}`, `${y} + ${x}`].find((k) => TWO_CLASS_OVERLAP_ALLOWLIST.has(k))
+                if (key) continue
+                covered.push(`${file}: \`${x}\` 的 ${px.size} 条声明全被 \`${y}\` 重写（${[...px].join(' / ')}）`)
+              }
+            }
+          }
+        }
+      }
+    }
+    walkVue(resolve(process.cwd(), 'src'))
+    expect(
+      [...new Set(covered)],
+      `同一元素上两个 af-* 类，其中一个整块失效（改它不会影响页面）：\n${[...new Set(covered)].join('\n')}`,
+    ).toEqual([])
+  })
+
+  /* 上一条守着「不许再有新的」。这一条守着**已修的那一对真的修好了**：
+     `.af-taskcard` 必须仍是 `.af-card` 的严格子集（只剩一条独有声明），
+     且那条独有声明就是 `align-items: stretch`。两条合起来才排得掉
+     「改回 14 条声明」与「把独有的一条也删了」两种回潮。 */
+  it('`.af-taskcard` 只保留 `.af-card` 覆盖不到的那一条声明（`align-items`）', () => {
+    /* `ruleFor` 要求选择器**全文相等**，而 `.af-card` 出现在 `:hover` /
+       `:focus-visible` 与后代选择器里的次数远多于本体，所以这里按
+       「整个主体恰好是 `.af-card`」筛，而不是 `find(r => r.selector === '.af-card')`。 */
+    const shell = parseCssRules(readRepoFile('packages/web/src/styles/prototype-shell.css'))
+    const cardRules = shell.filter((r) => classNamesInRule(r).includes('.af-card'))
+    expect(cardRules.length, 'shell 里没有 `.af-card`——卡片视觉基准没了').toBeGreaterThan(0)
+    const cardProps = new Set(
+      cardRules.flatMap((r) =>
+        [...stripCssComments(r.body).matchAll(/(?:^|;)\s*([a-z-]+)\s*:/g)].map((m) => m[1]),
+      ),
+    )
+    const own = RULES_OWN('.af-taskcard')
+    expect(own.size, '`.af-taskcard` 基础块被整条删掉了（`align-items: stretch` 是它唯一的存在理由）').toBeGreaterThan(0)
+    const blind = [...own].filter((p) => cardProps.has(p))
+    expect(
+      blind,
+      `\`.af-taskcard\` 里的 ${blind.join(' / ')} 被 \`.af-card\` 重写（同特异性、后导入 → 从不生效）`,
+    ).toEqual([])
+    expect([...own], '`.af-taskcard` 的独有声明必须正好是 `align-items`').toEqual(['align-items'])
   })
 
   /* **这条守的是一个真踩过的坑**：第一版我新写了 `.af-card` 当容器，
@@ -278,8 +447,14 @@ describe('面板三分区（子任务 12）', () => {
      `overflow-x: visible` 就是这样被误删过一次）——那是实测的事，不是本守卫的结论。 */
 
   /* 宽松口径允许的重叠。**每一项都是「有意的局部覆盖」**，不是全量重定义：
-     prototype-shell.css 那边一律带前缀（`.af-drawer` / `html[data-rail='off']`
-     / `.af-region--warn`），只在特定作用域里改几个声明。 */
+     prototype-shell.css 那边一律带前缀（`.af-drawer` / `html[data-rail='off']`），
+     只在特定作用域里改几个声明。
+
+     **`.af-region__head` 那一条已删（v0.8.1 第5轮，G39）**：它放行的是 shell
+     里的 `.af-region--warn .af-region__head { background: … }`，而 `.af-region--warn`
+     **零模板消费者**——白名单拿一个没人用的变体，给一处真实的重叠开了口子。
+     变体连同这条豁免一起删。下面的「白名单条目已不再是真实重叠」反向断言会
+     把这种**幽灵条目**判红，所以删规则时必须同时删条目，否则这里立刻红。 */
   const LOOSE_OVERLAP_ALLOWLIST: Array<{ cls: string; why: string }> = [
     {
       cls: '.af-btn',
@@ -297,10 +472,6 @@ describe('面板三分区（子任务 12）', () => {
       cls: '.af-msg__who',
       why: 'shell 只有 `.af-drawer .af-msg__who`：抽屉署名行字号降到 2xs。',
     },
-    {
-      cls: '.af-region__head',
-      why: 'shell 只有 `.af-region--warn .af-region__head`：warning 变体换底色，基底来自 components.css。',
-    },
   ]
 
   it('两份样式表不许有同名类的全量定义（严格口径为空）', () => {
@@ -310,6 +481,26 @@ describe('面板三分区（子任务 12）', () => {
     const both = [...a].filter((s) => b.has(s)).sort()
     expect(both, `同时定义在两个文件里（后导入的 prototype-shell.css 会全覆盖）：${both.join(', ')}`)
       .toEqual([])
+    /* **自检：扫描器必须真的在数东西**（v0.8.1 第5轮，G23）。这条守卫最容易
+       的死法不是「漏了一种书写形态」，而是**两边都空**——空集与空集的交集
+       当然还是空集，守卫恒真。两个文件都在、扫描器也该跑得出几百个类，
+       数量崩掉只可能是 `parseCssRules` / `classNamesIn` 被改坏，或文件路径
+       拼错读进了空串。所以把规模下限钉在这里。 */
+    expect(a.size, 'components.css 一个「单类整个主体」的类都没扫出来').toBeGreaterThan(100)
+    expect(b.size, 'prototype-shell.css 一个「单类整个主体」的类都没扫出来').toBeGreaterThan(50)
+    /* 再补一个**已知真重叠**的正例：`.af-region__title` 在 shell 的
+       `.af-region--warn`（已删，见下）之外，仍以「shell 只在后代里引用」的
+       形式出现在两边。没有这条，「扫描器瞎了 → 交集空 → 断言绿」的死法就
+       没人拦。正例取自**宽松口径**（它数的是「类名同时出现在两份样式表」，
+       包括后代选择器里的命中），且点名一个**不在严格交集里**的类——
+       严格口径为空是**期望行为**，不能拿它当正例。 */
+    const looseA = classNamesIn(css, { wholeSubject: false })
+    const looseB = classNamesIn(shell, { wholeSubject: false })
+    const looseBoth = [...looseA].filter((s) => looseB.has(s)).sort()
+    expect(looseBoth.length, '宽松口径的跨文件命中数不该少于白名单本身——扫描器瞎了').toBeGreaterThanOrEqual(
+      LOOSE_OVERLAP_ALLOWLIST.length,
+    )
+    expect(looseBoth.includes('.af-btn'), '正例：.af-btn 应当同时出现在两份样式表里（shell 的收起态覆盖）').toBe(true)
   })
 
   /* **宽松口径的命中必须全部在白名单内**：白名单外的命中说明新增了一处

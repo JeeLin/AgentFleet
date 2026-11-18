@@ -19,10 +19,13 @@
         卡住合法代码。
 
    唯一可判、也唯一值得守的那一条：**本文件里**的页面级布局两族合计
-   **≤30 条规则**（实测 19 条：.af-auth 6 / .af-wb 13），由
+   **≤30 条规则**（实测 25 条：.af-auth 9 / .af-wb 16），由
    `src/styles/components.test.ts` 断言。用「条」不用「行」：一条规则写成
    一行还是七行只差换行，行数量的是排版、不是规模。超了说明往页面壳里
    塞了本该是组件的东西——那时该拆组件，不是继续往这两族里堆。
+   **分项数字会漂**（v0.8.1 第5轮复核：前一版写「19 条：6 / 13」，实测已经
+   是 25 条 9 / 16——门禁只判 `≤30` 不判等值，所以不会自己变红）。加了规则
+   要回来重数，或者干脆只信上限那半句。
 
    ── 三条组织规则 ──────────────────────────────────────────────────
    ① 每个组件的四态（hover / active / focus / disabled）在同一个块里写完，
@@ -296,21 +299,10 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 .af-field__hint { font-size: var(--af-text-sm); color: var(--af-fg-tertiary); line-height: var(--af-leading-snug); }
 .af-field__error { font-size: var(--af-text-sm); color: var(--af-danger-fg); line-height: var(--af-leading-snug); }
 
-/* Checkbox：用 accent 而不是系统默认（系统样式在暗底上不可见） */
-.af-check {
-  appearance: none; width: 14px; height: 14px; flex: 0 0 14px;
-  background: var(--af-surface-2); border: 1px solid var(--af-border-strong);
-  border-radius: var(--af-radius-sm); cursor: pointer; position: relative;
-  transition: background-color var(--af-dur-instant) linear, border-color var(--af-dur-instant) linear;
-}
-.af-check:hover { border-color: var(--af-accent); }
-.af-check:checked { background: var(--af-accent); border-color: var(--af-accent); }
-.af-check:checked::after {
-  content: ''; position: absolute; left: 3px; top: 0px;
-  width: 4px; height: 8px; border: solid var(--af-fg-on-accent);
-  border-width: 0 2px 2px 0; transform: rotate(45deg);
-}
-.af-check:disabled { opacity: 0.5; pointer-events: none; }
+/* §4 此前还有一档 `.af-check`（自绘 checkbox，5 条规则）：**整族零模板消费者**
+   ——全仓 `.vue` / `.ts` 里 `af-check` 命中 0 处，模板用的是原生
+   `<input type="checkbox">`。v0.8.1 第5轮按「整族零消费即删」裁定删除
+   （G53/G54）。要自绘 checkbox 时重新写，不要以「留着待用」的形式挂着。 */
 
 /* ===========================================================================
    5. StatusDot / State / Badge
@@ -399,11 +391,13 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 }
 
 /* ===========================================================================
-   7. Tabs
+   7. Tabs —— **本节已删除**（v0.8.1 第5轮，G54）
    -------------------------------------------------------------------------
    只有真的互斥时才用 tabs。终端与文件是同时看的 → 不用 tabs（见规范 §7.1）。
+   所以这一节从一开始就只有一条 `.af-tabs`，而它**零模板消费者**：与其留一条
+   没人用的规则去「提示怎么用 tabs」，不如让规范里那句话单独承担这件事。
+   号不回收：§8 起往后的引用锚点都还叫原来的号。
    =========================================================================== */
-.af-tabs { display: flex; gap: var(--af-space-1); border-bottom: 1px solid var(--af-border-subtle); }
 
 /* ===========================================================================
    8. Table
@@ -469,33 +463,18 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 .af-tree__row[data-excluded='true'] .af-tree__name::before { content: '⊘ '; text-decoration: none; }
 
 /* ===========================================================================
-   10. Toast
+   10. Toast —— **本节已删除**（v0.8.1 第5轮，G51 并入 G54）
    -------------------------------------------------------------------------
-   aria-live 由 JS 在创建时按 sticky 决定（alert vs status）。
-   sticky = 不自动消失：可恢复的失败必须走这一条。
+   原本的约定是「aria-live 由 JS 在创建时按 sticky 决定（alert vs status），
+   sticky = 不自动消失：可恢复的失败必须走这一条」。但 `.af-toasts` /
+   `.af-toast` / `__body` / `__title` / `__text` / `__actions` 五条子块
+   **整族零消费者**：模板、`.ts` 以及原型 `prototype/assets/app.css` 三处
+   都没有 toast 这个词。v0.8.1 第5轮按「整族零消费即删」裁定删除，
+   `tokens.css` 的 `--af-z-toast` 随之删除。
+   可恢复的失败现在由就地提示（`.af-callout--failed` / 字段的 `__error`）
+   承担——它们有消费者、也留得住。要做 toast 时从 `prototype/` 取回视觉，
+   连同消费者、`aria-live` 的取舍与规范 §3 的节数一起加。
    =========================================================================== */
-.af-toasts {
-  position: fixed; right: var(--af-space-5); bottom: var(--af-space-10);
-  display: flex; flex-direction: column; gap: var(--af-space-2);
-  z-index: var(--af-z-toast); max-width: 380px;
-}
-.af-toast {
-  display: flex; align-items: flex-start; gap: var(--af-space-3);
-  padding: var(--af-space-3) var(--af-space-4);
-  background: var(--af-surface-3); border: 1px solid var(--af-border-default);
-  border-radius: var(--af-radius-md); box-shadow: var(--af-shadow-2);
-  font-size: var(--af-text-sm);
-  animation: af-toast-in var(--af-dur-fast) var(--af-ease-out);
-}
-@keyframes af-toast-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-.af-toast[data-tone='ok'] { border-left: 2px solid var(--af-ok); }
-.af-toast[data-tone='warn'] { border-left: 2px solid var(--af-warn); }
-.af-toast[data-tone='danger'] { border-left: 2px solid var(--af-danger); }
-.af-toast[data-tone='info'] { border-left: 2px solid var(--af-info); }
-.af-toast__body { flex: 1 1 auto; display: flex; flex-direction: column; gap: var(--af-space-1); }
-.af-toast__title { color: var(--af-fg-primary); font-weight: var(--af-weight-medium); }
-.af-toast__text { color: var(--af-fg-secondary); line-height: var(--af-leading-snug); }
-.af-toast__actions { display: flex; gap: var(--af-space-2); margin-top: var(--af-space-1); }
 
 /* ===========================================================================
    11. Modal / 抽屉 / 命令面板
@@ -525,30 +504,10 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
   border-top: 1px solid var(--af-border-subtle); flex: 0 0 auto;
 }
 
-/* 命令面板：模态的替代品，所以层级更高 */
-.af-palette {
-  position: fixed; left: 50%; top: 12vh; transform: translateX(-50%);
-  width: min(560px, calc(100% - var(--af-space-10)));
-  display: flex; flex-direction: column;
-  background: var(--af-surface-3); border: 1px solid var(--af-border-default);
-  border-radius: var(--af-radius-lg); box-shadow: var(--af-shadow-3);
-  z-index: var(--af-z-palette); overflow: hidden;
-}
-.af-palette__input {
-  background: none; border: 0; border-bottom: 1px solid var(--af-border-subtle);
-  color: var(--af-fg-primary); font-family: inherit; font-size: var(--af-text-md);
-  padding: var(--af-space-4) var(--af-space-5); width: 100%;
-}
-.af-palette__input:focus { outline: none; }
-.af-palette__list { max-height: 50vh; overflow: auto; padding: var(--af-space-2); }
-.af-palette__item {
-  display: flex; align-items: center; gap: var(--af-space-3);
-  padding: var(--af-space-2) var(--af-space-3); border-radius: var(--af-radius-sm);
-  font-size: var(--af-text-md); color: var(--af-fg-secondary); cursor: pointer;
-}
-.af-palette__item:hover { background: var(--af-surface-2); }
-.af-palette__item[aria-selected='true'] { background: var(--af-accent-bg); color: var(--af-fg-primary); }
-.af-palette__keys { margin-left: auto; display: flex; gap: var(--af-space-1); }
+/* 命令面板（`.af-palette` / `__input` / `__list` / `__item` / `__keys`）同样是
+   **整族零模板消费者**（模板 / `.ts` / 原型三处都命中 0），v0.8.1 第5轮按
+   「整族零消费即删」裁定删除（G54），`tokens.css` 的 `--af-z-palette` 随之删除。
+   键位帮助 `.af-help` 仍在用，见下一条。 */
 
 /* 键位帮助：最高层级，它解释其他所有 */
 .af-help {
@@ -641,24 +600,17 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 .af-skeleton--row { height: var(--af-row-compact); }
 
 /* ===========================================================================
-   13. Tooltip
+   13. Tooltip —— **本节已删除**（v0.8.1 第5轮，G54）
    -------------------------------------------------------------------------
-   键盘用户也要看得到：tooltip 在 :focus-visible 时同样出现。
-   且 tooltip 内容**必须**同时存在于 aria-label 或正文里——
-   不许让信息只活在 hover 中。
+   原本的两条纪律仍然成立，只是现在没有工具类来承载它们：键盘用户也要看得到
+   （tooltip 在 `:focus-visible` 时同样出现）、且 tooltip 内容**必须**同时
+   存在于 `aria-label` 或正文里——不许让信息只活在 hover 中。
+   `.af-tip` / `.af-tip__body` **整族零模板消费者**，v0.8.1 第5轮按
+   「整族零消费即删」裁定删除。它此前还在 `visual-contract.test.ts` 有一条
+   **专门守着死代码**的用例（断言一条没有任何消费者的规则仍在），一并删除。
+   要 tooltip 时从 `prototype/assets/app.css` 取回视觉，并同时补上消费者与
+   「`:focus-visible` 也要浮现」那条断言。
    =========================================================================== */
-.af-tip { position: relative; }
-.af-tip__body {
-  position: absolute; left: 50%; bottom: calc(100% + 6px); transform: translateX(-50%);
-  background: var(--af-surface-3); border: 1px solid var(--af-border-default);
-  border-radius: var(--af-radius-sm); box-shadow: var(--af-shadow-2);
-  padding: var(--af-space-2) var(--af-space-3); font-size: var(--af-text-2xs);
-  color: var(--af-fg-secondary); white-space: nowrap;
-  opacity: 0; pointer-events: none; z-index: var(--af-z-sticky);
-  transition: opacity var(--af-dur-fast) var(--af-ease-out);
-}
-.af-tip:hover .af-tip__body,
-.af-tip:focus-visible .af-tip__body { opacity: 1; }
 
 /* ===========================================================================
    14. Kbd
@@ -702,41 +654,18 @@ kbd, .kbd {
 .af-track__cap { display: block; width: 2px; height: 6px; background: var(--af-accent); border-radius: var(--af-radius-full); }
 
 /* ===========================================================================
-   16. 只读遮罩
+   16. 只读遮罩 / 17. 退避走带 —— **两节已删除**（v0.8.1 第5轮，G54）
    -------------------------------------------------------------------------
-   断线冻结用「压一层极淡斜纹」而不是盖遮罩：遮住内容就等于把
-   「设备上它还活着，Hub 暂时够不着」这句话变成唯一信息。
+   原本的设计判断仍然有效，只是**没有任何消费者**：
+     · §16 断线冻结用「压一层极淡斜纹」而不是盖遮罩——遮住内容就等于把
+       「设备上它还活着，Hub 暂时够不着」这句话变成唯一信息。
+     · §17 指数退避的等待不是「转圈圈」：让用户看见「下一次重连在什么时候」。
+   `.af-frozen` / `__note` 与 `.af-backoff` / `__fill` + `@keyframes af-backoff`
+   **两族都零模板消费者**（模板 / `.ts` / 原型三处命中 0），按「整族零消费
+   即删」裁定删除。断线三态现在由 `.af-state[data-state='reconnecting']`
+   （`StatusDot` / `StateBadge` 的六态形状）表达，那一条有消费者。
+   这两族若要做，重新写规则并补消费者——别把规则留在样式表里冒充已实现。
    =========================================================================== */
-.af-frozen { position: relative; }
-.af-frozen::after {
-  content: ''; position: absolute; inset: 0; pointer-events: none;
-  background: repeating-linear-gradient(45deg, transparent, transparent 6px, rgba(224, 82, 92, 0.07) 6px, rgba(224, 82, 92, 0.07) 12px);
-  border: 1px solid var(--af-danger-line); border-radius: var(--af-radius-sm);
-}
-.af-frozen > * { pointer-events: none; }
-.af-frozen__note {
-  position: absolute; left: 50%; top: var(--af-space-3); transform: translateX(-50%);
-  background: var(--af-danger-bg); border: 1px solid var(--af-danger-line);
-  border-radius: var(--af-radius-sm); padding: var(--af-space-1) var(--af-space-3);
-  font-size: var(--af-text-2xs); color: var(--af-danger-fg); white-space: nowrap;
-  z-index: 1;
-}
-
-/* ===========================================================================
-   17. 退避走带（reconnecting 的进度感）
-   -------------------------------------------------------------------------
-   指数退避的等待不是「转圈圈」：让用户看见「下一次重连在什么时候」。
-   =========================================================================== */
-.af-backoff {
-  height: 2px; background: var(--af-warn-bg); border-radius: var(--af-radius-full);
-  overflow: hidden; position: relative;
-}
-.af-backoff__fill {
-  position: absolute; left: 0; top: 0; bottom: 0; width: 40%;
-  background: var(--af-warn); border-radius: var(--af-radius-full);
-  animation: af-backoff 1.6s var(--af-ease-in-out) infinite;
-}
-@keyframes af-backoff { 0% { left: -40%; } 100% { left: 100%; } }
 
 /* ===========================================================================
    18. 认证页布局
@@ -1019,19 +948,11 @@ kbd, .kbd {
 }
 .af-fpane__preview .ln { color: var(--af-fg-disabled); user-select: none; }
 
-/* diff */
-.af-diff { font-family: var(--af-font-mono); font-size: var(--af-text-md); line-height: var(--af-leading-tight); }
-.af-diff__row { display: flex; padding: 0 var(--af-space-3); white-space: pre; }
-.af-diff__row[data-kind='add'] { background: var(--af-add-ink); color: var(--af-fg-primary); }
-.af-diff__row[data-kind='del'] { background: var(--af-del-ink); color: var(--af-fg-primary); }
-.af-diff__row[data-kind='hunk'] { background: var(--af-surface-2); color: var(--af-info-fg); }
-.af-diff__sign { flex: 0 0 14px; user-select: none; color: var(--af-fg-tertiary); }
-.af-diff__row[data-kind='add'] .af-diff__sign { color: var(--af-ok-fg); }
-.af-diff__row[data-kind='del'] .af-diff__sign { color: var(--af-danger-fg); }
-
-/* git 面板（v0.4.0，只读）：分支 + 改动列表 + 逐文件 diff。
-   配色与上面的 `.af-diff` 共用同一批变量——两处 diff 长得不一样会让人以为
-   它们是两种不同的事实。 */
+/* diff 的**实现**是 `GitDiff.vue` 的 `.af-gdiff__*` 类（住在该组件的 scoped
+   块里）。这里曾有一份 `.af-diff` / `__row` / `__sign` 的全局副本，**整族零
+   模板消费者**（模板用的是 `.af-gdiff__*`），v0.8.1 第5轮删除（G54）。
+   git 面板（v0.4.0，只读）：全局这一层只负责面板骨架，逐行配色由组件按同一批
+   `--af-*-ink` 变量给。 */
 .af-git { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
 .af-git__head {
   display: flex; align-items: center; gap: var(--af-space-3);
@@ -1131,21 +1052,8 @@ kbd, .kbd {
    却会把「抽屉长什么样」的答案指向错的数字。删掉它，真相源只剩一处。
    注意 `.af-traj__ms` 从未被任何模板引用——它是这份副本里的孤儿。 */
 
-/* 状态模拟条（原型专用：让「断线三态」可一键看到） */
-.af-sim {
-  display: flex; align-items: center; gap: var(--af-space-2);
-  padding: var(--af-space-2) var(--af-space-5);
-  background: var(--af-surface-1); border-bottom: 1px solid var(--af-border-subtle);
-  font-size: var(--af-text-sm); color: var(--af-fg-tertiary); flex: 0 0 auto;
-}
-.af-sim__b {
-  padding: var(--af-space-1) var(--af-space-3); border-radius: var(--af-radius-sm);
-  border: 1px solid var(--af-border-subtle); background: var(--af-surface-2);
-  color: var(--af-fg-secondary); font-family: inherit; font-size: var(--af-text-sm);
-  cursor: pointer;
-}
-.af-sim__b:hover { border-color: var(--af-border-strong); color: var(--af-fg-primary); }
-.af-sim__b[aria-pressed='true'] { background: var(--af-accent-bg); border-color: var(--af-accent-line); color: var(--af-accent-fg); }
+/* §20 末尾此前还有一条「状态模拟条」`.af-sim` / `.af-sim__b`（原型专用，让
+   「断线三态」可一键看到）：**整族零模板消费者**，v0.8.1 第5轮删除（G54）。 */
 
 /* ===========================================================================
    21. 会话 tab 条（多会话切换）
@@ -1574,17 +1482,21 @@ kbd, .kbd {
 
 /* 卡片是 `<button>` 而不是 `<a>`：它在看板里触发的是「打开这张卡」这个动作，
    而不是导航到另一个文档。用 button 的额外好处是键盘 `Tab` 天然可达、
-   `Enter` / `Space` 天然触发，不需要自己代理键位。 */
+   `Enter` / `Space` 天然触发，不需要自己代理键位。
+
+   **基础块只留一条独有声明（v0.8.1 第5轮，G40）**：模板两处都写
+   `class="af-card af-taskcard"`（`TaskCard.vue:123`、`BoardPage.vue:595`），而
+   `prototype-shell.css` 后导入、`.af-card` 与 `.af-taskcard` 同为单类选择器、
+   特异性相同 —— 这里原有的 14 条声明里 **13 条从来没生效过**
+   （`display` / `flex-direction` / `gap` / `width` / `text-align` / `background` /
+   `border` / `border-radius` / `padding` / `color` / `font` / `cursor` /
+   `transition` 全被 `.af-card` 覆盖），`:hover` 与 `:focus-visible` 也被
+   `.af-card:hover` / `.af-card:focus-visible` 压掉。
+   只有 `align-items: stretch` 是独有且必要的（卡片的子块要撑满卡片宽）。
+   视觉基准见 `prototype-shell.css` §4 的 `.af-card`——**改卡片外观去那里改**。 */
 .af-taskcard {
-  display: flex; flex-direction: column; gap: var(--af-space-2);
-  width: 100%; text-align: left; align-items: stretch;
-  background: var(--af-surface-2); border: 1px solid var(--af-border-subtle);
-  border-radius: var(--af-radius-sm); padding: var(--af-space-3);
-  color: inherit; font: inherit; cursor: pointer;
-  transition: background-color var(--af-dur-instant) linear, border-color var(--af-dur-instant) linear;
+  align-items: stretch;
 }
-.af-taskcard:hover { background: var(--af-surface-3); border-color: var(--af-border-strong); }
-.af-taskcard:focus-visible { outline: 2px solid var(--af-border-focus); outline-offset: -2px; }
 
 /* 标题单行省略 + `title` 全文（原型 `board.js:184-253` 的同一条口径）：
    看板的价值是扫一眼看全，两三个字折行会让六列一起垮掉。 */

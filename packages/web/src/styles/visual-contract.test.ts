@@ -47,15 +47,18 @@ import type { CssRule } from '@/test/css-scan'
    1. `.af-head__sub` 的 `color` 是 `var(--p-fg-3)` 算出来的 rgb——另一个 lane
       正在改 `--p-fg-3`。所以本文件**不断言它的值**，只断言它**引用了**这条
       变量（「存在」层级），颜色达标由 `theme-css.test.ts` 负责。
-   2. `.af-tip:focus-visible` 在真实路由里**没有消费者**（`grep -r af-tip src/`
-      只命中 `components.css`），所以无法在页面上 Tab 到真实的 tooltip。
-      本文件断言的是**规则本身**（`.af-tip:focus-visible .af-tip__body { opacity: 1 }`
-      这条规则存在且值正确），并用一行注明了这一点——它守的是「这条规则被
-      删掉」，不是「某个页面上的 tooltip 真的浮现了」。
-   3. `.af-taskcard:focus-visible` 的 `outline-color` 走的是 `var(--af-border-focus)`
+   2. `.af-taskcard:focus-visible` 的 `outline-color` 走的是 `var(--af-border-focus)`
       →`var(--p-acc)`，四套主题各一个值。这里只钉「宽度 / 线型 / offset」这些
       **主题无关**的字面量，颜色由下一节按主题逐个断言 `--af-border-focus`
       有值且引用的就是 `--p-acc`。
+      ⚠️ **这条规则已经不在 `components.css` 了**（v0.8.1 第5轮，G40）：模板两处
+      都写 `class="af-card af-taskcard"`，而 `prototype-shell.css` 后导入、同特异性，
+      于是 `components.css` 那份 `.af-taskcard:focus-visible` **从来没生效过**——
+      真正画环的是 `.af-card:focus-visible`。所以下面的契约行与断言都改指
+      **shell** 里的 `.af-card:focus-visible`，并另加一条反向断言：`components.css`
+      里**不许**再出现 `.af-taskcard:focus-visible`（留着只会让人以为环在那儿）。
+      （此处原本还有一条 NOTE 说的是 `.af-tip:focus-visible`：那整族在同一轮里按
+      「整族零消费即删」删除，连着守着它的用例一起删，所以那条 NOTE 不复存在。）
    =========================================================================== */
 
 const SHELL = 'packages/web/src/styles/prototype-shell.css'
@@ -344,12 +347,16 @@ const CONTRACT: ContractRow[] = [
 
   /* ---- 任务卡的键盘焦点（无障碍） ----------------------------------- */
   {
-    file: COMPONENTS,
-    selector: '.af-taskcard:focus-visible',
+    /* **这条环的真身在 shell，不在 components**（G40）：模板写的是
+       `class="af-card af-taskcard"`，`prototype-shell.css` 后导入、同特异性，
+       所以 `components.css` 那份 `.af-taskcard:focus-visible` 从来没生效过。
+       下面 §3 有一条反向断言：`components.css` 里不许再写它。 */
+    file: SHELL,
+    selector: '.af-card:focus-visible',
     prop: 'outline-offset',
     expect: '-2px',
     measured:
-      '看板页（真实创建一张任务卡后，从「刷新」按 2 次 Tab 到 `button.af-taskcard`）· 1440×900 · ' +
+      '看板页（真实创建一张任务卡后，从「刷新」按 2 次 Tab 到 `button.af-card.af-taskcard`）· 1440×900 · ' +
       '`el.matches(":focus-visible")` 为 true，实测 computed outline = "rgb(194,164,105) solid 2px"、' +
       'outline-offset = -2px。**内缩**而不是外扩：卡片坐在列体里，外扩的环会被列边界裁掉',
     computed: '-2px',
@@ -357,12 +364,19 @@ const CONTRACT: ContractRow[] = [
 
   /* ---- 正文测度 ------------------------------------------------------ */
   {
-    file: TOKENS,
-    selector: ':root',
-    prop: '--af-measure',
-    expect: '68ch',
+    /* **断的是规则，不是 token**（G25）：这一行原来指向 tokens.css 的
+       `--af-measure: 68ch`，可 68ch 是「测度的值」，不是「有人在用它」——
+       `.af-empty--compact .af-empty__text { max-width: var(--af-measure) }`
+       这条**消费者**此前完全没有网：把 `max-width` 换成 `44ch` 或整条删掉，
+       页面上的空态横幅就会拖成一条长线，而所有断言仍然绿。
+       所以这一行改钉那条规则引用的是哪个 token，字面量 68ch 仍由下面的
+       `TOKEN_LITERALS` 钉住（两层合起来才是「横幅最终 510.5px」）。 */
+    file: COMPONENTS,
+    selector: '.af-empty--compact .af-empty__text',
+    prop: 'max-width',
+    expect: 'var(--af-measure)',
     measured:
-      '看板页「整板空」横幅的 `.af-empty__text`（`.af-empty--compact .af-empty__text { max-width: var(--af-measure) }`）· ' +
+      '看板页「整板空」横幅的 `.af-empty__text`（`<EmptyState compact>` 渲染的就是这两个类）· ' +
       '1440×900 · 实测 computed max-width 510.548px、该元素 1ch = 7.5081px → 510.548 / 7.5081 ≈ **68.0ch**；' +
       '设备页同一条 510.548px。⚠️ 这是**反推**出来的 ch 数（浏览器把 ch 算成了 px），不是直接读到的 "68ch"',
   },
@@ -601,28 +615,30 @@ describe('焦点环（全站唯一一条，tokens.css）', () => {
     expect(missing, `焦点环颜色在主题里断了：${missing.join('; ')}`).toEqual([])
   })
 
-  it('`.af-taskcard:focus-visible` 有环（卡片是 `<button>`，键盘必须看得见）', () => {
-    const rule = ruleFor(RULES[COMPONENTS], '.af-taskcard:focus-visible')
-    expect(rule, '任务卡的键盘焦点环规则不见了').toBeDefined()
+  it('`.af-card:focus-visible` 有环（卡片是 `<button>`，键盘必须看得见）', () => {
+    /* **断在 shell 上**（G40）：真正生效的是 `.af-card:focus-visible`——模板写
+       `class="af-card af-taskcard"`，本文件后导入、同特异性，`components.css`
+       那份被整条盖掉。 */
+    const rule = ruleFor(RULES[SHELL], '.af-card:focus-visible')
+    expect(rule, '卡片（= `.af-card`）的键盘焦点环规则不见了').toBeDefined()
     const outline = propValue(rule!, 'outline')
     const offset = propValue(rule!, 'outline-offset')
-    expect(outline, '任务卡焦点环（实测 2px solid，颜色随主题）').toBe('2px solid var(--af-border-focus)')
-    expect(offset, '任务卡焦点环内缩 2px（实测 -2px，外扩会被列边界裁掉）').toBe('-2px')
+    expect(outline, '卡片焦点环（实测 2px solid，颜色随主题）').toBe('2px solid var(--af-border-focus)')
+    expect(offset, '卡片焦点环内缩 2px（实测 -2px，外扩会被列边界裁掉）').toBe('-2px')
   })
 
-  it('`.af-tip:focus-visible` 那条规则还在（tooltip 不能只活在 hover 里）', () => {
-    /* NOTE（如实标注）：真实路由里**没有 .af-tip 的消费者**（grep 只命中
-       components.css），所以这句话只能断言**规则本身**存在且值正确。
-       它守的是「有人把这行删了」——删了以后所有 tooltip 就只剩 hover，
-       键盘/触屏用户永远看不到。 */
-    const rules = RULES[COMPONENTS]
-    const hover = rules.find((r) => r.selector.includes('.af-tip:hover .af-tip__body'))
-    expect(hover, 'tooltip 的 hover 浮现规则不见了').toBeDefined()
-    expect(hover!.selector.replace(/\s+/g, ' ').trim(), 'focus-visible 分支必须与 hover 并列在同一组').toBe(
-      '.af-tip:hover .af-tip__body, .af-tip:focus-visible .af-tip__body',
+  it('`components.css` 里不再有 `.af-taskcard:focus-visible`（同特异性、后导入，那一份从来没生效）', () => {
+    /* 反向守卫：G40 删掉的就是这条**从没生效过**的规则。它若回来了，人会以为
+       「任务卡的焦点环在 components.css」——于是改那里、页面毫无变化，而这个
+       文件里的 `.af-card:focus-visible` 断言仍然绿。两个真相源必须只剩一个。 */
+    const resurrected = RULES[COMPONENTS].filter((r) =>
+      r.selector.split(',').some((s) => s.trim() === '.af-taskcard:focus-visible'),
     )
-    expect(propValue(hover!, 'opacity'), 'tolltip 浮现后的不透明度（实测 hover 与键盘 focus 都为 1）').toBe('1')
-    expect(propValue(ruleFor(rules, '.af-tip__body')!, 'opacity'), '默认隐藏（否则所有 tooltip 一直挂着）').toBe('0')
+    expect(
+      resurrected.map((r) => r.selector),
+      '`.af-taskcard:focus-visible` 又回到 components.css 了：它会被 prototype-shell.css 的 ' +
+        '`.af-card:focus-visible` 整条盖掉，改它不会影响页面。要改焦点环请改 shell 那条',
+    ).toEqual([])
   })
 })
 

@@ -107,7 +107,7 @@ describe('模板里的 af-* 类名都有定义（`.af-head__title` 那次漏定�
    */
   const NO_RULE_BY_DESIGN = new Map<string, string>([
     // ① 纯钩子
-    ['af-card', '卡片钩子：外观来自同一元素上的 `af-taskcard` / `af-catalog__card` 等具体类'],
+    ['af-card', '卡片钩子：外观来自同一元素上的 `af-taskcard` 等具体类'],
 
     // ── ① 续：根标记类（外观全部由后代选择器或同一元素上的具体类承担）─────────
     // 说明：下面这一族的豁免在 v0.8.1 子任务 10 曾整块涉及，但「页面外壳那一族」
@@ -218,6 +218,54 @@ describe('模板里的 af-* 类名都有定义（`.af-head__title` 那次漏定�
     // 拿一个确实有规则的类当正例，否则 `staticClasses` / `isDefined` 若双双
     // 失效（一个恒返回空、一个恒返回 false），上面两条断言会在空集合上恒真。
     expect(staticClasses(VUE_SRC.get('packages/web/src/App.vue') ?? '')).toContain('af-shell')
+    expect(isDefined('af-shell')).toBe(true)
+  })
+
+  /*
+    **v0.8.1 第5轮删掉的「整族零消费」类不许回来**（G53/G54）。
+
+    上面那条门禁只拦「模板用了、样式表没定义」的方向；这一条拦**反方向**：
+    「样式表定义了、模板没人用」。第5轮按 `grep` 复算删掉了 18 个这样的族
+    （`/tmp/a_work/dead.txt`，复算脚本 `/tmp/a_work/dead.mjs`），规则删了、
+    原地留的是墓碑注释。要真用上某一族，正确动作是**连着模板消费者一起写**
+    ——那会让这条守卫自然变红，逼着改动者把豁免与理由补上，而不是让规则
+    悄悄挂在样式表里冒充已实现。
+
+    名单按族写（不含变体后缀前缀的根名）。**判据是「样式表里出现 `.name`
+    选择器」**：模板侧出现不算（那正是「要回来了」的正确姿势的一半，
+    另一半必须等规则一起回来、让这一条红了以后由人裁决）。
+  */
+  it('第5轮删掉的整族零消费类不许只以规则形式回来（要有就要连消费者一起要）', () => {
+    const DELETED_FAMILIES = [
+      'af-backoff',
+      'af-bar',
+      'af-check',
+      'af-diff',
+      'af-frozen',
+      'af-meter',
+      'af-meters',
+      'af-num-c',
+      'af-palette',
+      'af-sep',
+      'af-sim',
+      'af-split',
+      'af-sr',
+      'af-strong',
+      'af-tabs',
+      'af-toast',
+      'af-toasts',
+      'af-tip',
+    ]
+    /* 反向自检：名单里必须**一个**都还没有定义——否则这条守卫上线即红，
+       说明有族被漏删（那就该去删规则，而不是把名字从名单里拿掉）。 */
+    const defined = DELETED_FAMILIES.filter((name) => isDefined(name))
+    expect(
+      defined,
+      `这些族在第5轮已按「整族零消费即删」删除（原地留有墓碑注释），现在样式表里又出现了：\n` +
+        `${defined.join(', ')}\n` +
+        `要恢复请连着模板消费者一起加，并把名字从这份名单里移出、写明理由`,
+    ).toEqual([])
+    // 判定有效：拿一个真实存在的类当正例，防止 isDefined 恒 false 时恒真。
     expect(isDefined('af-shell')).toBe(true)
   })
 })

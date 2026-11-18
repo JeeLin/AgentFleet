@@ -146,11 +146,16 @@ describe('外壳骨架类与原型对齐', () => {
 
   it('布局常量在 tokens.css 里有定义，且值与原型一致', () => {
     // 原型 `tokens.css:38-39`：--rail-w: 224px; --head-h: 56px;
+    /* **「原型可读」只断言一次，放在循环外**（v0.8.1 第5轮，G34）：原来这句
+       `expect(PROTOTYPE_CSS.length).toBeGreaterThan(0)` 写在 for 里，于是它
+       被重复执行两次、也把「原型文件读到了」这件事伪装成「每一项都验过了」。
+       它是一条**前置条件**（读不到原型 → 后面的比对全是空转），
+       该在进入比对之前断一次；放进循环只会让失败信息指向最后一项。 */
+    expect(PROTOTYPE_CSS.length, '原型样式表没读到——下面每一项比对都会是空转').toBeGreaterThan(0)
     for (const [name, protoValue] of [
       ['--af-rail-w', '224px'],
       ['--af-head-h', '56px'],
     ] as const) {
-      expect(PROTOTYPE_CSS.length).toBeGreaterThan(0) // 原型可读
       const decl = new RegExp(`${name}\\s*:\\s*([^;]+);`).exec(stripComments(TOKENS_CSS))
       expect(decl, `tokens.css 缺少 ${name}——原型布局常量没有落地`).not.toBeNull()
       expect((decl as RegExpExecArray)[1].trim()).toBe(protoValue)
@@ -229,7 +234,7 @@ describe('关键规则的取值来源与原型一致', () => {
       impl,
       [
         '.af-btn 没有取标准行高。',
-        'design-system.md:222 规定 row-regular(32px) 用于按钮，row-compact(26px) 用于表格。',
+        'design-system.md:324 规定 row-regular(32px) 用于按钮，row-compact(26px) 用于表格。',
         '上一轮这里写的是 compact 行高，比原型矮 6px。',
       ].join('\n'),
     ).toMatch(/min-height:\s*var\(--p-row\)|min-height:\s*var\(--af-row-regular\)/)
@@ -544,7 +549,7 @@ const ROUTED_PAGES = [
  *   「不在对齐范围」，所以没有任何门禁看得见。
  * - `NewSessionPage.vue`：当前没有路由（新形态下会话必须先有项目，
  *   `/sessions/new` 在 `LEGACY_PATHS` 里落到总览），但它是
- *   `docs/design-system.md:1706` 登记的新建会话落点，实现是完整的。
+ *   `docs/design-system.md:1806` 登记的新建会话落点，实现是完整的。
  *
  * 这两条与 `ROUTED_PAGES` 分开列：`ROUTED_PAGES` 要参与「与 App.vue 对齐」
  * 的集合比较，而这两个组件本来就不在路由表里，混进去会让那条比较恒红。
@@ -634,7 +639,7 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
      * 「我在哪几个会话里」，标题行答「这个是哪个」，状态行答「绑在哪台设备、
      * 哪个目录、哪个 agent」。挤成一行时窄屏下路径会把设备名挤没，而两者说的
      * 不是同一件事（`SessionPage.test.ts` 三条用例钉着这个分层）。所以它用
-     * 自己的 `.af-wb__head`（`components.css:703`，有独立的 padding / 背景 /
+     * 自己的 `.af-wb__head`（`components.css:758`，有独立的 padding / 背景 /
      * 发丝线），不套 `.af-head`——这不是漏做，是**不做**。
      */
     const HEAD_DESIGN_OVERRIDE: Record<string, string> = {
@@ -652,7 +657,7 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
      * 还是被删掉的 `af-page`——`ProjectTaskPage.vue`（`af-page af-taskd`）
      * 挂着 TODO 却一直绿，正是这么漏的。这个判据等于永远为真，必须改。
      *
-     * **也不能只看根节点**：`App.vue:707` 已经渲染了 `<main class="af-main">`
+     * **也不能只看根节点**：`App.vue:844` 已经渲染了 `<main class="af-main">`
      * （外壳的唯一根，带 `tabindex="-1"` 供 `focusMain()` 用），页面再包一层
      * `main.af-main` 就是嵌套 `<main>`——非法 HTML，且 `querySelector` 会先命中
      * 外层那个空的。所以页面根节点**不该**是 `af-main`，而是它里面的内容。

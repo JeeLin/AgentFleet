@@ -133,14 +133,22 @@ describe('token / 组件数与设计文档一致', () => {
     expect(counts[0], '主题文件里一个 --af-* 颜色都没定义').toBeGreaterThan(0)
   })
 
-  it('components.css 的小节数与 §3 的「23 组组件（23 节）」一致', () => {
+  it('components.css 的小节数与 §3 的「18 组组件（18 节）」一致', () => {
     const doc = readFileSync(DESIGN_DOC, 'utf-8')
-    const m = doc.match(/（23 节/)
+    const m = doc.match(/（18 节/)
     expect(m, 'design-system.md §3 不再声明组件节数').not.toBeNull()
     const css = readFileSync(COMPONENTS_CSS, 'utf-8')
     // 小节标题是 `   3. Button` 这种「行首缩进 + 序号 + 点 + 标题」的形状。
-    const sections = (css.match(/^\s+\d+\.\s+\S/gm) ?? []).length
-    expect(sections).toBe(23)
+    /* **只数「还活着的节」**：v0.8.1 第5轮删掉了 5 个整族零消费的节（§7 Tabs /
+       §10 Toast / §13 Tooltip / §16 只读遮罩 / §17 退避走带），23 → 18。
+       删掉的节在原地留一条**墓碑注释**（标题后面带「本节已删除」），说明
+       「为什么没有它」和「要加回来时连带要补什么」——但它不算一节，否则
+       计数会把「删了多少」也数成组件，删得越多数字反而越大。
+       号也不回收（§7 / §10 / §13 / §16 / §17 留空）：回收会让文档、注释与
+       `prototype/` 对照表里的 `§n` 锚点全部错位。 */
+    const titles = css.match(/^\s+\d+\.\s+\S.*$/gm) ?? []
+    const sections = titles.filter((t) => !t.includes('本节已删除') && !t.includes('两节已删除')).length
+    expect(sections).toBe(18)
   })
 
   it('每个 token 只在 :root 里定义一次，重复出现的名字只在 reduce-motion 里覆写', () => {

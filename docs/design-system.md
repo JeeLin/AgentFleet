@@ -88,8 +88,10 @@
 
 分两处住，按「与配色有关 / 无关」划界：
 
-- **`packages/web/src/styles/tokens.css`（64 个变量）** —— 字族、字号、行高、
-  间距、圆角、层级、动效。**零个颜色**。
+- **`packages/web/src/styles/tokens.css`（62 个变量）** —— 字族、字号、行高、
+  间距、圆角、层级、动效。**零个颜色**。（v0.8.1 第5轮：`--af-z-toast` /
+  `--af-z-palette` 随 `.af-toast*` / `.af-palette*` 两个整族零消费的组件一起
+  删除，64 → 62。）
 - **`packages/web/src/styles/theme-{neutral,warm,paper,cream}.css`（各 74 个
   `--af-*` 颜色变量）** —— 四套配色，各一份。颜色真相源在这里。
 
@@ -410,7 +412,11 @@
 
 ## 3. 基础组件契约
 
-23 组组件，全部在 `packages/web/src/styles/components.css`（23 节：§0 复位 + §1–22 组件）。
+18 组组件，全部在 `packages/web/src/styles/components.css`（18 节 = §0 复位 +
+17 个现存组件节）。小节号是**身份**不是密度：v0.8.1 第5轮删掉 5 个整族零消费的
+节（§7 Tabs / §10 Toast / §13 Tooltip / §16 只读遮罩 / §17 退避走带，23 → 18），
+原地留一条「本节已删除」的墓碑注释说明**为什么删、加回来要连带补什么**；
+号不回收——回收会让文档、注释与 `prototype/` 对照表里的 `§n` 锚点全部错位。
 状态一律用 `data-*` 属性表达（`data-state` / `data-open` / `data-inert` / `data-tone` /
 `data-level`），**不用 JS 加 class**——class 是样式实现，`data-*` 是契约。
 
@@ -1791,7 +1797,7 @@ Mock 形状 = 将来 API 的形状。前端只读。
 |---|---|
 | 本文件（判断依据） | `docs/design-system.md` |
 | §2 token 定义（130 个定义行 / 125 个唯一名） | `packages/web/src/styles/tokens.css` |
-| §3 组件样式（23 节） | `packages/web/src/styles/components.css` |
+| §3 组件样式（18 节） | `packages/web/src/styles/components.css` |
 | §4 交互范式 / 焦点栈 / 键位表 | `packages/web/src/shared/keynav.ts` + `shared/focus.ts` + `shared/shell-keys.ts` |
 | 外壳与导航 | `packages/web/src/App.vue` + `page-chrome.css` | 
 | 页面级数据访问 | `domains/device/api.ts` / `domains/agent/api.ts` / `domains/session/api.ts`（传输层在 `shared/http.ts`） |

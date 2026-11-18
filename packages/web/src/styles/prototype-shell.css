@@ -381,19 +381,21 @@ html[data-rail='off'] .af-rail__actions .af-btn {
    `components.css` 里已有一版 `.af-region`，但那是「补漏」写的：它把
    `--af-border-default` 当作边框色，而原型用 `--line-2`（更淡的一档）。
    高信息密度下一条更重的边会把区域切碎。这里按原型取淡一档。
-   =========================================================================== */
 
-.af-region--warn { border-color: var(--p-warn-line-c); }
-.af-region--warn .af-region__head { background: var(--p-warn-bg-c); }
+   本节此前还有两条 `.af-region--warn`（warning 变体的边框与头部底色），
+   **零模板消费者**（`grep -rn 'af-region--warn' packages/web/src/domains
+   packages/web/src/pages` 无输出），而它正是 `ui-scale.test.ts` 宽松口径
+   白名单里 `af-region__head` 那一条的**唯一理由**——白名单拿一个没人用的
+   变体放行了真实的重叠。v0.8.1 第5轮两条一起删（G39）：变体没有消费者，
+   豁免也就没有理由。`.af-tag--warn` 仍在用 `--p-warn-bg-c` / `--p-warn-line-c`。
+   =========================================================================== */
 
 /* ===========================================================================
    4. 卡片（原型 app.css:292-327）
    -------------------------------------------------------------------------
    原型 `.af-card` 是看板里那张卡片的**视觉基准**：`--surf-2` 底 +
-   `--line` 边 + `--r-sm` 圆角 + 140ms 过渡。实现里的 `.af-taskcard`
-   （components.css）目前用 `--af-surface-2` + `--af-border-subtle`，
-   对应的是同一组槽位，但少了 `--af-card__meta` / `--af-card__why` 两个子块。
-   这里补齐，并让 `.af-taskcard` 与 `.af-card` 的取值走同一套别名。
+   `--line` 边 + `--r-sm` 圆角 + 140ms 过渡。子块实现用的是
+   `.af-taskcard__*`（`components.css` §22），不是本节的 `.af-card__*`。
    =========================================================================== */
 
 .af-card {
@@ -410,27 +412,12 @@ html[data-rail='off'] .af-rail__actions .af-btn {
 .af-card:hover { background: var(--p-surf-3); border-color: var(--p-line-3); text-decoration: none; }
 .af-card:focus-visible { outline: 2px solid var(--af-border-focus); outline-offset: -2px; }
 
-.af-card__title {
-  font-size: var(--p-t-sm); font-weight: var(--af-weight-medium);
-  line-height: var(--p-lh-tight);
-  color: var(--p-fg);
-}
-.af-card__meta {
-  display: flex; align-items: center; gap: var(--p-s2); flex-wrap: wrap;
-  font-size: var(--p-t-2xs); color: var(--p-fg-2);
-}
-
-/* 失败原因：卡片上最该被看见的一行，所以给它底色 + 左线。app.css:317-327。 */
-.af-card__why {
-  font-family: var(--af-font-mono); font-size: var(--p-t-2xs); line-height: 1.55;
-  color: var(--p-failed);
-  background: var(--p-failed-bg);
-  border-left: 2px solid var(--p-failed);
-  border-radius: 0 var(--p-r-xs) var(--p-r-xs) 0;
-  padding: var(--p-s1) var(--p-s2);
-  display: flex; flex-direction: column; gap: 1px;
-}
-.af-card__why b { font-weight: var(--af-weight-semibold); }
+/* 本节此前还有 `.af-card__title` / `__meta` / `__why` 三个子块：**模板零使用**
+   （`TaskCard.vue` 的子块是 `.af-taskcard__title` / `__meta` / `__why`），
+   v0.8.1 第5轮删除（G44）。上面这条 `.af-card` 是**唯一**的卡片视觉基准：
+   模板两处都写 `class="af-card af-taskcard"`，本文件后导入、同特异性，所以卡片
+   外观由这里决定，`.af-taskcard` 只剩 `align-items` 一条独有声明
+   （见 components.css §22）。 */
 
 /* ===========================================================================
    5. 看板（原型 app.css:368-413）
@@ -468,8 +455,8 @@ html[data-rail='off'] .af-rail__actions .af-btn {
 
      改成 `minmax(0, 1fr)`：六列等分可用宽度（1216 - 40 padding - 40 gap
      ≈ 每列 189px）。列内卡片标题本来就是 `text-overflow: ellipsis`，收窄
-     只是多省略几个字，不会破版。窗口再窄时仍走下面 720px 的媒体查询
-     （那时才允许横向滚动 / 单列堆叠）。 */
+     只是多省略几个字，不会破版。窗口再窄时走本文件 §11 的 900px 断点
+     （那里取消板内横滚、改由页面滚动）。 */
   grid-auto-columns: minmax(0, 1fr);
   gap: var(--p-s3);
   padding: var(--p-s4) var(--p-s5) var(--p-s5);
@@ -539,55 +526,16 @@ html[data-rail='off'] .af-rail__actions .af-btn {
 }
 
 /* ===========================================================================
-   6. 摘要读数带（原型 app.css:415-445）
+   6–7. 摘要读数带 / 双栏 —— **两节已删除**（v0.8.1 第5轮，G54 + G56）
    -------------------------------------------------------------------------
-   四行项目摘要（v0.8.2 落实内容，但**视觉基座**在这里：一条四格的带子）。
-   本里程碑不填内容，先把「带子怎么长」定下来，否则 v0.8.2 会再造一套。
+   `.af-meters` / `.af-meter*`（原型 app.css:415-445 的四格摘要带）与
+   `.af-split*`（app.css:687-694 的详情页双栏）**整族零模板消费者**：模板 /
+   `.ts` / 原型页面三处都命中 0。它们与 `components.css` 的布局原语
+   （`.af-row` / `.af-stack` / `.af-panel`）语义重复，却分裂在两份样式表里，
+   改一处另一处不跟——所以按「整族零消费即删」裁定删除，而不是留着待用。
+   v0.8.2 真要「摘要带 / 双栏」时，先定它的家（`components.css` §2 布局原语
+   还是本文件的原型搬取层），再连着消费者一起写。
    =========================================================================== */
-
-.af-meters {
-  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
-  margin: var(--p-s4) var(--p-s5) 0;
-  background: var(--p-surf-1);
-  border: 1px solid var(--p-line-2);
-  border-radius: var(--p-r-md);
-  overflow: hidden;
-  flex: 0 0 auto;
-}
-.af-meter {
-  padding: var(--p-s3) var(--p-s4);
-  display: flex; flex-direction: column; gap: 1px;
-  min-width: 0; border-left: 1px solid var(--p-line);
-  color: inherit; text-decoration: none;
-}
-.af-meter:first-child { border-left: none; }
-a.af-meter:hover { background: var(--p-surf-2); text-decoration: none; }
-.af-meter--action { background: var(--p-warn-bg-c); }
-.af-meter__k {
-  font-size: var(--p-t-2xs); font-weight: var(--af-weight-semibold);
-  letter-spacing: 0.06em; text-transform: uppercase; color: var(--p-fg-2);
-  display: flex; align-items: center; gap: var(--p-s1);
-}
-.af-meter__v {
-  font-size: var(--p-t-sm); font-weight: var(--af-weight-medium); color: var(--p-fg-strong);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.af-meter__v--warn { color: var(--p-warn-c); }
-.af-meter__sub { font-size: var(--p-t-2xs); color: var(--p-fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-/* ===========================================================================
-   7. 双栏（详情页，原型 app.css:687-694）
-   =========================================================================== */
-
-.af-split {
-  display: grid; grid-template-columns: minmax(0, 1fr) 360px;
-  gap: var(--p-s4); padding: var(--p-s5); min-height: 0;
-}
-.af-split--fill { flex: 1; overflow: hidden; }
-.af-split__col {
-  display: flex; flex-direction: column; gap: var(--p-s4);
-  min-height: 0; min-width: 0; overflow-y: auto;
-}
 
 /* ===========================================================================
    8. 折叠区（原型 app.css:1557-1581）
@@ -619,10 +567,14 @@ a.af-meter:hover { background: var(--p-surf-2); text-decoration: none; }
    8b. 通用件与键值对（原型 app.css:168-185、464-468）
    -------------------------------------------------------------------------
    为什么要搬到这里来：`.af-kv` / `.af-kv__k` / `.af-kv__v` 原来**只**在
-   `DevicesPage.vue` 的 scoped 块里定义过一次，而模板里还有 4 个别的页面
-   在用它们（`DeviceDetailPage` / `ProjectTaskPage` / `BindPage` /
-   `ProjectSettingsPage`）。scoped 样式不外泄，于是那 4 处的键值对退化成
+   `DevicesPage.vue` 的 scoped 块里定义过一次，而模板里还有 4 个别的文件
+   在用它们（`DeviceDetailPage` / `ProjectTaskPage` / `AcceptancePanel` /
+   `FailurePanel`）。scoped 样式不外泄，于是那 4 处的键值对退化成
    「一个接一个的裸 span」——没有两列网格，标签与值全挤在一行。
+   （名单按 v0.8.1 第5轮实测重写：`grep -rln 'af-kv' packages/web/src` →
+   `DevicesPage` / `DeviceDetailPage` / `ProjectTaskPage` / `AcceptancePanel`
+   / `FailurePanel`。前一版点的 `BindPage` / `ProjectSettingsPage` 一处都没有
+   ——它们用的是自己的 `.af-bind__kv`。）
 
    这正是子任务 13「跨页组件抽取」应当抓出、但按类名 grep 抓不出的问题：
    类名在模板里**有**，只是定义在别人的 scoped 里。
@@ -642,21 +594,19 @@ a.af-meter:hover { background: var(--p-surf-2); text-decoration: none; }
    与 `af-xs` 在没有定义时不会报错，只是那句话和正文一样亮——「次要信息」
    这一层语义就消失了。 */
 .af-mono { font-family: var(--af-font-mono); font-size: 0.93em; }
-.af-num-c { font-variant-numeric: tabular-nums; }
 .af-dim { color: var(--p-fg-2); }
 .af-mute { color: var(--p-fg-3); }
-.af-strong { color: var(--p-fg-strong); }
 .af-xs { font-size: var(--p-t-xs); }
 .af-2xs { font-size: var(--p-t-2xs); }
 .af-row { display: flex; align-items: center; gap: var(--p-s3); flex-wrap: wrap; }
 .af-row--tight { gap: var(--p-s2); }
 .af-stack { display: flex; flex-direction: column; gap: var(--p-s4); }
 .af-spacer { flex: 1; }
-.af-sep { color: var(--p-fg-3); }
-.af-sr {
-  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
-  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
-}
+/* `.af-strong` / `.af-num-c` / `.af-sep` / `.af-sr` 四条工具类**零模板消费者**
+   （模板 / `.ts` 命中 0），v0.8.1 第5轮删除（G54 + G56）：`.af-strong` 与
+   `.af-mute` / `.af-dim` 同族，写了没人用就等于多一个会漂的真相源；`.af-sr`
+   那类「视觉隐藏但读屏可见」的需求要用时必须连 `aria-*` 的用法一起审查，
+   不该以裸工具类的形式挂着。 */
 
 /* 六态形状：色盲也能分（失败 / 排队色值亮度接近）。app.css:233-260。
    `StateBadge` 的图形部分就是这几个，定义在这里才能被多页共用。 */
@@ -788,11 +738,8 @@ a.af-meter:hover { background: var(--p-surf-2); text-decoration: none; }
    本节此前还有一条 `.af-empty__shape`（原型空态的虚线小方块），零模板消费者，
    已随第3轮精简删除——需要时从原型 `app.css:490-527` 取回。 */
 
-.af-bar { height: 5px; border-radius: var(--p-r-full); background: var(--p-surf-4); overflow: hidden; }
-.af-bar__fill { height: 100%; border-radius: var(--p-r-full); background: var(--p-acc); }
-.af-bar__fill--done { background: var(--p-done); }
-.af-bar__fill--failed { background: var(--p-failed); }
-.af-bar__fill--warn { background: var(--p-warn-c); }
+/* 本节此前还有 `.af-bar` / `__fill` / `__fill--done|failed|warn`（原型进度条）：
+   **整族零模板消费者**，v0.8.1 第5轮删除（G54 + G56）。 */
 
 /* ===========================================================================
    10b. 项目分组网格（原型 app.css:363-367）
@@ -917,15 +864,20 @@ a.af-meter:hover { background: var(--p-surf-2); text-decoration: none; }
 
 @media (max-width: 900px) {
   .af-shell { grid-template-columns: 1fr; }
+  /* 窄屏**自动**隐藏左栏。它和服务「用户手动收起」的 `html[data-rail='off']`
+     族（本文件 §1，`html[data-rail='off'] .af-rail` = `:183-185`）是两条不同
+     语义的路径，**不能合并成一条**：
+       · 这里：视口窄于 900px 时左栏整个不渲染——窄屏没有「收起」这回事。
+       · §1 那族**没有** `display: none`：用户主动折叠时左栏仍在，只是窄成
+         56px 的图标条，隐藏的是品牌文字 / 组标题 / 项目列表等子块。
+     两条都留着才成立：删掉本节这条，窄屏会渲染一条挤掉内容区一半宽的图标条；
+     删掉 §1 那族，桌面收起时文字会溢出 56px 的轨道。 */
   .af-rail { display: none; }
   /* 窄屏没有「收起」这回事：左栏根本不渲染（见上一行），靠底部面板。
      这条覆盖掉桌面那条 `0 1fr`，否则窄屏收起后主区宽度会是 0+1fr 的一栏。 */
   html[data-rail='off'] .af-shell { grid-template-columns: 1fr; }
   html[data-rail='off'] .af-rail__brand .af-navbtn { display: none; }
-  .af-split { grid-template-columns: 1fr; }
   .af-head { padding: 0 var(--p-s4); }
-  .af-meters { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: var(--p-s3) var(--p-s3) 0; }
-  .af-meters .af-meter:nth-child(3) { border-left: none; }
   /* 窄屏取消**板内**横滚，改由页面整体滚：上面那条 `grid-auto-columns: 86%`
      让每列占满视口宽度的 86%，板子本身不再溢出，`.af-board` 本体（§5）的
      `overflow-x: auto` 必须在这里被撤掉——否则那个 auto 会自己变成滚容器，

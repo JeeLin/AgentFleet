@@ -10,7 +10,7 @@
    =========================================================================== */
 import { describe, expect, it } from 'vitest'
 
-import { stripCssComments } from '@/test/css-scan'
+import { customPropsIn, stripCssComments } from '@/test/css-scan'
 
 import { readRepoFile } from '@/test/css'
 
@@ -55,10 +55,13 @@ function implName(proto: string): string {
  *
  * `--p-fg-3` 为什么离开原型：原型的 `--fg-3` 在四套主题里全部低于 WCAG AA
  * 4.5:1（实测 3.40 / 2.67 / 2.70 / 3.69），而它被当作**真实文字色**在用
- * （`.af-head__sub`、`th`、`.af-field__hint`、`.af-rail__status`、
- * `.af-settings__p`…）。原型那边还留着「装饰 仅用于非文字元素与占位」的
- * 旧注释，与实际用途不符。所以实现在四套主题里都换成达标值，色相不动、
- * 只调亮度。**这条不是「值恰好变了」，是「辅助文字必须读得清」。**
+ * （`.af-head__sub`、`th`、`.af-field__hint`…）。原型那边还留着「装饰 仅用于
+ * 非文字元素与占位」的旧注释，与实际用途不符。所以实现在四套主题里都换成
+ * 达标值，色相不动、只调亮度。**这条不是「值恰好变了」，是「辅助文字必须读得清」。**
+ *
+ * （v0.8.1 第5轮，G48：这条例由原本把 `.af-rail__status` 也列成 `--p-fg-3`
+ * 的消费者之一，而全仓 `.af-rail__status` 命中 0——它是个**死类名**，写在
+ * 理由里等于让下一个人以为那里有一条要照顾的文字。名单只留真实消费者。）
  */
 const INTENTIONAL_DEVIATIONS: Record<string, { value: string; why: string }> = {
   '--p-fg-3': {
@@ -170,10 +173,19 @@ describe('四套主题逐值对照原型', () => {
   })
 
   it('四份实现的变量名集合完全一致（可切换的前提）', () => {
-    const sets = THEMES.map((t) => [...vars(readRepoFile(`packages/web/src/styles/theme-${t}.css`)).keys()].sort())
+    /* **用 `customPropsIn` 而不是 `vars()`**（v0.8.1 第5轮，G62）：`vars()` 是
+       「整份文本跑 `(--x)\s*:` 正则」，于是**注释里**写的 `--af-x: #abc`（解释
+       某条取值为什么这样写时的自然写法）会被当成一次真实定义，`var(--x)` 里的
+       引用也会被算进名字集合。判「这一份定义了哪些变量」必须看**规则体的左侧**，
+       否则一份主题只要在注释里提过某个名字，集合比对就替它遮住了真正漏掉的定义。
+       `vars()` 那条「取某个变量的值」的用例维持原样——它要的是值，不是名字集合。 */
+    const sets = THEMES.map((t) => [...customPropsIn(readRepoFile(`packages/web/src/styles/theme-${t}.css`))].sort())
     for (let i = 1; i < sets.length; i++) {
       expect(sets[i], `${THEMES[i]} 与 ${THEMES[0]} 的变量名集合不同`).toEqual(sets[0])
     }
+    /* 反向：集合不能空。空的集合之间当然「完全一致」——那正是这条守卫最可能的
+       假绿形态（解析器坏了、或正则改成只认 `--p-x:` 的拼写）。 */
+    expect(sets[0].length, '四份主题一个自定义属性都没解析出来').toBeGreaterThan(10)
   })
 
   it('默认主题 neutral 的页面底就是原型那个值，不是上一轮自造的那个', () => {

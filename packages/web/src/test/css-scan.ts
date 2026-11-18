@@ -172,3 +172,24 @@ export function propValue(rule: CssRule, property: string): string | undefined {
 export function ruleFor(rules: CssRule[], selector: string): CssRule | undefined {
   return rules.find((r) => r.selector.replace(/\s+/g, ' ').trim() === selector)
 }
+
+/**
+ * 一份样式表里**声明**了哪几个自定义属性（`--x: value`）。
+ *
+ * **为什么单独一件**（v0.8.1 第5轮，G62）：`theme-css.test.ts` 里原本自己写了
+ * 一次「从整份文本正则抠 `--name:`」，于是「同一个变量在四份主题里各出现几次」
+ * 只能按**文本命中**算——注释里提到过的变量名、`var(--x)` 里的**引用**、
+ * 属性名的子串全都被算进去。判据应当是「这一份**定义**了它」，那就得按规则体
+ * 解析（剥注释 → 花括号配对 → 只看声明体的左侧）。
+ *
+ * 与 `vars()` 那类「取某个变量的值」的区别：这里**只回答名字集合**，不碰取值，
+ * 因为调用方要做的是四份主题之间的**集合比对**。同名声明多次只留一个名字——
+ * 判「有没有定义」时重复没有意义，重复本身由 `keynav.test.ts` 的去重断言管。
+ */
+export function customPropsIn(css: string): Set<string> {
+  const out = new Set<string>()
+  for (const rule of parseCssRules(css)) {
+    for (const m of rule.body.matchAll(/(?:^|;)\s*(--[a-zA-Z0-9_-]+)\s*:/g)) out.add(m[1])
+  }
+  return out
+}
