@@ -361,6 +361,56 @@ describe('关键规则的取值来源与原型一致', () => {
     expect(ruleBody(clean, '.af-definitely-not-a-rule'), '判据本身要能判「没有」').toBe('')
   })
 
+  it('页头的副标题不许带 UA 默认 margin（G75：`<p>` 会把页头顶到 70.8px）', () => {
+    /* **这条守的是一个「写了 h1 却忘了 p」的漏项**（v0.8.1 第5轮 4d 验收 F5）。
+
+       实测（playwright，1440×900）：`/agents` 与 `/settings` 的页头是 **70.8px**，
+       而契约 `--af-head-h` 是 56px，左栏那条线跟着错位 14.8px。同一份
+       `.af-head` 规则在 `/devices` 上是 56px，差别只在结构：
+         · `/devices`：`<h1 class="af-head__title">设备</h1>` +
+           `<span class="af-head__sub">…</span>` —— 平铺兄弟（原型写法）；
+         · `/agents`：`<div><h1 class="af-head__title">Agent</h1>` +
+           `<p class="af-head__sub">…</p></div>` —— 包裹列（`PageHead` 文档里
+           记录过的合法写法，副标题是一整句说明时用）。
+
+       病根是 **`<p>` 带 UA 默认的 `margin: 1em`**：正文 12.5px 字号下上下各
+       12.5px，包裹列实测 **69.8px**，而它自己的内容只有
+       「22（标题）+ 4（gap）+ 18.75（副标题）= 44.8px」——多出来的 25px 全是
+       margin。`.af-head__title` 那条规则写了 `margin: 0`，`.af-head__sub`
+       那条**漏了**：同一条规则的两半，一半写了另一半没写。
+
+       清零后实测：三页页头全部 **56px**，包裹列 44.8px（与 `.af-head` 注释里
+       算的 44.75px 一致）。
+
+       判据只钉「`margin` 归零」而不是钉 56px：渲染高度在 CSS 里算不出来
+       （要排版引擎），而这条漏项的可检测形态就是「`.af-head__sub` 没有
+       `margin: 0`」。 */
+    const rules = parseCssRules(IMPL_CSS)
+    const sub = ruleFor(rules, '.af-head__sub')
+    expect(sub, 'prototype-shell.css 里没有 .af-head__sub 规则').toBeDefined()
+
+    const margin = propValue(sub!, 'margin')
+    expect(
+      margin,
+      [
+        '`.af-head__sub` 没有 `margin: 0`。',
+        '它在实现里有 `<span>`（原型写法）与 `<p>`（`PageHead` 的包裹列写法）两副面孔，',
+        '而 `<p>` 带 UA 默认的 `margin: 1em`：12.5px 字号下上下各 12.5px，',
+        '包裹列被撑到 69.8px、页头 70.8px（实测 /agents 与 /settings），',
+        '比 `--af-head-h` 的 56px 高 14.8px，左栏那条线跟着错位。',
+        '`.af-head__title` 那边写了 `margin: 0`，这里是同一条规则的另一半。',
+      ].join('\n'),
+    ).toBe('0')
+
+    /* 包裹列本身也钉一条：它必须是「竖排 + 4px gap」，不能是 `display: block`。
+       换回 block 时标题与副标题的间距会退回 25px（margin 又回来了）。 */
+    const wrap = ruleFor(rules, '.af-head > div')
+    expect(wrap, '没有 `.af-head > div` 规则：`PageHead` 的包裹列写法没有样式').toBeDefined()
+    expect(propValue(wrap!, 'flex-direction'), '包裹列必须竖排（标题在上、副标题在下）').toBe(
+      'column',
+    )
+  })
+
   it('左栏品牌行的高度必须等于页头高度（G64：每一页的两条水平线要对齐）', () => {
     /* **这条守的是一条视觉上极显眼、但没有任何门禁看得见的错位**（G64）。
        左栏品牌行与主区页头是同一水平带上的两条 `border-bottom`：只要两者

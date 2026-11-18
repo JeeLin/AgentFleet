@@ -370,7 +370,18 @@ html[data-rail='off'] .af-rail__actions .af-btn {
   line-height: 1;
   letter-spacing: -0.01em; /* 22px 下 Inter 默认字距偏松，收一点更像标题 */
 }
-.af-head__sub { font-size: var(--p-t-xs); color: var(--p-fg-3); white-space: nowrap; }
+/* `.af-head__sub` 在实现里有两副面孔：原型是 `<span>`，而 `PageHead` 的包裹
+   div 写法里调用方用的是 `<p>`（`AgentCatalogPage` / `SettingsPage` /
+   `OverviewPage` 等）。**`<p>` 带 UA 默认的上下 `margin: 1em`**（正文 12.5px
+   字号下各 12.5px），而这条规则原先只写了字号与颜色，没清 margin——
+   于是包裹列实测 69.8px 而不是注释里算的 44.8px，页头被顶到 **70.8px**
+   （比 `--af-head-h` 的 56px 高 14.8px，左栏那条线跟着错位）。
+   `h1.af-head__title` 那边写了 `margin: 0`，这里漏了，是同一条规则的两半。
+   清零之后单行副标题的包裹列 = 22 + 4 + 18.75 = **44.75px**，落在 56px 内。 */
+.af-head__sub {
+  font-size: var(--p-t-xs); color: var(--p-fg-3); white-space: nowrap;
+  margin: 0;
+}
 
 /* **页头默认槽里的包裹 div**（`<PageHead><div><h1/><p/></div></PageHead>`）：
    标题 + 副标题竖排的那一列。它是 `PageHead` 文档里记录过的合法写法
