@@ -388,12 +388,41 @@ describe('面板三分区（子任务 12）', () => {
        `--af-fg-strong` 转发的就是同层同主题的 `--p-fg-strong`，不存在
        「跨层取到别的值」这条隐蔽分叉。）
        **判据强度没有放宽**：正则里 `-fg-strong` 是紧接 `fg` 的字面，
-       `--p-fg-2` / `--af-fg-2` / `--p-fg` / 写死色值仍然全部判红。
+       所以写成 `--p-fg-2` / `--af-fg-2` / `--p-fg` / 写死色值都判红。
        （这句话原写作「反过来也挡不住有人换成 `--p-fg-2`」——实测是错的，
        新正则**挡得住**；注释如实陈述判据能力，才不会被下一个人当成
-       「这里有个洞」去补一条更松的断言。） */
-    expect(block).toMatch(/--(?:af|p)-fg-strong/)
+       「这里有个洞」去补一条更松的断言。）
+       **第 7 轮补强：判据锚定到 `color:` 这一条声明，不再看整个规则块。**
+       原写法 `expect(block).toMatch(...)` 有真实缺口——在块内**追加**一条
+       `outline-color: var(--p-fg-2)`（`color` 仍是正确的 strong），
+       28 条用例全绿，而注释却声称「`--p-fg-2` 仍然判红」。根因是
+       `cssBlockOf` 把块内注释也算进来、`toMatch` 命中任意一处即过。
+       现在用 `declOf()` 剥注释并按属性名取值，追加别的属性不再能干扰判据。 */
+    expect(declOf(css, '.af-panel__title', 'color')).toMatch(/--(?:af|p)-fg-strong/)
     expect(block).toContain('--af-weight-semibold')
+  })
+
+  /* `declOf` 自己的判据要能验：它是上面那条「标题必须 strong」的承重墙，
+     写错了不会有人发现（测试还是绿的）。三条最小事实，用内联 CSS 钉住——
+     不依赖真实样式表，改样式不会让它假红。 */
+  it('declOf 取「最后一条」属性值，剥注释，忽略别的属性', () => {
+    // 注释放在**真声明之后**：不剥注释时「取最后一条」会读到注释里那条，
+    // 这条断言立刻红——两个机制（剥注释 / 取最后）各自都被钉住。
+    const sample = `
+      .x {
+        color: var(--af-fg-strong);
+        outline-color: var(--p-fg-2);
+        /* color: var(--p-fg-2); */
+      }
+    `
+    expect(declOf(sample, '.x', 'color')).toBe('var(--af-fg-strong)')
+    // 只出现一次时如实取那一次
+    expect(declOf(sample, '.x', 'outline-color')).toBe('var(--p-fg-2)')
+    // 属性不存在 → 空串（交给调用方断言判红，不静默通过）
+    expect(declOf(sample, '.x', 'background-color')).toBe('')
+    // 同块内写两条 → CSS 后者胜，必须取最后一条
+    const twice = `.y { color: var(--af-fg-strong); color: var(--p-fg-2); }`
+    expect(declOf(twice, '.y', 'color')).toBe('var(--p-fg-2)')
   })
 
   it('正文段落收窄到可读测度，但面板 body 本身不收窄', () => {
@@ -998,4 +1027,34 @@ function cssBlockOf(css: string, selector: string): string {
   if (i < 0) return ''
   const j = css.indexOf('}', i)
   return css.slice(i, j + 1)
+}
+
+/**
+ * 取一条规则里**某条属性**的声明体（剥注释、按属性名锚定）。
+ *
+ * 为什么规则块不够用：`cssBlockOf` 取到第一个 `}` 为止，**把块内注释也算了进去**，
+ * 而 `toMatch` 只要命中一处就过。所以「块里出现过 `--af-fg-strong`」不等于
+ * 「`color` 用的是它」——第 7 轮 4c 用一个变异证明了这一点：
+ *
+ *   .af-panel__title {
+ *     ...
+ *     color: var(--af-fg-strong);          ← 正确的那条还在
+ *     outline-color: var(--p-fg-2);        ← 追加一条别的属性
+ *   }
+ *
+ * 28 条用例**全绿**，可注释里明明写着「`--p-fg-2` 仍然判红」。原因是断言
+ * `toMatch` 命中的是 `color` 那行，追加的 `outline-color` 从未被看。
+ * **判据从此锚定到属性名**：`color: X` 里的 X 必须匹配，块内别处出现什么都不算。
+ *
+ * 找不到该属性返回空串（与 `cssBlockOf` 一致，交给调用方的断言判红）。
+ */
+function declOf(css: string, selector: string, prop: string): string {
+  const raw = cssBlockOf(css, selector)
+  // 剥块注释：注释里提到 token 名不算「用了它」（与 token-orphans 守卫同一口径）。
+  const body = raw.replace(/\/\*[\s\S]*?\*\//g, '')
+  // **取最后一条**：同一条规则里写两次 `color:` 时，CSS 由后者胜出。
+  // 取第一条会让「追加一条 `color: var(--p-fg-2)`」这种变异逃逸——
+  // 页面上真正显示的是 `--p-fg-2`，而断言读到的是前面那条 strong。
+  const all = [...body.matchAll(new RegExp(`(?:^|[;{\\s])${prop}\\s*:\\s*([^;]+);`, 'g'))]
+  return all.length ? all[all.length - 1][1].trim() : ''
 }
