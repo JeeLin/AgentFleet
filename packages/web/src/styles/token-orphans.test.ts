@@ -19,7 +19,7 @@
    **「它曾经被用过、被什么替换了」本身就是设计数据。**
 
    所以本轮处置从「删」改成「登记 + 钉住」：
-     · 27 个全部保留；
+     · 全部保留，一个不删；
      · 每一个在 `DECLARED_ORPHANS` 里写明**为什么留**，理由必须可证伪；
      · 这条用例把「实际孤儿名单」与「登记表」钉成**双向一致**：
          ① 出现一个新孤儿（定义了、没人用、也没登记）→ 判红，逼着你
@@ -28,6 +28,17 @@
          ③ 登记项被真正消费了（表里有、但它已经有 `var()` 消费者）→ 判红，
             提示把它从表里移除——**登记不是永久豁免**，一旦它重新服役，
             这条豁免就该消失。
+
+    ── 数字为什么是 34 而不是一开始说的 27（这段是判据演进史，别删）──
+    · 20 → **27**：第一版扫描把**注释里的 token 名**当消费者（见下节），
+      剥掉注释后多出 7 个；
+    · 27 → **34（+8）**：第 6 轮 4b 指出「消费」口径过宽——`--x: var(--y)`
+      这种**定义右侧**的 `var()` 也被算成「y 被消费」。收紧后多出 8 个
+      `THEME_SOURCE_SLOTS`（真身槽位：`--p-fg-strong` / `--p-sh-1/2` /
+      `--p-scrim` / `--p-inset-c` / `--p-add-ink-c` / `--p-del-ink-c` /
+      `--af-space-13`）。它们此前一直靠别人的定义右侧「假装有消费者」。
+    · `--af-fg-strong`（补了 17 处消费者）在 `RETIRED_ORPHANS`，不计入 34。
+    所以现在：**34 条登记 + 1 条退役**。
 
     ── 判据为什么必须「剥注释后再扫」────────────────────────────────────
    这是本轮我自己踩的坑：初版用朴素正则扫 `var(--x)`，得到 20 个孤儿；
@@ -45,6 +56,15 @@
    那边管**类名**（`.af-*` 有没有定义 / 有没有人用），这边管**自定义属性**
    （`--af-*` / `--p-*` 有没有人 `var()`）。两个反向守卫形状相同、对象不同，
    刻意分开：混在一起时改一条断言会连带影响另一边的读数。
+
+   ── 下面 34 条理由里的「N 次」是什么口径（写死，别再各写一套）─────────
+   **全部是「`var()` 引用计数」，范围 = `packages/web/src/` 的 `.css` + `.vue`，
+   不含 `theme-*.css` 里 `--x: var(--y)` 这种转发定义，不含测试文件。**
+   说「同族在役」时，数的是同族各名字的 `var()` 引用次数，不是「有几个名字存在」。
+   原型侧同理：`grep -o 'var(--名字)' prototype/assets/app.css | wc -l`。
+   写理由时要么两个数都给（名字数 + 次数），要么只用次数并写明「`var()` 计数」。
+   **不许把「4 个类型」与「40 次总数」并列成「四个（共 40 次）」**——那是两套口径
+   混在一句话里，读者会以为每个类型各 10 次。
    =========================================================================== */
 
 import { readdirSync, readFileSync, statSync } from 'node:fs'
@@ -108,11 +128,31 @@ function definedProps(): Map<string, string[]> {
  *
  * ③ 是刻意放宽的：不认它就会把「被测试按名读取」的 token 报成孤儿。
  * 但**注释不算**——`STRIPPED` 已经剥过，这正是本文件头讲的那个坑。
+ *
+ * ── ① 要排除「定义右侧的 `var()`」──────────────────────────────────────
+ * `--af-fg-strong: var(--p-fg-strong)` 里，`var(--p-fg-strong)` 是**声明**
+ * 在给 `--af-fg-strong` 赋值，它并不说明 `--p-fg-strong` 被谁读了。
+ * 不排除的话会造出「假消费」：实测有 7 个名字只因出现在别人的定义右侧
+ * 就被算成「有消费者」——`--af-space-13`、`--p-add-ink-c`、`--p-del-ink-c`、
+ * `--p-inset-c`、`--p-scrim`、`--p-sh-1`、`--p-sh-2`。
+ * 其中 `--af-space-13` 是纯档位：它明明零消费，却因
+ * `--p-s8: var(--af-space-13)` 这条转发被当成人人都在用的 token。
+ *
+ * 判法：看 `var(` 前面（同一段，未跨 `{` `}` `;`）是不是只有
+ * 「`--名字` + `:` + 可选空白」。是 → 定义右侧，跳过。
  */
 function consumedProps(): Set<string> {
   const out = new Set<string>()
   for (const text of STRIPPED.values()) {
-    for (const m of text.matchAll(/var\(\s*(--[a-zA-Z0-9_-]+)/g)) out.add(m[1])
+    for (const m of text.matchAll(/var\(\s*(--[a-zA-Z0-9_-]+)/g)) {
+      /* 往回找最近的「分隔符」（`{` `}` `;`），取中间那段看它是不是
+         `--x:` 形态。限 200 字符是为了不让长规则体把开销拖大。 */
+      const before = text.slice(Math.max(0, m.index - 200), m.index)
+      const cut = Math.max(before.lastIndexOf('{'), before.lastIndexOf('}'), before.lastIndexOf(';'))
+      const seg = cut >= 0 ? before.slice(cut + 1) : before
+      if (/^\s*--[a-zA-Z0-9_-]+\s*:\s*$/.test(seg)) continue // 定义右侧，不算消费
+      out.add(m[1])
+    }
     for (const m of text.matchAll(/['"`](--[a-zA-Z0-9_-]+)['"`]/g)) out.add(m[1])
     // 无前缀写法：'af-text-md' → --af-text-md
     for (const m of text.matchAll(/['"`](af|p)-([a-zA-Z0-9_-]+)['"`]/g)) out.add(`--${m[1]}-${m[2]}`)
@@ -126,8 +166,72 @@ function consumedProps(): Set<string> {
    一条测试/注释里记着的替换史，要么指向「同族其余档位仍在服役」这个事实。
 
    分组按**保留理由的性质**，不按文件。同一组里的 token 理由相同，
-   就不重复写 27 遍。 */
+   就不重复写 N 遍。 */
 type OrphanReason = { why: string; kin: string }
+
+/* ④ **真身槽位**：它们是被 `--af-*` 门面层**转发出去**的那一端，自身没有规则
+   直接读。第 6 轮 4b 指出「消费」口径过宽（把定义右侧的 `var()` 也算消费）后，
+   收紧判据才暴露出来——**它们之前一直是靠别人的定义右侧「假装有消费者」**。
+
+   为什么必须保留：这些名字承载的是**配色/几何的字面值**（四套主题各一套），
+   门面层的 `--af-*` 只是转发。删了真身，转发链断掉，四套主题的色值就没了落点。
+   这与「纯档位没人用」是两件事：`--p-sh-1` 不是「空档位」，它是阴影值本体。 */
+const THEME_SOURCE_SLOTS: Record<string, OrphanReason> = {
+  '--p-fg-strong': {
+    why:
+      '**真身槽位**（四套主题各一个字面值：`#dfe3e8` / `#e2ded6` / `#1c2127` / `#23211c`）。'
+      + '被 `--af-fg-strong` 与 `--af-term-ansi-bright-white` 两条转发出去（`theme-*.css:75/127/152/222`）。'
+      + '自身零规则直接读——G92 把那 17 处都改走 `--af-fg-strong` 门面层之后，'
+      + '它就成了「只被转发、不被直读」的真身。这正是门面层该有的形状，不是死代码。',
+    kin: '--af-fg-strong（17 次直读，在役）、--af-term-ansi-bright-white',
+  },
+  '--p-add-ink-c': {
+    why:
+      '**真身槽位**（diff 新增侧的墨色）。被 `--af-add-ink` 与 `--af-add-ink-strong` '
+      + '两条转发（`theme-*.css`），自身零直读。`-c` 后缀是「这一层是颜色」的既有约定'
+      + '（见 `theme-neutral.css` 的改名说明：`--add → --p-add-ink-c` 是有意改名）。',
+    kin: '--af-add-ink / --af-add-ink-strong（各 1 次直读）',
+  },
+  '--p-del-ink-c': {
+    why:
+      '**真身槽位**（diff 删除侧的墨色）。被 `--af-del-ink`、`--af-del-ink-strong`、'
+      + '`--af-danger-ink` 三条转发，自身零直读。删了会让 diff 两侧与 danger 墨色同时失去落点。',
+    kin: '--af-del-ink / --af-danger-ink（各 1 次直读）',
+  },
+  '--p-inset-c': {
+    why:
+      '**真身槽位**（内凹表面的颜色，原型 `--inset` 一族）。被 `--af-inset` 与 '
+      + '`--af-term-bg` 转发。四套主题各一套字面值——删了就是丢一份配色数据。',
+    kin: '--af-inset（在役）、--af-term-bg',
+  },
+  '--p-scrim': {
+    why:
+      '**真身槽位**（遮罩层颜色，浮层背后的压暗）。被 `--af-scrim` 转发。'
+      + '四套主题各一套（暗色/亮色的压暗强度不同，不能共用一套值）。',
+    kin: '--af-scrim（在役）',
+  },
+  '--p-sh-1': {
+    why:
+      '**真身槽位**：阴影第一档的字面值（`0 1px 2px rgba(0,0,0,0.28)`，四套各一份）。'
+      + '被 `--af-shadow-1` 转发。原型 `--sh-1` 自己也是零消费（浮层统一用 `-3`），'
+      + '但三档是一条阶梯，且**阴影值是颜色**——删了就丢数据。',
+    kin: '--af-shadow-1、--af-shadow-3（在役）',
+  },
+  '--p-sh-2': {
+    why:
+      '**真身槽位**：阴影第二档字面值（`0 6px 18px rgba(0,0,0,0.38)`，四套各一份），'
+      + '被 `--af-shadow-2` 转发。零直读原因与保留理由同 `--p-sh-1`。',
+    kin: '--af-shadow-2、--af-shadow-3（在役）',
+  },
+  '--af-space-13': {
+    why:
+      '**纯档位，但被转发**：56px，原型间距第 8 档 `--s8: 56px` 的精确映射（`--p-s8: var(--af-space-13)`）。'
+      + '它自己零直读，而 `--p-s8` 有 12 次直读——**这是「档位 → 原型槽位」的桥**，'
+      + '删了 `--p-s8` 就断链。与 `--af-space-14`（72px，原型无对应档）不同：'
+      + '13 有原型出处（`prototype/assets/tokens.css:33`）。',
+    kin: '--af-space-1..12（在役）、--p-s8（12 次直读）',
+  },
+}
 
 /** ① 原型里有这个槽位，实现必须搬过来（`theme-css.test.ts` 逐值对照原型的门禁）。 */
 const PROTOTYPE_COLOR_SLOTS: Record<string, OrphanReason> = {
@@ -207,8 +311,11 @@ const PROTOTYPE_ALIAS_LAYER: Record<string, OrphanReason> = {
   },
   '--p-r-lg': {
     why:
-      '原型圆角 5 档里的第 4 档（`prototype/assets/tokens.css:35`：`--r-lg: 14px`），原型 `app.css` 用 1 次'
-      + '（`.af-drawer` 底部面板）。`SIZING_ALIASES` 显式要求存在。'
+      '原型圆角 5 档里的第 4 档（`prototype/assets/tokens.css:35`：`--r-lg: 14px`）。'
+      + '**原型 `app.css` 用 2 次**，都在 `:1152` 的 `.af-navpanel` 一行里'
+      + '（`border-radius: var(--r-lg) var(--r-lg) 0 0`，导航面板的上两角）——'
+      + '不是抽屉：`.af-drawer` 块（`app.css:559-569`）里只有 `--r-md` / `--r-sm`。'
+      + '`SIZING_ALIASES` 显式要求存在。'
       + '注意它与 `--p-r-md` 都指向 `--af-radius-lg`（两档压成一档）——'
       + '**这个压缩决定没有留下理由注释**，是这条守卫发现的既有欠账之一。',
     kin: '--p-r-{xs,sm,md,full}（在役）',
@@ -216,9 +323,13 @@ const PROTOTYPE_ALIAS_LAYER: Record<string, OrphanReason> = {
   '--p-t-lg': {
     why:
       '原型字号 `--t-lg: 18px` 的传名（原型 `app.css` 用 1 次）。`SIZING_ALIASES` 要求存在。'
-      + '**它曾经有消费者、后来被有意替换掉**：`prototype-shell.css:360` 的注释写着'
-      + '「用 display 档（22px）而不是原来的 `--p-t-lg`（18px）：实测 18px 压不住'
-      + '14.5px 正文」——**这段替换史本身就是设计数据**，删了 token 就失去了它指向的对象。',
+      + '**它当前零消费本身就是一条证据**：`tokens.css:339` 的行尾注释写着「18：页面标题」，'
+      + '而 `prototype-shell.css:360` 实测得出的结论正好相反——「用 display 档（22px）'
+      + '而不是原来的 18px：实测 18px 压不住 14.5px 正文」。'
+      + '**这两句注释对「18px 该不该当页面标题」给了相反答案**，是既有欠账；'
+      + '`--p-t-lg` 没人读，正是这个矛盾留下的物证。'
+      + '注意 `:360` 讲的是 `.af-head__title` 这一个选择器，**不是** `--p-t-lg` 的替换史'
+      + '（两者容易混：`--p-t-lg` 是 18px，`--af-text-lg` 是另一条 15px，别混为一谈）。',
     kin: '--p-t-{2xs,xs,sm,md}（在役）',
   },
   '--p-t-xl': {
@@ -328,10 +439,12 @@ const IMPLEMENT_ONLY_TIERS: Record<string, OrphanReason> = {
   '--af-danger-ink': {
     why:
       '原型没有 `danger` 名号（对应概念叫 `--del`），本槽转发到 `--p-del-ink-c`。'
-      + '同族 `--af-danger` / `-fg` / `-bg` / `-line` **四个全在役**（共 40 次），'
-      + '唯独 `-ink` 这一格没人读。保留：它是「danger 的墨色（diff/代码里的深色变体）」'
+      + '同族四个在役，**按类拆开的 `var()` 消费数**：`--af-danger` 8 次、`-fg` 14 次、'
+      + '`-bg` 9 次、`-line` 9 次；`-ink` 0 次。（不要把这四个数与「族总 40 次」并列——'
+      + '40 是含 `-ink` 在内的全族出现次数，并列会让人误以为 `-ink` 也有一份。）'
+      + '保留：它是「danger 的墨色（diff/代码里的深色变体）」'
       + '这一命名意图的落点；删了之后 `-ink` 这个后缀在 danger 族里就没有先例可循。',
-    kin: '--af-danger{, -fg, -bg, -line}（在役 4 个）',
+    kin: '--af-danger 8 / -fg 14 / -bg 9 / -line 9（`var()` 计数，四份主题定义不计）',
   },
   '--af-border-disabled': {
     why:
@@ -339,7 +452,8 @@ const IMPLEMENT_ONLY_TIERS: Record<string, OrphanReason> = {
       + '接最弱一档边界 */`——**注释明写了这是一个推断出来的槽位**（原型没给，'
       + '按语义接到 `--p-line-2`）。同族 `subtle/default/strong/focus` 四档在役。'
       + '保留：这是「原型缺哪一档、我们按什么原则补的」的**唯一书面记录**。'
-      + '同族里 `--af-fg-disabled` 在役 12 次，说明 disabled 态本身是存在的。',
+      + '同族里 `--af-fg-disabled` 全仓 `var()` 14 次（`components.css` 10 + 4 个 `.vue`），'
+      + '说明 disabled 态本身是存在的。',
     kin: '--af-border-{subtle,default,strong,focus}（在役 4 档）',
   },
   '--af-border-selected': {
@@ -356,13 +470,21 @@ const DECLARED_ORPHANS = new Map<string, OrphanReason>([
   ...Object.entries(PROTOTYPE_COLOR_SLOTS),
   ...Object.entries(PROTOTYPE_ALIAS_LAYER),
   ...Object.entries(IMPLEMENT_ONLY_TIERS),
+  ...Object.entries(THEME_SOURCE_SLOTS),
 ])
 
 /* ── 已退役的孤儿：曾经零消费者、后来补上了消费者 ────────────────────────
    为什么需要这张表：`--af-fg-strong` 原本在 `PROTOTYPE_COLOR_SLOTS` 里，
    理由写的是「原型用 33 次、实现绕过门面层」。G92 的处置就是把它补回来
-   （`components.css` 5 处 + `prototype-shell.css` 10 处改走 `var(--af-fg-strong)`），
+   （`components.css` 5 处 + `prototype-shell.css` 10 处 + `NewProjectPage.vue`
+   2 处，共 17 处改走 `var(--af-fg-strong)`），
    于是它不再是孤儿，按 ③ 号用例的要求从 `DECLARED_ORPHANS` 移除。
+
+   **别把它和 `--af-term-ansi-bright-white` 混淆**：后者是
+   `--af-term-ansi-bright-white: var(--p-fg-strong)`（四份主题各一行），
+   消费的是 `--p-fg-strong`，**不是** `--af-fg-strong`。名字里都有 `fg-strong`
+   但这个转发不构成对门面层的消费——实测父提交上 `var(--af-fg-strong)`
+   出现 **0 次**。这类「相邻行名字相似」很容易被读成「它早就有人用了」。
 
    但「移除」不等于「这件事没发生过」。这张表把退役记录下来，并用一条用例
    钉住它们**当前确实有消费者**——否则有人把那些 `var()` 改回 `--p-fg-strong`，
@@ -371,7 +493,8 @@ const DECLARED_ORPHANS = new Map<string, OrphanReason>([
 const RETIRED_ORPHANS: Record<string, string> = {
   '--af-fg-strong':
     'G92 补消费者后退役：原型 `--fg-strong` 在 `app.css` 被用 33 次，'
-    + '实现里那 15 处曾直接写 `var(--p-fg-strong)` 绕过门面层。'
+    + '实现里那 17 处曾直接写 `var(--p-fg-strong)` 绕过门面层'
+    + '（`components.css` 5 + `prototype-shell.css` 10 + `NewProjectPage.vue` 2）。'
     + '改成 `var(--af-fg-strong)` 之后门面层才真的在服役。',
 }
 
