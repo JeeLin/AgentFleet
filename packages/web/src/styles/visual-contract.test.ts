@@ -401,8 +401,43 @@ const CONTRACT: ContractRow[] = [
    字面量），下面逐行的断言就是**假绿**。所以先证明表是「实心」的。
    =========================================================================== */
 describe('契约表自检', () => {
-  it('表里至少有 15 行（少于这个数说明有人在悄悄删契约）', () => {
-    expect(CONTRACT.length).toBeGreaterThanOrEqual(15)
+  it('表里恰好 27 行（删一行都算在悄悄删契约）', () => {
+    /* 初版是 `toBeGreaterThanOrEqual(15)`，而实测表 27 条——删掉 12 行仍然绿
+       （v0.8.1 第5轮 4c F5 / G80 的变异实证）。下限只防「删空」，不防「删半」。
+       **钉住确切条数**：删一行即红。哪天真要删契约行，必须同步改这个数——
+       那是一次显式动作，不是顺手删。 */
+    expect(CONTRACT.length).toBe(27)
+  })
+
+  it('关键契约组不得缺席（按组计下限，删行即使总数对得上也会被点名）', () => {
+    /* 初版白名单写的是 `.af-head` / `.af-btn` / `.af-input`——**那是我编的**，
+       表里根本不存在这些 selector（实测只有 10 种）。凭印象写白名单等于
+       把「守卫的守卫」建在自己的想象上。改成按表里**真实存在**的组计下限：
+       删行会同时破坏总数（27）与本表的分布，两道都会响。 */
+    const minPerSelector: Record<string, number> = {
+      '.af-head__title': 4,
+      '.af-head > div': 4,
+      '.af-head > div .af-head__sub': 4,
+      '.af-head__sub': 2,
+      '.af-rail__name': 1,
+      '.af-rail__mark': 1,
+      '.af-rail__foot': 1,
+      '.af-empty--compact .af-empty__text': 1,
+      '.af-panel__body > p + p': 1,
+      '.af-card:focus-visible': 1,
+    }
+    const missing: string[] = []
+    for (const [sel, min] of Object.entries(minPerSelector)) {
+      const n = CONTRACT.filter((r) => r.selector === sel).length
+      if (n < min) missing.push(`${sel}: ${n} < ${min}`)
+    }
+    const unknown = [...new Set(CONTRACT.map((r) => r.selector))].filter((s) => !(s in minPerSelector))
+    expect(
+      unknown,
+      `契约表出现了本守卫不认识的 selector：${unknown.join(', ')}——`
+        + '把它加进 minPerSelector（新契约行要有下限），或说明它为什么不必守',
+    ).toEqual([])
+    expect(missing, `关键契约组缺行：${missing.join('; ')}`).toEqual([])
   })
 
   it('每行的 expect 都非空、且每行都写清了在哪一页量到', () => {
