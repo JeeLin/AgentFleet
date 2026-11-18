@@ -19,6 +19,13 @@ import type { Task, TaskStateWire } from '@/domains/project/taskTypes'
 import { STATES } from '@/shared/state'
 import { mountIn } from '@/test/mount'
 import { settle, stubFetch } from '@/test/http'
+import {
+  clearRouteFocusTarget,
+  focusRouteTarget,
+  hasRouteFocusTarget,
+  lastRouteFocusId,
+  setRouteFocusTarget,
+} from '@/shared/focus'
 import { navigate, route } from '@/router'
 
 /**
@@ -828,5 +835,136 @@ describe('BoardPage（v0.8.1）：骨架与原型 board.html 对齐', () => {
     // 集合相等（不是数组相等）：顺序由上一条用例钉着，这里钉的是
     // 「有没有某一个态被两个列共用 / 漏掉」——那会让六条顶部色带少一条。
     expect(new Set(states)).toEqual(new Set(['pending', 'queued', 'running', 'review', 'done', 'failed']))
+  })
+})
+
+/* ===========================================================================
+   G65：卡片是键盘可达的**入口**，不是「点完就丢焦点」的装饰
+   ---------------------------------------------------------------------------
+   第3轮验收实测：卡片 click / ⏎ 进任务详情后 `activeElement` 是
+   `MAIN.af-main`，Back 回看板焦点也不回那张卡。这一组钉两件事：
+     ① `openTask` 在 `navigate()` 之前**登记来源**（否则详情页没有落点可让）；
+     ② 卡片带 `data-id="任务 id"`（返回时按它找回同一张卡）。
+   返回后的「落到哪张卡」由 `focus.test.ts` 的三档用例与
+   `ProjectTaskPage.test.ts` 的详情落点用例覆盖；这里只钉看板这一侧的契约。
+   =========================================================================== */
+describe('G65：看板卡片的键盘路径', () => {
+  it('点卡片前先登记来源，导航后「让出 main」的标志仍等页面消费', async () => {
+    stubBoard([task({ id: 'tsk_1', state: 'pending', title: '把构建时间降到 60s 内' })])
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    // 干净起点：`mountAt` 里的 `navigate` 会落一次焦点，先复位。
+    clearRouteFocusTarget()
+    expect(hasRouteFocusTarget(), '复位后不该有残留').toBe(false)
+
+    const card = w.find('.af-taskcard')
+    expect(card.exists()).toBe(true)
+    await card.trigger('click')
+    await flushUntilSettled(w)
+
+    // 路由 `navigate()` 的微任务在这一页挂载期间就跑过了；若 `openTask`
+    // 没有登记，标志为假，详情页就没有「该让出」的依据。
+    // 判据：点完之后 `route` 已是任务页，而**卡片本身仍带着可找回的 id**。
+    expect(route.value.name).toBe('project-task')
+    expect(route.value.params.taskId).toBe('tsk_1')
+  })
+
+  it('每张卡带 data-id=任务 id（返回看板时靠它找回同一张卡）', async () => {
+    stubBoard([
+      task({ id: 'tsk_a', state: 'pending' }),
+      task({ id: 'tsk_b', state: 'running' }),
+    ])
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const ids = Array.from(w.element.querySelectorAll('.af-taskcard')).map((el) =>
+      el.getAttribute('data-id'),
+    )
+    expect(ids.sort()).toEqual(['tsk_a', 'tsk_b'])
+  })
+
+  it('openTask 把「上一站」记成被点的那张卡：Back 回来能落到同一张卡上', async () => {
+    // **必须走真实的点击路径**（`card.trigger('click')` → `openTask`），
+    // 不能自己调 `setRouteFocusTarget`：那样测的是测试自己，而不是
+    // `openTask` 里那句登记。反向验证过——把 `openTask` 里的
+    // `setRouteFocusTarget(...)` 删掉，下面「登记过」这条立刻红。
+    stubBoard([task({ id: 'tsk_a', state: 'pending' }), task({ id: 'tsk_b', state: 'running' })])
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    // `mountAt` 里的 `navigate()` 会消费掉早先的让出标志，先复位成干净起点。
+    clearRouteFocusTarget()
+
+    const card = w.element.querySelector<HTMLElement>('[data-id="tsk_b"]')
+    expect(card, '第二张卡存在').not.toBeNull()
+    card!.focus()
+    expect(document.activeElement, '前置：焦点在这张卡上').toBe(card)
+
+    await w.find('[data-id="tsk_b"]').trigger('click')
+    // 断言用 `lastRouteFocusId()` 而不是 `hasRouteFocusTarget()`：让出标志
+    // 会被 `navigate()` 的微任务立刻消费掉，`trigger('click')` 一 await 就
+    // 读不到了；「上一站」则要活到下一次换页，微任务之后仍然在。
+    // 删掉 `openTask` 里的 `setRouteFocusTarget(...)` 时这条会红。
+    expect(route.value.name, '已跳到任务详情').toBe('project-task')
+    expect(route.value.params.taskId).toBe('tsk_b')
+    expect(lastRouteFocusId(), 'openTask 必须把这张卡记成上一站').toBe('tsk_b')
+    await flushUntilSettled(w)
+
+    // ③ 模拟详情页把焦点放到标题后 Back 回看板：卡片重新渲染，焦点回到
+    //    同一张卡（`data-id` 是那条线索）。
+    clearRouteFocusTarget()
+    const back = w.element.querySelector<HTMLElement>('[data-id="tsk_b"]')
+    setRouteFocusTarget(back)
+    expect(focusRouteTarget(), '第一次是让出').toBeNull()
+    const restored = focusRouteTarget()
+    expect(restored?.getAttribute('data-id'), '应回到被点的那张卡').toBe('tsk_b')
+    expect(document.activeElement).toBe(back)
+    clearRouteFocusTarget()
+  })
+})
+
+/* ===========================================================================
+   G69：看板页只有一个页头副标题（正文那行不再是 `h2.af-head__sub`）
+   ---------------------------------------------------------------------------
+   第3轮验收的发现：`BoardPage.vue` 的正文顶部有一行
+   `<h2 class="af-head__sub">{{ project?.name }}</h2>`，它与页头 `PageHead` 里的
+   `.af-head__sub` **逐字重复**同一个项目名，而且它自己还是个 `h2`——于是这一页的
+   标题结构是「H1 + H2（文本与 H1 完全重复）+ 6 个 H3 列标题」。读屏用户按标题
+   跳转时会先听到两遍项目名，再听列名。
+
+   修法：正文那行降级为 `<p class="af-muted af-board__sub">`——文字不变、
+   位置不变，但**不再占一个标题层级**，`.af-head__sub` 回归页头独占。
+
+   这一组钉的判据是「数量」而不是「有没有」：将来谁在正文里再挂一个
+   `.af-head__sub`，红在「多个」上，而不是静默地给读屏用户多播一遍。
+   反向验证：把模板改回 `<h2 class="af-head__sub">` → 下面两条都红。
+   =========================================================================== */
+describe('G69：看板页的标题层级', () => {
+  it('正文不再有 `h2.af-head__sub`（本页页头也没有副标题，所以整页一个都没有）', async () => {
+    stubBoard([task({ id: 'tsk_1', state: 'pending' })])
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    // 本页的页头是手写的 `<header class="af-head">`：只有一个下拉按钮里的
+    // `h1.af-head__title`，**没有** `.af-head__sub`。所以修好之后整页
+    // `.af-head__sub` 的数目是 0——正文那个 `h2` 曾经是唯一的一个。
+    expect(
+      w.element.querySelectorAll('h2.af-head__sub').length,
+      '正文不该再造一个与 H1 重复的 h2',
+    ).toBe(0)
+    expect(w.element.querySelectorAll('.af-head__sub').length, '页头副标题类只属于页头').toBe(0)
+  })
+
+  it('正文那行项目名是 `<p>`，不是 `h2`（不占标题层级）', async () => {
+    stubBoard([task({ id: 'tsk_1', state: 'pending' })])
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+
+    const sub = w.element.querySelector('.af-board__sub')
+    expect(sub, '正文里保留那行项目名').not.toBeNull()
+    expect(sub?.tagName, '它是段落，不是标题').toBe('P')
+    // 反向：`h2` 一出现，标题跳转就会多停一站，且文本与 H1 重复。
+    expect(w.element.querySelectorAll('h2.af-head__sub').length).toBe(0)
   })
 })

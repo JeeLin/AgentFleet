@@ -226,7 +226,13 @@ describe('DeviceTable：设备名与指纹这一格的竖向对齐', () => {
   })
 
   it('名字可收缩：长名字走省略号，不把整列撑宽去挤别的列', () => {
-    expect(src).toMatch(/\.af-dev-name__name\s*\{[^}]*min-width:\s*0/)
+    // 判据钉在 `.af-dev-name`（那一格真正带的类，模板 `:166`）上。
+    // v0.8.1 第5轮 G49 之前这里断的是 `.af-dev-name__name`——那条规则零消费者
+    // （模板里没有元素带这个类），测试等于在保护死代码：删 CSS 会红，而删掉
+    // 死 CSS 正是对的。反向验证：把 `.af-dev-name` 里的 `min-width: 0` 删掉 → 红。
+    expect(src).toMatch(/\.af-dev-name\s*\{[^}]*min-width:\s*0/)
+    // 再钉一条：死规则不许回潮（它能通过上面那条正则旁边的空转）。
+    expect(src, '`.af-dev-name__name` 零消费者，别再加回来').not.toContain('af-dev-name__name')
   })
 })
 

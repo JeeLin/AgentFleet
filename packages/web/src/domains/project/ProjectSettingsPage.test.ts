@@ -384,8 +384,9 @@ describe('ProjectSettingsPage（v0.8.1）：骨架与原型 project-settings.htm
     const w = mountAt()
     await flush(w)
 
-    // 原型 `project-settings.html:14-24`：`header.af-head` 与 `.af-body` 是
-    // 两个兄弟。判据取「整页只有一个」——将来谁在 `.af-body` 里再包一层它，
+    // 原型 `project-settings.html:15-37`：`header.af-head`（`:15-23`）与
+    // `.af-body`（`:37`）是两个兄弟，中间夹着 `div.af-filters`（`:28`）。
+    // 判据取「整页只有一个」——将来谁在 `.af-body` 里再包一层它，
     // 这一条会红在「多个」而不是静默取第一个通过。
     const bodies = Array.from(w.element.querySelectorAll('.af-body'))
     expect(bodies, '整页只该有一个 .af-body（页面内容区）').toHaveLength(1)

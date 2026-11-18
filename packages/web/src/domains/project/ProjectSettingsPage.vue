@@ -215,12 +215,17 @@ onMounted(load)
 </script>
 
 <template>
-  <!-- 页面骨架照原型 `project-settings.html:14-24`：页头是 `header.af-head`
-       （返回按钮 + 标题 + 两个徽标 + 右侧「绑定与配额」），内容在 `.af-body` 里。
+  <!-- 页面骨架照原型 `project-settings.html:15-37`：页头是 `header.af-head`
+       （`project-settings.html:15-23`：返回按钮 + 标题 + 两个徽标 + 右侧两个动作），
+       然后是 `div.af-filters`（`:28`）那一行说明，内容在 `.af-body`（`:37`）里。
        上一版是自造的 `.af-page` / `.af-page__head` / `.af-page__title` ——
        那一族规则在 v0.8.1 子任务 2 已随类名删除。这里改用共享的 `PageHead`
        （其余 4 页同一写法），标题/副标题换成原型的 `.af-head__title`。
-       根容器给 `.af-body`：原型里承载滚动的是它（`app.css:132`）。 -->
+       根容器给 `.af-body`：原型里承载滚动的是它（`app.css:132`）。
+       **行号说明**：本页原注释抄的是别页的 `:14-24`——14 在原型里是空行
+       （`<html>` 头与 `<main>` 之间），`.af-body` 在 **37** 行。同批其余 3 页
+       的同一句也一起按实测校正了（`archived.html:15-34`、`project-new.html:15-23`、
+       `project-bind.html:15-24`）。 -->
   <PageHead>
     <button
       type="button"
@@ -245,8 +250,8 @@ onMounted(load)
   </PageHead>
 
   <div class="af-body">
-    <!-- 原型 `project-settings.html:24` 的内容层：`.af-body` 里的这一层同时
-         带内边距与 960px 限宽（原型的 `padding:20px 20px 64px;max-width:960px`
+    <!-- 原型 `project-settings.html:38` 的内容层：`.af-body`（`:37`）里的这一层
+         同时带内边距与 960px 限宽（原型的 `padding:20px 20px 64px;max-width:960px`
          是内联样式，实现侧走 scoped 规则，见文件尾）。 -->
     <div class="af-pset__body">
     <p v-if="loading" class="af-muted">正在读取项目…</p>
@@ -570,7 +575,7 @@ onMounted(load)
 </template>
 
 <style scoped>
-/* 内容层：原型 `project-settings.html:24` 的 `padding:20px 20px 64px;max-width:960px`
+/* 内容层：原型 `project-settings.html:38` 的 `padding:20px 20px 64px;max-width:960px`
    是内联样式，实现侧不写内联，落成这一条。**限宽 960px 不是随手取的**：
    这一页几乎全是「档 / 策略」对照表，主区吃满 1400px 时每行只有几个字，
    读起来要来回扫视；原型也是这么定的。 */

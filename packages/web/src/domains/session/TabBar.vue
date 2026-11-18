@@ -24,7 +24,7 @@
    那是浏览器的快捷键，拦不住。把一个冲突的键绑到不可逆动作上比不给键更危险。
    =========================================================================== */
 
-import { nextTick, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 
 import { neighborId, type TabMeta, type TabsState } from '@/shared/tabs'
 import { PANEL_ICON, PANEL_LABEL, type PanelName } from '@/shared/panel'
@@ -126,6 +126,23 @@ function onLabelKeydown(id: string, e: KeyboardEvent): void {
 
 /** 当前 tab 的 label。页面的 `⇧Tab` 回跳与「切 tab 后进正文」都用它。 */
 defineExpose({ focusTab })
+
+/**
+ * `{ tabId → 当前工具 }` 的派生表（v0.8.1 第5轮 G59）。
+ *
+ * 只保留**真的开着工具**的那些 tab：`null` 相当于「没有」，留在表里会让模板的
+ * `v-if` 变成「键存在」而不是「值非空」。于是模板里两处读同一个非空值，
+ * 不需要再写 `!` 强断言——这也是本项要修的：`panelIcons[tab.id]!` 出现两次，
+ * 而 `v-if` 的收窄在 Vue 模板里不跨属性生效。
+ */
+const toolIcon = computed<Record<string, PanelName>>(() => {
+  const out: Record<string, PanelName> = {}
+  for (const tab of props.tabs) {
+    const name = props.panelIcons[tab.id]
+    if (name) out[tab.id] = name
+  }
+  return out
+})
 </script>
 
 <template>
@@ -157,14 +174,20 @@ defineExpose({ focusTab })
         <span class="af-tab__name">{{ tab.title }}</span>
       </button>
       <!-- 当前工具图标：切回去之前先知道会看到什么。
-           v0.4.0 这里是个数字徽标（面板数）；一格之后数字恒为 1，见 props 注释。 -->
+           v0.4.0 这里是个数字徽标（面板数）；一格之后数字恒为 1，见 props 注释。
+
+           v0.8.1 第5轮 G59：**一次查表，两处读同一个变量**。原来这一格写的是
+           `v-if="panelIcons[tab.id]"` + 两个 `panelIcons[tab.id]!`——Vue 模板的
+           `v-if` 收窄不跨属性生效，只能靠两个 `!` 强断言硬压类型，等于每次渲染
+           查三遍同一张表，而断言把「表里没这个键」的可能性藏起来了。
+           现在脚本里算一次 `toolIcon`（`{ id → 工具名 }` 的派生表），模板只读它。 -->
       <span
-        v-if="panelIcons[tab.id]"
+        v-if="toolIcon[tab.id]"
         class="af-tab__tool"
         data-tab-tool
-        :title="`这个会话当前开着${PANEL_LABEL[panelIcons[tab.id]!]}面板`"
+        :title="`这个会话当前开着${PANEL_LABEL[toolIcon[tab.id] as PanelName]}面板`"
         aria-hidden="true"
-      >{{ PANEL_ICON[panelIcons[tab.id]!] }}</span>
+      >{{ PANEL_ICON[toolIcon[tab.id] as PanelName] }}</span>
       <!-- 脏标记：关掉这个 tab 会丢掉未保存的改动（§5.5.2）。写在 tab 上是因为
            那份改动随 tab 一起消失，而面板在切走时已经被卸掉、说不出口。 -->
       <span

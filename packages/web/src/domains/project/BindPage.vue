@@ -207,8 +207,8 @@ onMounted(load)
 </script>
 
 <template>
-  <!-- 页面骨架照原型 `project-bind.html:14-22`：页头是 `header.af-head`
-       （上一步 + 标题 + 两个徽标 + 右侧「完成，进看板」），内容在 `.af-body` 里。
+  <!-- 页面骨架照原型 `project-bind.html:15-24`：页头是 `header.af-head`（`:15-22`）
+       （上一步 + 标题 + 两个徽标 + 右侧「完成，进看板」），内容在 `.af-body`（`:24`）里。
        上一版根容器是自造的 `.af-page` —— 那一族规则在 v0.8.1 子任务 2 已随类名
        删除，于是这一页的内容既没有内边距也没有与页头分开的层级。 -->
   <PageHead>

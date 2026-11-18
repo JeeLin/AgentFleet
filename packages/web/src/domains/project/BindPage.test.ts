@@ -394,7 +394,7 @@ describe('BindPage（v0.8.1）：骨架与原型 project-bind.html 对齐', () =
     const w = mountAt('p_1')
     await flush(w)
 
-    // 原型 `project-bind.html:14-22`：`header.af-head` 与 `.af-body` 是两个兄弟。
+    // 原型 `project-bind.html:15-24`：`header.af-head`（`:15-22`）与 `.af-body`（`:24`）是两个兄弟。
     // 判据取「整页只有一个」——将来谁在 `.af-body` 里再包一层它，这一条会红在
     // 「多个」而不是静默取第一个通过。
     const bodies = Array.from(w.element.querySelectorAll('.af-body'))

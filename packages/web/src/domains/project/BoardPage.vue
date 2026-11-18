@@ -65,6 +65,7 @@ import { STATES } from '@/shared/state'
 import { describeShape } from '@/shared/projectShape'
 import { parseStamp } from '@/shared/format'
 import { ApiError, describeReadFailure } from '@/shared/http'
+import { focusRouteTarget, setRouteFocusTarget } from '@/shared/focus'
 import { navigate, route } from '@/router'
 
 /** 当前项目 id，从地址读——地址栏是真相源。 */
@@ -209,6 +210,12 @@ onMounted(() => {
   clock = setInterval(() => {
     now.value = Date.now()
   }, 1000)
+  /* 从任务详情**返回**看板：把焦点还给刚才那张卡（v0.8.1 第5轮 G65）。
+     `focusRouteTarget()` 认「上一次落焦点」的 `data-id`（详情页 `h1` 带着
+     同一个任务 id），在新渲染的看板里找到同名卡片并聚焦——不这么做的话
+     焦点落在 `main`，键盘用户又得从头 Tab。放在 `load()` 之前：卡片还没渲染
+     时它找不到目标，会退到 `main`（等价于旧行为），不会抛。 */
+  focusRouteTarget()
   void load()
 })
 // 卸载必须清：不清就是每次进出看板多一个每秒跑一次的定时器。
@@ -288,8 +295,18 @@ const SHAPE_CLASS = {
  *
  * 卡片上**没有其他可点区域**：本轮不做拖拽换列——拖拽要 6×6 的合法边判断，
  * 做错就是把非法转移画成合法。
+ *
+ * ── 为什么先登记 `setRouteFocusTarget`（v0.8.1 第5轮 G65） ──────────
+ * 不登记的话，换页后焦点由 `focusRouteTarget()` 落到 `main[tabindex="-1"]`，
+ * 键盘用户得重新 Tab 一遍整页才够得着「← 看板」。登记之后下一次落焦点让给
+ * 「页面自己落标题」这一档——**焦点交给任务详情的 `h1`（任务标题）**，
+ * 那才是用户刚点开的东西。清理由 `focusRouteTarget()` 负责，这里只管登记。
  */
 function openTask(id: string): void {
+  // 记下发起导航的那张卡（`event.currentTarget` 就是卡片按钮本身）：
+  // 返回看板时 `focusRouteTarget()` 按 `data-id` 找回同一张卡。
+  const source = document.activeElement
+  setRouteFocusTarget(source instanceof HTMLElement ? source : null)
   navigate(`/project/${encodeURIComponent(projectId.value)}/task/${encodeURIComponent(id)}`)
 }
 
@@ -470,14 +487,24 @@ async function submitCreate(): Promise<void> {
       <button type="button" class="af-btn" @click="navigate('/')">回总览</button>
     </EmptyState>
 
-    <template v-else-if="tasks !== null">
-      <!-- 分区标题：`af-page__subtitle` 是实现自造的那一族（`af-page*`），原型
-           `app.css` 里命中 0 条规则；对应位是 `.af-region__title`（v0.8.1
-           子任务 2 的裁定：自造类名一律删，不留别名）。删掉后这个 `h2` 会退回
-           浏览器默认尺寸，比页头 h1 还大一圈，所以同时补上 `af-head__sub`
-           （`app.css:129`，原型里「同一块内容的小一号标题」），本页的可见文案
-           与 `role="heading"` 层级都不变。 -->
-      <h2 class="af-head__sub">{{ project?.name ?? '看板' }}</h2>
+    <template v-else>
+      <!-- 分区标题（v0.8.1 第5轮 G69）：**不再是 `h2.af-head__sub`**。
+
+           历史：`af-page__subtitle` 是实现自造的那一族（`af-page*`），原型
+           `app.css` 里命中 0 条规则；v0.8.1 子任务 2 删自造类名时，为了不让
+           这个 `h2` 退回浏览器默认尺寸，顺手挂了 `.af-head__sub`。副作用是
+           **同一页出现两个 `.af-head__sub`**：页头那个（`.af-head` 里的副标题）
+           与这一个，而后者还是 `h2`——无障碍的标题结构检查因此报
+           「H1 + H2（文本与 H1 重复『…』）+ 6 个 H3 列标题」，且页头副标题的
+           20.63px 排版被这里重复消费一次。
+
+           现在的做法：降级为 `<p>` 并改挂**正文层**的 `.af-muted`
+           （`components.css:1291`，现役的「次要文字」档），与页头
+           `.af-head__sub` 彻底分开——页头的小号标题只属于页头，正文里不再造
+           第二个标题层级。文案与可见位置都不变；`.af-muted` 自带 12.5px 档，
+           视觉上仍是「比正文小一号的说明」。`aria-hidden="true"` 不挂：
+           项目名对读屏用户也有意义，`<p>` 不是标题，重复播报的隐患随之消失。 -->
+      <p class="af-muted af-board__sub">{{ project?.name ?? '看板' }}</p>
 
       <!-- 写失败（含「重读任务失败」）单独一条，看板留在下面：写失败时把整页
            换成错误态，用户会以为任务没了。 -->
@@ -655,6 +682,19 @@ async function submitCreate(): Promise<void> {
    两侧内边距取 `--p-s3`（12px）与 `.af-col__head` 的左右内边距对齐（原型
    `app.css:389`），上面不加顶距：`.af-col__head` 自带底边线，再垫一段空白会
    让列头和它的说明分成两块。 */
+/* 看板正文里的项目名那一行（v0.8.1 第5轮 G69）。
+   ---------------------------------------------------------------------------
+   它原来是 `<h2 class="af-head__sub">`——借页头的副标题类来压字号。现在降级为
+   `<p class="af-muted af-board__sub">`：标题层级归页头独占（一页一个
+   `.af-head__sub`），正文这行只保留「比正文小一号的说明」这个视觉意图。
+   `.af-muted` 给颜色与字号（`components.css:1291`），这里只补行高与
+   「别贴着上边」——`.af-body--fill` 是 `overflow:hidden` 的列容器，没有默认
+   段距。 */
+.af-board__sub {
+  margin: 0 0 var(--p-s2);
+  line-height: var(--af-leading-snug);
+}
+
 .af-col__note {
   margin: 0;
   padding: var(--p-s2) var(--p-s3) 0;

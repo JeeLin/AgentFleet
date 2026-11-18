@@ -123,6 +123,7 @@ const relative = computed(() => relativeTime(props.task.updated_at, props.now))
     class="af-card af-taskcard"
     type="button"
     :data-state="state"
+    :data-id="task.id"
     :title="task.title"
     @click="emit('open', task.id)"
   >

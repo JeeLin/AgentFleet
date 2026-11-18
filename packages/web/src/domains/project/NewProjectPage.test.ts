@@ -277,6 +277,135 @@ describe('NewProjectPage：提交中', () => {
   })
 })
 
+describe('NewProjectPage：第二步（选设备与目录）的前置校验', () => {
+  /* 为什么这三条单独成组：`finishBind()` 的两条前置校验与 `pickDevice()` 的
+     默认目录推导此前**整段没有用例**（`NewProjectPage.vue` 行覆盖 87.27%，
+     未覆盖行 68 / 87-89 / 157-192）。反向验证过：把 `finishBind` 里「固定目录
+     不能为空」那句换成 `'x'`（即删掉这条校验），整套测试仍然全绿——两个前置
+     校验是**没有人看着的**。这三条就是那道门。 */
+  const TWO_DEVICES = {
+    '/api/projects': { body: CREATED },
+    '/api/devices': {
+      body: [
+        {
+          id: 'n_1',
+          name: 'mbp.local',
+          platform: 'darwin/arm64',
+          status: 'online',
+          last_seen: 'unix:1700000000',
+          cpu: 10,
+          mem: 20,
+          gpu: false,
+          agents: [],
+          usable_agents: [],
+          derived: false,
+          key_fingerprint: '9f3***21b',
+          node_version: '0.1.0',
+        },
+        {
+          id: 'n_2',
+          name: 'pi',
+          platform: 'linux/arm64',
+          status: 'offline',
+          last_seen: 'unix:1700000000',
+          cpu: 5,
+          mem: 10,
+          gpu: false,
+          agents: [],
+          usable_agents: [],
+          derived: false,
+          key_fingerprint: 'aa1***9cc',
+          node_version: '0.1.0',
+        },
+      ],
+    },
+  }
+
+  /** 把页面推到第二步，并等设备列表落地。 */
+  async function reachStep2(w: ReturnType<typeof mountIn>): Promise<void> {
+    await flush(w)
+    await submitWith(w, '内部指标台')
+  }
+
+  /** 点「绑定并进入看板」。 */
+  async function clickBind(w: ReturnType<typeof mountIn>): Promise<void> {
+    const bind = w.findAll('button').find((b) => b.text().includes('绑定并进入看板'))
+    expect(bind, '第二步应有「绑定并进入看板」').toBeTruthy()
+    await bind!.trigger('click')
+    await flush(w)
+  }
+
+  it('没选设备就点「绑定」：给中文提示、**一个绑定请求都不发**、也不跳走', async () => {
+    const fetchMock = stubFetch(TWO_DEVICES)
+    const w = mountAtNew()
+    await reachStep2(w)
+
+    // 一个设备都没选（`deviceId` 仍是 ''）。此时默认目录也还是空的，
+    // 所以这条同时守住了「校验顺序」：先说「先选一台设备」，
+    // 而不是报一个用户没法理解的目录问题。
+    await clickBind(w)
+
+    expect(w.text()).toContain('先选一台设备')
+    expect(w.text()).not.toContain('固定目录不能为空')
+    // 真正要守的是「没打后端」：拿空 deviceId 去 PUT 会打到
+    // `/api/projects/p_9/bindings/`（尾斜杠），后端当成 404，用户看到的是
+    // 「绑定失败」，而真相是他还没选设备。
+    const puts = fetchMock.mock.calls.filter(
+      ([, init]) => (init as RequestInit | undefined)?.method === 'PUT',
+    )
+    expect(puts, '没选设备时不该发绑定请求').toHaveLength(0)
+    expect(route.value.name).toBe('projects-new')
+  })
+
+  it('选了设备但把目录清空：拒绝并说明为什么（空目录会把工作树建在设备根上）', async () => {
+    const fetchMock = stubFetch(TWO_DEVICES)
+    const w = mountAtNew()
+    await reachStep2(w)
+
+    // 选第一台设备（走 `@change` → `pickDevice`，与用户点标签同一条路）。
+    await w.find('input[name="af-new-device"][value="n_1"]').setValue()
+    await flush(w)
+
+    // `pickDevice` 刚推导出默认目录，这里把它清掉——模拟用户手动删空。
+    const dir = w.find('input[placeholder^="比如：~/work"]')
+    expect((dir.element as HTMLInputElement).value, 'pickDevice 应已填好默认目录').not.toBe('')
+    await dir.setValue('   ')
+    await flush(w)
+
+    await clickBind(w)
+
+    expect(w.text()).toContain('固定目录不能为空')
+    expect(w.text()).toContain('工作树建在设备根上')
+    // 目录为空时 PUT 出去的 `fixed_dir` 是 `''`，后端要么拒绝要么建在根上，
+    // 两种都不是用户想要的——所以一个请求都不该发。
+    const puts = fetchMock.mock.calls.filter(
+      ([, init]) => (init as RequestInit | undefined)?.method === 'PUT',
+    )
+    expect(puts, '固定目录为空时不该发绑定请求').toHaveLength(0)
+    expect(route.value.name).toBe('projects-new')
+  })
+
+  it('选中设备时按项目名推导默认目录：~/work/<项目名，空格换连字符>', async () => {
+    stubFetch(TWO_DEVICES)
+    const w = mountAtNew()
+    await flush(w)
+    // 项目名带一个空格，用来同时验证 slug 规则（`replace(/\s+/g, '-')`）。
+    await submitWith(w, '内部 指标台')
+
+    await w.find('input[name="af-new-device"][value="n_1"]').setValue()
+    await flush(w)
+    const dir = w.find('input[placeholder^="比如：~/work"]')
+    expect((dir.element as HTMLInputElement).value).toBe('~/work/内部-指标台')
+
+    // 已经选中的设备再点一次**不覆盖**用户手填的目录——否则改一次设备
+    // 就把用户刚敲的路径冲掉了。
+    await dir.setValue('/srv/custom')
+    await w.find('input[name="af-new-device"][value="n_2"]').setValue()
+    await flush(w)
+    expect((dir.element as HTMLInputElement).value).toBe('/srv/custom')
+  })
+})
+
 /* ===========================================================================
    v0.8.1 子任务 7：页面骨架与原型逐层对齐（`prototype/project-new.html`）
    ---------------------------------------------------------------------------
@@ -296,7 +425,7 @@ describe('NewProjectPage（v0.8.1）：骨架与原型 project-new.html 对齐',
     const w = mountAtNew()
     await flush(w)
 
-    // 原型 `project-new.html:14-21`：`header.af-head` 与 `.af-body` 是两个兄弟。
+    // 原型 `project-new.html:15-23`：`header.af-head`（`:15-21`）与 `.af-body`（`:23`）是两个兄弟。
     // 判据取「整页只有一个」——将来谁在 `.af-body` 里再包一层它，这一条会红在
     // 「多个」而不是静默取第一个通过。
     const bodies = Array.from(w.element.querySelectorAll('.af-body'))

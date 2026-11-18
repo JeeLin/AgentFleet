@@ -80,8 +80,8 @@ onMounted(load)
 </script>
 
 <template>
-  <!-- 页面骨架照原型 `archived.html:14-20`：页头是 `header.af-head`
-       （返回总览 + 标题 + 右侧动作），内容在 `.af-body` 里。上一版是自造的
+  <!-- 页面骨架照原型 `archived.html:15-34`：页头是 `header.af-head`（`:15-21`），
+       （返回总览 + 标题 + 右侧动作），内容在 `.af-body`（`:34`）里。上一版是自造的
        `.af-page` / `.af-page__head` / `.af-page__title` / `.af-page__actions`
        —— 那一族规则在 v0.8.1 子任务 2 已随类名删除，于是这一页没有页头几何。
        现在改用共享的 `PageHead`（其余 4 页同一写法）。 -->

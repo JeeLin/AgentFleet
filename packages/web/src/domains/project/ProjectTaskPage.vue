@@ -46,7 +46,7 @@
    还在，换掉整页等于把这两样一起丢掉。
    =========================================================================== */
 
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
 import PageHead from '@/domains/shared/components/PageHead.vue'
@@ -57,6 +57,7 @@ import { getTask, submitAcceptance, submitFailure } from '@/domains/project/task
 import type { Execution, Task } from '@/domains/project/taskTypes'
 import { parseStamp, relativeTime } from '@/shared/format'
 import { ApiError, describeReadFailure } from '@/shared/http'
+import { focusRouteTarget, hasRouteFocusTarget } from '@/shared/focus'
 import { STATES } from '@/shared/state'
 import { navigate, route } from '@/router'
 
@@ -135,6 +136,53 @@ onMounted(() => {
   }
   void load()
 })
+
+/**
+ * 换页后的焦点落点（v0.8.1 第5轮 G65）。
+ *
+ * 从看板点开一张卡进来时，**焦点要落在任务标题上**，而不是 `main`——后者会让
+ * 键盘用户第一次 Tab 落到页头的「← 看板」，等于每次进出一个任务都要重新
+ * Tab 一遍整页。
+ *
+ * 三个约束，缺一条就会静默退化：
+ *   ① **必须等 `h1` 真的在 DOM 里**：`task` 是异步取到的，页头是
+ *      `v-if="task"`。所以在 `task` 变化后 `await nextTick()` 再量，
+ *      而不是在 `onMounted` 里（那时 `h1` 还不存在）。
+ *   ② **只做一次**：`now` 每秒变一次，盯着 `task` 只触发一次，但仍用
+ *      `focusedOnce` 闸住——将来若有人把依赖加宽，也不会每秒把焦点抢回标题。
+ *   ③ **只在「有来源」时抢**：`hasRouteFocusTarget()` 为假的路径（直接输地址、
+ *      Back 回看板）不该被本页抢走落点，那些交给 `focusRouteTarget()` 的
+ *      第 ②/③ 档。
+ */
+let focusedOnce = false
+watch(
+  () => task.value,
+  async () => {
+    if (focusedOnce || !task.value) return
+    focusedOnce = true
+    // 等 `v-if="task"` 的页头渲染出来再量。`flush: 'post'` 只保证**本次**
+    // 更新已应用，`PageHead` 的 `v-if` 是同一帧里插入的，所以这里再
+    // `nextTick()` 一次最稳。
+    await nextTick()
+    const heading = taskHeading()
+    if (!heading) return
+    // `h1` 默认不可编程聚焦：不补 `tabindex="-1"` 的话 `focus()` 在部分
+    // 浏览器里只移动「焦点锚点」而不改 `activeElement`，读屏也不会播报标题。
+    // 与 `focusMain()` 给 `h1` 补的那一份是同一个理由（§4.3）。
+    if (!heading.hasAttribute('tabindex')) heading.setAttribute('tabindex', '-1')
+    heading.focus()
+    // 消费掉「让出」标志：路由那次微任务可能已经先跑过，也可能还没跑
+    // （取决于 `navigate()` 与本次 `load()` 谁先落地）。消费一次即可——
+    // 留着的后果是下一次换页会**多让出一档**，焦点停在 `<body>` 上。
+    if (hasRouteFocusTarget()) focusRouteTarget()
+  },
+  { flush: 'post' },
+)
+
+/** 本页的标题元素：`.af-head__title`，带 `data-id`（返回看板时按它找回卡片）。 */
+function taskHeading(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('h1.af-head__title[data-id]')
+}
 
 // 卸载必须清：不清就是每次进出任务页多一个每秒跑一次的定时器。
 onUnmounted(() => {
@@ -416,7 +464,7 @@ function backToBoard(): void {
        `af-taskd` 留在内容层上——它是这一页的样式命名空间，不是骨架。 -->
   <PageHead v-if="task">
     <div>
-      <h1 class="af-head__title">
+      <h1 class="af-head__title" :data-id="task.id">
         {{ task.title }}
         <StateBadge :state="task.state" />
         <span

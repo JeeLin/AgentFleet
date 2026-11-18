@@ -231,6 +231,11 @@ export function handleLayerKeydown(
  *
  * 用 `main` 而不是 `h1.focus()`：`main` 的 `tabindex="-1"` 是「这里是一片
  * 内容的起点」，比「这里是标题」更准确。
+ *
+ * **路由落焦点不要直接用它**：`router.ts` 的 `navigate()` / `popstate` 走的是
+ * `focusRouteTarget()`——它在「明确定位到来源元素」时才让出焦点，其余情形
+ * 才落到这里。本函数保留为**无条件落 main** 的那一档（既有 5 条用例钉着
+ * 它的语义，见 `focus.test.ts` / `router.test.ts`）。
  */
 export function focusMain(doc: Document = document): HTMLElement | null {
   const main = doc.querySelector<HTMLElement>('main[tabindex="-1"]')
@@ -241,8 +246,159 @@ export function focusMain(doc: Document = document): HTMLElement | null {
   return main
 }
 
+/* ===========================================================================
+   路由级焦点目标（v0.8.1 第5轮 G65）
+   ---------------------------------------------------------------------------
+   **缺陷**：卡片 click / Enter 进任务详情后 `document.activeElement` 是
+   `MAIN.af-main`（`tabindex="-1"`），第一次 Tab 落到页头的「← 看板」；按浏览器
+   Back 回到看板时焦点又不回那张卡。键盘用户走一趟就得重新 Tab 一遍整页。
+
+   **成因**：换页后落焦点只有一条路——「交回 main」。`router.ts` 的
+   `navigate()` / `startRouter().onPop` 调 `focusMain()`，`App.vue` 的路由
+   watch 也内联了同一段。它分不出「用户从哪儿来」，于是每次都把焦点从
+   刚点的那张卡拿走。
+
+   **改法**：换页落焦点前先问一句「这次换页有明确来源吗」。有 → 把焦点交给
+   **新页面自己的标题**（详情页 `h1`，带 `tabindex="-1"`）；来源元素能救回来
+   → 交给它（返回看板时回到同一张卡）；都没有 → `main`（原语义，不动）。
+
+   ── 两张表：sticky（只活一次）+ last（活到下次落焦点） ─────────────
+   `sticky`：发起导航的一方（点卡片 / 点列表行）在 `navigate()` **之前**登记。
+   它的唯一含义是「**接下来那一次**落焦点别抢 main，让页面自己落标题」。
+   登记之后**必须被消费一次**，否则「页面自己落标题」与「落到 main」两条
+   规则会在同一次换页里打架。
+
+   `last`：`focusRouteTarget()` **实际聚焦到的**元素。它活到下一次落焦点，
+   是「用户上一步站在哪」的等价物。从详情返回时 `sticky` 已经没了，但
+   `last`（详情页 `h1`）还带着 `data-id`，于是能按 id 找回同一张卡。
+
+   ── 为什么按 `data-id` 而不是 CSS 类找回来 ────────────────────────
+   类名是样式契约（`class-usage.test.ts` 还双向钉着），会随重构漂；也有的
+   卡片同时挂四五个类，挑哪个当身份都是猜。`data-*` 天生是行为钩子：
+   `TaskCard.vue` 的 `:data-id="task.id"` 与详情页 `h1` 的 `:data-id` 同源，
+   两边写的是同一个任务 id，一眼能追。
+
+   ── 一条纪律：`focusRouteTarget()` 幂等且不抛 ─────────────────────
+   它会在 `navigate()` 的微任务里、`popstate` 的微任务里、以及页面自己的
+   `onMounted` 里被调用（应用了 Lane D 补丁之后 App.vue 的 watch 也调）。
+   谁先跑都不该炸；`sticky` 被消费之后重复调用就是「无来源」那一档。
+   =========================================================================== */
+
+/**
+ * 「这一次换页把落点让给页面自己」的标志。
+ *
+ * 由 `setRouteFocusTarget()` 置位，由 `focusRouteTarget()` 消费一次。**它不负责
+ * 记住上一站**（那是 `lastRouteFocus` 的事）——两件事分开存，是因为它们
+ * 生命周期不同：让出只活到第一次落焦点，上一站要活到下一次换页。
+ */
+let routeFocusYield = false
+
+/** 上一站：发起导航的那个元素（卡片 / 行）。返回时按它的 `data-id` 找回。 */
+let lastRouteFocus: HTMLElement | null = null
+
+/**
+ * 登记这次导航的**来源元素**。
+ *
+ * 由发起导航的一方在 `navigate()` 之前调用（看板的 `openTask`）。两件事：
+ *   ① 下一次 `focusRouteTarget()` **让出焦点**（页面自己落标题）；
+ *   ② 记住它当「上一站」——返回时按 `data-id` 找回同一张卡/行。
+ *
+ * 传 `null` 等同「本次无来源」（不让出、不记上一站）。
+ */
+export function setRouteFocusTarget(el: HTMLElement | null): void {
+  routeFocusYield = el !== null
+  if (el) lastRouteFocus = el
+}
+
+/**
+ * 清空两处记录。测试用（模块级状态会跨用例污染）。生产代码不需要——
+ * 消费与覆盖会自动推进。
+ */
+export function clearRouteFocusTarget(): void {
+  routeFocusYield = false
+  lastRouteFocus = null
+}
+
+/** 是否还欠着一次「让出 main」。只给外壳接线与测试用。 */
+export function hasRouteFocusTarget(): boolean {
+  return routeFocusYield
+}
+
+/**
+ * 「上一站」的 `data-id`（没有上一站时为 `null`）。只给测试用。
+ *
+ * 与 `hasRouteFocusTarget()` 分开，是因为两者生命周期不同：让出标志在第一次
+ * 落焦点后立刻消失（`navigate()` 的微任务就把它消费了），而上一站要活到
+ * 下一次换页。想验「`openTask` 登记了来源」这件事，只有这个值在微任务之后
+ * 仍然看得到。
+ */
+export function lastRouteFocusId(): string | null {
+  return lastRouteFocus?.getAttribute('data-id') ?? null
+}
+
+/**
+ * 换页后的首焦点。返回实际聚焦的元素（没聚焦任何人时 `null`）。
+ *
+ * 三档优先级（**顺序就是判据**）：
+ *
+ *   1. **还欠着一次「让出」** → 不聚焦任何东西，把标志清掉。
+ *      这一次换页的落点由**页面自己**负责（详情页落自己的 `h1`）。
+ *      为什么不在这里替页面聚焦标题：本函数被 `navigate()` 的微任务调用，
+ *      那一刻 Vue 还没把新页面渲染出来（`App.vue` 的注释写过同一件事），
+ *      查到的 `h1` 是上一页的——在旧节点上聚焦等于把焦点扔进一个马上要
+ *      消失的元素。
+ *
+ *   2. **有上一站（`lastRouteFocus` 带 `data-id`）** → 在 `main` 里找同名
+ *      `data-id` 的元素并聚焦。这是「详情 → 返回列表」那一步：回看板不是
+ *      「点卡片」，没人登记让出，但上一站是详情页带着同一个任务 id 的
+ *      `h1`，于是焦点回到**那张卡**上。
+ *
+ *   3. 其余 → `main` 自己（`h1` 只补 `tabindex="-1"`，不抢焦点）。
+ *      这一档**逐字等价于旧的 `focusMain()`**：`router.test.ts` 与
+ *      `App.test.ts` 的既有用例断的就是「`activeElement` 是 `main`」。
+ *
+ * 幂等且不抛：它会被 router 的微任务、popstate 的微任务、页面自己的
+ * `onMounted` 各调一次（应用 Lane D 的补丁之后 App.vue 的 watch 也调），
+ * 谁先跑都不该炸。
+ */
+export function focusRouteTarget(doc: Document = document): HTMLElement | null {
+  if (routeFocusYield) {
+    routeFocusYield = false
+    return null
+  }
+  const main = doc.querySelector<HTMLElement>('main[tabindex="-1"]')
+  const h1 = main?.querySelector('h1') ?? null
+  if (h1 && !h1.hasAttribute('tabindex')) h1.setAttribute('tabindex', '-1')
+  // 找回上一站时**优先在本页 `main` 里找**（那是真实的 App 形状），
+  // 找不到就退到整份文档——组件级测试里被挂载的页面不在 `main` 里面，
+  // 而「返回时回到来源卡片」这条契约与包不包 `main` 无关。
+  const wanted = lastRouteFocus?.getAttribute('data-id') ?? null
+  const target =
+    findByDataId(main, wanted) ?? findByDataId(doc.documentElement, wanted) ?? main
+  if (!target) return null
+  target.focus()
+  return target
+}
+
+/**
+ * 在 `root` 里找 `data-id === wanted` 的元素。
+ *
+ * **不用属性选择器**（`[data-id="${…}"]`）：值里出现引号或反斜杠时，
+ * 就算 `CSS.escape` 转义了，`querySelector` 也可能抛 `DOMException`——而本函数
+ * 抛异常等于「换页后键盘用户的焦点丢了」。逐元素比属性值是唯一不会因为
+ * 数据长得奇怪而失败的写法，且元素数量是「一块板子的卡片数」，成本可忽略。
+ */
+function findByDataId(root: Element | null, wanted: string | null): HTMLElement | null {
+  if (!root || wanted === null || wanted === '') return null
+  for (const el of Array.from(root.querySelectorAll<HTMLElement>('[data-id]'))) {
+    if (el.getAttribute('data-id') === wanted) return el
+  }
+  return null
+}
+
 /** 清空栈。测试用；生产代码不许调（它会让所有浮层的关闭路径变成空操作）。 */
 export function resetForTest(): void {
   stack.length = 0
   inertOthers(null, false)
+  clearRouteFocusTarget()
 }

@@ -44,7 +44,7 @@
 
 import { shallowRef, type ShallowRef } from 'vue'
 
-import { focusMain } from '@/shared/focus'
+import { focusRouteTarget } from '@/shared/focus'
 
 /** 路由名。与 `prototype/` 的页面对照表一一对应（子任务 8）。 */
 export type RouteName =
@@ -282,7 +282,9 @@ export interface NavigateOptions {
  * `push` 与 `replace` 的区别只有一条：`replace` 不留下历史记录。新建会话
  * 成功后的跳转用 `replace`——用户按「后退」不该回到一张已经提交过的表单。
  *
- * 跳转后的焦点落点是 `main`（§4.3），**没有开关**：会话工作台切 tab 是
+ * 跳转后的焦点落点由 `focusRouteTarget()` 决定（§4.3，v0.8.1 第5轮 G65）：
+ * 有明确来源元素时让出（页面自己落标题 / 回到来源卡片），其余才落 `main`。
+ * **没有开关**：会话工作台切 tab 是
  * **视图切换**（DECISIONS D10），它走 `history.replaceState`（见
  * `SessionPage.vue` 的 `syncUrl`），不经过这里——`route` 不变，焦点由页面
  * 自己落。
@@ -292,10 +294,10 @@ export function navigate(to: string, opts: NavigateOptions = {}): void {
   const method = opts.replace ? 'replaceState' : 'pushState'
   history[method](null, '', to)
   route.value = matchRoute(to)
-  // 跳转后的焦点落点是 `main`（§4.3）。放在下一次微任务之后：Vue 还没把
+  // 跳转后的焦点落点（§4.3）。放在下一次微任务之后：Vue 还没把
   // 新页面渲染出来时 `main` 里是旧内容，聚焦本身没问题，但屏幕阅读器
   // 播报的标题会是上一页的。
-  queueMicrotask(() => focusMain())
+  queueMicrotask(() => focusRouteTarget())
 }
 
 /** 启动 popstate 监听。返回卸载函数（测试用）。 */
@@ -304,7 +306,7 @@ export function startRouter(): () => void {
   started = true
   const onPop = (): void => {
     route.value = matchRoute(currentPath())
-    queueMicrotask(() => focusMain())
+    queueMicrotask(() => focusRouteTarget())
   }
   window.addEventListener('popstate', onPop)
   return () => {
