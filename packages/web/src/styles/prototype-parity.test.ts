@@ -470,7 +470,7 @@ describe('关键规则的取值来源与原型一致', () => {
        4c F1 / G76）。上面三条守的是「品牌行外壳」，而 G64 真正改掉的**机制**是
        标题块的行高：`AF` 与 `AgentFleet` 两行若继承正文的 23.925px，两行就吃
        48px，56px 的壳里塞不下——这正是 80.84px 的来源。
-       4c 变异实测：把 1.25 改回 1.65（G64 核心修复整体回退），**全量 1376 条
+       4c 变异实测：把 1.25 改回 1.65（G64 核心修复整体回退），**全量用例
        全绿**。也就是说这条修复此前只活在代码里，没有任何东西挡着它被改回去。 */
     const titleblock = ruleFor(rules, '.af-rail__titleblock')
     expect(titleblock, 'prototype-shell.css 里没有 .af-rail__titleblock 规则').toBeDefined()
@@ -855,8 +855,10 @@ describe('跨文件门禁：页面必须真的用骨架类', () => {
     /**
      * 判据是「页面**外壳**里有原型的两块之一」，不是「页面里出现过这两个类名」。
      *
-     * **为什么不能只看「出现过」**（2026-11-16 实测发现门禁被绕过）：上一版用
-     * `staticClassesWithShared()`，它会把 `<PageHead>` 组件贡献的 `af-head`
+     * **为什么不能只看「出现过」**（2026-11-16 实测发现门禁被绕过）：上一版用一个
+     * 「把页面自己 + 它引用的共享组件（如 `<PageHead>`）的静态类名并起来」的
+     * 扫描函数（**该函数已随这个修法一起删掉**，现在只剩 `test/sfc.ts` 的
+     * `staticClassesOf`，只扫页面自身），它会把 `<PageHead>` 组件贡献的 `af-head`
      * 并进页面的类名集合。可 `PageHead` 渲染的页头**本来就是页面自己的第一个
      * 子节点**，于是任何一页只要用了 `<PageHead>` 就无条件命中，哪怕根容器
      * 还是被删掉的 `af-page`——`ProjectTaskPage.vue`（`af-page af-taskd`）

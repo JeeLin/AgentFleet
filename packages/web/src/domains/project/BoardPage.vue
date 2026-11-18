@@ -271,7 +271,7 @@ async function refresh(): Promise<void> {
 /**
  * 切换器菜单开着没有。
  *
- * **项目名本身就是那个按钮**（见 `components.css` 的 `.af-switch`）：左栏收起
+ * **项目名本身就是那个按钮**（见 `prototype-shell.css` §9 的 `.af-switch`）：左栏收起
  * 之后这是唯一的换项目入口，所以它必须一直可见，不能藏进二级菜单。
  */
 const menuOpen = ref(false)
@@ -607,7 +607,7 @@ async function submitCreate(): Promise<void> {
            20.63px 排版被这里重复消费一次。
 
            现在的做法：降级为 `<p>` 并改挂**正文层**的 `.af-muted`
-           （`components.css:1291`，现役的「次要文字」档），与页头
+           （`components.css:1208`，现役的「次要文字」档），与页头
            `.af-head__sub` 彻底分开——页头的小号标题只属于页头，正文里不再造
            第二个标题层级。文案与可见位置都不变；`.af-muted` 自带 12.5px 档，
            视觉上仍是「比正文小一号的说明」。`aria-hidden="true"` 不挂：
@@ -707,7 +707,7 @@ async function submitCreate(): Promise<void> {
          true`）。Teleport 到 body 后浮层自成第三个子节点，`#app` 才会真的
          被 inert（管家抽屉正是这么做的，实测 `appInert: true` /
          抢焦点失败）。
-         `.af-scrim` 是 `position: fixed; inset: 0`（`components.css:518`），
+         `.af-scrim` 是 `position: fixed; inset: 0`（`components.css:516`），
          所以挂到 body 下视觉零变化。 -->
     <Teleport to="body">
       <div v-if="dialogOpen" ref="modalEl" class="af-scrim" @click="onScrim">
@@ -815,7 +815,7 @@ async function submitCreate(): Promise<void> {
    它原来是 `<h2 class="af-head__sub">`——借页头的副标题类来压字号。现在降级为
    `<p class="af-muted af-board__sub">`：标题层级归页头独占（一页一个
    `.af-head__sub`），正文这行只保留「比正文小一号的说明」这个视觉意图。
-   `.af-muted` 给颜色与字号（`components.css:1291`），这里只补行高与
+   `.af-muted` 给颜色与字号（`components.css:1208`），这里只补行高与
    「别贴着上边」——`.af-body--fill` 是 `overflow:hidden` 的列容器，没有默认
    段距。 */
 .af-board__sub {

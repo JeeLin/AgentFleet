@@ -16,7 +16,7 @@
 
    现状（2026-11-05，对着 `routes/projects.rs` 与 `hub-storage/src/binding.rs` 核过）：
    - **合并权三档**：后端**没有**这个字段。`ProjectView` 只有
-     `id/name/shape/theme_color/archived_at/created_at`。
+     `id/name/shape/theme_color/upstream_url/archived_at/created_at` 七个字段。
    - **隔离策略**：形态读得到（`shape`）、能升（`POST /shape`），这块真接。
    - **配额与清理**：字段**在绑定上**（`binding.disk_quota_bytes` /
      `binding.cleanup_policy`），**不在项目上**。所以这里按项目改不了——
