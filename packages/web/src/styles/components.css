@@ -245,6 +245,38 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 .af-btn--primary:hover { background: var(--p-acc-strong); border-color: var(--p-acc-strong); color: var(--p-on-acc); }
 .af-btn--primary:active { background: var(--af-accent-active); border-color: var(--af-accent-active); }
 
+/* 主按钮**禁用态单独一套配色**（v0.8.1 第5轮 G72）。
+   -------------------------------------------------------------------------
+   上面那条 `.af-btn:disabled`（:232）对普通按钮是对的：`opacity: 0.5` 让它
+   整体退到背景里，`color: var(--af-fg-disabled)` 保证字还能读。
+
+   但主按钮不是普通按钮——它的底色是 `--p-acc`（强调色实底，页面主操作用）。
+   两条规则一叠就出事：
+     · `opacity: 0.5` 是**整元素**淡化，底色与文字**一起**向页面底靠，
+       于是「文字 vs 底」的对比度不随淡化保持，而是塌掉；
+     · 再叠一个 `color: var(--af-fg-disabled)`（= fg-3，本身就是弱色），
+       字与彩色底几乎同亮度。
+   实测四套主题（修复前）：warm 1.13:1 / neutral 1.06:1 / paper 1.10:1 /
+   cream 1.06:1——**全部远低于 AA 4.5:1，等于看不见字**。而这不是边缘状态：
+   表单没填完时主按钮就是禁用的，用户填表全程都在看它。
+
+   **为什么不能靠调 `opacity` 的数值解决**：实测把底与字都换成高对比色
+   （fg-strong，原始 10.7–15.4:1）后，叠 `opacity: 0.5` 也只能到
+   3.2–3.9:1，**仍然不达 AA**。半透明淡化会让两个颜色同时向背景靠拢，
+   对比度按比例折半，这是 `opacity` 的数学性质，调数值改不掉。
+
+   所以这里**取消主按钮禁用态的 `opacity`**，改用一对显式配色：
+   中性表面底 `--p-surf-2` + `--p-fg-3` 文字。实测四套主题
+   5.05 / 5.14 / 5.29 / 5.32:1，全部过 AA；而 fg-3 明确弱于正常态用的
+   fg-2（5.85–6.74:1），所以「这按钮现在点不了」的观感仍然成立。
+   视觉上它从「褪色的彩色块」变成「灰色按钮」——这也更符合禁用态该有的样子。 */
+.af-btn--primary:disabled,
+.af-btn--primary[aria-disabled='true'] {
+  opacity: 1;
+  background: var(--p-surf-2); border-color: var(--p-line-3);
+  color: var(--p-fg-3);
+}
+
 .af-btn--danger {
   background: var(--p-failed-bg); color: var(--p-failed); border-color: var(--p-failed-line);
 }

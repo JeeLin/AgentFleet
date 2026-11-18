@@ -68,12 +68,19 @@ const INTENTIONAL_DEVIATIONS: Record<string, { value: string; why: string }> = {
     value: 'per-theme',
     why: '原型的 --fg-3 四套全部低于 WCAG AA 4.5:1，而它被当文字色用（页头副标题 / 表头 / 字段提示）。',
   },
+  '--p-fg-2': {
+    value: 'per-theme',
+    why: 'v0.8.1 第5轮 G71/G73：--p-fg-3 为达 AA 而提亮后，warm/neutral 的 fg-2 与它只剩 1.16x/1.20x，'
+      + '两级视觉上塌成一级；paper/cream 则是 fg-2 与 fg-3 本就只差 1.09x/1.12x。'
+      + '故四套的 --p-fg-2 一并调整，使「次要 vs 三级」级差 ≥ 1.25x。'
+      + '（--p-fg-2 是次要文字，本身在调之前就达标，改它纯粹是为了保住梯子。）',
+  },
 }
 
 /** 四套主题 `--p-fg-3` 的达标值（期望值写死在这里，不从实现里再算一遍）。 */
 const FG3_TARGETS = {
-  neutral: '#828991',
-  warm: '#8c887d',
+  neutral: '#969da5',
+  warm: '#9d998e',
   paper: '#616972',
   cream: '#6c6758',
 } as const
@@ -164,12 +171,54 @@ describe('四套主题逐值对照原型', () => {
       const ratio = contrastRatio(expected, bg)
       const ratioFg2 = contrastRatio(fg2, bg)
       if (ratio < 4.5) failures.push(`theme-${theme} 的 --p-fg-3 对页面底只有 ${ratio.toFixed(2)}:1（< 4.5）`)
-      // 三级层次不能塌：--p-fg-3 必须仍明显弱于 --p-fg-2。
-      if (!(ratioFg2 > ratio)) {
-        failures.push(`theme-${theme} 的 --p-fg-3（${ratio.toFixed(2)}:1）不弱于 --p-fg-2（${ratioFg2.toFixed(2)}:1）`)
+      /* **页面底不是唯一的落点**（v0.8.1 第5轮 G71）：这一条原先只量 `--p-bg`，
+         于是 warm / neutral 判绿，而 fg-3 在更亮的 surf-1 / surf-2 / surf-3 上
+         只有 4.44 / 4.06 / 3.68 与 4.37 / 3.98 / 3.56——全部不达 AA。三级文字
+         用在看板列（surf-1）、卡片（surf-2）、卡片悬停（surf-3）上，那些层才是
+         它真实的背景。只量页面底，等于把最难的那三层藏起来。
+         `contrast.test.ts` 有同一判据的完整版（含 G72/G73），这里保留一份
+         紧挨着取值守卫，让「改了这个十六进制」与「它是否达标」在同一个文件里。 */
+      for (const surf of ['--p-surf-1', '--p-surf-2', '--p-surf-3'] as const) {
+        const surface = impl.get(surf)
+        if (!surface?.startsWith('#')) continue
+        const r = contrastRatio(expected, norm(surface))
+        if (r < 4.5) failures.push(`theme-${theme} 的 --p-fg-3 对 ${surf} 只有 ${r.toFixed(2)}:1（< 4.5）`)
+      }
+      /* 三级层次不能塌，而且要**分得出来**（v0.8.1 第5轮 G73）：原先只要求
+         `ratioFg2 > ratio`，于是 paper 的 1.09x、cream 的 1.12x 都能过——两级
+         在视觉上已经是同一级，文档却还写着「三级文字梯子」。1.25x 取四套修好
+         后的实测最低值（paper 1.25x / cream 1.27x / warm 1.30x / neutral 1.31x）。 */
+      const MIN_RAMP = 1.25
+      if (ratioFg2 / ratio < MIN_RAMP) {
+        failures.push(
+          `theme-${theme} 的 --p-fg-3（${ratio.toFixed(2)}:1）与 --p-fg-2（${ratioFg2.toFixed(2)}:1）`
+            + `只差 ${(ratioFg2 / ratio).toFixed(2)}x（< ${MIN_RAMP}x），两级塌成一级`,
+        )
       }
     }
     expect(failures, `--p-fg-3 未达标注解：\n${failures.join('\n')}`).toEqual([])
+  })
+
+  /* `--p-fg-2` 也进了「有意偏离表」（G73 为保住梯子而调整），于是它跳过了逐值
+     比对。跳过比对就必须有别的守卫接住，否则这个变量从此无人看管——那正是
+     「有意偏离」这个机制最容易被误用的地方：它本意是带着理由偏离，不是把变量
+     移出守卫。这条钉住四套的确切值，改了就红。 */
+  it('--p-fg-2 四套的确切值（G73 有意偏离原型，值写死在这里）', () => {
+    const FG2_TARGETS = {
+      neutral: '#adb4bd',
+      warm: '#b4afa4',
+      paper: '#535a64',
+      cream: '#5d574c',
+    } as const
+    const failures: string[] = []
+    for (const theme of THEMES) {
+      const impl = vars(readRepoFile(`packages/web/src/styles/theme-${theme}.css`))
+      const actual = norm(impl.get('--p-fg-2')!)
+      if (actual !== FG2_TARGETS[theme]) {
+        failures.push(`theme-${theme} 的 --p-fg-2 是 ${actual}，定下的是 ${FG2_TARGETS[theme]}`)
+      }
+    }
+    expect(failures, `--p-fg-2 值不符：\n${failures.join('\n')}`).toEqual([])
   })
 
   it('四份实现的变量名集合完全一致（可切换的前提）', () => {
