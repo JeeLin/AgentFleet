@@ -465,6 +465,38 @@ describe('关键规则的取值来源与原型一致', () => {
           + '56px 里的正确做法是把两块缩小、横向 padding 归零（22 + 4 + 28 = 54 ≤ 56）。',
       ).not.toBe('column')
     }
+
+    /* ④ **`.af-rail__titleblock` 的 `line-height` 必须是 1.25**（v0.8.1 第5轮
+       4c F1 / G76）。上面三条守的是「品牌行外壳」，而 G64 真正改掉的**机制**是
+       标题块的行高：`AF` 与 `AgentFleet` 两行若继承正文的 23.925px，两行就吃
+       48px，56px 的壳里塞不下——这正是 80.84px 的来源。
+       4c 变异实测：把 1.25 改回 1.65（G64 核心修复整体回退），**全量 1376 条
+       全绿**。也就是说这条修复此前只活在代码里，没有任何东西挡着它被改回去。 */
+    const titleblock = ruleFor(rules, '.af-rail__titleblock')
+    expect(titleblock, 'prototype-shell.css 里没有 .af-rail__titleblock 规则').toBeDefined()
+    const lh = propValue(titleblock!, 'line-height')
+    expect(
+      lh,
+      `\`.af-rail__titleblock\` 的 line-height 是 \`${lh}\`，必须是 \`1.25\`。`
+        + '这是 G64 的核心修复：标题块里 `AF` 与 `AgentFleet` 两行继承正文的 23.925px '
+        + '就要吃 48px，56px 的品牌行装不下，实测撑到 80.84px（比页头高 24.84px）。',
+    ).toBe('1.25')
+
+    /* ⑤ **`.af-panel__head` 的 `min-height` 必须取自常规档**（v0.8.1 第5轮
+       4c F1 / G76 第二半）。`components.css:406-408` 的注释自己讲了这段历史：
+       原来固定 `--af-row-compact`（26px），17px 标题 + 行高 1.5 约 25.5px，再加
+       padding 就溢出，于是改成常规档。4c 变异实测：把它换回 26px，**全量全绿** ——
+       也就是说这条判断只写在注释里。 */
+    const panelHead = ruleFor(parseCssRules(COMPONENTS_CSS), '.af-panel__head')
+    expect(panelHead, 'components.css 里没有 .af-panel__head 规则').toBeDefined()
+    const panelMinH = propValue(panelHead!, 'min-height')
+    expect(
+      panelMinH,
+      `\`.af-panel__head\` 的 min-height 是 \`${panelMinH}\`，必须取自常规档`
+        + '（`var(--af-row-regular)` 或别名 `var(--p-row)`）。紧凑档 26px 装不下 '
+        + '17px 标题 + 行高 1.5（约 25.5px），再加 padding 就溢出——components.css:406 '
+        + ' 的注释记着这段历史，但此前没有任何守卫。',
+    ).toMatch(/var\(--af-row-regular\)|var\(--p-row\)/)
   })
 
   it('动效时长取标准档而非「瞬时」档', () => {

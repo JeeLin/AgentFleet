@@ -7,6 +7,7 @@ import {
   propValue,
   ruleFor,
   stripCssComments,
+  type CssRule,
 } from '@/test/css-scan'
 
 import { readdirSync, readFileSync } from 'node:fs'
@@ -116,29 +117,123 @@ describe('层级阶梯（子任务 12）', () => {
      用了比正文更小的字号。实证两处——`.af-region__title` 原为 13.5px、
      `.af-panel__title` 原为 14.5px（与正文同档），都压不住内容。
      标题可以同大但要靠字重/明度区分，**绝不能更小**。 */
-  it('任何 *__title 的字号都不小于正文', () => {
+  /* 取一条规则体里**每一条** `font-size` 声明（同名多次全收）。
+     `propValue` 只取末条——那对「最终生效值」是对的，但这里要问的是
+     「有没有任何一条写小了」，取末条恰好会漏掉前面那条（G78）。 */
+  function fontSizeDeclsIn(rule: CssRule): string[] {
+    const out: string[] = []
+    for (const part of rule.body.split(';')) {
+      const at = part.indexOf(':')
+      if (at < 0) continue
+      if (part.slice(0, at).trim() !== 'font-size') continue
+      out.push(part.slice(at + 1).trim())
+    }
+    return out
+  }
+
+  it('任何 *__title / *__heading 的字号都不小于正文', () => {
+    /* ── 这条守的是一类反复出现的缺陷 ────────────────────────────────────
+       标题类（`*__title` / `*__heading`）用了比正文更小的字号。实证两处——
+       `.af-region__title` 原为 13.5px、`.af-panel__title` 原为 14.5px（与正文
+       同档），都压不住内容。标题可以同大但要靠字重/明度区分，**绝不能更小**。
+
+       ── 为什么从「按行跑正则」改成「结构化扫描」（v0.8.1 第5轮 G77/G78/G85）──
+       初版判据是 `/^(\.[a-z][a-z0-9_-]*__title[a-z0-9_-]*)\s*\{([^}]*)\}/gm`，
+       4c 的变异矩阵证明它有三重死角，**连续两轮（round3 F2/P29、round4 F2）
+       原样存活**：
+
+         · **G77 行首锚**：`^` + `m` 要求选择器在行首，于是缩进在 `@media` 块
+           里的规则一律扫不到。实测把 `@media` 内的 `.af-panel__title` 降到
+           2xs 全绿。
+         · **G78 同名第二条**：`[^}]*` 只能吃单行体，且 `matchAll` 对同一选择器
+           的**第二次出现**各算一条、各自通过。于是在 `.af-panel__title` 里先写
+           合法值再写 `font-size: var(--af-text-2xs)`（后者胜，真实 computed
+           是 11px）——**全绿**。
+         · **G85 别名 token**：`--p-t-md` 这类主题别名不在 `tokens.css` 的
+           `--name: Npx` 里，`pxMatch` 取不到就 `continue`（静默跳过）。实测把
+           `.af-drawer__title` 从 `--p-t-md` 降到 `--p-t-2xs` 全绿。
+
+       现在改为：`parseCssRules` 展开 `@media`（带 `atRules` 链）→ 逐个选择器
+       收集**每一条** `font-size` 声明 → 用能跟 `var()` 转发的 `pxOfToken` 还原
+       实际 px → 要求**全部**命中值都不小于正文。这样「事后追加一条更小的」
+       和「写进 @media」都被同一条判据覆盖。 */
     const body = tokenPx(tokens, 'af-text-md')
     const cssFiles = [
       readRepoFile('packages/web/src/styles/components.css'),
       readRepoFile('packages/web/src/styles/prototype-shell.css'),
     ]
+
+    /* 字号令牌 → px。**必须跟 `var()` 转发**：主题文件里 `--p-t-md: var(--af-text-md)`
+       这类别名很常见，只看 `tokens.css` 会把它们全当成「非字号 token」跳过——
+       而那正是 G85 里 `.af-drawer__title` 逃逸的机制。 */
+    /* **文件名动态枚举，不手写清单**：初版手写了 `theme-dark.css`，而实际叫
+       `theme-warm.css`——`readRepoFile` 直接 ENOENT，守卫当场炸。手写清单还会在
+       新增主题时静默漏掉一份（少一份 = 某些别名 token 解析不出来 = 静默跳过）。 */
+    const THEME_TOKENS = readdirSync(resolve(process.cwd(), 'src/styles'))
+      .filter((f) => f.endsWith('.css'))
+      .map((f) => readFileSync(resolve(process.cwd(), 'src/styles', f), 'utf-8'))
+      .join('\n')
+    function pxOfToken(name: string, depth = 0): number | null {
+      const direct = new RegExp(`--${name}:\\s*(\\d+(?:\\.\\d+)?)px`).exec(THEME_TOKENS)
+      if (direct) return Number(direct[1])
+      if (depth >= 5) return null
+      const alias = new RegExp(`--${name}:\\s*var\\(--([a-z0-9-]+)\\)`).exec(THEME_TOKENS)
+      return alias ? pxOfToken(alias[1], depth + 1) : null
+    }
+
     const offenders: string[] = []
-    // 只查用 token 声明的字号；写死 px 的另由 design-system 的取值纪律管。
+    /** 被扫到（并成功解析出 px）的类名——供下面的枚举校验用。 */
+    const seen = new Set<string>()
+    let checked = 0
     for (const css of cssFiles) {
-      const re = /^(\.[a-z][a-z0-9_-]*__title[a-z0-9_-]*)\s*\{([^}]*)\}/gm
-      for (const m of css.matchAll(re)) {
-        const sel = m[1]
-        const bodyBlock = m[2]
-        // 只看直接声明 font-size 的那条；继承的不算。
-        const fs = /font-size:\s*var\((--[a-z0-9-]+)\)/.exec(bodyBlock)
-        if (!fs) continue
-        const name = fs[1].replace(/^--/, '')
-        // text-card / text-display / text-lg 及以上都合规；sm/xs/2xs 违规。
-        const pxMatch = new RegExp(`--${name}:\\s*(\\d+(?:\\.\\d+)?)px`).exec(tokens)
-        if (!pxMatch) continue // 非字号 token（如 --p-t-sm）跳过，由主题对照管
-        if (Number(pxMatch[1]) < body) offenders.push(`${sel} = ${pxMatch[1]}px < ${body}px`)
+      for (const rule of parseCssRules(css)) {
+        /* 选择器可能是一组（`.a, .b`）：逐个取以 `__title` / `__heading` 结尾
+           的那个类。`classNamesInRule` 已按逗号切好，这里再用一次同样的口径。 */
+        /* 两个 helper 都返回**带点**的 `.af-x`；统一在这里去掉前导点，后续
+           `seen` / 豁免表 / 报错文案全部用不带点的形式。 */
+        for (const raw of classNamesInRule(rule)) {
+          const cls = raw.replace(/^\./, '')
+          if (!/__title$|__heading$|__title--|__heading--/.test(cls)) continue
+          /* **同名多次声明全部收集**（G78）：`declarationsOf` 返回该属性在
+             匹配规则里的每一条，不是只取末条——我们要的是「有没有任何一条
+             写小了」，不是「最终生效值是多少」（后者会让前面那条更小的被发现
+             吗？不会，取末条恰好漏掉它）。 */
+          for (const decl of fontSizeDeclsIn(rule)) {
+            const m = /^var\(--([a-z0-9-]+)\)$/.exec(decl.trim())
+            if (!m) continue // 写死 px 的另由 design-system 的取值纪律管
+            const px = pxOfToken(m[1])
+            if (px === null) continue
+            checked += 1
+            seen.add(cls)
+            const where = rule.atRules.length ? ` @${rule.atRules.join(' ')}` : ''
+            if (px < body) offenders.push(`.${cls}${where} = ${px}px < ${body}px`)
+          }
+        }
       }
     }
+    /* **这条守卫自己不能空转**（v0.8.1 第5轮 4c 的教训）：`offenders` 恒空无法
+       区分「真没问题」与「一条都没扫到」。初版我拍了个 `checked > 10` 的阈值，
+       实测只扫到 8 条就判红——那个数字是我凭空想的，不是事实。
+       现在改成**枚举校验**：样式表里每一个 `*__title` / `*__heading` 类都必须
+       有字号声明被扫到，缺一个就点名。这样新增一个标题类而守卫漏掉它会立刻暴露，
+       也不依赖任何拍出来的阈值。 */
+    const declared = new Set<string>()
+    for (const css of cssFiles) {
+      /* `classNamesIn` 返回带点的 `.af-x`，而上面循环里 `classNamesInRule` 不带点——
+         两处口径必须一致，否则枚举校验永远说「没覆盖到」。统一取不带点的形式。 */
+      for (const cls of classNamesIn(css)) if (/__title$|__heading$/.test(cls)) declared.add(cls.slice(1))
+    }
+    /* 显式豁免：这些类只有非字号声明（`margin: 0` 之类），没有「写成更小」的余地。
+       **豁免要写理由**，否则下一个人不知道该不该往下加。 */
+    const NO_FONT_SIZE_BY_DESIGN = new Set([
+      'af-switch__title', // 只有 `margin: 0`，字号继承自 `.af-switch`
+    ])
+    const missed = [...declared].filter((c) => !NO_FONT_SIZE_BY_DESIGN.has(c) && !seen.has(c))
+    expect(
+      missed,
+      `这些 *__title/__heading 类没有被字号守卫覆盖到（判据失效或新类漏登记）：${missed.join(', ')}`,
+    ).toEqual([])
+    expect(checked, '一条字号都没扫到——守卫彻底失效').toBeGreaterThan(0)
     expect(offenders, offenders.join('; ')).toEqual([])
   })
 })
