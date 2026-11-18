@@ -14,6 +14,7 @@ import {
   parseCssRules,
   propValue,
   ruleFor,
+  stripCssAndLineComments,
 } from '@/test/css-scan'
 
 describe('parseCssRules / classNamesIn', () => {
@@ -111,5 +112,47 @@ describe('parseCssRules / classNamesIn', () => {
   it('declarationsOf 不会把 `border-color` 当成 `color`', () => {
     const rules = parseCssRules('.af-a { border-color: red; color: blue }')
     expect(declarationsOf(rules, 'color').map((h) => h.value)).toEqual(['blue'])
+  })
+})
+
+describe('stripCssAndLineComments：字符串里的 `//` 不是注释', () => {
+  /* **这一组守的是「否定断言 + 丢内容的扫描器」这个组合**（v0.8.1 第5轮 4b
+     实测）。初版逐行 `line.indexOf('//')` 之后整行截断，注释里还写着「本仓没
+     有把 `//` 放在字符串里的写法」——实测这句是错的，`NewProjectPage.vue:65`
+     的 `url.startsWith('http://')` 就是。
+
+     危害不在「少剥了几个字符」，而在调用它的 6 处全是
+     `expect(code.match(/fetch/) ?? []).toHaveLength(0)` 这类**否定断言**：
+     截断让本该被看见的 `fetch` 隐形，守卫误判为通过。所以下面第三、四条不是
+     「顺便测一下」，它们是这个 bug 的真实形态。 */
+
+  it('`http://` 在字符串里时整行保留（生产代码里的真实写法）', () => {
+    const src = "if (url.startsWith('http://') || url.startsWith('ssh://')) { ok() }"
+    expect(stripCssAndLineComments(src)).toBe(src)
+  })
+
+  it('`http://` 在双引号与模板串里同样保留', () => {
+    const src = 'const a = "http://hub.local"; const b = `ws://x.y`'
+    expect(stripCssAndLineComments(src)).toBe(src)
+  })
+
+  it('**判红机制**：同行的 `fetch` 不许被 `http://` 截断吞掉（否定断言误判为通过）', () => {
+    // 正是初版会误判为绿的形状：`//` 一截，`void fetch(url)` 就消失了。
+    const src = "if (url.startsWith('http://')) { void fetch(url) }"
+    expect(stripCssAndLineComments(src), '整行里没有真注释，一个字都不该少').toBe(src)
+    expect(/fetch/.test(stripCssAndLineComments(src)), 'fetch 必须仍然扫得到').toBe(true)
+  })
+
+  it('转义引号不会让字符串提前收尾', () => {
+    const src = "const s = 'a\\'//b'; const t = real // 注释"
+    expect(stripCssAndLineComments(src).trimEnd()).toBe("const s = 'a\\'//b'; const t = real")
+  })
+
+  it('真正的行注释照旧剥掉，且保留换行（行号对得上）', () => {
+    const src = 'const a = 1 // 注释里有 fetch\nconst b = 2'
+    const out = stripCssAndLineComments(src)
+    expect(out).not.toContain('fetch')
+    expect(out.split('\n'), '行数不变').toHaveLength(2)
+    expect(out.split('\n')[1]).toBe('const b = 2')
   })
 })

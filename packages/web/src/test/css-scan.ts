@@ -32,17 +32,68 @@ export function stripCssComments(src: string): string {
  * 不许 `setInterval`）要扫整份 `.vue`——注释里说明这条纪律本身就会写着那些字样，
  * 不剥行注释就会自己把自己判红。
  *
- * 行注释的识别是**逐行**的：`line.indexOf('//')` 之后一切舍弃。这对本仓够用
- * （没有把 `//` 放在字符串里的写法），不需要真正的词法器。
+ * ── 为什么不能逐行 `indexOf('//')`（v0.8.1 第5轮 4b 实测） ────────────
+ * 初版是 `line.indexOf('//')` 之后**整行截断**，注释里说「没有把 `//` 放在
+ * 字符串里的写法」——**这句是错的**。实测源码里就有：
+ *
+ *   `NewProjectPage.vue:65`  if (url.startsWith('http://') || …)
+ *   `App.shell-state.test.ts:51`  new URL(String(url), 'http://hub.local')
+ *
+ * 前者是**生产代码**：整行被截成 `if (url.startsWith('http:`，后半段连同
+ * `|| url.startsWith('https://')` 全丢。而更危险的是**判红的机制**：调用它的
+ * 6 处全是 `expect(code.match(/fetch|request\(|https?:/g) ?? []).toHaveLength(0)`
+ * 这类**否定断言**——只要有人写出
+ *
+ *   if (url.startsWith('http://')) { void fetch(url) }
+ *
+ * `//` 一截，`void fetch(url)` 就隐形了，守卫**误判为通过**。否定断言遇上
+ * 「丢内容」的扫描器，等于把洞焊死在门禁里。
+ *
+ * 现在的做法：单趟字符扫描，跟踪「当前是否在字符串 / 模板串 / 行注释里」。
+ * 只认真正的行注释起点（`//` 且不在字符串内），其余字符原样保留。不做
+ * 正则字面量的词法分析（`/a\/\/b/` 这类要区分「除号」与「正则」需要真正的
+ * 语法上下文，成本远大于收益）——本仓没有把 `//` 写进正则字面量的地方，
+ * 而上面那两类**真实存在**的形态已被覆盖。
  */
 export function stripCssAndLineComments(src: string): string {
-  return stripCssComments(src)
-    .split('\n')
-    .map((line) => {
-      const at = line.indexOf('//')
-      return at >= 0 ? line.slice(0, at) : line
-    })
-    .join('\n')
+  const text = stripCssComments(src)
+  const out: string[] = []
+  /** 当前所在的字符串定界符（`'` / `"` / `` ` ``），`null` = 不在字符串里。 */
+  let quote: string | null = null
+  let i = 0
+  while (i < text.length) {
+    const ch = text[i]
+    const next = text[i + 1]
+    if (quote !== null) {
+      // 字符串内：转义符把下一个字符一起吃掉（`'\''` 不该提前收尾）。
+      if (ch === '\\') {
+        out.push(ch, next ?? '')
+        i += 2
+        continue
+      }
+      if (ch === quote) quote = null
+      out.push(ch)
+      i += 1
+      continue
+    }
+    /* 模板串里的 `${…}` 会嵌表达式，那里的 `//` 仍是注释——但嵌套花括号要
+       配对才能判断 `}` 是「回到模板串」还是「表达式里的块」。本仓没有这种
+       写法，按「反引号内一律是字符串」处理，宁可少剥也不多剥。 */
+    if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch
+      out.push(ch)
+      i += 1
+      continue
+    }
+    if (ch === '/' && next === '/') {
+      // 行注释：吃到行尾（保留换行本身，行号才对得上）。
+      while (i < text.length && text[i] !== '\n') i += 1
+      continue
+    }
+    out.push(ch)
+    i += 1
+  }
+  return out.join('')
 }
 
 export interface CssRule {

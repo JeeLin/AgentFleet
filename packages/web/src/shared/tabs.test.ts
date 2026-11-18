@@ -204,6 +204,30 @@ describe('sessionStorage 持久化', () => {
     expect(() => saveTabs(null, stateOf('a'))).not.toThrow()
   })
 
+  it('设备已被删除的 tab（`nodeId: null`）能原样存回、原样读回', () => {
+    /* **这条守的是「类型说 `string | null`，判据却只认 `string`」的分叉**
+       （v0.8.1 第5轮 4b 实测）。`TabMeta.nodeId` 的字段注释明写「`null` = 这台
+       设备已被删除」，`normalizeTabMeta` 也把它透传下去；但 `isTabMeta` 判的是
+       `typeof t.nodeId === 'string'`，于是**这份完全合法的 tab 读回来被判成
+       「形状不对」**，`loadTabs` 用 `.filter()` 静默剔除——用户刷新一次，
+       设备刚被删掉的那个 tab 就凭空消失，它承载的 `baseRev` / `baseRevStatus`
+       （注释明写「随 tab 持久化」）也一起没了。
+
+       判红方式：把 `isTabMeta` 的 `(typeof t.nodeId === 'string' || t.nodeId === null)`
+       改回 `typeof t.nodeId === 'string'` → 这条立刻红，`back.tabs` 变成空数组。
+       `SessionPage.test.ts` 那条「设备已被删除」的用例盖不住这里：它的注释自己
+       写着「那份 seed 会被丢弃」，然后绕去走 `metaOf` 真实路径。 */
+    const removed: TabMeta = { ...meta('a'), nodeId: null, baseRev: '3f2a1b0', baseRevStatus: 'ok' }
+    const store = fakeStorage()
+    saveTabs(store, { tabs: [removed], activeId: 'a' })
+
+    const back = loadTabs(store)
+    expect(back.tabs.map((t) => t.id), '设备已删的 tab 不能被丢掉').toEqual(['a'])
+    expect(back.tabs[0]?.nodeId, '`nodeId: null` 要原样回来，不能变空串或 undefined').toBeNull()
+    expect(back.tabs[0]?.baseRev, '起点跟着 tab 一起活下来').toBe('3f2a1b0')
+    expect(back.tabs[0]?.baseRevStatus).toBe('ok')
+  })
+
   it('写失败不抛（配额满时只活在这一页）', () => {
     const store = fakeStorage()
     store.setItem = () => {
