@@ -547,9 +547,21 @@ const ROUTED_PAGES = [
  *   10 页一起退回——2026-11-17 实测它当时确实是 `section.af-page` +
  *   `.af-page__head` / `__title`，即 10 个占位页全是裸 `<h1>`，而它们
  *   「不在对齐范围」，所以没有任何门禁看得见。
- * - `NewSessionPage.vue`：当前没有路由（新形态下会话必须先有项目，
- *   `/sessions/new` 在 `LEGACY_PATHS` 里落到总览），但它是
- *   `docs/design-system.md:1806` 登记的新建会话落点，实现是完整的。
+ * - `NewSessionPage.vue`：**当前没有路由、也没有任何调用点**（新形态下会话必须
+ *   先有项目，`/sessions/new` 在 `router.ts:190` 的 `LEGACY_PATHS` 里落到总览；
+ *   设备页的「用它开会话」走 `DevicesPage.createSession`，它自己也不发请求），
+ *   唯一加载它的只有它自己那份 `NewSessionPage.test.ts`。
+ *   留着它是因为 `docs/design-system.md:1800`（§9 实现索引的「新建会话」一行）
+ *   仍把 `domains/session/NewSessionPage.vue` 登记为新建会话的落点——这是规范
+ *   层面登记的落点，不是本里程碑可达的入口。也就是说：**它暂时只是一份按规范
+ *   保留的落点**，「实现是完整的」这句话不成立（一份没有调用点的组件，
+ *   完整性无从验证）。等真的接上路由或调用点时，把它移进 `ROUTED_PAGES`
+ *   （或在 `OUT_OF_SCOPE_PAGES` 里写清为什么它不守骨架判据）。
+ *
+ *   > 上一版这里写的是「`docs/design-system.md:1706` 登记的新建会话落点，
+ *   > 实现是完整的」。两处都过期了：`:1706` 是 §8.2「原型验证不了的东西」的
+ *   > 正文，真正的映射行在 **`:1800`**；而「实现是完整的」在零调用点的前提下
+ *   > 是一句无法核实的断言。
  *
  * 这两条与 `ROUTED_PAGES` 分开列：`ROUTED_PAGES` 要参与「与 App.vue 对齐」
  * 的集合比较，而这两个组件本来就不在路由表里，混进去会让那条比较恒红。
