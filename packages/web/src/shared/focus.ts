@@ -47,7 +47,19 @@ export function isVisible(el: Element): boolean {
   if (el.closest('[inert]')) return false
   const win = el.ownerDocument.defaultView
   if (!win) return false
-  return win.getComputedStyle(el).display !== 'none'
+  /* **必须逐级向上查**，不能只看自身：`display:none` 是可继承的「生效性」，
+     祖先被隐藏时子元素自己也看不见，但 `getComputedStyle(子元素).display`
+     在真实浏览器里返回 `none`、在 happy-dom 里却仍返回 `inline-block`。
+     只看自身的话，测试环境下恒为 true（等于没有判据），而生产 CSS 里
+     `display: none` 有 4 处是**属性选择器**形态、不经 `[hidden]`
+     （`.af-tool[data-open='false'] .af-tool__body`、
+     `html[data-rail='off'] .af-rail__*` 三处），用户可达。
+     向上查到 `body` 即止——`body`/`html` 的 display 不影响可见性。 */
+  for (let cur: Element | null = el; cur && cur !== el.ownerDocument.body; cur = cur.parentElement) {
+    const cs = win.getComputedStyle(cur)
+    if (cs.display === 'none' || cs.visibility === 'hidden') return false
+  }
+  return true
 }
 
 /**

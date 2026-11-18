@@ -86,13 +86,24 @@ describe('focus stack', () => {
     const scrim = document.getElementById('scrim') as HTMLElement
     const title = document.getElementById('title') as HTMLElement
     const modal = document.getElementById('modal') as HTMLElement
-    // 前提自检：内层对话框确实带 tabindex="-1"（不在 Tab 序列里）
-    expect(modal.tabIndex, '夹具前提变了：内层应是 tabindex="-1"').toBe(-1)
+    /* 前提自检判**属性**而非 `tabIndex`：`div` 不带 `tabindex` 属性时
+       `tabIndex` 本来也是 `-1`，断言它等于 -1 是恒真的（第7轮 4b 实测：
+       把属性整个删掉，39 条用例仍全绿）。要钉住的是「属性在」这件事。 */
+    expect(
+      modal.getAttribute('tabindex'),
+      '夹具前提变了：内层对话框必须带 tabindex="-1" 属性',
+    ).toBe('-1')
     push(scrim)
     expect(
       document.activeElement,
       '首焦点必须落在「标题」输入框，而不是 tabindex="-1" 的对话框容器',
     ).toBe(title)
+    /* 夹具里的 `opener` 不是装饰：`push()` 会把浮层之外的 body 直接子节点
+       设为 inert，它正是这条的观测点（第7轮 4b 指出它此前从未被引用）。 */
+    expect(
+      (document.getElementById('opener') as HTMLElement).inert,
+      '打开浮层后，浮层之外的元素必须 inert',
+    ).toBe(true)
   })
 
   /* 回归：`[hidden]` 里的控件同样是 `FOCUSABLE` 的匹配，但 `focus()` 对它无效，
@@ -120,6 +131,37 @@ describe('focus stack', () => {
       document.activeElement,
       '首焦点必须跳过 [hidden] 里的控件，落到真实输入框上',
     ).toBe(real)
+  })
+
+  /* 上一条只覆盖 `[hidden]` 这一种「不可见」，走的是 `closest('[hidden]')` 兜底。
+     `display:none` 是另一条完全独立的路径，且被隐藏者是**祖先**而非自身——
+     生产 CSS 里这种形态有 4 处是属性选择器（`.af-tool[data-open='false'] …`、
+     `html[data-rail='off'] …`），用户可达。`getComputedStyle(子元素).display`
+     在 happy-dom 下仍报 `inline-block`，所以判据必须自己逐级向上查。 */
+  it('push 不会把首焦点交给 display:none 祖先里的控件', () => {
+    document.body.innerHTML = `
+      <div id="scrim">
+        <div style="display:none"><button id="ghost">幽灵</button></div>
+        <div id="modal" role="dialog" aria-modal="true" tabindex="-1">
+          <input id="title" type="text" />
+        </div>
+      </div>
+    `
+    const ghost = document.getElementById('ghost') as HTMLElement
+    const title = document.getElementById('title') as HTMLElement
+    // 前提自检：幽灵按钮自身确实「看起来可见」（display 不是 none），
+    // 只有祖先隐藏这一条能把它排除——否则这条用例证明不了「逐级向上查」
+    const win = ghost.ownerDocument.defaultView!
+    expect(
+      win.getComputedStyle(ghost).display,
+      '夹具前提变了：幽灵按钮自身不应是 display:none，隐藏必须来自祖先',
+    ).not.toBe('none')
+    expect(ghost.tabIndex, '夹具前提变了：幽灵按钮应仍是可聚焦元素').toBe(0)
+    push(document.getElementById('scrim') as HTMLElement)
+    expect(
+      document.activeElement,
+      '首焦点必须跳过 display:none 祖先里的控件，落到真实输入框上',
+    ).toBe(title)
   })
 
   it('push 优先挑 data-autofocus', () => {
