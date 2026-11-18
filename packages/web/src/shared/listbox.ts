@@ -17,6 +17,7 @@
    而 `AF.currentRow()` 也靠它判断，所以它不是装饰。
    =========================================================================== */
 
+import { isVisible } from './focus'
 import { declareImplemented, isActivatable } from './keynav'
 
 /**
@@ -93,13 +94,25 @@ function isRow(el: Element): el is HTMLElement {
 }
 
 /**
- * 可见的行。`[hidden]` 祖先里的行不算——折叠起来的子目录不能被
- * 方向键走到（原型 keynav.js §5 的 `!r.closest('[hidden]')` 判据）。
+ * 可见的行。判据**与焦点栈共用同一份**（`focus.ts` 的 `isVisible`）。
+ *
+ * ── 为什么不再自己写一份（v0.8.1 第5轮 G89）─────────────────────────
+ * 这里原本是 `!r.closest('[hidden]') && getComputedStyle(r).display !== 'none'`
+ * ——和 `focus.ts:45` 的 `isVisible` 是同一个判据的两份拷贝，而**少了一条**：
+ * 没有 `[inert]` 祖先判定。后果不是「不好看」，是行为不一致：
+ *
+ *   · 模态 / 抽屉打开时，`focus.ts` 的 `makeInertExcept` 会把背景设成 `inert`，
+ *     于是 Tab 顺序跳过它（正确）；
+ *   · 而方向键走的是 `visibleRows`，背景行仍被算作「可见」——焦点被 Tab
+ *     挡在浮层里，↑↓ 却能把 `aria-selected` 挪到浮层背后的行上，
+ *     读屏会念出「已选中」一个用户看不见的行。
+ *
+ * 两份判据分叉这件事本身也是病根（AGENTS.md 维度 24）：一份改了另一份不跟，
+ * 而且两份都各自有测试、看起来都「有守卫」。所以这里改成**导入同一个函数**，
+ * 顺带让 `isVisible` 的 `export` 有了真实跨模块消费者（4a S2 的另一半）。
  */
 function visibleRows(list: HTMLElement): HTMLElement[] {
-  return Array.from(list.querySelectorAll<HTMLElement>('[data-row]')).filter(
-    (r) => !r.closest('[hidden]') && getComputedStyle(r).display !== 'none',
-  )
+  return Array.from(list.querySelectorAll<HTMLElement>('[data-row]')).filter(isVisible)
 }
 
 /** 行所在的容器（向上找最近的 list/tree）。 */

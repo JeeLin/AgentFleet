@@ -195,6 +195,52 @@ describe('Home / End', () => {
     press(row('r1'), 'End')
     expect(document.activeElement).toBe(row('r1'))
   })
+
+  /* **`[inert]` 祖先里的行也必须不可达**（v0.8.1 第5轮 4a S9 / G89）。
+     ---------------------------------------------------------------------
+     这条守的是一个**两份判据分叉**的实证：`focus.ts:45` 的 `isVisible` 判
+     `[hidden]` / `[inert]` / `display:none` 三样，而 `listbox.ts` 自己那份
+     只判了两样——**少了 `[inert]`**。
+
+     后果不是样式问题：模态 / 抽屉打开时 `makeInertExcept` 把背景设成 `inert`，
+     Tab 顺序正确地跳过了背景，但方向键仍能把 `aria-selected` 挪到浮层背后的
+     行上——读屏会念出「已选中」一个用户看不见的行。两份判据各自都有测试、
+     看起来都「有守卫」，所以这个缺口一直没人发现。
+
+     **判据用 `aria-selected` 而不是 `document.activeElement`**：
+     happy-dom 里 `inert` 容器内的元素**根本 focus 不了**（实测 `focus()` 之后
+     `activeElement` 是空的）。初版用例断言「焦点没动」，于是**变异后照样绿**
+     ——不是因为判据生效，而是因为那个元素无论如何都拿不到焦点，两版行为一样。
+     那是一条假绿用例（我写完变异验证才发现，记在这里）。
+     `selectRow` 除了 `focus()` 还会写 `aria-selected`，后者在 happy-dom 里工作
+     正常，所以改判它。 */
+  it('inert 容器里的行不可达（Tab 进不去的地方，方向键也不该走到）', () => {
+    document.body.innerHTML =
+      '<div id="list" data-role="list" tabindex="0">' +
+      '<button data-row id="r1" tabindex="-1">一</button>' +
+      '<div id="behind" inert>' +
+      '<button data-row id="r2" tabindex="-1">二</button>' +
+      '<button data-row id="r3" tabindex="-1">三</button>' +
+      '</div></div>'
+    const list = document.getElementById('list') as HTMLElement
+    attach(list, { role: 'list' })
+    /** 当前被标成选中的行 id（`null` = 没有）。 */
+    const selected = (): string | null =>
+      Array.from(list.querySelectorAll('[data-row]'))
+        .find((r) => r.getAttribute('aria-selected') === 'true')?.id ?? null
+
+    row('r1').focus()
+    press(row('r1'), 'End')
+    expect(selected(), 'End 不该选中 inert 容器里的行').toBe('r1')
+    press(row('r1'), 'ArrowDown')
+    expect(selected(), '↓ 不该选中 inert 容器里的行').toBe('r1')
+
+    // 去掉 inert 之后同一批行立刻可达——证明上面「没动」是因为判据生效，
+    // 而不是因为这段 DOM 本身就走不到（初版正是栽在这个「分不清」上）。
+    document.getElementById('behind')?.removeAttribute('inert')
+    press(row('r1'), 'End')
+    expect(selected(), 'inert 去掉后应当能选中最后一行').toBe('r3')
+  })
 })
 
 describe('Enter：语义属于行', () => {
