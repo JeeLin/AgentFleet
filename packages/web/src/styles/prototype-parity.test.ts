@@ -361,6 +361,62 @@ describe('关键规则的取值来源与原型一致', () => {
     expect(ruleBody(clean, '.af-definitely-not-a-rule'), '判据本身要能判「没有」').toBe('')
   })
 
+  it('左栏品牌行的高度必须等于页头高度（G64：每一页的两条水平线要对齐）', () => {
+    /* **这条守的是一条视觉上极显眼、但没有任何门禁看得见的错位**（G64）。
+       左栏品牌行与主区页头是同一水平带上的两条 `border-bottom`：只要两者
+       高度不等，**每一页**上那两条线就差一截，整页看着「不齐」。
+
+       实测过的两种形态（1440×900，playwright）：
+         · 修复前展开态：品牌行 80.84px vs 页头 56px → delta **24.84px**；
+         · 修复前收起态：品牌行 **99px**（`AF` 方块与开关被排成两行）→ delta 43px。
+
+       成因是「`min-height` 只管下限，内容撑高照样超」：
+         · 展开态：`padding: 16px` 上下 + 两行文字继承 `line-height: 23.925px`
+           （两行吃 48px）→ 远超 56；
+         · 收起态：`flex-direction: column` 让 26 + 8 + 40 = 74 加 padding 成 99。
+
+       CSS 里算不出「最终渲染高度」（要排版引擎），所以这里守**三条能一起
+       保证它的结构约束**，缺一条都会让高度失控：
+         ① 品牌行 `min-height` 绑定 `--af-head-h`（与页头同一个槽位，不是又一个 56px）；
+         ② 垂直 padding 不能是 `--p-s4` 那档（16px 上下 = 32px，56 里装不下内容）；
+         ③ 收起态不许把品牌行改成 `column`（那是最容易「为了塞下而换方向」的改法，
+            实测换完 99px）。 */
+    const rules = parseCssRules(IMPL_CSS)
+    const brand = ruleFor(rules, '.af-rail__brand')
+    expect(brand, 'prototype-shell.css 里没有 .af-rail__brand 规则').toBeDefined()
+
+    const minHeight = propValue(brand!, 'min-height')
+    expect(
+      minHeight,
+      `品牌行的 min-height 是 \`${minHeight}\`，应绑定 \`var(--af-head-h)\`。`
+        + '页头用的就是这个变量——品牌行另写一个数字，两边迟早漂开（G64）。',
+    ).toBe('var(--af-head-h)')
+
+    const padding = propValue(brand!, 'padding') ?? ''
+    expect(
+      padding,
+      `品牌行的 padding 是 \`${padding}\`。垂直方向用 \`--p-s4\`(16px、上下共 32px)时，`
+        + '56px 的壳里只剩 24px 给内容，两行文字必然把它顶到 ~81px——'
+        + '实测 80.84 vs 页头 56，delta 24.84（G64）。垂直内边距应收到 `--p-s1` 一档。',
+    ).not.toMatch(/^var\(--p-s4\)\s+var\(--p-s4\)$|^var\(--p-s4\)$/)
+
+    /* 收起态：**不许是 column**。这一条特意写成「找收起态的品牌行规则」而不是
+       匹配全文，因为 `html[data-rail='off']` 前缀只在收起态生效。 */
+    const collapsed = rules.filter(
+      (r) => r.selector.includes(".af-rail__brand") && r.selector.includes('data-rail'),
+    )
+    expect(collapsed.length, '没有收起态（html[data-rail=off]）的品牌行规则').toBeGreaterThan(0)
+    for (const r of collapsed) {
+      const dir = propValue(r, 'flex-direction')
+      expect(
+        dir,
+        `收起态把品牌行改成了 \`flex-direction: ${dir}\`——竖排后 26 + gap + 40 塞不进 56px，`
+          + '实测撑到 99px，比页头高 43px（G64）。'
+          + '56px 里的正确做法是把两块缩小、横向 padding 归零（22 + 4 + 28 = 54 ≤ 56）。',
+      ).not.toBe('column')
+    }
+  })
+
   it('动效时长取标准档而非「瞬时」档', () => {
     // 原型 .af-btn / .af-card / .af-rail__list a 都是 140ms var(--ease)。
     const protoBtn = ruleBody(PROTOTYPE_CSS, '.af-btn')
