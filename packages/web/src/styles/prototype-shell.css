@@ -489,15 +489,22 @@ html[data-rail='off'] .af-rail__actions .af-btn {
    5. 看板（原型 app.css:368-413）
    -------------------------------------------------------------------------
    差异要点（本轮逐条对照出来的）：
-     · 列宽：原型 `minmax(236px, 1fr)`，实现**已经不从适用**——见下面
+     · 列宽：原型 `minmax(236px, 1fr)`，实现**已经不再适用**——见下面
        `.af-board` 规则处的完整演进史（236px 下限会让第 6 列被裁在视口外，
        现行方案是「六列一屏 + 列名不截断」的折中）。原文这里写的「实现写
        180px」是**早已被替换的中间态**，全仓已无 180px，别按它去核。
      · 列头状态色带：原型有 `border-top: 2px solid` 的**状态色**，实现**也有**
-       （`:560` 的 `border-top: 2px solid` + `:566-570` 五种 `[data-state]`
-       各给一个 `border-top-color`）。原文写「实现没有」是第5轮之前的旧状态。
+       ——`.af-col__head` 规则里的 `border-top: 2px solid`，加上紧随其后的
+       **6 条** `.af-col[data-state='…'] .af-col__head { border-top-color: … }`
+       （pending / queued / running / review / done / **failed**，六列六色）。
+       原文写「实现没有」是第5轮之前的旧状态。
+       **这里不写裸行号**：本文件行数改一次就漂一次，而 `anchors.test.ts`
+       只判「那一行存在且非空」——写成 `:560` 那种错行号照样绿，第 6 轮
+       我就这么写错过一次（实际 `border-top` 在 `.af-col__head`、六色紧随
+       其后，也不是「五种」）。按选择器名找，永远对。
      · 空列原型用 `::after` 画一块虚线框写「这一列是空的」，实现只有空态组件
-       —— 这一条仍然成立。
+       —— 这一条仍然成立（`grep -c 'af-col--empty' prototype-shell.css` = 0，
+       原型 `app.css:1415` 有该规则）。
 
    ── 类名就是原型那个 `.af-board`，**不是变体**（2026-11-17 改回） ──────
    本节原先叫 `.af-board--proto`，而 `components.css` 里另有一份 `.af-board`
