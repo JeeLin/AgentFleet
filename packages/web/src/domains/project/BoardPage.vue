@@ -53,7 +53,7 @@
    `TaskCard.test.ts` 有一条源码级断言守着）。
    =========================================================================== */
 
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import EmptyState from '@/domains/shared/components/EmptyState.vue'
 import StateBadge from '@/domains/shared/components/StateBadge.vue'
@@ -65,7 +65,14 @@ import { STATES } from '@/shared/state'
 import { describeShape } from '@/shared/projectShape'
 import { parseStamp } from '@/shared/format'
 import { ApiError, describeReadFailure } from '@/shared/http'
-import { focusRouteTarget, handleLayerKeydown, pop, push, setRouteFocusTarget } from '@/shared/focus'
+import {
+  focusRouteTarget,
+  handleLayerKeydown,
+  lastRouteFocusId,
+  pop,
+  push,
+  setRouteFocusTarget,
+} from '@/shared/focus'
 import { navigate, route } from '@/router'
 
 /** 当前项目 id，从地址读——地址栏是真相源。 */
@@ -200,24 +207,42 @@ async function load(): Promise<void> {
     tasks.value = []
     failure.value = describeReadFailure(e, '项目')
   } finally {
-    if (token === loadToken) loading.value = false
+    if (token === loadToken) {
+      loading.value = false
+      /* 数据到齐后补一次「返回来源卡片」的焦点（见 `restoreSourceFocus`）。
+         只有真的有待找回的目标时才做，否则会抢当页自己的首焦点。 */
+      void restoreSourceFocus()
+    }
   }
 }
 
-// 换项目时重载：`:id` 变了就是不同项目，不能沿用上一份数据。
-watch(projectId, load)
-onMounted(() => {
-  clock = setInterval(() => {
-    now.value = Date.now()
-  }, 1000)
-  /* 从任务详情**返回**看板：把焦点还给刚才那张卡（v0.8.1 第5轮 G65）。
-     `focusRouteTarget()` 认「上一次落焦点」的 `data-id`（详情页 `h1` 带着
-     同一个任务 id），在新渲染的看板里找到同名卡片并聚焦——不这么做的话
-     焦点落在 `main`，键盘用户又得从头 Tab。放在 `load()` 之前：卡片还没渲染
-     时它找不到目标，会退到 `main`（等价于旧行为），不会抛。 */
-  focusRouteTarget()
-  void load()
-})
+  // 换项目时重载：`:id` 变了就是不同项目，不能沿用上一份数据。
+  watch(projectId, load)
+  onMounted(() => {
+    clock = setInterval(() => {
+      now.value = Date.now()
+    }, 1000)
+    void load()
+  })
+
+/* 从任务详情**返回**看板：把焦点还给刚才那张卡（v0.8.1 第5轮 G65）。
+
+   **必须在数据到齐之后补一次**（第5轮 4b 实测）。原先只在 `onMounted` 里
+   调一次，而那时 `load()` 还没发出去——卡片一张都没渲染，`focusRouteTarget`
+   找不到目标就退到 `main`（它的注释当时把这写成「等价于旧行为，不会更坏」，
+   实际上它**静默地**什么都没做）。实测鼠标路径：点卡 → 详情 → 点「← 看板」
+   → 焦点落在 `main`，`dataId: null`；键盘路径碰巧对，因为那时详情页的 `h1`
+   带着 `data-id` 且渲染更早。这条 bug 因此藏了三轮。
+
+   判据用 `lastRouteFocusId()`：只有「上一次落地带着 `data-id`」（即用户是从
+   某张卡/某一行进来的）才补这一次。换项目、直接打开看板时它是 `null`，
+   不抢当页自己的首焦点。`await nextTick()` 让 `v-for` 把卡片真的挂上去。 */
+async function restoreSourceFocus(): Promise<void> {
+  if (lastRouteFocusId() === null) return
+  await nextTick()
+  // 再等一帧：`focusRouteTarget` 按 `data-id` 找，卡片此时必须在 DOM 里。
+  requestAnimationFrame(() => focusRouteTarget())
+}
 // 卸载必须清：不清就是每次进出看板多一个每秒跑一次的定时器。
 onUnmounted(() => {
   if (clock !== null) {
@@ -302,10 +327,20 @@ const SHAPE_CLASS = {
  * 「页面自己落标题」这一档——**焦点交给任务详情的 `h1`（任务标题）**，
  * 那才是用户刚点开的东西。清理由 `focusRouteTarget()` 负责，这里只管登记。
  */
-function openTask(id: string): void {
-  // 记下发起导航的那张卡（`event.currentTarget` 就是卡片按钮本身）：
-  // 返回看板时 `focusRouteTarget()` 按 `data-id` 找回同一张卡。
-  const source = document.activeElement
+function openTask(id: string, event?: Event): void {
+  /* 记下发起导航的那张卡：返回看板时 `focusRouteTarget()` 按 `data-id` 找回
+     同一张卡。
+
+     **必须取 `event.currentTarget`，不能用 `document.activeElement`**
+     （v0.8.1 第5轮 4b 实测）。Chrome 里鼠标点 `<button>` **不会**把它设为
+     `activeElement`——那是 Safari/Firefox 的行为。所以鼠标用户点卡进详情、
+     再点「← 看板」回来时，`activeElement` 是 `<body>`，登记到的是 `null`，
+     焦点落到 `main` 而不是原卡（实测 `afterBack: {tag:"MAIN", dataId:null}`）。
+     键盘用户（Tab 到卡上按 Enter）碰巧是对的，因为那时按钮确实有焦点——
+     这正是这条 bug 藏了三轮的原因：`BoardPage.test.ts:906` 的用例手动
+     `card!.focus()` 之后才点，把鼠标路径盖住了。
+     `currentTarget` 在两种路径下都是那张卡本身。 */
+  const source = (event?.currentTarget ?? document.activeElement) as HTMLElement | null
   setRouteFocusTarget(source instanceof HTMLElement ? source : null)
   navigate(`/project/${encodeURIComponent(projectId.value)}/task/${encodeURIComponent(id)}`)
 }

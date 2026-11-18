@@ -296,7 +296,7 @@ describe('面板三分区（子任务 12）', () => {
   })
 
   /* **同一元素上的两个 `af-*` 类，不许一方把另一方全量盖掉**（v0.8.1 第5轮，
-     G40 的通用网）。实证：`TaskCard.vue:123` / `BoardPage.vue:595` 写的是
+     G40 的通用网）。实证：`TaskCard.vue:129` / `BoardPage.vue:771` 写的是
      `class="af-card af-taskcard"`，而 `.af-card` 住在**后导入**的
      `prototype-shell.css`、与 `.af-taskcard` 同为单类选择器、特异性相同——
      于是 `components.css` 里那 14 条声明 **13 条从上线那天起就是死的**，

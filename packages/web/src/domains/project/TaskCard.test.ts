@@ -267,11 +267,22 @@ describe('TaskCard：组件纪律（源码级）', () => {
     expect(code.match(/setInterval|setTimeout/g) ?? []).toHaveLength(0)
   })
 
-  it('点卡片发 open 事件，带上任务 id（不自己跳转）', async () => {
-    // 判红方式：把 `emit('open', …)` 删掉 → 红。
+  it('点卡片发 open 事件，带上任务 id 与原生事件（不自己跳转）', async () => {
+    /* 判红方式：把 `emit('open', …)` 删掉 → 红。
+
+       **第二个参数 `$event` 是 G65 的返回焦点要用的**（第5轮 4b 实测）：
+       `BoardPage.openTask` 要从 `event.currentTarget` 认出「是哪张卡发起的
+       导航」，因为 Chrome 里鼠标点 `<button>` 不会把它设为
+       `document.activeElement`。只传 id 时调用方拿不到元素，鼠标用户的
+       返回焦点就落回 `main`（实测）。这条用例同时钉住「事件真的透传出来了」，
+       否则 `openTask` 里那个 `event?.currentTarget` 永远拿到 `undefined`。 */
     const w = mountCard(task({ id: 'tsk_42' }), NOW_3M12S)
     await w.trigger('click')
-    expect(w.emitted('open')).toEqual([['tsk_42']])
+    const events = w.emitted('open')
+    expect(events, '要发一次 open').toHaveLength(1)
+    expect(events?.[0]?.[0], '第一个参数是任务 id').toBe('tsk_42')
+    expect(events?.[0]?.[1], '第二个参数必须是原生 MouseEvent（G65 返回焦点靠它的 currentTarget）')
+      .toBeInstanceOf(Event)
   })
 })
 

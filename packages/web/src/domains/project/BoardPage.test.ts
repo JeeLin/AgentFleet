@@ -947,6 +947,59 @@ describe('G65：看板卡片的键盘路径', () => {
     expect(document.activeElement).toBe(back)
     clearRouteFocusTarget()
   })
+
+  /* ===========================================================================
+     G65 的**真实返回路径**（第5轮 4b 实测补的）
+     ---------------------------------------------------------------------------
+     上面那条用例手动 `card!.focus()` 之后才点，还手动 `setRouteFocusTarget`
+     来模拟返回——它把鼠标路径整个盖住了。实际缺陷：
+
+       · Chrome 里鼠标点 `<button>` **确实**会聚焦它（这点与 4b 的推断相反，
+         实测 `activeBefore: "BUTTON"`），所以 `document.activeElement` 那条
+         不是病根；
+       · 真正的病根是**时机**：`onMounted` 里调 `focusRouteTarget()` 时
+         `load()` 还没回来，看板一张卡都没渲染，`findByDataId` 什么也找不到，
+         退到 `main`。原注释把这一步写成「等价于旧行为，不会更坏」，但它
+         实际上是**静默失效**：用户在详情页点「← 看板」，焦点落在 `main`
+         而不是刚才那张卡。
+
+     所以这条用例钉的是「数据到齐之后必须补一次」。它不手动造焦点，而是
+     摆好「上一站」再挂载页面，看挂载 + 加载完成后焦点落在哪。 */
+  it('从详情返回：数据到齐后焦点回到来源卡片（不是 main）', async () => {
+    stubBoard([task({ id: 'tsk_a', state: 'pending' }), task({ id: 'tsk_b', state: 'running' })])
+    clearRouteFocusTarget()
+    /* 摆出「上一站是 tsk_b」：真实路径里这是详情页 `h1`（带 `data-id`）。
+       这里直接登记，因为本用例要测的是**看板恢复焦点**这一段，不是详情页
+       怎么写进去的那一段（那一段由上面那条用例守）。 */
+    const origin = document.createElement('h1')
+    origin.setAttribute('data-id', 'tsk_b')
+    document.body.appendChild(origin)
+    setRouteFocusTarget(origin)
+    /* **登记完就把它摘掉**——这是真实路径的形状：详情页的 `h1` 在离开详情页时
+       已经随组件卸载消失，回来时 DOM 里只有看板的卡片带那个 `data-id`。
+       不摘掉的话 `findByDataId` 会先把到这个 `h1`（它按文档顺序取第一个），
+       用例就变成「回到那个夹具」而不是「回到卡片」，测的东西偏了。 */
+    origin.remove()
+    // 让出标志会被挂载期间的 `navigate()` 消费掉；本用例关心的是「上一站」还在。
+    const w = mountAt('p_1')
+    await flushUntilSettled(w)
+    /* `restoreSourceFocus()` 里 `await nextTick()` + `requestAnimationFrame`，
+       所以要多等一轮宏任务才看得到最终焦点。 */
+    await new Promise((r) => setTimeout(r, 60))
+
+    const target = w.element.querySelector('[data-id="tsk_b"]')
+    expect(target, '卡片已渲染').not.toBeNull()
+    expect(
+      document.activeElement,
+      [
+        '返回看板后焦点必须落在来源卡片上，不能是 main。',
+        '`onMounted` 里那一次 `focusRouteTarget()` 跑在 `load()` 之前，',
+        '那时卡片还没渲染，会静默退到 main——所以 `load()` 的 finally 里',
+        '必须补一次（`restoreSourceFocus`）。',
+      ].join('\n'),
+    ).toBe(target)
+    clearRouteFocusTarget()
+  })
 })
 
 /* ===========================================================================

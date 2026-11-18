@@ -85,7 +85,13 @@ const props = defineProps<{
   execution: Execution | null
 }>()
 
-const emit = defineEmits<{ (e: 'open', id: string): void }>()
+const emit = defineEmits<{
+  /* 第二个参数是原生事件：`BoardPage.openTask` 要用 `currentTarget` 记下
+     「是哪张卡发起的导航」（G65 的返回焦点靠它）。只传 id 的话调用方拿不到
+     元素，退回 `document.activeElement` —— 而鼠标点 `<button>` 在 Chrome 里
+     不会把它设为 activeElement，返回焦点就丢了（第5轮 4b 实测）。 */
+  (e: 'open', id: string, event: MouseEvent): void
+}>()
 
 const state = computed(() => props.task.state)
 const isRunning = computed(() => state.value === 'running')
@@ -125,7 +131,7 @@ const relative = computed(() => relativeTime(props.task.updated_at, props.now))
     :data-state="state"
     :data-id="task.id"
     :title="task.title"
-    @click="emit('open', task.id)"
+    @click="emit('open', task.id, $event)"
   >
     <span class="af-taskcard__title">{{ task.title }}</span>
 
