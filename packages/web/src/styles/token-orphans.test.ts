@@ -79,6 +79,25 @@
    `proto:` 前缀 = 原型侧）；用例会逐项复算，写错、漏写、或理由里出现没声明的
    数字都判红。**不许把「4 个类型」与「40 次总数」并列成「四个（共 40 次）」**
    ——那是两套口径混在一句话里，读者会以为每个类型各 10 次。
+
+   ── 判据覆盖到哪一格（v0.8.1 第8轮第2次修复后）──────────────────────
+   第8轮首版把「散文 ↔ counts」写成**单向**（从 `counts` 出发查实测），
+   于是散文那侧可以整片撒谎而无人发现：改 `why` 里的 `-fg 14 次` → `-fg 0 次`
+   （0 是邻键的值）、「族总 40 次」→「族总 8 次」、删掉 `@…/ConvFlow.vue` 键
+   而散文不动 —— 全都判绿。现在补上**反向**三格：
+     · **短名必须绑到具体键**：`-fg 14` 里的 14 必须等于 `--af-danger-fg` 的声明值，
+       不是「等于某个键的值」。带单位（`14 次`）与紧凑（`-fg 14`）两种写法同一判据；
+     · **`family:` 要有散文锚**：`族总 N 次` 的 N 必须等于该 `family:` 键的声明值
+       （且散文里真的写了「族总」这两个字）；
+     · **`@路径` 键必须在散文里被提到**：分文件键的**文件名主干**没出现在散文里 → 判红；
+       反向亦然（散文写了文件名却没有对应键 → 判红）。
+   以及 `minConsumers` 与 `counts['--af-fg-strong']` 必须一致——同一个数写两遍，
+   改一处而不改另一处就是自相矛盾（实测过：下限写 0 或负数会静默放行）。
+   **不覆盖（如实登记，不是待办）**：字面色值（`#cdae7a` / `rgba(0,0,0,0.28)` /
+   `0.14` 这类 alpha）、中文数字（`十二次`）、数字与单位之间夹非 ASCII 空白
+   （全角空格 / `&nbsp;`）。这几类靠人对着 `theme-*.css` 复算：
+   字面值形态太多（hex / rgba / 阴影三元组），中文数词与量词的合法分隔也太多，
+   强行匹配的误报面大于它挡住的洞。
    =========================================================================== */
 
 import { readdirSync, readFileSync, statSync } from 'node:fs'
@@ -265,6 +284,25 @@ function shortNamesOf(key: string): string[] {
   const familyTail = k.replace(/^(?:af|p)-/, '')
   const lastSeg = k.slice(k.lastIndexOf('-') + 1)
   return [...new Set([k, familyTail, lastSeg])].sort((a, b) => b.length - a.length)
+}
+
+/**
+ * `@路径` 键 → **文件名主干**（`…/domains/project/ProjectTaskPage.vue` → `ProjectTaskPage`）。
+ *
+ * 散文里的分文件明细写的是文件名而不是属性名 ——
+ * 「`components.css` 8 + 3 个 `.vue` 共 4 处：ProjectTaskPage 1 / …」。
+ * 那串数字**必须逐个绑到具体的 `@路径` 键**，否则改错也没人发现（实测过：判绿）。
+ *
+ * 只取**文件**级键的最后一节；**目录**级键（`…/domains`，没有扩展名）不产别名 ——
+ * 它的值是「该目录下合计」，与散文里的单个文件名不是同一件事，混在一起会绑错。
+ */
+function pathStemsOf(key: string): string[] {
+  const at = key.indexOf('@')
+  if (at < 0) return []
+  const path = key.slice(at + 1)
+  const base = path.slice(path.lastIndexOf('/') + 1)
+  if (!/\.[a-z]+$/i.test(base)) return []
+  return [base.replace(/\.[a-z]+$/i, '')]
 }
 
 /* ── 登记表：每一个「定义了但零 var() 消费」的名字，逐条写理由 ──────────────
@@ -820,7 +858,10 @@ describe('零 var() 消费的自定义属性必须逐个登记理由（反向守
        第一个短名（原文形如 `'--af-danger 8 / …'`）前面是那个拼接空格，照样命中。
        `(?![\d.])` 挡住 `14.5` 被截成 `14`。 */
     const UNIT_RE = /(\d+)\s*(次|处)/g
-    const COMPACT_RE = /(?:^|[\s/、：（`(])(-{1,2}[a-z][a-z0-9-]*)\s+(\d+)(?![\d.])/g
+    /* 分文件明细：`ProjectTaskPage 1` —— 驼峰文件名主干（大写开头、含至少一个大写）
+       + 数字。要求驼峰是为了不误抓 `paper 是 0.10` 这类散文：
+       `cream` / `paper` 全小写，不会被当成文件名。 */
+    const FILE_DETAIL_RE = /\b([A-Z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*)\s+(\d+)(?![\d.])/g
     type Row = { name: string; text: string; counts: Record<string, number> }
     const rows: Row[] = [
       ...[...DECLARED_ORPHANS].map(([name, e]) => ({
@@ -849,7 +890,9 @@ describe('零 var() 消费的自定义属性必须逐个登记理由（反向守
         }
       }
 
-      /* (2) 紧凑写法：短名 → 唯一键，数字必须等于该键的声明值。 */
+      /* 短名 → 键（(2) 的唯一依据）。共享短名**判红而不是跳过**：跳过的写法实测有洞——
+         `--af-fg-strong` 同时声明 `proto:--fg-strong` 与 `--af-fg-strong`，两者都产出
+         短名 `strong`，于是散文写 `-strong 99` 会被整条跳过、数字没人复算（实测 8 passed）。 */
       const aliasToKeys = new Map<string, string[]>()
       for (const key of Object.keys(counts)) {
         for (const alias of shortNamesOf(key)) {
@@ -859,53 +902,169 @@ describe('零 var() 消费的自定义属性必须逐个登记理由（反向守
         }
       }
       const ambiguous = new Set([...aliasToKeys].filter(([, ks]) => ks.length > 1).map(([a]) => a))
-      for (const m of text.matchAll(COMPACT_RE)) {
-        const alias = m[1].replace(/^--?/, '')
-        const value = Number(m[2])
-        /* 共享短名**判红而不是跳过**。跳过的写法实测有洞：`--af-fg-strong` 条目同时
-           声明 `proto:--fg-strong` 与 `--af-fg-strong`，两者都产出短名 `strong`，
-           于是散文里写 `-strong 99` 会被整条跳过、数字没人复算（实测：8 passed）。
-           改成判红后，想写紧凑形态就必须用不歧义的短名（或写全名）。 */
+
+      /* 文件名主干 → `@路径` 键（供 (2b) 分文件明细绑定）。 */
+      const stemToKeys = new Map<string, string[]>()
+      for (const key of Object.keys(counts)) {
+        for (const stem of pathStemsOf(key)) {
+          const list = stemToKeys.get(stem)
+          if (list) list.push(key)
+          else stemToKeys.set(stem, [key])
+        }
+      }
+
+      /* (2) 散文里的数字**必须绑到具体键**，两种写法同一判据：
+           · 紧凑 —— `` `--af-danger` 8 / -fg 14 ``（短名 + 数字，无单位）；
+           · 带单位 —— `` `-fg` 14 次 `` / `12 次` / `4 处`。
+
+         两种写法都要先认出「这个数字前面说的是谁」，再拿**那个键的声明值**比。
+         只按「数字在不在 values 里」判是**已经实测过的洞**：`-fg 14` 改成 `-fg 8`
+         时 8 恰好是邻键 `--af-danger` 的值，于是蒙混过关。
+         短名要求以 `-` 开头：否则 `--sh-2: 0 6px` 里的「0 6px」会被读成
+         「名字 0 + 次数 6」，`0.28` 这类小数也会被切开。
+         `(?![\d.])` 挡住 `14.5` 被截成 `14`。
+
+         带单位写法有个额外形态：`12 次` 前面**没有**短名（主语在上一句，如
+         「`--p-s8` 有 12 次直读」里短名离得远）。这种「裸数字」只校验
+         「值在已声明集合里」——它是兜底，不是主判据；靠 (4) 的反向检查
+         保证「声明了却没人提」不会发生。 */
+      const VALUE_WITH_NAME_RE =
+        /(?:^|[\s/、：（`(])(-{1,2}[a-z][a-z0-9-]*)\s+(\d+)(?![\d.])|(?:^|[\s/、：（`(])(-{1,2}[a-z][a-z0-9-]*)[`」]?\s*(\d+)\s*(?:次|处)/g
+      const bindValue = (aliasRaw: string, valueRaw: string) => {
+        const alias = aliasRaw.replace(/^--?/, '')
+        const value = Number(valueRaw)
         if (ambiguous.has(alias)) {
           problems.push(
-            `${name}: 散文写「${m[1]} ${m[2]}」，但短名 ${alias} 同时命中多个键`
+            `${name}: 散文写「${aliasRaw} ${valueRaw}」，但短名 ${alias} 同时命中多个键`
               + `（${(aliasToKeys.get(alias) ?? []).join(' / ')}）——写全名或换用不歧义的短名`,
           )
-          continue
+          return
         }
         const hitKeys = aliasToKeys.get(alias)
         if (!hitKeys) {
           problems.push(
-            `${name}: 散文写「${m[1]} ${m[2]}」，但 counts 里没有短名为 ${alias} 的键`
+            `${name}: 散文写「${aliasRaw} ${valueRaw}」，但 counts 里没有短名为 ${alias} 的键`
               + `（已声明：${declaredList || '无'}）`,
           )
+          return
+        }
+        const [key] = hitKeys
+        if (counts[key] !== value) {
+          problems.push(
+            `${name} / ${key}: 散文写「${aliasRaw} ${valueRaw}」，但该键声明 ${counts[key]} 次`
+              + `（${key} 的实测值与声明值另由 (1) 校验）`,
+          )
+        }
+      }
+      for (const m of text.matchAll(VALUE_WITH_NAME_RE)) {
+        if (m[1] !== undefined) bindValue(m[1], m[2])
+        else if (m[3] !== undefined) bindValue(m[3], m[4])
+      }
+
+      /* (2b) 分文件明细：`ProjectTaskPage 1 / NewSessionPage 2` 这类「文件名主干 + 数字」。
+         它既不是带单位次数，也不符合紧凑写法（驼峰文件名不以 `-` 开头），
+         必须单列——实测把明细改成 `3 / 1 / 0` 原先是 8 passed。
+         要求驼峰是为了不误抓 `paper 是 0.10`：`cream` / `paper` 全小写。 */
+      for (const m of text.matchAll(FILE_DETAIL_RE)) {
+        const stem = m[1]
+        const value = Number(m[2])
+        const hitKeys = stemToKeys.get(stem)
+        if (!hitKeys) {
+          problems.push(
+            `${name}: 散文写「${stem} ${value}」，但 counts 里没有该文件的分文件键`
+              + `（已声明：${declaredList || '无'}）——分文件明细必须配一条 @路径 键`,
+          )
+          continue
+        }
+        if (hitKeys.length > 1) {
+          problems.push(`${name}: 文件名主干 ${stem} 同时命中多个键（${hitKeys.join(' / ')}）`)
           continue
         }
         const [key] = hitKeys
         if (counts[key] !== value) {
           problems.push(
-            `${name} / ${key}: 散文写「${m[1]} ${m[2]}」，但该键声明 ${counts[key]} 次`
-              + `（${key} 的实测值与声明值另由 (1) 校验）`,
+            `${name} / ${key}: 散文写「${stem} ${value} 处」，但该键声明 ${counts[key]} 次`,
           )
         }
       }
 
-      /* (3) 兜底：带单位的次数表述，其数字必须出现在某个声明值里。
-         只管带单位的形态——紧凑写法的错绑由 (2) 负责，这里再按「值存在」放行
-         就等于把 (2) 的结论覆盖掉。 */
-      const unitPhrases = [...text.matchAll(UNIT_RE)].map((m) => `${m[1]} ${m[2]}`)
-      if (unitPhrases.length > 0 && Object.keys(counts).length === 0) {
+      /* (2c) `family:` 键必须有散文锚。它按设计不给短名别名（见 `shortNamesOf()`），
+         于是 (2) 看不见它，只能单列。判据两条：
+           · 散文里必须出现「族总」二字（这是约定写法，不是让读者猜）；
+           · 「族总 N 次」的 N 必须等于该 `family:` 键的声明值。
+         原先只靠 (1) 的「声明=实测」，于是把散文「族总 40 次」改成「族总 8 次」
+         （8 是邻键的值）判绿——这句散文当时是**完全脱钩**的。 */
+      for (const [key, value] of Object.entries(counts)) {
+        if (!key.startsWith('family:')) continue
+        const fam = key.slice('family:'.length)
+        const famRe = new RegExp(
+          `族总\\s*(\\d+)\\s*次|[「\`]族总\\s*(\\d+)\\s*次`,
+        )
+        const hit = text.match(famRe)
+        if (!hit) {
+          problems.push(
+            `${name} / ${key}: 声明了族总次数，但散文里没有「族总 N 次」这句话`
+              + `（已声明 ${value}）——聚合键必须写出来，否则它只被 (1) 自证`,
+          )
+          continue
+        }
+        const prose = Number(hit[1] ?? hit[2])
+        if (prose !== value) {
+          problems.push(
+            `${name} / ${key}（${fam} 全族）: 散文写「族总 ${prose} 次」，但该键声明 ${value} 次`,
+          )
+        }
+      }
+
+      /* (3) 裸数字兜底：散文里没带短名的「N 次 / N 处」，其值必须在某个声明值里。
+         这是**(2) 覆盖不到时的安全网**，不是主判据——能绑名字的都在 (2) 绑过了。 */
+      const orphanNumbers = [...text.matchAll(UNIT_RE)]
+        .filter((m) => {
+          const before = text.slice(Math.max(0, (m.index ?? 0) - 24), m.index ?? 0)
+          return !/(-{1,2}[a-z][a-z0-9-]*)[`」]?\s*$/.test(before)
+        })
+        .map((m) => Number(m[1]))
+      if (orphanNumbers.length > 0 && Object.keys(counts).length === 0) {
         problems.push(
-          `${name}: 理由里写了次数（${unitPhrases.join('、')}）但没声明 counts——这些数字目前没人复算`,
+          `${name}: 理由里写了次数（${orphanNumbers.join('、')}）但没声明 counts——这些数字目前没人复算`,
         )
         continue
       }
-      const unexplained = unitPhrases.filter((p) => !values.includes(Number(p.split(' ')[0])))
+      const unexplained = [...new Set(orphanNumbers)].filter((n) => !values.includes(n))
       if (unexplained.length > 0) {
         problems.push(
-          `${name}: 理由里的 ${unexplained.join('、')} 在 counts 里找不到对应值`
+          `${name}: 理由里的 ${unexplained.map((n) => `${n} 次`).join('、')} 在 counts 里找不到对应值`
             + `（已声明：${declaredList}）`,
         )
+      }
+
+      /* (4) **反向检查**：`counts` 里声明的每个键，都必须在散文里被提到。
+         没有这一条，(2)/(3) 都只是「散文说了什么就去查什么」——散文**少说**
+         一句就安全了。实测：删掉 `@…/ConvFlow.vue` 键而散文那一句不动，判绿；
+         删掉散文里的「族总 40 次」整句，也判绿。
+         键怎么算「被提到」：
+           · 普通键 —— 它的任一短名出现在散文里；
+           · `@路径` 键 —— 末段文件名主干出现在散文里；
+           · `family:` 键 —— 散文里有「族总 N 次」（由上一条管）。 */
+      for (const key of Object.keys(counts)) {
+        if (key.startsWith('family:')) continue
+        if (key.includes('@')) {
+          const stems = pathStemsOf(key)
+          if (stems.length > 0 && !stems.some((s) => text.includes(s))) {
+            problems.push(
+              `${name} / ${key}: counts 声明了这个分文件键，但散文里没提到文件 ${stems.join(' / ')}`
+                + '——要么写进散文，要么删掉这个键',
+            )
+          }
+          continue
+        }
+        const aliases = shortNamesOf(key)
+        if (aliases.length > 0 && !aliases.some((a) => text.includes(a))) {
+          problems.push(
+            `${name} / ${key}: counts 声明了这个键，但散文里没提到它`
+              + `（已知短名：${aliases.join(' / ')}）——要么写进散文，要么删掉这个键`,
+          )
+        }
       }
     }
     expect(problems, `counts 与理由不一致：\n${problems.join('\n')}`).toEqual([])
