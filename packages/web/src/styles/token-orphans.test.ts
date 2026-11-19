@@ -385,14 +385,18 @@ const THEME_SOURCE_SLOTS: Record<string, OrphanReason> = {
   },
   '--p-sh-1': {
     why:
-      '**真身槽位**：阴影第一档的字面值（`0 1px 2px rgba(0,0,0,0.28)`，四套各一份）。'
+      '**真身槽位**：阴影第一档的字面值。**四套主题各写各的值**（不是「一份共用」）：'
+      + 'neutral `0 1px 2px rgba(0,0,0,0.28)` / warm `…rgba(0,0,0,0.30)` / '
+      + 'paper `…rgba(20,26,34,0.07)` / cream `…rgba(40,34,20,0.08)`。'
       + '被 `--af-shadow-1` 转发。原型 `--sh-1` 自己也是零消费（浮层统一用 `-3`），'
       + '但三档是一条阶梯，且**阴影值是颜色**——删了就丢数据。',
     kin: '--af-shadow-1、--af-shadow-3（在役）',
   },
   '--p-sh-2': {
     why:
-      '**真身槽位**：阴影第二档字面值（`0 6px 18px rgba(0,0,0,0.38)`，四套各一份），'
+      '**真身槽位**：阴影第二档字面值，同样**四套各异**：'
+      + 'neutral `0 6px 18px rgba(0,0,0,0.38)` / warm `…rgba(20,16,8,0.40)` / '
+      + 'paper `0 4px 14px rgba(20,26,34,0.10)` / cream `0 4px 14px rgba(40,34,20,0.11)`。'
       + '被 `--af-shadow-2` 转发。零直读原因与保留理由同 `--p-sh-1`。',
     kin: '--af-shadow-2、--af-shadow-3（在役）',
   },
@@ -541,10 +545,17 @@ const PROTOTYPE_ALIAS_LAYER: Record<string, OrphanReason> = {
       '原型 `--mono`（`prototype/assets/tokens.css:18`）的传名，'
       + '`-c` 后缀是「避免与 `--af-*` 撞名」的既有约定。`SIZING_ALIASES` 要求存在。'
       + '原型 `app.css` 用 11 次；实现里等宽一律写 `--af-font-mono`，全仓 `var()` 引用 15 处'
-      + '（`components.css` 6、`prototype-shell.css` 2，其余落在 6 个 `.vue` 文件里）'
-      + '——不含 `tokens.css:357` 这条定义右侧，也不含注释里的提及。这层代理因此跑了空车。',
+      + '（`components.css` 6、`prototype-shell.css` 2，其余匀在六个 `.vue` 文件里，'
+      + '其中 `FilesPanel.vue` 占 2 处、其余各一处）'
+      + '——不含 `tokens.css` 里 `--p-mono-c` 定义右侧那一条，也不含注释里的提及。这层代理因此跑了空车。',
     kin: '--p-sans（同组）',
-    counts: { 'proto:--mono': 11, '--af-font-mono': 15 },
+    counts: {
+      'proto:--mono': 11,
+      '--af-font-mono': 15,
+      '--af-font-mono@packages/web/src/styles/components.css': 6,
+      '--af-font-mono@packages/web/src/styles/prototype-shell.css': 2,
+      '--af-font-mono@packages/web/src/domains/session/FilesPanel.vue': 2,
+    },
   },
 }
 
@@ -819,7 +830,22 @@ describe('零 var() 消费的自定义属性必须逐个登记理由（反向守
        计数走 `implVarCount()`——全文件唯一的计数器，不另写一份。 */
     const defined = definedProps()
     const broken: string[] = []
-    for (const [name, { minConsumers }] of Object.entries(RETIRED_ORPHANS)) {
+    for (const [name, { minConsumers, counts }] of Object.entries(RETIRED_ORPHANS)) {
+      /* 下限必须与 `counts` 里同一个数的另一份声明对齐——**这是同一个数写了两遍**。
+         不对齐的话，把 `minConsumers` 改成 0 或负数会静默放行（实测过：判绿），
+         而 `counts['--af-fg-strong']` 那处的 17 还在,两处自相矛盾却没人发现。 */
+      const declared = counts?.[name]
+      if (declared !== undefined && declared !== minConsumers) {
+        broken.push(
+          `${name}: 下限 ${minConsumers} 与 counts 里声明的 ${declared} 不一致`
+            + '——同一个数写了两遍，改一处必须改另一处',
+        )
+        continue
+      }
+      if (minConsumers < 1) {
+        broken.push(`${name}: 下限写成 ${minConsumers}，等于把守卫关掉——必须是正数`)
+        continue
+      }
       if (!defined.has(name)) {
         broken.push(`${name}: 已定义=否（token 被删了？）`)
         continue
