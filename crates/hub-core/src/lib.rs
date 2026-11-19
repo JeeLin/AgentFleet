@@ -5,6 +5,7 @@
 
 pub mod auth;
 pub mod channels;
+pub mod cleanup;
 pub mod connections;
 pub mod error;
 pub mod limits;
@@ -17,6 +18,11 @@ pub mod time;
 
 pub use auth::{HubAuth, SetupToken};
 pub use channels::HubChannels;
+pub use cleanup::{
+    items_from_ack_payload, on_failure_ack, preview, previews_run, session_for_execution,
+    Candidate, CleanupPreview, FailureReport, ItemClass, RecordedPreview, StoredItem,
+    CLEANUP_PREVIEW_KIND, CONSERVATIVE_KEEP_ARTIFACTS,
+};
 pub use connections::{ConnHandle, ConnectionRegistry};
 pub use error::CoreError;
 pub use identity::{Fingerprint, KeyPair};
