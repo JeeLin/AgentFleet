@@ -70,8 +70,11 @@ html[data-theme="neutral"], :root {
   --p-done: #84c3a1;
   --p-done-bg: rgba(132, 195, 161, 0.14);
   --p-done-line: rgba(132, 195, 161, 0.32);
-  --p-failed: #dc908b;
-  --p-failed-bg: rgba(220, 144, 139, 0.14);
+  /* 第8轮 G75 通用判据抓出：原 #dc908b 压在 rgba(220,144,139,0.14) 上、
+     合成到 --p-surf-2 后只有 4.44:1。提亮到 #e29a95 → 4.81:1，色相不变。
+     -bg 的 RGB 同步换，避免前景与底是两套红。 */
+  --p-failed: #e29a95;
+  --p-failed-bg: rgba(226, 154, 149, 0.14);
   --p-failed-line: rgba(220, 144, 139, 0.34);
   --p-butler: #b4a5e0;
   --p-butler-bg: rgba(180, 165, 224, 0.14);

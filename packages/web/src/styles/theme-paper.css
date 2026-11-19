@@ -29,9 +29,16 @@ html[data-theme="paper"] {
   --p-pending: #5c636d;
   --p-pending-bg: rgba(92, 99, 109, 0.10);
   --p-pending-line: rgba(92, 99, 109, 0.28);
-  --p-queued: #8a6208;
-  --p-queued-bg: rgba(138, 98, 8, 0.10);
-  --p-queued-line: rgba(138, 98, 8, 0.28);
+  /* 第8轮 4d 实测：原来的 `#8a6208`（与原型逐字节一致）压在
+     `rgba(138,98,8,0.10)` 的半透明底上，`.af-badge--warn` 只有 **4.366:1**，
+     不到 4.5。这是**实现侧主动偏离原型的一处**（原型值不动，按用户裁定
+     两边从此在该值上不一致）。
+     加深到 `#805a07` 后实测 **4.907:1**；`-bg` / `-line` 的 RGB 同步换成
+     128,90,7，否则前景与底色是两套黄褐，视觉上会分层。
+     其余语义色（failed / ok / acc / agent）四主题均已达标，无需偏离。 */
+  --p-queued: #805a07;
+  --p-queued-bg: rgba(128, 90, 7, 0.10);
+  --p-queued-line: rgba(128, 90, 7, 0.28);
   --p-running: #1d5c96;
   --p-running-bg: rgba(29, 92, 150, 0.10);
   --p-running-line: rgba(29, 92, 150, 0.28);

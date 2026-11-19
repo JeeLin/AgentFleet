@@ -41,8 +41,10 @@ html[data-theme="warm"] {
   --p-done: #93c3a0;
   --p-done-bg: rgba(147, 195, 160, 0.15);
   --p-done-line: rgba(147, 195, 160, 0.34);
-  --p-failed: #db9188;
-  --p-failed-bg: rgba(219, 145, 136, 0.15);
+  /* 同 theme-neutral.css：原 #db9188 合成到 --p-surf-2 上 4.43:1，提亮到
+     #e29a95 → 4.79:1。色相不变，-bg 的 RGB 同步换。 */
+  --p-failed: #e29a95;
+  --p-failed-bg: rgba(226, 154, 149, 0.15);
   --p-failed-line: rgba(219, 145, 136, 0.34);
   --p-butler: #bcabcf;
   --p-butler-bg: rgba(188, 171, 207, 0.15);

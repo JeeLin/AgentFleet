@@ -29,9 +29,12 @@ html[data-theme="cream"] {
   --p-pending: #5c636d;
   --p-pending-bg: rgba(92, 99, 109, 0.10);
   --p-pending-line: rgba(92, 99, 109, 0.26);
-  --p-queued: #8a6208;
-  --p-queued-bg: rgba(138, 98, 8, 0.11);
-  --p-queued-line: rgba(138, 98, 8, 0.28);
+  /* 同 `theme-paper.css` 的同一处偏离：`#8a6208` -> `#805a07`。
+     原值压 `rgba(138,98,8,0.11)` 实测 4.252:1，加深后 4.775:1。
+     理由与背景色同步改动的说明见 paper 主题那一段注释。 */
+  --p-queued: #805a07;
+  --p-queued-bg: rgba(128, 90, 7, 0.11);
+  --p-queued-line: rgba(128, 90, 7, 0.28);
   --p-running: #1d5c96;
   --p-running-bg: rgba(29, 92, 150, 0.10);
   --p-running-line: rgba(29, 92, 150, 0.26);

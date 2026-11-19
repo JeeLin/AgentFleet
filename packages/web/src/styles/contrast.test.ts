@@ -263,4 +263,68 @@ describe('对比度守卫', () => {
       })
     }
   })
+
+  /* G75 的通用化（第8轮 4d 实测 `.af-badge--warn` 在 paper 4.36 / cream 4.25）。
+     ---------------------------------------------------------------------------
+     这一类缺陷的形状是固定的：**语义色的前景压在它自己那层半透明底上**。
+     `.af-badge--warn` / `.af-badge--ok` / `.af-tag--queued` / `.af-callout--*`
+     都是 `color: var(--本文档-fg)` + `background: var(--本文档-bg)`，而 `-bg`
+     是 `rgba(同一个色, 0.10~0.15)`。
+
+     两个容易漏的点，这条判据都堵上：
+       ① 直接用 `rgba(...)` 算对比度会得出虚高读数——半透明底必须先按 alpha
+          合成到它下面的实体层（这里是 `--p-surf-1`，badge/tag 最常落的地方）上。
+       ② 只量页面底不够：badge 很少直接坐在 `--p-bg` 上，它坐在卡片 / 阶段条里。
+
+     判据只对「有 `-bg` 兄弟变量」的语义色生效，且要求前景与底同源（同色相）。
+     前景加深不该影响 `-line`（描边不是文字，AA 不管它）。 */
+  const SEMANTIC_PAIRS = [
+    ['--p-queued', '--p-queued-bg'],
+    ['--p-failed', '--p-failed-bg'],
+    ['--p-ok', '--p-ok-bg'],
+    ['--p-running', '--p-running-bg'],
+    ['--p-pending', '--p-pending-bg'],
+  ] as const
+
+  describe('G75 — 语义色压在它自己的半透明底上仍达 AA（合成后再算）', () => {
+    for (const name of THEMES) {
+      it(`${name}：语义色 / 自己的 -bg 合成底 ≥ ${AA}:1`, () => {
+        const failures: string[] = []
+        for (const [fgKey, bgKey] of SEMANTIC_PAIRS) {
+          const rawBg = TOKENS[name].get(bgKey)
+          if (rawBg === undefined) continue
+          const fg = token(name, fgKey)
+
+          /* `-bg` 是 `rgba(r,g,b,a)`：取它的颜色与 alpha，**按 alpha 合成**到
+             它下面最常落的那一层（`--p-surf-1` 是区域容器；卡片是 surf-2）。
+             两层都量：同一枚 badge 在看板列里（surf-1）与卡片里（surf-2）都会出现。 */
+          const m = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(
+            rawBg.trim(),
+          )
+          if (!m) continue
+          const bgRgb: Rgb = [Number(m[1]), Number(m[2]), Number(m[3])]
+          const alpha = m[4] === undefined ? 1 : Number(m[4])
+
+          for (const underKey of ['--p-surf-1', '--p-surf-2'] as const) {
+            const painted = over(bgRgb, alpha, token(name, underKey))
+            const ratio = contrast(fg, painted)
+            if (ratio < AA) {
+              failures.push(
+                `${fgKey} 压在 ${bgKey}(α${alpha}) 合成到 ${underKey} 上只有 ${ratio.toFixed(2)}:1`,
+              )
+            }
+          }
+        }
+        expect(
+          failures,
+          `主题 ${name} 的语义色在自带的半透明底上不达 AA ${AA}:1：\n${failures.join('\n')}\n`
+            + '这类组合的形状是固定的：`color: var(--p-X)` + `background: var(--p-X-bg)`，'
+            + '而 `-bg` 是同一色相的 rgba。三个坑都会让读数虚高：'
+            + '① 直接拿 rgba 算而不是合成到实体层；'
+            + '② 只量 --p-bg 而 badge 实际坐在 surf-1/surf-2 上；'
+            + '③ 只量中性主题——纸白/米白两套的底最亮，往往就是它们不过。',
+        ).toEqual([])
+      })
+    }
+  })
 })

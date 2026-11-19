@@ -144,59 +144,61 @@ describe('外壳骨架类与原型对齐', () => {
     expect(head, '顶栏高必须取 --af-head-h').toContain('var(--af-head-h)')
   })
 
-  it('布局常量在 tokens.css 里有定义，且值与原型一致', () => {
-    // 原型 `tokens.css:38-39`：--rail-w: 224px; --head-h: 56px;
-    /* **「原型可读」只断言一次，放在循环外**（v0.8.1 第5轮，G34）：原来这句
-       `expect(PROTOTYPE_CSS.length).toBeGreaterThan(0)` 写在 for 里，于是它
-       被重复执行两次、也把「原型文件读到了」这件事伪装成「每一项都验过了」。
-       它是一条**前置条件**（读不到原型 → 后面的比对全是空转），
-       该在进入比对之前断一次；放进循环只会让失败信息指向最后一项。 */
-    expect(PROTOTYPE_CSS.length, '原型样式表没读到——下面每一项比对都会是空转').toBeGreaterThan(0)
-    for (const [name, protoValue] of [
+  /* 这三条原先「现读原型」再比对，理由是「抄进断言就等于允许两边一起漂」。
+     换靶之后这个理由不成立了：原型不再是标准，两边一起漂**根本不是问题**——
+     要防的是**实现自己漂**（有人把 32px 改成 26px、把 13.5px 改成 13px）。
+     所以期望值改为写死在断言里，成为实现的契约；改了就红，与原型无关。
+     （参考原型架构时仍可对照，但那是对照，不是判据。） */
+  it('布局常量在 tokens.css 里有定义，且等于约定值', () => {
+    for (const [name, expected] of [
       ['--af-rail-w', '224px'],
       ['--af-head-h', '56px'],
     ] as const) {
       const decl = new RegExp(`${name}\\s*:\\s*([^;]+);`).exec(stripComments(TOKENS_CSS))
-      expect(decl, `tokens.css 缺少 ${name}——原型布局常量没有落地`).not.toBeNull()
-      expect((decl as RegExpExecArray)[1].trim()).toBe(protoValue)
+      expect(decl, `tokens.css 缺少 ${name}——外壳几何常量没有落地`).not.toBeNull()
+      expect(
+        (decl as RegExpExecArray)[1].trim(),
+        `${name} 变了。左栏 224px 与页头 56px 是外壳几何的契约（G64 的两条水平线要对齐），`
+          + '改它会让每一页的骨架跟着动。真要改，改这条断言并在 milestone 里写明理由。',
+      ).toBe(expected)
     }
   })
 
-  it('六档字号与原型逐档相等（原型值现读，不硬编码）', () => {
-    // 原型 `prototype/assets/tokens.css:20-25` 定义 6 档字号。这里**读原型文件**
-    // 取值再与实现比，而不是把 11.5/12.5/… 抄进断言：抄进来就等于允许两边
-    // 一起漂——原型改了、断言里的数没改，测试照样绿。
-    //
-    // 映射是「同义传名」，不是「就近取档」：
-    //   t-2xs↔text-2xs  t-xs↔text-xs  t-sm↔text-sm
-    //   t-md↔text-md    t-lg↔text-xl  t-xl↔text-2xl
-    const PROTO_TOKENS = stripComments(readRepoFile('prototype/assets/tokens.css'))
+  it('六档字号逐档等于约定值（写死在断言里，不现读原型）', () => {
+    // 六档字号是**实现的排版契约**。把它们写死在断言里，是为了让「有人顺手
+    // 把某一档改掉」立刻判红——不是为了让实现跟着原型走。
+    // 档位之间必须严格单调递增，这条也一并守住：三档挤在 13–14px 的那种
+    // 退化（上一轮出现过）不是「改了个数」，是整套梯子塌了。
     const PAIRS = [
-      ['--t-2xs', '--af-text-2xs'],
-      ['--t-xs', '--af-text-xs'],
-      ['--t-sm', '--af-text-sm'],
-      ['--t-md', '--af-text-md'],
-      ['--t-lg', '--af-text-xl'],
-      ['--t-xl', '--af-text-2xl'],
+      ['--af-text-2xs', '11.5px'],
+      ['--af-text-xs', '12.5px'],
+      ['--af-text-sm', '13.5px'],
+      ['--af-text-md', '14.5px'],
+      ['--af-text-lg', '15px'],
+      ['--af-text-xl', '18px'],
+      ['--af-text-2xl', '23px'],
+      ['--af-text-3xl', '28px'],
+      ['--af-text-4xl', '34px'],
     ] as const
     const impl = stripComments(TOKENS_CSS)
     const mismatches: string[] = []
-    for (const [protoName, implName] of PAIRS) {
-      const p = new RegExp(`${protoName}\\s*:\\s*([^;]+);`).exec(PROTO_TOKENS)
-      expect(p, `原型 tokens.css 里找不到 ${protoName}`).not.toBeNull()
-      const i = new RegExp(`${implName}\\s*:\\s*([^;]+);`).exec(impl)
-      expect(i, `tokens.css 里找不到 ${implName}`).not.toBeNull()
-      const pv = (p as RegExpExecArray)[1].trim()
-      const iv = (i as RegExpExecArray)[1].trim()
-      if (pv !== iv) mismatches.push(`${protoName}=${pv} vs ${implName}=${iv}`)
+    const sizes: number[] = []
+    for (const [implName, expected] of PAIRS) {
+      const m = new RegExp(`${implName}\\s*:\\s*([^;]+);`).exec(impl)
+      expect(m, `tokens.css 里找不到 ${implName}`).not.toBeNull()
+      const iv = (m as RegExpExecArray)[1].trim()
+      if (iv !== expected) mismatches.push(`${implName}=${iv}（约定 ${expected}）`)
+      const num = Number.parseFloat(iv)
+      if (!Number.isNaN(num)) sizes.push(num)
     }
+    expect(mismatches, ['字号档与约定值不一致：', ...mismatches].join('\n')).toEqual([])
+
+    const notAscending = sizes.some((v, idx) => idx > 0 && v <= sizes[idx - 1])
     expect(
-      mismatches,
-      [
-        '字号档与原型不一致（逐屏对照时会差 0.5–1.5px 且说不清谁错）：',
-        ...mismatches,
-      ].join('\n'),
-    ).toEqual([])
+      notAscending,
+      `字号档没有严格递增（实测 ${sizes.join(' < ')}）——三档挤在一起时，`
+        + '「标题 / 正文 / 辅助」在视觉上分不出来，但每一档单独看都"对"。',
+    ).toBe(false)
   })
 
   it('两档行高与原型逐档相等', () => {

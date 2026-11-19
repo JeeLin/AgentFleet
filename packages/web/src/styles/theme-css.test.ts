@@ -1,12 +1,35 @@
 /* ===========================================================================
-   四套主题的 CSS 逐值对照原型
+   四套主题：**实现自洽 + 无障碍**（原型降级为参照物）
    ---------------------------------------------------------------------------
-   原型配色真相源是 `prototype/styles/theme-*.css` 四份文件，**不是**
-   `prototype/assets/tokens.css`（那个文件零个颜色变量）。本用例把两边的
-   `--p-*` 与 `--*` 变量逐一比对，防止「搬的时候手一抖少一位十六进制」。
+   ── 本次判据换靶（用户裁定，v0.8.1 第8轮）────────────────────────────
+   从这一轮起，**`prototype/` 不再是标准**。标准是 `packages/web` 的实际实现；
+   原型退回「新页面可以参考它的页面架构」这一层参考资料的地位。
 
-   为什么值得这么细：配色错了不会报错、不会崩，只是「看着不像」。上一轮就是
-   漏了这一层，页面底是 `#080a0d` 而原型是 `#191d21`，四条关键色全不一致。
+   旧判据是「实现的每个 `--p-*` 必须逐值等于 `prototype/styles/theme-*.css`」，
+   它有两个问题，都是这次换靶要解决的：
+
+     ① **靶子错位**：原型自己有可访问性缺陷（`--fg-3` 四套全部低于 AA、
+        `--queued` 在纸白/米白上 4.37 / 4.25）。把它当标准，就等于要求实现
+        连缺陷一起照抄；实现想修，反而要挤进「有意偏离」这张表里自证清白。
+        那套流程本末倒置——**修好可访问性不该是「偏离」，它就是基线**。
+     ② **它守不住它想守的东西**：「逐值相等」在原型不再更权威之后，
+        无法回答「这个值对不对」。真正要守的是「这个色压在它真实的落点
+        背景上读不读得清」。
+
+   换靶后的判据分两层：
+
+     ① **实现自洽**：四份主题文件的**变量名集合完全一致**（可切换的前提），
+        且每个 `--p-*` 都在四份里都有定义。这一层与原型无关。
+     ② **无障碍硬判据**：语义色对**它的真实落点背景**必须达到 WCAG AA 4.5:1。
+        落点不是「页面底」，而是这个色真正被用到的那些层（`--p-surf-1/2/3`、
+        以及各自 `-bg` 半透明底的**合成色**）——半透明底要先按 alpha 合到
+        下一层实体底上再算，直接量 `rgba(...)` 会得出虚高的读数。
+
+   ── 原型对照还留不留 ────────────────────────────────────────────────
+   留，但**降级为差异清单**：实现与原型不一致时，不再直接判红，而是要求
+   该变量在 `PROTOTYPE_DIFFS` 里有一条理由。这样「搬的时候手一抖少一位
+   十六进制」这类错误仍然抓得住（它没有理由），而「实现主动修好」只需
+   写一句话，不必把修好说成「偏离」。
    =========================================================================== */
 import { describe, expect, it } from 'vitest'
 
@@ -43,41 +66,41 @@ function implName(proto: string): string {
 }
 
 /**
- * **有意不跟随原型的变量**：这里列的每一条都是「实现比原型更严格」的改动，
- * 不是搬运走样，所以不参与逐值比对——但也不许静默放过，下面单独断言它的值。
+ * **实现与原型不一致的地方**（含理由）。
  *
- * 为什么需要这份表：逐值比对的不变式是「实现 == 原型」，而原型是只读的参照基准
- * （`prototype/` 下文件头自称「最低一处 4.53:1」）。当实现的取值必须**比原型更严**
- * 时，不变式与事实就冲突了。此时的正确动作不是放宽比对（那会让真正的搬运错误
- * 一起漏网），而是把这一条从「通用比对」里摘出来、升级成一条**更具体的断言**：
- * 值必须是这个，并且必须真的达标。摘出来的代价是「多一条要维护的期望值」，
- * 换来的是「这条例外永远带着它的理由与数值」。
+ * 注意语义：这张表不再叫「有意偏离」。原型降级为参照物之后，实现改进自己的
+ * 可访问性**不需要**向原型自证；这张表存在的唯一目的，是把「实现了改」和
+ * 「搬的时候手一抖」区分开——两者都表现为「实现 != 原型」，但前者有理由。
  *
- * `--p-fg-3` 为什么离开原型：原型的 `--fg-3` 在四套主题里全部低于 WCAG AA
- * 4.5:1（按 warm / paper / cream / neutral 顺序，`contrast(fg-3, bg)` 四舍五入
- * 到两位小数是 3.40 / 2.67 / 2.70 / 3.69；若中途不四舍五入直接截断会看到
- * 3.39 / 2.66 / 2.71 / 3.68——两种口径都对，写在这里免得下一个人以为是漂移），
- * 而它被当作**真实文字色**在用
- * （`.af-head__sub`、`th`、`.af-field__hint`…）。原型那边还留着「装饰 仅用于
- * 非文字元素与占位」的旧注释，与实际用途不符。所以实现在四套主题里都换成
- * 达标值，色相不动、只调亮度。**这条不是「值恰好变了」，是「辅助文字必须读得清」。**
- *
- * （v0.8.1 第5轮，G48：这条例由原本把 `.af-rail__status` 也列成 `--p-fg-3`
- * 的消费者之一，而全仓 `.af-rail__status` 命中 0——它是个**死类名**，写在
- * 理由里等于让下一个人以为那里有一条要照顾的文字。名单只留真实消费者。）
+ * 所以判据是：与原型不一致 **且** 不在这张表里 → 判红（大概是搬错了）。
+ * 在表里 → 放行，但下面的无障碍硬判据仍会独立量它，该达标的一个都跑不掉。
  */
-const INTENTIONAL_DEVIATIONS: Record<string, { value: string; why: string }> = {
-  '--p-fg-3': {
-    value: 'per-theme',
-    why: '原型的 --fg-3 四套全部低于 WCAG AA 4.5:1，而它被当文字色用（页头副标题 / 表头 / 字段提示）。',
-  },
-  '--p-fg-2': {
-    value: 'per-theme',
-    why: 'v0.8.1 第5轮 G71/G73：--p-fg-3 为达 AA 而提亮后，warm/neutral 的 fg-2 与它只剩 1.16x/1.20x，'
-      + '两级视觉上塌成一级；paper/cream 则是 fg-2 与 fg-3 本就只差 1.09x/1.12x。'
-      + '故四套的 --p-fg-2 一并调整，使「次要 vs 三级」级差 ≥ 1.25x。'
-      + '（--p-fg-2 是次要文字，本身在调之前就达标，改它纯粹是为了保住梯子。）',
-  },
+const PROTOTYPE_DIFFS: Record<string, string> = {
+  '--p-fg-3':
+    '原型 --fg-3 四套全部低于 WCAG AA 4.5:1，而它被当真实文字色用'
+    + '（.af-head__sub / th / .af-field__hint）。实现换成达标值，色相不动、只调亮度。',
+  '--p-fg-2':
+    '第5轮 G71/G73：fg-3 为达 AA 而提亮后，warm/neutral 的 fg-2 与它只剩 1.16x/1.20x，'
+    + 'paper/cream 本就只差 1.09x/1.12x，两级视觉上塌成一级。实现调整 fg-2 使级差 ≥ 1.25x。'
+    + '（fg-2 本身调之前就达标，改它纯粹是为了保住「次要 vs 三级」这把梯子。）',
+  '--p-queued':
+    '第8轮 4d 实测：原型 #8a6208 压在 rgba(...,0.10~0.11) 半透明底上，'
+    + '.af-badge--warn 在 paper 只有 4.37:1、cream 4.25:1，不到 4.5。'
+    + '落点是 .af-badge--warn / .af-tag--queued / .af-callout--warn 的文字色。'
+    + '两套亮主题加深到 #805a07（4.91 / 4.78），-bg/-line 的 RGB 同步换掉。',
+  '--p-queued-bg':
+    '随 --p-queued 一起换的底色 RGB（138,98,8 -> 128,90,7）。'
+    + '只改前景不改底色，前景与底会是两套黄褐，视觉上分层。'
+    + 'alpha 不变（paper 0.10 / cream 0.11），所以透明度语义与原型一致。',
+  '--p-queued-line':
+    '随 --p-queued 一起换的描边 RGB（138,98,8 -> 128,90,7），理由同上。alpha 不变（0.28）。',
+  '--p-failed':
+    '第8轮 G75 通用判据：原 #dc908b(neutral) / #db9188(warm) 压在自带的半透明 -bg 上、'
+    + '合成到 --p-surf-2 后只有 4.44 / 4.43:1。提亮到 #e29a95 → 4.81 / 4.79:1，色相不变。'
+    + 'paper/cream 的 #a52a1e 本来就过，不动。',
+  '--p-failed-bg':
+    '随 --p-failed 一起换的底色 RGB（neutral 220,144,139 / warm 219,145,136 -> 226,154,149），'
+    + '理由同上：只改前景不改底色，前景与底会是两套红。alpha 不变。',
 }
 
 /** 四套主题 `--p-fg-3` 的达标值（期望值写死在这里，不从实现里再算一遍）。 */
@@ -118,9 +141,9 @@ function normVarRefs(v: string): string {
   return norm(v).replace(/var\(--([a-z0-9-]+)\)/g, (_m, name: string) => `var(${implName(`--${name}`)})`)
 }
 
-describe('四套主题逐值对照原型', () => {
+describe('主题：实现自洽（与原型无关）', () => {
   for (const theme of THEMES) {
-    it(`theme-${theme}：每个原型颜色变量都被搬过来且值一致`, () => {
+    it(`theme-${theme}：与参照物不一致的变量都写了理由，没写的大概是搬错了`, () => {
       const proto = vars(readRepoFile(`prototype/styles/theme-${theme}.css`))
       const impl = vars(readRepoFile(`packages/web/src/styles/theme-${theme}.css`))
 
@@ -132,36 +155,70 @@ describe('四套主题逐值对照原型', () => {
       expect(colours.length, `theme-${theme} 原型文件没有颜色变量，路径或解析有问题`).toBeGreaterThan(0)
 
       const missing: string[] = []
-      const differing: string[] = []
+      const unexplained: string[] = []
       for (const p of colours) {
         const i = implName(p)
         if (!impl.has(i)) {
           missing.push(`${p} → ${i}`)
           continue
         }
-        // 有意的偏离不走逐值比对，由下面那条专门的用例负责（它断言得比这里更细：
-        // 不只判「等于某个值」，还判「那个值真的达到 WCAG AA」）。
-        if (INTENTIONAL_DEVIATIONS[i]) continue
         // --dot-* 在原型里是 var(--acc) 之类，实现是 var(--p-acc)——同一回事。
         // **只对原型侧做改名归一**：实现侧已经是 `--p-*`，再走一遍 implName
         // 会变成 `--p-p-acc`（这个 bug 被本测试自己抓出来过）。
         const a = normVarRefs(proto.get(p)!)
         const b = norm(impl.get(i)!)
-        if (a !== b) differing.push(`${p} → ${i}：原型 ${a} / 实现 ${b}`)
+        if (a === b) continue
+        // 与参照物不一致是**允许**的（实现才是标准），但必须写清是哪一种不一致：
+        // 是「实现主动改」还是「搬的时候手一抖」。没有理由的差异一律判红——
+        // 这条是换靶之后唯一还在防「搬错」的判据，不能松。
+        if (!PROTOTYPE_DIFFS[i]) unexplained.push(`${p} → ${i}：参照 ${a} / 实现 ${b}`)
       }
       expect(missing, `theme-${theme} 漏搬的变量：\n${missing.join('\n')}`).toEqual([])
-      expect(differing, `theme-${theme} 取值不一致：\n${differing.join('\n')}`).toEqual([])
+      expect(
+        unexplained,
+        `theme-${theme} 这些变量与参照物不一致却没写理由（要么补进 PROTOTYPE_DIFFS，要么是搬错了）：\n`
+          + unexplained.join('\n'),
+      ).toEqual([])
     })
   }
 
-  /* 有意偏离原型的变量：值必须是定下的那个，**并且**它必须真的达标。
-     只断言「等于 #828991」是记不住理由的——下一个人看到实现与原型不一致，
-     会以为是搬错了。这条用例带着理由和数值一起守着。
-     **不从实现里再算期望值**：期望是设计决定的十六进制，写在 FG3_TARGETS。 */
-  it('--p-fg-3 四套都不跟随原型，且必须达到 WCAG AA 4.5:1（辅助文字读得清）', () => {
-    const entries = Object.keys(INTENTIONAL_DEVIATIONS).map((name) => ({ name, ...INTENTIONAL_DEVIATIONS[name] }))
-    expect(entries.length, '有意偏离表空了，这条守卫会恒真').toBeGreaterThan(0)
+  /* 登记表不能变成「写了就不用管」的垃圾桶：每条登记都必须**至少在一套主题里**
+     真的与参照物不一致。某个变量后来被全部改回与原型一致时，这条会红，
+     提醒把理由删掉——否则下一个人会读到一条描述着已不存在的差异的理由。
+     **按「四套里只要有一套不同」判**：像 `--p-queued` 这种只改了 paper/cream
+     两套的登记不该被判过期（早先按「每套都必须不同」写，立刻把 neutral/warm
+     误判成过期——同一份实现里出现「有的主题改、有的不改」本来就是常态）。 */
+  it('PROTOTYPE_DIFFS 里每条登记都对应一处真实差异（登记表不许留过期条）', () => {
+    for (const [name, why] of Object.entries(PROTOTYPE_DIFFS)) {
+      expect(typeof why, `${name} 的理由不是字符串`).toBe('string')
+      expect(why.length, `${name} 的理由是空话（长度 ${why.length}）`).toBeGreaterThan(10)
 
+      const protoName = Object.keys(NAME_MAP).find((k) => NAME_MAP[k] === name) ?? `--${name.slice(4)}`
+      const differsSomewhere: string[] = []
+      let compared = 0
+      for (const theme of THEMES) {
+        const proto = vars(readRepoFile(`prototype/styles/theme-${theme}.css`))
+        const impl = vars(readRepoFile(`packages/web/src/styles/theme-${theme}.css`))
+        const p = proto.get(protoName)
+        if (p === undefined) continue
+        compared += 1
+        if (norm(impl.get(name) ?? '') !== normVarRefs(p)) differsSomewhere.push(theme)
+      }
+      // 参照物里根本没有这个变量时无从比较，不能算「过期」也不能算「有效」，
+      // 这种情况由上面那条 unexplained 判据管（它只遍历参照物里有的变量）。
+      if (compared === 0) continue
+      expect(
+        differsSomewhere.length,
+        `${name} 在四套主题里都与参照物一致了，这条登记已过期，请从 PROTOTYPE_DIFFS 删掉`,
+      ).toBeGreaterThan(0)
+    }
+  })
+
+  /* `--p-fg-3` 的确切值 + 达标。这条**不依赖原型**：期望值是设计定下的
+     十六进制（`FG3_TARGETS`），达标是按实现自己的背景算的。
+     原型的 `--fg-3` 四套全部低于 AA，所以实现这边的值必然与参照物不同 ——
+     但那已经不是「偏离」，是基线差异，理由记在 `PROTOTYPE_DIFFS` 里。 */
+  it('--p-fg-3 四套的确切值，且必须达到 WCAG AA 4.5:1（辅助文字读得清）', () => {
     const failures: string[] = []
     for (const theme of THEMES) {
       const impl = vars(readRepoFile(`packages/web/src/styles/theme-${theme}.css`))

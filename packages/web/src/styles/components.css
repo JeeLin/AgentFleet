@@ -1486,6 +1486,18 @@ kbd, .kbd {
   border-color: var(--af-info-line); border-left-color: var(--af-info); background: var(--af-info-bg);
 }
 
+/* 带色 callout 里的弱化文字要**提一档**。
+   `.af-muted` 全局是 `--af-fg-tertiary`，压在普通面板底（`--af-surface-2`）上是
+   5.05–5.64:1，够；但 callout 的底是 `--af-warn-bg` / `--af-info-bg` ——
+   一层带色半透明叠在面板上，**比面板底更接近文字色**，对比度随之下降。
+   第8轮 4d 在构建产物上实测 `SPAN.af-muted` 在 warn / info 底上只有
+   4.081–4.426:1（8/8 不足 4.5）。
+   这一条只在本上下文提升到 `--af-fg-secondary`——它对应正文次级，
+   在同样的带色底上仍有 5.5–7.6:1，而「这是补充说明」的层级感由字号维持。 */
+.af-callout .af-muted {
+  color: var(--af-fg-secondary);
+}
+
 /* ===========================================================================
    任务组件：TaskCard / FailurePanel / AcceptancePanel
    -------------------------------------------------------------------------
