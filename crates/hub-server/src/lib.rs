@@ -15,6 +15,7 @@ pub mod import_auth;
 pub mod middleware_auth;
 pub mod presence;
 pub mod routes;
+pub mod scheduler;
 #[cfg(test)]
 mod test_support;
 
@@ -679,6 +680,21 @@ impl AppState {
     /// 出站控制帧表（顶替旧连接时寻址用）。
     pub fn outbound(&self) -> &conns::OutboundTable {
         &self.0.outbound
+    }
+
+    /// 调度器运行时（v0.8.2 子任务 3）。
+    ///
+    /// # 为什么不是 `Inner` 里的一个字段
+    ///
+    /// `Scheduler` **无状态**——它只借一个 `&AppState`，所有事实（心跳、绑定、
+    /// 执行）都从那里现读。把它存进 `Inner` 会得到「指向自己的字段」
+    /// （`AppState` 里存一个持 `&AppState` 的东西），那在 Rust 里表达不出来，
+    /// 也说明它本来就不该有生命周期之外的存在。
+    ///
+    /// 三个调用点（`routes/tasks.rs` 的 `create_task`、`routes/ws.rs` 的
+    /// `on_heartbeat`、以及将来的失败重派）各建一个，代价是一次字段拷贝。
+    pub fn scheduler(&self) -> scheduler::Scheduler<'_> {
+        scheduler::Scheduler::new(self)
     }
 
     /// 通道路由表（子任务 8）。

@@ -1243,6 +1243,51 @@ fn on_heartbeat(state: &AppState, conn_id: &str, auth: &Authenticated, frame: &F
     // `agent_runtime` 的语义是「这份清单就是设备现在的全部事实」——整体覆盖，
     // 卸载掉的 agent 随之消失（见 `AgentRuntimeRepo::replace_detected`）。
     persist_agents(state, &auth.node_id, &hb);
+
+    // v0.8.2 子任务 3：**设备上线触发「该设备待派任务重试路由」**。
+    //
+    // 为什么放在落库之后：路由要读的 `Reports` 在**上面**已经更新过了
+    // （`reports().record(..)`），落库只是持久化。若放在它之前，路由看到的是
+    // 上一次心跳的能力/负载；第一次心跳时甚至什么都没有 → 明明刚上线却说
+    // `no_allowed_device`。
+    //
+    // 按**绑定**找项目（`Scheduler::route_binding_tasks`），不遍历全部
+    // `pending`：一台设备只可能影响它绑定的那几个项目（路由的候选源就是绑定表）。
+    //
+    // 这是**同步**调用、没有 `.await`：心跳处理是读循环里的一段，阻塞它会让
+    // 这台设备后续的帧（含通道数据）全排在后面。路由本身只读几张小表、
+    // 走一个纯函数、`try_send` 一帧，量级是微秒。
+    retry_routes_for(state, &auth.node_id);
+}
+
+/// 设备上线/心跳后重试该设备绑定上的待派任务。
+///
+/// 抽成独立函数而不是内联在 [`on_heartbeat`] 里：它**每 15s 都会跑一次**
+/// （心跳周期），而绝大多数时候无事可做——先做一次「有没有 pending」的存在性
+/// 短路，避免在热路径上白读项目表与执行表。
+fn retry_routes_for(state: &AppState, node_id: &str) {
+    // 这台设备绑定的项目里，只要有一个还有 pending 任务就值得跑一轮完整路由。
+    let bindings = match hub_storage::BindingRepo::new(state.pool().clone())
+        .list_for_device(node_id)
+    {
+        Ok(b) => b,
+        // coverage: excluded — 读库失败；心跳不能因此断开，留痕即可。
+        Err(e) => {
+            tracing::warn!(node_id = %node_id, error = %e, "cannot list bindings for the online retry");
+            return;
+        }
+    };
+    let worth = bindings
+        .iter()
+        .any(|b| crate::scheduler::routing_worth_trying(state, &b.project_id));
+    if !worth {
+        return;
+    }
+    for (task_id, outcome) in state.scheduler().route_binding_tasks(node_id) {
+        if outcome.is_dispatched() {
+            tracing::info!(node_id = %node_id, task_id = %task_id, "late dispatch after the device came online");
+        }
+    }
 }
 
 /// 把心跳里的 `capabilities.agents` 落进 `agent_runtime`。

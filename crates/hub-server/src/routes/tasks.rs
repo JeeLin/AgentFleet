@@ -763,9 +763,62 @@ pub async fn create_task(
         )
         .map_err(|e| map_storage(e, "cannot create task"))?;
 
+    // v0.8.2 子任务 3：**建完任务就触发一次路由**（「任务可派」的第一个入口）。
+    //
+    // 选到设备 → 建执行 + `pending → queued` + 发 `task_dispatch` 帧；
+    // 选不到 → 任务留在 `pending`、归因进轨迹。**两种情况都是 201**：
+    // 派不出去不是「建任务失败」，而是一个会被后续事件（设备上线、重试）
+    // 重新尝试的正常状态。把这它翻译成 5xx 会让用户以为任务没建成。
+    //
+    // 这里**不等执行结果**：发完帧就返回，进展由设备经 `task_dispatch_ack`
+    // 回报（接收归子任务 5）。所以本调用不 `.await`、不阻塞请求线程。
+    let (outcome, push) = state.scheduler().route_task(&task);
+    if let Some(push) = push {
+        // 帧没送到 = 设备刚断开 / 半死不活。**不回给客户端一个错误**：
+        // 任务已经 `queued`、执行已经建好，等 `queued` 超时退回或人工收尾；
+        // 留痕是给运维的唯一线索。
+        tracing::warn!(
+            task_id = %task.id,
+            failure = ?push,
+            "the dispatch frame did not reach the device connection"
+        );
+    }
+
     // 重新读一遍再回显：与其余写端点同一条纪律（不回显请求体）。
-    let view = TaskView::new(&task);
-    Ok((StatusCode::CREATED, Json(json!({ "task": view }))))
+    //
+    // **必须重读**：`route_task` 成功时把状态推到了 `queued`，回显建任务时那份
+    // `task` 会让前端看到 `pending` 而看板上已经是「排队中」——两处不一致，
+    // 且 `version` 也差一次（`set_state` 涨了一次）。
+    let task = reload(&state, &task.id)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "task": task, "dispatch": dispatch_json(&outcome) })),
+    ))
+}
+
+/// 路由结论 → 响应体里的 `dispatch` 字段。
+///
+/// **给出去是刻意的**：用户点了「建任务」，页面上要能立刻说清「已派给谁」
+/// 还是「暂时没有可用设备（哪一层空）」。不说的话，「任务停在待办」与
+/// 「任务刚建好」在界面上长得一样——那正是缺陷池那条 🔴 的现象。
+fn dispatch_json(outcome: &crate::scheduler::RouteOutcome) -> serde_json::Value {
+    use crate::scheduler::RouteOutcome;
+    match outcome {
+        RouteOutcome::Dispatched { node_id, .. } => json!({
+            "outcome": "dispatched",
+            "node_id": node_id,
+        }),
+        RouteOutcome::Rejected { rejection } => json!({
+            "outcome": "rejected",
+            // 线上码：`no_allowed_device` / `binding_busy` / …（`Rejection::as_str`，
+            // 与 `task-model.md` §7.2 的 `rejected(...)` 同一套字面值）
+            "code": rejection.as_str(),
+        }),
+        RouteOutcome::NotPending { state } => json!({
+            "outcome": "not_pending",
+            "state": state.as_str(),
+        }),
+    }
 }
 
 /// `GET /api/tasks/{id}`：详情 = 任务 + 执行记录。

@@ -772,6 +772,28 @@ impl TaskRepo {
         };
         raw.into_iter().map(RawTask::into_task).collect()
     }
+
+    /// 一个项目里**全部 `pending` 任务**，按 `created_at` 升序（v0.8.2 子任务 3）。
+    ///
+    /// # 为什么不直接用 `list_for_project_with_state(project_id, Some(Pending))`
+    ///
+    /// 那个函数固定 `created_at DESC`——它服务的是**看板卡片顺序**（最新的在前，
+    /// 与 `prototype/assets/board.js` 一致）。调度器要的是相反的顺序：同一批
+    /// `pending` 任务里**先建的先派**，否则一个项目的待办会一直饿着最早的几张。
+    /// 在一个本该按队列读音的路径上事后反转一次数组也能得到同样结果，但那样
+    /// 「排序口径」就有两处：SQL 一处、调用方一处，改其中一处不会红。
+    ///
+    /// 状态过滤写在**常量**里而不是参数：本函数的契约就是「`pending` 的」，
+    /// 允许传别的态会让人以为它是一份通用的按态查询（那已经有两个了）。
+    pub fn list_pending_for_project(&self, project_id: &str) -> Result<Vec<TaskView>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(&format!(
+            "{SELECT_COLS} WHERE project_id = ?1 AND state = ?2 ORDER BY created_at ASC, id ASC"
+        ))?;
+        let rows = stmt.query_map(params![project_id, TaskState::Pending.as_str()], row_to_raw)?;
+        let raw = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        raw.into_iter().map(RawTask::into_task).collect()
+    }
 }
 
 /// 读出这一行的当前版本号；任务不存在时返回 `None`。
@@ -1337,6 +1359,42 @@ mod tests {
         let queued = tr.list_by_state(TaskState::Queued).unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].id, b.id);
+    }
+
+    /// `list_pending_for_project`：只含本项目的 `pending`，且**先建的在前**。
+    ///
+    /// 三条断言各自钉一件事，判红方式都能说出来：
+    /// - 混进另一个项目 / 混进非 `pending` → 第一条红（「只含」）；
+    /// - 排序反过来（用 `created_at DESC`）→ 第二条红（「先建的在前」）。
+    ///   这一条是**与 `list_for_project_with_state` 的唯一行为差别**，没有它
+    ///   两个函数就真的重复了。
+    #[test]
+    fn list_pending_for_project_is_ordered_oldest_first() {
+        let (_d, tr) = setup();
+        let older = tr.create(new_task("p_a"), "unix:10").unwrap();
+        let newer = tr.create(new_task("p_a"), "unix:11").unwrap();
+        // 另两个任务**故意用更早的时刻**：万一实现漏了 `state` / `project_id`
+        // 过滤，它们会先出现在结果里，断言立刻红。用同样的时刻则要靠 `id` 的
+        // 字典序兜底，那是不确定的。
+        let other_project = tr.create(new_task("p_b"), "unix:1").unwrap();
+        let already_queued = tr.create(new_task("p_a"), "unix:2").unwrap();
+        tr.set_state(&already_queued.id, TaskState::Queued, TS)
+            .unwrap();
+
+        let got: Vec<String> = tr
+            .list_pending_for_project("p_a")
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(
+            got,
+            vec![older.id.clone(), newer.id.clone()],
+            "只含 p_a 的 pending（不含 {} / {}）",
+            other_project.id,
+            already_queued.id
+        );
+        assert_eq!(got.first(), Some(&older.id), "先建的必须排在前面");
     }
 
     /// `is_terminal` 只对 `Done` / `Failed` 为真。
