@@ -240,7 +240,50 @@ pub struct TaskDispatchAck {
     /// [`crate::message::FAILURE_KINDS`]。
     #[serde(default)]
     pub failure_kind: Option<String>,
+    /// 磁盘耗尽时的**逐项实测清单**（v0.8.2）。
+    ///
+    /// 为什么需要它：Hub 侧的清理预演要回答「准备删什么、**各占多大**、清理后
+    /// 释放多少」。这些数只有设备知道——Hub 没有那台设备的文件系统，**编一个
+    /// 大小比不报坏得多**。只给自由文本的 `evidence` 会让预演算出「可释放 0」，
+    /// 那等于这条能力不存在。
+    ///
+    /// 其他失败形态不带（`None`）：只有 `disk_exhausted` 需要清理预演。
+    #[serde(default)]
+    pub items: Option<Vec<DiskItem>>,
 }
+
+/// 设备上一条占用磁盘的东西（`task_dispatch_ack.items` 的元素）。
+///
+/// **`bytes` 必须是实测值**，不接受估算：用户在「可释放 12.4 GB」上做决定，
+/// 编出来的数会让他清错东西。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskItem {
+    /// 设备上那条路径的原文。**不展开 `~`、不规范化**——Hub 没有那台设备的文件系统。
+    pub path: String,
+    /// 实测占用字节数。
+    pub bytes: u64,
+    /// 这是什么：`dependency_cache`（依赖缓存）/ `artifact`（任务产物）/
+    /// `worktree`（整棵工作树）。
+    /// **闭集**，Hub 按它分派「留不留」。取值必须与 `hub-core` 的
+    /// `ItemClass` 的 serde 名字一致——两边不一致会让 Hub 侧解析静默失败、
+    /// 预演拿到空清单。
+    pub class: String,
+    /// 最后一次被写的时刻（Unix 秒）。`None` = 拿不到。
+    ///
+    /// 「留最近 N 个」那一档要用它排先后。**拿不到时不猜**：`None` 的条目
+    /// 在 Hub 侧按「留下」处理（少算可释放空间，而不是丢诊断材料）。
+    #[serde(default)]
+    pub modified_at: Option<i64>,
+    /// 人读的名字（`node_modules` / 某个产物文件名）。
+    pub label: String,
+}
+
+/// `DiskItem.class` 的闭集取值。
+///
+/// **必须与 `hub-core` 的 `ItemClass` 的 serde 名字逐字一致**：Hub 侧用
+/// `from_value::<StoredItem>` 解析这份清单，名字对不上会静默失败、
+/// 预演拿到空清单并算出「可释放 0」。有一条用例把这三个串写死来钉住它。
+pub const DISK_ITEM_CLASSES: &[&str] = &["dependency_cache", "artifact", "worktree"];
 
 /// 派发阶段。**闭集**——设备报一个 Hub 不认识的阶段不能被静默丢弃。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -694,6 +737,7 @@ mod tests {
                 reason: None,
                 evidence: None,
                 failure_kind: None,
+                items: None,
             };
             let v = serde_json::to_value(&ack).unwrap();
             assert_eq!(v["stage"], serde_json::Value::String(lit.to_string()));
@@ -735,5 +779,88 @@ mod tests {
         assert!(a.reason.is_none());
         assert!(a.evidence.is_none());
         assert!(a.failure_kind.is_none());
+        assert!(a.items.is_none());
+    }
+
+    /// `disk_exhausted` 的 ack 带逐项实测清单——这是清理预演能算出「各占多大」
+    /// 的唯一来源。字段名写死，不靠 `to_value` 自比。
+    #[test]
+    fn a_disk_exhausted_ack_carries_the_measured_item_list() {
+        let ack = TaskDispatchAck {
+            execution_id: "e1".into(),
+            stage: DispatchStage::Failed,
+            reason: Some("over budget".into()),
+            evidence: Some("kept=3".into()),
+            failure_kind: Some("disk_exhausted".into()),
+            items: Some(vec![
+                DiskItem {
+                    path: "/w/node_modules".into(),
+                    bytes: 4000,
+                    class: "dependency_cache".into(),
+                    modified_at: Some(1_700_000_000),
+                    label: "node_modules".into(),
+                },
+                DiskItem {
+                    path: "/w/report.json".into(),
+                    bytes: 8000,
+                    class: "artifact".into(),
+                    modified_at: None,
+                    label: "report.json".into(),
+                },
+            ]),
+        };
+        let v = serde_json::to_value(&ack).unwrap();
+
+        // Load-bearing 字段名逐字核对
+        let items = v["items"].as_array().expect("items 必须是数组");
+        assert_eq!(items.len(), 2);
+        let first = items[0].as_object().unwrap();
+        let mut keys: Vec<&str> = first.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["bytes", "class", "label", "modified_at", "path"],
+            "DiskItem 的字段集合变了，Hub 侧的解析会静默拿到 None"
+        );
+        assert_eq!(items[0]["bytes"], serde_json::json!(4000));
+        assert_eq!(items[0]["class"], serde_json::json!("dependency_cache"));
+        // 拿不到时间就是 null，不编一个 0（0 是 1970，会被「留最近 N 个」当成最旧）
+        assert_eq!(items[1]["modified_at"], serde_json::Value::Null);
+
+        // 往返
+        let back: TaskDispatchAck = serde_json::from_value(v).unwrap();
+        let back_items = back.items.expect("items 必须还在");
+        assert_eq!(back_items.len(), 2);
+        assert_eq!(back_items[0].path, "/w/node_modules");
+        assert_eq!(back_items[0].bytes, 4000);
+        assert_eq!(back_items[0].modified_at, Some(1_700_000_000));
+        assert_eq!(back_items[1].path, "/w/report.json");
+        assert!(back_items[1].modified_at.is_none());
+    }
+
+    /// `DiskItem.class` 是闭集，且**必须与 `hub-core` 的 `ItemClass` 的 serde
+    /// 名字逐字一致**——Hub 侧用 `from_value::<StoredItem>` 解析这份清单，
+    /// 名字对不上会静默失败、预演拿到空清单并算出「可释放 0」。
+    ///
+    /// 这里把三个线上串写死：改协议或改 `ItemClass` 的任何一边，这条会红。
+    /// （`protocol` 不能依赖 `hub-core`，所以只能用字面量对拍。）
+    #[test]
+    fn disk_item_classes_are_a_closed_set_matching_the_hub_item_class() {
+        assert_eq!(DISK_ITEM_CLASSES.len(), 3);
+        let mut got = DISK_ITEM_CLASSES.to_vec();
+        got.sort_unstable();
+        assert_eq!(got, vec!["artifact", "dependency_cache", "worktree"]);
+
+        // 与 hub-core 的 ItemClass::as_str 逐字对齐（见该类型的 serde rename_all）
+        for c in ["dependency_cache", "artifact", "worktree"] {
+            assert!(DISK_ITEM_CLASSES.contains(&c), "缺 {c}");
+        }
+        // 预演要能对上「产物」「整棵工作树」「依赖缓存」——三者的处置各不同
+        assert!(DISK_ITEM_CLASSES.contains(&"artifact"));
+        assert!(DISK_ITEM_CLASSES.contains(&"worktree"));
+        assert!(
+            DISK_ITEM_CLASSES.contains(&"dependency_cache"),
+            "保守档要「留依赖缓存」，缺这个名字它就永远匹配不上"
+        );
     }
 }

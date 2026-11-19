@@ -20,7 +20,7 @@ pub use handshake::{
     ReconnectAuth, HANDSHAKE_TIMEOUT, NONCE_BYTES, PUBLIC_KEY_BYTES, SIGNATURE_BYTES,
 };
 pub use message::{
-    reason, AuthFail, AuthOk, Challenge, DeviceInfo, Disconnect, DisconnectReason, DispatchStage,
-    ErrPayload, ErrorCode, Hello, MessageType, TaskDispatch, TaskDispatchAck, UnknownAction,
-    FAILURE_KINDS,
+    reason, AuthFail, AuthOk, Challenge, DeviceInfo, Disconnect, DisconnectReason, DiskItem,
+    DispatchStage, ErrPayload, ErrorCode, Hello, MessageType, TaskDispatch, TaskDispatchAck,
+    UnknownAction, DISK_ITEM_CLASSES, FAILURE_KINDS,
 };
