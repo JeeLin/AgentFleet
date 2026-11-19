@@ -914,7 +914,8 @@ async fn browser_session_and_csrf_rules_are_unchanged() {
 // 8. 豁免表 / 消息类型数不变
 // ---------------------------------------------------------------------------
 
-/// 三张表逐字不变，`MessageType` 仍 17 个变体。
+/// 三张表逐字不变，`MessageType` 共 19 个变体（v0.8.2 新增 `TaskDispatch` /
+/// `TaskDispatchAck` 两个可选类型，原为 17）。
 ///
 /// 变体数用**穷尽 match** 锁：新增变体会让这个函数编译失败，而不是只让一个
 /// 计数断言红掉。
@@ -951,7 +952,11 @@ fn exempt_tables_and_message_type_count_are_unchanged() {
             ChannelCredit => 13,
             CloseChannel => 14,
             Err => 15,
-            Unknown => 16,
+            // v0.8.2 新增的两个可选类型。本用例钉的是「线上名字不重名」，
+            // 序号只是本地数组去重用的编号，不承载协议含义。
+            TaskDispatch => 16,
+            TaskDispatchAck => 17,
+            Unknown => 18,
         }
     }
     let all = [
@@ -971,14 +976,16 @@ fn exempt_tables_and_message_type_count_are_unchanged() {
         ChannelCredit,
         CloseChannel,
         Err,
+        TaskDispatch,
+        TaskDispatchAck,
         Unknown,
     ];
     let unique: std::collections::BTreeSet<usize> = all.iter().map(|t| index(*t)).collect();
-    assert_eq!(all.len(), 17);
-    assert_eq!(unique.len(), 17);
+    assert_eq!(all.len(), 19);
+    assert_eq!(unique.len(), 19);
 
-    // 上面这两个 17 由**本地**手写的 `index()` 与本地数组决定，对「协议仍是
-    // 17 个变体」这条事实按构造恒真。真正锁住它的是**穷尽 match**：新增第 18
+    // 上面这两个 19 由**本地**手写的 `index()` 与本地数组决定，对「协议仍是
+    // 19 个变体」这条事实按构造恒真。真正锁住它的是**穷尽 match**：新增第 20
     // 个变体时 `index()` 缺臂 → 编译失败。下面用一段 `match` 把每个变体的
     // 线上名字写死——这才对「变体集合」本身可证伪（改名 / 加变体都会编译失败
     // 或断言失败），而不是数一遍自己写的数组。
@@ -999,6 +1006,8 @@ fn exempt_tables_and_message_type_count_are_unchanged() {
         ChannelCredit,
         CloseChannel,
         Err,
+        TaskDispatch,
+        TaskDispatchAck,
         Unknown,
     ]
     .iter()
@@ -1021,15 +1030,17 @@ fn exempt_tables_and_message_type_count_are_unchanged() {
         ChannelCredit => protocol::message::types::CHANNEL_CREDIT,
         CloseChannel => protocol::message::types::CLOSE_CHANNEL,
         Err => protocol::message::types::ERR,
+        TaskDispatch => protocol::message::types::TASK_DISPATCH,
+        TaskDispatchAck => protocol::message::types::TASK_DISPATCH_ACK,
         // `Unknown` 没有线上名字：它是「解析不出来的兜底」。
         Unknown => "",
     })
     .collect();
-    assert_eq!(names.len(), 17);
-    // 16 个有线上名字的变体两两不同，且都不是空串。
+    assert_eq!(names.len(), 19);
+    // 18 个有线上名字的变体两两不同，且都不是空串。
     let named: std::collections::BTreeSet<&str> =
         names.iter().copied().filter(|n| !n.is_empty()).collect();
-    assert_eq!(named.len(), 16, "16 个变体各有唯一线上名字");
+    assert_eq!(named.len(), 18, "18 个变体各有唯一线上名字");
     assert_eq!(names.iter().filter(|n| n.is_empty()).count(), 1);
 }
 
