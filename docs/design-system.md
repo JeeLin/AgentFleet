@@ -414,7 +414,7 @@
 
 18 组组件，全部在 `packages/web/src/styles/components.css`（18 节 = §0 复位 +
 17 个现存组件节）。小节号是**身份**不是密度：v0.8.1 第5轮删掉 5 个整族零消费的
-节（§7 Tabs / §10 Toast / §13 Tooltip / §16 只读遮罩 / §17 退避走带，23 → 18），
+节（第 7 Tabs / 第 10 Toast / 第 13 Tooltip / 第 16 只读遮罩 / 第 17 退避走带，23 → 18），
 原地留一条「本节已删除」的墓碑注释说明**为什么删、加回来要连带补什么**；
 号不回收——回收会让文档、注释与 `prototype/` 对照表里的 `§n` 锚点全部错位。
 状态一律用 `data-*` 属性表达（`data-state` / `data-open` / `data-inert` / `data-tone` /
