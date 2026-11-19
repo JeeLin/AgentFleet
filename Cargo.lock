@@ -564,7 +564,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "hub-core"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "argon2",
  "base64ct",
@@ -589,7 +589,7 @@ dependencies = [
 
 [[package]]
 name = "hub-server"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "argon2",
  "axum",
@@ -621,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "hub-storage"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "dirs",
  "identity",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "identity"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "ed25519-dalek",
  "rand 0.8.8",
@@ -970,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "node-cli"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "axum",
  "futures-util",
@@ -995,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "node-connector"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "base64ct",
  "libc",
@@ -1011,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "node-core"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "base64ct",
  "dirs",
@@ -1145,7 +1145,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "base64ct",
  "identity",

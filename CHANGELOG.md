@@ -14,12 +14,21 @@ once on 2026-11-05.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-19
+
+> 里程碑：页面与原型对齐——以实际实现为标准的视觉层重做，判据从「与原型逐字相同」改为「实现自洽 + 无障碍达标」。
+> Milestone: page and prototype alignment — the visual layer was rebuilt with the implementation as the standard; the criterion moved from "byte-identical to the prototype" to "self-consistent implementation plus accessibility compliance".
+
 ### Changed
 
 - **重新设计控制台界面**：页标题、卡片标题、正文形成三档字号与明度阶梯，长说明段落收窄到可读宽度，首屏不再被「本页为什么这么设计」的说明文字占据。 / **Redesigned the console UI**: page titles, card titles and body text now form a three-step size and weight hierarchy, long prose is capped to a readable measure, and the first screen is no longer taken over by text explaining the page's own design.
 - **空态不再像加载失败**：内容区里的空态改为一行横排（带结论、说明与主行动），实测高度由 242/254px 降到 82px。 / **Empty states no longer look like a failure**: in-content empties are now a single horizontal row with a conclusion, an explanation and the primary action — measured height drops from 242/254px to 82px.
 - **看板六列一屏可见**，不再需要横向滚动才能看到「已完成」列（列序不变）。 / **All six board columns now fit on screen**, so the done column no longer requires horizontal scrolling (column order unchanged).
 - **新建项目改为同页两步**：建完项目直接接着选设备与工作目录，不必再跳到另一页（也可跳过）。 / **New-project creation is now a two-step flow on one page**: after creating the project you pick the device and working directory right there instead of navigating away (skippable).
+
+### Fixed
+
+- **辅助文字与状态标签在浅色主题下看不清**：四套主题的辅助文字、任务状态标签与「待验收」标记原先照抄原型，对比度只有 3.5–4.5:1，低于 WCAG AA 的 4.5:1；现已逐套提到 4.5:1 以上。 / **Faint text and status tags were hard to read on light themes**: secondary text, task-state tags and the "review" badge had been copied from the prototype at 3.5–4.5:1 contrast, below WCAG AA's 4.5:1; all four themes now clear the threshold.
 
 ## [0.8.0] - 2026-11-16
 
