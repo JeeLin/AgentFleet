@@ -203,8 +203,30 @@ Hub 未初始化（`secret` 表无 `hub.password`）时，**拒绝所有 enroll*
 | `close_channel` | 双向 | `{ channel_id, reason }` |
 | exec（**无独立消息类型**） | Hub→node→Hub | 一次性命令（无 PTY）：`open_channel{connector:"exec"}` 发起，结果随 `channel_data` 回来（`{ stdout_b64, stderr_b64, timed_out }`）。协议里**没有** `exec_request` / `exec_result` 这两个类型 |
 | `err` | 双向 | 通用错误 `{ code, message }` |
+| `task_dispatch` | Hub→node | **v0.8.2 新增（可选集）**。派活 `{ execution_id, task_id, project_id, base_commit, worktree_path, branch, agent_id, prompt }`。设备侧建 worktree、校验 `HEAD == base_commit`、执行、回报。**`prompt` 不是权限批准**——agent 的权限确认仍只在本机进行，本帧**刻意不含** approval / permission 类字段（见 §4.2） |
+| `task_dispatch_ack` | node→Hub | **v0.8.2 新增（可选集）**。派发阶段 `{ execution_id, stage, reason?, evidence?, failure_kind? }`。`stage` 是**闭集**：`accepted` / `baseline_mismatch` / `running` / `succeeded` / `failed`——设备报一个 Hub 不认识的阶段不得被静默丢弃 |
 
 > 通道类型（terminal/files/git）各自的 payload schema 随 M1 定义；本里程碑先立框架。
+
+### 4.2 `task_dispatch` 的信任边界（v0.8.2）
+
+`task_dispatch` 让 Hub **主动**告诉设备去执行工作，这是本产品第一次跨出这一步，
+所以界线必须写死在协议层：
+
+| 走哪 | 是什么 | 能不能经 Hub |
+|---|---|---|
+| **安全许可**（能不能执行这条命令） | agent 问用户「允许我跑 `rm -rf` 吗」 | **只在本机，绝不经过 Hub** |
+| **业务决策**（用 Redis 还是 SQLite） | agent 问用户「选哪个方案」 | 可以经 Hub（进收件箱待决策） |
+
+**为什么 `prompt` 不是批准**：把 Hub 变成远程控制面 = 拿到 Hub 就能对设备说「用户已批准执行
+这条命令」。`AGENTS.md` 约束 1（Hub 不需要任何到设备的入站访问）正是为了堵这个面。
+故 `TaskDispatch` 结构体**没有任何** approval / permission / pre_approved 字段
+（`crates/protocol/src/message.rs` 的 `task_dispatch_payload_shape_is_exact_and_carries_no_approval`
+用例用白名单逐字断言这一点），设备侧**不得**因为收到 dispatch 而放宽任何权限检查。
+
+**向后兼容**：两个新类型都**不在** `types::REQUIRED` 里。老 node 收到未知 `t` 走
+[`MessageType::unknown_action`] 的 `Ignore`，不断连、不 bump `protocol_version`
+（§3 的版本规则：新增可选消息类型不 bump）。
 
 ### 4.1 M2 为什么**没有**新增消息类型
 

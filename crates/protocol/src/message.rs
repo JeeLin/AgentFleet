@@ -29,6 +29,8 @@ pub mod types {
     pub const CHANNEL_CREDIT: &str = "channel_credit";
     pub const CLOSE_CHANNEL: &str = "close_channel";
     pub const ERR: &str = "err";
+    pub const TASK_DISPATCH: &str = "task_dispatch";
+    pub const TASK_DISPATCH_ACK: &str = "task_dispatch_ack";
 
     /// 必需集：缺失或未知即握手失败。
     pub const REQUIRED: &[&str] = &[HELLO, CHALLENGE, AUTH, AUTH_OK, AUTH_FAIL, HEARTBEAT, ERR];
@@ -199,6 +201,100 @@ pub struct DeviceInfo {
     pub node_version: String,
 }
 
+/// Hub → 设备：去跑这个任务（v0.8.2，`scheduling.md` §5）。
+///
+/// **这不是权限批准。** `prompt` 只描述「要做的工作」，不构成用户对该动作的
+/// 授权——设备侧执行时 agent 的权限确认仍只在**设备本机**进行，Hub 永不下发
+/// 「已批准」（`PRODUCT.md` §5.4 的三条通路表：安全许可只在本机，业务决策才进
+/// Hub）。把 Hub 变成远程控制面 = 拿到 Hub 就能对设备说「用户已批准执行这条
+/// 命令」，而 `AGENTS.md` 约束 1（Hub 不需要任何到设备的入站访问）正是为了堵这
+/// 个面。故本结构体**刻意不含** approval / permission 类字段。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskDispatch {
+    pub execution_id: String,
+    pub task_id: String,
+    pub project_id: String,
+    /// 设备侧必须校验 `HEAD == base_commit`（`task-model.md` §7.3）。
+    pub base_commit: String,
+    /// 工作树绝对路径（Hub 在 `binding.fixed_dir` 下选定）。
+    pub worktree_path: String,
+    /// 任务分支名。
+    pub branch: String,
+    pub agent_id: String,
+    /// 交给 agent 的任务描述。**不是权限批准**，见类型注释。
+    pub prompt: String,
+}
+
+/// 设备 → Hub：派发的阶段进展与终态（v0.8.2）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskDispatchAck {
+    pub execution_id: String,
+    pub stage: DispatchStage,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// 证据（退出码 / stderr 摘要等）。失败时**必须**有（`task-model.md` §3：
+    /// 没有原因串的失败等于没发生）。
+    #[serde(default)]
+    pub evidence: Option<String>,
+    /// 失败形态，仅 `Stage::Failed` 时有值，取值见
+    /// [`crate::message::FAILURE_KINDS`]。
+    #[serde(default)]
+    pub failure_kind: Option<String>,
+}
+
+/// 派发阶段。**闭集**——设备报一个 Hub 不认识的阶段不能被静默丢弃。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DispatchStage {
+    /// 收到并认领。
+    Accepted,
+    /// 设备本地 `HEAD != base_commit`，**不硬跑**。
+    BaselineMismatch,
+    /// 开始执行。
+    Running,
+    Succeeded,
+    Failed,
+}
+
+impl DispatchStage {
+    /// 线上字符串。与 `serde` 的 `snake_case` 同一口径，单独列出来是给
+    /// 断言用的——测试里写死字符串，不靠 `serde_json::to_value` 自比（那是自证）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::BaselineMismatch => "baseline_mismatch",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// 全部变体。新增变体时本数组与上面的 `match` 同时改，否则
+    /// `every_dispatch_stage_round_trips` 会红。
+    pub const ALL: &'static [Self] = &[
+        Self::Accepted,
+        Self::BaselineMismatch,
+        Self::Running,
+        Self::Succeeded,
+        Self::Failed,
+    ];
+}
+
+/// 失败形态的线上字符串（`task-model.md` §3 的八种）。
+///
+/// 协议层只用字符串、不依赖 `hub-storage`——设备侧不该为了报一个失败形态
+/// 而编译整个存储层。
+pub const FAILURE_KINDS: &[&str] = &[
+    "baseline_mismatch",
+    "env_broken",
+    "disk_exhausted",
+    "agent_error",
+    "task_failed",
+    "interrupted",
+    "rejected",
+    "superseded",
+];
+
 /// 消息类型枚举（用于 match 分发；未知类型走 `Unknown`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageType {
@@ -218,6 +314,13 @@ pub enum MessageType {
     ChannelCredit,
     CloseChannel,
     Err,
+    /// Hub → 设备：去跑一个任务（v0.8.2）。
+    ///
+    /// **属可选集**：老 node 不认识它时走 [`MessageType::unknown_action`] 的
+    /// `Ignore`，不断连——这是约束 14 的要求，新增可选类型不得踢掉旧设备。
+    TaskDispatch,
+    /// 设备 → Hub：进度与终态（v0.8.2）。
+    TaskDispatchAck,
     Unknown,
 }
 
@@ -245,6 +348,8 @@ impl std::str::FromStr for MessageType {
             CHANNEL_CREDIT => Self::ChannelCredit,
             CLOSE_CHANNEL => Self::CloseChannel,
             ERR => Self::Err,
+            TASK_DISPATCH => Self::TaskDispatch,
+            TASK_DISPATCH_ACK => Self::TaskDispatchAck,
             _ => Self::Unknown,
         })
     }
@@ -472,5 +577,163 @@ mod tests {
         assert!(text.contains("/w"));
         assert!(!text.contains(".git"));
         assert!(!text.contains(".env"));
+    }
+
+    // ---- v0.8.2 task_dispatch ----
+
+    /// 两个新常量都走 `FromStr` 往返，且**都不在必需集里**——老 node 收到它们
+    /// 必须走 `Ignore` 而不是断连（约束 14）。
+    #[test]
+    fn task_dispatch_types_round_trip_and_are_optional() {
+        assert_eq!(
+            types::TASK_DISPATCH.parse::<MessageType>().unwrap(),
+            MessageType::TaskDispatch
+        );
+        assert_eq!(
+            types::TASK_DISPATCH_ACK.parse::<MessageType>().unwrap(),
+            MessageType::TaskDispatchAck
+        );
+        for t in [types::TASK_DISPATCH, types::TASK_DISPATCH_ACK] {
+            assert!(
+                !types::is_required(t),
+                "{t} 是可选集：老 node 不认识时不得断连"
+            );
+            assert_eq!(
+                MessageType::unknown_action(t),
+                UnknownAction::Ignore,
+                "{t} 未知时的处置必须是忽略"
+            );
+        }
+    }
+
+    /// `TaskDispatch` 的载荷字段名**写死在断言里**（不靠 `to_value` 自比——那是自证）。
+    /// 同时断言**没有任何 approval / permission 类字段**：这不是权限批准。
+    #[test]
+    fn task_dispatch_payload_shape_is_exact_and_carries_no_approval() {
+        let d = TaskDispatch {
+            execution_id: "e1".into(),
+            task_id: "t1".into(),
+            project_id: "p1".into(),
+            base_commit: "abc".into(),
+            worktree_path: "/w/t1".into(),
+            branch: "agentfleet/t1".into(),
+            agent_id: "a1".into(),
+            prompt: "do the thing".into(),
+        };
+        let v = serde_json::to_value(&d).unwrap();
+        let obj = v.as_object().expect("must be an object");
+
+        let mut got: Vec<&str> = obj.keys().map(String::as_str).collect();
+        got.sort_unstable();
+        let mut want = vec![
+            "agent_id",
+            "base_commit",
+            "branch",
+            "execution_id",
+            "project_id",
+            "prompt",
+            "task_id",
+            "worktree_path",
+        ];
+        want.sort_unstable();
+        assert_eq!(got, want, "字段集合变了就必须显式确认不是加错了东西");
+
+        // 跨信任边界：**没有任何字段表示「已获批准」**。
+        for k in obj.keys() {
+            let k = k.to_ascii_lowercase();
+            assert!(
+                !k.contains("approv")
+                    && !k.contains("permission")
+                    && !k.contains("pre_approved")
+                    && !k.contains("authoriz"),
+                "TaskDispatch 不得携带授权类字段，出现了 {k}"
+            );
+        }
+
+        // 逐字段反序列化相等（不靠整体 `==`，那样字段顺序漂移也能过）。
+        let back: TaskDispatch = serde_json::from_value(v).unwrap();
+        assert_eq!(back.execution_id, "e1");
+        assert_eq!(back.task_id, "t1");
+        assert_eq!(back.project_id, "p1");
+        assert_eq!(back.base_commit, "abc");
+        assert_eq!(back.worktree_path, "/w/t1");
+        assert_eq!(back.branch, "agentfleet/t1");
+        assert_eq!(back.agent_id, "a1");
+        assert_eq!(back.prompt, "do the thing");
+    }
+
+    /// `DispatchStage` **每个变体**都有往返断言——防将来加变体忘了映射。
+    ///
+    /// `ALL` 与 `as_str` 的 `match` 必须同时改，两处不一致时本用例会红。
+    #[test]
+    fn every_dispatch_stage_round_trips() {
+        // 先钉住变体总数：加变体时这里与 `ALL` 一起红，逼人回来补断言。
+        assert_eq!(DispatchStage::ALL.len(), 5);
+
+        let mut seen = Vec::new();
+        for st in DispatchStage::ALL {
+            let lit = st.as_str();
+            assert!(!seen.contains(&lit), "as_str 出现重复字面量 {lit}");
+            seen.push(lit);
+
+            // serde 口径与 as_str 口径必须一致
+            let json = serde_json::to_value(st).unwrap();
+            assert_eq!(
+                json,
+                serde_json::Value::String(lit.to_string()),
+                "{st:?} 的 serde 与 as_str 不一致"
+            );
+            // 往返
+            let back: DispatchStage = serde_json::from_value(json).unwrap();
+            assert_eq!(back, *st);
+
+            // ack 里也能往返（stage 是 ack 的字段，不是孤立的枚举）
+            let ack = TaskDispatchAck {
+                execution_id: "e".into(),
+                stage: *st,
+                reason: None,
+                evidence: None,
+                failure_kind: None,
+            };
+            let v = serde_json::to_value(&ack).unwrap();
+            assert_eq!(v["stage"], serde_json::Value::String(lit.to_string()));
+            let ack_back: TaskDispatchAck = serde_json::from_value(v).unwrap();
+            assert_eq!(ack_back.stage, *st);
+        }
+        assert_eq!(seen.len(), DispatchStage::ALL.len());
+    }
+
+    /// 失败形态的线上字符串就是 `task-model.md` §3 的八种，一个不多一个不少。
+    #[test]
+    fn failure_kinds_are_the_eight_specs() {
+        assert_eq!(FAILURE_KINDS.len(), 8);
+        let mut sorted = FAILURE_KINDS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 8, "FAILURE_KINDS 有重复项");
+
+        for k in [
+            "baseline_mismatch",
+            "env_broken",
+            "disk_exhausted",
+            "agent_error",
+            "task_failed",
+            "interrupted",
+            "rejected",
+            "superseded",
+        ] {
+            assert!(FAILURE_KINDS.contains(&k), "缺 {k}");
+        }
+    }
+
+    /// 缺可选字段的 ack 也要能解出来（老设备 / 进度帧只带 stage）。
+    #[test]
+    fn ack_tolerates_missing_optional_fields() {
+        let a: TaskDispatchAck =
+            serde_json::from_str(r#"{"execution_id":"e","stage":"running"}"#).unwrap();
+        assert_eq!(a.stage, DispatchStage::Running);
+        assert!(a.reason.is_none());
+        assert!(a.evidence.is_none());
+        assert!(a.failure_kind.is_none());
     }
 }
