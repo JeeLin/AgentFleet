@@ -825,11 +825,17 @@ function backToBoard(): void {
   color: var(--af-fg-secondary);
 }
 
-/* 占位段：整块压暗，让它看起来就是「还没做」而不是「读不出来」。
+/* 占位段：让它看起来是「还没做」，但**必须读得出来**。
+   原先用 `opacity: 0.6` 整块压暗，实测 `.af-region__note` 掉到 2.93:1
+   （第8轮 4d 在构建产物上实测）——「还没做」和「看不见」是两件事。
+   改成不淡化、只把文字降一档：区块底保持原样（虚线边框已经说明它是占位），
+   文字用 `--af-fg-tertiary`（它本来就比正文弱一档，仍过 AA）。
    不给 hover / cursor，因为它不可点。 */
 .af-taskd__todo {
-  opacity: 0.6;
+  border-style: dashed;
 }
+.af-taskd__todo .af-region__title { color: var(--af-fg-secondary); }
+.af-taskd__todo .af-region__note { color: var(--af-fg-tertiary); }
 .af-taskd__placeholder {
   margin: 0;
   font-size: var(--af-text-sm);
