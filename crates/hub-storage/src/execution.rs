@@ -140,6 +140,24 @@ impl FailureKind {
     pub fn counts_as_retry(self) -> bool {
         !matches!(self, Self::Superseded)
     }
+
+    /// 全部八种形态，按 `task-model.md` §3 那张表的顺序（编号 1 / 2 / 2.5 / 3 …）。
+    ///
+    /// **存在的理由是穷尽性**：`retry_policy` 的 `match` 是穷尽的，那挡得住
+    /// 「加了第九种却忘了给它定策略」；但挡不住「测试只覆盖了七种」。调度侧的
+    /// 矩阵用例拿本数组对账「七种 + 一种一个不漏」，于是两处同时被钉住。
+    ///
+    /// 顺序不是必须的（它是集合），但按规格表排能让对账的人一眼看出少了哪一格。
+    pub const ALL: &'static [Self] = &[
+        Self::BaselineMismatch,
+        Self::EnvBroken,
+        Self::DiskExhausted,
+        Self::AgentError,
+        Self::TaskFailed,
+        Self::Interrupted,
+        Self::Rejected,
+        Self::Superseded,
+    ];
 }
 
 impl FromStr for FailureKind {

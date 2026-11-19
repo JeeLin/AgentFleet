@@ -761,12 +761,97 @@ async fn relay(
             on_heartbeat(state, conn_id, auth, &frame);
             continue;
         }
+        // 设备回报的执行进展（v0.8.2 子任务 5）。**这是「任务进 running」的唯一来路**：
+        // 派发那一半在 `Scheduler::route_task`，回来的这一半只能在这里。
+        //
+        // 同步、就地处理：与 `scheduler.rs` 同一条口径，全程没有 `.await`，
+        // 因此不会阻塞读循环（心跳与通道帧都排在它后面）。
+        if frame.msg_type == types::TASK_DISPATCH_ACK {
+            on_dispatch_ack(state, &auth.node_id, &frame);
+            continue;
+        }
         if crate::channels::is_channel_type(&frame.msg_type) {
             dispatch_channel_frame(state, conn_id, &auth.node_id, &frame);
             continue;
         }
         // 其余（含未知类型）一律忽略：约束 14 前向兼容
     }
+}
+
+/// 一帧 `task_dispatch_ack`：解析 → 交给 [`crate::dispatch_ack`]。
+///
+/// # 解不开的载荷只丢这一帧
+///
+/// 与心跳同一口径（`on_heartbeat` 的 `dropping malformed heartbeat`）：连
+/// `execution_id` / `stage` 都读不出来，就没有任何可执行的动作，而**断连是更
+/// 糟的选择**——一台设备的其它通道会跟着一起断。
+///
+/// # 为什么改状态之后还要顺手重派
+///
+/// 失败回执的落库与「下一步换什么」是两件事（`:crate::dispatch_ack` 的模块注释），
+/// 后者在这里接上：`retry_policy` 已经算过一次，它给出 `DifferentDevice` /
+/// `DifferentAgent` 时意味着「该换条件再跑一次」。重派本身由
+/// [`crate::scheduler::Scheduler::retry_failed_execution`] 承接——它重新走 `pick`
+/// （含 ⑤ 磁盘门槛）。
+///
+/// `SameDevice` / `NoRetry` 一律**不自动重派**：前者的语义是「同设备重新 fetch
+/// 一次」，而 fetch 是设备侧的动作、不是一个新执行；后者是「换机器没用」。
+fn on_dispatch_ack(state: &AppState, node_id: &str, frame: &Frame) {
+    let ack: protocol::message::TaskDispatchAck = match frame.payload() {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::debug!(
+                node_id = %node_id,
+                error = %e,
+                "dropping malformed task_dispatch_ack"
+            );
+            return;
+        }
+    };
+    let outcome = crate::dispatch_ack::on_dispatch_ack(state, node_id, &ack);
+    if !outcome.is_applied() {
+        return;
+    }
+    // 只有「失败」才有下一步。重派前的 `retry_policy` 与 `dispatch_ack` 里算过的
+    // 是同一份纯函数，不引入第二套判断。
+    let kind = match ack.failure_kind.as_deref() {
+        Some(raw) => raw.parse::<hub_storage::FailureKind>().ok(),
+        // `baseline_mismatch` 是一个独立的 stage，回执可以不带 `failure_kind`。
+        None if ack.stage == protocol::message::DispatchStage::BaselineMismatch => {
+            Some(hub_storage::FailureKind::BaselineMismatch)
+        }
+        None => None,
+    };
+    let Some(kind) = kind else { return };
+    let plan = hub_core::schedule::retry_policy(kind);
+    if !matches!(
+        plan,
+        hub_core::schedule::RetryPlan::DifferentDevice
+            | hub_core::schedule::RetryPlan::DifferentAgent
+    ) {
+        return;
+    }
+    let Ok(Some(failed)) = state.executions().get(&ack.execution_id) else {
+        // coverage: excluded — 刚刚 `dispatch_ack` 才读过这一行；要触达需它在两步
+        // 之间被删掉（`execution` 没有删除入口）。
+        return;
+    };
+    let (retry, push) = state.scheduler().retry_failed_execution(&failed);
+    if let Some(push) = push {
+        tracing::warn!(
+            node_id = %node_id,
+            execution_id = %ack.execution_id,
+            failure = ?push,
+            "the retry dispatch frame did not reach the connection"
+        );
+    }
+    tracing::info!(
+        node_id = %node_id,
+        previous_execution_id = %ack.execution_id,
+        plan = plan.as_str(),
+        outcome = ?retry,
+        "retried the task after a failure ack"
+    );
 }
 
 /// 读侧限流：这一帧被容许，还是该断开（§6.1）。

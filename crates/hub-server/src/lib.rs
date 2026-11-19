@@ -11,6 +11,7 @@
 
 pub mod channels;
 pub mod conns;
+pub mod dispatch_ack;
 pub mod import_auth;
 pub mod middleware_auth;
 pub mod presence;

@@ -132,6 +132,32 @@ impl BindingRepo {
         self.list_by("project_id", project_id)
     }
 
+    /// 按**绑定自己的 id** 取那一行。
+    ///
+    /// # 为什么需要它（`execution` 表只存 `binding_id`）
+    ///
+    /// 事后处置一条执行时要问三件事：「它在哪台设备上」（`device_id`）、
+    /// 「按哪档清理」（`cleanup_policy`）、「配额多少」（`disk_quota_bytes`）。
+    /// `ExecutionView` 里只有 `binding_id`，从它找回那一行**需要一次按 id 的
+    /// 查询**——`get(project_id, device_id)` 要的是另一组键，用不上。
+    ///
+    /// 这条不是「顺手加个 getter」：没有它，每个事后读者（失败回执的清理预演、
+    /// 设备页的配额核算）都得写一遍「把全部绑定读出来再 `find`」，而那份实现
+    /// 会各写各的（一处按 id 比、一处按 device_id 比），迟早对不上。
+    pub fn get_by_id(&self, binding_id: &str) -> Result<Option<Binding>> {
+        let conn = self.pool.get()?;
+        let raw = conn
+            .query_row(
+                "SELECT id, project_id, device_id, fixed_dir, disk_quota_bytes,
+                        cleanup_policy, created_at
+                 FROM binding WHERE id = ?1",
+                params![binding_id],
+                row_to_raw,
+            )
+            .optional()?;
+        raw.map(RawBinding::into_binding).transpose()
+    }
+
     /// 一台设备的全部绑定（设备页——**双向可改的另一个方向**）。
     pub fn list_for_device(&self, device_id: &str) -> Result<Vec<Binding>> {
         self.list_by("device_id", device_id)

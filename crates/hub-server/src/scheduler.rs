@@ -56,8 +56,8 @@
 
 use std::collections::HashSet;
 
-use hub_core::schedule::{pick, Rejection, Routing, TaskConstraints};
-use hub_storage::execution::{ExecutionState, NewExecution};
+use hub_core::schedule::{pick, retry_policy, Rejection, RetryPlan, Routing, TaskConstraints};
+use hub_storage::execution::{ExecutionState, ExecutionView, FailureKind, NewExecution};
 use hub_storage::project::ProjectRepo;
 use hub_storage::task::{TaskState, TaskView};
 use hub_storage::{Binding, BindingRepo, TrajectoryRepo};
@@ -81,6 +81,28 @@ pub const TASK_REJECTED_KIND: &str = "task_rejected";
 /// （「这个任务第一次派给谁、什么时候」不该只存在于 `execution` 表里——那条路
 /// 还要经 `binding → device` 一跳，而这条记录自己带着 `node_id`）。
 pub const TASK_DISPATCHED_KIND: &str = "task_dispatched";
+
+/// 收到一条 `task_dispatch_ack` 时写在轨迹里的 `kind`（v0.8.2 子任务 5）。
+///
+/// **设备回报的每一个 stage 都留一条**，包括 `accepted`（那个不该改任何状态，
+/// 但「设备在什么时候接了单」正是排查「任务卡在 queued」时第一个要看的事实）。
+///
+/// 与 [`TASK_DISPATCHED_KIND`] 一样以任务 id 作分区（[`TASK_TRAJECTORY_NAMESPACE`]），
+/// 于是同一个任务的「派出去」与「回来了」落在同一条时间线上，顺序天然可读。
+pub const TASK_ACK_KIND: &str = "task_dispatch_ack";
+
+/// 一次失败之后「下一步换什么」写在轨迹里的 `kind`。
+///
+/// 与 [`TASK_ACK_KIND`] 分开而不是塞进同一条 payload：重试结论是**调度决策**，
+/// 失败回执是**设备事实**。合成一条之后，「这个任务失败过几次、每次决定换什么」
+/// 就得在 payload 里翻；两个 kind 则是两条 `WHERE kind = ...` 就能数出来的表。
+pub const TASK_RETRY_PLANNED_KIND: &str = "task_retry_planned";
+
+/// 换设备 / 换 agent 重派成功后写在轨迹里的 `kind`。
+///
+/// 与 [`TASK_DISPATCHED_KIND`] 分开：那一条是「第一次派」，这一条带**上一条执行**，
+/// 两条并排才能回答 `task-model.md` §7.3 的那个问题——「新旧 `base_commit` 各是什么」。
+pub const TASK_RETRIED_KIND: &str = "task_retried";
 
 /// 派发事实的轨迹挂在什么 `session_id` 下。
 ///
@@ -309,6 +331,258 @@ impl<'a> Scheduler<'a> {
             out.extend(self.route_project(&b.project_id));
         }
         out
+    }
+
+    /// 一条**已失败**的执行之后，按 `retry_policy` 换条件再派一次。
+    ///
+    /// # 它和 `route_task` 的分工
+    ///
+    /// `route_task` 只接受 `pending` 的任务（那是「还没派过」）。重派时任务已经
+    /// 是 `failed`，边表里 `failed → queued` 是合法的，但**不能跳过中间那一步**
+    /// ——所以顺序是：先把任务沿 `failed → queued` 推上去，再走与首次派发**同一
+    /// 条**执行创建 + 发帧路径。
+    ///
+    /// # 换设备**复用 `pick`**，不另写一套
+    ///
+    /// `scheduling.md` §5.1 末句：「换一台试」不等于「换一台不管空间够不够」。
+    /// 所以这里重新调 [`pick`] —— 它的 ⑤ 层就是那张磁盘硬门槛，而**候选里排除
+    /// 掉刚刚失败的那台**（`plan == DifferentDevice` 的意义就在这）。
+    ///
+    /// 更省事的做法是「取出上一次的 `binding_id`，在上面再建一条执行」：那既不过
+    /// 磁盘门槛、也不过能力层，等于把「换一台」实现成「原地再来一次」——而
+    /// `scheduling.md` §5.1 开头作废的正是那个说法。
+    ///
+    /// # `DifferentAgent`：`device_id` **不变**
+    ///
+    /// 这时候选源被收窄到「上一次那台设备」，换的只是帧里的 `agent_id`：从
+    /// `allowed_agents` 里挑一个**不是刚崩过的那个**。放宽任务约束是人的动作
+    /// （`task-model.md` §4「放宽约束」），本函数**不写 task 表一个字节**。
+    ///
+    /// # 新旧 `base_commit` 都留痕（`task-model.md` §7.3）
+    ///
+    /// 新执行的 `base_commit` 照抄任务的起点（与首次派发同一口径）；`None` 时
+    /// 设备侧会在 ack 里回填。**上一条执行的那一个**写进 `task_retried` 事实里，
+    /// 两条并排就能看出「换起点了吗、从哪换到哪」。
+    pub fn retry_failed_execution(
+        &self,
+        failed: &ExecutionView,
+    ) -> (RouteOutcome, Option<PushFailure>) {
+        let now = crate::routes::now();
+        let task = match self.state.tasks().get(&failed.task_id) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                tracing::warn!(task_id = %failed.task_id, "cannot retry: the task is gone");
+                return (
+                    RouteOutcome::Rejected {
+                        rejection: Rejection::NoAllowedDevice,
+                    },
+                    None,
+                );
+            }
+            // coverage: excluded — 读库失败（表被改坏），不 panic 也不编事实。
+            Err(e) => {
+                tracing::warn!(task_id = %failed.task_id, error = %e, "cannot read the task to retry");
+                return (
+                    RouteOutcome::Rejected {
+                        rejection: Rejection::NoAllowedDevice,
+                    },
+                    None,
+                );
+            }
+        };
+
+        // `failed` 是重派的合法起点（`task_state.rs` 的 `failed → queued`）；
+        // 别的状态说明有人已经动过，不抢。
+        if task.state != TaskState::Failed {
+            return (RouteOutcome::NotPending { state: task.state }, None);
+        }
+
+        let plan = retry_policy(
+            failed
+                .failure_kind
+                // 没有形态的执行不该走到重派路径（ack 处理只在有形态时才落库）。
+                // 用 `Rejected` 兜一个 NoRetry 的结论：什么都不做比猜一种更安全。
+                .unwrap_or(FailureKind::Rejected),
+        );
+
+        // ---- ① 取路由的输入（与 `route_task` 逐句同源）----
+        let project = match ProjectRepo::new(self.state.pool().clone()).get(&task.project_id) {
+            Ok(Some(p)) => p,
+            // coverage: excluded — 项目只归档不删除；见 `route_task` 同一条臂。
+            Ok(None) | Err(_) => return (RouteOutcome::NotPending { state: task.state }, None),
+        };
+        let bindings =
+            match BindingRepo::new(self.state.pool().clone()).list_for_project(&task.project_id) {
+                Ok(b) => b,
+                // coverage: excluded — 读库失败，同上。
+                Err(_) => return (RouteOutcome::NotPending { state: task.state }, None),
+            };
+        // 上一次那台设备是从绑定反查出来的（`ExecutionView` 只存 `binding_id`）。
+        let failed_device = bindings
+            .iter()
+            .find(|b| b.id == failed.binding_id)
+            .map(|b| b.device_id.clone());
+
+        // ---- ② `pick` 的候选源：`DifferentDevice` 时排除刚失败的那台 ----
+        let pairs: Vec<(String, Binding)> = match plan {
+            // 换 agent：候选只有上一次那台设备（`device_id` 不变）。
+            RetryPlan::DifferentAgent => bindings
+                .iter()
+                .filter(|b| Some(&b.device_id) == failed_device.as_ref())
+                .map(|b| (b.device_id.clone(), b.clone()))
+                .collect(),
+            // 换设备：**排除**刚失败的那台（否则「换一台」在同一台上再跑一次）。
+            RetryPlan::DifferentDevice => bindings
+                .iter()
+                .filter(|b| Some(&b.device_id) != failed_device.as_ref())
+                .map(|b| (b.device_id.clone(), b.clone()))
+                .collect(),
+            // 同设备重来 / 不重试：前者只留那台，后者不留（下面直接返回）。
+            RetryPlan::SameDevice => bindings
+                .iter()
+                .filter(|b| Some(&b.device_id) == failed_device.as_ref())
+                .map(|b| (b.device_id.clone(), b.clone()))
+                .collect(),
+            RetryPlan::NoRetry => Vec::new(),
+        };
+        if plan == RetryPlan::NoRetry {
+            self.record(
+                &task,
+                TASK_RETRY_PLANNED_KIND,
+                serde_json::json!({
+                    "execution_id": failed.id,
+                    "plan": plan.as_str(),
+                    "outcome": "skipped",
+                    "why": "superseded / rejected: changing the machine cannot help",
+                }),
+            );
+            return (RouteOutcome::NotPending { state: task.state }, None);
+        }
+
+        let reports = self.state.reports();
+        let nodes: Vec<(String, hub_core::Report)> = pairs
+            .iter()
+            .filter_map(|(device, _)| reports.get(device).map(|r| (device.clone(), r)))
+            .collect();
+        let constraints = constraints_of(&task);
+        let busy = |binding_id: &str| self.binding_is_busy(binding_id);
+        let routing = Routing::new(project.shape, &pairs, &busy);
+
+        let node_id = match pick(
+            &constraints,
+            nodes.iter().map(|(id, r)| (id.as_str(), r)),
+            &routing,
+        ) {
+            Ok(id) => id.to_string(),
+            Err(rejection) => {
+                // 没挑出来：**建零条执行**，任务留在 `failed` 等人处理。归因写进
+                // 与首次拒绝同一个 kind（`task_rejected`），于是「一直没派出去」
+                // 只需要查一个 kind。
+                self.record(
+                    &task,
+                    TASK_RETRY_PLANNED_KIND,
+                    serde_json::json!({
+                        "execution_id": failed.id,
+                        "plan": plan.as_str(),
+                        "outcome": "rejected",
+                        "code": rejection.as_str(),
+                    }),
+                );
+                self.reject(&task, rejection);
+                return (RouteOutcome::Rejected { rejection }, None);
+            }
+        };
+        let Some((_, binding)) = pairs.iter().find(|(n, _)| *n == node_id) else {
+            // coverage: excluded — `pick` 只会返回 `routing.bindings` 里的节点。
+            return (
+                RouteOutcome::Rejected {
+                    rejection: Rejection::NoAllowedDevice,
+                },
+                None,
+            );
+        };
+        let binding = binding.clone();
+
+        // ---- ③ 任务 `failed → queued`（走边表），再建执行、发帧 ----
+        if let Err(e) = self
+            .state
+            .tasks()
+            .set_state(&task.id, TaskState::Queued, &now)
+        {
+            tracing::warn!(task_id = %task.id, error = %e, "cannot queue the task for the retry");
+            let state = self
+                .state
+                .tasks()
+                .get(&task.id)
+                .ok()
+                .flatten()
+                .map_or(task.state, |t| t.state);
+            return (RouteOutcome::NotPending { state }, None);
+        }
+
+        let worktree_path = worktree_path_for(&binding, &task);
+        let execution = match self.state.executions().create(
+            NewExecution {
+                task_id: task.id.clone(),
+                binding_id: binding.id.clone(),
+                // 新起点：与首次派发同源（任务的 `base_commit`）。
+                base_commit: task.base_commit.clone(),
+                worktree_path: Some(worktree_path.clone()),
+            },
+            &now,
+        ) {
+            Ok(e) => e,
+            // coverage: excluded — 写库失败，只有故障注入能造。
+            Err(e) => {
+                tracing::error!(task_id = %task.id, error = %e, "cannot create the retry execution");
+                return (
+                    RouteOutcome::Rejected {
+                        rejection: Rejection::NoAllowedDevice,
+                    },
+                    None,
+                );
+            }
+        };
+
+        let agent_id = retry_agent(&task, failed.agent_id.as_deref(), plan);
+        let frame = dispatch_frame(
+            &task,
+            &DispatchTarget {
+                project_id: &binding.project_id,
+                execution_id: &execution.id,
+                worktree_path: &worktree_path,
+                agent_id: &agent_id,
+            },
+        );
+        let push = self.push(&node_id, &frame);
+
+        self.record(
+            &task,
+            TASK_RETRIED_KIND,
+            serde_json::json!({
+                "execution_id": execution.id,
+                "previous_execution_id": failed.id,
+                "plan": plan.as_str(),
+                "node_id": node_id,
+                "previous_binding_id": failed.binding_id,
+                "binding_id": binding.id,
+                // `task-model.md` §7.3：新旧起点**都**留在这里，两条并排就能看出
+                // 「换起点了吗、从哪换到哪」。`base_commit: null` 表示那一次没有
+                // 起点（设备侧会在 ack 里回填），不是空串。
+                "base_commit": execution.base_commit,
+                "previous_base_commit": failed.base_commit,
+                "agent_id": agent_id,
+                "push_failure": push.map(push_failure_code),
+            }),
+        );
+
+        (
+            RouteOutcome::Dispatched {
+                node_id,
+                execution_id: execution.id,
+            },
+            push,
+        )
     }
 
     /// 一次成功派发的全部副作用，**顺序不可换**。
@@ -702,6 +976,57 @@ fn picked_agent(task: &TaskView) -> String {
         [only] => only.clone(),
         _ => String::new(),
     }
+}
+
+/// 换 agent 时帧里该填哪个 agent。
+///
+/// # `DifferentAgent` 与 `picked_agent` 的差别
+///
+/// [`picked_agent`] 回答的是「任务点名了**唯一**一个 agent 吗」——首次派发时
+/// Hub 还没见过谁崩过，只能照任务的话填。重派时多了一条信息：**上一次那个崩了**
+/// （`agent_error`）。所以这里从任务名单里挑一个**与上一次不同**的。
+///
+/// # 为什么现在拿不到「上一次是哪个」
+///
+/// `execution.agent_id` 这一期**恒为 `None`**（见 `hub_storage::execution` 的
+/// `ExecutionView::agent_id` 注释：端到端写入还没接线）。没有「上一次」可排除时
+/// 本函数取名单里的第一个——那是**诚实的**：它不假装换来一个不同的 agent，
+/// 而换 agent 这件事仍然通过把 `agent_id` 显式写进帧来生效（设备侧不再用默认值）。
+///
+/// 一旦 `execution.agent_id` 开始落库，把 `previous_agent` 传进来即可，函数形状
+/// 已经是那个形状。
+///
+/// 其余三种 `RetryPlan` 一律走 [`picked_agent`]：它们换的不是 agent。
+fn retry_agent(task: &TaskView, previous_agent: Option<&str>, plan: RetryPlan) -> String {
+    if plan != RetryPlan::DifferentAgent {
+        return picked_agent(task);
+    }
+    let raw = task.allowed_agents.as_deref().unwrap_or_default().trim();
+    if raw.is_empty() {
+        // 任务没说用哪个 agent → 交空串让设备用自己的默认（与首次派发同一口径）。
+        return String::new();
+    }
+    let names: Vec<String> = match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        _ => raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+    };
+    // 名单有多个时取**第一个不同于上一次**的那个；只有一个时退回它（那一次的
+    // `agent_error` 与任务名单冲突，该由人去改约束，本函数不越权改 task 表）。
+    names
+        .iter()
+        .find(|n| Some(n.as_str()) != previous_agent)
+        .or_else(|| names.first())
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// 交给 agent 的任务描述。
