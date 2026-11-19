@@ -201,13 +201,25 @@ describe('外壳骨架类与原型对齐', () => {
     ).toBe(false)
   })
 
-  it('两档行高与原型逐档相等', () => {
-    const PROTO_TOKENS = stripComments(readRepoFile('prototype/assets/tokens.css'))
+  /* 同上面两条（换靶收尾，第9轮 4c 🟢-4）：行高是**实现的排版契约**，
+     期望值写死在断言里，不再现读原型。要防的是「有人顺手把 1.65 改成 1.6」，
+     不是「实现和原型一起漂」——原型已经不是标准了。
+     现读原型的写法与同文件的字号/布局常量自相矛盾：那两条已改成写死，
+     这一条还留着，等于同一批判据里两套口径。 */
+  it('两档行高逐档等于约定值（写死在断言里，不现读原型）', () => {
     const impl = stripComments(TOKENS_CSS)
-    const pTight = /--lh-tight\s*:\s*([^;]+);/.exec(PROTO_TOKENS)?.[1].trim()
-    const pBody = /--lh-body\s*:\s*([^;]+);/.exec(PROTO_TOKENS)?.[1].trim()
-    expect(/--af-leading-tight\s*:\s*([^;]+);/.exec(impl)?.[1].trim()).toBe(pTight)
-    expect(/--af-leading-base\s*:\s*([^;]+);/.exec(impl)?.[1].trim()).toBe(pBody)
+    for (const [name, expected] of [
+      ['--af-leading-tight', '1.45'],
+      ['--af-leading-base', '1.65'],
+    ] as const) {
+      const m = new RegExp(`${name}\\s*:\\s*([^;]+);`).exec(impl)
+      expect(m, `tokens.css 里找不到 ${name}`).not.toBeNull()
+      expect(
+        (m as RegExpExecArray)[1].trim(),
+        `${name} 变了（约定 ${expected}）。行高是排版契约：改它会同时动到表格、`
+          + '列表、终端（tight）与说明性散文（base）的密度。真要改，改这条断言并写明理由。',
+      ).toBe(expected)
+    }
   })
 })
 

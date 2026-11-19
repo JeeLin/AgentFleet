@@ -257,7 +257,23 @@ describe('主题：实现自洽（与原型无关）', () => {
          紧挨着取值守卫，让「改了这个十六进制」与「它是否达标」在同一个文件里。 */
       for (const surf of ['--p-surf-1', '--p-surf-2', '--p-surf-3'] as const) {
         const surface = impl.get(surf)
-        if (!surface?.startsWith('#')) continue
+        /* **不是字面 hex 就判红，而不是跳过**（第9轮 4c 🟢-6）：原先写
+           `if (!surface?.startsWith('#')) continue`，于是某主题若把 `--p-surf-*`
+           写成 `color-mix()` / `var()`，那一层的检查会**自动消失**——判据绿了，
+           但绿色的意思是「没量」，不是「达标」。三层里少一层最难量的亮层，
+           正是 G71 当初漏掉 warm/neutral 的形状（只量页面底的时候它们全绿）。
+           要求显式字面值：想换写法，先让 `contrastRatio` 会算它，再来改这一行。 */
+        if (surface === undefined) {
+          failures.push(`theme-${theme} 没有定义 ${surf}——fg-3 在它上面是否达标无从判断`)
+          continue
+        }
+        if (!surface.trim().startsWith('#')) {
+          failures.push(
+            `theme-${theme} 的 ${surf} 是 \`${surface.trim()}\`（非字面 hex）——`
+              + '这条判据只能算字面值。要么写成 hex，要么扩展 contrastRatio，不能靠跳过它换绿灯。',
+          )
+          continue
+        }
         const r = contrastRatio(expected, norm(surface))
         if (r < 4.5) failures.push(`theme-${theme} 的 --p-fg-3 对 ${surf} 只有 ${r.toFixed(2)}:1（< 4.5）`)
       }
