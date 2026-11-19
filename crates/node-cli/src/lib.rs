@@ -946,24 +946,36 @@ mod tests {
     }
 
     /// lib 单测里没有 Cargo 注入的 `CARGO_BIN_EXE_afcli`（它只给集成测试），
-    /// 但 `current_exe()` 就在 `target/debug/deps/` 下，`afcli` 是它的同级
-    /// `../afcli`。断言它存在再返回，缺了就当场报错而不是路径拼错。
+    /// 所以要自己从测试可执行文件的位置推到 `afcli`。
+    ///
+    /// **不能假设 `current_exe()` 的上一级就是 `target/debug`**：普通
+    /// `cargo test` 下它在 `target/debug/deps/`（上两级是 `debug`），但
+    /// `cargo llvm-cov` 把测试跑在 `target/llvm-cov-target/debug/build/<crate>-<hash>/`
+    /// 里——那里的上一级还是 `build/node-cli`，再上一级才到 `debug`。
+    /// 早期实现写死了「上两级」，于是覆盖率门禁在干净环境里**结构性必失败**
+    /// （而本地因为残留的 `target/llvm-cov-target/debug/afcli` 能侥幸通过，
+    /// 是最难查的那种假绿）。
+    ///
+    /// 现在自下而上找第一层含有 `afcli` 的祖先目录。找不到就把沿途试过的
+    /// 路径都列出来，免得又变成一句「路径拼错」。
     #[cfg(unix)]
     fn sibling_binary() -> std::path::PathBuf {
         let exe = std::env::current_exe().expect("test exe");
-        let bin = exe
-            .parent()
-            .and_then(|deps| deps.parent())
-            .expect("target/debug")
-            .join(BIN_NAME);
-        // 先把路径渲染好再断言：`assert!` 的消息只在失败时求值，把
-        // `display()` 放在消息里会让这一行在正常通过的用例里覆盖不到。
-        let shown = bin.display().to_string();
-        assert!(
-            bin.is_file(),
-            "找不到被测二进制 {shown}（由 cargo build 产出）"
-        );
-        bin
+
+        let mut tried: Vec<String> = Vec::new();
+        let mut dir = exe.parent();
+        while let Some(d) = dir {
+            let candidate = d.join(BIN_NAME);
+            if candidate.is_file() {
+                return candidate;
+            }
+            tried.push(candidate.display().to_string());
+            dir = d.parent();
+        }
+
+        // 先把路径渲染好再断言：`assert!` 的消息只在失败时求值。
+        let shown = tried.join("、");
+        panic!("找不到被测二进制 {BIN_NAME}（由 cargo build 产出），试过：{shown}");
     }
 
     /// 从管道读满一行就返回。`supervise` 永不退出，不能用 `read_to_string`
