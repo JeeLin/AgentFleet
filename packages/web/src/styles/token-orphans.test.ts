@@ -66,14 +66,19 @@
    （`--af-*` / `--p-*` 有没有人 `var()`）。两个反向守卫形状相同、对象不同，
    刻意分开：混在一起时改一条断言会连带影响另一边的读数。
 
-   ── 下面 34 条理由里的「N 次」是什么口径（写死，别再各写一套）─────────
-   **全部是「`var()` 引用计数」，范围 = `packages/web/src/` 的 `.css` + `.vue`，
-   不含 `theme-*.css` 里 `--x: var(--y)` 这种转发定义，不含测试文件。**
+   ── 下面每条理由里的「N 次」都由 `implVarCount()` 实测并钉住 ──────────
+   口径只写在 `implVarCount()` / `protoVarCount()` 一处（`counts` 字段与「次数与
+   实测值一致」那条用例共用它们），这里不再抄第二套散文：
+     · **实现侧** —— `packages/web/src/` 的 `.css` + `.vue` **剥注释后**的
+       `var()` 引用数，**不含** `theme-*.css` 里 `--x: var(--y)` 这种转发定义，
+       也不含测试文件；
+     · **原型侧** —— `prototype/assets/app.css` 里 `var(--名字)` 的出现数
+       （等价于 `grep -o`，不剥注释）。
    说「同族在役」时，数的是同族各名字的 `var()` 引用次数，不是「有几个名字存在」。
-   原型侧同理：`grep -o 'var(--名字)' prototype/assets/app.css | wc -l`。
-   写理由时要么两个数都给（名字数 + 次数），要么只用次数并写明「`var()` 计数」。
-   **不许把「4 个类型」与「40 次总数」并列成「四个（共 40 次）」**——那是两套口径
-   混在一句话里，读者会以为每个类型各 10 次。
+   每条理由只要写了次数，就必须在 `counts` 里声明「键 → 值」（键无前缀 = 实现侧，
+   `proto:` 前缀 = 原型侧）；用例会逐项复算，写错、漏写、或理由里出现没声明的
+   数字都判红。**不许把「4 个类型」与「40 次总数」并列成「四个（共 40 次）」**
+   ——那是两套口径混在一句话里，读者会以为每个类型各 10 次。
    =========================================================================== */
 
 import { readdirSync, readFileSync, statSync } from 'node:fs'
@@ -81,6 +86,7 @@ import { join, relative } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
+import { readRepoFile } from '@/test/css'
 import { stripCssAndLineComments } from '@/test/css-scan'
 
 const SRC = join(process.cwd(), 'src')
@@ -169,6 +175,98 @@ function consumedProps(): Set<string> {
   return out
 }
 
+/* ── 全文件**唯一**的一份「次数」计数器 ───────────────────────────────────
+   文件头说的口径就实现在这里，登记表的 `counts` 字段（见「次数与实测值一致」
+   那条用例）与所有人工写下的数字都用它复算。**不要另写第二份**：两份计数器
+   哪怕只差「含不含转发定义」这一项，`counts` 与实测就会各说各话，判据分叉
+   比没有判据更难查。
+
+   口径（与文件头一致）：
+     · 实现侧 —— `STRIPPED`（**已剥注释**）里的 `var(--名字)` 计数；
+     · 排除 `--x: var(--y)` —— 判法与 `consumedProps()` 逐字相同（往回找最近的
+       `{` `}` `;`，取中间那段，若只有 `--名字:` 就是定义右侧，跳过）；
+     · 原型侧 —— `prototype/assets/app.css` 的 `var(--名字)` 计数（不剥注释，
+       与 `grep -o` 等价）。
+   名字比较都用 `(?![-a-zA-Z0-9_])` 收尾：否则 `--af-danger` 会把
+   `var(--af-danger-fg)` 也数进去（实测会从 8 变 40，正是文件头警告的
+   「两套口径混在一句话里」）。 */
+function implVarCount(name: string, pathPrefix = '', family = false): number {
+  const suffix = family ? '' : '(?![-a-zA-Z0-9_])'
+  const re = new RegExp(`var\\(\\s*${name.replace(/-/g, '\\-')}${suffix}`, 'g')
+  let n = 0
+  for (const [file, text] of STRIPPED) {
+    if (pathPrefix && !file.startsWith(pathPrefix)) continue
+    for (const m of text.matchAll(re)) {
+      const before = text.slice(Math.max(0, m.index - 200), m.index)
+      const cut = Math.max(before.lastIndexOf('{'), before.lastIndexOf('}'), before.lastIndexOf(';'))
+      const seg = cut >= 0 ? before.slice(cut + 1) : before
+      if (/^\s*--[a-zA-Z0-9_-]+\s*:\s*$/.test(seg)) continue // 定义右侧，不算消费
+      n += 1
+    }
+  }
+  return n
+}
+
+function protoVarCount(name: string): number {
+  const re = new RegExp(`var\\(\\s*${name.replace(/-/g, '\\-')}(?![-a-zA-Z0-9_])`, 'g')
+  return prototypeSource().match(re)?.length ?? 0
+}
+
+/** 原型侧正文（惰性读一次）。`readRepoFile` 是既有助手，路径相对仓库根。 */
+let protoCache: string | null = null
+function prototypeSource(): string {
+  protoCache ??= readRepoFile('prototype/assets/app.css')
+  return protoCache
+}
+
+/**
+ * `counts` 的键 → 实测次数。四种键形：
+ *   · `--名字`          —— 实现侧全仓；
+ *   · `--名字@路径前缀`  —— 实现侧只数路径以该前缀开头的文件（`STRIPPED` 的键
+ *                          相对仓库根，所以前缀写 `packages/web/src/…`）；
+ *   · `proto:--名字`    —— 原型 `app.css`；
+ *   · `family:--名字`   —— 实现侧「全族」出现次数（**前缀**匹配，含 `-fg`/`-bg`
+ *                          等所有后缀）。只给「族总次数」这类句子用：族总不是
+ *                          任何单个名字的计数，用 `--名字` 表达不了。
+ * 路径键是给「总数 + 分文件拆分」用的：只钉总数的话，拆分里的数字写错没人发现。
+ */
+function measureCount(key: string): number {
+  if (key.startsWith('proto:')) return protoVarCount(key.slice('proto:'.length))
+  if (key.startsWith('family:')) return implVarCount(key.slice('family:'.length), '', true)
+  const at = key.indexOf('@')
+  return at < 0 ? implVarCount(key) : implVarCount(key.slice(0, at), key.slice(at + 1))
+}
+
+/* ── `counts` 的键 → 散文里可能用来指它的**短名** ─────────────────────────
+   为什么需要：理由里写 `-fg 14`、`-bg 9` 这种省略写法和 `--af-danger 8` 混着用。
+   只按「数字在不在 `Object.values(counts)` 里」判是不够的——`-bg 9` 改成 `-bg 8`
+   时，8 恰好是 `--af-danger` 的声明值，于是蒙混过关（实测过：⑥ 判绿）。
+   所以要把「短名 → 数字」绑到**同一个键**上。
+
+   映射规则（⑥ 的唯一依据，别在用例里另写一套）：
+     1. 去掉 `proto:` 前缀；去掉前导 `--`。
+        例：`proto:--warn-bg` → `warn-bg`，`--af-danger-fg` → `af-danger-fg`；
+     2. 由此得到「全名短名」，再展开两个省略别名，因为散文会省公共前缀：
+          · 家族尾巴 —— 去掉第一段 `af` / `p`：`af-danger-fg` → `danger-fg`
+          · 最末一段 —— `af-danger-fg` → `fg`
+     3. **`family:` 与 `@路径` 键不给别名**：
+          · `family:` 是「全族总数」，散文写「族总 40 次」而不是紧凑短名；
+            给它 `af-danger` 会和同名键抢同一串文字，实测会互相打架；
+          · `@路径` 是同一个 token 的**分文件拆分**，别名与全名键完全重复，
+            绑定必然有歧义。这两类只靠「声明值 vs 实测值」与带单位的兜底校验。
+   匹配时按**精确短名**查表（不做前缀匹配）：`-bg` 查 `bg`，`--af-danger` 查
+   `af-danger`。前缀匹配会把 `--af-danger-bg` 的数字记到 `--af-danger` 账上。
+   两个键共享同一别名时（如 `proto:--mono` 与 `--af-font-mono` 都有 `mono`），
+   该别名在 ⑥ 里**判红**（不用它绑值，也不静默跳过）：跳过会让那个数字没人复算，
+   实测有洞（`-strong 99` 曾判绿）。 */
+function shortNamesOf(key: string): string[] {
+  if (key.startsWith('family:') || key.includes('@')) return []
+  const k = key.replace(/^proto:/, '').replace(/^--/, '')
+  const familyTail = k.replace(/^(?:af|p)-/, '')
+  const lastSeg = k.slice(k.lastIndexOf('-') + 1)
+  return [...new Set([k, familyTail, lastSeg])].sort((a, b) => b.length - a.length)
+}
+
 /* ── 登记表：每一个「定义了但零 var() 消费」的名字，逐条写理由 ──────────────
    **不许写「暂未使用」**——那等于给孤儿开后门，G92 之前那批就是「暂未使用」
    攒出来的。每条理由都必须能被证伪：要么指向原型里的一行原文，要么指向
@@ -176,7 +274,14 @@ function consumedProps(): Set<string> {
 
    分组按**保留理由的性质**，不按文件。同一组里的 token 理由相同，
    就不重复写 N 遍。 */
-type OrphanReason = { why: string; kin: string }
+type OrphanReason = {
+  why: string
+  kin: string
+  /* 理由里写下的「N 次」逐项声明（键 → 值）。用例会拿 `measureCount()` 复算，
+     写错 / 漏声明的数字都判红。键形见 `measureCount()` 的注释（实现侧 / `@路径`
+     / `proto:` / `family:`）。 */
+  counts?: Record<string, number>
+}
 
 /* ⑤ **原型槽位的纯档位**：只有 1 个名字，但**不能并入 ④**——
    ④ 的判据是「四套主题各一套字面值」（实测 7 个成员在主题里各出现 4 次），
@@ -190,7 +295,8 @@ const PROTOTYPE_SCALE_BRIDGES: Record<string, OrphanReason> = {
       + '它自己零直读，而 `--p-s8` 有 12 次直读——**这是「档位 → 原型槽位」的桥**，'
       + '删了 `--p-s8` 就断链。与 `--af-space-14`（72px，原型无对应档）不同：'
       + '13 有原型出处（`prototype/assets/tokens.css:33`）。',
-    kin: '--af-space-1..12（在役）、--p-s8（12 次直读）',
+    kin: '--af-space-1..12（在役）、--p-s8（唯一消费者，见理由）',
+    counts: { '--p-s8': 12 },
   },
 }
 
@@ -205,23 +311,27 @@ const THEME_SOURCE_SLOTS: Record<string, OrphanReason> = {
   '--p-fg-strong': {
     why:
       '**真身槽位**（四套主题各一个字面值：`#dfe3e8` / `#e2ded6` / `#1c2127` / `#23211c`）。'
-      + '被 `--af-fg-strong` 与 `--af-term-ansi-bright-white` 两条转发出去（`theme-*.css:75/127/152/222`）。'
-      + '自身零规则直接读——G92 把那 17 处都改走 `--af-fg-strong` 门面层之后，'
+      + '被两条转发消费：四份 `theme-*.css` 里各有一行 `--af-fg-strong: var(--p-fg-strong)`，'
+      + '也各有一行 `--af-term-ansi-bright-white: var(--p-fg-strong)`。'
+      + '自身零规则直接读——G92 把那些直读都改走 `--af-fg-strong` 门面层之后，'
       + '它就成了「只被转发、不被直读」的真身。这正是门面层该有的形状，不是死代码。',
-    kin: '--af-fg-strong（17 次直读，在役）、--af-term-ansi-bright-white',
+    kin: '--af-fg-strong（17 次直读，在役）、--af-term-ansi-bright-white（四份主题各一行转发）',
+    counts: { '--af-fg-strong': 17 },
   },
   '--p-add-ink-c': {
     why:
       '**真身槽位**（diff 新增侧的墨色）。被 `--af-add-ink` 与 `--af-add-ink-strong` '
       + '两条转发（`theme-*.css`），自身零直读。`-c` 后缀是「这一层是颜色」的既有约定'
       + '（见 `theme-neutral.css` 的改名说明：`--add → --p-add-ink-c` 是有意改名）。',
-    kin: '--af-add-ink / --af-add-ink-strong（各 1 次直读）',
+    kin: '--af-add-ink（1 次直读）、--af-add-ink-strong（0 次直读）',
+    counts: { '--af-add-ink': 1, '--af-add-ink-strong': 0 },
   },
   '--p-del-ink-c': {
     why:
       '**真身槽位**（diff 删除侧的墨色）。被 `--af-del-ink`、`--af-del-ink-strong`、'
       + '`--af-danger-ink` 三条转发，自身零直读。删了会让 diff 两侧与 danger 墨色同时失去落点。',
-    kin: '--af-del-ink / --af-danger-ink（各 1 次直读）',
+    kin: '--af-del-ink（1 次直读）、--af-del-ink-strong（0 次）、--af-danger-ink（0 次）',
+    counts: { '--af-del-ink': 1, '--af-del-ink-strong': 0, '--af-danger-ink': 0 },
   },
   '--p-inset-c': {
     why:
@@ -250,7 +360,15 @@ const THEME_SOURCE_SLOTS: Record<string, OrphanReason> = {
   },
 }
 
-/** ① 原型里有这个槽位，实现必须搬过来（`theme-css.test.ts` 逐值对照原型的门禁）。 */
+/** ① 原型里有这个槽位，实现必须搬过来。
+ *
+ *  判据有两条，**对 8 个组员并非同一条**，别读成「全部由 `theme-css.test.ts` 逐值对照」：
+ *    · 3 个**字面槽位**（`--p-warn` / `--p-warn-bg` / `--p-warn-line`）——
+ *      四份 `theme-*.css` 里是字面色值，由 `theme-css.test.ts` 逐值对照原型；
+ *    · 5 个**转发槽位**（`--af-pending-{fg,bg,line}` 与 `--af-shadow-1/2`）——
+ *      四份 `theme-*.css` 里是 `--x: var(--y)`，由定义本身担保「这个槽位存在」，
+ *      而 `theme-css.test.ts` 的 `implName()` 只把原型名映射到 `--p-*`，
+ *      **读不到**这 5 个 `--af-*` 名字，所以那 5 个不在它的逐值对照范围内。 */
 const PROTOTYPE_COLOR_SLOTS: Record<string, OrphanReason> = {
   /* 注意：`--af-fg-strong` 曾在此，G92 补消费者后已移到 `RETIRED_ORPHANS`。 */
   '--af-pending-fg': {
@@ -268,26 +386,31 @@ const PROTOTYPE_COLOR_SLOTS: Record<string, OrphanReason> = {
       '原型 `--pending-bg`（`prototype/styles/theme-neutral.css:63`，四套各一份）的实现侧转发，'
       + '原型 `app.css` 用 1 次。零消费者原因同 `--af-pending-fg`：实现绕过门面层。',
     kin: '--af-pending-{fg,line}',
+    counts: { 'proto:--pending-bg': 1 },
   },
   '--af-pending-line': {
     why:
       '原型 `--pending-line`（`prototype/styles/theme-neutral.css:63`，四套各一份）的实现侧转发，'
       + '原型 `app.css` 用 1 次。零消费者原因同 `--af-pending-fg`。',
     kin: '--af-pending-{fg,bg}',
+    counts: { 'proto:--pending-line': 1 },
   },
   '--af-shadow-1': {
     why:
       '原型 `--sh-1: 0 1px 2px rgba(0,0,0,0.28)`（四套各一份）的实现侧转发。'
-      + '原型自己 `app.css` **零消费**，实现里浮层统一用 `--af-shadow-3`。'
+      + '原型自己 `app.css` 用 0 次，实现里浮层统一用 `--af-shadow-3`。'
       + '保留：`tokens.css:192` 起 §9 的注释写明「阴影名为 `--af-shadow-1/2/3`」'
       + '——**三档是一条阶梯**，只留第三档会让 `-3` 这个编号失去前两级依据。'
       + '要收就整族收到 `--af-shadow-1`，不能只删中间。',
     kin: '--af-shadow-3（在役，components.css）',
+    counts: { 'proto:--sh-1': 0 },
   },
   '--af-shadow-2': {
     why:
-      '原型 `--sh-2: 0 6px 18px rgba(0,0,0,0.38)` 的实现侧转发，零消费原因同 `--af-shadow-1`。',
+      '原型 `--sh-2: 0 6px 18px rgba(0,0,0,0.38)` 的实现侧转发（原型 `app.css` 用 2 次），'
+      + '零消费原因同 `--af-shadow-1`。',
     kin: '--af-shadow-3（在役）、--af-shadow-1',
+    counts: { 'proto:--sh-2': 2 },
   },
   '--p-warn': {
     why:
@@ -298,6 +421,7 @@ const PROTOTYPE_COLOR_SLOTS: Record<string, OrphanReason> = {
       + '**配色数据本身**：删了就把「原型 warn 是什么色」从代码里抹掉了，'
       + '`theme-css.test.ts` 也会判「原型有、实现没有」。',
     kin: '--p-warn-{bg,line}、--p-warn-{c,bg-c,line-c}（在役）',
+    counts: { 'proto:--warn': 8 },
   },
   '--p-warn-bg': {
     why:
@@ -305,12 +429,14 @@ const PROTOTYPE_COLOR_SLOTS: Record<string, OrphanReason> = {
       + '注：paper 是 0.10、cream 是 0.11，不是同一个值——这正是「每份各自计数」的例子）。'
       + '原型 `app.css` 用 5 次。零消费原因与保留理由同 `--p-warn`。',
     kin: '--p-warn、--p-warn-line、--p-warn-bg-c（在役）',
+    counts: { 'proto:--warn-bg': 5 },
   },
   '--p-warn-line': {
     why:
       '**字面色值**，原型 `--warn-line` 逐值搬来（0.32/0.34/0.28/0.28）。'
       + '原型 `app.css` 用 4 次。零消费原因与保留理由同 `--p-warn`。',
     kin: '--p-warn、--p-warn-bg、--p-warn-line-c（在役）',
+    counts: { 'proto:--warn-line': 4 },
   },
 }
 
@@ -336,6 +462,7 @@ const PROTOTYPE_ALIAS_LAYER: Record<string, OrphanReason> = {
       + '注意它与 `--p-r-md` 都指向 `--af-radius-lg`（两档压成一档）——'
       + '**这个压缩决定没有留下理由注释**，是这条守卫发现的既有欠账之一。',
     kin: '--p-r-{xs,sm,md,full}（在役）',
+    counts: { 'proto:--r-lg': 2 },
   },
   '--p-t-lg': {
     why:
@@ -348,6 +475,7 @@ const PROTOTYPE_ALIAS_LAYER: Record<string, OrphanReason> = {
       + '注意 `:360` 讲的是 `.af-head__title` 这一个选择器，**不是** `--p-t-lg` 的替换史'
       + '（两者容易混：`--p-t-lg` 是 18px，`--af-text-lg` 是另一条 15px，别混为一谈）。',
     kin: '--p-t-{2xs,xs,sm,md}（在役）',
+    counts: { 'proto:--t-lg': 1 },
   },
   '--p-t-xl': {
     why:
@@ -372,12 +500,13 @@ const PROTOTYPE_ALIAS_LAYER: Record<string, OrphanReason> = {
   },
   '--p-mono-c': {
     why:
-      '原型 `--mono`（`prototype/assets/tokens.css:18`，原型 `app.css` 用 11 次）的传名，'
+      '原型 `--mono`（`prototype/assets/tokens.css:18`）的传名，'
       + '`-c` 后缀是「避免与 `--af-*` 撞名」的既有约定。`SIZING_ALIASES` 要求存在。'
-      + '实现里等宽一律写 `--af-font-mono`（全仓 `var()` 引用 **15 处**：`components.css` 6、'
-      + '`prototype-shell.css` 2，另 6 个 `.vue` 各 1-2 处——不含 `tokens.css:357` 这条'
-      + '定义右侧，也不含 2 处注释提及），这层代理因此跑了空车。',
+      + '原型 `app.css` 用 11 次；实现里等宽一律写 `--af-font-mono`，全仓 `var()` 引用 15 处'
+      + '（`components.css` 6、`prototype-shell.css` 2，其余落在 6 个 `.vue` 文件里）'
+      + '——不含 `tokens.css:357` 这条定义右侧，也不含注释里的提及。这层代理因此跑了空车。',
     kin: '--p-sans（同组）',
+    counts: { 'proto:--mono': 11, '--af-font-mono': 15 },
   },
 }
 
@@ -465,6 +594,14 @@ const IMPLEMENT_ONLY_TIERS: Record<string, OrphanReason> = {
       + '保留：它是「danger 的墨色（diff/代码里的深色变体）」'
       + '这一命名意图的落点；删了之后 `-ink` 这个后缀在 danger 族里就没有先例可循。',
     kin: '--af-danger 8 / -fg 14 / -bg 9 / -line 9（`var()` 计数，四份主题定义不计）',
+    counts: {
+      '--af-danger': 8,
+      '--af-danger-fg': 14,
+      '--af-danger-bg': 9,
+      '--af-danger-line': 9,
+      '--af-danger-ink': 0,
+      'family:--af-danger': 40,
+    },
   },
   '--af-border-disabled': {
     why:
@@ -472,9 +609,18 @@ const IMPLEMENT_ONLY_TIERS: Record<string, OrphanReason> = {
       + '接最弱一档边界 */`——**注释明写了这是一个推断出来的槽位**（原型没给，'
       + '按语义接到 `--p-line-2`）。同族 `subtle/default/strong/focus` 四档在役。'
       + '保留：这是「原型缺哪一档、我们按什么原则补的」的**唯一书面记录**。'
-      + '同族里 `--af-fg-disabled` 全仓 `var()` 14 次（`components.css` 10 + 4 个 `.vue`），'
+      + '同族里 `--af-fg-disabled` 全仓 `var()` 12 次（`components.css` 8 + 3 个 `.vue` '
+      + '共 4 处：ProjectTaskPage 1 / NewSessionPage 2 / ConvFlow 1），'
       + '说明 disabled 态本身是存在的。',
     kin: '--af-border-{subtle,default,strong,focus}（在役 4 档）',
+    counts: {
+      '--af-fg-disabled': 12,
+      '--af-fg-disabled@packages/web/src/styles/components.css': 8,
+      '--af-fg-disabled@packages/web/src/domains': 4,
+      '--af-fg-disabled@packages/web/src/domains/project/ProjectTaskPage.vue': 1,
+      '--af-fg-disabled@packages/web/src/domains/session/NewSessionPage.vue': 2,
+      '--af-fg-disabled@packages/web/src/domains/session/ConvFlow.vue': 1,
+    },
   },
   '--af-border-selected': {
     why:
@@ -485,7 +631,9 @@ const IMPLEMENT_ONLY_TIERS: Record<string, OrphanReason> = {
   },
 }
 
-/* 三张表合成一张：守卫只关心「名字 → 理由」。 */
+/* 五张表合成一张：守卫只关心「名字 → 理由」。
+   （分组是「保留理由的性质」：① 原型红槽 / ② 原型对照层 / ③ 实现自加档 /
+   ④ 主题真身 / ⑤ 纯档位桥；改分组时同步改这里的「五」，别让计数漂移。） */
 const DECLARED_ORPHANS = new Map<string, OrphanReason>([
   ...Object.entries(PROTOTYPE_COLOR_SLOTS),
   ...Object.entries(PROTOTYPE_ALIAS_LAYER),
@@ -511,12 +659,26 @@ const DECLARED_ORPHANS = new Map<string, OrphanReason>([
    钉住它们**当前确实有消费者**——否则有人把那些 `var()` 改回 `--p-fg-strong`，
    它就会悄悄回到孤儿状态，而 ③ 号用例此时只会说「表里没这个名字」，
    不会提醒补登记。**退役也要有人看着**，这是 G92 留下的教训。 */
-const RETIRED_ORPHANS: Record<string, string> = {
-  '--af-fg-strong':
-    'G92 补消费者后退役：原型 `--fg-strong` 在 `app.css` 被用 33 次，'
-    + '实现里那 17 处曾直接写 `var(--p-fg-strong)` 绕过门面层'
-    + '（`components.css` 5 + `prototype-shell.css` 10 + `NewProjectPage.vue` 2）。'
-    + '改成 `var(--af-fg-strong)` 之后门面层才真的在服役。',
+const RETIRED_ORPHANS: Record<string, { why: string; minConsumers: number; counts?: Record<string, number> }> = {
+  '--af-fg-strong': {
+    why:
+      'G92 补消费者后退役：原型 `--fg-strong` 在 `app.css` 被用 33 次，'
+      + '实现里那 17 处曾直接写 `var(--p-fg-strong)` 绕过门面层'
+      + '（`components.css` 5 处 + `prototype-shell.css` 10 处 + `NewProjectPage.vue` 2 处）。'
+      + '改成 `var(--af-fg-strong)` 之后门面层才真的在服役。',
+    /* 17 是**下限**不是「当前恰好 17」：退役项的意义是「别再回到 0」，
+       而每处都钉死会让任何一次正常改版（多一个调用点 / 少一个调用点）
+       变成假红灯。下限仍然能把「改回 `--p-fg-strong`」抓成红——那会把
+       计数打到 0～16 之间。 */
+    minConsumers: 17,
+    counts: {
+      'proto:--fg-strong': 33,
+      '--af-fg-strong': 17,
+      '--af-fg-strong@packages/web/src/styles/components.css': 5,
+      '--af-fg-strong@packages/web/src/styles/prototype-shell.css': 10,
+      '--af-fg-strong@packages/web/src/domains/project/NewProjectPage.vue': 2,
+    },
+  },
 }
 
 describe('零 var() 消费的自定义属性必须逐个登记理由（反向守卫）', () => {
@@ -610,17 +772,142 @@ describe('零 var() 消费的自定义属性必须逐个登记理由（反向守
        它就会**静默**回到孤儿状态——此时 ① 号用例只会说「多了一个未登记的
        孤儿」，不会指认「这是你刚弄坏的」。这条把它接住。
 
-       判据写成「已定义 **且** 有消费者」，不是「不在孤儿集合里」：
-       退役项被整个删掉时也不在孤儿集合里，那样这条会静默通过。 */
+       判据写成「已定义 **且** 消费者数 ≥ `minConsumers`」，不是「不在孤儿集合里」：
+       退役项被整个删掉时也不在孤儿集合里，那样这条会静默通过。
+
+       **只数不查量是不够的**：初版只断言「有消费者（≥1）」，于是把 17 处里的
+       12 处改回 `var(--p-fg-strong)` 仍然判绿——剩下的 5 处让它「看起来还在役」。
+       现在用 `minConsumers` 钉住下限，并把实测值与原登记说明（17）对齐。
+       计数走 `implVarCount()`——全文件唯一的计数器，不另写一份。 */
     const defined = definedProps()
-    const consumed = consumedProps()
-    const broken = Object.keys(RETIRED_ORPHANS)
-      .filter((n) => !(defined.has(n) && consumed.has(n)))
-      .sort()
+    const broken: string[] = []
+    for (const [name, { minConsumers }] of Object.entries(RETIRED_ORPHANS)) {
+      if (!defined.has(name)) {
+        broken.push(`${name}: 已定义=否（token 被删了？）`)
+        continue
+      }
+      const measured = implVarCount(name)
+      if (measured < minConsumers) {
+        broken.push(`${name}: 消费者 ${measured} 次 < 下限 ${minConsumers} 次`)
+      }
+    }
     expect(
       broken,
-      `这些名字被登记为「已退役（有消费者）」，但现在没有消费者了：\n${broken.join('\n')}\n`
+      `这些名字被登记为「已退役（有消费者）」，但现在消费者数低于登记下限：\n${broken.join('\n')}\n`
         + '要么把消费者改回来，要么把它们移回 DECLARED_ORPHANS 重新写明理由。',
     ).toEqual([])
+  })
+
+  /* ⑥ 理由里的每个「N 次 / N 处」都必须有 `counts` 背书 ────────────────────
+     文件头那条口径（「`implVarCount()` 实测」）在这里落成断言。它管两件事：
+       a) 写了次数却没在 `counts` 里声明 → 判红（否则那句话没人复算）；
+       b) `counts` 里声明的值 ≠ `measureCount()` 实测 → 判红（写错了）。
+     **键集合要双向对齐**：只查 a 会让「随手多写一个键」蒙混过关，
+     只查 b 会让「整句数字全删掉」变成合法逃逸。
+     报错信息必须同时给出「条目 / 属性 / 声明值 / 实测值」，否则拿到红灯的人
+     还得自己去猜是哪一半错了——那是审查维度 18 点名的「错误口径」缺陷。 */
+  it('⑥ 理由里的次数都由 counts 声明，且散文里的短名/数字逐个对齐', () => {
+    const problems: string[] = []
+    /* 两种写法都要认：
+         · 带单位 —— `12 次` / `4 处`；
+         · 紧凑   —— `` `--af-danger` 8 / -fg 14 ``（短名 + 数字，无单位）。
+       紧凑写法不能只按「数字在不在 values 里」判：`-bg 9` 改成 `-bg 8` 时，
+       8 恰好是另一个键（`--af-danger`）的声明值，会蒙混过关（实测过：判绿）。
+       所以紧凑写法必须按 `shortNamesOf()` 绑到**具体的键**。
+       紧凑正则要求短名以 `-` 开头：否则 `--sh-2: 0 6px` 里的「0 6px」会被读成
+       「名字 0 + 次数 6」，`0.28` 这类小数也会被切开。
+       边界字符集里没有引号：`text` 是 `why + ' ' + kin` 拼起来的，所以 `kin` 的
+       第一个短名（原文形如 `'--af-danger 8 / …'`）前面是那个拼接空格，照样命中。
+       `(?![\d.])` 挡住 `14.5` 被截成 `14`。 */
+    const UNIT_RE = /(\d+)\s*(次|处)/g
+    const COMPACT_RE = /(?:^|[\s/、：（`(])(-{1,2}[a-z][a-z0-9-]*)\s+(\d+)(?![\d.])/g
+    type Row = { name: string; text: string; counts: Record<string, number> }
+    const rows: Row[] = [
+      ...[...DECLARED_ORPHANS].map(([name, e]) => ({
+        name,
+        text: `${e.why} ${e.kin}`,
+        counts: e.counts ?? {},
+      })),
+      ...Object.entries(RETIRED_ORPHANS).map(([name, e]) => ({
+        name,
+        text: e.why,
+        counts: e.counts ?? {},
+      })),
+    ]
+    for (const { name, text, counts } of rows) {
+      const values = Object.values(counts)
+      const declaredList = Object.entries(counts).map(([k, v]) => `${k}=${v}`).join('、')
+
+      /* (1) 声明值必须等于实测值。这条与散文无关，只钉 `counts` 自己。 */
+      for (const [key, value] of Object.entries(counts)) {
+        const measured = measureCount(key)
+        if (measured !== value) {
+          problems.push(
+            `${name} / ${key}: 声明 ${value} 次，实测 ${measured} 次`
+              + '（口径见 implVarCount()，改数字前先复算）',
+          )
+        }
+      }
+
+      /* (2) 紧凑写法：短名 → 唯一键，数字必须等于该键的声明值。 */
+      const aliasToKeys = new Map<string, string[]>()
+      for (const key of Object.keys(counts)) {
+        for (const alias of shortNamesOf(key)) {
+          const list = aliasToKeys.get(alias)
+          if (list) list.push(key)
+          else aliasToKeys.set(alias, [key])
+        }
+      }
+      const ambiguous = new Set([...aliasToKeys].filter(([, ks]) => ks.length > 1).map(([a]) => a))
+      for (const m of text.matchAll(COMPACT_RE)) {
+        const alias = m[1].replace(/^--?/, '')
+        const value = Number(m[2])
+        /* 共享短名**判红而不是跳过**。跳过的写法实测有洞：`--af-fg-strong` 条目同时
+           声明 `proto:--fg-strong` 与 `--af-fg-strong`，两者都产出短名 `strong`，
+           于是散文里写 `-strong 99` 会被整条跳过、数字没人复算（实测：8 passed）。
+           改成判红后，想写紧凑形态就必须用不歧义的短名（或写全名）。 */
+        if (ambiguous.has(alias)) {
+          problems.push(
+            `${name}: 散文写「${m[1]} ${m[2]}」，但短名 ${alias} 同时命中多个键`
+              + `（${(aliasToKeys.get(alias) ?? []).join(' / ')}）——写全名或换用不歧义的短名`,
+          )
+          continue
+        }
+        const hitKeys = aliasToKeys.get(alias)
+        if (!hitKeys) {
+          problems.push(
+            `${name}: 散文写「${m[1]} ${m[2]}」，但 counts 里没有短名为 ${alias} 的键`
+              + `（已声明：${declaredList || '无'}）`,
+          )
+          continue
+        }
+        const [key] = hitKeys
+        if (counts[key] !== value) {
+          problems.push(
+            `${name} / ${key}: 散文写「${m[1]} ${m[2]}」，但该键声明 ${counts[key]} 次`
+              + `（${key} 的实测值与声明值另由 (1) 校验）`,
+          )
+        }
+      }
+
+      /* (3) 兜底：带单位的次数表述，其数字必须出现在某个声明值里。
+         只管带单位的形态——紧凑写法的错绑由 (2) 负责，这里再按「值存在」放行
+         就等于把 (2) 的结论覆盖掉。 */
+      const unitPhrases = [...text.matchAll(UNIT_RE)].map((m) => `${m[1]} ${m[2]}`)
+      if (unitPhrases.length > 0 && Object.keys(counts).length === 0) {
+        problems.push(
+          `${name}: 理由里写了次数（${unitPhrases.join('、')}）但没声明 counts——这些数字目前没人复算`,
+        )
+        continue
+      }
+      const unexplained = unitPhrases.filter((p) => !values.includes(Number(p.split(' ')[0])))
+      if (unexplained.length > 0) {
+        problems.push(
+          `${name}: 理由里的 ${unexplained.join('、')} 在 counts 里找不到对应值`
+            + `（已声明：${declaredList}）`,
+        )
+      }
+    }
+    expect(problems, `counts 与理由不一致：\n${problems.join('\n')}`).toEqual([])
   })
 })
