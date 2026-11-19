@@ -86,6 +86,19 @@ pub struct Worker {
     /// 客户端的克隆。表本身放在 `Mutex` 里（`Conversations` 内部）而不是放
     /// worker 上，是为了让「哪条会话在跑」在 `select!` 的每一臂里都查得到。
     conversations: std::sync::Arc<crate::agent::Conversations>,
+    /// 已认领的 `execution_id`（子任务 4 的幂等）。
+    ///
+    /// **跨连接存活**：放进程级（`Arc`）而不是会话级。Hub 在没收到终态回报时
+    /// 会重派，而重派往往发生在**重连之后**——若集合跟着会话一起清掉，
+    /// 那条重派就会被当成新活再跑一遍，两条执行抢同一个 worktree。
+    ledger: std::sync::Arc<crate::dispatch::Ledger>,
+    /// 派发队列（`scheduling.md` §3.3：同一绑定默认串行）。
+    ///
+    /// 一次只跑一条派发，其余的排队等它。派发在 `spawn_blocking` 里跑，
+    /// 所以它不会堵住心跳与通道——那正是「任务」与「对话」能并存的原因。
+    dispatch_queue: std::sync::Arc<crate::dispatch::Queue>,
+    /// 派发的可注入配置（磁盘采样间隔 / 预算阈值 / 保留个数）。
+    dispatch_config: crate::dispatch::DispatchConfig,
 }
 
 /// 主动泵一轮的周期。
@@ -109,6 +122,9 @@ impl Worker {
             log: Box::new(log),
             detected: crate::agent::Detected::new(),
             conversations: std::sync::Arc::new(crate::agent::Conversations::new()),
+            ledger: std::sync::Arc::new(crate::dispatch::Ledger::new()),
+            dispatch_queue: std::sync::Arc::new(crate::dispatch::Queue::new()),
+            dispatch_config: crate::dispatch::DispatchConfig::default(),
         }
     }
 
@@ -134,6 +150,9 @@ impl Worker {
             log: Box::new(log),
             detected: crate::agent::Detected::new(),
             conversations: std::sync::Arc::new(crate::agent::Conversations::new()),
+            ledger: std::sync::Arc::new(crate::dispatch::Ledger::new()),
+            dispatch_queue: std::sync::Arc::new(crate::dispatch::Queue::new()),
+            dispatch_config: crate::dispatch::DispatchConfig::default(),
         }
     }
 
@@ -466,6 +485,11 @@ impl Worker {
         // 发送」这种人手速率的动作，30 ms 一轮等于每秒 33 次空查一张表。
         // 100 ms 在人的感知里仍然是「点了就发」。
         let mut inbound = tokio::time::interval(Duration::from_millis(100));
+        // 派发队列的推进周期。与 `inbound` 同一量级：它承载的动作由本机
+        // `spawn_blocking` 线程产出，不是网络往返。
+        let mut dispatch_ticker = tokio::time::interval(PUMP_INTERVAL);
+        // 正在跑的那一次派发（同一绑定默认串行，所以至多一个）。
+        let mut running: Option<crate::dispatch::Running> = None;
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
@@ -506,6 +530,19 @@ impl Worker {
                 _ = inbound.tick() => {
                     self.drain_inbound(est).await; // coverage: excluded (racy) — select! 竞争臂，见上。
                 }
+                // 派发队列的推进（子任务 4）。
+                //
+                // **独立成一条臂**而不是在收到 `task_dispatch` 时当场执行：
+                // 执行是阻塞的（git worktree add + 等子进程），放在读臂上会把
+                // 整条会话连同心跳一起冻住——那台设备在 Hub 眼里就掉线了，
+                // 而它的任务其实跑得很好。真正的执行在 `spawn_blocking` 里，
+                // `running` / 终态回报由它经通道推回本循环再发出去。
+                //
+                // 与 `inbound` / `pump` 一样是**竞争臂**（理由同 :347）：
+                // llvm-cov 下进不进取决于 Tokio 的随机轮询。
+                _ = dispatch_ticker.tick() => {
+                    self.drain_dispatch(est, &mut running).await; // coverage: excluded (racy) — select! 竞争臂，见上。
+                }
                 incoming = est.next_text() => match incoming {
                     Err(ConnOutcome::Transport { detail }) => return SessionEnd::Transport(detail),
                     // `next_text` 只产出 Transport；这条归类是诚实的降级，
@@ -524,6 +561,9 @@ impl Worker {
                             if let Some(ended) = self.on_channel_message(est, &frame).await {
                                 return ended;
                             }
+                            // 派发（子任务 4）。**必须放在这里**而不是 `conn.rs`
+                            // ——那里是握手阶段，只处理 auth_ok / auth_fail。
+                            self.on_dispatch_frame(est, &frame, &mut running).await;
                         }
                     },
                 },
@@ -807,6 +847,194 @@ impl Worker {
             payload,
         ))
         .await
+    }
+
+    /// 收到一帧 `task_dispatch`：认领 → 回 `accepted` → 入队。
+    ///
+    /// **这里只做不阻塞的事**：真正的建树 / 校验 / 执行在
+    /// [`Self::drain_dispatch`] 里交给 `spawn_blocking`（见 `session` 那条臂的
+    /// 注释）。放在读臂上等 git 与子进程会把心跳一起冻住。
+    ///
+    /// 三条硬约束的落点：
+    ///
+    /// - **基线不符绝不硬跑**：判定在 `dispatch::run` 里，`Mismatch` 分支在
+    ///   `Running` 之前就返回了，一个字节的 agent 都不执行。
+    /// - **执行中监控磁盘**：`dispatch::execute` 的采样循环，配置来自
+    ///   `self.dispatch_config`（生产默认值见 `dispatch::DEFAULT_*`）。
+    /// - **`prompt` 不是权限批准**：本函数与 `dispatch` 模块都没有任何
+    ///   「因为收到 dispatch 所以放行」的路径；`prompt` 只被放进子进程的环境
+    ///   变量（告诉 agent 要做什么），不进任何权限判定。
+    async fn on_dispatch_frame(
+        &self,
+        est: &mut Established,
+        frame: &Frame,
+        running: &mut Option<crate::dispatch::Running>,
+    ) {
+        if frame.msg_type != protocol::message::types::TASK_DISPATCH {
+            return;
+        }
+        match crate::dispatch::parse_frame(&frame.msg_type, &frame.c) {
+            crate::dispatch::Incoming::Rejected(r) => {
+                // **不静默吞掉**：Hub 那侧会一直等回报，所以要留一条说得清的日志；
+                // 能定位到 `execution_id` 时再回一条带归因的 `failed`，
+                // 免得那条执行在 Hub 上永远停在 queued。
+                self.say(&format!("task dispatch rejected: {}", r.reason));
+                if let Some(execution_id) = r.execution_id {
+                    self.send_ack(
+                        est,
+                        &protocol::message::TaskDispatchAck {
+                            execution_id,
+                            stage: protocol::message::DispatchStage::Failed,
+                            reason: Some(r.reason),
+                            evidence: Some("rejected on the device before any execution".into()),
+                            failure_kind: Some("rejected".to_string()),
+                        },
+                    )
+                    .await;
+                }
+            }
+            crate::dispatch::Incoming::Dispatch(dispatch) => {
+                if !self.ledger.claim(&dispatch.execution_id) {
+                    self.say(&format!(
+                        "task dispatch {} ignored: duplicate delivery",
+                        dispatch.execution_id
+                    ));
+                    return;
+                }
+                // `accepted` **立刻发**：Hub 落「设备已接单」靠它，而建树可能要
+                // 几秒（大仓库 checkout）。等建完再发等于让 Hub 白等。
+                self.send_ack(
+                    est,
+                    &protocol::message::TaskDispatchAck {
+                        execution_id: dispatch.execution_id.clone(),
+                        stage: protocol::message::DispatchStage::Accepted,
+                        reason: None,
+                        evidence: None,
+                        failure_kind: None,
+                    },
+                )
+                .await;
+                let depth = self.dispatch_queue.push((*dispatch).clone());
+                self.say(&format!(
+                    "task dispatch {} accepted (queue depth {depth})",
+                    dispatch.execution_id
+                ));
+                // 队列刚有活：不必等下一个 tick。
+                if running.is_none() {
+                    self.drain_dispatch(est, running).await;
+                }
+            }
+        }
+    }
+
+    /// 推进派发队列：取一件开始跑，或把正在跑的那一次的进展回报出去。
+    ///
+    /// 一次只跑一件（`scheduling.md` §3.3：同一绑定默认串行——两个任务并行
+    /// 的磁盘占用不是翻倍而是乘上并发数）。
+    async fn drain_dispatch(
+        &self,
+        est: &mut Established,
+        running: &mut Option<crate::dispatch::Running>,
+    ) {
+        let mut finished = false;
+        if let Some(run) = running.as_ref() {
+            for ack in run.take_pending() {
+                let terminal = ack.stage != protocol::message::DispatchStage::Accepted
+                    && ack.stage != protocol::message::DispatchStage::Running;
+                self.send_ack(est, &ack).await;
+                if terminal {
+                    finished = true;
+                }
+            }
+            if finished {
+                // 终态已回报：让 `execution_id` 可以被下一次派发重新认领。
+                // **不在 `accepted` 时就 forget**——那会让同一 `execution_id`
+                // 的重复投递又跑一遍。
+                self.ledger.forget(&run.execution_id);
+                self.say(&format!("task dispatch {} settled", run.execution_id));
+                *running = None;
+            }
+        }
+        if running.is_some() {
+            return;
+        }
+        let Some(next) = self.dispatch_queue.pop() else {
+            return;
+        };
+        *running = Some(self.start_dispatch(next));
+    }
+
+    /// 把一件派发丢进阻塞线程池，并返回它的回报口。
+    fn start_dispatch(
+        &self,
+        dispatch: protocol::message::TaskDispatch,
+    ) -> crate::dispatch::Running {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let execution_id = dispatch.execution_id.clone();
+        let config = self.dispatch_config.clone();
+        let repo = self.dispatch_repo_root();
+        let data_dir = self.data_dir.clone();
+        // **阻塞的活绝不能在本线程上跑**：`git worktree add` 与等子进程都是
+        // 同步 IO，放在 `select!` 的臂里会把心跳臂一起堵住（`v0.2.0` 的 exec
+        // 事故就是这么把心跳堵住的，症状是设备在 Hub 眼里掉线、本地毫无异常）。
+        tokio::task::spawn_blocking(move || {
+            let mut sink = crate::dispatch::ChannelSink(tx);
+            let outcome = crate::dispatch::run(&dispatch, &config, &repo, &mut sink);
+            for ack in &outcome.acks {
+                // 日志与 `Worker::say` 同一个落点（`entry::write` 单行 O_APPEND，
+                // 不会与主线程的行交错）。这里不持有 `Worker`：`spawn_blocking`
+                // 的闭包要 `'static`，而 `Worker` 不是 `Send` 的共享对象。
+                crate::entry::write(
+                    &data_dir,
+                    crate::entry::ROLE_WORKER,
+                    "info",
+                    &format!(
+                        "task dispatch {} reported {}",
+                        ack.execution_id,
+                        ack.stage.as_str()
+                    ),
+                );
+            }
+        });
+        crate::dispatch::Running::new(execution_id, rx)
+    }
+
+    /// 派发的工作仓库根。
+    ///
+    /// 帧里的 `worktree_path` 是**要建出来的目录**，不是仓库本身；`git worktree add`
+    /// 必须在一个已有的仓库里跑。本期用**设备数据目录**下的 `repos` 作为仓库根
+    /// ——真正的 fetch（从 Hub 拉代码）归项目管理面，本期还没落地，所以这里只
+    /// 保证「有一个目录能当仓库根」，没有仓库时由 `dispatch::run` 报
+    /// `env_broken` 并给出可读原因。**不在这里凭空 `git init`**：那会让一次派发
+    /// 对着一棵空树「成功」跑完，是本项目最反对的那类假阳性。
+    fn dispatch_repo_root(&self) -> PathBuf {
+        self.data_dir.join("repos")
+    }
+
+    /// 发一条派发回报。发不出去**不算执行失败**——Hub 判离站靠收不到心跳，
+    /// 而真正重要的是设备把活干完并留下日志。
+    async fn send_ack(&self, est: &mut Established, ack: &protocol::message::TaskDispatchAck) {
+        let payload = match serde_json::to_value(ack) {
+            Ok(v) => v,
+            // coverage: excluded — `TaskDispatchAck` 全是字符串与 Option<String>，
+            // 序列化失败构造不出（没有能失败的类型）。
+            Err(e) => {
+                self.say(&format!(
+                    "task dispatch ack encode failed ({}): {e}",
+                    ack.execution_id
+                ));
+                return;
+            }
+        };
+        let frame = Frame::push(protocol::message::types::TASK_DISPATCH_ACK, 0, payload);
+        if let Err(e) = est.send(&frame).await {
+            self.say(&format!(
+                "task dispatch ack send failed ({} {}): {}",
+                ack.execution_id,
+                ack.stage.as_str(),
+                outcome_phrase(&e)
+            ));
+        }
     }
 
     /// 控制面帧 → 会话终止判定。不是控制面的一律返回 `None`。

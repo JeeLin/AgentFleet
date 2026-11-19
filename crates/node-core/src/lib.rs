@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod channel;
 pub mod conn;
+pub mod dispatch;
 pub mod entry;
 pub mod heartbeat;
 pub mod identity;
@@ -15,6 +16,7 @@ pub mod reconnect;
 pub mod supervisor;
 pub mod update;
 pub mod worker;
+pub mod worktree;
 
 /// connector 与 PTY 在独立 crate `node-connector` 里（v0.12.0 按需加载
 /// 必须靠 crate 边界）。这里 re-export 是为了让既有调用点写

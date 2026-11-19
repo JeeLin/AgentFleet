@@ -228,6 +228,38 @@ Hub 未初始化（`secret` 表无 `hub.password`）时，**拒绝所有 enroll*
 [`MessageType::unknown_action`] 的 `Ignore`，不断连、不 bump `protocol_version`
 （§3 的版本规则：新增可选消息类型不 bump）。
 
+### 4.3 `task_dispatch` 的设备侧时序（v0.8.2）
+
+设备收到派发后**只做三件判定就回报**，每一步都不含糊：
+
+```text
+收到 task_dispatch
+  → 解析失败 / 未知 stage / 缺字段 → 回 Failed{failure_kind:"rejected"} + 可读原因
+                                     （不静默丢、不 panic；静默丢弃会让该执行在 Hub 上
+                                      永远停在 queued）
+  → worktree 建不出来（目录建不了 / git 失败）→ 回 Failed{failure_kind:"env_broken"}
+                                     （**不是** baseline_mismatch：那会让 Hub 去「重新
+                                      fetch」，而真正的问题是这台机器建不出目录）
+  → HEAD != base_commit           → 回 BaselineMismatch + 「本地是 X，要求 Y」
+                                     **不硬跑**：不报 running、不启动 agent
+  → HEAD == base_commit           → 回 Running → 执行
+                                      │ 执行期间按周期实测 worktree 占用
+                                      ├ 超预算 → **提前中止**，回
+                                      │   Failed{failure_kind:"disk_exhausted"}，
+                                      │   只保留前 N 个新增产物做诊断
+                                      └ 正常结束 → Succeeded /
+                                          Failed{failure_kind:"task_failed"|"agent_error"}
+```
+
+**`task_failed` 与 `agent_error` 的区别**（两者重试处置不同：换设备 vs 换 agent）：
+agent 正常退出但事情没做成（测试红了）= `task_failed`；agent 自己崩了 / 起不来 = `agent_error`。
+
+**幂等**：同一 `execution_id` 重复投递**不重复执行**。设备侧维护一份已认领台账，
+认领失败即视为重复，直接丢弃而不再跑一遍——重投是网络行为，不是「再跑一次」的授权。
+
+**执行不阻塞心跳**：真执行放在阻塞线程池，消息循环只负责入队。同步等
+`git worktree add` 与子进程会冻住心跳（`v0.2.0` 的 exec 事故就是这个形状）。
+
 ### 4.1 M2 为什么**没有**新增消息类型
 
 M2 往这一层加的东西只有一个：**心跳的 `agents` 字段**（设备上报扫描到哪些 agent）。
