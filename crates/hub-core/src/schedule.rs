@@ -22,14 +22,17 @@
 //! - **排序是字典序比较链，不是加权评分**（§4.3）：把负载 / 内存 / 磁盘 / 亲和
 //!   揉成一个浮点数，权重全靠拍脑袋，且「为什么选了这台」答不上来。有序链能答。
 //!
-//! # 本模块**不写**的部分
+//! # 失败之后下一步（`retry_policy`）
 //!
-//! `retry_policy`（失败形态 → 换设备 / 换 agent / 不重试）属于子任务 5，由另一
-//! 名开发者在本文件里补。本模块的结构不挡路：它只需要 `FailureKind` 与一个新的
-//! `RetryPlan` 枚举，与下面的常量、[`Routing`]、[`pick`] 零交集。
+//! 同一个文件里还有 [`retry_policy`]：失败形态 → [`RetryPlan`]（换设备 / 换
+//! agent / 同设备重来 / 不重试），矩阵来自 `scheduling.md` §5.1。它和上面的过滤
+//! 打分**零交集**，放在一起是因为两者都是「路由这一件事的纯函数部分」——**换设备
+//! 也要重新走一遍 [`pick`]**，那张磁盘硬门槛就在本文件里，两处分开反而容易让人
+//! 在重派路径上手写一套挑选逻辑。
 
 use std::collections::{BTreeSet, HashMap};
 
+use hub_storage::execution::FailureKind;
 use hub_storage::project::ProjectShape;
 use hub_storage::Binding;
 
@@ -955,6 +958,120 @@ fn compare_candidates(
     a_id.cmp(b_id)
 }
 
+// ---------------------------------------------------------------------------
+// 失败之后：换设备 / 换 agent / 同设备重来 / 不重试（`scheduling.md` §5.1）
+// ---------------------------------------------------------------------------
+
+/// 一次失败之后，下一步该**换什么条件**。
+///
+/// # 为什么是一个枚举而不是「换设备: bool + 换 agent: bool」
+///
+/// 两个布尔能拼出四种组合，其中三种有意义、一种（两个都换）没有——那等于
+/// 「把两个变量同时改掉再试一次」，出了结果也说不清是哪一个起了作用。枚举把
+/// 「不可能的组合」从类型上删掉，调用方的 `match` 也因此只有一个维度要想。
+///
+/// **刻意不含「怎么挑出那一台/那一个」**：那件事归 [`pick`]（含 ⑤ 磁盘硬门槛）
+/// 与调用方（换 agent 时 `device_id` 不变）。本类型只回答「该换哪一类条件」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryPlan {
+    /// 在同一台设备上用**同样的条件**重来一次。
+    ///
+    /// 唯一合法的情形是「重新拿一次代码就会好」——`baseline_mismatch` 的
+    /// 重新 `fetch`（`scheduling.md` §5.1 那行）。**不要**拿它当「原地重试」的
+    /// 通用出口：同样的条件下重试不会奇迹般成功，那正是 §5.1 开头作废旧说法的
+    /// 理由。
+    SameDevice,
+    /// 换一台设备重派。`device_id` 变，任务定义不变。
+    ///
+    /// 换设备时**磁盘硬门槛仍然生效**（§5.1 末句）：「换一台试」不等于「换一台
+    /// 不管空间够不够」。所以调用方必须重新走 [`pick`]（它的 ⑤ 层就是那张门槛），
+    /// 不能自己另写一套挑选。
+    DifferentDevice,
+    /// 换 agent 重派，**`device_id` 不变**。
+    ///
+    /// `task-model.md` §3.1 的原话：「同一个 agent 在同一台机器上重启，大概率
+    /// 还是同样的崩溃」——所以换 agent 有用、换机器不一定。把它做成
+    /// `DifferentDevice` 会让「这台设备上另一个 agent 本来能跑」这件事永远试不到。
+    DifferentAgent,
+    /// 不重试。`superseded` 专用：需求变了，换机器没用（`task-model.md` §3 第 7 行
+    /// 写明「永远没用」）。
+    NoRetry,
+}
+
+impl RetryPlan {
+    /// 线上字符串。单独列出来是给断言与轨迹用的——写进留痕的那一列必须是稳的
+    /// 字面量，不能跟着 `Debug` 的格式走。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SameDevice => "same_device",
+            Self::DifferentDevice => "different_device",
+            Self::DifferentAgent => "different_agent",
+            Self::NoRetry => "no_retry",
+        }
+    }
+
+    /// 全部变体。新增变体时本数组与上面的 `match` 同时改。
+    pub const ALL: &'static [Self] = &[
+        Self::SameDevice,
+        Self::DifferentDevice,
+        Self::DifferentAgent,
+        Self::NoRetry,
+    ];
+}
+
+/// 失败形态 → 下一步换什么条件（`scheduling.md` §5.1 那张表）。
+///
+/// | `failure_kind` | `RetryPlan` | 依据 |
+/// |---|---|---|
+/// | `env_broken` | `DifferentDevice` | 回原机重试是把已知坏环境再试一次 |
+/// | `disk_exhausted` | `DifferentDevice` | 同上；**且新设备要过 ⑤ 磁盘门槛** |
+/// | `task_failed` | `DifferentDevice` | 「事情没做成」，换台机器是有用的那个变量 |
+/// | `agent_error` | `DifferentAgent` | 换 agent 优先于换设备（同 agent 重启大概率同样崩） |
+/// | `interrupted` | `DifferentDevice` | 本期不做续跑，见下 |
+/// | `baseline_mismatch` | `SameDevice` | 同设备重新 fetch 一次 |
+/// | `rejected` | `NoRetry` | 调度器当场拒的，重试前要先改条件（见下） |
+/// | `superseded` | `NoRetry` | 需求变了，换机器没用 |
+///
+/// # `match` 必须穷尽，不许 `_ =>`
+///
+/// 协议侧 [`protocol::FAILURE_KINDS`] 现在是八条，但它是**另一份清单**（在
+/// `protocol` crate 里，设备也要读它）。将来加第九种形态时，若这里写了
+/// `_ => NoRetry`，新增的那一种会**静默地不重试**——症状是「任务失败后什么
+/// 都不发生」，而没有任何一处报错。写成穷尽匹配，那一次改动会在编译期红。
+///
+/// # `interrupted` 为什么是 `DifferentDevice` 而不是 `SameDevice`
+///
+/// §5.1 的口径是「**先续跑**（同设备，有检查点）；续不上才换设备」。本期
+/// **没有检查点机制**，也就没有「续跑」这个动作可做——那么在「同设备从头重跑」
+/// 与「换设备从头重跑」之间，前者是 §5.1 开头点名作废的那种做法（同样条件不会
+/// 奇迹般成功），后者至少换了环境。所以这一期取 `DifferentDevice`。
+///
+/// ⚠️ **检查点落地后这里要改回 `SameDevice` + 一个「先续跑」的分支**：那时
+/// 「保现场」比「换环境」值钱（§5.1「唯一回到同一台的合法情形是有检查点可续」）。
+///
+/// # `rejected` 为什么是 `NoRetry`
+///
+/// `task-model.md` §3.1 写明它「从来不是设备报上来的，是调度器当场拒的」——
+/// 它不产生 Execution，也就不该走到这条以 Execution 为前提的路径上。真被报了
+/// （设备侧误发），重试同一个约束只会得到同一个拒绝；该做的是**改条件**
+/// （放宽 `allowed_devices` / 装 agent），那是人的动作，不是调度器的。
+pub fn retry_policy(kind: FailureKind) -> RetryPlan {
+    match kind {
+        FailureKind::EnvBroken => RetryPlan::DifferentDevice,
+        FailureKind::DiskExhausted => RetryPlan::DifferentDevice,
+        FailureKind::TaskFailed => RetryPlan::DifferentDevice,
+        // 换 agent 优先于换设备：`device_id` 不变。
+        FailureKind::AgentError => RetryPlan::DifferentAgent,
+        // 本期不做续跑，理由见函数文档。
+        FailureKind::Interrupted => RetryPlan::DifferentDevice,
+        // 同设备重新 fetch 一次（「再失败就换设备」是第二次的结论，不由本函数
+        // 一次性给出——那要看这一次重试的结果）。
+        FailureKind::BaselineMismatch => RetryPlan::SameDevice,
+        FailureKind::Rejected => RetryPlan::NoRetry,
+        FailureKind::Superseded => RetryPlan::NoRetry,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1840,5 +1957,135 @@ mod tests {
             route(&task, &[("n_1", report)], &binds),
             Err(Rejection::NoAgent)
         );
+    }
+
+    // -----------------------------------------------------------------
+    // 失败之后：八种形态逐一的 RetryPlan（`scheduling.md` §5.1）
+    // -----------------------------------------------------------------
+
+    /// 八种失败形态**逐一**断言预期的 `RetryPlan`，并逐条写清理由。
+    ///
+    /// # 为什么一条用例里放八个断言而不是拆成八条
+    ///
+    /// 拆开之后「漏了某一种」会表现为「少一条用例」——而少一条用例在测试报告里
+    /// 和「本来就没有这一种」长得一样。放在一起的那段 `for` 逐个走**规格的八种**
+    /// （手写的一份清单，不是从枚举里枚举出来的），最后再对账「枚举的两侧都
+    /// 不多不少」，于是漏一种、多一种、改错一种都会红。
+    ///
+    /// 反命题（错实现会红的样子）：把 `AgentError` 也写成 `DifferentDevice`
+    /// （「反正都是换」），第二组断言立刻红。
+    #[test]
+    fn every_failure_kind_maps_to_the_retry_plan_the_spec_asks_for() {
+        // (形态, 期望, 一句话依据) —— 依据逐字来自 `scheduling.md` §5.1 那张表。
+        let table: &[(FailureKind, RetryPlan, &str)] = &[
+            (
+                FailureKind::EnvBroken,
+                RetryPlan::DifferentDevice,
+                "回原机重试是把已知坏环境再试一次",
+            ),
+            (
+                FailureKind::DiskExhausted,
+                RetryPlan::DifferentDevice,
+                "磁盘满就是那台机器的环境；但要先过 ⑤ 的硬门槛",
+            ),
+            (
+                FailureKind::TaskFailed,
+                RetryPlan::DifferentDevice,
+                "「事情没做成」，换台机器是有用的那个变量",
+            ),
+            (
+                FailureKind::AgentError,
+                RetryPlan::DifferentAgent,
+                "换 agent 优先于换设备（同 agent 重启大概率同样崩）",
+            ),
+            (
+                FailureKind::Interrupted,
+                RetryPlan::DifferentDevice,
+                "本期没有检查点、做不了续跑，于是换环境而不是原地重来",
+            ),
+            (
+                FailureKind::BaselineMismatch,
+                RetryPlan::SameDevice,
+                "同设备重新 fetch 一次就会好",
+            ),
+            (
+                FailureKind::Rejected,
+                RetryPlan::NoRetry,
+                "调度器当场拒的：不产生执行，重试同一个约束还是同一个拒绝",
+            ),
+            (
+                FailureKind::Superseded,
+                RetryPlan::NoRetry,
+                "需求变了，换机器没用",
+            ),
+        ];
+
+        for (kind, want, why) in table {
+            assert_eq!(
+                retry_policy(*kind),
+                *want,
+                "{:?}（{}）应当 {}，依据：{why}",
+                kind,
+                kind.as_str(),
+                want.as_str()
+            );
+        }
+
+        // 两侧对账：上面手写的清单必须**恰好**覆盖全部八种，不多不少。
+        // 漏一种 → 这里红；协议将来加第九种而本文件忘了加 → 这里也红
+        // （`FailureKind` 的 match 已经在 `retry_policy` 里逼人加，这条是第二道）。
+        assert_eq!(table.len(), 8, "规格只有八种失败形态");
+        assert_eq!(
+            FailureKind::ALL.len(),
+            table.len(),
+            "`FailureKind::ALL` 与这组期望必须同时改"
+        );
+        for kind in FailureKind::ALL {
+            assert!(
+                table.iter().any(|(k, _, _)| k == kind),
+                "{:?} 没有登记期望——新增形态时这里必须一起加",
+                kind
+            );
+        }
+        // 每个 `RetryPlan` 变体都至少被一种形态用到（否则它是个死分支）。
+        for plan in RetryPlan::ALL {
+            assert!(
+                table.iter().any(|(_, p, _)| p == plan),
+                "{} 没有任何失败形态映射到它",
+                plan.as_str()
+            );
+        }
+    }
+
+    /// `agent_error` → `DifferentAgent`，**不是** `DifferentDevice`。
+    ///
+    /// 单列一条是因为它是矩阵里唯一一个「换的东西不是机器」的格子，也最容易被
+    /// 「反正都换一下」抹平。判红方式：把 `agent_error` 那臂写成
+    /// `RetryPlan::DifferentDevice`，这条立刻红——而上面那条也会红，两条互为印证。
+    #[test]
+    fn an_agent_error_swaps_the_agent_and_not_the_device() {
+        assert_eq!(
+            retry_policy(FailureKind::AgentError),
+            RetryPlan::DifferentAgent,
+            "同一个 agent 在同一台机器上重启，大概率还是同样的崩溃"
+        );
+        assert_ne!(
+            retry_policy(FailureKind::AgentError),
+            RetryPlan::DifferentDevice,
+            "换的是 agent，device_id 必须不变"
+        );
+    }
+
+    /// `RetryPlan` 的线上串逐字写死。
+    ///
+    /// 不靠 `as_str()` 自比：那样改一个字符串，断言跟着改，永远绿。这几个字面量
+    /// 会被写进轨迹，页面按它们分组。
+    #[test]
+    fn the_retry_plan_codes_are_written_out_literally() {
+        assert_eq!(RetryPlan::SameDevice.as_str(), "same_device");
+        assert_eq!(RetryPlan::DifferentDevice.as_str(), "different_device");
+        assert_eq!(RetryPlan::DifferentAgent.as_str(), "different_agent");
+        assert_eq!(RetryPlan::NoRetry.as_str(), "no_retry");
+        assert_eq!(RetryPlan::ALL.len(), 4, "四个变体，四个线上码");
     }
 }

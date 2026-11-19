@@ -33,6 +33,7 @@ pub use reports::{
     merge_into_stored, presence, report_from_heartbeat, Presence, Report, Reports, OFFLINE_AFTER,
 };
 pub use schedule::{
-    pick, Rejection, Routing, TaskConstraints, DISK_SAFETY_MARGIN_BYTES, WORKTREE_BASE_BYTES,
+    pick, retry_policy, Rejection, RetryPlan, Routing, TaskConstraints, DISK_SAFETY_MARGIN_BYTES,
+    WORKTREE_BASE_BYTES,
 };
 pub use session::{Session, SessionStore};
