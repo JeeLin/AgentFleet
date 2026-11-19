@@ -1266,7 +1266,8 @@ kbd, .kbd {
    本文件**不再定义看板几何**（2026-11-17 删除）。上一版这里有一整族自造的
    `.af-board__col*`（列 / 列头 / 列体 / 列名 / 说明句 / 计数徽标，9 条规则）
    外加一份 `.af-board` 几何，而模板早已迁到原型的 `.af-col*`
-   （`BoardPage.vue:481`）→ 那一族 `grep -rc` 实测**模板零引用**，是死代码。
+   （`BoardPage.vue` 的 `section.af-col[data-state]` 模板）→ 那一族 `grep -rc`
+   实测**模板零引用**，是死代码。
    更糟的是它那份 `.af-board` 会与原型版抢同一个选择器：原型几何当时被放在
    `prototype-shell.css` 的变体类 `.af-board--proto` 里（模板零引用），于是
    页面命中的是这里的上一版几何——缺 `height: 100%` / `min-height: 0`、
@@ -1484,7 +1485,8 @@ kbd, .kbd {
    `Enter` / `Space` 天然触发，不需要自己代理键位。
 
    **基础块只留一条独有声明（v0.8.1 第5轮，G40）**：模板两处都写
-   `class="af-card af-taskcard"`（`TaskCard.vue:123`、`BoardPage.vue:595`），而
+   `class="af-card af-taskcard"`（`TaskCard.vue` 那个 `<button>` 的 `class`、
+   `BoardPage.vue` 新建表单里 `aria-label="预览"` 那张卡片），而
    `prototype-shell.css` 后导入、`.af-card` 与 `.af-taskcard` 同为单类选择器、
    特异性相同 —— 这里原有的 14 条声明里 **13 条从来没生效过**
    （`display` / `flex-direction` / `gap` / `width` / `text-align` / `background` /

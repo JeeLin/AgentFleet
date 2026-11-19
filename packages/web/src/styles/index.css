@@ -15,19 +15,26 @@
    第三层**必须最后**：它定义的是外壳与页面骨架（`.af-shell` / `.af-head` /
    `.af-body` / `.af-col` 等）。同名选择器以**后加载者**为准，所以顺序反过来
    会让两边的定义互相打架（症状是「样式改动没反应，且不报错」）。
-   **别把这条与 18% 类名重合率混为一谈**：重合率是静态 `grep` 出的统计量
-   （原型 255 个类里 47 个与实现同名），`@import` 顺序对它**零影响**。
-   它说明的是「上一轮大量类根本没搬过来」，与加载顺序无关——这两件事
-   曾被写在同一句话里，属于错误归因（第6轮订正）。
+   **别把这条与类名重合率混为一谈**：重合率是静态 `grep` 出的统计量
+   （口径：剥掉 `/* */` 注释后取唯一 `.类名` 集合，再对 `prototype/assets/app.css`
+   与 `components.css` 取交集——原型 277 个、实现 203 个、同名 34 个 ≈ 12%），
+   `@import` 顺序对它**零影响**。它说明的是「上一轮大量类根本没搬过来」，
+   与加载顺序无关——这两件事曾被写在同一句话里，属于错误归因（第6轮订正）。
+   （旧读数「255 个类 / 47 个同名 / 18%」按上面口径复算不出来，已重测；
+   `prototype-parity.test.ts` 与 `prototype-shell.css` 段头里的同一组旧读数
+   尚未同步，读到时不作数。）
 
    （注：`prototype-shell.css` 的 §3「区域容器」**没有规则**，只有一段说明；
-   `.af-region` 一族只在 `components.css:1369-1395`。此前这里写「`.af-region`
+   `.af-region` 一族只在 `components.css` 第 22 节的无编号子块「区域与提示条」
+   ——`.af-region` / `.af-region__head` / `.af-region__title` / `.af-region__note` /
+   `.af-region__body` / `.af-region__body--flush` 六条。此前这里写「`.af-region`
    也有原型版」是误记，第6轮已核 git 历史确认它从未移植。）
 
    三份文件都是 grep 校验过的单一真相源：变量数与 `design-system.md` §2
-   的「（62 个变量）」、组件节数与 §3 的「18 节」由 `shared/keynav.test.ts`
-   断言，原型对齐度由 `styles/prototype-parity.test.ts` 按类名清单断言。
-   （v0.8.1 第5轮：`--af-z-toast` / `--af-z-palette` 随死代码删除，64 → 62；
+   的「（85 个变量）」由 `styles/tokens.test.ts` 断言，组件节数与 §3 的
+   「（18 节）」由 `shared/keynav.test.ts` 断言，原型对齐度由
+   `styles/prototype-parity.test.ts` 按类名清单断言。
+   （v0.8.1 第5轮：`--af-z-toast` / `--af-z-palette` 随死代码删除；
    components.css 删掉 §7 Tabs / §10 Toast / §13 Tooltip / §16 只读遮罩 /
    §17 退避走带五个整族零消费的节，23 → 18 节。）
    =========================================================================== */
