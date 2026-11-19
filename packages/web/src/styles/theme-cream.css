@@ -50,9 +50,11 @@ html[data-theme="cream"] {
   --p-butler: #6a4a90;
   --p-butler-bg: rgba(106, 74, 144, 0.10);
   --p-butler-line: rgba(106, 74, 144, 0.26);
-  --p-warn: #8a6208;
-  --p-warn-bg: rgba(138, 98, 8, 0.11);
-  --p-warn-line: rgba(138, 98, 8, 0.28);
+  /* 同 theme-paper.css：--p-warn 原 #8a6208 实测 4.252:1，同步到 #805a07
+     → 4.78:1。-bg 的 alpha 是 0.11（与 paper 的 0.10 不同，保持不变）。 */
+  --p-warn: #805a07;
+  --p-warn-bg: rgba(128, 90, 7, 0.11);
+  --p-warn-line: rgba(128, 90, 7, 0.28);
   --p-add-ink-c: rgba(22, 107, 52, 0.13);
   --p-del-ink-c: rgba(165, 42, 30, 0.13);
   --p-dot-a: var(--p-acc);

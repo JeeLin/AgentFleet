@@ -54,9 +54,12 @@ html[data-theme="paper"] {
   --p-butler: #6a4a90;
   --p-butler-bg: rgba(106, 74, 144, 0.10);
   --p-butler-line: rgba(106, 74, 144, 0.28);
-  --p-warn: #8a6208;
-  --p-warn-bg: rgba(138, 98, 8, 0.10);
-  --p-warn-line: rgba(138, 98, 8, 0.28);
+  /* 第9轮：--p-warn 与 --p-queued 是同源同值的两条变量（都是 #8a6208），
+     上一轮只改了 queued，warn 这条被手写 5 对清单漏在外面，
+     实测 4.366:1。同步加深到 #805a07 → 4.91:1，-bg/-line 的 RGB 同步换。 */
+  --p-warn: #805a07;
+  --p-warn-bg: rgba(128, 90, 7, 0.10);
+  --p-warn-line: rgba(128, 90, 7, 0.28);
   --p-add-ink-c: rgba(31, 107, 58, 0.12);
   --p-del-ink-c: rgba(165, 42, 30, 0.12);
   --p-dot-a: var(--p-acc);

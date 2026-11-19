@@ -101,6 +101,23 @@ const PROTOTYPE_DIFFS: Record<string, string> = {
   '--p-failed-bg':
     '随 --p-failed 一起换的底色 RGB（neutral 220,144,139 / warm 219,145,136 -> 226,154,149），'
     + '理由同上：只改前景不改底色，前景与底会是两套红。alpha 不变。',
+  '--p-warn':
+    '第9轮：G75 从「手写 5 对」改成「从主题现发现 9 对」后抓出 —— paper/cream 的'
+    + '--p-warn 与 --p-queued 是同源同值（都是 #8a6208），上一轮只改了 queued。'
+    + '压在自己 -bg 上合成到 surf-1 只有 4.37 / 4.25:1，同步加深到 #805a07 -> 4.91 / 4.78。',
+  '--p-warn-bg':
+    '随 --p-warn 一起换的底色 RGB（138,98,8 -> 128,90,7），理由同上。alpha 不变（paper 0.10 / cream 0.11）。',
+  '--p-warn-line':
+    '随 --p-warn 一起换的描边 RGB（138,98,8 -> 128,90,7），理由同上。alpha 不变（0.28）。',
+  '--p-review':
+    '第9轮同一条判据抓出：neutral/warm 的 --p-review 压在自己 -bg 上、合成到 --p-surf-2 '
+    + '只有 4.34 / 4.48:1。暗色主题提亮（#a79ad8 -> #b2a7e1 / #b09ec9 -> #bbaad3）'
+    + '-> 4.87 / 4.98。paper/cream 的 #6b3fa0 本来就过（5.69+），不动。',
+  '--p-review-bg':
+    '随 --p-review 一起换的底色 RGB（neutral 167,154,216 / warm 176,158,201 -> 178,167,225 / 187,170,211），'
+    + '理由同上。alpha 不变。',
+  '--p-review-line':
+    '随 --p-review 一起换的描边 RGB，理由同上。alpha 不变（0.34）。',
 }
 
 /** 四套主题 `--p-fg-3` 的达标值（期望值写死在这里，不从实现里再算一遍）。 */

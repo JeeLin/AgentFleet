@@ -277,22 +277,44 @@ describe('对比度守卫', () => {
        ② 只量页面底不够：badge 很少直接坐在 `--p-bg` 上，它坐在卡片 / 阶段条里。
 
      判据只对「有 `-bg` 兄弟变量」的语义色生效，且要求前景与底同源（同色相）。
-     前景加深不该影响 `-line`（描边不是文字，AA 不管它）。 */
-  const SEMANTIC_PAIRS = [
-    ['--p-queued', '--p-queued-bg'],
-    ['--p-failed', '--p-failed-bg'],
-    ['--p-ok', '--p-ok-bg'],
-    ['--p-running', '--p-running-bg'],
-    ['--p-pending', '--p-pending-bg'],
-  ] as const
+     前景加深不该影响 `-line`（描边不是文字，AA 不管它）。
 
+     **配色对不手写，从主题文件里现发现**（第9轮 4c 实测抓出的洞）：
+     这一条最早钉了手写的 5 对（queued/failed/ok/running/pending），而主题里
+     实际有 9 对（还漏了 acc/butler/done/review）。手写清单的毛病是——
+     以后新增一个语义色，**没人会记得回来把它加进清单**，于是漏检且无声。
+     这正是 G75 当初被关掉时的形状（用一个名单堵了一个洞，下一条同类色照样漏）。
+     现在改成：扫 ``--p-X-bg`` 这种键，它的前景就是 ``--p-X``，两者都在才算一对。
+     下面还有一条反向守卫：发现到的配对数不得少于约定下限。 */
   describe('G75 — 语义色压在它自己的半透明底上仍达 AA（合成后再算）', () => {
+    /* 从主题文件现发现的配对。`--p-X-bg` 的兄弟是 `--p-X`——但只有两者都在
+       **同一套主题**里定义时才成对（`--p-warn-bg` 的兄弟是 `--p-warn`，
+       它是另一层别名；`--p-acc-bg` 的兄弟 `--p-acc` 同理）。 */
+    const pairsOf = (name: ThemeName): [string, string][] => {
+      const m = TOKENS[name]
+      const out: [string, string][] = []
+      for (const key of m.keys()) {
+        if (!key.endsWith('-bg')) continue
+        const fgKey = key.slice(0, -'-bg'.length)
+        if (m.has(fgKey)) out.push([fgKey, key])
+      }
+      return out.sort(([a], [b]) => a.localeCompare(b))
+    }
+
     for (const name of THEMES) {
       it(`${name}：语义色 / 自己的 -bg 合成底 ≥ ${AA}:1`, () => {
+        const pairs = pairsOf(name)
+        /* 反向守卫：发现机制本身失效（正则/前缀写错、主题文件被改名）时，
+           循环会是零次，上面那句 `toEqual([])` 会**空转判绿**。 */
+        expect(
+          pairs.length,
+          `主题 ${name} 里一对「语义色 + 自己的 -bg」都没发现——发现机制失效了，`
+            + '下面的循环会空转判绿。当前键：' + [...TOKENS[name].keys()].filter((k) => k.endsWith('-bg')).join(', '),
+        ).toBeGreaterThanOrEqual(6)
+
         const failures: string[] = []
-        for (const [fgKey, bgKey] of SEMANTIC_PAIRS) {
-          const rawBg = TOKENS[name].get(bgKey)
-          if (rawBg === undefined) continue
+        for (const [fgKey, bgKey] of pairs) {
+          const rawBg = TOKENS[name].get(bgKey) as string
           const fg = token(name, fgKey)
 
           /* `-bg` 是 `rgba(r,g,b,a)`：取它的颜色与 alpha，**按 alpha 合成**到

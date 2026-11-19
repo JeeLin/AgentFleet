@@ -35,9 +35,11 @@ html[data-theme="warm"] {
   --p-running: #8fb0d6;
   --p-running-bg: rgba(143, 176, 214, 0.15);
   --p-running-line: rgba(143, 176, 214, 0.34);
-  --p-review: #b09ec9;
-  --p-review-bg: rgba(176, 158, 201, 0.15);
-  --p-review-line: rgba(176, 158, 201, 0.34);
+  /* 同 theme-neutral.css：原 #b09ec9 合成到 --p-surf-2 上 4.48:1，
+     提亮到 #bbaad3 → 4.98:1。色相不变，-bg/-line 的 RGB 同步换。 */
+  --p-review: #bbaad3;
+  --p-review-bg: rgba(187, 170, 211, 0.15);
+  --p-review-line: rgba(187, 170, 211, 0.34);
   --p-done: #93c3a0;
   --p-done-bg: rgba(147, 195, 160, 0.15);
   --p-done-line: rgba(147, 195, 160, 0.34);

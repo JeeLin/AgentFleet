@@ -64,9 +64,12 @@ html[data-theme="neutral"], :root {
   --p-running: #7fb0e8;
   --p-running-bg: rgba(127, 176, 232, 0.14);
   --p-running-line: rgba(127, 176, 232, 0.34);
-  --p-review: #a79ad8;
-  --p-review-bg: rgba(167, 154, 216, 0.14);
-  --p-review-line: rgba(167, 154, 216, 0.34);
+  /* 第9轮 4c 把 G75 从「手写 5 对」改成「从主题现发现 9 对」后当场抓出：
+     原 #a79ad8 压在自己的 rgba(...,0.14) 上、合成到 --p-surf-2 只有 4.34:1。
+     暗色主题提亮到 #b2a7e1 → 4.87:1，色相不变；-bg/-line 的 RGB 同步换。 */
+  --p-review: #b2a7e1;
+  --p-review-bg: rgba(178, 167, 225, 0.14);
+  --p-review-line: rgba(178, 167, 225, 0.34);
   --p-done: #84c3a1;
   --p-done-bg: rgba(132, 195, 161, 0.14);
   --p-done-line: rgba(132, 195, 161, 0.32);
