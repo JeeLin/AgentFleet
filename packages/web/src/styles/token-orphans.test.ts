@@ -456,26 +456,33 @@ const PROTOTYPE_COLOR_SLOTS: Record<string, OrphanReason> = {
   },
   '--p-warn': {
     why:
-      '**字面色值**（不是转发）：四套主题各一套，`#cdae7a` / `#cfae74` / `#8a6208` / `#8a6208`，'
-      + '从原型 `--warn`（`prototype/styles/theme-neutral.css:70` 一行三槽）逐值搬来。原型的 `--warn` 在'
-      + '`app.css` 用 **8 次**。实现里 `--af-warn-*` 走的是 `--p-queued*`（两者原型同值），'
+      '**字面色值**（不是转发）：四套主题各一套，`#cdae7a` / `#cfae74` / `#805a07` / `#805a07`。'
+      + '前两套从原型 `--warn`（`prototype/styles/theme-neutral.css:70` 一行三槽）逐值搬来；'
+      + 'paper/cream 两套**已与原型脱钩**（原型 `#8a6208` → 实现 `#805a07`，理由见 `theme-css.test.ts` '
+      + '的 `PROTOTYPE_DIFFS[--p-warn]`：压在自己 -bg 上不达 AA）。'
+      + '原型的 `--warn` 在 `app.css` 用 **8 次**。实现里 `--af-warn-*` 走的是 `--p-queued*`，'
       + '另有一族 `--p-warn-c` 专供 `.af-tag--warn`——**裸三兄弟因此空转**，但它们是'
-      + '**配色数据本身**：删了就把「原型 warn 是什么色」从代码里抹掉了，'
-      + '`theme-css.test.ts` 也会判「原型有、实现没有」。',
+      + '**备用配色数据**：删了就把「warn 是什么色」从代码里抹掉了，'
+      + '`theme-css.test.ts` 也会判「原型有、实现没有」。'
+      + '第9轮把它们一起改成达标值：空转不等于可以存着不达标的值，'
+      + '将来谁把 `.af-tag--warn` 接到裸三兄弟上时不该直接踩坑。',
     kin: '--p-warn-{bg,line}、--p-warn-{c,bg-c,line-c}（在役）',
     counts: { 'proto:--warn': 8 },
   },
   '--p-warn-bg': {
     why:
-      '**字面色值**，原型 `--warn-bg` 逐值搬来（四套 alpha 各异：0.14/0.15/0.10/0.11，'
+      '**字面色值**（四套 alpha 各异：0.14/0.15/0.10/0.11，'
       + '注：paper 是 0.10、cream 是 0.11，不是同一个值——这正是「每份各自计数」的例子）。'
+      + 'RGB 部分：neutral/warm 逐值搬自原型 `--warn-bg`；paper/cream 随 `--p-warn` 一起'
+      + '从 `138,98,8` 换成 `128,90,7`（只改前景不改底会是两套黄褐）。alpha 不变。'
       + '原型 `app.css` 用 5 次。零消费原因与保留理由同 `--p-warn`。',
     kin: '--p-warn、--p-warn-line、--p-warn-bg-c（在役）',
     counts: { 'proto:--warn-bg': 5 },
   },
   '--p-warn-line': {
     why:
-      '**字面色值**，原型 `--warn-line` 逐值搬来（0.32/0.34/0.28/0.28）。'
+      '**字面色值**（四套 alpha：0.32/0.34/0.28/0.28）。'
+      + 'RGB 部分同 `--p-warn-bg`：neutral/warm 逐值搬自原型，paper/cream 随 `--p-warn` 脱钩。'
       + '原型 `app.css` 用 4 次。零消费原因与保留理由同 `--p-warn`。',
     kin: '--p-warn、--p-warn-bg、--p-warn-line-c（在役）',
     counts: { 'proto:--warn-line': 4 },
