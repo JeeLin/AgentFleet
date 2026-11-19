@@ -42,7 +42,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use protocol::message::{DispatchStage, TaskDispatch, TaskDispatchAck, FAILURE_KINDS};
+use protocol::message::{DiskItem, DispatchStage, TaskDispatch, TaskDispatchAck, FAILURE_KINDS};
 
 use crate::worktree::{self, BaselineVerdict};
 
@@ -335,6 +335,26 @@ fn ack(
         reason,
         evidence,
         failure_kind: failure_kind.map(str::to_string),
+        items: None,
+    }
+}
+
+/// 同 [`ack`]，但带上磁盘逐项实测清单。
+///
+/// 只有 `disk_exhausted` 用得上：Hub 侧的清理预演要回答「准备删什么、各占多大、
+/// 清理后释放多少」，这些数**只有设备知道**——Hub 没有这台机器的文件系统，
+/// 编一个大小比不报坏得多。不带这一项，预演只能算出「可释放 0」。
+fn ack_with_items(
+    execution_id: &str,
+    stage: DispatchStage,
+    reason: Option<String>,
+    evidence: Option<String>,
+    failure_kind: Option<&str>,
+    items: Vec<DiskItem>,
+) -> TaskDispatchAck {
+    TaskDispatchAck {
+        items: Some(items),
+        ..ack(execution_id, stage, reason, evidence, failure_kind)
     }
 }
 
@@ -484,7 +504,7 @@ pub fn run<S: AckSink>(
             used,
             kept,
             kept_dir,
-        } => ack(
+        } => ack_with_items(
             execution_id,
             DispatchStage::Failed,
             Some(format!(
@@ -499,6 +519,9 @@ pub fn run<S: AckSink>(
                 kept_dir
             )),
             Some("disk_exhausted"),
+            // 逐项实测清单：Hub 的清理预演靠它回答「各占多大、能释放多少」。
+            // **只报实测值**——`used` 是执行期间真实的目录求和，不是估算。
+            disk_items_for_abort(&prepared.path, used, &kept_dir),
         ),
         ExecOutcome::NotStarted { detail } => ack(
             execution_id,
@@ -771,6 +794,65 @@ fn quarantine_artifacts(
 /// 有一条**可执行的**检查（新增形态时这里会立刻暴露）。
 pub fn is_known_failure_kind(kind: &str) -> bool {
     FAILURE_KINDS.contains(&kind)
+}
+
+/// 磁盘耗尽中止时的逐项清单（`ack.items`）。
+///
+/// 报两项：
+///
+/// - **整棵工作树**（`class: "worktree"`）：这是被丢弃的大头，`used` 是执行期间
+///   实测的目录求和，**不是估算**。它在 `quarantine_artifacts` 之后被删掉
+///   （见调用处），所以它就是「能释放多少」的主要来源。
+/// - **保留下来的产物**（`class: "artifact"`，逐个）：它们是诊断材料，
+///   要留下、**不该**被算进「可释放」。报上来是为了让人看到「留着这些」。
+///
+/// 只报**实测**大小：读不到的条目**不猜**，直接不报（少算可释放空间，
+/// 而不是编一个数让用户清错东西）。
+fn disk_items_for_abort(worktree: &Path, used: u64, kept_dir: &str) -> Vec<DiskItem> {
+    let mut items = Vec::new();
+
+    items.push(DiskItem {
+        path: worktree.display().to_string(),
+        bytes: used,
+        class: "worktree".to_string(),
+        modified_at: None,
+        label: worktree.file_name().map_or_else(
+            || "worktree".to_string(),
+            |s| s.to_string_lossy().into_owned(),
+        ),
+    });
+
+    // 保留下来的产物：逐个实测大小。这是「留下」项，Hub 侧按 class 分派。
+    let kept = Path::new(kept_dir);
+    if let Ok(entries) = std::fs::read_dir(kept) {
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        // 排序只为让输出稳定（两次同样的中止给出同样的清单）。
+        names.sort();
+
+        for name in names {
+            let path = kept.join(&name);
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue; // 读不到就不报，不猜
+            };
+            items.push(DiskItem {
+                modified_at: meta.modified().ok().and_then(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .and_then(|d| i64::try_from(d.as_secs()).ok())
+                }),
+                path: path.display().to_string(),
+                bytes: meta.len(),
+                class: "artifact".to_string(),
+                label: name,
+            });
+        }
+    }
+
+    items
 }
 
 /// 一个小助手：把一串 ack 压成「有没有终态」的判定（给调用方落日志用）。
@@ -1118,6 +1200,52 @@ mod tests {
             !wt.exists(),
             "中止时必须删掉整个工作树（它是要避免的磁盘灾难）"
         );
+
+        // 4. 回执必须带逐项实测清单——Hub 的清理预演靠它算「各占多大、能释放多少」。
+        //    没有它，预演只能算出「可释放 0」，这条能力等于不存在。
+        let items = terminal
+            .items
+            .as_ref()
+            .expect("disk_exhausted 的 ack 必须带 items 清单");
+
+        let worktree_item = items
+            .iter()
+            .find(|i| i.class == "worktree")
+            .expect("必须报出被丢弃的整棵工作树");
+        assert!(
+            worktree_item.bytes > 0,
+            "工作树的字节数必须是实测的 > 0，实际 {}",
+            worktree_item.bytes
+        );
+        assert_eq!(
+            worktree_item.path,
+            wt.display().to_string(),
+            "报的必须就是那棵被删的工作树"
+        );
+
+        let artifacts: Vec<&DiskItem> = items.iter().filter(|i| i.class == "artifact").collect();
+        assert_eq!(
+            artifacts.len(),
+            3,
+            "保留的 3 个产物要逐个报上来（它们是诊断材料，不该被算进可释放）"
+        );
+        for a in &artifacts {
+            assert!(a.bytes > 0, "产物 {} 的字节数必须是实测的 > 0", a.label);
+            assert!(
+                std::path::Path::new(&a.path).exists(),
+                "报上来的产物必须真的还在：{}",
+                a.path
+            );
+        }
+
+        // 闭集：class 只能是协议定的那三种。
+        for i in items {
+            assert!(
+                protocol::message::DISK_ITEM_CLASSES.contains(&i.class.as_str()),
+                "class {} 不在闭集里",
+                i.class
+            );
+        }
     }
 
     /// **判据 5：未知 `stage` / 缺字段的帧 → 不 panic、不静默吞掉。**

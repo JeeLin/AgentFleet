@@ -888,6 +888,7 @@ impl Worker {
                             reason: Some(r.reason),
                             evidence: Some("rejected on the device before any execution".into()),
                             failure_kind: Some("rejected".to_string()),
+                            items: None,
                         },
                     )
                     .await;
@@ -911,6 +912,7 @@ impl Worker {
                         reason: None,
                         evidence: None,
                         failure_kind: None,
+                        items: None,
                     },
                 )
                 .await;
