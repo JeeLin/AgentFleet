@@ -11,6 +11,7 @@ pub mod limits;
 pub mod registry;
 pub mod repo;
 pub mod reports;
+pub mod schedule;
 pub mod session;
 pub mod time;
 
@@ -24,5 +25,8 @@ pub use registry::Registry;
 pub use repo::{BareRepo, RepoError};
 pub use reports::{
     merge_into_stored, presence, report_from_heartbeat, Presence, Report, Reports, OFFLINE_AFTER,
+};
+pub use schedule::{
+    pick, Rejection, Routing, TaskConstraints, DISK_SAFETY_MARGIN_BYTES, WORKTREE_BASE_BYTES,
 };
 pub use session::{Session, SessionStore};
