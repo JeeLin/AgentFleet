@@ -44,6 +44,16 @@
    由 `src/styles/prototype-parity.test.ts` 按类名清单断言。
    =========================================================================== */
 
+/* 全局链接色：原型 `app.css` 第 30 行 `a { color: var(--acc); text-decoration: none; }`
+   ——移植时漏了这一条，后果是**任何没显式设色的 `<a>` 都掉回浏览器 UA 的链接色**：
+   `-webkit-link`（`rgb(158,158,255)`）在 `color-scheme: dark` 下就是这个紫蓝，
+   它在 paper / cream 两套亮底上只有 2.1:1，且不属于任何 token。
+   实测来源：总览页 `.af-region__title > a`（项目名链接）——父级写了
+   `color: var(--af-fg-strong)`，但继承被 UA 的 `a:-webkit-any-link` 规则盖掉。
+   这是**全局兜底**，不是给单个组件打补丁：缺了它，下一个新写的裸链接还会重现。 */
+a { color: var(--af-accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
 /* ===========================================================================
    1. 外壳：rail + 主区（原型 §外壳 app.css:46-134）
    -------------------------------------------------------------------------

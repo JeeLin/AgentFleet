@@ -229,8 +229,22 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 }
 .af-btn:hover { background: var(--p-surf-3); border-color: var(--p-line-4); color: var(--af-fg-strong); }
 .af-btn:active { background: var(--p-surf-2); }
-.af-btn:disabled, .af-btn[aria-disabled='true'] {
-  opacity: 0.5; pointer-events: none; color: var(--af-fg-disabled);
+/* 禁用态**不用 `opacity`**（v0.8.1 第8轮 G72b 订正）。
+   -------------------------------------------------------------------------
+   原先写 `opacity: 0.5`，理由是「整体淡下去，一眼看出点不了」。这个理由对
+   **观感**成立，对**可读性**不成立：`opacity` 是整元素淡化，底色与文字
+   **一起**向页面底靠，于是「文字 vs 底」的对比度不随淡化保持，而是塌掉。
+   第5轮只给 `.af-btn--primary` 单独修了配色（见下方那段），其余按钮没动 ——
+   实测真实控件的禁用态（设备表与 Agent 目录的「用它开会话」）是
+   **2.07–2.78:1**，正是 G72 注释里判为「等于看不见」的同一量级。
+
+   现在统一成：**不淡化，改用显式弱色**（`--p-fg-3` 文字 + `--p-surf-2` 底 +
+   `--p-line-3` 描边）。四套主题实测 5.05–5.32:1。
+   `pointer-events: none` 保留——它才是「点不了」的机制，`opacity` 只是视觉提示。 */
+.af-btn:disabled,
+.af-btn[aria-disabled='true'] {
+  background: var(--p-surf-2); border-color: var(--p-line-3);
+  color: var(--p-fg-3); opacity: 1; pointer-events: none;
 }
 /* 原型 `.af-btn--sm { min-height: 26px; font-size: var(--t-2xs); padding: 0 8px }` */
 .af-btn--sm { min-height: 26px; padding: 0 var(--p-s2); font-size: var(--p-t-2xs); }
@@ -451,7 +465,12 @@ td, li, p, h1, h2, h3 { -webkit-user-select: text; user-select: text; }
 .af-table tbody tr[aria-selected='true'] { background: var(--af-accent-bg); box-shadow: inset 2px 0 0 var(--af-accent); }
 .af-table tbody tr[aria-selected='true'] td { color: var(--af-fg-primary); }
 .af-table tbody tr[data-inert='true'] td { color: var(--af-fg-tertiary); }
-.af-table tbody tr[data-inert='true'] .af-btn { pointer-events: none; opacity: 0.6; }
+/* inert 行里的按钮：`pointer-events: none` 保留，`opacity` 去掉。
+   `opacity: .6` 会让按钮内的文字与底一起向页面底靠，实测禁用主按钮只有
+   **2.734:1**（第8轮 4d 在设备表「用它开会话」上实测）。整行已经是
+   `--af-fg-tertiary` 的弱色（上一条 `td` 规则），按钮不需要再叠一层淡化：
+   它与 `.af-btn:disabled` 的统一配色（`--p-fg-3` 文字 + `--p-surf-2` 底）一致。 */
+.af-table tbody tr[data-inert='true'] .af-btn { pointer-events: none; }
 
 /* 表格外框：边框 + 圆角 + 滚动三件一起来。缺圆角时滚到角落，表格的方角会
    戳出圆角框外；缺 `overflow:auto` 时 `.af-table th` 那层 sticky 会跟着

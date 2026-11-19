@@ -542,7 +542,7 @@ const PROTOTYPE_ALIAS_LAYER: Record<string, OrphanReason> = {
   },
   '--p-mono-c': {
     why:
-      '原型 `--mono`（`prototype/assets/tokens.css:18`）的传名，'
+      '原型 `--mono`（`prototype/assets/tokens.css` 的字族段）的传名，'
       + '`-c` 后缀是「避免与 `--af-*` 撞名」的既有约定。`SIZING_ALIASES` 要求存在。'
       + '原型 `app.css` 用 11 次；实现里等宽一律写 `--af-font-mono`，全仓 `var()` 引用 15 处'
       + '（`components.css` 6、`prototype-shell.css` 2，其余匀在六个 `.vue` 文件里，'
@@ -658,13 +658,15 @@ const IMPLEMENT_ONLY_TIERS: Record<string, OrphanReason> = {
       + '接最弱一档边界 */`——**注释明写了这是一个推断出来的槽位**（原型没给，'
       + '按语义接到 `--p-line-2`）。同族 `subtle/default/strong/focus` 四档在役。'
       + '保留：这是「原型缺哪一档、我们按什么原则补的」的**唯一书面记录**。'
-      + '同族里 `--af-fg-disabled` 全仓 `var()` 12 次（`components.css` 8 + 3 个 `.vue` '
+      + '同族里 `--af-fg-disabled` 全仓 `var()` 11 次（`components.css` 7 + 3 个 `.vue` '
       + '共 4 处：ProjectTaskPage 1 / NewSessionPage 2 / ConvFlow 1），'
-      + '说明 disabled 态本身是存在的。',
+      + '说明 disabled 态本身是存在的。'
+      + '（第8轮 G72b 把 `.af-btn` 禁用态的 `color` 从那一个改成了 `--p-fg-3`，'
+      + '所以 `components.css` 从 8 降到 7——`opacity: .5` 会让对比度塌到 2.07:1。）',
     kin: '--af-border-{subtle,default,strong,focus}（在役 4 档）',
     counts: {
-      '--af-fg-disabled': 12,
-      '--af-fg-disabled@packages/web/src/styles/components.css': 8,
+      '--af-fg-disabled': 11,
+      '--af-fg-disabled@packages/web/src/styles/components.css': 7,
       '--af-fg-disabled@packages/web/src/domains': 4,
       '--af-fg-disabled@packages/web/src/domains/project/ProjectTaskPage.vue': 1,
       '--af-fg-disabled@packages/web/src/domains/session/NewSessionPage.vue': 2,
