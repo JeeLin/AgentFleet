@@ -405,26 +405,64 @@ describe('面板三分区（子任务 12）', () => {
   })
 
   /* `declOf` 自己的判据要能验：它是上面那条「标题必须 strong」的承重墙，
-     写错了不会有人发现（测试还是绿的）。三条最小事实，用内联 CSS 钉住——
-     不依赖真实样式表，改样式不会让它假红。 */
-  it('declOf 取「最后一条」属性值，剥注释，忽略别的属性', () => {
-    // 注释放在**真声明之后**：不剥注释时「取最后一条」会读到注释里那条，
-    // 这条断言立刻红——两个机制（剥注释 / 取最后）各自都被钉住。
+     写错了不会有人发现（测试还是绿的）。用内联 CSS 钉住——不依赖真实样式表，
+     改样式不会让它假红。
+
+     **两条机制各用「两个方向」的夹具**（v0.8.1 第8轮 G110）。原写法方向单一：
+     正确值总在前、错值总在后，注释也总在真声明之后。方向单一时，有的变异
+     靠夹具**凑巧**才被抓住，换一种同样合法的夹具就漏——实测「不剥注释」在
+     「注释排在真声明**之前**」的形态下 **29 条全绿**（正是 commit message 自陈
+     「第一版两个子用例其实是空的」那个形态）。所以下面四个夹具成对出现：
+
+       · **取最后 vs 取第一**：`forward`（正确在前、错在后）期望末条、`backward`
+         （错在前、正确在后）也期望末条。两条都断言**具体的末条值**，因此取第一条
+         的实现会在两条上都返回首个值、与期望不符 → 红。断言的是「后者胜」的取值
+         语义，不是「两个值不同」这种弱事实。
+
+       · **剥注释 vs 不剥**：注释里写**错值**，两个位置各放一条。
+         - `commentAfter`（注释在真声明**之后**）：不剥注释时「取最后一条」吃到
+           注释里的错值 → **红**；
+         - `commentBefore`（注释在真声明**之前**）：不剥注释时末条仍是真声明里的
+           正确值（这条本身**绿**），它钉的是「取第一条」——“先取到注释里的错值”。
+         两者合起来才保证「不剥注释」在至少一个方向被抓住。
+
+     结论要可证伪：不要写「这条断言立刻红」这种只对单一方向成立的绝对话。
+     实际保证是「四个夹具里，任一机制被改坏都至少有一条断言红」——上面每条
+     变异都已实测为 1 failed / 28 passed。 */
+  it('declOf 取「最后一条」属性值，剥注释，忽略别的属性（两个方向都钉住）', () => {
     const sample = `
       .x {
         color: var(--af-fg-strong);
         outline-color: var(--p-fg-2);
-        /* color: var(--p-fg-2); */
       }
     `
-    expect(declOf(sample, '.x', 'color')).toBe('var(--af-fg-strong)')
     // 只出现一次时如实取那一次
+    expect(declOf(sample, '.x', 'color')).toBe('var(--af-fg-strong)')
+    // 别的属性（`outline-color` 里也含 "color"）不得被误当成 `color`
     expect(declOf(sample, '.x', 'outline-color')).toBe('var(--p-fg-2)')
     // 属性不存在 → 空串（交给调用方断言判红，不静默通过）
     expect(declOf(sample, '.x', 'background-color')).toBe('')
-    // 同块内写两条 → CSS 后者胜，必须取最后一条
-    const twice = `.y { color: var(--af-fg-strong); color: var(--p-fg-2); }`
-    expect(declOf(twice, '.y', 'color')).toBe('var(--p-fg-2)')
+
+    /* ── 方向一：正确值在前、错值在后 → 期望末条（错值）──────────────────
+       CSS 后者胜：页面上生效的是 `--p-fg-2`。取第一条会返回正确值 → 红。 */
+    const forward = `.f { color: var(--af-fg-strong); color: var(--p-fg-2); }`
+    expect(declOf(forward, '.f', 'color')).toBe('var(--p-fg-2)')
+
+    /* ── 方向二：错值在前、正确值在后 → 期望末条（正确值）────────────────
+       与前一条**反过来**：取第一条会返回错值 → 红。两条合起来，
+       「必须取最后一条」这条语义在任一方向上都无处可逃。 */
+    const backward = `.b { color: var(--p-fg-2); color: var(--af-fg-strong); }`
+    expect(declOf(backward, '.b', 'color')).toBe('var(--af-fg-strong)')
+
+    /* ── 注释在真声明**之后**：不剥注释时「取最后一条」会读到注释里的错值 → 红 */
+    const commentAfter = `.ca { color: var(--af-fg-strong); /* color: var(--p-fg-2); */ }`
+    expect(declOf(commentAfter, '.ca', 'color')).toBe('var(--af-fg-strong)')
+
+    /* ── 注释在真声明**之前**：不剥注释时末条仍是真声明里的正确值（这条绿），
+       但「取第一条」会读到注释里的错值 → 红。两个变异各被一个方向钉住，
+       所以「不剥注释」不会因为夹具形态而漏。 */
+    const commentBefore = `.cb { /* color: var(--p-fg-2); */ color: var(--af-fg-strong); }`
+    expect(declOf(commentBefore, '.cb', 'color')).toBe('var(--af-fg-strong)')
   })
 
   it('正文段落收窄到可读测度，但面板 body 本身不收窄', () => {
