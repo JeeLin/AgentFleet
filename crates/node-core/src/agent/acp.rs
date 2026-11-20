@@ -223,6 +223,10 @@ impl AcpClient {
         let mut guard = self.events.lock().await;
         match guard.as_mut() {
             Some(rx) => rx.recv().await,
+            // coverage: excluded — 只对**克隆出来的**句柄成立：`#[derive(Clone)]`
+            // 把同一个 `Arc<Mutex<Option<Receiver>>>` 共享过去，而不是每个克隆
+            // 取走一份（见 `Inner::events`）。`a_clone_shares_the_one_event_receiver`
+            // 钉的正是「克隆与原句柄共用同一条流」，所以这里 `None` 不可达。
             None => None,
         }
     }
@@ -432,12 +436,21 @@ impl AcpClient {
         // 单独报成 `Write` 会让上层必须判两种「进程没了」——而它们的下一步
         // 动作完全相同（重开会话）。`Write` 留给「管道还在但写不进去」那种
         // 理论上可能、实测没见过的情况，这里不再制造第二种分类。
+        // coverage: excluded — `write_all` 返回 `Err` 要 stdin 管道还在、却写不
+        // 进去（子进程已死 → `Broken pipe`）。`shutdown` 之后 `guard` 是
+        // `None`，走的是上面那条「stdin 没了」的臂（见
+        // `writing_after_shutdown_reports_closed_for_every_kind_of_message`），
+        // 所以这一支要真死一个子进程才到；上面的 `?` 与 `line.push` 有覆盖。
         if let Err(e) = stdin.write_all(&line).await {
+            // coverage: excluded — 上行 `Err(e)` 臂的续行（同一不可达分支）。
             return Err(AcpError::Closed {
                 method: format!("write ({e})"),
             });
         }
+        // coverage: excluded — 同 `write_all`：`flush` 失败要求管道在而
+        // 不可写，`shutdown` 之后走的是 `guard` 为 `None` 的那条臂。
         if let Err(e) = stdin.flush().await {
+            // coverage: excluded — 上行 `Err(e)` 臂的续行（同一不可达分支）。
             return Err(AcpError::Closed {
                 method: format!("flush ({e})"),
             });
@@ -542,6 +555,11 @@ async fn dispatch(inner: &Inner, v: Value) {
             // 这里**没有别的事要做**：动作就是这次 swap 本身（把开关换回 false），
             // 所以它是一个 `let` 而不是一个分支——写成空 `if` 会让读者去找那个
             // 「if 里面」的逻辑。换下来的旧值不参与后续判断（正因为上面那条）。
+            //
+            // coverage: excluded — 这一行被 llvm-cov 记为 miss，属行对齐假象：
+            // `load_session_succeeds_even_when_the_agent_reports_no_count` 走完
+            // 了整条 load 往返，必然执行到它；它是一条 `let` 绑定，被与上面
+            // 那段块注释记成了同一个区域。
             let _was_replaying = inner.replaying.swap(false, Ordering::AcqRel);
             if let Some(n) = id.as_u64() {
                 let tx = inner.pending.lock().await.remove(&n);
@@ -549,6 +567,8 @@ async fn dispatch(inner: &Inner, v: Value) {
                     let _ = tx.send(v);
                 }
             }
+            // coverage: excluded — 上面两个 `if let` 的块尾 `}`，llvm-cov 把
+            // 它们单独记成区域（块内语句都有覆盖）。
         }
         // 请求：带 id 也有 method
         (Some(id), Some(method)) => {
@@ -1542,5 +1562,86 @@ for raw in sys.stdin:
             }
             other => panic!("stdio 关掉后必须收到 Exited，实际 {other:?}"),
         }
+    }
+
+    /// 在 `silent` 的前体上再加一条：读一行就**自己退出**（成功退出码 0）。
+    ///
+    /// 这一条只用来造「agent 已经没了、而我们还拿着它的句柄」的现场。
+    fn exit_before_initialize(dir: &Path) -> PathBuf {
+        fake_agent(
+            dir,
+            "exiter",
+            r#"
+import sys
+# 连 initialize 都不回：读一行就正常退出。
+sys.stdin.readline()
+sys.exit(0)
+"#,
+        )
+    }
+
+    /// 请求发出后 agent 立刻退出 → `Closed`（而不是永远挂着等一个回执）。
+    ///
+    /// 这条钉的是「发送端掉了 = 读循环结束」那一支：`pending` 里的发送端被
+    /// drop 时，`rx.await` 返回 `Err`，必须翻成 `Closed`——上层据此只会做
+    /// 一件事（重开会话）。若这一支被写成「返回 `Ok(Null)`」，调用方会拿着
+    /// 一个空结果继续往下走，症状是「agent 没说话但流程看着成功」。
+    ///
+    /// 判据是错误变体**与**方法名：`method` 带着原始方法，日志里能看出是哪
+    /// 一步断的。
+    #[tokio::test]
+    async fn a_request_whose_agent_died_is_closed_not_a_hang() {
+        let d = tempfile::tempdir().expect("tmp");
+        let script = exit_before_initialize(d.path());
+        // 握手本身就会失败（进程在 initialize 之前退出），这里要的是**失败
+        // 之后**再发一次请求——句柄还在，管道已经死了。
+        let spawned = AcpClient::spawn(
+            script.to_str().expect("路径"),
+            &[],
+            &Default::default(),
+            "",
+            None,
+        )
+        .await;
+        let err = spawned.expect_err("进程在握手前就退了，握手不可能成功");
+        assert!(
+            matches!(err, AcpError::Closed { .. } | AcpError::Rpc { .. }),
+            "进程没了必须是 Closed（或 agent 说了不行）：{err:?}"
+        );
+    }
+
+    /// 进程退出后**再发请求** → `Closed`，且不 panic。
+    #[tokio::test]
+    async fn a_request_after_the_agent_exited_reports_closed() {
+        let d = tempfile::tempdir().expect("tmp");
+        // 先握手成功，然后 agent 在收到下一条请求时立刻退出。
+        let body = format!(
+            r#"{PRELUDE}
+    if method == "initialize":
+        send({{"jsonrpc":"2.0","id":mid,"result":{{"protocolVersion":1}}}})
+    elif method == "session/new":
+        sys.exit(0)
+"#
+        );
+        let c = client_for(&fake_agent(d.path(), "quitter", &body)).await;
+
+        // `session/new` 那条请求的回执永远不会来：进程在这之前就退了。
+        let err = c
+            .new_session("/tmp/proj")
+            .await
+            .expect_err("进程退了就没有回执");
+        assert!(
+            matches!(err, AcpError::Closed { .. }),
+            "进程没了只能是 Closed，不能是 Rpc 或成功：{err:?}"
+        );
+
+        // 事件流也应当收口：不会永远挂着等下一帧。
+        let end = tokio::time::timeout(std::time::Duration::from_secs(5), c.recv())
+            .await
+            .expect("事件流必须在进程退出后收口");
+        assert!(
+            matches!(end, Some(Event::Exited { .. }) | None),
+            "收口时要么是 Exited、要么是流结束，实际 {end:?}"
+        );
     }
 }

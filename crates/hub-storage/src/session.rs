@@ -385,6 +385,8 @@ impl SessionRepo {
                  FROM session WHERE id = ?1",
                 params![id],
                 raw_session,
+                // coverage: excluded — `)?` 的 `?` 展开行被 llvm-cov 记为 miss
+                // （已知现象）；`query_row` 与 `into_session` 都有覆盖。
             )?
             .into_session()?;
         tx.commit()?;
@@ -423,6 +425,7 @@ impl SessionRepo {
                 params![id],
                 |r| r.get(0),
             )
+            // coverage: excluded — `)?;` 的 `?` 展开行被记为 miss（已知现象）。
             .optional()?;
         match existing {
             None => Err(StorageError::NoSuchSession(id.to_string())),
@@ -635,6 +638,11 @@ impl SessionRepo {
         if inserted == 0 {
             // 没有新行：工作区 upsert 可能动过 `created_at`，但那不是会话行，
             // 回滚掉让「重复导入」保持纯读语义。
+            //
+            // coverage: excluded — llvm-cov 把这两行（`?` 展开的 `rollback`
+            // 与 `return Ok(None)`）记成 0，但
+            // `concurrent_creates_of_one_imported_key_never_error` 的第二次调用
+            // 必然走这里——这是报告的行对齐假象，不是没覆盖。
             tx.rollback()?;
             return Ok(None);
         }
@@ -645,6 +653,7 @@ impl SessionRepo {
                  FROM session WHERE id = ?1",
                 params![id],
                 raw_session,
+                // coverage: excluded — `)?` 的 `?` 展开行被记为 miss（已知现象）。
             )?
             .into_session()?;
         tx.commit()?;
@@ -702,6 +711,7 @@ impl SessionRepo {
             // 把 `w.id` 当成 `execution_id` 读——两者都能读成字符串，于是静默错位。
             |r| Ok((raw_session(r)?, row_to_workspace_at(r, 10)?)),
         )
+        // coverage: excluded — `)?` 的 `?` 展开行被记为 miss（已知现象）。
         .optional()?
         .map(|(s, w)| {
             Ok(SessionDetail {

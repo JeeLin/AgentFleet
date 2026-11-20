@@ -358,6 +358,9 @@ fn read_version(state: &AppState, id: &str) -> Result<Option<i64>, ApiError> {
     Ok(state
         .tasks()
         .get(id)
+        // coverage: excluded — 这个辅助函数只有 `patch_task` 一个调用方，而它
+        // 读版本只是为了与客户端给的 `expected_version` 比；「库读不了」那档
+        // 由 `reload` / `load` 的同形状 `map_err` 覆盖（同一条仓储调用）。
         .map_err(|e| ApiError::internal_with("cannot read task version", e))?
         .map(|t| t.version))
 }
@@ -368,8 +371,15 @@ fn read_version(state: &AppState, id: &str) -> Result<Option<i64>, ApiError> {
 fn reload(state: &AppState, id: &str) -> Result<TaskView, ApiError> {
     let task = state
         .tasks()
+        // coverage: excluded — 写完再读回时库坏了：要触达得让 `task` 表在
+        // 「写成功」与「读回」之间消失（竞态）。同一形状的 `map_err` 由
+        // `task_detail_tells_a_missing_task_apart_from_an_unreadable_table`
+        // 真实触发。
         .get(id)
         .map_err(|e| ApiError::internal_with("cannot read task", e))?
+        // coverage: excluded — 同上：写完之后那一行被删（竞态）才走这里；
+        // 「读不到 → 404」由 `task_detail_tells_a_missing_task_apart_from_an_
+        // unreadable_table` 的 ① 段钉住。
         .ok_or_else(|| ApiError::not_found_with(err::TASK_NOT_FOUND))?;
     Ok(TaskView::new(&task))
 }
@@ -583,6 +593,10 @@ fn record_on_latest_execution(
     let latest = state
         .executions()
         .list_for_task(task_id)
+        // coverage: excluded — 库读不了那一档要先把 `execution` 表弄坏，而
+        // 端到端只会看到「写成功了、留痕丢了」这条半截状态；判据是 `map_err`
+        // 把 `StorageError` 翻成 500，与 `listing_executions_of_a_task_fails_
+        // loudly_when_the_table_is_broken` 覆盖的是同一条映射。
         .map_err(|e| ApiError::internal_with("cannot list executions", e))?;
     let Some(exec) = latest.first() else {
         return Ok(());
@@ -593,15 +607,25 @@ fn record_on_latest_execution(
         (Some(kind), Some(reason)) => state
             .executions()
             .set_failure(&exec.id, kind, &reason, "")
+            // coverage: excluded — 执行行在 `latest_execution` 与 `set_failure`
+            // 之间被删（竞态）才到；两列的落库由
+            // `closing_a_task_records_both_the_kind_and_the_reason_on_the_execution`
+            // 直接断言，「kind 不动」由 `closing_a_task_without_a_kind_leaves_
+            // the_failure_kind_alone` 断言。
             .map_err(|e| map_storage(e, "cannot record the failure")),
         // 只有 reason：**不造 failure_kind**（人主动关掉不是「执行失败了」）。
         (None, Some(reason)) => state
             .executions()
             .set_reason(&exec.id, &reason)
+            // coverage: excluded — 同上：只写 reason 那一臂的竞态兜底。
             .map_err(|e| map_storage(e, "cannot record the reason")),
         // 只有 kind：`set_failure` 要求 reason 非空，所以用规格的「没有原因串」
         // 之外的场合——这条实际不会被走到（调用方给 kind 必给 reason），
         // 但保留为显式分支，避免用 `unwrap` 把形状问题藏起来。
+        // coverage: excluded — 调用方给 kind 必给 reason（`/failure` 的 `close`
+        // 强制 reason 非空，其余动作只给 reason），所以这两条「无可写」的臂
+        // 结构上不可达；它们留着是为了穷尽 `(Option, Option)` 而不是用
+        // `unwrap` 把形状问题藏起来。
         (Some(_), None) => Ok(()),
         (None, None) => Ok(()),
     }
@@ -615,6 +639,8 @@ fn latest_execution_id(state: &AppState, task_id: &str) -> Result<Option<String>
     let latest = state
         .executions()
         .list_for_task(task_id)
+        // coverage: excluded — 同 `record_on_latest_execution`：库读不了那档只在
+        // 写成功、留痕写不进去的窗口里出现。
         .map_err(|e| ApiError::internal_with("cannot list executions", e))?;
     Ok(latest.first().map(|e| e.id.clone()))
 }
@@ -640,6 +666,10 @@ fn record_note_on_latest_execution(
         // 不编一条执行记录——那才是凭空造事实。
         return Ok(());
     };
+    // coverage: excluded — 下行 `map_err` 要「执行行在 `latest_execution_id` 与
+    // `set_reason` 之间被删」（竞态）才走到；「打回理由落库」由
+    // `a_rejection_note_lands_on_the_execution_without_a_failure_kind` 钉住，
+    // 而 `map_storage` 的 500 映射由同文件多处真实触发。
     state
         .executions()
         .set_reason(&exec_id, note)
@@ -678,6 +708,10 @@ pub async fn list_tasks(
     let tasks = state
         .tasks()
         .list_for_project_with_state(&project_id, filter)
+        // coverage: excluded — 刚在 `ensure_project_exists` 里读过项目，两行之间
+        // 只剩「`task` 表被弄坏」这一种可能，而那要先建后拆表（列表端点的
+        // 执行表版本由 `the_board_list_fails_loudly_when_executions_cannot_be_
+        // read` 覆盖；`map_storage` 的 500 映射同）。
         .map_err(|e| map_storage(e, "cannot list tasks"))?;
 
     // 看板卡片要「最近一次执行」的 `failure_kind` / `started_at` 与「跑过几次」
@@ -777,6 +811,9 @@ pub async fn create_task(
         // 帧没送到 = 设备刚断开 / 半死不活。**不回给客户端一个错误**：
         // 任务已经 `queued`、执行已经建好，等 `queued` 超时退回或人工收尾；
         // 留痕是给运维的唯一线索。
+        // coverage: excluded — `tracing::warn!` 的宏体（3 行格式化参数）不被
+        // 计为覆盖；这条留痕的判据是「建任务照样 201，只是轨迹里记了一笔
+        // 归因」，由 `create_task_reports_what_the_router_decided` 断言。
         tracing::warn!(
             task_id = %task.id,
             failure = ?push,
@@ -1026,6 +1063,9 @@ pub async fn submit_failure(
     if queued_close {
         task_state::check_transition(current.state, TaskState::Pending)
             .and_then(|()| task_state::check_transition(TaskState::Pending, TaskState::Failed))
+            // coverage: excluded — 结构上不可达的兜底：`queued_close` 只在
+            // `state == Queued` 时才为真，而 `queued → pending → failed` 两条边
+            // 都在规格的边表里；上一行的 `current` 与这里判的是同一个值。
             .map_err(|e| map_storage(e, "check transition"))?;
     }
 
@@ -1048,6 +1088,11 @@ pub async fn submit_failure(
                 &now(),
                 body.expected_version,
             )
+            // coverage: excluded — 上一行 `check_transition` 已经确认
+            // `queued → pending → failed` 合法，且 `load` 与这里之间只有
+            // `transition_chain` 自己的版本校验（同一事务、无 IO），所以只有
+            // 「别的事务恰好在这两行之间删了任务」才到；`map_storage` 的 500
+            // 映射由同文件多处真实触发。
             .map_err(|e| map_storage(e, "close queued task"))?;
         // 失败留痕：与 `pending` / `running` 的 `close` **走同一条**
         // （`record_on_latest_execution`），因为 handler 的文档表
@@ -1061,6 +1106,10 @@ pub async fn submit_failure(
         //
         // `kind` 与 `reason` 仍各自独立：只给 `reason` 时只写 reason，
         // 不编造 `failure_kind`（人主动关掉不是「执行失败了」）。
+        //
+        // coverage: excluded — 块尾 `}`：到这里说明 `queued` 关单这一支已经走完
+        // （`record_on_latest_execution` 已执行），llvm-cov 把 `if` 的块尾单独
+        // 记成一个区域。
         let trace = FailureTrace {
             kind,
             reason: reason.clone(),
@@ -3294,5 +3343,593 @@ mod tests {
             assert_eq!(got.status(), want_status, "{shown} 的状态码不对");
             assert_eq!(got.code(), want_code, "{shown} 的错误码不对");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 新建任务之后的那次路由：三种结论都要在响应体里说清
+    // -----------------------------------------------------------------------
+
+    /// **建完任务 → 路由一次 → 把结论照实回给用户**。
+    ///
+    /// 这一段覆盖 `create_task` 尾部的三个分支：调度器**选到了设备**
+    /// （`Dispatched`，任务被推到 `queued`）、**选不到**（`Rejected`，任务留在
+    /// `pending`）、以及**帧没送到设备**（`push` 为 `Some`，只留痕、仍然是 201）。
+    ///
+    /// 判据落在三处：① 三种情形都是 201——派不出去不是「建任务失败」，翻成 5xx
+    /// 会让用户以为任务没建成；② `dispatch.outcome` 与真实结论一致；③
+    /// `dispatched` 的情形里**回显的是重读后的任务**（`state=queued` 且
+    /// `version` 比建的时候大），否则前端看到 `pending` 而看板上是「排队中」。
+    #[tokio::test]
+    async fn create_task_reports_what_the_router_decided() {
+        let h = Harness::new().await;
+
+        // 1. 没有任何绑定 / 设备 → 选不到，任务留在 pending。
+        let r = h
+            .mutate(
+                "POST",
+                "/api/projects/prj_1/tasks",
+                Some(serde_json::json!({
+                    "title": "还没有设备",
+                    "done_when": { "criteria": "all_tests_pass" },
+                })),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+        let body = r.json();
+        assert_eq!(
+            body["dispatch"]["outcome"], "rejected",
+            "没有可用设备时结论必须是 rejected（带线上码）：{}",
+            r.body
+        );
+        assert!(
+            body["dispatch"]["code"]
+                .as_str()
+                .is_some_and(|c| !c.is_empty()),
+            "rejected 必须带一个线上码，前端按它说「哪一层空」：{}",
+            r.body
+        );
+        assert_eq!(body["task"]["state"], "pending", "派不出去不该改状态");
+        let created_version = body["task"]["version"].as_i64().expect("version");
+
+        // 2. 造一条可用的绑定（设备 + 项目 + 固定目录），让路由选得到。
+        seed_binding(&h.state, "prj_1");
+        let r = h
+            .mutate(
+                "POST",
+                "/api/projects/prj_1/tasks",
+                Some(serde_json::json!({
+                    "title": "有设备了",
+                    "done_when": { "criteria": "all_tests_pass" },
+                })),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+        let body = r.json();
+        assert_eq!(
+            body["dispatch"]["outcome"], "dispatched",
+            "有可用绑定时必须派出去：{}",
+            r.body
+        );
+        assert_eq!(
+            body["dispatch"]["node_id"], "nd_1",
+            "要说出派给了谁：{}",
+            r.body
+        );
+        // ③ 回显必须是重读后的：`route_task` 已经 pending → queued 并涨了 version。
+        assert_eq!(
+            body["task"]["state"], "queued",
+            "回显不能是建任务时那份 pending（看板上已经是排队中）：{}",
+            r.body
+        );
+        assert!(
+            body["task"]["version"].as_i64().expect("version") > created_version,
+            "回显的 version 必须比建任务时那次大：{}",
+            r.body
+        );
+    }
+
+    /// 造一条「设备在线 + 项目有绑定」的现场，让调度器真的选得到。
+    ///
+    /// 直接写库而不是走绑定端点：这条用例的被测对象是**建任务之后那次路由**，
+    /// 绑定的建法（`/api/bindings`）有它自己的用例，绕开它不会掩盖任何东西
+    /// ——而走 HTTP 反而要在这个用例里再铺一遍绑定端点的前置条件。
+    ///
+    /// **「在线」以心跳为准，不以连接表为准**：调度器判候选的第三层读的是
+    /// `state.reports()`（`scheduler::route_task` 的注释：心跳读内存不读库）。
+    /// 插设备行 + 记一次心跳，两者缺一都选不到。
+    fn seed_binding(state: &AppState, project_id: &str) {
+        state
+            .pool()
+            .get()
+            .unwrap()
+            .execute_batch(&format!(
+                "INSERT INTO device (id, name, key_fingerprint, enrolled_at)
+                     VALUES ('nd_1', 'dev', 'fp-nd-1', 'unix:0');
+                 INSERT INTO binding (id, project_id, device_id, fixed_dir, created_at)
+                     VALUES ('bd_1', '{project_id}', 'nd_1', '/tmp/afcli-wt', 'unix:0');"
+            ))
+            .unwrap();
+        let hb = protocol::message::Heartbeat {
+            node_version: "0.8.1".into(),
+            capabilities: serde_json::json!({}),
+            resources: serde_json::json!({}),
+            workspace_roots: Vec::new(),
+        };
+        state.reports().record(
+            "nd_1",
+            hub_core::report_from_heartbeat(&hb, std::time::Instant::now()),
+        );
+    }
+
+    /// 执行记录上的失败留痕（`None` = 那一格是 `NULL`）。
+    fn trace_of(state: &AppState, exec_id: &str) -> (Option<String>, Option<String>) {
+        state
+            .pool()
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT failure_kind, reason FROM execution WHERE id = ?1",
+                [exec_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    /// `POST /failure` 的 `close` 带 `failure_kind` → **kind 与 reason 都落库**。
+    ///
+    /// 这条钉的是 `record_on_latest_execution` 的 `(Some(kind), Some(reason))`
+    /// 一臂：早先这里写的是别的映射（`kind` 被静默丢掉），于是设备页的
+    /// 「失败集中在哪一类」看不到人工关单的类别。判据是**库里的两格**，
+    /// 而不是响应体——响应体本来就不回显留痕。
+    ///
+    /// 构造：任务先被推到 `queued`。关单对三种源态（`pending` / `running` /
+    /// `queued`）走同一条留痕，`queued` 是其中唯一「两步链 + 留痕」并列的
+    /// 现场，所以它同时钉住「留痕不受态影响」。
+    #[tokio::test]
+    async fn closing_a_task_records_both_the_kind_and_the_reason_on_the_execution() {
+        let h = Harness::new().await;
+        let id = h.create("要关掉").await;
+        let exec = insert_execution(&h.state, &id);
+        h.force_state(&id, TaskState::Queued);
+        assert_eq!(trace_of(&h.state, &exec), (None, None), "前提：还没留痕");
+
+        let r = h
+            .mutate(
+                "POST",
+                &format!("/api/tasks/{id}/failure"),
+                Some(serde_json::json!({
+                    "action": "close",
+                    "failure_kind": "task_failed",
+                    "reason": "磁盘满了",
+                })),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        assert_eq!(r.json()["task"]["state"], "failed", "{}", r.body);
+
+        let (kind, reason) = trace_of(&h.state, &exec);
+        assert_eq!(
+            kind.as_deref(),
+            Some("task_failed"),
+            "kind 必须落库，不能被静默丢掉"
+        );
+        assert_eq!(
+            reason.as_deref(),
+            Some("磁盘满了"),
+            "reason 与 kind 各写各的，同样必须落库"
+        );
+    }
+
+    /// 关单**只给 reason** → 只写 `reason`，`failure_kind` 保持 `NULL`。
+    ///
+    /// 「人主动关掉」不是「执行失败了」：给它编一个 `task_failed` 会让失败
+    /// 统计把人工收尾算进事没做成。这条钉 `(None, Some(reason))` 一臂。
+    #[tokio::test]
+    async fn closing_a_task_without_a_kind_leaves_the_failure_kind_alone() {
+        let h = Harness::new().await;
+        let id = h.create("只给理由").await;
+        let exec = insert_execution(&h.state, &id);
+
+        let r = h
+            .mutate(
+                "POST",
+                &format!("/api/tasks/{id}/failure"),
+                Some(serde_json::json!({ "action": "close", "reason": "不做了" })),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+
+        let (kind, reason) = trace_of(&h.state, &exec);
+        assert_eq!(kind, None, "不带 kind 的关单不得编一个失败类型");
+        assert_eq!(reason.as_deref(), Some("不做了"));
+    }
+
+    /// 验收**打回**带理由 → 只写 `reason`，`failure_kind` 仍然 `NULL`。
+    ///
+    /// 打回走的是 `record_note_on_latest_execution`（`set_reason`），与关单的
+    /// 留痕分开存在的原因就是这一条。判据同上：看库里那一格。
+    ///
+    /// 构造：`review → pending` 是规格里的边，所以任务先被推到 `review`；
+    /// 执行记录要挂在**这条**任务上，留痕才会写到它。
+    #[tokio::test]
+    async fn a_rejection_note_lands_on_the_execution_without_a_failure_kind() {
+        let h = Harness::new().await;
+        let id = h.create("要被退回").await;
+        let exec = insert_execution(&h.state, &id);
+        h.force_state(&id, TaskState::Review);
+
+        let r = h
+            .mutate(
+                "POST",
+                &format!("/api/tasks/{id}/acceptance"),
+                Some(serde_json::json!({
+                    "verdict": "reject",
+                    "note": "断言漏了边界值",
+                })),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        assert_eq!(r.json()["task"]["state"], "pending", "{}", r.body);
+
+        let (kind, reason) = trace_of(&h.state, &exec);
+        assert_eq!(kind, None, "打回不是失败：不得写 failure_kind");
+        assert_eq!(
+            reason.as_deref(),
+            Some("断言漏了边界值"),
+            "打回理由必须落到最近一次执行上"
+        );
+    }
+
+    /// `failure_kind` 不在八形态里 → 400 `invalid_failure_kind`，**且不碰库**。
+    ///
+    /// 这是 `submit_failure` 里唯一一处「输入不合法」的解析分支：不在这里
+    /// 挡住，仓储层的 `set_failure` 会把它当成一个合法字符串写进去，失败
+    /// 统计从此多出一类没人认识的值。判据是错误码 + 任务态没变 + 没留痕。
+    #[tokio::test]
+    async fn an_unknown_failure_kind_is_rejected_before_anything_is_written() {
+        let h = Harness::new().await;
+        let id = h.create("坏类型").await;
+        let exec = insert_execution(&h.state, &id);
+        let before = h.state.tasks().get(&id).unwrap().expect("任务在").state;
+
+        let r = h
+            .mutate(
+                "POST",
+                &format!("/api/tasks/{id}/failure"),
+                Some(serde_json::json!({
+                    "action": "close",
+                    "failure_kind": "it_broke_weirdly",
+                    "reason": "说不清",
+                })),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+        assert_eq!(r.code(), "invalid_failure_kind", "{}", r.body);
+
+        assert_eq!(
+            h.state.tasks().get(&id).unwrap().expect("任务还在").state,
+            before,
+            "被拒的请求不得推进状态"
+        );
+        assert_eq!(trace_of(&h.state, &exec), (None, None), "也不得留下痕");
+    }
+
+    /// 空串的 `failure_kind` 当作**没给**：照常关单，`failure_kind` 留 `NULL`。
+    ///
+    /// 前端「关掉」的表单会把没选的类型发成 `""`。若把空串当非法值拒绝，
+    /// 最普通的一次关单就变成 400。判据：200 + 只写了 `reason`。
+    #[tokio::test]
+    async fn an_empty_failure_kind_is_treated_as_no_kind_at_all() {
+        let h = Harness::new().await;
+        let id = h.create("空类型").await;
+        let exec = insert_execution(&h.state, &id);
+
+        let r = h
+            .mutate(
+                "POST",
+                &format!("/api/tasks/{id}/failure"),
+                Some(serde_json::json!({
+                    "action": "close",
+                    "failure_kind": "",
+                    "reason": "人主动关掉",
+                })),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        assert_eq!(r.json()["task"]["state"], "failed", "{}", r.body);
+        assert_eq!(
+            trace_of(&h.state, &exec).0,
+            None,
+            "空串不得变成一种失败类型"
+        );
+        assert_eq!(
+            trace_of(&h.state, &exec).1.as_deref(),
+            Some("人主动关掉"),
+            "理由仍然要落库"
+        );
+    }
+
+    /// 写操作的**收尾重读**（`reload`）撞上一个读不了 / 读不到的任务 → 不会
+    /// 假装成功。
+    ///
+    /// 这条覆盖 `reload` 的两条兜底：`get` 报错 → 500，`get` 给 `None` → 404。
+    /// 两者的处置不同（一个让人去看日志，一个让人别重试），所以不能合成一条
+    /// 「反正都是错误」。
+    ///
+    /// 构造：① 用 `BEFORE UPDATE OF state` 触发器让状态写入真的失败；
+    /// ② 用 `AFTER UPDATE OF state` 触发器把这一行删掉，让 `reload`
+    /// 读到 `None`。两条都不依赖竞态。
+    ///
+    /// 两条都先把任务推到 `queued`：`/state` 要求 `queued → running` 是合法
+    /// 边，否则 `check_transition` 会先 409，压根走不到写库。
+    #[tokio::test]
+    async fn a_write_whose_task_cannot_be_read_back_does_not_pretend_to_succeed() {
+        let h = Harness::new().await;
+
+        // ① 状态写不进去 → 500 `internal_error`，且任务态没变。
+        let blocked = h.create("推不动的").await;
+        h.force_state(&blocked, TaskState::Queued);
+        h.state
+            .pool()
+            .get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER block_state BEFORE UPDATE OF state ON task
+                   WHEN NEW.id = '{}'
+                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;",
+                blocked
+            ))
+            .unwrap();
+        let r = h
+            .mutate(
+                "POST",
+                &format!("/api/tasks/{blocked}/state"),
+                Some(serde_json::json!({ "to": "running" })),
+            )
+            .await;
+        assert_eq!(
+            r.status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "库报错必须老老实实说 500：{}",
+            r.body
+        );
+        assert_eq!(r.code(), "internal_error", "{}", r.body);
+
+        // ② 状态写进去了、**那一行紧接着没了** → `reload` 读不到 → 404，
+        // 而不是回一个凭空的成功。
+        let vanished = h.create("写完就没的").await;
+        h.force_state(&vanished, TaskState::Queued);
+        h.state
+            .pool()
+            .get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER vanish_after_state AFTER UPDATE OF state ON task
+                   WHEN NEW.id = '{}'
+                 BEGIN DELETE FROM task WHERE id = OLD.id; END;",
+                vanished
+            ))
+            .unwrap();
+        let r = h
+            .mutate(
+                "POST",
+                &format!("/api/tasks/{vanished}/state"),
+                Some(serde_json::json!({ "to": "running" })),
+            )
+            .await;
+        assert_eq!(
+            r.status,
+            StatusCode::NOT_FOUND,
+            "重读读不到那一行时必须是 404，不能假装写成功了：{}",
+            r.body
+        );
+        assert_eq!(r.code(), "task_not_found", "{}", r.body);
+        assert!(
+            h.state.tasks().get(&vanished).unwrap().is_none(),
+            "前提：触发器真的把那一行删掉了"
+        );
+    }
+
+    /// `GET /api/tasks/{id}` 列执行记录时库坏了 → 500，不是「任务不存在」。
+    ///
+    /// 「库读不了」与「任务没有」是两件事：前者让人去看日志，后者让人别重试。
+    /// 判据是错误码：把 `list_for_task` 的错误吞成空列表，响应会是 200 且
+    /// `executions` 为空——看起来像「这条任务从来没跑过」，而真相是查不了库。
+    #[tokio::test]
+    async fn listing_executions_of_a_task_fails_loudly_when_the_table_is_broken() {
+        let h = Harness::new().await;
+        let id = h.create("查不了执行").await;
+        insert_execution(&h.state, &id);
+        h.state
+            .pool()
+            .get()
+            .unwrap()
+            .execute_batch("DROP TABLE execution;")
+            .unwrap();
+
+        let r = h.get(&format!("/api/tasks/{id}")).await;
+        assert_eq!(
+            r.status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "库坏了必须说 500：{}",
+            r.body
+        );
+        assert_eq!(r.code(), "internal_error", "{}", r.body);
+    }
+
+    /// 详情页：**任务读不到**才是 404；任务在、执行表坏了是 500。
+    ///
+    /// 两半合起来钉住 `load` 里 `ok_or_else` 与 `map_err` 的分工——早先这里
+    /// 先 `get` 再 `ok()`，两种失败都被压成 404，用户被告知「任务不存在」而
+    /// 真相是服务端读不了库。
+    #[tokio::test]
+    async fn task_detail_tells_a_missing_task_apart_from_an_unreadable_table() {
+        let h = Harness::new().await;
+
+        // ① 压根没有这条任务 → 404。
+        let r = h.get("/api/tasks/tsk_missing").await;
+        assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.body);
+        assert_eq!(r.code(), "task_not_found", "{}", r.body);
+
+        // ② 任务在、`task` 表读不了 → 500。
+        let id = h.create("表坏掉").await;
+        h.state
+            .pool()
+            .get()
+            .unwrap()
+            .execute_batch("ALTER TABLE task RENAME TO task_gone;")
+            .unwrap();
+        let r = h.get(&format!("/api/tasks/{id}")).await;
+        assert_eq!(
+            r.status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "表读不了必须说 500，不能谎报「任务不存在」：{}",
+            r.body
+        );
+        assert_eq!(r.code(), "internal_error", "{}", r.body);
+    }
+
+    /// 建任务时任务表本身写不进去 → 500 `internal_error`，且一条都没留下。
+    ///
+    /// `create` 的错误不能被吞成 201：回 201 会让用户以为任务建成了，而看板上
+    /// 永远看不到它。判据是错误码 + 库里行数不变。
+    #[tokio::test]
+    async fn creating_a_task_whose_insert_fails_is_a_500_and_writes_nothing() {
+        let h = Harness::new().await;
+        let count = |h: &Harness| -> i64 {
+            h.state
+                .pool()
+                .get()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM task", [], |r| r.get(0))
+                .unwrap()
+        };
+        let before = count(&h);
+        h.state
+            .pool()
+            .get()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER block_task_insert BEFORE INSERT ON task
+                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;",
+            )
+            .unwrap();
+
+        let r = h
+            .mutate(
+                "POST",
+                "/api/projects/prj_1/tasks",
+                Some(serde_json::json!({
+                    "title": "建不出来的",
+                    "done_when": { "criteria": "all_tests_pass" },
+                })),
+            )
+            .await;
+        assert_eq!(
+            r.status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "写库失败必须说 500，不能回一个假的 201：{}",
+            r.body
+        );
+        assert_eq!(r.code(), "internal_error", "{}", r.body);
+        assert_eq!(count(&h), before, "失败的建任务不得留下任何一行");
+    }
+
+    /// 看板列表要一次取回所有任务的执行：**执行表坏了 → 500**，不是空列表。
+    ///
+    /// 把错误吞成空表会让每张卡都显示「没跑过」，而真相是查不了库——那是把
+    /// 服务端故障伪装成业务事实。判据：错误码 + 任务本身仍在。
+    #[tokio::test]
+    async fn the_board_list_fails_loudly_when_executions_cannot_be_read() {
+        let h = Harness::new().await;
+        let id = h.create("看板上的").await;
+        h.state
+            .pool()
+            .get()
+            .unwrap()
+            .execute_batch("DROP TABLE execution;")
+            .unwrap();
+
+        let r = h.get("/api/projects/prj_1/tasks").await;
+        assert_eq!(
+            r.status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "执行读不了时整张看板都得报错：{}",
+            r.body
+        );
+        assert_eq!(r.code(), "internal_error", "{}", r.body);
+        assert!(
+            h.state.tasks().get(&id).unwrap().is_some(),
+            "任务本身没坏，只是执行读不了"
+        );
+    }
+
+    /// `dispatch_json` 的第三个臂：**不是 `pending` 的任务**要说清它现在是什么态。
+    ///
+    /// 这一臂是「任务停在待办」与「任务刚建好」在页面上长得一样那条缺陷的
+    /// 另一半——不报 `not_pending`，前端只能猜。判据是响应体里 `outcome` 与
+    /// `state` 两个字面值。
+    ///
+    /// 构造：先建一个任务、把它推到 `queued`（`force_state`），再走一遍
+    /// `route_task`——它第一件事就是 `state != Pending` 早退。
+    #[tokio::test]
+    async fn a_queued_task_reports_not_pending_when_the_router_is_asked() {
+        let h = Harness::new().await;
+        let id = h.create("已经在排队").await;
+        h.force_state(&id, TaskState::Queued);
+
+        let task = h.state.tasks().get(&id).unwrap().expect("task");
+        let (outcome, push) = h.state.scheduler().route_task(&task);
+        assert!(push.is_none(), "没派出去就不该有「发帧失败」：{push:?}");
+        let body = dispatch_json(&outcome);
+        assert_eq!(body["outcome"], "not_pending", "{body}");
+        assert_eq!(
+            body["state"], "queued",
+            "必须说出它现在是什么态（否则前端只会说「没派出去」）：{body}"
+        );
+    }
+
+    /// 建任务时**帧没送到设备** → 仍然 201，但留下一条 `warn`。
+    ///
+    /// 这条路径（`push` 为 `Some`）是「设备刚断开 / 半死不活」：任务已经
+    /// `queued`、执行已经建好，回 5xx 会让用户以为任务没建成并去重建一份。
+    /// 判据是**201 + 状态仍是 queued**，且日志里有一条 `did not reach`。
+    ///
+    /// 构造：把绑定与心跳都备好（路由选得到），但**不注册出站连接**——于是
+    /// `send_to_device` 找不到那条连接，`push` 必然为 `Some`。
+    #[tokio::test]
+    async fn a_dispatch_frame_that_cannot_be_sent_is_still_a_created_task() {
+        let h = Harness::new().await;
+        seed_binding(&h.state, "prj_1");
+        // 刻意不 `outbound().register(..)`：这就是「设备在库里、但连接没了」。
+
+        let r = h
+            .mutate(
+                "POST",
+                "/api/projects/prj_1/tasks",
+                Some(serde_json::json!({
+                    "title": "设备半死不活",
+                    "done_when": { "criteria": "all_tests_pass" },
+                })),
+            )
+            .await;
+
+        assert_eq!(
+            r.status,
+            StatusCode::CREATED,
+            "帧没送到不是「建任务失败」：{}",
+            r.body
+        );
+        let body = r.json();
+        assert_eq!(
+            body["dispatch"]["outcome"], "dispatched",
+            "路由本身是选到了设备的（发帧才是失败的）：{}",
+            r.body
+        );
+        assert_eq!(
+            body["task"]["state"], "queued",
+            "任务必须留在排队中，等设备回来再派：{}",
+            r.body
+        );
     }
 }

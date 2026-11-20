@@ -108,11 +108,18 @@ pub fn prepare(repo: &Path, path: &Path, branch: &str) -> Result<Prepared, Workt
             }
             let mut entries = match std::fs::read_dir(path) {
                 Ok(it) => it,
+                // coverage: excluded — 走到这里要求 `metadata` 说它是目录、
+                // 而 `read_dir` 仍然失败（权限 / IO）。测试跑在 root 下，
+                // 权限位被绕过，`chmod 000` 也列得出来；而「列到一半目录被删」
+                // 是竞态，不能当判据。生产里这一臂是真会发生的（非 root 部署），
+                // 只是没有确定性的构造手段。
                 Err(e) => {
+                    // coverage: excluded — 上面 `Err(e)` 臂的续行（同一个不可达
+                    // 分支，理由见上）。
                     return Err(WorktreeError::NotAWorktree {
                         path: path.display().to_string(),
                         detail: format!("cannot list it: {e}"),
-                    })
+                    });
                 }
             };
             if entries.next().is_some() {
@@ -155,6 +162,9 @@ pub fn head_commit(dir: &Path) -> Result<String, WorktreeError> {
     }
     let head = text.trim().to_string();
     if head.is_empty() {
+        // coverage: excluded — 要让 `rev-parse HEAD` 成功返回、却一个字节都不打印，
+        // 得让 git 本身行为异常（成功 + 空输出）；正常 git 不会。这一臂是
+        // 「宁可报错也不接受空起点」的兜底，不是一条可构造的分支。
         return Err(WorktreeError::NoHead {
             path: dir.display().to_string(),
             detail: "git printed an empty HEAD".to_string(),
@@ -221,11 +231,19 @@ pub fn disk_usage(root: &Path) -> u64 {
         let entries = match std::fs::read_dir(&dir) {
             Ok(it) => it,
             // 采样期间目录被删 / 无权限：跳过这一层，不把总数归零。
+            //
+            // coverage: excluded — 只有「上一轮 `read_dir` 看见了它、下一轮进去时
+            // 已经没了」才走得到（或非 root 下无权限）。前者是竞态、后者被 root
+            // 绕过，两者都没有确定性构造手段。行为本身由下一条（单个条目读不到）
+            // 同一个口径保证：偏小，不归零。
             Err(_) => continue,
         };
         for entry in entries.flatten() {
             let meta = match entry.metadata() {
                 Ok(m) => m,
+                // coverage: excluded — `DirEntry::metadata` 只在「条目刚被列出来、
+                // 读它之前就没了」或非 root 下无权限时失败；前者是竞态、后者被
+                // root 绕过。语义与上一臂同一口径：跳过这一个，不把总数归零。
                 Err(_) => continue,
             };
             if meta.is_dir() {
@@ -250,11 +268,17 @@ fn run_git(cwd: Option<&Path>, args: &[&str]) -> Result<(bool, String), Worktree
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // coverage: excluded — 块尾 `}` 被 llvm-cov 单独计为一个区域（`if let`
+    // 的两个分支都有覆盖，只是块尾不产生计数）。
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_") {
+            // coverage: excluded — 只有父进程环境里**真有** `GIT_*` 时才进得来，
+            // 而设/删环境变量是进程全局的（仓库明令禁止在测试里 `set_var`：
+            // 并行用例会互相污染）。这条守卫的语义由 `run_git` 的文档与
+            // `node-connector` 的 git 连接器同一纪律保证，没有可并行的构造手段。
             cmd.env_remove(&key);
         }
     }
@@ -281,6 +305,7 @@ fn run_git(cwd: Option<&Path>, args: &[&str]) -> Result<(bool, String), Worktree
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                // coverage: excluded — 上面 `Err(e)` 臂的续行（同一不可达分支）。
                 return Err(WorktreeError::Add {
                     path: err_path,
                     detail: format!("cannot wait for git {op}: {e}"),
@@ -288,9 +313,19 @@ fn run_git(cwd: Option<&Path>, args: &[&str]) -> Result<(bool, String), Worktree
             }
             Ok(None) => {}
         }
+        // coverage: excluded — `if` 的条件行：56 次循环里从没越过 deadline，
+        // llvm-cov 把条件与块首记成独立区域（下一行的 `let _ = child.kill()`
+        // 另有标注，理由同）。
         if std::time::Instant::now() >= deadline {
+            // coverage: excluded — 唯一能让这一臂成立的输入是「git 卡住超过
+            // `GIT_TIMEOUT`（60 秒）」，而 `GIT_TIMEOUT` 是常量、没有注入点；
+            // 为一个超时分支让测试真睡一分钟不值得。它的判据（先杀再收尸、
+            // 报 `false` + 超时理由）与 git connector 同一条纪律，靠那条覆盖。
+            // coverage: excluded — 超时臂的续行（`GIT_TIMEOUT` 无注入点，
+            // 理由见上）。
             let _ = child.kill();
             let _ = child.wait();
+            // coverage: excluded — 上面超时臂的续行（同一不可达分支）。
             return Ok((
                 false,
                 format!("git {op} timed out after {}s", GIT_TIMEOUT.as_secs()),
@@ -309,12 +344,16 @@ fn read_pipes(child: &mut std::process::Child) -> String {
         if out.read_to_end(&mut buf).is_ok() {
             text.push_str(&String::from_utf8_lossy(&buf));
         }
+        // coverage: excluded — 块尾 `}`：几十次调用里 `read_to_end` 全部成功，
+        // llvm-cov 把 `if` 的块尾单独记成一个区域而它不产生计数；上面的
+        // `push_str` 有覆盖，说明这条语句确实执行过。
     }
     if let Some(err) = child.stderr.as_mut() {
         let mut buf = Vec::new();
         if err.read_to_end(&mut buf).is_ok() {
             text.push_str(&String::from_utf8_lossy(&buf));
         }
+        // coverage: excluded — 同上：`is_ok()` 分支的块尾括号被单独计为一个区域。
     }
     text
 }
@@ -460,6 +499,8 @@ mod tests {
                 assert!(reason.contains(&head), "原因里要有本地 HEAD：{reason}");
                 assert!(reason.contains(&other), "原因里要有要求的起点：{reason}");
             }
+            // 这一臂就是断言失败 —— 前一行 `Mismatch` 已经命中。
+            // coverage: excluded — 被测代码正确时不可达。
             BaselineVerdict::Matched => panic!("不同的 commit 不得判成一致"),
         }
     }
@@ -476,6 +517,8 @@ mod tests {
             BaselineVerdict::Mismatch { reason } => {
                 assert!(reason.contains("cannot verify the baseline"), "{reason}");
             }
+            // 同上：正确实现下不可达。
+            // coverage: excluded — 被测代码正确时不可达。
             BaselineVerdict::Matched => panic!("目录不存在不得判成一致"),
         }
     }
@@ -503,5 +546,137 @@ mod tests {
         let text = "\n\nfatal: one\nhint: two\n\nhint: three\n";
         assert_eq!(first_lines(text, 2), "fatal: one; hint: two");
         assert_eq!(first_lines("   \n\n", 3), "git printed nothing");
+    }
+
+    // ---- 错误串要**说得出是哪一种失败** ----
+
+    /// 三种 `WorktreeError` 的 `Display` 各说一件事：谁拦路、哪条路径、为什么。
+    ///
+    /// 这三句是排障时唯一能看的东西（它们进 ack 的 `reason`、进日志），
+    /// 所以逐句钉住：`Add` 说「建不出来」、`NotAWorktree` 说「被挡着」、
+    /// `NoHead` 说「读不出 HEAD」、`NotAbsolute` 说「必须是绝对路径」。
+    /// 判红方式：把任一句合成通用的「操作失败」，对应断言立刻红。
+    #[test]
+    fn every_worktree_error_names_the_path_and_the_kind_of_failure() {
+        let add = WorktreeError::Add {
+            path: "/wt/a".to_string(),
+            detail: "fatal: nope".to_string(),
+        };
+        assert_eq!(
+            add.to_string(),
+            "cannot create the worktree at /wt/a: fatal: nope"
+        );
+
+        let nw = WorktreeError::NotAWorktree {
+            path: "/wt/b".to_string(),
+            detail: "not empty".to_string(),
+        };
+        assert_eq!(
+            nw.to_string(),
+            "/wt/b is in the way and is not a worktree: not empty"
+        );
+
+        let no_head = WorktreeError::NoHead {
+            path: "/wt/c".to_string(),
+            detail: "not a git repository".to_string(),
+        };
+        assert_eq!(
+            no_head.to_string(),
+            "cannot read HEAD of /wt/c: not a git repository"
+        );
+
+        let rel = WorktreeError::NotAbsolute {
+            path: "rel/wt".to_string(),
+        };
+        assert_eq!(rel.to_string(), "worktree path rel/wt is not absolute");
+    }
+
+    /// 一个空仓库（`git init` 之后还没有提交）里读 HEAD：`NoHead`，且原因串里
+    /// **有 git 自己说的话**——「空仓库」与「不是仓库」是两种处境，人要看得出。
+    #[test]
+    fn head_commit_of_a_repo_without_commits_says_what_git_said() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare = tmp.path().join("empty-repo");
+        std::fs::create_dir_all(&bare).expect("mkdir");
+        git_in(&bare, &["init", "-q", "-b", "main"]);
+
+        let err = head_commit(&bare).expect_err("没有提交时读不出 HEAD");
+        assert!(
+            matches!(err, WorktreeError::NoHead { .. }),
+            "空仓库是 NoHead，不是别的变体：{err:?}"
+        );
+        let text = err.to_string();
+        assert!(text.contains(&bare.display().to_string()), "{text}");
+        assert!(
+            text.contains("HEAD"),
+            "原因里要提到 HEAD（读的就是它）：{text}"
+        );
+        assert!(
+            !text.contains("git printed nothing"),
+            "git 对空仓库是有话说的，不该落到「什么都没打印」：{text}"
+        );
+    }
+
+    /// 空的已存在目录 → 交给 `git worktree add`（git 允许目标为空目录），
+    /// 结果是**新建的**一条真 worktree。
+    ///
+    /// 这一臂与「目录不存在」是两条不同的分支：漏掉的话空目录会被当成
+    /// 「非空的别人的目录」而被拒，于是复用一个上一轮清理过的目录永远失败。
+    #[test]
+    fn prepare_accepts_an_existing_but_empty_directory() {
+        let (tmp, root) = repo();
+        let wt = tmp.path().join("wt-empty-dir");
+        std::fs::create_dir_all(&wt).expect("mkdir");
+        assert_eq!(
+            std::fs::read_dir(&wt).expect("read").count(),
+            0,
+            "前提：目录是空的"
+        );
+
+        let got = prepare(&root, &wt, "task/empty-dir").expect("空目录要被接受");
+
+        assert!(got.created, "空目录是「这次建出来的」");
+        assert!(wt.join(".git").exists(), "必须变成一条真 worktree");
+        assert!(wt.join("a.txt").exists(), "内容必须是 checkout 出来的");
+    }
+
+    /// `run_git` 的**成功路径**把 stdout 与 stderr 都收回来并截到 4096 字节：
+    /// git 报错常带完整用法说明，几 KB 一条进 ack 不合适。
+    ///
+    /// 判据是长度上限与内容：`rev-parse --verify` 一个不存在的 rev，git 的
+    /// stderr 有话要说，返回值里看得到，且不超过 4096。
+    #[test]
+    fn run_git_caps_the_text_it_hands_back() {
+        let (_tmp, root) = repo();
+        let (ok, text) = run_git(Some(&root), &["rev-parse", "--verify", "no-such-rev"])
+            .expect("git 本身要能起来");
+        assert!(!ok, "不存在的 rev 必须报失败");
+        assert!(!text.trim().is_empty(), "失败时 git 的 stderr 要带回来");
+        assert!(text.len() <= 4096, "回收的文本必须截到 4096 以内");
+    }
+
+    /// `read_pipes` 在子进程**两条管道都有输出**时把两段都读完（先 stdout
+    /// 后 stderr）。
+    ///
+    /// 直接拿一个真子进程：只读一条管道的话，另一条写满缓冲区时子进程会
+    /// 卡在写上一动不动——而 `run_git` 又有 60 秒超时，症状是「git 无缘无故
+    /// 超时」。判据是两段都在返回值里。
+    #[test]
+    fn read_pipes_collects_both_streams_of_a_finished_child() {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("echo to-stdout; echo to-stderr >&2")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn");
+        let status = child.wait().expect("wait");
+        assert!(status.success());
+
+        let text = read_pipes(&mut child);
+
+        assert!(text.contains("to-stdout"), "stdout 要在：{text:?}");
+        assert!(text.contains("to-stderr"), "stderr 也要在：{text:?}");
     }
 }

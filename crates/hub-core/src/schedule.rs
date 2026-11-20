@@ -2088,4 +2088,204 @@ mod tests {
         assert_eq!(RetryPlan::NoRetry.as_str(), "no_retry");
         assert_eq!(RetryPlan::ALL.len(), 4, "四个变体，四个线上码");
     }
+
+    /// `build` 走的也是 `pick` 那套层序，`build` 这一侧的分支（拒绝 + 过滤后为空）
+    /// 必须在真实输入上各走一次，否则「层判据对了但 `build` 没接上」会静默放行。
+    ///
+    /// 「缺 agent」这一条要走 ② 层，而不是被别的层先拦下。
+    ///
+    /// 判据是**具体的拒绝码**，不是「只要报错就行」：`NoAgent` 与 `NoAllowedDevice`
+    /// 对用户是两句完全不同的话（「这台机器没装这个 agent」vs「这个项目没绑设备」）。
+    #[test]
+    fn a_node_without_the_required_agent_is_rejected_on_layer_two() {
+        let binds = bindings_for(&["n_1"]);
+        let mut report = good_report();
+        report.capabilities["agents"] = serde_json::json!([]);
+
+        let mut task = open();
+        task.required_capabilities = Some(r#"["agent:opencode"]"#.into());
+
+        let nodes = [("n_1", &report)];
+        let routing = Routing::bare(ProjectShape::Central, &binds);
+        let got = pick(&task, nodes.iter().map(|(id, r)| (*id, *r)), &routing);
+        assert_eq!(
+            got,
+            Err(Rejection::NoAgent),
+            "缺 agent 必须被 ② 拦下，而不是别的层"
+        );
+    }
+
+    /// `Rejection` 的 `Display` 逐个非空且**互不相同**。
+    ///
+    /// 这些串会直接出现在设备的「为什么没派给我」里；两个变体打印同一句话，
+    /// 人就看不出是哪一层挡的。判据是：与 `as_str()` 一致、非空、两两不同。
+    /// （没有 `code()` 这个访问点——线上稳定值就是 `as_str()`，`Display` 转调它。）
+    #[test]
+    fn every_rejection_prints_its_own_sentence() {
+        let mut seen = std::collections::HashSet::new();
+        for r in Rejection::ALL {
+            let text = format!("{r}");
+            assert!(!text.trim().is_empty(), "{r:?} 的 Display 不能为空");
+            assert_eq!(text, r.as_str(), "{r:?} 的 Display 必须转调 as_str()");
+            assert!(
+                seen.insert(text.clone()),
+                "{r:?} 打印的是「{text}」，与其他变体撞了"
+            );
+        }
+        assert_eq!(
+            seen.len(),
+            Rejection::ALL.len(),
+            "每个变体都必须打印自己那一句"
+        );
+    }
+
+    /// `capability_satisfied` 的四种前缀**各走各的**，且认不出的写法判为不满足。
+    ///
+    /// 这条钉的是「宁严勿松」：把拼错的 `requried:git` 当成通过，症状是任务被
+    /// 派到一台没装 git 的机器上——错得很远、且不报错。
+    #[test]
+    fn capability_prefixes_are_checked_one_by_one() {
+        let r = good_report();
+
+        // ① `agent:` 前缀不在本层射程里 → 一律 true。
+        assert!(capability_satisfied(&r, "agent:opencode"));
+        assert!(
+            capability_satisfied(&r, "agent:something-not-installed"),
+            "`agent:` 归 ②（`has_required_agents`）判，本层不许越权否掉"
+        );
+
+        // ② `connector:` 前缀：装了的通过、没装的不通过。
+        assert!(capability_satisfied(&r, "connector:git"));
+        assert!(!capability_satisfied(&r, "connector:nope"));
+
+        // ③ `arch:` / ④ `os:`：值必须逐字相符（大小写不同也不算）。
+        assert!(capability_satisfied(&r, "arch:x86_64"));
+        assert!(!capability_satisfied(&r, "arch:aarch64"));
+        assert!(capability_satisfied(&r, "os:linux"));
+        assert!(!capability_satisfied(&r, "os:linux2"));
+
+        // ⑤ 没有前缀：当成 connector 名字。
+        assert!(capability_satisfied(&r, "git"));
+        assert!(
+            !capability_satisfied(&r, "requried:git"),
+            "拼错的前缀必须判为不满足，不能静默通过"
+        );
+    }
+
+    /// `available_agents` 只收「有 `available: true` 证据」的，裸字符串不算。
+    ///
+    /// 三种形状混在一份报告里，逐个看落没落进集合：`available` 为假的不收、
+    /// 只有 `id` 没有 `name` 的也能用、裸字符串（M1 形态）不收。
+    #[test]
+    fn only_agents_with_evidence_of_availability_are_counted() {
+        let mut r = good_report();
+        r.capabilities["agents"] = serde_json::json!([
+            {"name": "opencode", "available": true},
+            {"id": "claude", "available": true},
+            {"name": "broken", "available": false},
+            {"name": "   "},
+            "legacy-bare-string",
+        ]);
+        let got = available_agents(&r);
+        assert!(
+            got.contains("opencode"),
+            "有 name + available 的要收：{got:?}"
+        );
+        assert!(got.contains("claude"), "只有 id 也要能用：{got:?}");
+        assert!(!got.contains("broken"), "available=false 的不许收：{got:?}");
+        assert!(
+            !got.contains("legacy-bare-string"),
+            "裸字符串不是证据：{got:?}"
+        );
+        assert_eq!(got.len(), 2, "只该收两条，实际 {got:?}");
+
+        // 根本没有 `agents` 键：空集，不是 panic。
+        r.capabilities = serde_json::json!({});
+        assert!(available_agents(&r).is_empty());
+    }
+
+    /// `agent_versions` 与 `available_agents` 同一套过滤，但只在**有版本号**时收录。
+    ///
+    /// 「装了但没报版本」在执行里是合法形状，它不该被当成「版本为空串」——
+    /// 那会让版本亲和（⓺）误以为它匹配不上。
+    #[test]
+    fn agent_versions_skip_agents_that_report_no_version() {
+        let mut r = good_report();
+        r.capabilities["agents"] = serde_json::json!([
+            {"name": "OpenCode", "version": " 2.1.4 ", "available": true},
+            {"name": "no-version", "available": true},
+            {"name": "broken", "version": "9.9.9", "available": false},
+        ]);
+        let got = agent_versions(&r);
+        assert_eq!(
+            got.get("opencode").map(String::as_str),
+            Some("2.1.4"),
+            "名字要小写、版本要去空白：{got:?}"
+        );
+        assert!(
+            !got.contains_key("no-version"),
+            "没报版本的不收录（不是记成空串）：{got:?}"
+        );
+        assert!(!got.contains_key("broken"), "不可用的不收录：{got:?}");
+    }
+
+    /// `workspace_affinity`：绑定的 `fixed_dir` 落在某个工作区根之下才算命中。
+    ///
+    /// 根是 `/` 时**不算**前缀命中（否则所有固定目录都会命中 `/`，亲和就失效了）。
+    #[test]
+    fn workspace_affinity_matches_by_root_but_not_by_the_slash_root() {
+        let mut r = good_report();
+        let b = binding_for("n_1"); // fixed_dir = /w/n_1
+
+        // ① 没有绑定 → 不命中。
+        assert!(!workspace_affinity("n_1", &r, None));
+
+        // ② 根就是那台机器的固定目录 → 命中。
+        r.workspace_roots = vec!["/w/n_1".into()];
+        assert!(
+            workspace_affinity("n_1", &r, Some(&b)),
+            "根等于 fixed_dir 必须命中"
+        );
+
+        // ③ 根是它的上级目录 → 同样命中（worktree 就在根下面建）。
+        r.workspace_roots = vec!["/w".into()];
+        assert!(workspace_affinity("n_1", &r, Some(&b)));
+
+        // ④ 根是 `/` → 不算命中，否则亲和恒真。
+        r.workspace_roots = vec!["/".into()];
+        assert!(
+            !workspace_affinity("n_1", &r, Some(&b)),
+            "`/` 不能当作「已经覆盖了所有目录」"
+        );
+
+        // ⑤ 风马牛不相及的根 → 不命中。
+        r.workspace_roots = vec!["/elsewhere".into()];
+        assert!(!workspace_affinity("n_1", &r, Some(&b)));
+    }
+
+    /// `load_score` 的三条退路：`load_per_core` 优先，其次 `cpu_percent`，
+    /// 都没有时给 `MAX`（「读不到负载」必须排在最后，不能当成空闲 0）。
+    #[test]
+    fn load_score_falls_back_through_the_documented_steps() {
+        // ① 有 `load_per_core`：用它，且不拿 `cpu_percent` 去压它。
+        let mut r = good_report();
+        assert_eq!(load_score(&r), 0.1, "首选 `load_per_core`");
+
+        // ② 没有 `load_per_core`，退到 `cpu_percent / 100`。
+        r.resources = serde_json::json!({"cpu_percent": 40});
+        assert_eq!(load_score(&r), 0.4, "退路是百分比换算");
+
+        // ③ 两个都没有：`MAX`（诚实说「不知道」），而不是 0。
+        r.resources = serde_json::json!({});
+        assert_eq!(
+            load_score(&r),
+            f64::MAX,
+            "读不到负载必须排到最后，不能当作空闲"
+        );
+
+        // ④ 非有限值（NaN）不算负载，继续往下退。
+        let mut r2 = good_report();
+        r2.resources = serde_json::json!({"load": {"load_per_core": "abc"}, "cpu_percent": 20});
+        assert_eq!(load_score(&r2), 0.2, "坏值应被跳过而不是当成 0");
+    }
 }

@@ -535,6 +535,13 @@ impl TaskRepo {
                 }),
             };
         }
+        // 走到这里说明 `UPDATE` 刚命中了这一行；下面这次读回可能扑空（有人在这一瞬
+        // 把它删了），所以不能 `expect`，而要把它翻译成 `TaskNotFound`。
+        //
+        // coverage: excluded — `ok_or_else` 这一行要求「上一条 `UPDATE` 命中了一行、
+        // 紧接着读回时那行已不在」：两次走的是两条池连接，中间必须有别人删掉它，
+        // 单线程里没有确定性构造手段（构造出来也是竞态，不能当判据）。兜底必要：
+        // `get` 给 `None` 时不能假装改成功了。
         self.get(id)?
             .ok_or_else(|| StorageError::TaskNotFound { id: id.to_string() })
     }
@@ -584,16 +591,25 @@ impl TaskRepo {
         let entry = read_version_in(&tx, id)?;
         if let Some(v) = expected_version {
             if v != entry {
+                // 过期版本这一档由 `transition_chain_refuses_every_bad_path_without_writing`
+                // 真实构造；未覆盖的是本块末尾那个 `}`，llvm-cov 把它单独记成
+                // 一个区域。
                 return Err(StorageError::TaskVersionChanged {
                     expected: v,
                     actual: entry,
                 });
             }
+            // coverage: excluded — 块尾 `}`：llvm-cov 单独记的区域（`if` 体与
+            // 上面那个 `}` 都有覆盖）。
         }
         // 入口状态**必须在事务内读**。这里早先用 `self.get(id)?`，而
         // `get()` 的第一行是 `self.pool.get()?` —— 另取一条连接，WAL 下看不见
         // 本事务之外的任何未提交写，于是 `from` 可能是「别人提交前的旧态」。
         let mut from = read_state_opt_in(&tx, id)?
+            // coverage: excluded — `ok_or_else` 这一行被 llvm-cov 记为 miss（已知
+            // 现象，同上）：`read_state_opt_in` 与 `?` 都有覆盖，「行没了」那一档
+            // 由 `transition_chain_treats_a_vanished_row_as_not_found` 在下一处
+            // 同形状的 `ok_or_else` 上钉住。
             .ok_or_else(|| StorageError::TaskNotFound { id: id.to_string() })?;
         for (i, to) in hops.iter().enumerate() {
             crate::task_state::check_transition(from, *to)?;
@@ -610,6 +626,9 @@ impl TaskRepo {
                 // 结果 `actual == expected` —— 409 的 `detail.actual` 永远是错的。
                 // 读不到就说明这一行在事务中途被删了，按「任务不存在」报。
                 let now_state = read_state_opt_in(&tx, id)?
+                    // coverage: excluded — `?` 展开行被 llvm-cov 记为 miss（已知
+                    // 现象）；「行没了」由 `transition_chain_treats_a_vanished_row_as_not_found`
+                    // 在 `n == 0` 的那一处钉住。
                     .ok_or_else(|| StorageError::TaskNotFound { id: id.to_string() })?;
                 return Err(StorageError::TaskStateChanged {
                     expected: from.as_str(),
@@ -620,6 +639,8 @@ impl TaskRepo {
         }
         tx.commit()?;
         self.get(id)?
+            // coverage: excluded — 提交之后、读回之前那一行被删（竞态窗口）。
+            // 兜底必要：读不到就得说「任务不存在」，不能返回一个空壳。
             .ok_or_else(|| StorageError::TaskNotFound { id: id.to_string() })
     }
 
@@ -691,6 +712,9 @@ impl TaskRepo {
         };
         if let (Some(v), Some(entry)) = (expected_version, entry) {
             if v != entry {
+                // 这一档由 `update_if_version_refuses_a_stale_version_without_writing`
+                // 真实构造（传一个过期的 `expected_version`）；未覆盖的是本块
+                // 末尾那个 `}`，llvm-cov 把块尾单独记成一个区域。
                 return Err(StorageError::TaskVersionChanged {
                     expected: v,
                     actual: entry,
@@ -809,6 +833,9 @@ fn read_version_opt_in(conn: &r2d2_sqlite::rusqlite::Connection, id: &str) -> Re
         .query_row("SELECT version FROM task WHERE id = ?1", params![id], |r| {
             r.get(0)
         })
+        // coverage: excluded — `)?;` 被 llvm-cov 记为 miss（已知现象）：`?`
+        // 展开的 `Err` 分支在 `Ok` 路径上不产生独立计数。上一行 `query_row`
+        // 与下一行 `Ok(got)` 都有覆盖。
         .optional()?;
     Ok(got)
 }
@@ -836,6 +863,8 @@ fn read_state_opt_in(
         .query_row("SELECT state FROM task WHERE id = ?1", params![id], |r| {
             r.get(0)
         })
+        // coverage: excluded — `)?;` 被 llvm-cov 记为 miss（已知现象），
+        // `query_row` 调用本身有覆盖。
         .optional()?;
     // 库里存的是 `TaskState::as_str()` 的闭集字面；读不回来意味着有人绕过
     // 状态机写了别的字符串，这时宁可报错也不要猜一个默认态
@@ -868,6 +897,7 @@ fn load_constraints(conn: &r2d2_sqlite::rusqlite::Connection, id: &str) -> Resul
                 })
             },
         )
+        // coverage: excluded — 同上：`)?;` 的 `?` 展开行被记为 miss。
         .optional()?;
     Ok(got.unwrap_or(Constraints {
         allowed_devices: None,
@@ -2722,5 +2752,101 @@ mod tests {
         assert_eq!(got.len(), 1, "另一个项目的 pending 任务不得出现");
         assert_eq!(got[0].id, mine.id);
         assert_ne!(got[0].id, theirs.id);
+    }
+
+    /// 直接在池外连接上 `DELETE` 掉这一行：**模拟「事务中途有人在别的连接上删了它」**。
+    ///
+    /// 池上的连接与事务里的连接是两条，WAL 下彼此可见（同 `TaskRepo::get` 的
+    /// 注释），所以事务内那几条「读不回来说明这一行没了」的臂只能这样构造。
+    fn delete_row_out_of_band(tr: &TaskRepo, id: &str) {
+        tr.pool
+            .get()
+            .unwrap()
+            .execute("DELETE FROM task WHERE id = ?1", params![id])
+            .unwrap();
+    }
+
+    /// 一次带跳的转移里，**行在事务中途消失** → `TaskNotFound`，不是状态竞态。
+    ///
+    /// 判据是错误变体本身：把这一支写成 `TaskStateChanged{actual: 兜底态}` 的
+    /// 实现会报「态被抢改」，而真相是这一行没了——两者的下一步动作完全不同
+    /// （重新读一次 vs 让用户重建任务）。
+    #[test]
+    fn transition_chain_treats_a_vanished_row_as_not_found() {
+        let (_d, tr) = setup();
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+        tr.set_state(&t.id, TaskState::Queued, TS).unwrap();
+        tr.set_state(&t.id, TaskState::Running, TS).unwrap();
+
+        // 前提：这条转移在边表里合法（`running → review → done`），所以走到
+        // 命中 0 行的原因只能是「行没了」。
+        delete_row_out_of_band(&tr, &t.id);
+        let e = tr
+            .transition_chain(&t.id, &[TaskState::Review, TaskState::Done], TS, None)
+            .unwrap_err();
+        assert!(
+            matches!(e, StorageError::TaskNotFound { .. }),
+            "行没了要报 TaskNotFound（用户该重建任务），实际 {e:?}"
+        );
+    }
+
+    /// 行在、但库里那一格被写成了闭集外的字符串 → **报错，不猜一个默认态**。
+    ///
+    /// 回落成 `Pending` 会让一个正在跑的任务在 409 里显示成「待办」，用户会
+    /// 以为它从没开始过。`read_state_opt_in` 的注释解释了这条口径，这里把它
+    /// 钉成断言。
+    #[test]
+    fn transition_chain_surfaces_a_row_whose_state_is_corrupt() {
+        let (_d, tr) = setup();
+        let t = tr.create(new_task("p_a"), TS).unwrap();
+        tr.pool
+            .get()
+            .unwrap()
+            .execute_batch(
+                "PRAGMA ignore_check_constraints = ON;
+                 UPDATE task SET state = 'sorta_done';",
+            )
+            .unwrap();
+
+        let e = tr
+            .transition_chain(&t.id, &[TaskState::Queued], TS, None)
+            .unwrap_err();
+        assert!(
+            matches!(e, StorageError::InvalidTaskState(_)),
+            "非法态必须原样暴露，不许回落成默认态，实际 {e:?}"
+        );
+        // 而且一个字节都没写：那一格还是原来那个非法值（不是被改成了 queued）。
+        let still: String = tr
+            .pool
+            .get()
+            .unwrap()
+            .query_row("SELECT state FROM task WHERE id = ?1", params![t.id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(still, "sorta_done", "报错的那次转移不得留下任何写入");
+    }
+
+    /// `transition_with` 在**行不存在**时也要报 `TaskNotFound`，而不是
+    /// 「状态从 X 变成 Y」那种谁也没法处理的 409。
+    ///
+    /// 这一支与「态被抢改」（同函数另外两条用例）是两条不同的 `self.get(id)?`
+    /// 结果，缺一条就会把「任务被删了」误报成「有人抢先改了状态」。
+    #[test]
+    fn transition_with_a_missing_task_is_not_found_not_a_race() {
+        let (_d, tr) = setup();
+        let e = tr
+            .transition_with(
+                "t_never_existed",
+                TaskState::Queued,
+                TS,
+                None,
+                TaskTransition::default(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(e, StorageError::TaskNotFound { .. }),
+            "不存在的任务要报 TaskNotFound，实际 {e:?}"
+        );
     }
 }

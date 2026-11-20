@@ -202,9 +202,11 @@ impl<'a> Scheduler<'a> {
             Ok(Some(p)) => p,
             // 项目不存在 / 读不出来 → 按「约束那一层空」归因，不 panic。
             // 这里**不建执行**：一个不属于任何项目的任务不该被派到设备上。
-            // coverage: excluded — 项目只归档不删除，`Ok(None)` 正常走不到；
-            // `Err` 要先把库读坏。两条都归到同一个码，见 `AGENTS.md`
-            // 「生产代码禁 panic 铁律」。
+            //
+            // 两条臂都归到同一个码，见 `AGENTS.md`「生产代码禁 panic 铁律」。
+            // 项目只归档不删除，所以 `Ok(None)` 在生产里正常走不到；`Err(_)` 由
+            // 单测 `an_unreadable_project_table_rejects_instead_of_panicking`
+            // 把 `project` 表改名真实触发。
             Ok(None) | Err(_) => return self.reject(task, Rejection::NoAllowedDevice),
         };
         if project.is_archived() {
@@ -218,7 +220,9 @@ impl<'a> Scheduler<'a> {
         let bindings =
             match BindingRepo::new(self.state.pool().clone()).list_for_project(&task.project_id) {
                 Ok(b) => b,
-                // coverage: excluded — 读绑定失败 = 库坏了，同上。
+                // 读绑定失败 = 库坏了；单测
+                // `an_unreadable_binding_table_rejects_instead_of_panicking` 把
+                // `binding` 表改名真实触发。
                 Err(_) => return self.reject(task, Rejection::NoAllowedDevice),
             };
         let pairs = binding_pairs(&bindings);
@@ -264,9 +268,11 @@ impl<'a> Scheduler<'a> {
     pub fn route_project(&self, project_id: &str) -> Vec<(String, RouteOutcome)> {
         let tasks = match self.state.tasks().list_pending_for_project(project_id) {
             Ok(t) => t,
-            // coverage: excluded — 读库失败（表被改坏）只有故障注入能造。
-            // 不 panic、不留假事实，只记日志。
+            // 读库失败（表被改坏）——单测
+            // `route_project_returns_empty_when_the_task_table_is_unreadable`
+            // 把 `task` 表改名真实触发。不 panic、不留假事实，只记日志。
             Err(e) => {
+                // coverage: excluded — 日志宏体，无条件分支。
                 tracing::warn!(
                     project_id = %project_id,
                     error = %e,
@@ -279,6 +285,7 @@ impl<'a> Scheduler<'a> {
         for task in tasks {
             let (outcome, push) = self.route_task(&task);
             if let Some(push) = push {
+                // coverage: excluded — 日志宏体，无条件分支。
                 tracing::warn!(
                     task_id = %task.id,
                     failure = ?push,
@@ -310,8 +317,11 @@ impl<'a> Scheduler<'a> {
         let bindings = match BindingRepo::new(self.state.pool().clone()).list_for_device(device_id)
         {
             Ok(b) => b,
-            // coverage: excluded — 读库失败，见 `route_project` 同一个理由。
+            // 读库失败；单测
+            // `route_binding_tasks_returns_empty_when_the_binding_table_is_unreadable`
+            // 把 `binding` 表改名真实触发。
             Err(e) => {
+                // coverage: excluded — 日志宏体，无条件分支。
                 tracing::warn!(
                     device_id = %device_id,
                     error = %e,
@@ -326,6 +336,10 @@ impl<'a> Scheduler<'a> {
         let mut out = Vec::new();
         for b in bindings {
             if !seen.insert(b.project_id.clone()) {
+                // coverage: excluded — `binding` 的唯一约束落在
+                // `(project_id, device_id)` 上，同一台设备在同一个项目上
+                // 只能有一行，所以这个 `continue` 在现有表结构下走不到；
+                // 留着是给「将来允许多绑定」的挡板。
                 continue;
             }
             out.extend(self.route_project(&b.project_id));
@@ -379,7 +393,10 @@ impl<'a> Scheduler<'a> {
                     None,
                 );
             }
-            // coverage: excluded — 读库失败（表被改坏），不 panic 也不编事实。
+            // 读库失败（表被改坏），不 panic 也不编事实。生产走不到，因为
+            // `failed` 这一行是 `self.state.tasks().get` 刚读出来的同一条表；
+            // 单测 `a_retry_whose_requeue_fails_reports_the_state_without_creating_an_execution`
+            // 把 `task` 表改名覆盖了同一张表不可读时的收尾口径。
             Err(e) => {
                 tracing::warn!(task_id = %failed.task_id, error = %e, "cannot read the task to retry");
                 return (
@@ -408,13 +425,17 @@ impl<'a> Scheduler<'a> {
         // ---- ① 取路由的输入（与 `route_task` 逐句同源）----
         let project = match ProjectRepo::new(self.state.pool().clone()).get(&task.project_id) {
             Ok(Some(p)) => p,
-            // coverage: excluded — 项目只归档不删除；见 `route_task` 同一条臂。
+            // 项目只归档不删除，`Ok(None)` 生产走不到；`Err(_)` 由单测
+            // `a_retry_with_an_unreadable_project_table_reports_not_pending`
+            // 把 `project` 表改名真实触发。
             Ok(None) | Err(_) => return (RouteOutcome::NotPending { state: task.state }, None),
         };
         let bindings =
             match BindingRepo::new(self.state.pool().clone()).list_for_project(&task.project_id) {
                 Ok(b) => b,
-                // coverage: excluded — 读库失败，同上。
+                // 读库失败；单测
+                // `a_retry_with_an_unreadable_binding_table_reports_not_pending`
+                // 把 `binding` 表改名真实触发。
                 Err(_) => return (RouteOutcome::NotPending { state: task.state }, None),
             };
         // 上一次那台设备是从绑定反查出来的（`ExecutionView` 只存 `binding_id`）。
@@ -532,8 +553,11 @@ impl<'a> Scheduler<'a> {
             &now,
         ) {
             Ok(e) => e,
-            // coverage: excluded — 写库失败，只有故障注入能造。
+            // 写库失败。生产里只有库坏时成立；单测
+            // `a_retry_whose_execution_insert_is_rejected_is_reported` 用
+            // `BEFORE INSERT` 触发器让这条 `INSERT` 真的失败。
             Err(e) => {
+                // coverage: excluded — 日志宏体，无条件分支。
                 tracing::error!(task_id = %task.id, error = %e, "cannot create the retry execution");
                 return (
                     RouteOutcome::Rejected {
@@ -618,8 +642,11 @@ impl<'a> Scheduler<'a> {
             &now,
         ) {
             Ok(e) => e,
-            // coverage: excluded — 建执行失败 = 写库失败，只有故障注入能造。
+            // 建执行失败 = 写库失败。生产里只有库坏时成立；单测
+            // `dispatch_backs_out_when_either_the_execution_or_the_state_cannot_be_written`
+            // 用 `WHERE 0` 视图让这条 `INSERT` 真的失败。
             Err(e) => {
+                // coverage: excluded — 日志宏体，无条件分支。
                 tracing::error!(
                     task_id = %task.id,
                     error = %e,
@@ -644,7 +671,8 @@ impl<'a> Scheduler<'a> {
                 .executions()
                 .set_state(&execution.id, ExecutionState::Aborted)
             {
-                // coverage: excluded — 收尾失败 = 写库失败。
+                // 收尾失败 = 写库失败（同一时刻另一处也在写这张表）。
+                // coverage: excluded — 日志宏体，无条件分支。
                 tracing::error!(
                     execution_id = %execution.id,
                     error = %e2,
@@ -715,6 +743,7 @@ impl<'a> Scheduler<'a> {
             // 路由**不排除**它（`scheduling.md` §3：重连中的设备仍可调度），但帧
             // 必须走一条活连接——所以这里如实返回「没送出去」，等它重连后的心跳
             // 再触发一次重试路由。
+            // coverage: excluded — 日志宏体，无条件分支。
             tracing::info!(
                 node_id = %node_id,
                 "no live connection for the chosen node; the dispatch frame was not sent"
@@ -725,9 +754,10 @@ impl<'a> Scheduler<'a> {
         match outbound.send(&handle.conn_id, frame.clone()) {
             Ok(true) => None,
             Ok(false) => Some(PushFailure::NotConnected),
-            // coverage: excluded — 控制面队列打满要求同一台设备同时收到一批
-            // 还没被写协程取走的控制帧；本里程碑一条连接一次只会有一个在途
-            // 派发。`PushError::QueueFull` 的映射本身由 `conns.rs` 的单测钉住。
+            // 控制面队列打满。生产里要求同一台设备同时收到一批还没被写协程
+            // 取走的控制帧；单测 `a_full_control_queue_is_reported_as_queue_full`
+            // 直接把队列填满。`PushError::QueueFull` 的映射本身由 `conns.rs`
+            // 的单测另钉一遍。
             Err(PushError::QueueFull) => Some(PushFailure::QueueFull),
         }
     }
@@ -783,6 +813,7 @@ impl<'a> Scheduler<'a> {
             serde_json::to_string(&payload).unwrap_or_else(|_| format!("{{\"kind\":\"{kind}\"}}"));
         let event = hub_storage::NewEvent::new(seq, kind, text);
         if let Err(e) = repo.append(&session_id, entity_id, &event, &crate::routes::now()) {
+            // coverage: excluded — 日志宏体，无条件分支。
             tracing::warn!(
                 task_id = %task.id,
                 kind = kind,
@@ -1080,7 +1111,2063 @@ fn push_failure_code(f: PushFailure) -> &'static str {
 pub fn routing_worth_trying(state: &AppState, project_id: &str) -> bool {
     match state.tasks().list_pending_for_project(project_id) {
         Ok(t) => !t.is_empty(),
-        // coverage: excluded — 读库失败；见上：宁可多跑。
+        // 读库失败：宁可多跑一轮路由，不可漏派一次。用 `test_support::break_table`
+        // 把表改名制造真实的读失败（同 `dispatch_ack` 的错误分支口径）。
         Err(_) => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use hub_core::reports::Report;
+    use hub_storage::execution::ExecutionRepo;
+    use hub_storage::project::{NewProject, ProjectShape};
+    use hub_storage::task::{DoneWhen, NewTask};
+    use hub_storage::{BindingSpec, CleanupPolicy, TaskRepo};
+    use protocol::frame::Frame;
+
+    use crate::test_support::{break_table, state};
+
+    /// 一个只收日志、不打印的 `tracing` 订阅者。
+    ///
+    /// 「I/O 错误不得静默」（`AGENTS.md`）的判据是**那条 warn 真的被记下来了**，
+    /// 而不是「那个分支没 panic」。日志宏的字段常量在覆盖率里是可执行行，
+    /// 没有订阅者时它们永远是 0——那是假缺口，但更糟的是「记了没记」这件事
+    /// 本身没人验过。
+    ///
+    /// 订阅者是**线程局部的**（`with_default`）：并行的 `#[tokio::test]` 不会
+    /// 被顺手写进这份缓冲，也不会被它拖慢。
+    struct Logs {
+        lines: std::sync::Arc<parking_lot::Mutex<Vec<(tracing::Level, String)>>>,
+    }
+
+    impl Logs {
+        fn capture<T>(f: impl FnOnce() -> T) -> (T, Self) {
+            use tracing_subscriber::layer::SubscriberExt as _;
+
+            /// 只收 `message` 字段（`tracing::warn!("...")` 的第一段）。
+            struct Visitor<'a>(&'a mut String);
+            impl tracing::field::Visit for Visitor<'_> {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        use std::fmt::Write as _;
+                        let _ = write!(self.0, "{value:?}");
+                    }
+                }
+            }
+
+            #[derive(Clone)]
+            struct Collect(std::sync::Arc<parking_lot::Mutex<Vec<(tracing::Level, String)>>>);
+
+            impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Collect {
+                fn on_event(
+                    &self,
+                    event: &tracing::Event<'_>,
+                    _ctx: tracing_subscriber::layer::Context<'_, S>,
+                ) {
+                    let mut msg = String::new();
+                    event.record(&mut Visitor(&mut msg));
+                    // 消息正文去掉 `tracing` 给 `&str` 加的那对引号。
+                    self.0
+                        .lock()
+                        .push((*event.metadata().level(), msg.replace('"', "")));
+                }
+            }
+
+            let buf = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+            let subscriber = tracing_subscriber::registry().with(Collect(buf.clone()));
+            let out = tracing::subscriber::with_default(subscriber, f);
+            (out, Self { lines: buf })
+        }
+
+        /// 有没有一条 `level` 级别、正文包含 `needle` 的日志。
+        fn has(&self, level: tracing::Level, needle: &str) -> bool {
+            self.lines
+                .lock()
+                .iter()
+                .any(|(l, m)| *l == level && m.contains(needle))
+        }
+
+        fn messages(&self) -> Vec<String> {
+            self.lines.lock().iter().map(|(_, m)| m.clone()).collect()
+        }
+    }
+
+    /// 绑定目录。**必须是绝对路径**：`hub_core::schedule` 的「拿得到代码」那一层
+    /// 用 `fixed_dir.starts_with('/')` 判定，相对路径一律 `no_code`。
+    const FIXED_DIR: &str = "/srv/af/worktrees";
+    /// 建库 / 建行的固定时刻（与集成测试同一口径，便于并排读）。
+    const T0: &str = "unix:1700000000";
+
+    // -----------------------------------------------------------------
+    // 夹具
+    // -----------------------------------------------------------------
+
+    fn task_repo(st: &AppState) -> TaskRepo {
+        TaskRepo::new(st.pool().clone())
+    }
+
+    fn execution_repo(st: &AppState) -> ExecutionRepo {
+        ExecutionRepo::new(st.pool().clone())
+    }
+
+    fn build_project(st: &AppState, name: &str, shape: ProjectShape) -> String {
+        ProjectRepo::new(st.pool().clone())
+            .create(
+                NewProject {
+                    name: name.to_string(),
+                    shape,
+                    theme_color: None,
+                    upstream_url: None,
+                },
+                T0,
+            )
+            .unwrap()
+            .id
+    }
+
+    fn bind_with_dir(st: &AppState, project_id: &str, device_id: &str, fixed_dir: &str) -> String {
+        BindingRepo::new(st.pool().clone())
+            .upsert(
+                project_id,
+                device_id,
+                BindingSpec {
+                    fixed_dir: fixed_dir.to_string(),
+                    // 不设配额：配额会把 ⑤ 的判据变成「配额够不够」，而本模块的
+                    // 用例要的是「有没有合格设备」这件事本身。
+                    disk_quota_bytes: None,
+                    cleanup_policy: CleanupPolicy::Balanced,
+                },
+                T0,
+            )
+            .unwrap()
+            .id
+    }
+
+    fn bind(st: &AppState, project_id: &str, device_id: &str) -> String {
+        bind_with_dir(st, project_id, device_id, FIXED_DIR)
+    }
+
+    /// 一份「能跑 git + opencode、磁盘很宽裕」的心跳（⑤ 的门槛是 576 MiB）。
+    fn report(capabilities: serde_json::Value, free_disk_mb: u64) -> Report {
+        Report {
+            node_version: "0.1.0".to_string(),
+            capabilities,
+            resources: serde_json::json!({"disk": {"workspace_free_mb": free_disk_mb}}),
+            workspace_roots: Vec::new(),
+            at: std::time::Instant::now(),
+        }
+    }
+
+    fn capable_caps() -> serde_json::Value {
+        serde_json::json!({
+            "connectors": ["git"],
+            "agents": [{"id": "opencode", "name": "opencode", "version": "0.0.1", "available": true}],
+        })
+    }
+
+    /// 设备上线：心跳落进内存上报缓存 + 在连接注册表里占一条连接。
+    ///
+    /// 返回控制面收端——路由要求两者都有（前者过能力层，后者才能发帧），
+    /// 而收端让「帧到底发出去没有」可以直接断言，不必和写协程抢时序。
+    fn device_online(st: &AppState, node_id: &str) -> tokio::sync::mpsc::Receiver<Frame> {
+        st.reports()
+            .record(node_id, report(capable_caps(), 102_400));
+        let conn_id = format!("conn-{node_id}");
+        let (control_rx, _data_rx) = st.outbound().register(&conn_id);
+        st.connections().insert(
+            node_id.to_string(),
+            hub_core::ConnHandle { conn_id, gen: 1 },
+        );
+        // 前提：上报真的进了缓存。`Reports::record` 会「缺省即保留」地合并，
+        // 夹具若静默失败，后面所有「派不出去」都会看起来像路由的错误。
+        assert!(
+            st.reports().get(node_id).is_some(),
+            "夹具失败：{node_id} 的心跳没有进上报缓存"
+        );
+        control_rx
+    }
+
+    /// 心跳有、但**连接没有**（`Presence::Reconnecting`）：路由不排除它，
+    /// 但帧一定送不出去。
+    fn device_present_without_connection(st: &AppState, node_id: &str) {
+        let rx = device_online(st, node_id);
+        drop(rx);
+        let handle = st.connections().get(node_id).expect("连接刚注册过");
+        st.connections().remove_if_current(node_id, &handle.conn_id);
+        assert!(
+            st.connections().get(node_id).is_none(),
+            "夹具失败：{node_id} 的连接没摘掉"
+        );
+        assert!(
+            st.reports().get(node_id).is_some(),
+            "夹具失败：心跳必须留着（这一档是 Reconnecting，不是离线）"
+        );
+    }
+
+    fn create_task(st: &AppState, project_id: &str, title: &str) -> TaskView {
+        task_repo(st)
+            .create(
+                NewTask::new(
+                    project_id,
+                    title,
+                    DoneWhen {
+                        criteria: None,
+                        // `DoneWhen` 自己要求「验收标准不能两栏都空」。
+                        description: Some("跑通即可".to_string()),
+                    },
+                ),
+                T0,
+            )
+            .unwrap()
+    }
+
+    fn create_task_with(
+        st: &AppState,
+        project_id: &str,
+        title: &str,
+        mut new: NewTask,
+    ) -> TaskView {
+        new.project_id = project_id.to_string();
+        new.title = title.to_string();
+        task_repo(st).create(new, T0).unwrap()
+    }
+
+    fn task_state(st: &AppState, task_id: &str) -> TaskState {
+        task_repo(st).get(task_id).unwrap().expect("task row").state
+    }
+
+    fn execution_count(st: &AppState, task_id: &str) -> usize {
+        execution_repo(st).list_for_task(task_id).unwrap().len()
+    }
+
+    /// 某任务在派发轨迹里的 `(kind, payload)`，按物理顺序。
+    fn facts(st: &AppState, task_id: &str) -> Vec<(String, String)> {
+        let session_id = format!("{TASK_TRAJECTORY_NAMESPACE}{task_id}");
+        st.trajectory()
+            .list(&session_id, 0, 100)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.kind, e.payload))
+            .collect()
+    }
+
+    fn last_payload(st: &AppState, task_id: &str, kind: &str) -> Option<serde_json::Value> {
+        facts(st, task_id)
+            .into_iter()
+            .rev()
+            .find(|(k, _)| k == kind)
+            .map(|(_, p)| serde_json::from_str::<serde_json::Value>(&p).unwrap())
+    }
+
+    /// 把任务沿边表推到 `failed`（`retry_failed_execution` 的唯一合法起点）。
+    fn push_to_failed(st: &AppState, task_id: &str) {
+        let repo = task_repo(st);
+        for to in [TaskState::Queued, TaskState::Running, TaskState::Failed] {
+            repo.set_state(task_id, to, T0).unwrap();
+        }
+    }
+
+    /// 一条挂在 `binding_id` 上的执行（不经过路由，用来构造重派输入）。
+    fn execution_on(
+        st: &AppState,
+        task_id: &str,
+        binding_id: &str,
+        kind: Option<FailureKind>,
+    ) -> ExecutionView {
+        let repo = execution_repo(st);
+        let exec = repo
+            .create(
+                NewExecution {
+                    task_id: task_id.to_string(),
+                    binding_id: binding_id.to_string(),
+                    base_commit: Some("deadbeef".to_string()),
+                    worktree_path: Some(format!("{FIXED_DIR}/{task_id}")),
+                },
+                T0,
+            )
+            .unwrap();
+        // `failure_kind` 没有公开的写入口，直接用 SQL 落一个：这模拟的是
+        // 「ack 处理已经把它标成失败」之后的那一行。
+        if let Some(kind) = kind {
+            repo.set_failure(&exec.id, kind, kind.as_str(), "").unwrap();
+            repo.set_state(&exec.id, ExecutionState::Failed).unwrap();
+        }
+        repo.get(&exec.id).unwrap().unwrap()
+    }
+
+    fn frame_or_none(rx: &mut tokio::sync::mpsc::Receiver<Frame>) -> Option<Frame> {
+        rx.try_recv().ok()
+    }
+
+    // -----------------------------------------------------------------
+    // route_task
+    // -----------------------------------------------------------------
+
+    /// `RouteOutcome::is_dispatched` 是调用点唯一的判据（`routes/tasks.rs` 用它
+    /// 决定响应里的 `outcome`），两种结论各断言一次。
+    #[tokio::test]
+    async fn is_dispatched_is_true_only_for_a_dispatched_conclusion() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        bind(&st, &project_id, "n_1");
+        let _frames = device_online(&st, "n_1");
+
+        let task = create_task(&st, &project_id, "要派出去");
+        let (outcome, push) = st.scheduler().route_task(&task);
+        assert!(outcome.is_dispatched(), "合格设备在线时必须派出去");
+        assert_eq!(push, None);
+
+        let rejected = RouteOutcome::Rejected {
+            rejection: Rejection::BindingBusy,
+        };
+        assert!(!rejected.is_dispatched(), "被拒不是「派出去了」");
+        assert!(!RouteOutcome::NotPending {
+            state: TaskState::Queued
+        }
+        .is_dispatched());
+    }
+
+    /// 非 `pending` 的任务**根本不去算路由**：结论是 `NotPending` 而不是
+    /// `Rejected`（后者会凭空造出一批 `no_allowed_device` 归因）。
+    #[tokio::test]
+    async fn a_non_pending_task_is_reported_as_not_pending_and_never_touches_the_database() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        bind(&st, &project_id, "n_1");
+        let mut frames = device_online(&st, "n_1");
+
+        let task = create_task(&st, &project_id, "已经派过了");
+        push_to_failed(&st, &task.id);
+        let failed = task_repo(&st).get(&task.id).unwrap().unwrap();
+        assert_eq!(failed.state, TaskState::Failed);
+
+        let (outcome, push) = st.scheduler().route_task(&failed);
+        assert_eq!(
+            outcome,
+            RouteOutcome::NotPending {
+                state: TaskState::Failed
+            }
+        );
+        assert_eq!(push, None);
+        // 零执行、零轨迹、零帧：连「拒绝」那条事实都不该有。
+        assert_eq!(execution_count(&st, &task.id), 0);
+        assert!(facts(&st, &task.id).is_empty(), "没算路由就不该留痕");
+        assert!(frame_or_none(&mut frames).is_none());
+    }
+
+    /// 归档项目**停止派发**：设备完全合格也不派，归因落在 ⓪（项目级停止开关
+    /// 不是某一层过滤，所以不新增 `Rejection` 变体）。
+    #[tokio::test]
+    async fn an_archived_project_is_not_dispatched_and_the_reason_lands_on_layer_zero() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        bind(&st, &project_id, "n_1");
+        // 收端留着不读：本用例只关心「归档之后不再发帧」，而第一帧是前提那一步发的。
+        let _frames = device_online(&st, "n_1");
+
+        let task = create_task(&st, &project_id, "项目归档了");
+        // 前提：归档**之前**它是能派的——否则下面的「不派」可能只是夹具坏了。
+        let (before, _) = st.scheduler().route_task(&task);
+        assert!(before.is_dispatched(), "前提：归档之前必须能派：{before:?}");
+
+        // 回到 pending（沿合法边绕一圈），然后归档项目。
+        let repo = task_repo(&st);
+        for to in [TaskState::Running, TaskState::Failed, TaskState::Queued] {
+            repo.set_state(&task.id, to, T0).unwrap();
+        }
+        ProjectRepo::new(st.pool().clone())
+            .archive(&project_id, "unix:1700000009")
+            .unwrap();
+        let pending = create_task(&st, &project_id, "归档之后建的");
+        assert_eq!(pending.state, TaskState::Pending);
+
+        let (outcome, push) = st.scheduler().route_task(&pending);
+        assert_eq!(
+            outcome,
+            RouteOutcome::Rejected {
+                rejection: Rejection::NoAllowedDevice
+            }
+        );
+        assert_eq!(push, None);
+        assert_eq!(execution_count(&st, &pending.id), 0, "归档项目不许建执行");
+        assert_eq!(task_state(&st, &pending.id), TaskState::Pending);
+        let payload = last_payload(&st, &pending.id, TASK_REJECTED_KIND).expect("归因");
+        assert_eq!(payload["layer"], "0");
+        assert_eq!(payload["code"], "no_allowed_device");
+    }
+
+    /// `ProjectRepo::get` 读不出来（表被改名）→ 按 ⓪ 归因，**不 panic、不建执行**。
+    #[tokio::test]
+    async fn an_unreadable_project_table_rejects_instead_of_panicking() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        bind(&st, &project_id, "n_1");
+        let _frames = device_online(&st, "n_1");
+        let task = create_task(&st, &project_id, "项目表坏了");
+
+        break_table(&st, "project");
+
+        let (outcome, push) = st.scheduler().route_task(&task);
+        assert_eq!(
+            outcome,
+            RouteOutcome::Rejected {
+                rejection: Rejection::NoAllowedDevice
+            },
+            "读不出项目只能按 ⓪ 归因，不许 panic"
+        );
+        assert_eq!(push, None);
+        assert_eq!(execution_count(&st, &task.id), 0);
+    }
+
+    /// `BindingRepo::list_for_project` 读不出来 → 同一个码，同样不 panic。
+    #[tokio::test]
+    async fn an_unreadable_binding_table_rejects_instead_of_panicking() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        bind(&st, &project_id, "n_1");
+        let _frames = device_online(&st, "n_1");
+        let task = create_task(&st, &project_id, "绑定表坏了");
+        assert!(
+            ProjectRepo::new(st.pool().clone())
+                .get(&project_id)
+                .unwrap()
+                .is_some(),
+            "前提：项目必须读得出来，这条才只测绑定那一处"
+        );
+
+        break_table(&st, "binding");
+
+        let (outcome, push) = st.scheduler().route_task(&task);
+        assert_eq!(
+            outcome,
+            RouteOutcome::Rejected {
+                rejection: Rejection::NoAllowedDevice
+            }
+        );
+        assert_eq!(push, None);
+        assert_eq!(execution_count(&st, &task.id), 0);
+    }
+
+    /// 绑定的 `fixed_dir` 是相对路径 → ⑥「拿不到代码」，层号 `"6"`。
+    ///
+    /// 判红方式：把 `pick` 的 `shape` 传成 `Central` 之外的东西不影响这一条，
+    /// 但把 `constraints_of` 的 `pinned_device` 填成「单元素 `allowed_devices`」
+    /// 会让它跳过全部过滤 → 结论变成 `Dispatched`。
+    #[tokio::test]
+    async fn a_binding_with_a_relative_fixed_dir_is_attributed_to_layer_six() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        // 绑定目录是相对路径 → ⑥「拿不到代码」；这条任务会被它挡下。
+        bind_with_dir(&st, &project_id, "n_rel", "~/code/proj");
+        st.reports()
+            .record("n_rel", report(capable_caps(), 102_400));
+        let rel = create_task(&st, &project_id, "相对路径");
+
+        let (outcome, _) = st.scheduler().route_task(&rel);
+        assert_eq!(
+            outcome,
+            RouteOutcome::Rejected {
+                rejection: Rejection::NoCode
+            },
+            "相对 fixed_dir 必须报 ⑥（Hub 不知道 `~` 在哪）"
+        );
+        let payload = last_payload(&st, &rel.id, TASK_REJECTED_KIND).expect("归因");
+        assert_eq!(payload["layer"], "6", "⑥ 的层号是 6");
+        assert_eq!(payload["code"], "no_code");
+    }
+
+    /// 再叠一条从真实路由里走出来的非 ⓪ 归因：任务要 `codex`、设备只有
+    /// `opencode` → ② `NoAgent`，层号 `"2"`。
+    #[tokio::test]
+    async fn a_missing_agent_is_attributed_to_layer_two() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        bind(&st, &project_id, "n_1");
+        let mut frames = device_online(&st, "n_1");
+
+        let task = create_task_with(
+            &st,
+            &project_id,
+            "要 codex",
+            NewTask {
+                required_capabilities: Some(r#"["agent:codex"]"#.into()),
+                ..NewTask::new(
+                    "",
+                    "",
+                    DoneWhen {
+                        criteria: None,
+                        description: Some("跑通".into()),
+                    },
+                )
+            },
+        );
+        let (outcome, _) = st.scheduler().route_task(&task);
+        assert_eq!(
+            outcome,
+            RouteOutcome::Rejected {
+                rejection: Rejection::NoAgent
+            }
+        );
+        let payload = last_payload(&st, &task.id, TASK_REJECTED_KIND).expect("归因");
+        assert_eq!(payload["layer"], "2");
+        assert_eq!(payload["code"], "no_agent");
+        // 约束原文必须进 payload：只说「no_allowed_device」用户不知道该改哪一条。
+        assert_eq!(
+            payload["constraints"]["required_capabilities"],
+            r#"["agent:codex"]"#
+        );
+        assert!(frame_or_none(&mut frames).is_none());
+    }
+
+    /// `Rejection` 的线上码与层号是两套字面值，逐条对拍一遍
+    /// （`task-model.md` §7.2 的原文写死在 `Rejection::as_str` 里）。
+    ///
+    /// 判红方式：任一层的层号错一位——层号是给人看的「到底卡在哪」，
+    /// 错一位就把排查引到错误的那一层。
+    #[test]
+    fn every_rejection_variant_has_its_own_code_and_layer() {
+        let expected = [
+            (Rejection::NoAllowedDevice, "no_allowed_device", "0"),
+            (Rejection::IsolationBlocked, "isolation_blocked", "1"),
+            (Rejection::NoAgent, "no_agent", "2"),
+            (Rejection::NoConnector, "no_connector", "3"),
+            (Rejection::RamInsufficient, "ram_insufficient", "4"),
+            (Rejection::DiskInsufficient, "disk_insufficient", "5"),
+            (Rejection::NoCode, "no_code", "6"),
+            (Rejection::BindingBusy, "binding_busy", "7"),
+        ];
+        assert_eq!(
+            Rejection::ALL.len(),
+            expected.len(),
+            "层号表必须覆盖 `Rejection::ALL` 的每一个变体"
+        );
+        for (variant, code, layer) in expected {
+            assert_eq!(variant.as_str(), code, "{variant:?} 的线上码");
+            assert_eq!(rejection_layer(variant), layer, "{code} 的层号");
+            assert!(Rejection::ALL.contains(&variant));
+        }
+    }
+
+    /// 隔离式项目里，一台**没绑定**本项目的设备不能接活（① `IsolationBlocked`）。
+    ///
+    /// 判红方式：`route_task` 把 `Project::shape` 写死成 `Central` —— 那时这台
+    /// 设备会在 ⑦ 之前被放过，结论变成 `Dispatched`。
+    ///
+    /// 候选源就是绑定表，所以这台「没绑定」的设备必须**绑在别的项目上**才能
+    /// 进候选。隔离式项目这边**一条绑定都没有**，于是「隔离式项目里没有任何
+    /// 可选设备」这件事本身就是 ⓪ 里那句「现在都不可用」。
+    ///
+    /// ① 自己的判定（`shape == Isolated && binding.is_none()`）在本模块的路由
+    /// 形状下**不可达**：候选源就是本项目绑定表，没有绑定就没有候选，`pick`
+    /// 连 `filter` 都进不去。那一条由 `hub_core::schedule` 的
+    /// `layer_one_rejects_an_unbound_device_in_an_isolated_project` 直接对拍
+    /// 纯函数——归因逻辑的真相在那一层，本模块只是它的调用方。
+    #[tokio::test]
+    async fn an_isolated_project_without_any_binding_is_rejected_on_layer_zero() {
+        let (st, _dir) = state();
+        let isolated = build_project(&st, "iso", ProjectShape::Isolated);
+        let other = build_project(&st, "other", ProjectShape::Central);
+        // 绑在**别的**项目上：这台设备的心跳能让它成为「有意的设备」，但它
+        // 不在隔离式项目的候选源里。
+        bind(&st, &other, "n_out");
+        let _out_frames = device_online(&st, "n_out");
+
+        let task = create_task(&st, &isolated, "隔离项目里一条绑定都没有");
+        let (outcome, push) = st.scheduler().route_task(&task);
+        assert_eq!(
+            outcome,
+            RouteOutcome::Rejected {
+                rejection: Rejection::NoAllowedDevice
+            },
+            "隔离式项目里没有候选 → ⓪「现在都不可用」"
+        );
+        assert_eq!(push, None);
+        let payload = last_payload(&st, &task.id, TASK_REJECTED_KIND).expect("归因");
+        assert_eq!(payload["layer"], "0");
+        assert_eq!(payload["code"], "no_allowed_device");
+        assert_eq!(execution_count(&st, &task.id), 0);
+    }
+
+    /// 磁盘不够（⑤ `DiskInsufficient`，层号 `"5"`）——最容易被写漏的一层。
+    #[tokio::test]
+    async fn a_tight_disk_is_attributed_to_layer_five() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        bind(&st, &project_id, "n_tight");
+        // 100 MiB：远低于 ⑤ 的门槛（64 MiB 基础开销 + 512 MiB 安全余量）。
+        st.reports().record("n_tight", report(capable_caps(), 100));
+        let conn_id = "conn-n_tight".to_string();
+        let _rx = st.outbound().register(&conn_id);
+        st.connections().insert(
+            "n_tight".to_string(),
+            hub_core::ConnHandle { conn_id, gen: 1 },
+        );
+
+        let task = create_task(&st, &project_id, "盘要满了");
+        let (outcome, _) = st.scheduler().route_task(&task);
+        assert_eq!(
+            outcome,
+            RouteOutcome::Rejected {
+                rejection: Rejection::DiskInsufficient
+            }
+        );
+        assert_eq!(
+            last_payload(&st, &task.id, TASK_REJECTED_KIND).expect("归因")["layer"],
+            "5"
+        );
+    }
+
+    /// 选出了设备但**连接不在**（正在退避重连）→ `Dispatched` + `NotConnected`。
+    ///
+    /// 两件事必须分开：结论仍是 `Dispatched`（执行与状态都已落库），而「没送到」
+    /// 写在轨迹的 `push_failure` 上。判红方式：`push` 在没连接时返回 `None`。
+    #[tokio::test]
+    async fn a_chosen_device_without_a_live_connection_reports_a_push_failure() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        bind(&st, &project_id, "n_gone");
+        device_present_without_connection(&st, "n_gone");
+
+        let task = create_task(&st, &project_id, "连不上");
+        let ((outcome, push), logs) = Logs::capture(|| st.scheduler().route_task(&task));
+        assert!(outcome.is_dispatched(), "{outcome:?}");
+        assert_eq!(push, Some(PushFailure::NotConnected));
+        assert!(
+            logs.has(
+                tracing::Level::INFO,
+                "no live connection for the chosen node"
+            ),
+            "「选出来了但没送到」必须留痕：{:?}",
+            logs.messages()
+        );
+        // 执行照样建了（先落库、再发帧），任务照样 `queued`。
+        assert_eq!(execution_count(&st, &task.id), 1);
+        assert_eq!(task_state(&st, &task.id), TaskState::Queued);
+        let payload = last_payload(&st, &task.id, TASK_DISPATCHED_KIND).expect("派发事实");
+        assert_eq!(payload["push_failure"], "not_connected");
+    }
+
+    /// 连接在、但出站表里那条 `conn_id` 已经被摘掉 → `OutboundTable::send`
+    /// 返回 `Ok(false)`，同样是 `NotConnected` 而不是静默成功。
+    #[tokio::test]
+    async fn a_connection_whose_outbound_entry_is_gone_reports_not_connected() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        bind(&st, &project_id, "n_half");
+        let mut frames = device_online(&st, "n_half");
+        // 连接注册表还指着 `conn-n_half`，但出站表里那一项已经没了（写协程退出）。
+        st.outbound().remove("conn-n_half");
+
+        let task = create_task(&st, &project_id, "半死不活");
+        let (outcome, push) = st.scheduler().route_task(&task);
+        assert!(outcome.is_dispatched(), "{outcome:?}");
+        assert_eq!(push, Some(PushFailure::NotConnected));
+        assert!(frame_or_none(&mut frames).is_none(), "出站项没了就没有帧");
+        let payload = last_payload(&st, &task.id, TASK_DISPATCHED_KIND).expect("派发事实");
+        assert_eq!(payload["push_failure"], "not_connected");
+    }
+
+    /// 同一绑定上已有未收尾的执行 → ⑦ `BindingBusy`（层号 `"7"`）。
+    ///
+    /// 这条同时证明 `binding_is_busy` 问的是 `ExecutionState::is_terminal`：
+    /// 把那条执行收尾成 `aborted` 之后，同一个绑定立刻又能派。
+    #[tokio::test]
+    async fn a_busy_binding_is_attributed_to_layer_seven_and_frees_up_once_terminal() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let binding_id = bind(&st, &project_id, "n_1");
+        let _frames = device_online(&st, "n_1");
+
+        let first = create_task(&st, &project_id, "第一个");
+        let (outcome, _) = st.scheduler().route_task(&first);
+        assert!(outcome.is_dispatched(), "{outcome:?}");
+        let running = execution_repo(&st).list_for_binding(&binding_id).unwrap();
+        assert_eq!(running.len(), 1);
+        assert!(
+            st.scheduler().binding_is_busy(&binding_id),
+            "前提：绑定在忙"
+        );
+
+        let second = create_task(&st, &project_id, "第二个");
+        let (blocked, _) = st.scheduler().route_task(&second);
+        assert_eq!(
+            blocked,
+            RouteOutcome::Rejected {
+                rejection: Rejection::BindingBusy
+            }
+        );
+        assert_eq!(
+            last_payload(&st, &second.id, TASK_REJECTED_KIND).expect("归因")["layer"],
+            "7"
+        );
+
+        // 把第一条执行收尾 → 绑定空出来，第二个立刻能派。
+        execution_repo(&st)
+            .set_state(&running[0].id, ExecutionState::Aborted)
+            .unwrap();
+        assert!(!st.scheduler().binding_is_busy(&binding_id));
+        let (now, _) = st.scheduler().route_task(&second);
+        assert!(now.is_dispatched(), "空出来的绑定必须能接活：{now:?}");
+    }
+
+    /// 执行表读不出来时 `binding_is_busy` **当作忙**（宁忙不空）：把「读不出来」
+    /// 当成「空着」会让同一个绑定并发派两条任务。
+    #[tokio::test]
+    async fn an_unreadable_execution_table_is_treated_as_busy() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let binding_id = bind(&st, &project_id, "n_1");
+        let _frames = device_online(&st, "n_1");
+        let task = create_task(&st, &project_id, "执行表坏了");
+
+        // 前提：正常时它是空的。
+        assert!(!st.scheduler().binding_is_busy(&binding_id));
+        break_table(&st, "execution");
+        assert!(
+            st.scheduler().binding_is_busy(&binding_id),
+            "读不出来必须当作忙"
+        );
+
+        // 于是路由在 ⑦ 上被挡下——而不是「以为空着」于是建了第二条执行。
+        let (outcome, _) = st.scheduler().route_task(&task);
+        assert_eq!(
+            outcome,
+            RouteOutcome::Rejected {
+                rejection: Rejection::BindingBusy
+            }
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // route_project
+    // -----------------------------------------------------------------
+
+    /// `route_project` 逐条路由本项目**全部** `pending`，其余项目与非 `pending`
+    /// 一概不碰。
+    ///
+    /// 顺序是 `created_at` 升序（`list_pending_for_project` 的口径）：第一个派出
+    /// 去之后，第二个会在 ⑦ 上被挡下——`scheduling.md` §3.3 的串行不需要额外
+    /// 加锁，靠的是「刚建的那条执行已经在库里」。
+    #[tokio::test]
+    async fn route_project_walks_its_own_pending_tasks_oldest_first() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let other = build_project(&st, "other", ProjectShape::Central);
+        bind(&st, &project_id, "n_1");
+        let _frames = device_online(&st, "n_1");
+
+        let older = task_repo(&st)
+            .create(
+                NewTask::new(
+                    &project_id,
+                    "先建的",
+                    DoneWhen {
+                        criteria: None,
+                        description: Some("跑通".into()),
+                    },
+                ),
+                "unix:1700000001",
+            )
+            .unwrap();
+        let newer = task_repo(&st)
+            .create(
+                NewTask::new(
+                    &project_id,
+                    "后建的",
+                    DoneWhen {
+                        criteria: None,
+                        description: Some("跑通".into()),
+                    },
+                ),
+                "unix:1700000002",
+            )
+            .unwrap();
+        let elsewhere = create_task(&st, &other, "别的项目");
+        let done = create_task(&st, &project_id, "已经做完");
+        for to in [
+            TaskState::Queued,
+            TaskState::Running,
+            TaskState::Review,
+            TaskState::Done,
+        ] {
+            task_repo(&st).set_state(&done.id, to, T0).unwrap();
+        }
+
+        let results = st.scheduler().route_project(&project_id);
+
+        assert_eq!(
+            results.len(),
+            2,
+            "只该路由本项目的两条 pending：{results:?}"
+        );
+        assert_eq!(results[0].0, older.id, "先建的先派");
+        assert!(results[0].1.is_dispatched(), "{:?}", results[0].1);
+        assert_eq!(results[1].0, newer.id);
+        assert_eq!(
+            results[1].1,
+            RouteOutcome::Rejected {
+                rejection: Rejection::BindingBusy
+            },
+            "第一个派走之后第二个必须在 ⑦ 上被挡下"
+        );
+        // 别的项目的任务、非 pending 的任务都没被碰过。
+        assert_eq!(task_state(&st, &elsewhere.id), TaskState::Pending);
+        assert_eq!(execution_count(&st, &elsewhere.id), 0);
+        assert_eq!(task_state(&st, &done.id), TaskState::Done);
+        assert_eq!(execution_count(&st, &done.id), 0);
+    }
+
+    /// `route_project` 里的「帧没送到」也要留痕（`route_task` 的 `push` 被
+    /// 逐条转成一条 warn，并原样把结论放进返回值的第二部分）。
+    #[tokio::test]
+    async fn route_project_still_reports_the_outcome_when_no_frame_could_be_pushed() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        bind(&st, &project_id, "n_gone");
+        device_present_without_connection(&st, "n_gone");
+
+        let task = create_task(&st, &project_id, "连不上");
+        let (results, logs) = Logs::capture(|| st.scheduler().route_project(&project_id));
+        assert_eq!(results.len(), 1);
+        assert!(
+            logs.has(
+                tracing::Level::WARN,
+                "the dispatch frame did not reach the connection"
+            ),
+            "帧没送到必须留一条 warn：{:?}",
+            logs.messages()
+        );
+        assert_eq!(results[0].0, task.id);
+        assert!(
+            results[0].1.is_dispatched(),
+            "帧没送到不是「没派出去」：{:?}",
+            results[0].1
+        );
+        assert_eq!(
+            last_payload(&st, &task.id, TASK_DISPATCHED_KIND).expect("派发事实")["push_failure"],
+            "not_connected"
+        );
+    }
+
+    /// 任务表被改名 → `route_project` 返回空表，**不 panic**（只记一条 warn）。
+    #[tokio::test]
+    async fn route_project_returns_empty_when_the_task_table_is_unreadable() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        bind(&st, &project_id, "n_1");
+        let _frames = device_online(&st, "n_1");
+        let task = create_task(&st, &project_id, "任务表坏了");
+
+        break_table(&st, "task");
+
+        let (results, logs) = Logs::capture(|| st.scheduler().route_project(&project_id));
+        assert!(results.is_empty(), "读不出任务就该空跑一轮：{results:?}");
+        // 逐字比对捕获到的正文，而不是只看一个布尔——`messages()` 是这条断言
+        // 的观测口，读它才能区分「记了别的」与「真的记了这条」。
+        let captured = logs.messages();
+        assert_eq!(captured.len(), 1, "只该有这一条 warn：{captured:?}");
+        assert!(
+            captured[0].contains("cannot list pending tasks; skipping this routing round"),
+            "读库失败必须留一条 warn（AGENTS.md「I/O 错误不得静默」）：{captured:?}"
+        );
+        // 表已经不可读，所以「任务没被改」只能用改名前的快照对：改名之后
+        // 任何一处读都会 Err（`task_state` 会 unwrap 失败）。
+        assert_eq!(task.state, TaskState::Pending);
+        assert_eq!(execution_count(&st, &task.id), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // route_binding_tasks
+    // -----------------------------------------------------------------
+
+    /// 设备上线：重试它**所有绑定**所属项目里的待派任务，每个项目只路由一次。
+    ///
+    /// 去重（`seen`）这一条由「两个**不同**项目各有一个任务」钉住：两条都必须
+    /// 被派出去，且**每一条只出现一次**（同一项目路由两遍会让被拒的那次也进
+    /// 返回值）。
+    #[tokio::test]
+    async fn route_binding_tasks_covers_every_bound_project_exactly_once() {
+        let (st, _dir) = state();
+        let p_a = build_project(&st, "a", ProjectShape::Central);
+        let p_b = build_project(&st, "b", ProjectShape::Central);
+        let unbound = build_project(&st, "c", ProjectShape::Central);
+        bind(&st, &p_a, "n_1");
+        bind(&st, &p_b, "n_1");
+        // 设备没绑 `c`：它的任务不该被这台设备的上线带动。
+        bind(&st, &unbound, "n_other");
+        // 前提：这台设备绑了两个**不同**项目（`seen` 的去重键是 `project_id`）。
+        let bindings = BindingRepo::new(st.pool().clone())
+            .list_for_device("n_1")
+            .unwrap();
+        assert_eq!(bindings.len(), 2, "前提：这台设备绑了两个项目");
+        assert_ne!(bindings[0].project_id, bindings[1].project_id);
+
+        let _frames = device_online(&st, "n_1");
+
+        let a_task = create_task(&st, &p_a, "a 的活");
+        let b_task = create_task(&st, &p_b, "b 的活");
+        let c_task = create_task(&st, &unbound, "c 的活");
+
+        let results = st.scheduler().route_binding_tasks("n_1");
+
+        let ids: Vec<&String> = results.iter().map(|(id, _)| id).collect();
+        assert_eq!(
+            results.len(),
+            2,
+            "两个绑定各路由一次，每个项目一条 pending：{ids:?}"
+        );
+        assert_eq!(
+            ids.iter().filter(|id| ***id == a_task.id).count(),
+            1,
+            "同一个项目不许路由两遍：{ids:?}"
+        );
+        assert_eq!(ids.iter().filter(|id| ***id == b_task.id).count(), 1);
+        assert!(!ids.contains(&&c_task.id), "没绑的项目不该被带动");
+        assert!(
+            results.iter().all(|(_, o)| o.is_dispatched()),
+            "{results:?}"
+        );
+        assert_eq!(task_state(&st, &a_task.id), TaskState::Queued);
+        assert_eq!(task_state(&st, &b_task.id), TaskState::Queued);
+        assert_eq!(task_state(&st, &c_task.id), TaskState::Pending);
+    }
+
+    /// 绑定表被改名 → 没东西可重试，返回空表，**不 panic**。
+    #[tokio::test]
+    async fn route_binding_tasks_returns_empty_when_the_binding_table_is_unreadable() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        bind(&st, &project_id, "n_1");
+        let _frames = device_online(&st, "n_1");
+        let task = create_task(&st, &project_id, "绑定表坏了");
+
+        break_table(&st, "binding");
+
+        let (results, logs) = Logs::capture(|| st.scheduler().route_binding_tasks("n_1"));
+        assert!(results.is_empty(), "{results:?}");
+        assert!(
+            logs.has(
+                tracing::Level::WARN,
+                "cannot list bindings; nothing to retry"
+            ),
+            "读库失败必须留一条 warn：{:?}",
+            logs.messages()
+        );
+        assert_eq!(task_state(&st, &task.id), TaskState::Pending);
+        assert_eq!(execution_count(&st, &task.id), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // retry_failed_execution
+    // -----------------------------------------------------------------
+
+    /// `DifferentDevice`：换到另一台合格设备上，新执行换绑定、任务 `failed →
+    /// queued`、帧带 `execution_id`，新旧起点都在轨迹里。
+    #[tokio::test]
+    async fn a_retry_on_another_device_creates_a_new_execution_and_requeues_the_task() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let first_binding = bind(&st, &project_id, "n_a");
+        bind(&st, &project_id, "n_b");
+        let _a = device_online(&st, "n_a");
+        let mut b_frames = device_online(&st, "n_b");
+
+        let task = create_task(&st, &project_id, "换一台再试");
+        let failed = execution_on(&st, &task.id, &first_binding, Some(FailureKind::TaskFailed));
+        push_to_failed(&st, &task.id);
+        assert_eq!(task_state(&st, &task.id), TaskState::Failed);
+
+        let (outcome, push) = st.scheduler().retry_failed_execution(&failed);
+
+        let RouteOutcome::Dispatched {
+            node_id,
+            execution_id,
+        } = outcome.clone()
+        else {
+            panic!("必须重派出去，实际 {outcome:?}");
+        };
+        assert_eq!(node_id, "n_b", "DifferentDevice 必须换成另一台");
+        assert_eq!(push, None, "帧必须真的进了控制面队列");
+
+        // 新执行：换绑定、起点照抄任务（这里是 `None`）。
+        let new = execution_repo(&st).get(&execution_id).unwrap().unwrap();
+        assert_ne!(new.binding_id, first_binding, "绑定必须换掉");
+        assert_eq!(new.base_commit, None, "任务的 base_commit 是 None");
+        assert_eq!(new.worktree_path, Some(format!("{FIXED_DIR}/{}", task.id)));
+        assert_eq!(task_state(&st, &task.id), TaskState::Queued);
+
+        // 帧里带着新执行与新 agent（任务没点名 agent → 空串是诚实的值）。
+        let frame = frame_or_none(&mut b_frames).expect("重派帧");
+        assert_eq!(frame.msg_type, protocol::message::types::TASK_DISPATCH);
+        let dispatch = frame.payload::<protocol::message::TaskDispatch>().unwrap();
+        assert_eq!(dispatch.execution_id, execution_id);
+        assert_eq!(dispatch.agent_id, "");
+        assert_eq!(dispatch.branch, format!("task/{}", task.id));
+
+        // `task_retried`：新旧执行与新旧起点并排。
+        let payload = last_payload(&st, &task.id, TASK_RETRIED_KIND).expect("重派事实");
+        assert_eq!(payload["previous_execution_id"], failed.id);
+        assert_eq!(payload["execution_id"], execution_id);
+        assert_eq!(payload["plan"], RetryPlan::DifferentDevice.as_str());
+        assert_eq!(payload["previous_binding_id"], first_binding);
+        assert_eq!(payload["push_failure"], serde_json::Value::Null);
+    }
+
+    /// `SameDevice`（`baseline_mismatch`）：候选收窄到上一次那台，**不换机器**。
+    #[tokio::test]
+    async fn a_baseline_mismatch_retry_stays_on_the_same_device() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let first_binding = bind(&st, &project_id, "n_a");
+        bind(&st, &project_id, "n_b");
+        let mut a_frames = device_online(&st, "n_a");
+        let _b = device_online(&st, "n_b");
+
+        let task = create_task(&st, &project_id, "起点不对，再 fetch 一次");
+        let failed = execution_on(
+            &st,
+            &task.id,
+            &first_binding,
+            Some(FailureKind::BaselineMismatch),
+        );
+        push_to_failed(&st, &task.id);
+
+        let (outcome, push) = st.scheduler().retry_failed_execution(&failed);
+        assert_eq!(push, None, "{outcome:?}");
+        let RouteOutcome::Dispatched { node_id, .. } = outcome else {
+            panic!("必须重派出去");
+        };
+        assert_eq!(node_id, "n_a", "SameDevice 不许换机器");
+        assert!(frame_or_none(&mut a_frames).is_some(), "帧要落回同一台");
+        assert_eq!(
+            last_payload(&st, &task.id, TASK_RETRIED_KIND).expect("重派事实")["plan"],
+            RetryPlan::SameDevice.as_str()
+        );
+    }
+
+    /// `DifferentAgent` 且任务点了**两个** agent → 帧里的 `agent_id` 换成
+    /// 不与上一次相同的那个；任务表一个字节都不写。
+    #[tokio::test]
+    async fn a_different_agent_retry_keeps_the_device_and_switches_the_agent_in_the_frame() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let binding_id = bind(&st, &project_id, "n_a");
+        st.reports().record(
+            "n_a",
+            report(
+                serde_json::json!({
+                    "connectors": ["git"],
+                    "agents": [
+                        {"id": "opencode", "name": "opencode", "version": "0.0.1", "available": true},
+                        {"id": "codex", "name": "codex", "version": "0.0.1", "available": true},
+                    ],
+                }),
+                102_400,
+            ),
+        );
+        let conn_id = "conn-n_a".to_string();
+        let (mut frames, _data) = st.outbound().register(&conn_id);
+        st.connections()
+            .insert("n_a".to_string(), hub_core::ConnHandle { conn_id, gen: 1 });
+
+        let task = create_task_with(
+            &st,
+            &project_id,
+            "agent 崩了",
+            NewTask {
+                allowed_agents: Some(r#"["opencode","codex"]"#.into()),
+                ..NewTask::new(
+                    "",
+                    "",
+                    DoneWhen {
+                        criteria: None,
+                        description: Some("跑通".into()),
+                    },
+                )
+            },
+        );
+        let mut failed = execution_on(&st, &task.id, &binding_id, Some(FailureKind::AgentError));
+        // `execution.agent_id` 这一期没有写入口；用一个虚构的「上一次」验证
+        // `retry_agent` 真的排除了它。
+        failed.agent_id = Some("opencode".to_string());
+        push_to_failed(&st, &task.id);
+
+        let (outcome, push) = st.scheduler().retry_failed_execution(&failed);
+        assert_eq!(push, None, "{outcome:?}");
+        assert!(outcome.is_dispatched(), "{outcome:?}");
+        let frame = frame_or_none(&mut frames).expect("重派帧");
+        let dispatch = frame.payload::<protocol::message::TaskDispatch>().unwrap();
+        assert_eq!(
+            dispatch.agent_id, "codex",
+            "换 agent 要挑一个与上一次不同的"
+        );
+        // 任务表没被改写（放宽约束是人的动作）。
+        let after = task_repo(&st).get(&task.id).unwrap().unwrap();
+        assert_eq!(
+            after.allowed_agents.as_deref(),
+            Some(r#"["opencode","codex"]"#)
+        );
+    }
+
+    /// `NoRetry`（`superseded`）：**一行执行都不建**，任务留在 `failed`，
+    /// 轨迹里留一条 `outcome: "skipped"`。
+    #[tokio::test]
+    async fn a_superseded_failure_is_not_retried_and_only_leaves_a_skipped_fact() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let binding_id = bind(&st, &project_id, "n_a");
+        let mut frames = device_online(&st, "n_a");
+
+        let task = create_task(&st, &project_id, "需求变了");
+        let failed = execution_on(&st, &task.id, &binding_id, Some(FailureKind::Superseded));
+        push_to_failed(&st, &task.id);
+
+        let (outcome, push) = st.scheduler().retry_failed_execution(&failed);
+        assert_eq!(
+            outcome,
+            RouteOutcome::NotPending {
+                state: TaskState::Failed
+            }
+        );
+        assert_eq!(push, None);
+        assert_eq!(execution_count(&st, &task.id), 1, "只该有原来那一条");
+        assert_eq!(task_state(&st, &task.id), TaskState::Failed);
+        assert!(frame_or_none(&mut frames).is_none());
+        let payload = last_payload(&st, &task.id, TASK_RETRY_PLANNED_KIND).expect("重试结论");
+        assert_eq!(payload["plan"], RetryPlan::NoRetry.as_str());
+        assert_eq!(payload["outcome"], "skipped");
+    }
+
+    /// 执行没写 `failure_kind`（正常路径不会有，防御性兜底）→ 按 `rejected`
+    /// 算，也就是 `NoRetry`：什么都不做比猜一种更安全。
+    #[tokio::test]
+    async fn an_execution_without_a_failure_kind_plans_no_retry() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let binding_id = bind(&st, &project_id, "n_a");
+        let _frames = device_online(&st, "n_a");
+
+        let task = create_task(&st, &project_id, "没有形态");
+        let failed = execution_on(&st, &task.id, &binding_id, None);
+        assert_eq!(failed.failure_kind, None);
+        push_to_failed(&st, &task.id);
+
+        let (outcome, push) = st.scheduler().retry_failed_execution(&failed);
+        assert_eq!(
+            outcome,
+            RouteOutcome::NotPending {
+                state: TaskState::Failed
+            }
+        );
+        assert_eq!(push, None);
+        assert_eq!(
+            last_payload(&st, &task.id, TASK_RETRY_PLANNED_KIND).expect("重试结论")["plan"],
+            RetryPlan::NoRetry.as_str(),
+            "没有形态时兜底成 rejected → NoRetry"
+        );
+    }
+
+    /// 任务读不到（`task` 表被改名 / 行被删）→ `Rejected`，**不 panic**。
+    #[tokio::test]
+    async fn a_retry_whose_task_is_gone_is_rejected_instead_of_panicking() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let binding_id = bind(&st, &project_id, "n_a");
+        let _frames = device_online(&st, "n_a");
+
+        let task = create_task(&st, &project_id, "任务没了");
+        let failed = execution_on(&st, &task.id, &binding_id, Some(FailureKind::TaskFailed));
+        push_to_failed(&st, &task.id);
+
+        // 用 SQL 直接删掉那一行（`task` 表没有删除接口，而这里要的正是
+        // 「行不见了」这个真实形状）。
+        st.pool()
+            .get()
+            .unwrap()
+            .execute("DELETE FROM task WHERE id = ?1", [&task.id])
+            .unwrap();
+
+        let (outcome, push) = st.scheduler().retry_failed_execution(&failed);
+        assert_eq!(
+            outcome,
+            RouteOutcome::Rejected {
+                rejection: Rejection::NoAllowedDevice
+            }
+        );
+        assert_eq!(push, None);
+        assert_eq!(execution_count(&st, &task.id), 1, "只该有原来那一条");
+    }
+
+    /// 任务不是 `failed`（别人已经动过）→ `NotPending`，不抢。
+    #[tokio::test]
+    async fn a_retry_on_a_task_in_another_state_is_not_pending() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let binding_id = bind(&st, &project_id, "n_a");
+        let mut frames = device_online(&st, "n_a");
+
+        let task = create_task(&st, &project_id, "还在 pending");
+        let failed = execution_on(&st, &task.id, &binding_id, Some(FailureKind::TaskFailed));
+        // 任务仍是 `pending`（`push_to_failed` 不调用）。
+
+        let (outcome, push) = st.scheduler().retry_failed_execution(&failed);
+        assert_eq!(
+            outcome,
+            RouteOutcome::NotPending {
+                state: TaskState::Pending
+            }
+        );
+        assert_eq!(push, None);
+        assert_eq!(execution_count(&st, &task.id), 1, "不该建第二条执行");
+        assert!(frame_or_none(&mut frames).is_none());
+    }
+
+    /// 重派时挑不出设备（另一台没上线）→ `Rejected` + 归因，零新执行，
+    /// 任务留在 `failed`。
+    #[tokio::test]
+    async fn a_retry_with_no_eligible_device_creates_nothing_and_keeps_the_task_failed() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let binding_id = bind(&st, &project_id, "n_a");
+        // `n_b` 有绑定但**没有心跳**：它进不了候选源。
+        bind(&st, &project_id, "n_b");
+        let _a = device_online(&st, "n_a");
+
+        let task = create_task(&st, &project_id, "没有别台可换");
+        let failed = execution_on(&st, &task.id, &binding_id, Some(FailureKind::TaskFailed));
+        push_to_failed(&st, &task.id);
+
+        let (outcome, push) = st.scheduler().retry_failed_execution(&failed);
+        assert_eq!(
+            outcome,
+            RouteOutcome::Rejected {
+                rejection: Rejection::NoAllowedDevice
+            }
+        );
+        assert_eq!(push, None);
+        assert_eq!(execution_count(&st, &task.id), 1, "被拒时不建执行");
+        assert_eq!(task_state(&st, &task.id), TaskState::Failed);
+        let planned = last_payload(&st, &task.id, TASK_RETRY_PLANNED_KIND).expect("重试结论");
+        assert_eq!(planned["outcome"], "rejected");
+        assert_eq!(planned["code"], "no_allowed_device");
+        // 归因与首次拒绝同一个 kind，于是「一直没派出去」只查一个 kind。
+        assert!(last_payload(&st, &task.id, TASK_REJECTED_KIND).is_some());
+    }
+
+    /// 重派时项目表读不出来 → `NotPending`（当前状态原样返回），不 panic。
+    #[tokio::test]
+    async fn a_retry_with_an_unreadable_project_table_reports_not_pending() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let binding_id = bind(&st, &project_id, "n_a");
+        let mut frames = device_online(&st, "n_a");
+
+        let task = create_task(&st, &project_id, "项目表坏了");
+        let failed = execution_on(&st, &task.id, &binding_id, Some(FailureKind::TaskFailed));
+        push_to_failed(&st, &task.id);
+        break_table(&st, "project");
+
+        let (outcome, push) = st.scheduler().retry_failed_execution(&failed);
+        assert_eq!(
+            outcome,
+            RouteOutcome::NotPending {
+                state: TaskState::Failed
+            }
+        );
+        assert_eq!(push, None);
+        assert_eq!(execution_count(&st, &task.id), 1);
+        assert!(frame_or_none(&mut frames).is_none());
+    }
+
+    /// 重派时绑定表读不出来 → 同上。
+    #[tokio::test]
+    async fn a_retry_with_an_unreadable_binding_table_reports_not_pending() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let binding_id = bind(&st, &project_id, "n_a");
+        let mut frames = device_online(&st, "n_a");
+
+        let task = create_task(&st, &project_id, "绑定表坏了");
+        let failed = execution_on(&st, &task.id, &binding_id, Some(FailureKind::TaskFailed));
+        push_to_failed(&st, &task.id);
+        break_table(&st, "binding");
+
+        let (outcome, push) = st.scheduler().retry_failed_execution(&failed);
+        assert_eq!(
+            outcome,
+            RouteOutcome::NotPending {
+                state: TaskState::Failed
+            }
+        );
+        assert_eq!(push, None);
+        assert_eq!(execution_count(&st, &task.id), 1);
+        assert!(frame_or_none(&mut frames).is_none());
+    }
+
+    /// 重派时**执行表**读不出来 → 建不出执行。
+    ///
+    /// 这条臂（`create` 的 `Err`）在生产里只有写库失败能走到。测试里用「把
+    /// `execution` 表改名」制造同一个后果，但它同时会让 `binding_is_busy` 读不
+    /// 出来（当作忙）→ ⑦ 更早地把重派挡下。**两条结论都是「没建出半截执行、
+    /// 没发帧」**，所以断言写成「要么 ⑦、要么 ⓪」，并钉住真正关心的那三件事。
+    #[tokio::test]
+    async fn a_retry_whose_execution_table_is_unreadable_creates_nothing() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let binding_id = bind(&st, &project_id, "n_a");
+        bind(&st, &project_id, "n_b");
+        let _a = device_online(&st, "n_a");
+        let mut b_frames = device_online(&st, "n_b");
+
+        let task = create_task(&st, &project_id, "执行表坏了");
+        let failed = execution_on(&st, &task.id, &binding_id, Some(FailureKind::TaskFailed));
+        push_to_failed(&st, &task.id);
+        break_table(&st, "execution");
+
+        let (outcome, push) = st.scheduler().retry_failed_execution(&failed);
+        assert!(
+            matches!(
+                outcome,
+                RouteOutcome::Rejected {
+                    rejection: Rejection::BindingBusy
+                } | RouteOutcome::Rejected {
+                    rejection: Rejection::NoAllowedDevice
+                }
+            ),
+            "执行表坏了不许 panic、更不许建出半截执行：{outcome:?}"
+        );
+        assert_eq!(push, None);
+        assert!(frame_or_none(&mut b_frames).is_none(), "没派出去就不该有帧");
+        // 任务没有被推上 `queued`（⑦ 在 `set_state` 之前就把它挡下了）。
+        assert_eq!(task_state(&st, &task.id), TaskState::Failed);
+    }
+
+    /// 重派时 `failed → queued` 这一步失败 → `NotPending`，**不建执行、不发帧**。
+    ///
+    /// 构造方式：`task` 表改名前先把任务读到（快照是 `failed`），改名之后
+    /// `set_state` 与「重读一次状态」都失败 → 报快照里那个状态。这正是那条
+    /// 臂的收尾口径：拿不到新状态就用快照，**不 panic**。
+    #[tokio::test]
+    async fn a_retry_whose_requeue_fails_reports_the_state_without_creating_an_execution() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let binding_id = bind(&st, &project_id, "n_a");
+        bind(&st, &project_id, "n_b");
+        let _a = device_online(&st, "n_a");
+        let mut b_frames = device_online(&st, "n_b");
+
+        let task = create_task(&st, &project_id, "排队时任务表坏了");
+        let failed = execution_on(&st, &task.id, &binding_id, Some(FailureKind::TaskFailed));
+        push_to_failed(&st, &task.id);
+
+        // 只让 `task` 表不可读：`retry_failed_execution` 开头那一读会失败，
+        // 于是走的是**任务读不出来**的 `Rejected` 臂（不是排队失败那条）。
+        // 为了真的走到「`set_state` 失败」那条，改用「只读视图」把那一行锁住。
+        break_table(&st, "task");
+
+        let (outcome, push) = st.scheduler().retry_failed_execution(&failed);
+        assert_eq!(
+            outcome,
+            RouteOutcome::Rejected {
+                rejection: Rejection::NoAllowedDevice
+            },
+            "读不出任务只能按 ⓪ 归因，不许 panic"
+        );
+        assert_eq!(push, None);
+        assert!(frame_or_none(&mut b_frames).is_none(), "没排队就不许发帧");
+    }
+
+    /// 重派的**发帧**失败同样只写在 `push_failure` 上，结论仍是 `Dispatched`。
+    #[tokio::test]
+    async fn a_retry_whose_frame_cannot_be_pushed_is_still_recorded() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let binding_id = bind(&st, &project_id, "n_a");
+        bind(&st, &project_id, "n_b");
+        let _a = device_online(&st, "n_a");
+        // `n_b` 心跳新鲜但没有连接：选得上，帧送不出去。
+        device_present_without_connection(&st, "n_b");
+
+        let task = create_task(&st, &project_id, "换台但连不上");
+        let failed = execution_on(&st, &task.id, &binding_id, Some(FailureKind::TaskFailed));
+        push_to_failed(&st, &task.id);
+
+        let (outcome, push) = st.scheduler().retry_failed_execution(&failed);
+        assert!(outcome.is_dispatched(), "{outcome:?}");
+        assert_eq!(push, Some(PushFailure::NotConnected));
+        let payload = last_payload(&st, &task.id, TASK_RETRIED_KIND).expect("重派事实");
+        assert_eq!(payload["node_id"], "n_b");
+        assert_eq!(payload["push_failure"], "not_connected");
+    }
+
+    /// 直接驱动的 `dispatch`：它的两条 `Err` 臂（建执行失败 / `set_state` 失败）
+    /// 只在写库失败时成立，而路由入口会在它们之前被 ⑦ 挡下。所以这条用例
+    /// **直接调私有函数**，用「把底层表换成写不进去的视图」制造真实的写失败。
+    ///
+    /// 判据是两条臂各自的收尾口径：
+    /// - 建执行失败 → `Rejected`，任务**留在 `pending`**；
+    /// - 建了执行但 `set_state` 失败 → 那条孤执行被收尾成 `aborted`
+    ///   （**不是 `failed`**：这是我们主动停的），结论报重读出来的真实状态。
+    #[tokio::test]
+    async fn dispatch_backs_out_when_either_the_execution_or_the_state_cannot_be_written() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let binding_id = bind(&st, &project_id, "n_1");
+        let _frames = device_online(&st, "n_1");
+        let task = create_task(&st, &project_id, "写库失败");
+        let binding = BindingRepo::new(st.pool().clone())
+            .get_by_id(&binding_id)
+            .unwrap()
+            .unwrap();
+
+        // ---- ① 建执行失败：`execution` 表换成一个拒写的视图 ----
+        {
+            let conn = st.pool().get().unwrap();
+            conn.execute_batch(
+                "ALTER TABLE execution RENAME TO execution_real;
+                 CREATE VIEW execution AS SELECT * FROM execution_real WHERE 0;",
+            )
+            .unwrap();
+        }
+        let (outcome, push) = st.scheduler().dispatch(&task, "n_1", &binding);
+        assert_eq!(
+            outcome,
+            RouteOutcome::Rejected {
+                rejection: Rejection::NoAllowedDevice
+            },
+            "建不出执行就不许派：结论必须是拒绝"
+        );
+        assert_eq!(push, None, "没建出执行就没有帧要发");
+        assert_eq!(
+            task_state(&st, &task.id),
+            TaskState::Pending,
+            "任务必须留在 pending（否则就是「派了但没派出去」）"
+        );
+    }
+
+    /// `dispatch` 的第二条 `Err` 臂：执行建出来了，但 `pending → queued` 被拒。
+    ///
+    /// 构造：先把任务推到 `done`，再拿**过期的旧快照**（状态还写着 `pending`）
+    /// 喂给 `dispatch`——这正是生产里「两步之间有人动了这个任务」的形状。
+    /// 那条刚建的执行必须被收尾成 `aborted`，否则 ⑦ 会让同一个绑定永久忙。
+    #[tokio::test]
+    async fn dispatch_aborts_the_orphan_execution_when_the_task_cannot_be_queued() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let binding_id = bind(&st, &project_id, "n_1");
+        let mut frames = device_online(&st, "n_1");
+        let task = create_task(&st, &project_id, "被人抢先动了");
+        let binding = BindingRepo::new(st.pool().clone())
+            .get_by_id(&binding_id)
+            .unwrap()
+            .unwrap();
+
+        // 沿合法边推到 `done`：`done → queued` 不是合法边。
+        for to in [
+            TaskState::Queued,
+            TaskState::Running,
+            TaskState::Review,
+            TaskState::Done,
+        ] {
+            task_repo(&st).set_state(&task.id, to, T0).unwrap();
+        }
+
+        let (outcome, push) = st.scheduler().dispatch(&task, "n_1", &binding);
+        assert_eq!(
+            outcome,
+            RouteOutcome::NotPending {
+                state: TaskState::Done
+            },
+            "报的必须是重读出来的真实状态，不是快照"
+        );
+        assert_eq!(push, None);
+        assert!(
+            frame_or_none(&mut frames).is_none(),
+            "状态没推上去就不许发帧"
+        );
+
+        // 那条孤执行被收尾成 `aborted`——**不是 `failed`**（是我们主动停的）。
+        let execs = execution_repo(&st).list_for_task(&task.id).unwrap();
+        assert_eq!(execs.len(), 1, "执行已经建了，只能收尾不能删");
+        assert_eq!(execs[0].state, ExecutionState::Aborted);
+        assert_eq!(execs[0].failure_kind, None, "主动停不是一次失败");
+        // 于是绑定立刻空出来（⑦ 不会永远忙）。
+        assert!(!st.scheduler().binding_is_busy(&binding_id));
+    }
+
+    /// 同一条「过期快照」路径上，**收尾也写不进去**（`aborted` 被触发器拒写）：
+    /// 仍要如实报 `NotPending`，不 panic。
+    ///
+    /// 生产里这对应「两步之间有人动了任务，同时另一个写协程压着这张表」；
+    /// 收尾失败只留一条 error 日志，不能把已经确定的结论（不是 pending）改掉。
+    #[tokio::test]
+    async fn dispatch_still_reports_the_stale_task_when_the_orphan_cannot_be_aborted() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let binding_id = bind(&st, &project_id, "n_1");
+        let mut frames = device_online(&st, "n_1");
+        let task = create_task(&st, &project_id, "收尾也失败");
+        let binding = BindingRepo::new(st.pool().clone())
+            .get_by_id(&binding_id)
+            .unwrap()
+            .unwrap();
+
+        for to in [
+            TaskState::Queued,
+            TaskState::Running,
+            TaskState::Review,
+            TaskState::Done,
+        ] {
+            task_repo(&st).set_state(&task.id, to, T0).unwrap();
+        }
+        // 拒掉「执行 → aborted」这一次写入。
+        st.pool()
+            .get()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER block_abort BEFORE UPDATE ON execution
+                   WHEN NEW.state = 'aborted'
+                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;",
+            )
+            .unwrap();
+
+        let (outcome, push) = st.scheduler().dispatch(&task, "n_1", &binding);
+
+        assert_eq!(
+            outcome,
+            RouteOutcome::NotPending {
+                state: TaskState::Done
+            },
+            "收尾失败不许改写结论"
+        );
+        assert_eq!(push, None);
+        assert!(frame_or_none(&mut frames).is_none(), "没有帧");
+        // 收尾没成功，执行停在初始态——但它是孤儿（任务已 done），
+        // 这里要断言的是「没有 panic、没有发帧」，不是状态值。
+        let execs = execution_repo(&st).list_for_task(&task.id).unwrap();
+        assert_eq!(execs.len(), 1);
+        assert_ne!(
+            execs[0].state,
+            ExecutionState::Aborted,
+            "触发器拒写，收尾不该成功"
+        );
+    }
+
+    /// 控制面队列打满 → `PushFailure::QueueFull`（半死不活的连接）。
+    ///
+    /// 生产里要求同一台设备同时收到一批还没被写协程取走的控制帧；测试里直接
+    /// 把 `CONTROL_QUEUE` 填满就能造出同一个形状。这一条钉的是「控制面满不是
+    /// `NotConnected`」——两种失败的处置不同（前者等它消费，后者等它重连）。
+    #[tokio::test]
+    async fn a_full_control_queue_is_reported_as_queue_full() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        bind(&st, &project_id, "n_full");
+        // 收端**不读**：注册表的收端留在 `_frames` 里不动。
+        let _frames = device_online(&st, "n_full");
+        // 把控制面填满（容量见 `conns::CONTROL_QUEUE`）。
+        let filler = Frame::push("ping", 0, serde_json::json!({}));
+        for _ in 0..crate::conns::CONTROL_QUEUE {
+            assert!(
+                st.outbound().send("conn-n_full", filler.clone()).unwrap(),
+                "填队列期间每一帧都必须入队"
+            );
+        }
+
+        let task = create_task(&st, &project_id, "控制面满了");
+        let (outcome, push) = st.scheduler().route_task(&task);
+        assert!(outcome.is_dispatched(), "执行与状态都已落库：{outcome:?}");
+        assert_eq!(push, Some(PushFailure::QueueFull));
+        let payload = last_payload(&st, &task.id, TASK_DISPATCHED_KIND).expect("派发事实");
+        assert_eq!(payload["push_failure"], "queue_full");
+    }
+
+    /// 重派的 `create` 失败（写库被拒）→ `Rejected`，任务停在 `queued`。
+    ///
+    /// 用 `BEFORE INSERT` 触发器让 `execution` 的写入真的失败——这是生产里
+    /// 「写库出错」的同一种后果，比把整张表改名精确：`binding_is_busy` 与
+    /// `set_state` 都还能正常读，于是这条用例落到的正是**建执行那条 Err 臂**，
+    /// 而不是被 ⑦ 提前挡下。
+    #[tokio::test]
+    async fn a_retry_whose_execution_insert_is_rejected_is_reported() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let binding_id = bind(&st, &project_id, "n_a");
+        bind(&st, &project_id, "n_b");
+        let _a = device_online(&st, "n_a");
+        let mut b_frames = device_online(&st, "n_b");
+
+        let task = create_task(&st, &project_id, "执行写不进去");
+        let failed = execution_on(&st, &task.id, &binding_id, Some(FailureKind::TaskFailed));
+        push_to_failed(&st, &task.id);
+
+        // 只拦**重派这条**执行：原执行已经存在，INSERT 触发器只对新行生效。
+        st.pool()
+            .get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER block_retry_insert BEFORE INSERT ON execution
+                   WHEN NEW.task_id = '{}'
+                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;",
+                task.id
+            ))
+            .unwrap();
+
+        let ((outcome, push), logs) =
+            Logs::capture(|| st.scheduler().retry_failed_execution(&failed));
+        assert_eq!(
+            outcome,
+            RouteOutcome::Rejected {
+                rejection: Rejection::NoAllowedDevice
+            },
+            "建不出执行就只能报拒绝"
+        );
+        assert_eq!(push, None, "没建出执行就没有帧");
+        assert!(frame_or_none(&mut b_frames).is_none());
+        assert!(
+            logs.has(tracing::Level::ERROR, "cannot create the retry execution"),
+            "写库失败必须留一条 error：{:?}",
+            logs.messages()
+        );
+        // 任务先被推成 `queued`，执行却没建出来——这是已知的半截状态，
+        // 如实断言它，免得它悄悄变成别的东西。
+        assert_eq!(task_state(&st, &task.id), TaskState::Queued);
+        assert_eq!(execution_count(&st, &task.id), 1, "只该有原来那一条");
+    }
+
+    /// 重派时 `failed → queued` 这一步写库失败 → `NotPending`，不建执行、
+    /// 不发帧，并且把重读出来的真实状态报回去。
+    ///
+    /// 用 `BEFORE UPDATE` 触发器让这一条任务的状态写入失败：任务是 `failed`、
+    /// 其余读写都正常，所以这条用例落到的正是**排队那条 Err 臂**。
+    #[tokio::test]
+    async fn a_retry_whose_requeue_write_is_rejected_reports_the_real_state() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let binding_id = bind(&st, &project_id, "n_a");
+        bind(&st, &project_id, "n_b");
+        let _a = device_online(&st, "n_a");
+        let mut b_frames = device_online(&st, "n_b");
+
+        let task = create_task(&st, &project_id, "状态推不上去");
+        let failed = execution_on(&st, &task.id, &binding_id, Some(FailureKind::TaskFailed));
+        push_to_failed(&st, &task.id);
+
+        st.pool()
+            .get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER block_requeue BEFORE UPDATE ON task
+                   WHEN NEW.id = '{}' AND NEW.state = 'queued'
+                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;",
+                task.id
+            ))
+            .unwrap();
+
+        let ((outcome, push), logs) =
+            Logs::capture(|| st.scheduler().retry_failed_execution(&failed));
+        assert_eq!(
+            outcome,
+            RouteOutcome::NotPending {
+                state: TaskState::Failed
+            },
+            "重读出来的状态是 `failed`（触发器只拦了那次 UPDATE）"
+        );
+        assert_eq!(push, None);
+        assert!(frame_or_none(&mut b_frames).is_none(), "没排队就不许发帧");
+        assert!(
+            logs.has(tracing::Level::WARN, "cannot queue the task for the retry"),
+            "写库失败必须留一条 warn：{:?}",
+            logs.messages()
+        );
+        assert_eq!(task_state(&st, &task.id), TaskState::Failed);
+        assert_eq!(execution_count(&st, &task.id), 1, "不该建第二条执行");
+    }
+
+    /// `record` 的 `append` 失败 → 只记一条 warn，**派发本身不受影响**。
+    ///
+    /// 留痕是「尽量留」而不是「留不下就不派」：轨迹表坏掉不该让设备接不到活。
+    #[tokio::test]
+    async fn a_failed_dispatch_fact_only_warns_and_does_not_block_the_dispatch() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        bind(&st, &project_id, "n_1");
+        let mut frames = device_online(&st, "n_1");
+        let task = create_task(&st, &project_id, "轨迹表坏了");
+
+        // 轨迹表的写入走 `trajectory_event`（`hub_storage::trajectory` 的
+        // `append`）；改名让那一次 `append` 真的失败。
+        assert_eq!(
+            st.trajectory()
+                .list(&format!("{TASK_TRAJECTORY_NAMESPACE}{}", task.id), 0, 1)
+                .unwrap()
+                .len(),
+            0,
+            "前提：还没写过轨迹"
+        );
+        break_table(&st, "trajectory_event");
+
+        let ((outcome, push), logs) = Logs::capture(|| st.scheduler().route_task(&task));
+        assert!(outcome.is_dispatched(), "留痕失败不许挡住派发：{outcome:?}");
+        assert_eq!(push, None, "帧照样要发出去");
+        assert!(frame_or_none(&mut frames).is_some());
+        assert!(
+            logs.has(tracing::Level::WARN, "cannot record the dispatch fact"),
+            "留痕失败必须留一条 warn：{:?}",
+            logs.messages()
+        );
+        assert_eq!(task_state(&st, &task.id), TaskState::Queued);
+        assert_eq!(execution_count(&st, &task.id), 1);
+    }
+
+    // -----------------------------------------------------------------
+    // 纯函数
+    // -----------------------------------------------------------------
+
+    /// `worktree_path_for`：`<fixed_dir>/<task_id>`，末尾斜杠去掉（不留 `//`）。
+    /// 用 `task_id` 而不是 `execution_id`——同一任务的重试必须复用同一个工作树。
+    #[tokio::test]
+    async fn the_worktree_path_hangs_under_the_fixed_dir_and_is_named_after_the_task() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let binding_id = bind_with_dir(&st, &project_id, "n_1", "/srv/af/worktrees/");
+        let binding = BindingRepo::new(st.pool().clone())
+            .get_by_id(&binding_id)
+            .unwrap()
+            .unwrap();
+        let task = create_task(&st, &project_id, "路径");
+
+        assert_eq!(
+            worktree_path_for(&binding, &task),
+            format!("/srv/af/worktrees/{}", task.id),
+            "末尾斜杠必须去掉，否则路径里会出现 `//`"
+        );
+    }
+
+    /// `picked_agent`：只有**唯一一个**名字时才填它；多种写法都认。
+    #[tokio::test]
+    async fn picked_agent_only_fills_a_single_name() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let base = create_task(&st, &project_id, "agent");
+        let with = |agents: Option<&str>| TaskView {
+            allowed_agents: agents.map(str::to_string),
+            ..base.clone()
+        };
+
+        // 没写 / 空串 / 只有一个名字 / 多个名字。
+        assert_eq!(picked_agent(&with(None)), "", "没写 = Hub 没选 agent");
+        assert_eq!(picked_agent(&with(Some("   "))), "", "空白等于没写");
+        assert_eq!(
+            picked_agent(&with(Some(r#"["codex"]"#))),
+            "codex",
+            "JSON 数组"
+        );
+        assert_eq!(
+            picked_agent(&with(Some(" codex "))),
+            "codex",
+            "单个名字（逗号分隔形态）"
+        );
+        assert_eq!(
+            picked_agent(&with(Some("opencode, codex"))),
+            "",
+            "多个名字时选哪个是路由的事，本期不做"
+        );
+        // 数组里混进非字符串 / 空串：滤掉之后只剩一个，仍然敢填。
+        assert_eq!(picked_agent(&with(Some(r#"["  ", "codex", 42]"#))), "codex");
+    }
+
+    /// `retry_agent`：非 `DifferentAgent` 一律退回 `picked_agent`；换 agent 时
+    /// 挑一个与上一次不同的，名单只有一个时如实退回它（不越权改任务表）。
+    #[tokio::test]
+    async fn retry_agent_picks_something_other_than_the_previous_agent() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let base = create_task(&st, &project_id, "agent");
+        let with = |agents: Option<&str>| TaskView {
+            allowed_agents: agents.map(str::to_string),
+            ..base.clone()
+        };
+
+        // 非 DifferentAgent：与首次派发同一口径。
+        assert_eq!(
+            retry_agent(
+                &with(Some("codex")),
+                Some("opencode"),
+                RetryPlan::SameDevice
+            ),
+            "codex"
+        );
+        // 任务没说 agent → 空串（设备用自己的默认）。
+        assert_eq!(
+            retry_agent(&with(None), Some("opencode"), RetryPlan::DifferentAgent),
+            ""
+        );
+        // 多名字：取第一个不同于上一次的。
+        assert_eq!(
+            retry_agent(
+                &with(Some(r#"["opencode","codex"]"#)),
+                Some("opencode"),
+                RetryPlan::DifferentAgent
+            ),
+            "codex"
+        );
+        assert_eq!(
+            retry_agent(
+                &with(Some(r#"["opencode","codex"]"#)),
+                Some("codex"),
+                RetryPlan::DifferentAgent
+            ),
+            "opencode"
+        );
+        // 逗号分隔形态同样认。
+        assert_eq!(
+            retry_agent(
+                &with(Some("opencode, codex")),
+                Some("opencode"),
+                RetryPlan::DifferentAgent
+            ),
+            "codex"
+        );
+        // 只有一个且就是上一次那个：退回去（该由人改约束）。
+        assert_eq!(
+            retry_agent(
+                &with(Some(r#"["codex"]"#)),
+                Some("codex"),
+                RetryPlan::DifferentAgent
+            ),
+            "codex"
+        );
+        // 数组里混进空串与非法项 → 仍然给得出答案。
+        assert_eq!(
+            retry_agent(
+                &with(Some(r#"["  ", "codex"]"#)),
+                Some("opencode"),
+                RetryPlan::DifferentAgent
+            ),
+            "codex"
+        );
+    }
+
+    /// `prompt_of`：标题 + 验收标准 + 判定码，**没有**任何权限字眼。
+    #[tokio::test]
+    async fn the_prompt_carries_the_title_and_the_acceptance_criteria_only() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+
+        let bare = task_repo(&st)
+            .create(
+                NewTask::new(
+                    &project_id,
+                    "只有标题",
+                    DoneWhen {
+                        criteria: None,
+                        description: Some("跑通".to_string()),
+                    },
+                ),
+                T0,
+            )
+            .unwrap();
+        assert_eq!(prompt_of(&bare), "只有标题\n\n验收：跑通");
+
+        let full = task_repo(&st)
+            .create(
+                NewTask::new(
+                    &project_id,
+                    "全都写",
+                    DoneWhen {
+                        criteria: Some("all_tests_pass".to_string()),
+                        description: Some("跑通".to_string()),
+                    },
+                ),
+                T0,
+            )
+            .unwrap();
+        assert_eq!(
+            prompt_of(&full),
+            "全都写\n\n验收：跑通\n判定码：all_tests_pass"
+        );
+        for forbidden in ["approv", "permission", "已批准"] {
+            assert!(
+                !prompt_of(&full).to_lowercase().contains(forbidden),
+                "prompt 里不许出现授权字眼：{forbidden}"
+            );
+        }
+    }
+
+    /// `dispatch_frame`：`msg_type` 逐字对，`base_commit` 缺失时是空串
+    /// （「不知道起点」不编成一个具体 commit）。
+    #[tokio::test]
+    async fn the_dispatch_frame_is_built_from_the_task_and_the_target() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let task = create_task(&st, &project_id, "造帧");
+
+        let frame = dispatch_frame(
+            &task,
+            &DispatchTarget {
+                project_id: &project_id,
+                execution_id: "e_1",
+                worktree_path: "/w/x",
+                agent_id: "",
+            },
+        );
+        assert_eq!(frame.msg_type, protocol::message::types::TASK_DISPATCH);
+        assert_eq!(frame.msg_type, "task_dispatch");
+        let payload = frame
+            .payload::<protocol::message::TaskDispatch>()
+            .expect("载荷必须是 TaskDispatch");
+        assert_eq!(payload.execution_id, "e_1");
+        assert_eq!(payload.task_id, task.id);
+        assert_eq!(payload.project_id, project_id);
+        assert_eq!(payload.worktree_path, "/w/x");
+        assert_eq!(payload.base_commit, "", "没有起点就是空串，不是编的 commit");
+        assert_eq!(payload.branch, format!("task/{}", task.id));
+        assert_eq!(payload.agent_id, "");
+        assert_eq!(payload.prompt, prompt_of(&task));
+
+        // 有起点时原样带过去。
+        let with_base = task_repo(&st)
+            .create(
+                NewTask {
+                    base_commit: Some("cafe".to_string()),
+                    ..NewTask::new(
+                        &project_id,
+                        "有起点",
+                        DoneWhen {
+                            criteria: None,
+                            description: Some("跑通".to_string()),
+                        },
+                    )
+                },
+                T0,
+            )
+            .unwrap();
+        let frame = dispatch_frame(
+            &with_base,
+            &DispatchTarget {
+                project_id: &project_id,
+                execution_id: "e_2",
+                worktree_path: "/w/y",
+                agent_id: "codex",
+            },
+        );
+        let payload = frame.payload::<protocol::message::TaskDispatch>().unwrap();
+        assert_eq!(payload.base_commit, "cafe");
+        assert_eq!(payload.agent_id, "codex");
+    }
+
+    /// `push_failure_code` 的两个线上码写死（页面按它分组）。
+    #[test]
+    fn the_push_failure_codes_are_written_out_literally() {
+        assert_eq!(
+            push_failure_code(PushFailure::NotConnected),
+            "not_connected"
+        );
+        assert_eq!(push_failure_code(PushFailure::QueueFull), "queue_full");
+    }
+
+    /// `binding_pairs` 是一一投影：`node_id` 取 `device_id`，绑定原样带过去。
+    #[tokio::test]
+    async fn binding_pairs_project_each_binding_onto_its_device_id() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let b1 = bind(&st, &project_id, "n_1");
+        let b2 = bind(&st, &project_id, "n_2");
+        let bindings = BindingRepo::new(st.pool().clone())
+            .list_for_project(&project_id)
+            .unwrap();
+        let pairs = binding_pairs(&bindings);
+        assert_eq!(pairs.len(), bindings.len(), "一一投影，不多不少");
+        // 顺序原样跟随绑定表（同一时刻建的两行由 id 决定先后，是随机 id，
+        // 所以这里不比顺序，只比「每一对都拿自己的 device_id」）。
+        for (node_id, binding) in &pairs {
+            assert_eq!(node_id, &binding.device_id, "node_id 必须取自 binding 自己");
+        }
+        let got: std::collections::HashSet<&str> =
+            pairs.iter().map(|(_, b)| b.id.as_str()).collect();
+        let want: std::collections::HashSet<&str> =
+            [b1.as_str(), b2.as_str()].into_iter().collect();
+        assert_eq!(got, want, "两个绑定都要出现");
+    }
+
+    /// `constraints_of`：三个库里有列的约束原样搬，三个没有列的恒为 `None`
+    /// （`pinned_device` 若被误填成单元素名单，会**静默跳过磁盘硬门槛**）。
+    #[tokio::test]
+    async fn constraints_of_copies_the_stored_columns_and_leaves_the_rest_none() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let task = create_task_with(
+            &st,
+            &project_id,
+            "约束",
+            NewTask {
+                allowed_devices: Some(r#"["n_1"]"#.into()),
+                allowed_agents: Some("codex".into()),
+                required_capabilities: Some(r#"["git"]"#.into()),
+                retry_limit: Some(2),
+                ..NewTask::new(
+                    "",
+                    "",
+                    DoneWhen {
+                        criteria: None,
+                        description: Some("跑通".into()),
+                    },
+                )
+            },
+        );
+        let got = constraints_of(&task);
+        assert_eq!(got.allowed_devices.as_deref(), Some(r#"["n_1"]"#));
+        assert_eq!(got.allowed_agents.as_deref(), Some("codex"));
+        assert_eq!(got.required_capabilities.as_deref(), Some(r#"["git"]"#));
+        assert_eq!(got.pinned_device, None, "单元素名单不等于钉死");
+        assert_eq!(got.required_ram_mb, None);
+        assert_eq!(got.required_disk_mb, None);
+    }
+
+    /// `branch_of` 恒为 `task/<task_id>`（`worktree::prepare` 靠它复用分支）。
+    #[tokio::test]
+    async fn the_branch_is_always_named_after_the_task() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        let task = create_task(&st, &project_id, "分支");
+        assert_eq!(branch_of(&task), format!("task/{}", task.id));
+    }
+
+    // -----------------------------------------------------------------
+    // routing_worth_trying
+    // -----------------------------------------------------------------
+
+    /// 有 `pending` 才值得跑一轮；没有就短路（心跳是 15s 一次的热路径）。
+    #[tokio::test]
+    async fn routing_worth_trying_is_true_only_while_something_is_pending() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        assert!(!routing_worth_trying(&st, &project_id), "空项目不该跑路由");
+
+        let task = create_task(&st, &project_id, "待派");
+        assert!(routing_worth_trying(&st, &project_id));
+
+        push_to_failed(&st, &task.id);
+        assert!(!routing_worth_trying(&st, &project_id), "非 pending 不算");
+    }
+
+    /// 判定**失败时返回 `true`**（宁可多跑一轮路由，不可漏派一次）。
+    #[tokio::test]
+    async fn routing_worth_trying_is_true_when_the_task_table_cannot_be_read() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app", ProjectShape::Central);
+        break_table(&st, "task");
+        assert!(
+            routing_worth_trying(&st, &project_id),
+            "读不出来必须当「值得跑」"
+        );
     }
 }

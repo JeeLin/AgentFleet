@@ -90,6 +90,8 @@ impl AckOutcome {
 pub fn on_dispatch_ack(state: &AppState, node_id: &str, ack: &TaskDispatchAck) -> AckOutcome {
     let outcome = apply(state, node_id, ack);
     match &outcome {
+        // coverage: excluded — 日志宏体，无条件分支（三个分支各记一条，字段行
+        // 不被 llvm-cov 归到调用点）。
         AckOutcome::Applied { execution, task } => tracing::info!(
             node_id = %node_id,
             execution_id = %ack.execution_id,
@@ -98,6 +100,7 @@ pub fn on_dispatch_ack(state: &AppState, node_id: &str, ack: &TaskDispatchAck) -
             task_state = task.map(TaskState::as_str),
             "dispatch ack applied"
         ),
+        // coverage: excluded — 日志宏体，无条件分支。
         AckOutcome::Ignored { why } => tracing::debug!(
             node_id = %node_id,
             execution_id = %ack.execution_id,
@@ -105,6 +108,7 @@ pub fn on_dispatch_ack(state: &AppState, node_id: &str, ack: &TaskDispatchAck) -
             reason = why,
             "dispatch ack ignored"
         ),
+        // coverage: excluded — 日志宏体，无条件分支。
         AckOutcome::Rejected { why } => tracing::warn!(
             node_id = %node_id,
             execution_id = %ack.execution_id,
@@ -128,6 +132,7 @@ fn apply(state: &AppState, node_id: &str, ack: &TaskDispatchAck) -> AckOutcome {
             }
         }
         Err(e) => {
+            // coverage: excluded — 日志宏体，无条件分支。
             tracing::warn!(
                 execution_id = %ack.execution_id,
                 error = %e,
@@ -173,6 +178,7 @@ fn apply(state: &AppState, node_id: &str, ack: &TaskDispatchAck) -> AckOutcome {
             // 重复的 `running` 不该改写首次开始时间——`mark_started` 内部是
             // `WHERE started_at IS NULL`，这里只是把那条口径用上。
             if let Err(e) = state.executions().mark_started(&current.id, &now) {
+                // coverage: excluded — 日志宏体，无条件分支。
                 tracing::warn!(execution_id = %current.id, error = %e, "cannot mark started_at");
             }
             let task = self_task(state, &current);
@@ -205,6 +211,7 @@ fn apply(state: &AppState, node_id: &str, ack: &TaskDispatchAck) -> AckOutcome {
                 return unreadable(e, &current.id);
             }
             if let Err(e) = state.executions().mark_ended(&current.id, &now) {
+                // coverage: excluded — 日志宏体，无条件分支。
                 tracing::warn!(execution_id = %current.id, error = %e, "cannot mark ended_at");
             }
             let task = self_task(state, &current);
@@ -266,6 +273,10 @@ fn handle_failure(
         // 闭集与枚举本该一致（`protocol` 与 `hub-storage` 各存一份，靠
         // `the_protocol_kinds_parse_into_storage_kinds` 那条用例对拍）。这一臂
         // 只在两份清单漂移时成立——那时**更要**不落库。
+        //
+        // coverage: excluded — 走到这里要求「在 `FAILURE_KINDS` 里但
+        // `FailureKind::from_str` 不认识」，而上面那条对拍用例保证两份清单
+        // 一一对应；两份同时改错才会到这里，构造不出来。
         return AckOutcome::Rejected {
             why: "failure_kind does not parse into a storage kind",
         };
@@ -304,6 +315,7 @@ fn handle_failure(
         return unreadable(e, &current.id);
     }
     if let Err(e) = state.executions().mark_ended(&current.id, &now) {
+        // coverage: excluded — 日志宏体，无条件分支。
         tracing::warn!(execution_id = %current.id, error = %e, "cannot mark ended_at");
     }
 
@@ -388,6 +400,9 @@ fn run_cleanup_preview(
     now: &str,
 ) {
     let Some(exec) = state.executions().get(execution_id).ok().flatten() else {
+        // coverage: excluded — 日志宏体，无条件分支。另外这一臂要求执行在
+        // `handle_failure` 刚写完它之后、到这里之前消失（同一函数、无 await），
+        // 生产里走不到；`record` 的留痕失败另有单测，但那是另一条路。
         tracing::warn!(
             execution_id = %execution_id,
             "cannot read the execution back for the cleanup preview"
@@ -399,6 +414,7 @@ fn run_cleanup_preview(
         // 绑定没了（项目 / 设备被删）：没有策略就没有预演的依据。不编一个默认档
         // ——`CleanupPolicy` 的默认值是「路由层没给」时的取值，不是「绑定不见了」。
         Ok(None) => {
+            // coverage: excluded — 日志宏体，无条件分支。
             tracing::warn!(
                 execution_id = %execution_id,
                 binding_id = %exec.binding_id,
@@ -407,6 +423,7 @@ fn run_cleanup_preview(
             return;
         }
         Err(e) => {
+            // coverage: excluded — 日志宏体，无条件分支。
             tracing::warn!(
                 execution_id = %execution_id,
                 error = %e,
@@ -419,6 +436,7 @@ fn run_cleanup_preview(
     let session_id = match hub_core::cleanup::session_for_execution(&sessions, execution_id) {
         Ok(s) => s,
         Err(e) => {
+            // coverage: excluded — 日志宏体，无条件分支。
             tracing::warn!(
                 execution_id = %execution_id,
                 error = %e,
@@ -438,6 +456,7 @@ fn run_cleanup_preview(
         state.trajectory(),
         now,
     ) {
+        // coverage: excluded — 日志宏体，无条件分支。
         Ok(Some(recorded)) => tracing::info!(
             execution_id = %execution_id,
             node_id = %node_id,
@@ -447,11 +466,13 @@ fn run_cleanup_preview(
         ),
         // `Ok(None)` 有三种正常原因（不是 disk_exhausted / 没会话 / 清单为空），
         // 都在 `on_failure_ack` 的文档里逐条写了；这里不再复述。
+        // coverage: excluded — 日志宏体，无条件分支。
         Ok(None) => tracing::debug!(
             execution_id = %execution_id,
             items = items.len(),
             "disk_exhausted：预演没有可留痕的结果"
         ),
+        // coverage: excluded — 日志宏体，无条件分支。
         Err(e) => tracing::warn!(
             execution_id = %execution_id,
             error = %e,
@@ -503,6 +524,7 @@ fn self_task(state: &AppState, exec: &ExecutionView) -> Option<TaskView> {
     match state.tasks().get(&exec.task_id) {
         Ok(t) => t,
         Err(e) => {
+            // coverage: excluded — 日志宏体，无条件分支。
             tracing::warn!(
                 task_id = %exec.task_id,
                 error = %e,
@@ -553,6 +575,7 @@ fn advance_task(
         Err(e) => {
             // 非法边是**正常**的重复投递信号（设备重连后再报一次 `running`，
             // 而任务已经 `review` 了）。记 info 而不是 warn：它不是故障。
+            // coverage: excluded — 日志宏体，无条件分支。
             tracing::info!(
                 task_id = %task.id,
                 execution_id = %execution_id,
@@ -568,6 +591,7 @@ fn advance_task(
 
 /// 一次执行读不出来时的统一结论（不 panic，只留痕）。
 fn unreadable(e: hub_storage::StorageError, execution_id: &str) -> AckOutcome {
+    // coverage: excluded — 日志宏体，无条件分支。
     tracing::warn!(
         execution_id = %execution_id,
         error = %e,
@@ -609,6 +633,7 @@ fn record(state: &AppState, task_id: &str, kind: &str, payload: serde_json::Valu
         serde_json::to_string(&payload).unwrap_or_else(|_| format!("{{\"kind\":\"{kind}\"}}"));
     let event = hub_storage::NewEvent::new(seq, kind, text);
     if let Err(e) = repo.append(&session_id, task_id, &event, &crate::routes::now()) {
+        // coverage: excluded — 日志宏体，无条件分支。
         tracing::warn!(
             task_id = %task_id,
             kind = kind,
@@ -645,6 +670,1274 @@ mod tests {
                 "同一个形态在两边必须是同一串（否则统计数据会分叉）"
             );
         }
+    }
+
+    // =================================================================
+    // 夹具：真库 + 真仓储（与 `scheduler.rs` 的测试同一套 `test_support`）
+    // =================================================================
+
+    use hub_storage::execution::{ExecutionRepo, NewExecution};
+    use hub_storage::project::{NewProject, ProjectRepo, ProjectShape};
+    use hub_storage::task::{DoneWhen, NewTask, TaskRepo};
+    use hub_storage::{BindingSpec, CleanupPolicy};
+
+    use crate::test_support::state;
+
+    const FIXED_DIR: &str = "/srv/af/worktrees";
+    const T0: &str = "unix:1700000000";
+
+    fn build_project(st: &AppState, name: &str) -> String {
+        ProjectRepo::new(st.pool().clone())
+            .create(
+                NewProject {
+                    name: name.to_string(),
+                    shape: ProjectShape::Central,
+                    theme_color: None,
+                    upstream_url: None,
+                },
+                T0,
+            )
+            .unwrap()
+            .id
+    }
+
+    fn bind(st: &AppState, project_id: &str, device_id: &str) -> String {
+        BindingRepo::new(st.pool().clone())
+            .upsert(
+                project_id,
+                device_id,
+                BindingSpec {
+                    fixed_dir: FIXED_DIR.to_string(),
+                    disk_quota_bytes: None,
+                    cleanup_policy: CleanupPolicy::Balanced,
+                },
+                T0,
+            )
+            .unwrap()
+            .id
+    }
+
+    /// 落一条设备行：`SessionRepo::create` 会显式查设备表并报 `NoSuchDevice`。
+    fn register_device(st: &AppState, device_id: &str) {
+        st.pool()
+            .get()
+            .unwrap()
+            .execute(
+                "INSERT INTO device (id, name, key_fingerprint, enrolled_at)
+                 VALUES (?1, ?1, ?2, ?3)",
+                [
+                    device_id.to_string(),
+                    format!("fp-{device_id}"),
+                    T0.to_string(),
+                ],
+            )
+            .unwrap();
+    }
+
+    fn create_task(st: &AppState, project_id: &str, title: &str) -> TaskView {
+        TaskRepo::new(st.pool().clone())
+            .create(
+                NewTask::new(
+                    project_id,
+                    title,
+                    DoneWhen {
+                        criteria: None,
+                        description: Some("跑通即可".to_string()),
+                    },
+                ),
+                T0,
+            )
+            .unwrap()
+    }
+
+    fn create_execution(
+        st: &AppState,
+        task_id: &str,
+        binding_id: &str,
+        worktree: Option<&str>,
+        base: Option<&str>,
+    ) -> ExecutionView {
+        ExecutionRepo::new(st.pool().clone())
+            .create(
+                NewExecution {
+                    task_id: task_id.to_string(),
+                    binding_id: binding_id.to_string(),
+                    base_commit: base.map(str::to_string),
+                    worktree_path: worktree.map(str::to_string),
+                },
+                T0,
+            )
+            .unwrap()
+    }
+
+    fn ack(execution_id: &str, stage: DispatchStage) -> TaskDispatchAck {
+        TaskDispatchAck {
+            execution_id: execution_id.to_string(),
+            stage,
+            reason: None,
+            evidence: None,
+            failure_kind: None,
+            items: None,
+        }
+    }
+
+    fn failed_ack(execution_id: &str, kind: &str) -> TaskDispatchAck {
+        TaskDispatchAck {
+            reason: Some(format!("{kind} happened")),
+            evidence: Some("exit code 1".to_string()),
+            failure_kind: Some(kind.to_string()),
+            ..ack(execution_id, DispatchStage::Failed)
+        }
+    }
+
+    fn exec_row(st: &AppState, execution_id: &str) -> ExecutionView {
+        ExecutionRepo::new(st.pool().clone())
+            .get(execution_id)
+            .unwrap()
+            .unwrap()
+    }
+
+    fn task_row(st: &AppState, task_id: &str) -> TaskView {
+        TaskRepo::new(st.pool().clone())
+            .get(task_id)
+            .unwrap()
+            .unwrap()
+    }
+
+    fn facts(st: &AppState, task_id: &str) -> Vec<(String, String)> {
+        let session_id = format!("{TASK_TRAJECTORY_NAMESPACE}{task_id}");
+        st.trajectory()
+            .list(&session_id, 0, 100)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.kind, e.payload))
+            .collect()
+    }
+
+    fn last_payload(st: &AppState, task_id: &str, kind: &str) -> Option<serde_json::Value> {
+        facts(st, task_id)
+            .into_iter()
+            .rev()
+            .find(|(k, _)| k == kind)
+            .map(|(_, p)| serde_json::from_str(&p).unwrap())
+    }
+
+    /// 一条「已经派出去」的任务：`pending → queued`，执行 `pending`。
+    fn dispatched(st: &AppState, device: &str) -> (String, String) {
+        let project_id = build_project(st, "app");
+        let binding_id = bind(st, &project_id, device);
+        let task = create_task(st, &project_id, "活");
+        TaskRepo::new(st.pool().clone())
+            .set_state(&task.id, TaskState::Queued, T0)
+            .unwrap();
+        let exec = create_execution(
+            st,
+            &task.id,
+            &binding_id,
+            Some(&format!("{FIXED_DIR}/w")),
+            Some("deadbeef"),
+        );
+        (exec.id, task.id)
+    }
+    // -----------------------------------------------------------------
+    // on_dispatch_ack：公开入口的三种结论各记一条日志
+    // -----------------------------------------------------------------
+
+    /// `on_dispatch_ack` 的三条分支（applied / ignored / rejected）都要走一遍：
+    /// 它是唯一记日志的地方，调用点（`relay` 的分派）拿到的就是它的返回值。
+    #[test]
+    fn on_dispatch_ack_reports_all_three_outcomes() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+
+        // applied：running
+        let applied = on_dispatch_ack(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+        assert!(applied.is_applied(), "{applied:?}");
+
+        // ignored：重复 running
+        let ignored = on_dispatch_ack(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+        assert_eq!(
+            ignored,
+            AckOutcome::Ignored {
+                why: "already in that state"
+            }
+        );
+
+        // rejected：闭集外形态
+        let rejected = on_dispatch_ack(&st, "n_1", &failed_ack(&exec_id, "disk_full"));
+        assert_eq!(
+            rejected,
+            AckOutcome::Rejected {
+                why: "failure_kind is outside the closed set"
+            }
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // apply ①：找不到执行
+    // -----------------------------------------------------------------
+
+    /// 执行不存在 → `Ignored`（**不是** `Rejected`）：设备在 Hub 换代前接过活，
+    /// 它报上来的那一条 Hub 根本没有，这不是"形状不对"，只是"不用做"。
+    #[test]
+    fn an_ack_for_an_unknown_execution_is_ignored() {
+        let (st, _dir) = state();
+        let outcome = apply(&st, "n_1", &ack("e_missing", DispatchStage::Running));
+        assert_eq!(
+            outcome,
+            AckOutcome::Ignored {
+                why: "unknown execution"
+            }
+        );
+        assert!(!outcome.is_applied());
+    }
+
+    /// 执行表读不出来 → `Ignored`，不 panic。
+    #[test]
+    fn an_ack_whose_execution_is_unreadable_is_ignored() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+
+        crate::test_support::break_table(&st, "execution");
+
+        let outcome = apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+        assert_eq!(
+            outcome,
+            AckOutcome::Ignored {
+                why: "execution unreadable"
+            }
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // apply ②：accepted 只留痕
+    // -----------------------------------------------------------------
+
+    /// `accepted` **不改任何状态**，只落一条 `task_ack` 事实。
+    ///
+    /// 判红方式：让 `Accepted` 顺手动一次状态（例如把任务推向 `running`）——
+    /// 那时任务会在设备真正开跑之前就离开 `queued`，而执行的 `started_at` 还是空。
+    #[test]
+    fn accepted_only_leaves_a_fact_and_changes_no_state() {
+        let (st, _dir) = state();
+        let (exec_id, task_id) = dispatched(&st, "n_1");
+        let before_exec = exec_row(&st, &exec_id).state;
+
+        let outcome = apply(&st, "n_1", &ack(&exec_id, DispatchStage::Accepted));
+
+        assert_eq!(
+            outcome,
+            AckOutcome::Ignored {
+                why: "accepted is an ack, not a state"
+            },
+            "接单不是一次状态推进"
+        );
+        assert_eq!(exec_row(&st, &exec_id).state, before_exec, "执行状态不许变");
+        assert_eq!(
+            task_row(&st, &task_id).state,
+            TaskState::Queued,
+            "任务仍是 queued"
+        );
+        let fact = last_payload(&st, &task_id, TASK_ACK_KIND).expect("接单事实");
+        assert_eq!(fact["stage"], "accepted");
+        assert_eq!(fact["execution_id"], exec_id);
+        assert_eq!(fact["node_id"], "n_1");
+    }
+
+    // -----------------------------------------------------------------
+    // apply ③：running
+    // -----------------------------------------------------------------
+
+    /// `running` → 执行 `Running`、任务 `queued → running`、`started_at` 落库。
+    #[test]
+    fn running_advances_both_the_execution_and_the_task() {
+        let (st, _dir) = state();
+        let (exec_id, task_id) = dispatched(&st, "n_1");
+
+        let outcome = apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+
+        assert_eq!(
+            outcome,
+            AckOutcome::Applied {
+                execution: ExecutionState::Running,
+                task: Some(TaskState::Running),
+            }
+        );
+        assert!(outcome.is_applied());
+        assert_eq!(exec_row(&st, &exec_id).state, ExecutionState::Running);
+        assert_eq!(task_row(&st, &task_id).state, TaskState::Running);
+        assert!(
+            exec_row(&st, &exec_id).started_at.is_some(),
+            "开跑时刻必须落库"
+        );
+        // 轨迹里同时有「任务推进」与（经由 `advance_task`）的 ack 事实。
+        let fact = last_payload(&st, &task_id, TASK_ACK_KIND).expect("推进事实");
+        assert_eq!(fact["task_from"], "queued");
+        assert_eq!(fact["task_to"], "running");
+    }
+
+    /// 重复的 `running`（执行已经在 `Running`）→ `Ignored`，不改写 `started_at`
+    /// 之外的东西。
+    ///
+    /// 判红方式：去掉 `stale` 里「同状态也算不用做」那一条 —— 那时第二次
+    /// `running` 会真的再走一遍 `set_state`，虽然结果一样，但语义上是"又推进了
+    /// 一次"，会让轨迹里多出一条假的推进事实。
+    #[test]
+    fn a_repeated_running_ack_is_ignored() {
+        let (st, _dir) = state();
+        let (exec_id, task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+        let started = exec_row(&st, &exec_id).started_at;
+        let facts_before = facts(&st, &task_id).len();
+
+        let outcome = apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+
+        assert_eq!(
+            outcome,
+            AckOutcome::Ignored {
+                why: "already in that state"
+            }
+        );
+        assert_eq!(
+            exec_row(&st, &exec_id).started_at,
+            started,
+            "首次开始时间不许被重复 ack 改写"
+        );
+        assert_eq!(
+            facts(&st, &task_id).len(),
+            facts_before,
+            "重复 ack 不留新事实"
+        );
+    }
+
+    /// 执行已经收尾又收到 `running` → `Ignored`（状态不倒退）。
+    #[test]
+    fn a_running_ack_on_an_ended_execution_is_ignored() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+        ExecutionRepo::new(st.pool().clone())
+            .set_state(&exec_id, ExecutionState::Succeeded)
+            .unwrap();
+
+        let outcome = apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+
+        assert_eq!(
+            outcome,
+            AckOutcome::Ignored {
+                why: "the execution already ended; the ack would move it backwards"
+            }
+        );
+        assert_eq!(
+            exec_row(&st, &exec_id).state,
+            ExecutionState::Succeeded,
+            "终态不许被推回去"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // apply ④：succeeded
+    // -----------------------------------------------------------------
+
+    /// `succeeded` → 执行 `Succeeded`、任务 `running → review`、`ended_at` 落库。
+    #[test]
+    fn succeeded_advances_the_task_to_review() {
+        let (st, _dir) = state();
+        let (exec_id, task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+
+        let outcome = apply(&st, "n_1", &ack(&exec_id, DispatchStage::Succeeded));
+
+        assert_eq!(
+            outcome,
+            AckOutcome::Applied {
+                execution: ExecutionState::Succeeded,
+                task: Some(TaskState::Review),
+            }
+        );
+        assert_eq!(exec_row(&st, &exec_id).state, ExecutionState::Succeeded);
+        assert!(
+            exec_row(&st, &exec_id).ended_at.is_some(),
+            "收尾时刻必须落库"
+        );
+        assert_eq!(task_row(&st, &task_id).state, TaskState::Review);
+    }
+
+    /// 重复的 `succeeded` → `Ignored`（执行已终态）。
+    #[test]
+    fn a_repeated_succeeded_ack_is_ignored() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Succeeded));
+
+        let outcome = apply(&st, "n_1", &ack(&exec_id, DispatchStage::Succeeded));
+
+        assert_eq!(
+            outcome,
+            AckOutcome::Ignored {
+                why: "the execution already ended; the ack would move it backwards"
+            }
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // handle_failure：形态校验
+    // -----------------------------------------------------------------
+
+    /// `failed` 缺 `failure_kind` → `Rejected`，**一个字节都不落库**。
+    ///
+    /// 判红方式：给缺失形态兜一个默认值（例如 `agent_error`）——那时失败会被
+    /// 记成一种它可能不是的形态，reject 的理由永远不出现。
+    #[test]
+    fn a_failed_ack_without_a_failure_kind_is_rejected() {
+        let (st, _dir) = state();
+        let (exec_id, task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+        let facts_before = facts(&st, &task_id).len();
+
+        let outcome = apply(
+            &st,
+            "n_1",
+            &TaskDispatchAck {
+                failure_kind: None,
+                ..ack(&exec_id, DispatchStage::Failed)
+            },
+        );
+
+        assert_eq!(
+            outcome,
+            AckOutcome::Rejected {
+                why: "failure_kind is required on a failed ack"
+            }
+        );
+        assert_eq!(
+            exec_row(&st, &exec_id).state,
+            ExecutionState::Running,
+            "被拒时执行状态不许动"
+        );
+        assert_eq!(facts(&st, &task_id).len(), facts_before, "被拒不落库");
+    }
+
+    /// `failure_kind` 在闭集之外 → `Rejected`，执行**仍是 `Running`**（没落脏值）。
+    #[test]
+    fn a_failure_kind_outside_the_closed_set_is_rejected() {
+        let (st, _dir) = state();
+        let (exec_id, task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+
+        let outcome = apply(&st, "n_1", &failed_ack(&exec_id, "disk_full"));
+
+        assert_eq!(
+            outcome,
+            AckOutcome::Rejected {
+                why: "failure_kind is outside the closed set"
+            }
+        );
+        assert_eq!(
+            exec_row(&st, &exec_id).state,
+            ExecutionState::Running,
+            "闭集外的形态不许落库（否则整条执行会从列表里消失）"
+        );
+        assert_eq!(task_row(&st, &task_id).state, TaskState::Running);
+    }
+
+    /// `baseline_mismatch` stage **不带** `failure_kind` 也认——形态由 stage 自己
+    /// 推出来（`FailureKind::BaselineMismatch`）。
+    ///
+    /// 判红方式：把 `(None, BaselineMismatch)` 那一臂删掉 —— 那时它落进
+    /// `(None, _)` → `Rejected`，一条合法的基线不符会被当成形状不对丢掉。
+    #[test]
+    fn a_baseline_mismatch_stage_supplies_its_own_kind() {
+        let (st, _dir) = state();
+        let (exec_id, task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+
+        let outcome = apply(
+            &st,
+            "n_1",
+            &TaskDispatchAck {
+                failure_kind: None,
+                ..ack(&exec_id, DispatchStage::BaselineMismatch)
+            },
+        );
+
+        assert!(
+            outcome.is_applied(),
+            "基线不符是合法失败，不该被拒：{outcome:?}"
+        );
+        let row = exec_row(&st, &exec_id);
+        assert_eq!(row.state, ExecutionState::Failed);
+        assert_eq!(row.failure_kind, Some(FailureKind::BaselineMismatch));
+        // 没给 reason → 用形态自己的线上串兜一句。
+        assert_eq!(row.reason.as_deref(), Some("baseline_mismatch"));
+        assert_eq!(task_row(&st, &task_id).state, TaskState::Failed);
+        let plan = last_payload(&st, &task_id, TASK_RETRY_PLANNED_KIND).expect("重试结论");
+        assert_eq!(plan["failure_kind"], "baseline_mismatch");
+        assert_eq!(plan["plan"], RetryPlan::SameDevice.as_str());
+    }
+
+    // -----------------------------------------------------------------
+    // handle_failure：幂等 + 三列 + 重试结论
+    // -----------------------------------------------------------------
+
+    /// `failed{env_broken}` → 三列落库、任务 `running → failed`、`DifferentDevice`。
+    #[test]
+    fn an_env_broken_failure_records_the_three_columns_and_plans_a_new_device() {
+        let (st, _dir) = state();
+        let (exec_id, task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+
+        let outcome = apply(&st, "n_1", &failed_ack(&exec_id, "env_broken"));
+
+        assert_eq!(
+            outcome,
+            AckOutcome::Applied {
+                execution: ExecutionState::Failed,
+                task: Some(TaskState::Failed),
+            }
+        );
+        let row = exec_row(&st, &exec_id);
+        assert_eq!(row.state, ExecutionState::Failed);
+        assert_eq!(row.failure_kind, Some(FailureKind::EnvBroken));
+        assert_eq!(row.reason.as_deref(), Some("env_broken happened"));
+        assert_eq!(row.evidence.as_deref(), Some("exit code 1"));
+        assert!(row.ended_at.is_some(), "失败也要收尾时刻");
+
+        let plan = last_payload(&st, &task_id, TASK_RETRY_PLANNED_KIND).expect("重试结论");
+        assert_eq!(plan["plan"], RetryPlan::DifferentDevice.as_str());
+        assert_eq!(plan["requires_disk_gate"], true);
+        assert_eq!(plan["keeps_device"], false);
+        assert_eq!(plan["base_commit"], "deadbeef", "旧起点要留痕");
+        assert_eq!(plan["device_id"], "n_1", "设备 id 从绑定反查出来");
+    }
+
+    /// 已经收尾的执行又收到失败 → `Ignored`，三列**不被覆盖**（人写的理由保住）。
+    #[test]
+    fn a_failure_on_an_ended_execution_is_ignored() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+        apply(&st, "n_1", &failed_ack(&exec_id, "env_broken"));
+        let before = exec_row(&st, &exec_id);
+
+        let outcome = apply(&st, "n_1", &failed_ack(&exec_id, "agent_error"));
+
+        assert_eq!(
+            outcome,
+            AckOutcome::Ignored {
+                why: "the execution already ended"
+            }
+        );
+        let after = exec_row(&st, &exec_id);
+        assert_eq!(
+            after.failure_kind, before.failure_kind,
+            "重复失败不许改写形态（会覆盖人后来写的理由）"
+        );
+        assert_eq!(after.reason, before.reason);
+    }
+
+    /// 失败没带 `reason` → 用形态自己的线上串兜一句，而不是拒绝整条 ack。
+    #[test]
+    fn a_failure_without_a_reason_falls_back_to_the_kind() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+
+        let outcome = apply(
+            &st,
+            "n_1",
+            &TaskDispatchAck {
+                reason: Some("   ".to_string()),
+                evidence: None,
+                failure_kind: Some("agent_error".to_string()),
+                ..ack(&exec_id, DispatchStage::Failed)
+            },
+        );
+
+        assert!(outcome.is_applied(), "{outcome:?}");
+        let row = exec_row(&st, &exec_id);
+        assert_eq!(
+            row.reason.as_deref(),
+            Some("agent_error"),
+            "空白 reason 等于没给，用形态名兜"
+        );
+        assert_eq!(
+            row.evidence.as_deref(),
+            Some("none"),
+            "缺证据写成字面量 `none`（不是空串，见 `set_failure` 的文档）"
+        );
+    }
+
+    /// `agent_error` → `DifferentAgent`：`keeps_device` 为真、`requires_disk_gate`
+    /// 为假（换 agent 不换机器，不需要重过磁盘门槛）。
+    #[test]
+    fn an_agent_error_plans_a_different_agent_on_the_same_device() {
+        let (st, _dir) = state();
+        let (exec_id, task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+
+        apply(&st, "n_1", &failed_ack(&exec_id, "agent_error"));
+
+        let plan = last_payload(&st, &task_id, TASK_RETRY_PLANNED_KIND).expect("重试结论");
+        assert_eq!(plan["plan"], RetryPlan::DifferentAgent.as_str());
+        assert_eq!(plan["keeps_device"], true);
+        assert_eq!(plan["requires_disk_gate"], false);
+    }
+
+    // -----------------------------------------------------------------
+    // advance_task：三条「不用做 / 做不了」的路
+    // -----------------------------------------------------------------
+
+    /// `running` 到一个**已经是 `running`** 的任务 → 任务不动，但执行照样推进。
+    ///
+    /// 判红方式：`advance_task` 不先比状态就 `set_state` —— 边表会拒
+    /// `running → running`，于是这条 ack 变成一次 Err 日志而不是"任务已在目标态"。
+    #[test]
+    fn advance_task_is_a_no_op_when_the_task_is_already_there() {
+        let (st, _dir) = state();
+        let (exec_id, task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+        // 再造一条执行挂到同一个（已经 running 的）任务上。
+        let exec2 = create_execution(
+            &st,
+            &task_id,
+            &bind(&st, &build_project(&st, "app2"), "n_1"),
+            Some("/w/2"),
+            None,
+        );
+
+        let outcome = apply(&st, "n_1", &ack(&exec2.id, DispatchStage::Running));
+
+        assert_eq!(
+            outcome,
+            AckOutcome::Applied {
+                execution: ExecutionState::Running,
+                task: None,
+            },
+            "任务已在 running，这一步不用做"
+        );
+        assert_eq!(task_row(&st, &task_id).state, TaskState::Running);
+    }
+
+    /// 非法边（任务已经 `review`，又来一个 `running`）→ 任务不动、只记 info。
+    #[test]
+    fn advance_task_swallows_an_illegal_transition() {
+        let (st, _dir) = state();
+        let (exec_id, task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Succeeded));
+        assert_eq!(task_row(&st, &task_id).state, TaskState::Review);
+        // 一条新的、仍 pending 的执行挂到 review 任务上：`review → running` 非法。
+        let exec2 = create_execution(
+            &st,
+            &task_id,
+            &bind(&st, &build_project(&st, "app2"), "n_1"),
+            Some("/w/2"),
+            None,
+        );
+
+        let outcome = apply(&st, "n_1", &ack(&exec2.id, DispatchStage::Running));
+
+        assert_eq!(
+            outcome,
+            AckOutcome::Applied {
+                execution: ExecutionState::Running,
+                task: None,
+            },
+            "任务推不动，但 ack 本身生效（执行已 running）"
+        );
+        assert_eq!(
+            task_row(&st, &task_id).state,
+            TaskState::Review,
+            "非法边不许改状态"
+        );
+    }
+
+    /// 任务被删了（`self_task` 返回 `None`）→ 只推进执行，不 panic。
+    #[test]
+    fn a_missing_task_leaves_only_the_execution_to_advance() {
+        let (st, _dir) = state();
+        let (exec_id, task_id) = dispatched(&st, "n_1");
+        st.pool()
+            .get()
+            .unwrap()
+            .execute("DELETE FROM task WHERE id = ?1", [&task_id])
+            .unwrap();
+
+        let outcome = apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+
+        assert_eq!(
+            outcome,
+            AckOutcome::Applied {
+                execution: ExecutionState::Running,
+                task: None,
+            }
+        );
+        assert_eq!(exec_row(&st, &exec_id).state, ExecutionState::Running);
+    }
+
+    /// 任务表读不出来（`self_task` 的 `Err`）→ `None`，只推进执行，不 panic。
+    #[test]
+    fn an_unreadable_task_table_leaves_only_the_execution_to_advance() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+        crate::test_support::break_table(&st, "task");
+
+        let outcome = apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+
+        assert_eq!(
+            outcome,
+            AckOutcome::Applied {
+                execution: ExecutionState::Running,
+                task: None,
+            }
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // write 失败 → unreadable
+    // -----------------------------------------------------------------
+
+    /// 执行状态写不进去 → `Ignored`（`execution write failed`），不 panic。
+    #[test]
+    fn a_failed_execution_write_is_ignored() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+        // 触发器让这一次 `UPDATE execution` 真的失败。
+        st.pool()
+            .get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER block_exec_update BEFORE UPDATE ON execution
+                   WHEN NEW.id = '{exec_id}'
+                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;"
+            ))
+            .unwrap();
+
+        let outcome = apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+
+        assert_eq!(
+            outcome,
+            AckOutcome::Ignored {
+                why: "execution write failed"
+            }
+        );
+    }
+
+    /// `started_at` 写不进去（触发器拒写）→ 只留一条 warn，`running` 的推进照旧。
+    ///
+    /// 判红方式：删掉 `mark_started` 那一次调用，`started_at` 会一直是 `None`——
+    /// 但那条路径本来就不该失败，所以要看的是「失败被吞掉且状态仍推进」。
+    #[test]
+    fn a_failed_started_at_write_only_warns() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+        st.pool()
+            .get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER block_started BEFORE UPDATE ON execution
+                   WHEN NEW.id = '{exec_id}' AND NEW.started_at IS NOT NULL
+                    AND OLD.started_at IS NULL
+                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;"
+            ))
+            .unwrap();
+
+        let outcome = apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+
+        assert!(
+            outcome.is_applied(),
+            "时间戳失败不该挡住 running：{outcome:?}"
+        );
+        let row = exec_row(&st, &exec_id);
+        assert_eq!(row.state, ExecutionState::Running, "状态仍要推进");
+        assert_eq!(row.started_at, None, "写失败就该还是空");
+    }
+
+    /// `succeeded` 路径的 `ended_at` 写不进去 → 只留一条 warn，`review` 照旧。
+    #[test]
+    fn a_failed_ended_at_write_only_warns_on_success() {
+        let (st, _dir) = state();
+        let (exec_id, task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+        st.pool()
+            .get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER block_ended BEFORE UPDATE ON execution
+                   WHEN NEW.id = '{exec_id}' AND NEW.ended_at IS NOT NULL
+                    AND OLD.ended_at IS NULL
+                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;"
+            ))
+            .unwrap();
+
+        let outcome = apply(&st, "n_1", &ack(&exec_id, DispatchStage::Succeeded));
+
+        assert!(outcome.is_applied(), "{outcome:?}");
+        assert_eq!(exec_row(&st, &exec_id).state, ExecutionState::Succeeded);
+        assert_eq!(task_row(&st, &task_id).state, TaskState::Review);
+        assert_eq!(exec_row(&st, &exec_id).ended_at, None, "写失败就该还是空");
+    }
+
+    /// `failed` 路径的 `ended_at` 写不进去 → 只留一条 warn，失败本身仍落库。
+    #[test]
+    fn a_failed_ended_at_write_only_warns_on_failure() {
+        let (st, _dir) = state();
+        let (exec_id, task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+        st.pool()
+            .get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER block_ended_f BEFORE UPDATE ON execution
+                   WHEN NEW.id = '{exec_id}' AND NEW.ended_at IS NOT NULL
+                    AND OLD.ended_at IS NULL
+                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;"
+            ))
+            .unwrap();
+
+        let outcome = apply(&st, "n_1", &failed_ack(&exec_id, "env_broken"));
+
+        assert!(outcome.is_applied(), "{outcome:?}");
+        let row = exec_row(&st, &exec_id);
+        assert_eq!(row.state, ExecutionState::Failed, "失败必须落库");
+        assert_eq!(row.failure_kind, Some(FailureKind::EnvBroken));
+        assert_eq!(row.ended_at, None);
+        assert_eq!(task_row(&st, &task_id).state, TaskState::Failed);
+    }
+
+    /// `set_failure` 写不进去（触发器拒写）→ `Ignored`（`execution write failed`），
+    /// 且执行**仍是 `Running`**（三列没有一半落库）。
+    #[test]
+    fn a_failed_set_failure_write_is_ignored() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+
+        st.pool()
+            .get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER block_failure BEFORE UPDATE ON execution
+                   WHEN NEW.id = '{exec_id}' AND NEW.failure_kind IS NOT NULL
+                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;"
+            ))
+            .unwrap();
+
+        let outcome = apply(&st, "n_1", &failed_ack(&exec_id, "env_broken"));
+        assert_eq!(
+            outcome,
+            AckOutcome::Ignored {
+                why: "execution write failed"
+            }
+        );
+        let row = exec_row(&st, &exec_id);
+        assert_eq!(row.state, ExecutionState::Running, "失败没落库，状态不许变");
+        assert_eq!(row.failure_kind, None, "三列一个都不许半落");
+    }
+
+    /// `set_state(Failed)` 写不进去（三列已写）→ `Ignored`。
+    ///
+    /// 构造：只拦 `NEW.state = 'failed'` 的 UPDATE；`set_failure` 那条（只改三列）
+    /// 放行。于是失败三列落库了、状态没落——如实报 `execution write failed`。
+    #[test]
+    fn a_failed_set_state_write_is_ignored() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+
+        st.pool()
+            .get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER block_failed_state BEFORE UPDATE ON execution
+                   WHEN NEW.id = '{exec_id}' AND NEW.state = 'failed'
+                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;"
+            ))
+            .unwrap();
+
+        let outcome = apply(&st, "n_1", &failed_ack(&exec_id, "env_broken"));
+        assert_eq!(
+            outcome,
+            AckOutcome::Ignored {
+                why: "execution write failed"
+            }
+        );
+    }
+
+    /// 清理预演里绑定**读不出来**（表坏了）→ 跳过预演，失败本身仍落库。
+    #[test]
+    fn a_cleanup_preview_whose_binding_table_is_unreadable_still_records_the_failure() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+        // 表坏掉：`run_cleanup_preview` 里 `get_by_id` 会 Err。
+        crate::test_support::break_table(&st, "binding");
+
+        let outcome = apply(
+            &st,
+            "n_1",
+            &TaskDispatchAck {
+                failure_kind: Some("disk_exhausted".to_string()),
+                items: Some(vec![protocol::message::DiskItem {
+                    path: "/x".to_string(),
+                    bytes: 1,
+                    class: "artifact".to_string(),
+                    modified_at: None,
+                    label: "x".to_string(),
+                }]),
+                ..ack(&exec_id, DispatchStage::Failed)
+            },
+        );
+
+        assert!(
+            outcome.is_applied(),
+            "预演读不到绑定不妨碍失败落库：{outcome:?}"
+        );
+        assert_eq!(
+            exec_row(&st, &exec_id).state,
+            ExecutionState::Failed,
+            "失败仍要落库"
+        );
+    }
+
+    /// `succeeded` 的 `set_state` 写不进去 → `Ignored`（`execution write failed`）。
+    ///
+    /// 与 `running` 那条不同：这条落在 `apply` 的 `Succeeded` 分支里，是同一个
+    /// `unreadable` 结论的另一处调用点，漏一处就会让「写失败」在那一条路上变
+    /// panic。
+    #[test]
+    fn a_failed_succeeded_write_is_ignored() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+        st.pool()
+            .get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER block_succeeded BEFORE UPDATE ON execution
+                   WHEN NEW.id = '{exec_id}' AND NEW.state = 'succeeded'
+                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;"
+            ))
+            .unwrap();
+
+        let outcome = apply(&st, "n_1", &ack(&exec_id, DispatchStage::Succeeded));
+        assert_eq!(
+            outcome,
+            AckOutcome::Ignored {
+                why: "execution write failed"
+            }
+        );
+    }
+
+    /// 清理预演里**会话查不出来**（session 表坏了）→ 跳过预演，失败仍落库。
+    #[test]
+    fn a_cleanup_preview_whose_session_lookup_fails_still_records_the_failure() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+        // 会话表坏掉：`session_for_execution` 的 `sessions.list()` 会 Err。
+        crate::test_support::break_table(&st, "session");
+
+        let outcome = apply(
+            &st,
+            "n_1",
+            &TaskDispatchAck {
+                failure_kind: Some("disk_exhausted".to_string()),
+                items: Some(vec![protocol::message::DiskItem {
+                    path: "/x".to_string(),
+                    bytes: 1,
+                    class: "artifact".to_string(),
+                    modified_at: None,
+                    label: "x".to_string(),
+                }]),
+                ..ack(&exec_id, DispatchStage::Failed)
+            },
+        );
+
+        assert!(outcome.is_applied(), "{outcome:?}");
+        assert_eq!(exec_row(&st, &exec_id).state, ExecutionState::Failed);
+    }
+
+    /// 清理预演的**写入**失败（轨迹表坏了）→ 只记 warn，失败仍落库。
+    #[test]
+    fn a_cleanup_preview_whose_trajectory_write_fails_still_records_the_failure() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+        // 会话挂到这条执行上，好让预演走到「写入」那一步。
+        register_device(&st, "n_1");
+        let sessions = hub_storage::SessionRepo::new(st.pool().clone());
+        let session = sessions
+            .create(
+                "n_1",
+                "/srv/af/w",
+                None,
+                T0,
+                None,
+                hub_storage::BaseRevStatus::Unknown,
+            )
+            .unwrap();
+        sessions.set_execution_id(&session.id, &exec_id).unwrap();
+        // 轨迹表坏掉：预演的 `on_failure_ack` 写入会 Err。
+        crate::test_support::break_table(&st, "trajectory_event");
+
+        let outcome = apply(
+            &st,
+            "n_1",
+            &TaskDispatchAck {
+                failure_kind: Some("disk_exhausted".to_string()),
+                items: Some(vec![protocol::message::DiskItem {
+                    path: "/x".to_string(),
+                    bytes: 1,
+                    class: "artifact".to_string(),
+                    modified_at: None,
+                    label: "x".to_string(),
+                }]),
+                ..ack(&exec_id, DispatchStage::Failed)
+            },
+        );
+
+        assert!(outcome.is_applied(), "{outcome:?}");
+        assert_eq!(exec_row(&st, &exec_id).state, ExecutionState::Failed);
+    }
+
+    /// `record` 的 `last_seq` 读不出来 → 退到 0（一条留痕最坏被唯一约束挡下），
+    /// 不 panic、不影响 ack 的结论。
+    #[test]
+    fn a_record_whose_sequence_lookup_fails_falls_back_to_zero() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+        // 轨迹表坏掉：`record` 的 `last_seq` 与 `append` 都会失败，两条都只 warn。
+        crate::test_support::break_table(&st, "trajectory_event");
+
+        let outcome = apply(&st, "n_1", &ack(&exec_id, DispatchStage::Accepted));
+        assert_eq!(
+            outcome,
+            AckOutcome::Ignored {
+                why: "accepted is an ack, not a state"
+            },
+            "留痕失败不改 ack 的结论"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // stale / binding_device 纯函数
+    // -----------------------------------------------------------------
+
+    /// `stale`：终态优先于「同状态」；非终态且同状态也返回 `Some`；其余 `None`。
+    #[test]
+    fn stale_classifies_terminal_same_and_moving_states() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+        let pending = exec_row(&st, &exec_id);
+        assert_eq!(
+            stale(&pending, ExecutionState::Running),
+            None,
+            "pending 可以推进"
+        );
+
+        let mut running = pending.clone();
+        running.state = ExecutionState::Running;
+        assert_eq!(
+            stale(&running, ExecutionState::Running),
+            Some("already in that state")
+        );
+        assert_eq!(stale(&running, ExecutionState::Succeeded), None);
+
+        let mut done = pending;
+        done.state = ExecutionState::Succeeded;
+        assert_eq!(
+            stale(&done, ExecutionState::Running),
+            Some("the execution already ended; the ack would move it backwards"),
+            "终态优先，报的不是「同状态」"
+        );
+    }
+
+    /// `binding_device`：绑定在 → 拿 `device_id`；绑定不在 → `None`；读库失败 → `None`。
+    #[test]
+    fn binding_device_reads_the_id_and_tolerates_a_missing_row() {
+        let (st, _dir) = state();
+        let project_id = build_project(&st, "app");
+        let binding_id = bind(&st, &project_id, "n_9");
+        assert_eq!(
+            binding_device(&st, &binding_id).as_deref(),
+            Some("n_9"),
+            "绑定在就要报出设备"
+        );
+        assert_eq!(
+            binding_device(&st, "b_missing"),
+            None,
+            "绑定不在就是 None，不猜"
+        );
+
+        crate::test_support::break_table(&st, "binding");
+        assert_eq!(binding_device(&st, &binding_id), None, "读库失败也是 None");
+    }
+
+    // -----------------------------------------------------------------
+    // ack_payload
+    // -----------------------------------------------------------------
+
+    /// `ack_payload` 把 `items` 数组原样搬进 `items` 字段，且不带 `items` 时为空。
+    #[test]
+    fn ack_payload_round_trips_the_items_array() {
+        let with_items = TaskDispatchAck {
+            items: Some(vec![protocol::message::DiskItem {
+                path: "/srv/af/w/target".to_string(),
+                bytes: 1234,
+                class: "artifact".to_string(),
+                modified_at: None,
+                label: "target".to_string(),
+            }]),
+            ..ack("e_1", DispatchStage::Failed)
+        };
+        let payload = ack_payload(&with_items);
+        assert_eq!(payload["items"][0]["path"], "/srv/af/w/target");
+        assert_eq!(payload["items"][0]["bytes"], 1234);
+
+        let empty = ack_payload(&ack("e_1", DispatchStage::Running));
+        assert!(empty["items"].is_null(), "没带清单时没有 items");
+        assert!(
+            hub_core::cleanup::items_from_ack_payload(&empty).is_empty(),
+            "空载荷 → 空清单"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // run_cleanup_preview
+    // -----------------------------------------------------------------
+
+    /// `disk_exhausted` 带清单 + 有会话 → 真落一条 `disk_cleanup_preview`。
+    ///
+    /// 判红方式：`handle_failure` 里 `run_cleanup_preview` 那一次调用被删掉——
+    /// 那时这条轨迹事实不会出现，而「准备删什么」的能力等于不存在。
+    #[test]
+    fn a_disk_exhausted_ack_records_the_cleanup_preview() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+        // 会话挂到这条执行上（预演要往它的轨迹里写）。
+        register_device(&st, "n_1");
+        let sessions = hub_storage::SessionRepo::new(st.pool().clone());
+        let session = sessions
+            .create(
+                "n_1",
+                "/srv/af/w",
+                None,
+                T0,
+                None,
+                hub_storage::BaseRevStatus::Unknown,
+            )
+            .unwrap();
+        sessions.set_execution_id(&session.id, &exec_id).unwrap();
+
+        let outcome = apply(
+            &st,
+            "n_1",
+            &TaskDispatchAck {
+                reason: Some("disk full".to_string()),
+                evidence: Some("no space left".to_string()),
+                failure_kind: Some("disk_exhausted".to_string()),
+                items: Some(vec![
+                    protocol::message::DiskItem {
+                        path: "/srv/af/w/target".to_string(),
+                        bytes: 5_000_000,
+                        class: "artifact".to_string(),
+                        modified_at: None,
+                        label: "target".to_string(),
+                    },
+                    protocol::message::DiskItem {
+                        path: "/srv/af/w/node_modules".to_string(),
+                        bytes: 9_000_000,
+                        class: "dependency_cache".to_string(),
+                        modified_at: None,
+                        label: "node_modules".to_string(),
+                    },
+                ]),
+                ..ack(&exec_id, DispatchStage::Failed)
+            },
+        );
+
+        assert!(outcome.is_applied(), "{outcome:?}");
+        assert_eq!(
+            exec_row(&st, &exec_id).failure_kind,
+            Some(FailureKind::DiskExhausted)
+        );
+        // 预演事实挂在**会话**的轨迹上，不是任务的命名空间。
+        let previews = st
+            .trajectory()
+            .list(&session.id, 0, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "disk_cleanup_preview")
+            .count();
+        assert_eq!(previews, 1, "disk_exhausted 必须真跑一次清理预演");
+    }
+
+    /// `disk_exhausted` 但**没有会话** → `Ok(None)`，不 panic（预演没有落点）。
+    #[test]
+    fn a_disk_exhausted_ack_without_a_session_records_no_preview() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+
+        let outcome = apply(
+            &st,
+            "n_1",
+            &TaskDispatchAck {
+                failure_kind: Some("disk_exhausted".to_string()),
+                items: Some(vec![protocol::message::DiskItem {
+                    path: "/srv/af/w/target".to_string(),
+                    bytes: 1,
+                    class: "artifact".to_string(),
+                    modified_at: None,
+                    label: "target".to_string(),
+                }]),
+                ..ack(&exec_id, DispatchStage::Failed)
+            },
+        );
+
+        // 失败本身照样落库——预演丢一份方案不该让「它失败了」一起消失。
+        assert!(outcome.is_applied(), "{outcome:?}");
+        assert_eq!(
+            exec_row(&st, &exec_id).failure_kind,
+            Some(FailureKind::DiskExhausted)
+        );
+    }
+
+    /// `disk_exhausted` 但绑定没了 → 预演跳过（`Ok(None)` 的另一种来源），
+    /// 失败仍落库。
+    #[test]
+    fn a_disk_exhausted_ack_without_a_binding_records_no_preview() {
+        let (st, _dir) = state();
+        let (exec_id, _task_id) = dispatched(&st, "n_1");
+        apply(&st, "n_1", &ack(&exec_id, DispatchStage::Running));
+        let binding_id = exec_row(&st, &exec_id).binding_id;
+        st.pool()
+            .get()
+            .unwrap()
+            .execute("DELETE FROM binding WHERE id = ?1", [&binding_id])
+            .unwrap();
+
+        let outcome = apply(
+            &st,
+            "n_1",
+            &TaskDispatchAck {
+                failure_kind: Some("disk_exhausted".to_string()),
+                items: Some(vec![protocol::message::DiskItem {
+                    path: "/x".to_string(),
+                    bytes: 1,
+                    class: "artifact".to_string(),
+                    modified_at: None,
+                    label: "x".to_string(),
+                }]),
+                ..ack(&exec_id, DispatchStage::Failed)
+            },
+        );
+
+        assert!(outcome.is_applied(), "{outcome:?}");
+        assert_eq!(exec_row(&st, &exec_id).state, ExecutionState::Failed);
     }
 
     /// 闭集之外的值必须被挡在 `Rejected` 上，**一个字节都不落库**。

@@ -205,6 +205,9 @@ impl BindingRepo {
                 params![project_id, device_id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
+            // coverage: excluded — `)?;` 被 llvm-cov 记为 miss（已知现象）：
+            // `?` 的 `Err` 分支在 `Ok` 路径上不产生独立计数，而上面
+            // `query_row` 与下面 `match existing` 都有覆盖。
             .optional()?;
 
         match existing {
@@ -285,6 +288,7 @@ impl BindingRepo {
                 params![project_id, device_id],
                 |r| r.get(0),
             )
+            // coverage: excluded — 同上：`)?;` 的 `?` 展开行。
             .optional()?;
         let Some(binding_id) = existing else {
             return Err(StorageError::NoSuchBinding {
@@ -629,6 +633,96 @@ mod tests {
         ] {
             assert_eq!(CleanupPolicy::from_str(p.as_str()).unwrap(), p);
         }
+    }
+
+    /// 不指定策略时默认 `Balanced`——**不是 `Aggressive`**。
+    ///
+    /// 判据是具体变体：默认值决定「磁盘吃紧时先删谁」，而 `Aggressive`
+    /// 会删掉还可能有人要的产物。`Default::default()` 走的是 `impl Default`
+    /// 那一行，与 `from_str` 的解析是两条路（后者可以被串改坏而这条不受影响）。
+    #[test]
+    fn the_default_cleanup_policy_is_balanced_not_aggressive() {
+        assert_eq!(CleanupPolicy::default(), CleanupPolicy::Balanced);
+        assert_ne!(CleanupPolicy::default(), CleanupPolicy::Aggressive);
+        assert_ne!(CleanupPolicy::default(), CleanupPolicy::Conservative);
+    }
+
+    /// `get_by_id` 是**事后读者**找回那一行的唯一入口（`ExecutionView` 里只有
+    /// `binding_id`）：三个判据——命中时字段全对、不命中是 `None` 而不是错误、
+    /// 与 `get(project_id, device_id)` 读到的是同一行。
+    ///
+    /// 判红方式：把 `WHERE id = ?1` 改成 `WHERE project_id = ?1`，
+    /// 「按 id 找不到一个不存在的那条」与「另一条绑定读出来的 id 不对」会同时红。
+    #[test]
+    fn get_by_id_finds_the_row_or_says_there_is_none() {
+        let (_d, br) = setup();
+        let a = br.upsert("p_a", "n_a", spec("/srv/app"), TS).unwrap();
+        let b = br
+            .upsert("p_b", "n_b", spec("/srv/other"), "unix:1700000001")
+            .unwrap();
+        assert_ne!(a.id, b.id, "前提：两条绑定是两个 id");
+
+        let got = br.get_by_id(&a.id).unwrap().expect("按 id 必须找得到");
+        assert_eq!(got.id, a.id);
+        assert_eq!(got.project_id, "p_a");
+        assert_eq!(got.device_id, "n_a");
+        assert_eq!(got.fixed_dir, "/srv/app");
+        assert_eq!(got.disk_quota_bytes, Some(10 * 1024 * 1024 * 1024));
+        assert_eq!(got.cleanup_policy, CleanupPolicy::Balanced);
+        assert_eq!(got.created_at, TS);
+
+        // 与按 (project, device) 的查询是同一行。
+        assert_eq!(br.get("p_a", "n_a").unwrap().unwrap().id, a.id);
+
+        // 不存在的 id：`None`，不是错误（调用方要能区分「没有」与「读坏了」）。
+        assert!(
+            br.get_by_id("bd_missing").unwrap().is_none(),
+            "不存在的绑定必须给 None，而不是报错"
+        );
+    }
+
+    /// 库里那一行的策略坏了时，`get_by_id` 也要报 `InvalidCleanupPolicy`，
+    /// 不能回落默认值——这条与 `get` 的同类用例是**两条独立的读取路径**。
+    #[test]
+    fn get_by_id_reports_a_corrupt_policy_instead_of_defaulting() {
+        let (_d, br) = setup();
+        let b = br.upsert("p_a", "n_a", spec("/srv/app"), TS).unwrap();
+        br.pool
+            .get()
+            .unwrap()
+            .execute_batch(
+                "PRAGMA ignore_check_constraints = ON;
+                 UPDATE binding SET cleanup_policy = 'yolo';",
+            )
+            .unwrap();
+        let e = br.get_by_id(&b.id).unwrap_err();
+        assert!(matches!(e, StorageError::InvalidCleanupPolicy(_)), "{e:?}");
+    }
+
+    /// 删一条**从没存在过**的绑定 → `NoSuchBinding`，且库里一条都没少。
+    ///
+    /// 这条钉的是 `delete` 里那个 `.optional()?` 读完之后的 `None` 分支：
+    /// 不报错的话调用方会以为「已经删掉了」，而真相是从来就没有过。
+    /// 与 `deleting_a_missing_binding_is_named` 的差别：那条的库是空表，
+    /// 这条的库里**已经有别的绑定**——证明它按 (project, device) 精确匹配，
+    /// 不是「表里没数据就报错」。
+    #[test]
+    fn deleting_one_missing_binding_does_not_touch_the_others() {
+        let (_d, br) = setup();
+        let kept = br.upsert("p_a", "n_a", spec("/srv/app"), TS).unwrap();
+
+        let e = br.delete("p_b", "n_b").unwrap_err();
+        assert!(matches!(e, StorageError::NoSuchBinding { .. }), "{e:?}");
+
+        assert!(
+            br.get_by_id(&kept.id).unwrap().is_some(),
+            "别删掉不相关的那一条"
+        );
+        assert_eq!(
+            br.list_for_project("p_a").unwrap().len(),
+            1,
+            "失败的一删不得改动任何一行"
+        );
     }
 
     /// **没有执行记录时，改固定目录是允许的。**

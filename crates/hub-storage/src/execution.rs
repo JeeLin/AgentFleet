@@ -346,6 +346,9 @@ impl ExecutionRepo {
         if n == 0 {
             return Err(StorageError::ExecutionNotFound { id: id.to_string() });
         }
+        // 写进去了却读不回来 = 那一行在两条连接之间被人删了（竞态窗口）。
+        // coverage: excluded — 该窗口要另一个线程恰好在 `UPDATE` 与读回之间
+        // 删掉这一行；单测里没有确定性构造手段，构造出来也是竞态、不能当判据。
         self.get(id)?
             .ok_or_else(|| StorageError::ExecutionNotFound { id: id.to_string() })
     }
@@ -378,6 +381,7 @@ impl ExecutionRepo {
             }
             return Ok(current);
         }
+        // coverage: excluded — 同 `set_state`：`UPDATE` 命中后读回前那一行被删。
         self.get(id)?
             .ok_or_else(|| StorageError::ExecutionNotFound { id: id.to_string() })
     }
@@ -779,6 +783,40 @@ mod tests {
         assert!(matches!(e, StorageError::ExecutionNotFound { .. }), "{e:?}");
     }
 
+    /// 状态**写进去之后那一行又不见了** → `ExecutionNotFound`，而不是拿着一份
+    /// 残缺的行当成功返回。
+    ///
+    /// 判据是错误变体 + 「读不回来」这个事实本身；把末尾那个 `ok_or_else`
+    /// 换成「读不到就当成功」的实现会让这条红。
+    ///
+    /// 构造：一个 `AFTER UPDATE` 触发器，在状态被改写之后立刻删掉同一行。
+    /// 这比「让另一个线程抢在中间删」确定得多（那条是竞态，不能当判据）。
+    #[test]
+    fn set_state_reports_a_row_that_vanishes_right_after_the_write() {
+        let (_d, er) = setup();
+        let e = er.create(new_exec(), TS).unwrap();
+        er.pool
+            .get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER vanish_after_state AFTER UPDATE OF state ON execution
+                 WHEN NEW.id = '{}'
+                 BEGIN DELETE FROM execution WHERE id = OLD.id; END;",
+                e.id
+            ))
+            .unwrap();
+
+        let err = er.set_state(&e.id, ExecutionState::Running).unwrap_err();
+        assert!(
+            matches!(err, StorageError::ExecutionNotFound { .. }),
+            "行没了必须报「执行不存在」：{err:?}"
+        );
+        assert!(
+            er.get(&e.id).unwrap().is_none(),
+            "触发器必须真的删掉了那一行，否则这条用例测的是别的分支"
+        );
+    }
+
     /// **起点只填一次**：设备后报上来时可以补 `NULL`，但已有的值不被覆盖。
     #[test]
     fn base_commit_is_backfilled_once_and_never_overwritten() {
@@ -820,6 +858,54 @@ mod tests {
         let (_d, er) = setup();
         let e = er.set_base_commit("nope", REV).unwrap_err();
         assert!(matches!(e, StorageError::ExecutionNotFound { .. }), "{e:?}");
+    }
+
+    /// 起点**回填进去之后又读不到这一行** → `ExecutionNotFound`，不是
+    /// 「起点已经有了」的 409。
+    ///
+    /// 判据是错误变体：把 `set_base_commit` 末尾那一支写成
+    /// `BaseCommitAlreadySet`，用户会被告知「起点已设置」，而真相是这一行没了
+    /// ——两条路的下一步动作完全不同（改起点 vs 重跑）。
+    ///
+    /// 构造：回填成功后，用一个 SQLite 触发器把同一行在 `UPDATE` 之后删掉。
+    /// 不用「另一个线程删」那种竞态，判据才可复现。
+    #[test]
+    fn set_base_commit_reports_a_row_that_vanishes_right_after_the_write() {
+        let (_d, er) = setup();
+        let e = er.create(new_exec(), TS).unwrap();
+        // 这一行还没有起点（`new_exec` 带了 — 换成不带起点的现场）。
+        let e2 = er
+            .create(
+                NewExecution {
+                    base_commit: None,
+                    ..new_exec()
+                },
+                TS,
+            )
+            .unwrap();
+        er.pool
+            .get()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER vanish_after_base AFTER UPDATE OF base_commit ON execution
+                 WHEN NEW.id = '{}'
+                 BEGIN DELETE FROM execution WHERE id = OLD.id; END;",
+                e2.id
+            ))
+            .unwrap();
+
+        let err = er.set_base_commit(&e2.id, REV).unwrap_err();
+        assert!(
+            matches!(err, StorageError::ExecutionNotFound { .. }),
+            "行没了必须是「执行不存在」，不是「起点已设置」：{err:?}"
+        );
+        // 前提：那一行确实被删了（否则这条用例测的是别的分支）。
+        assert!(
+            er.get(&e2.id).unwrap().is_none(),
+            "触发器没生效，用例前提不成立"
+        );
+        // 另一条执行不受影响。
+        assert!(er.get(&e.id).unwrap().is_some());
     }
 
     /// `aborted` 与 `failed` 是两件事，终态集合要包含两者。

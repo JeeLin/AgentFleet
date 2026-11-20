@@ -163,9 +163,11 @@ impl Worker {
     /// 「Hub 还没设密码，去浏览器里做完 setup」这句话正是这种话。
     pub fn work<W: std::io::Write>(&mut self, out: W) -> std::process::ExitCode {
         self.rotate_log();
-        // coverage: excluded — `work` 是进程入口，只能靠 spawn 真二进制走到：
-        // `load_or_create` 的成功臂、失败臂与整条 `run_with` 链在单测里都触达不到
-        // （`run_with` 自建多线程 runtime，嵌在 `#[tokio::test]` 里会 panic）。
+        // `run_with` 是进程入口的后半段（自建多线程 runtime，嵌在
+        // `#[tokio::test]` 里会 panic），由它自己的标注说明为什么只能靠 spawn
+        // 真二进制走到；而**本函数的两条身份分支都有用例**：
+        // `work_reports_an_unreadable_identity_and_never_renames_the_device`
+        // 走 `Err`，`work_with_a_readable_identity_enters_run_with` 走 `Ok`。
         let identity = match Identity::load_or_create(&self.data_dir) {
             Ok(id) => id,
             // 身份文件坏了/读不了时**不能**重新生成：那等于换了一台设备，
@@ -180,12 +182,11 @@ impl Worker {
 
     /// 身份已备好之后的全部流程。
     ///
-    /// 与 [`Self::work`] 分开：`work` 是进程入口（只能靠 spawn 二进制走到），
-    /// 这里是「有了身份之后干什么」。拆开不是为了复用，是为了能测——
-    /// 单测覆盖 `connect_loop` 与 `session`（`run_with` 自身是 `-> ExitCode`
-    /// 的进程入口，没有对应用例，见下一行的 `coverage: excluded`）。
-    // coverage: excluded — 进程入口：自建多线程 runtime 并 block_on，
-    // 嵌在 `#[tokio::test]` 里会 panic。单测走 `connect_loop` 与 `session`。
+    /// 与 [`Self::work`] 分开：`work` 是进程入口，这里是「有了身份之后干什么」。
+    /// 拆开不是为了复用，而是让 `connect_loop` / `session` 能被单测直接调用；
+    /// 本函数自身由 `work_returns_success_after_the_hub_rejects_the_identity`
+    /// 覆盖——那条从**同步**测试里调 `work`，于是自建 runtime 与 `block_on` 都真跑
+    /// （放进 `#[tokio::test]` 才会 panic，所以它必须是不带 runtime 的 `#[test]`）。
     fn run_with<W: std::io::Write>(
         &mut self,
         mut identity: Identity,
@@ -194,15 +195,9 @@ impl Worker {
         let node_id = identity.node_id();
         self.say(&format!(
             "{BIN_NAME} worker starting, node_id={}, hub={}",
-            // 这一行的豁免由 `run_with` 上的标注（`:141`）给出：它是同一段
-            // 「进程入口」代码。**不在这里再写一条 `coverage: excluded`**——
-            // 一条指向别处的标注不带自己的理由，`--check` 会把它记成孤儿
-            // （没有登记行引用它），门禁就永远红。
             node_id.as_deref().unwrap_or("<none: will enroll>"),
             self.hub_url
         ));
-        // coverage: excluded — 同上：runtime 构造失败需 fd / 内存耗尽，
-        // 测试环境无可控构造手段（防御性兜底）。
 
         let rt = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -218,7 +213,6 @@ impl Worker {
         };
         // 退出码协议里的三个非零码都带「这一版坏了」的语义，
         // 而 worker 自己不打算判自己坏——它只会「正常停下」。
-        // coverage: excluded — 同上：`block_on` 是进程入口路径。
         let _ = rt.block_on(self.connect_loop(&mut identity, node_id.as_deref(), out));
         std::process::ExitCode::SUCCESS
     }
@@ -496,6 +490,8 @@ impl Worker {
                     // coverage: excluded — 心跳 tick 臂：需让 ticker 在 session
                     // 内触发而 read 不返回。
                     if let Err(e) = self.send_heartbeat(est).await {
+                        // coverage: excluded — 日志宏体；心跳发不出去的判据是
+                        // 「Hub 那边收不到」，由 `fake_hub` 记录心跳的那条用例钉住。
                         self.say(&format!("heartbeat send failed: {}", outcome_phrase(&e)));
                     }
                 }
@@ -525,8 +521,9 @@ impl Worker {
                 // 子进程的 stdin。放在 `pump` 臂里会让「用户发言」依赖于
                 // 「有没有 connector 通道在产出」。
                 //
-                // 本臂同样是一条**竞争臂**（理由同 :347）：llvm-cov 下进不进
-                // 取决于 Tokio 的随机轮询，按确定性行做双向核对会随机红。
+                // 本臂同样是一条**竞争臂**（理由同 `session` 里 `select!` 的
+                // `_ = pump.tick()` 那一臂）：llvm-cov 下进不进取决于 Tokio 的
+                // 随机轮询，按确定性行做双向核对会随机红。
                 _ = inbound.tick() => {
                     self.drain_inbound(est).await; // coverage: excluded (racy) — select! 竞争臂，见上。
                 }
@@ -538,7 +535,8 @@ impl Worker {
                 // 而它的任务其实跑得很好。真正的执行在 `spawn_blocking` 里，
                 // `running` / 终态回报由它经通道推回本循环再发出去。
                 //
-                // 与 `inbound` / `pump` 一样是**竞争臂**（理由同 :347）：
+                // 与 `inbound` / `pump` 一样是**竞争臂**（理由同 `session` 里
+                // `select!` 的 `_ = pump.tick()` 那一臂）：
                 // llvm-cov 下进不进取决于 Tokio 的随机轮询。
                 _ = dispatch_ticker.tick() => {
                     self.drain_dispatch(est, &mut running).await; // coverage: excluded (racy) — select! 竞争臂，见上。
@@ -547,7 +545,7 @@ impl Worker {
                     Err(ConnOutcome::Transport { detail }) => return SessionEnd::Transport(detail),
                     // `next_text` 只产出 Transport；这条归类是诚实的降级，
                     // coverage: excluded — `next_text` 只产出 Transport，这条归类结构上
-                    // 不可达（诚实的降级，见 :214 注释）。
+                    // 不可达（诚实的降级，见 `next_text` 的文档）。
                     // 不是为了兜住某个具体错误。
                     Err(other) => return SessionEnd::Transport(format!("read failed: {other:?}")),
                     Ok(None) => return SessionEnd::PeerClosed,
@@ -652,6 +650,9 @@ impl Worker {
             Err(e @ CancelError::NothingInFlight) => {
                 self.say(&format!("cancel ignored on {channel_id}: {e}"));
             }
+            // coverage: excluded — 日志宏体；要构造「`cancel` 写 ACP 失败」得先
+            // 让 agent 进程猝死，而那条路径的判据（下次开通道时要重连）由
+            // `conversations` 自己的用例覆盖。
             Err(e @ CancelError::Acp(_)) => {
                 self.say(&format!("cancel failed on {channel_id}: {e}"));
             }
@@ -659,6 +660,11 @@ impl Worker {
     }
 
     /// 收掉一条再也不会回话的通道，并把理由回给 Hub。
+    ///
+    /// coverage: excluded — 下面 `say` 那一行是日志宏体：只有「对端已经关掉、
+    /// 而我们还要往它写」才到，判据（对不对端收得到帧）由
+    /// `a_cancel_with_no_live_conversation_actually_tells_the_hub` 用一条正常
+    /// 连接钉住；把连接弄死之后再断言日志价值不大。
     async fn fail_channel(&self, est: &mut Established, channel_id: &str, reason: &str) {
         for out in channel::fail_external(channel_id, reason) {
             if let Err(e) = est.send(&out).await {
@@ -714,10 +720,10 @@ impl Worker {
                 ));
             })?;
         }
-        // 见 :347 的 `select!` 竞争臂：本函数只由 `pump_channel` 调用，而
-        // `pump_channel` 只在 `_ = pump.tick()` 那一臂被选中时才走到，Tokio 对
-        // 多条就绪臂随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒
-        // 可达，但**是否执行**取决于同一场竞争。
+        // 见 `session` 里 `select!` 的 `_ = pump.tick()` 竞争臂：本函数只由
+        // `pump_channel` 调用，而它只在那一臂被选中时才走到，Tokio 对多条就绪臂
+        // 随机轮询，故 `frames` 有时非空、有时为空。`Ok(())` 本身恒可达，但
+        // **是否执行**取决于同一场竞争。
         // `(racy)` 必须是尾注：多行注释块会被算到首行，那样 `--racy` 报出的行号
         // 与真正被豁免的那行差几条（实测差 4 行）。
         Ok(()) // coverage: excluded (racy) — 见上：select! 竞争臂的传递依赖。
@@ -755,12 +761,17 @@ impl Worker {
                     if let Err(e) = est.send(out).await {
                         // 通道帧回不回得出去**不**当成断连理由：Hub 判离站靠的是
                         // 收不到心跳，而它自己会发现这里断没断。只留痕。
+                        //
+                        // coverage: excluded — 日志宏体（`say` 这一行）；同上，
+                        // 要它成立得先断连接再往外写。
                         self.say(&format!(
                             "channel frame send failed ({}): {}",
                             out.msg_type,
                             outcome_phrase(&e)
                         ));
                     }
+                    // coverage: excluded — `for out in &frames` 循环体的块尾 `}`，
+                    // llvm-cov 把它单独记成一个区域（循环头与循环体都有覆盖）。
                 }
                 None
             }
@@ -774,6 +785,7 @@ impl Worker {
                 // agent 被 Hub 判成「不支持对话」。
                 for out in &frames {
                     if let Err(e) = est.send(out).await {
+                        // coverage: excluded — 日志宏体（`say` 这一行）。
                         self.say(&format!(
                             "channel frame send failed ({}): {}",
                             out.msg_type,
@@ -794,6 +806,7 @@ impl Worker {
                     // 页面永远显示「正在回复」。
                     for out in channel::fail_external(&channel_id, &reason) {
                         if let Err(e) = est.send(&out).await {
+                            // coverage: excluded — 日志宏体（`say` 这一行）。
                             self.say(&format!(
                                 "channel frame send failed ({}): {}",
                                 out.msg_type,
@@ -923,6 +936,10 @@ impl Worker {
                 ));
                 // 队列刚有活：不必等下一个 tick。
                 if running.is_none() {
+                    // coverage: excluded — 这一行的计数被 `select!` 竞争臂吃掉
+                    // （同 `dispatch_ticker` 臂）：`drain_dispatch` 本身由
+                    // `drain_dispatch_starts_nothing_while_one_is_running` 直接调用
+                    // 覆盖。
                     self.drain_dispatch(est, running).await;
                 }
             }
@@ -1025,11 +1042,16 @@ impl Worker {
                     "task dispatch ack encode failed ({}): {e}",
                     ack.execution_id
                 ));
+                // coverage: excluded — 上面 `Err(e)` 臂的续行（同一不可达分支）。
                 return;
             }
         };
         let frame = Frame::push(protocol::message::types::TASK_DISPATCH_ACK, 0, payload);
         if let Err(e) = est.send(&frame).await {
+            // coverage: excluded — 日志宏体（`say` 这一行）：只有「Hub 已经断开、
+            // 而本机刚好干完一件活」才到；断连的判据由心跳臂与
+            // `a_peer_close_reconnects_rather_than_stopping` 覆盖，不值得为一句
+            // 日志再专门弄断一次连接。
             self.say(&format!(
                 "task dispatch ack send failed ({} {}): {}",
                 ack.execution_id,
@@ -1442,19 +1464,23 @@ mod tests {
     // ---- connect_loop：真的连一次，只走「终态」那条会返回的路 ----
 
     /// 起一个假 Hub：`Reject` 在握手阶段就拒绝，其余三种先让握手成功再收尾。
+    ///
+    /// `TcpListener::from_std` 需要 reactor，所以它**在监听线程自己的 runtime 里**
+    /// 才做。放进线程体而不是调用点，是为了让不接受 `#[tokio::test]` 的调用方
+    /// （如 `work` 那条：被测函数自己建多线程 runtime 并 `block_on`，
+    /// 嵌在异步测试里会 panic）也能起这个夹具。
     fn fake_hub(tail: HubTail) -> String {
-        // std 的 bind：`fake_hub` 有时在 #[tokio::test] 里被调，
-        // 那里不能再 block_on 一个嵌套运行时。
+        // std 的 bind：调用点可能根本没有 tokio runtime。
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         std_listener.set_nonblocking(true).expect("nonblocking");
         let addr = std_listener.local_addr().expect("addr");
-        let listener = tokio::net::TcpListener::from_std(std_listener).expect("listener");
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("runtime");
             rt.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(std_listener).expect("listener");
                 // coverage: excluded — 测试夹具 `fake_hub`：fixture 只在测试自己起的
                 // 监听器上跑，accept / upgrade 失败臂构造不出。
                 let Ok((stream, _)) = listener.accept().await else {
@@ -1826,6 +1852,50 @@ mod tests {
         assert!(
             !log.contains("stopping for a human"),
             "不该再按终态停下：{log}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 清不掉过期绑定（身份文件读不动 / 写不了）→ **按终态停下并说清是哪一步**
+    /// 没做成，而不是假装清成功。
+    ///
+    /// 这条臂在 `can_retry_as_enroll` 为真之后、`clear_hub_binding()` 返回 `Err`
+    /// 时走到。假装清成功（或忽略错误继续以旧 `node_id` 重试）会让设备在
+    /// 「Hub 不认这个 node_id」上无限撞墙，每次刷一行日志。
+    ///
+    /// 构造：**先建好身份、再把它写坏**——`Identity` 的密钥在内存里，
+    /// 所以握手照常进行；坏掉的是 `clear_hub_binding` 那次读盘（它必须读文件
+    /// 才能改）。于是 Hub 的 `identity mismatch` 裁决落地、清理那一步失败。
+    #[tokio::test]
+    async fn an_unwritable_identity_stops_the_loop_instead_of_pretending() {
+        let (d, _w) = worker("reenroll-cannot-clear");
+        let url = fake_hub(HubTail::Reject);
+        let mut w = Worker::new(d.clone(), url);
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        // 以**重连形态**上去：`node_id` 是本地存的、Hub 不认的那个。
+        id.set_node_id("n_stale_from_another_hub").expect("node id");
+        std::fs::write(id.path(), b"{ not json").expect("corrupt");
+
+        let code = w
+            .connect_loop(&mut id, Some("n_stale_from_another_hub"), std::io::sink())
+            .await;
+
+        assert_eq!(
+            code, 0,
+            "清不掉绑定只能是终态：以旧 node_id 重试一万次还是同一条拒绝"
+        );
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
+        assert!(
+            log.contains("cannot drop the stale hub binding"),
+            "必须说清是「清绑定」这一步没做成：{log}"
+        );
+        assert!(
+            log.contains("stopping for a human"),
+            "清不掉就该停下来等人，而不是继续重试：{log}"
+        );
+        assert!(
+            !log.contains("dropped the stale hub binding"),
+            "没清成功就绝不能报「已清掉」：{log}"
         );
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -3547,6 +3617,600 @@ for line in sys.stdin:
             before + 1,
             "成功的心跳必须在对端留下一次到达，而不是只在本进程返回 Ok"
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ---- 构造：前台启动的日志落点 ----
+
+    /// `with_console_err` 造的 worker 与 `new` 造的**行为一致**（同一个
+    /// `data_dir` / `hub_url`），区别只在日志多一路 stderr 回显。
+    ///
+    /// 判据分两层：① 它的日志真的同时到了 stderr 与日志文件（这是这个构造
+    /// 存在的唯一理由）；② 它跑得起来（`dispatch_repo_root` 落在自己的数据
+    /// 目录下，说明字段没串位）。只断言「构造出来了」是恒真的——`Self { .. }`
+    /// 无论怎么填都构造得出来。
+    #[test]
+    fn a_console_worker_logs_to_both_stderr_and_the_file() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let echo = entry::ConsoleEcho::new(Vec::<u8>::new());
+        let w = Worker::with_console_err(
+            d.path().to_path_buf(),
+            "ws://hub/ws".to_string(),
+            echo.clone(),
+        );
+        w.say("front-desk alive");
+
+        let console = String::from_utf8(echo.lock().clone()).expect("utf8");
+        assert!(
+            console.contains("front-desk alive"),
+            "前台启动时那块屏幕上必须看得见日志：{console:?}"
+        );
+        let file = std::fs::read_to_string(crate::log::log_path(d.path())).expect("log");
+        assert!(file.contains("front-desk alive"), "{file}");
+        assert_eq!(
+            w.dispatch_repo_root(),
+            d.path().join("repos"),
+            "派发仓库根必须落在自己的数据目录下"
+        );
+        assert_eq!(w.hub_url, "ws://hub/ws");
+    }
+
+    // ---- 进程入口 ----
+
+    /// `work` 是**进程入口**：先 `rotate_log`，再读身份，再进 `run_with` 那个
+    /// 自建多线程 runtime 的 `block_on`。两条身份分支都在本文件里有用例：
+    /// `Err` 见下一条，`Ok` 见 `work_returns_success_after_the_hub_rejects_the_identity`。
+    #[test]
+    fn work_reports_an_unreadable_identity_and_never_renames_the_device() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let mut w = Worker::new(d.path().to_path_buf(), "ws://127.0.0.1:1/ws".to_string());
+        let id = Identity::load_or_create(d.path()).expect("identity");
+        // 身份文件坏了：这时**不能**重新生成（那等于换一台设备，重启后会撞
+        // 「指纹已存在」而永久接不进 Hub），只能停下并留痕。
+        std::fs::write(id.path(), b"{ not json").expect("corrupt");
+        let key_before = std::fs::read(id.path()).expect("read");
+
+        let code = w.work(std::io::sink());
+
+        // `ExitCode` 没有 `PartialEq` / 访问器，`Debug` 也不给可断言的字面量
+        // （只有 `ExitCode(unix_exit_status(1))`），所以与它自己的成功值对比：
+        // 「读不动身份」必须与「正常走完」是两个结果。
+        assert_ne!(
+            format!("{code:?}"),
+            format!("{:?}", std::process::ExitCode::SUCCESS),
+            "身份读不动时退出码必须是失败，实际 {code:?}"
+        );
+        let log = std::fs::read_to_string(crate::log::log_path(d.path())).expect("log");
+        assert!(log.contains("cannot load identity"), "{log}");
+        assert_eq!(
+            std::fs::read(id.path()).expect("read again"),
+            key_before,
+            "读不动身份时**不得**重建它——那等于换一台设备"
+        );
+    }
+
+    /// **`work` 的成功臂**：身份读得动 → 进 `run_with` → 真连一个假 Hub →
+    /// 被 Hub 裁决拒绝 → 正常收场。
+    ///
+    /// 判据是三点：① 返回 `SUCCESS`（而不是上一条那个失败码）；② 日志里有
+    /// `worker starting`——它只出现在 `run_with` 里，存在就证明 `work` 越过了
+    /// 身份那一步；③ 日志里有 `hub refused`——它只可能来自真的走完握手、
+    /// 收到 `auth_fail` 的 `connect_loop`。缺了 ③ 就分不清「连上了并被裁决」
+    /// 与「根本没连上」。
+    ///
+    /// ⚠️ **不能用 `ws://127.0.0.1:1/ws`（连接被拒的端口）**：`Transport` 在
+    /// `reconnect::retry_after` 里是**可重试**的，`connect_loop` 会在退避里
+    /// 无限转，`block_on` 永不返回。这条用例当初正是那么写的，结果挂死。
+    /// 只有 `Rejected` / `Superseded` 是终态，所以必须起一个会拒绝的假 Hub。
+    ///
+    /// 指纹会在 `auth_ok` 之前就落到 Hub 侧，所以这里用 `Reject` 分支
+    /// （握手阶段拒绝，不发 `auth_ok`）。
+    #[test]
+    fn work_returns_success_after_the_hub_rejects_the_identity() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let url = fake_hub(HubTail::Reject);
+        // 先备好一份**读得动**的身份。
+        Identity::load_or_create(d.path()).expect("identity");
+
+        let mut w = Worker::new(d.path().to_path_buf(), url);
+        let code = w.work(std::io::sink());
+
+        assert_eq!(
+            format!("{code:?}"),
+            format!("{:?}", std::process::ExitCode::SUCCESS),
+            "走到 `run_with` 并正常收场时必须是 SUCCESS，实际 {code:?}"
+        );
+        let log = std::fs::read_to_string(crate::log::log_path(d.path())).expect("log");
+        assert!(
+            log.contains("worker starting"),
+            "进了 `run_with` 才会写这句，缺了说明成功臂根本没走到：{log}"
+        );
+        assert!(
+            log.contains("hub refused"),
+            "必须真的握手并被 Hub 裁决，而不是「连不上就退出」：{log}"
+        );
+        assert!(
+            !log.contains("cannot load identity"),
+            "身份是好的，不该报读不动：{log}"
+        );
+    }
+
+    // ---- 会话的心跳 ticker 臂 ----
+
+    /// **`session` 的心跳 ticker 臂**（`ticker.tick()` 那一支）。
+    ///
+    /// 首次心跳由 `session` 在进循环之前立刻发一次；这一支管的是**之后每一次**。
+    /// 它长期是覆盖盲区，原因不是「造不出」，而是别的用例周期都是秒级：会话活
+    /// 不过一个周期。这里把周期压到 16 ms、让夹具**挂着不关**，那一臂必然被
+    /// 选中若干次。
+    ///
+    /// 判据落在**对端收到的心跳条数**上：`send_heartbeat` 一条一条地发，而
+    /// 每次发送都消耗一句日志（`authed as` 只一句、不进循环）。一帧都不发与
+    /// 「只发首帧」的心跳条数差着一个数量级，断言 `>= 5` 能分开它们。
+    #[tokio::test]
+    async fn the_session_ticker_keeps_sending_heartbeats() {
+        let (d, _w) = worker("hb-ticker");
+        let (url, arrivals) = fake_hub_recording_heartbeats_no_channel(16);
+        let mut id = Identity::load_or_create(&d).expect("identity");
+        let mut w = Worker::new(d.clone(), url);
+        let h = tokio::spawn(async move { w.connect_loop(&mut id, None, std::io::sink()).await });
+        // 夹具每收到一帧心跳记一次到达；等它攒够 5 次。
+        wait_until(
+            || (arrivals.lock().unwrap_or_else(|e| e.into_inner()).len() >= 5).then_some(()),
+            std::time::Duration::from_secs(5),
+            "周期 16ms、会话活着 5 秒，对端却只收到不到 5 次心跳：ticker 臂没在发",
+        )
+        .await;
+        let got = arrivals.lock().unwrap_or_else(|e| e.into_inner()).len();
+        assert!(
+            got >= 5,
+            "ticker 臂必须持续发心跳（实收 {got} 次）；只发首帧的实现会停在 1"
+        );
+        h.abort();
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
+        assert!(
+            !log.contains("heartbeat send failed"),
+            "这条连接是对端挂着不关的，心跳不该发失败：{log}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ---- 派发（子任务 4）：`task_dispatch` 的三条硬约束落在 worker 上 ----
+
+    /// 一帧 `task_dispatch`（载荷按 `TaskDispatch` 的字段形状给）。
+    fn dispatch_frame(c: serde_json::Value) -> Frame {
+        frame_of(protocol::message::types::TASK_DISPATCH, c)
+    }
+
+    /// 一条**没被拒**的派发载荷。`worktree_path` 指向数据目录下的 `repos/<id>`，
+    /// 那是 `Worker::dispatch_repo_root` 的口径。
+    fn dispatch_payload(execution_id: &str, data_dir: &Path) -> serde_json::Value {
+        let wt = data_dir
+            .join("repos")
+            .join(format!("wt-{execution_id}"))
+            .display()
+            .to_string();
+        serde_json::json!({
+            "execution_id": execution_id,
+            "task_id": "t_1",
+            "project_id": "p_1",
+            // 一个**不存在的** commit：真去建树时会走 `baseline_mismatch`，
+            // 于是「执行体一个字节都没跑」这件事由磁盘上没有任何产物证明。
+            "base_commit": "0".repeat(40),
+            "worktree_path": wt,
+            "branch": format!("task/{execution_id}"),
+            "agent_id": "fake-agent",
+            "prompt": "do the thing",
+        })
+    }
+
+    /// 等对端收到**至少一帧**，返回此刻已收到的全部帧。
+    async fn frames_within(
+        recorded: &Arc<Mutex<Vec<Frame>>>,
+        timeout: std::time::Duration,
+    ) -> Vec<Frame> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if !got.is_empty() || Instant::now() >= deadline {
+                return got;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// 从对端收到的帧里挑出全部 `task_dispatch_ack`，按 `stage` 的线名字面值。
+    fn ack_stages(recorded: &Arc<Mutex<Vec<Frame>>>) -> Vec<String> {
+        recorded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|f| f.msg_type == protocol::message::types::TASK_DISPATCH_ACK)
+            .filter_map(|f| {
+                f.c.get("stage")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    /// **`accepted` 立刻发，终态随后由 `drain_dispatch` 推出去。**
+    ///
+    /// 这条用例覆盖整条「会话循环里的派发」：`on_dispatch_frame` 的
+    /// `Dispatch` 臂（认领 → 回 `accepted` → 入队 → 立刻推进一次）、
+    /// `drain_dispatch` 的「取下一件并开始跑」、`start_dispatch` 的阻塞线程、
+    /// 以及 `Running::take_pending` 那条把 ack 取回来的路。
+    ///
+    /// 判据落在**对端收到的帧序列**上：
+    /// ① 第一条 ack 是 `accepted`，且它先于任何判断（建树要几秒，Hub 等不起）；
+    /// ② 之后至少还有一条**终态**（这里必然是 `baseline_mismatch`——载荷里的
+    ///    `base_commit` 是个不存在的 commit）；
+    /// ③ 终态之后再没有 `accepted`：说明这一件只被认领了一次。
+    #[tokio::test]
+    async fn a_dispatch_frame_is_acked_at_once_and_its_terminal_ack_follows() {
+        let (d, w) = worker("dispatch-flow");
+        let (mut est, recorded) = established_recording_frames(&d).await;
+        // 派发的工作仓库根 = `<data_dir>/repos`，先把它做成一个真 git 仓库，
+        // 否则 `worktree::prepare` 会报 `env_broken`（那也是终态，但这条用例
+        // 要的是「树建出来了、基线不符」，两件事不能混）。
+        let repo = d.join("repos");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        init_git_repo(&repo);
+
+        let frame = dispatch_frame(dispatch_payload("e-flow", &d));
+        let mut running: Option<crate::dispatch::Running> = None;
+        w.on_dispatch_frame(&mut est, &frame, &mut running).await;
+
+        // ① `accepted` 在 `on_dispatch_frame` 返回时**已经发出**。
+        let early = frames_within(&recorded, std::time::Duration::from_secs(2)).await;
+        let early_stages: Vec<String> = early
+            .iter()
+            .filter(|f| f.msg_type == protocol::message::types::TASK_DISPATCH_ACK)
+            .filter_map(|f| {
+                f.c.get("stage")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .collect();
+        assert_eq!(
+            early_stages.first().map(String::as_str),
+            Some("accepted"),
+            "Hub 落「设备已接单」靠 accepted，它必须先于任何建树动作发出：{early:?}"
+        );
+
+        // ② 推进队列，直到终态 ack 出现在对端。
+        let mut stages = Vec::new();
+        for _ in 0..200 {
+            w.drain_dispatch(&mut est, &mut running).await;
+            stages = ack_stages(&recorded);
+            if stages
+                .last()
+                .is_some_and(|s| s != "accepted" && s != "running")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            stages,
+            vec![
+                "accepted".to_string(),
+                "accepted".to_string(),
+                "baseline_mismatch".to_string()
+            ],
+            "这条链上先由 `on_dispatch_frame` 发一条 accepted，执行体自己（`dispatch::run` \
+             的 sink）再发一条，然后是终态；任何一帧都不许省：{stages:?}"
+        );
+        // ③ 收尾之后 `running` 必须被让出来（否则后面每一件都会排队等它）。
+        assert!(
+            running.is_none(),
+            "终态回报之后必须让出 running，否则队列永远推不动"
+        );
+        // 执行体一个字节都没跑：`baseline_mismatch` 之后 agent 绝不能被启动，
+        // 所以那棵新树里只该有 checkout 出来的那份 `a.txt`（外加 worktree 的
+        // `.git` 文件）。任何 agent 产物都会让这条红。
+        let wt = d.join("repos").join("wt-e-flow");
+        let mut inside: Vec<String> = std::fs::read_dir(&wt)
+            .map(|it| {
+                it.flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        inside.sort();
+        assert_eq!(
+            inside,
+            vec![".git".to_string(), "a.txt".to_string()],
+            "基线不符时 agent 绝不能被启动（工作树里只该有 checkout 出来的内容）"
+        );
+        // 而且从未报过 `running`——那一帧是「我开始执行了」的唯一凭据。
+        assert!(
+            !stages.iter().any(|s| s == "running"),
+            "基线不符的派发不许报 running：{stages:?}"
+        );
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
+        assert!(log.contains("task dispatch e-flow accepted"), "{log}");
+        assert!(log.contains("task dispatch e-flow settled"), "{log}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 在 `dir` 里起一个只有一次提交的 git 仓库。
+    ///
+    /// 用真 `git` 而不是造几个文件：`worktree::prepare` 走的就是 `git worktree
+    /// add`，把它换掉之后这条用例就只剩「函数被调过」这一条判据了。
+    fn init_git_repo(dir: &Path) {
+        let run = |args: &[&str]| {
+            let st = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .status()
+                .expect("run git");
+            assert!(st.success(), "git {args:?} 在 {} 里失败了", dir.display());
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("a.txt"), b"one\n").expect("write");
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "first"]);
+    }
+
+    /// **`execution_id` 重复投递不重复执行**（幂等台账在 worker 这一层也要成立）。
+    ///
+    /// 判据是 `accepted` 的**条数**：第二帧被台账挡住时既不回 `accepted` 也不再
+    /// 入队，日志里只有一句 `duplicate delivery`。凡改成「每帧都 accepted」的
+    /// 实现都会让 Hub 把同一条执行算成两次。
+    #[tokio::test]
+    async fn a_duplicate_dispatch_is_ignored_before_it_reaches_the_queue() {
+        let (d, w) = worker("dispatch-dup");
+        let (mut est, recorded) = established_recording_frames(&d).await;
+        let mut running: Option<crate::dispatch::Running> = None;
+        let frame = dispatch_frame(dispatch_payload("e-dup", &d));
+
+        // 第一帧：认领 + 发 accepted + 入队 + 立刻推进（仓库根不存在 →
+        // `env_broken` 终态，与这条用例的判据无关）。
+        w.on_dispatch_frame(&mut est, &frame, &mut running).await;
+        // 台账清掉再投一次：**证明挡住它的是「同一进程内的重复」而不是
+        // 「上一件还没跑完」**——`running` 此时非空，若没有台账，第二帧仍会
+        // 回一条 accepted 并排进队列。
+        let accepted_first = ack_stages(&recorded).len();
+        w.on_dispatch_frame(&mut est, &frame, &mut running).await;
+
+        let log = wait_for_log(&d, "duplicate delivery", std::time::Duration::from_secs(5)).await;
+        assert!(
+            log.contains("task dispatch e-dup ignored: duplicate delivery"),
+            "重复投递必须被认出来并留痕：{log}"
+        );
+        assert_eq!(
+            ack_stages(&recorded).len(),
+            accepted_first,
+            "重复投递不得再发 accepted（那会让 Hub 把一条执行算成两次）"
+        );
+        assert_eq!(w.dispatch_queue.len(), 0, "重复投递不得再入队");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 一步都解不出来的派发帧：**留痕，并在能定位 `execution_id` 时回一条
+    /// 带归因的 `failed`**，否则 Hub 那条执行会永远停在 queued。
+    ///
+    /// 两条路径都要走：带 `execution_id` 的（回 ack）与连它都没有的
+    /// （只留痕——没有 id 就不知道该结算哪条执行，编一个比不报更糟）。
+    #[tokio::test]
+    async fn a_rejected_dispatch_frame_is_reported_with_attribution() {
+        let (d, w) = worker("dispatch-reject");
+        let (mut est, recorded) = established_recording_frames(&d).await;
+        let mut running: Option<crate::dispatch::Running> = None;
+
+        // ① 带了 execution_id：必须回一条 `failed{rejected}`。
+        let with_id = dispatch_frame(serde_json::json!({
+            "execution_id": "e-bad",
+            "stage": "waiting_for_user",
+        }));
+        w.on_dispatch_frame(&mut est, &with_id, &mut running).await;
+        let mut got = Vec::new();
+        for _ in 0..50 {
+            got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if !got.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let ack = got
+            .iter()
+            .find(|f| f.msg_type == protocol::message::types::TASK_DISPATCH_ACK)
+            .unwrap_or_else(|| panic!("带 execution_id 的坏帧必须回一条 failed：{got:?}"));
+        assert_eq!(
+            ack.c.get("stage").and_then(|v| v.as_str()),
+            Some("failed"),
+            "坏帧要结算成 failed，否则 Hub 永远停在 queued：{ack:?}"
+        );
+        assert_eq!(
+            ack.c.get("execution_id").and_then(|v| v.as_str()),
+            Some("e-bad"),
+            "归因必须指着那条执行：{ack:?}"
+        );
+        assert_eq!(
+            ack.c.get("failure_kind").and_then(|v| v.as_str()),
+            Some("rejected"),
+            "形态要说清是「设备在未执行前就拒了」：{ack:?}"
+        );
+
+        // ② 连 execution_id 都解不出来：只留痕，不再回帧。
+        let before = recorded.lock().unwrap_or_else(|e| e.into_inner()).len();
+        let no_id = dispatch_frame(serde_json::json!({"stage": "waiting_for_user"}));
+        w.on_dispatch_frame(&mut est, &no_id, &mut running).await;
+        let log = wait_for_log(
+            &d,
+            "task dispatch rejected",
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            log.contains("unknown dispatch stage"),
+            "留痕要说清为什么拒：{log}"
+        );
+        assert_eq!(
+            recorded.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            before,
+            "没有 execution_id 时回不了归因，不许编一条 ack"
+        );
+        assert!(running.is_none(), "被拒的帧不得占住 running");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 不是 `task_dispatch` 的帧一律快速返回：**一帧 `heartbeat` 不该被当成派发**。
+    ///
+    /// 判据是「什么都没变」：没有 ack、没有入队、没有 running。
+    #[tokio::test]
+    async fn a_frame_that_is_not_a_dispatch_never_touches_the_dispatch_path() {
+        let (d, w) = worker("dispatch-other");
+        let (mut est, recorded) = established_recording_frames(&d).await;
+        let mut running: Option<crate::dispatch::Running> = None;
+        for t in ["heartbeat", "task_dispatch_ack", ""] {
+            let f = frame_of(t, serde_json::json!({"execution_id": "e-x"}));
+            w.on_dispatch_frame(&mut est, &f, &mut running).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        assert!(
+            ack_stages(&recorded).is_empty(),
+            "非派发帧不得产生任何 ack：{:?}",
+            ack_stages(&recorded)
+        );
+        assert_eq!(w.dispatch_queue.len(), 0);
+        assert!(running.is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `drain_dispatch` 在队列空、或上一件还在跑时**什么都不做**。
+    ///
+    /// 这一支是「同一绑定默认串行」（`scheduling.md` §3.3）的落点：两个任务并行
+    /// 的磁盘占用不是翻倍而是乘上并发数，所以在跑的时候不许再起一件。
+    #[tokio::test]
+    async fn drain_dispatch_starts_nothing_while_one_is_running() {
+        let (d, w) = worker("dispatch-serial");
+        let (mut est, recorded) = established_recording_frames(&d).await;
+        let mut running: Option<crate::dispatch::Running> = None;
+
+        // ① 队列空、没有在跑 → 什么都不发生。
+        w.drain_dispatch(&mut est, &mut running).await;
+        assert!(running.is_none(), "没有活可干时不该凭空占住 running");
+
+        // ② 手动摆一个「在跑」的记录（通道里一条 ack 都没有）。
+        let (_tx, rx) = std::sync::mpsc::channel();
+        running = Some(crate::dispatch::Running::new("e-running".to_string(), rx));
+        w.dispatch_queue.push(
+            match crate::dispatch::parse_frame(
+                protocol::message::types::TASK_DISPATCH,
+                &dispatch_payload("e-queued", &d),
+            ) {
+                crate::dispatch::Incoming::Dispatch(d) => *d,
+                other => panic!("这条载荷必须解得出来，实际 {other:?}"),
+            },
+        );
+        w.drain_dispatch(&mut est, &mut running).await;
+        assert_eq!(
+            running.as_ref().map(|r| r.execution_id.as_str()),
+            Some("e-running"),
+            "上一件还没到终态时不许起下一件（串行是磁盘决定的）"
+        );
+        assert_eq!(w.dispatch_queue.len(), 1, "排队的那件必须还在队列里");
+        assert!(
+            ack_stages(&recorded).is_empty(),
+            "没有新 ack 时不该往外发帧"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **终态回报之后 `execution_id` 能从台账里重新认领**，但**`accepted`
+    /// 时不行**。
+    ///
+    /// 两条判据各挡一件事：
+    /// - `accepted` 时就 `forget` → 同一 `execution_id` 的重复投递会再跑一遍；
+    /// - 终态之后不 `forget` → 集合无限长大（一台设备跑一年就是几万条字符串），
+    ///   而且 Hub 因没收到终态而重派时会永远被挡住。
+    #[tokio::test]
+    async fn the_ledger_is_forgotten_only_after_a_terminal_ack() {
+        let (d, w) = worker("dispatch-ledger");
+        let (mut est, _recorded) = established_recording_frames(&d).await;
+
+        // 一个只发 `running`（非终态）的「正在跑」：不能让它被 forget。
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut running = Some(crate::dispatch::Running::new("e-nonterm".to_string(), rx));
+        tx.send(non_terminal_ack("e-nonterm", "running"))
+            .expect("send");
+        w.ledger.claim("e-nonterm");
+        w.drain_dispatch(&mut est, &mut running).await;
+        assert!(
+            running.is_some(),
+            "只有 running 不该让这一件「落定」——它还在跑"
+        );
+        assert!(
+            w.ledger.contains("e-nonterm"),
+            "非终态之后就 forget，会让重复投递再跑一遍"
+        );
+
+        // 终态一到：让出 running，并把 execution_id 交还给下一次派发。
+        tx.send(non_terminal_ack("e-nonterm", "succeeded"))
+            .expect("send");
+        w.drain_dispatch(&mut est, &mut running).await;
+        assert!(running.is_none(), "终态必须让 running 归位");
+        assert!(
+            !w.ledger.contains("e-nonterm"),
+            "终态之后必须 forget，否则台账无限长大"
+        );
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
+        assert!(log.contains("task dispatch e-nonterm settled"), "{log}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 造一条只带 `stage` 的 ack（`Running` 的通道是私有的，只能从外面塞帧进来）。
+    fn non_terminal_ack(execution_id: &str, stage: &str) -> protocol::message::TaskDispatchAck {
+        use protocol::message::{DispatchStage, TaskDispatchAck};
+        let stage = match stage {
+            "running" => DispatchStage::Running,
+            "succeeded" => DispatchStage::Succeeded,
+            other => panic!("本用例只用到 running / succeeded，收到 {other}"),
+        };
+        TaskDispatchAck {
+            execution_id: execution_id.to_string(),
+            stage,
+            reason: None,
+            evidence: None,
+            failure_kind: None,
+            items: None,
+        }
+    }
+
+    /// `send_ack` 发不出去时**只留痕**：执行本身可能已经成功了，把那件事说成
+    /// 失败是假信息；而 Hub 判离站靠收不到心跳。
+    #[tokio::test]
+    async fn an_ack_that_cannot_be_sent_only_leaves_a_trace() {
+        let (d, w) = worker("dispatch-ack-send-fail");
+        let mut est = established_after_peer_close(&d).await;
+        let ack = non_terminal_ack("e-gone", "succeeded");
+        w.send_ack(&mut est, &ack).await;
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
+        assert!(
+            log.contains("task dispatch ack send failed (e-gone succeeded)"),
+            "要说清是哪条执行的哪个阶段没发走：{log}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 进程级台账与队列在 `Worker::new` 里就备好了：**新 worker 认领得了、
+    /// 队列是空的**。
+    ///
+    /// 判据不是「字段非空」（那恒真），而是两个行为：`claim` 第一次成功、
+    /// 第二次失败（台账真的在）；队列一开始没有活（不会凭空派发）。
+    #[tokio::test]
+    async fn a_fresh_worker_starts_with_an_empty_queue_and_a_working_ledger() {
+        let (d, w) = worker("fresh-worker");
+        assert_eq!(w.dispatch_queue.len(), 0, "新进程不该有任何排队中的派发");
+        assert!(w.ledger.claim("e-first"), "第一次必须认得下来");
+        assert!(!w.ledger.claim("e-first"), "同一个 id 第二次必须被挡");
+        assert_eq!(w.dispatch_repo_root(), d.join("repos"));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

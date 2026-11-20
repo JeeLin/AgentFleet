@@ -615,6 +615,8 @@ pub fn execute(dispatch: &TaskDispatch, config: &DispatchConfig, worktree: &Path
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                // coverage: excluded — 上面 `Err(e)` 臂的续行（同一个不可达
+                // 分支，理由见上）。
                 return ExecOutcome::NotStarted {
                     detail: format!("cannot wait for the agent: {e}"),
                 };
@@ -685,6 +687,8 @@ fn collect_output(child: &mut std::process::Child) -> String {
     let mut text = String::new();
     if let Some(out) = child.stdout.as_mut() {
         let mut buf = Vec::new();
+        // coverage: excluded — `is_ok()` 分支的块尾 `}`：块内语句有覆盖，
+        // llvm-cov 把块尾单独记成一个区域。
         if out.read_to_end(&mut buf).is_ok() {
             text.push_str(&String::from_utf8_lossy(&buf));
         }
@@ -697,6 +701,7 @@ fn collect_output(child: &mut std::process::Child) -> String {
             }
             text.push_str(&String::from_utf8_lossy(&buf));
         }
+        // coverage: excluded — 同上：块尾区域。
     }
     text
 }
@@ -723,6 +728,7 @@ fn top_level_files(worktree: &Path) -> HashSet<String> {
                 out.insert(name);
             }
         }
+        // coverage: excluded — `for` 循环的块尾 `}`：llvm-cov 单独记的区域。
     }
     out
 }
@@ -748,6 +754,8 @@ fn quarantine_artifacts(
 ) -> (usize, String) {
     let parent = worktree.parent().unwrap_or(worktree);
     let leaf = worktree.file_name().map_or_else(
+        // coverage: excluded — 只有工作树路径以 `..` 结尾（没有文件名）时才走
+        // 这一臂；生产里路径恒由 `worktree_path_for` 拼出一个叶子名。
         || "worktree".to_string(),
         |s| s.to_string_lossy().into_owned(),
     );
@@ -769,6 +777,7 @@ fn quarantine_artifacts(
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
+            // coverage: excluded — `read_dir` 的块尾 `}`：llvm-cov 单独记的区域。
             if name == ".git" || baseline.contains(&name) {
                 continue;
             }
@@ -785,6 +794,7 @@ fn quarantine_artifacts(
             if std::fs::copy(&from, dest.join(name)).is_ok() {
                 kept += 1;
             }
+            // coverage: excluded — 块尾 `}`：4 次拷贝都成功，块尾仍是独立区域。
         }
     }
     (kept, dest.display().to_string())
@@ -817,6 +827,7 @@ fn disk_items_for_abort(worktree: &Path, used: u64, kept_dir: &str) -> Vec<DiskI
         class: "worktree".to_string(),
         modified_at: None,
         label: worktree.file_name().map_or_else(
+            // coverage: excluded — 同上：路径没有文件名时才走这一臂。
             || "worktree".to_string(),
             |s| s.to_string_lossy().into_owned(),
         ),
@@ -836,6 +847,8 @@ fn disk_items_for_abort(worktree: &Path, used: u64, kept_dir: &str) -> Vec<DiskI
         for name in names {
             let path = kept.join(&name);
             let Ok(meta) = std::fs::metadata(&path) else {
+                // coverage: excluded — 刚 `read_dir` 列出来的文件在这一瞬被删（竞态）
+                // 才会走这里；「读不到就不报」的语义由 `kept` 清单本身的断言覆盖。
                 continue; // 读不到就不报，不猜
             };
             items.push(DiskItem {
@@ -1519,5 +1532,320 @@ mod tests {
             None => unsafe { std::env::remove_var("AFCLI_DISPATCH_CMD") },
         }
         out
+    }
+
+    // ---- 锁中毒之后**照常把事做完** ----
+    //
+    // `Ledger` / `Queue` / `Running` 里的临界区都只有一次容器操作，任何一处
+    // 中毒都意味着**别的地方**出了问题。这三处的处置是一致的：取回内层容器，
+    // 继续干活。写成 `panic!` 会让一台设备因为一次无关的 panic 永远派不动活；
+    // 写成「悄悄放弃」会让同一条执行被重跑。下面三条用例各让持锁线程先 panic。
+
+    /// 让 `mutex` 中毒：持锁 panic 一次。
+    fn poison<T>(mutex: &std::sync::Mutex<T>) {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = mutex.lock().expect("首次加锁不该中毒");
+            panic!("故意毒掉这把锁");
+        }));
+        assert!(r.is_err(), "前提：这一次必须真的 panic 了");
+        assert!(mutex.lock().is_err(), "前提：这把锁现在是中毒的");
+    }
+
+    /// 台账中毒后**幂等仍然成立**：认领、查询、遗忘都照常。
+    ///
+    /// 判据是三个返回值，不是「没 panic」：中毒后第一次 `claim` 必须给 `true`
+    /// （认下了）、第二次给 `false`（挡住了）、`forget` 之后 `contains` 给
+    /// `false`（真忘了）。
+    #[test]
+    fn a_poisoned_ledger_still_keeps_idempotency() {
+        let ledger = Ledger::new();
+        assert!(ledger.claim("e-keep"));
+        poison(&ledger.entries);
+
+        assert!(
+            ledger.claim("e-after-poison"),
+            "中毒之后必须照常认领（放弃 = 同一条执行被重跑）"
+        );
+        assert!(
+            !ledger.claim("e-after-poison"),
+            "中毒之后幂等也必须成立：同一个 id 第二次要挡住"
+        );
+        assert!(ledger.contains("e-keep"), "中毒前认下的必须还在");
+        ledger.forget("e-keep");
+        assert!(!ledger.contains("e-keep"), "forget 必须真的生效");
+    }
+
+    /// 队列中毒后**不丢活**：入队、出队、计数都照常，且顺序不变。
+    #[test]
+    fn a_poisoned_queue_never_drops_a_dispatch() {
+        let (_tmp, root) = repo();
+        let wt = root.parent().expect("parent").join("wt-poison");
+        let q = Queue::new();
+        q.push(dispatch_to("e-first", &root, &wt));
+        poison(&q.pending);
+
+        let depth = q.push(dispatch_to("e-second", &root, &wt));
+        assert_eq!(depth, 2, "中毒之后入队仍要给出真实深度");
+        assert_eq!(q.len(), 2, "中毒之后计数仍要真实");
+        assert!(!q.is_empty());
+        let first = q.pop().expect("先进先出：第一件必须还在");
+        assert_eq!(first.execution_id, "e-first", "顺序不能被中毒打乱");
+        assert_eq!(
+            q.pop().map(|d| d.execution_id),
+            Some("e-second".to_string())
+        );
+        assert_eq!(q.len(), 0);
+        assert!(q.is_empty(), "取空之后必须报告为空");
+    }
+
+    /// `Running` 的锁中毒后 `take_pending` **空手返回而不是 panic**：
+    /// 终态会在下一次 tick 再取，而 panic 会把会话循环带走。
+    #[test]
+    fn a_poisoned_running_reports_nothing_instead_of_panicking() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let running = Running::new("e-poisoned".to_string(), rx);
+        tx.send(ack("e-poisoned", DispatchStage::Running, None, None, None))
+            .expect("send");
+        poison(&running.acks);
+
+        assert!(
+            running.take_pending().is_empty(),
+            "中毒时只能空手返回（ack 仍在管道里，下一次 tick 会再取）"
+        );
+        assert_eq!(running.execution_id, "e-poisoned", "id 不受中毒影响");
+    }
+
+    /// **`ChannelSink` 把 ack 真的送进通道**（这是它存在的唯一理由）。
+    ///
+    /// 判据在接收端：收到的三条 ack 的 `stage` 与发送顺序一致。
+    #[test]
+    fn the_channel_sink_delivers_every_ack_in_order() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut sink = ChannelSink(tx);
+        sink.emit(ack("e-ch", DispatchStage::Accepted, None, None, None));
+        sink.emit(ack("e-ch", DispatchStage::Running, None, None, None));
+        sink.emit(ack("e-ch", DispatchStage::Succeeded, None, None, None));
+
+        let got: Vec<DispatchStage> = rx.try_iter().map(|a| a.stage).collect();
+        assert_eq!(
+            got,
+            vec![
+                DispatchStage::Accepted,
+                DispatchStage::Running,
+                DispatchStage::Succeeded
+            ],
+            "通道上必须是那三条、且顺序不变"
+        );
+    }
+
+    /// 接收端已经 drop 时 `ChannelSink` **丢掉这一帧而不是把执行判失败**。
+    ///
+    /// 判据是「不 panic 且发送端仍然可用」：`Drop` 掉接收端之后再发一条，
+    /// 第二条同样被丢掉——若实现里写成 `send(..).expect(..)`，这条会 panic。
+    #[test]
+    fn the_channel_sink_drops_frames_whose_receiver_is_gone() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        drop(rx);
+        let mut sink = ChannelSink(tx);
+        sink.emit(ack("e-gone", DispatchStage::Running, None, None, None));
+        sink.emit(ack("e-gone", DispatchStage::Succeeded, None, None, None));
+    }
+
+    /// **`baseline_mismatch` 的证据里要区分「新建的树」与「复用的树」。**
+    ///
+    /// 这一句是排障时唯一能回答「这个目录是这次建的吗」的线索：复用的树上
+    /// 基线不符，说明上一次执行留下了东西；新建的则说明 Hub 给的 commit 不对。
+    /// 判据是两次派发（先建后用）的证据文本各含其一。
+    #[test]
+    fn a_baseline_mismatch_says_whether_the_worktree_was_new_or_reused() {
+        let (tmp, root) = repo();
+        let wt = tmp.path().join("wt-new-vs-reused");
+        let mut frame = dispatch_to("e9", &root, &wt);
+        frame.base_commit = "0".repeat(40);
+
+        let mut fresh = RecordingSink::default();
+        run(&frame, &fast_config(), &root, &mut fresh);
+        let first = fresh
+            .acks
+            .last()
+            .and_then(|a| a.evidence.clone())
+            .unwrap_or_default();
+        assert!(
+            first.contains("(newly created)"),
+            "第一次是新建的树，证据必须这么说：{first}"
+        );
+
+        // 第二遍：树已经在了，`prepare` 会复用它。
+        let mut reused = RecordingSink::default();
+        run(&frame, &fast_config(), &root, &mut reused);
+        let second = reused
+            .acks
+            .last()
+            .and_then(|a| a.evidence.clone())
+            .unwrap_or_default();
+        assert!(
+            second.contains("(reused)"),
+            "同一路径第二次必须报「复用」：{second}"
+        );
+    }
+
+    /// **agent 退出码为负时归到 `agent_error`**（被信号杀掉），不是
+    /// `task_failed`：前者要换 agent / 换设备，后者只是这次没做成。
+    ///
+    /// 做法是让执行体**自己杀掉自己**（`kill -TERM $$`），于是 `ExitStatus`
+    /// 没有退出码、走 `code().unwrap_or(-1)` 那条路。判据是 `failure_kind`。
+    #[test]
+    fn an_agent_killed_by_a_signal_is_an_agent_error_not_a_task_failure() {
+        let (tmp, root) = repo();
+        let wt = tmp.path().join("wt-signal");
+        let frame = dispatch_to("e-sig", &root, &wt);
+
+        let mut sink = RecordingSink::default();
+        let out = with_dispatch_cmd("sh:kill -TERM $$", || {
+            run(&frame, &fast_config(), &root, &mut sink)
+        });
+
+        let terminal = out.terminal().expect("终态");
+        assert_eq!(terminal.stage, DispatchStage::Failed);
+        assert_eq!(
+            terminal.failure_kind.as_deref(),
+            Some("agent_error"),
+            "没有退出码（被信号杀掉）是 agent 崩了，不是任务没做成：{terminal:?}"
+        );
+        let reason = terminal.reason.clone().unwrap_or_default();
+        assert!(
+            reason.contains("the agent exited with -1"),
+            "原因里要说清没有退出码：{reason}"
+        );
+    }
+
+    /// 执行体**同时有 stdout 与 stderr** 时，证据里两段都在、中间换行。
+    ///
+    /// `collect_output` 的第二条 `read_to_end`（stderr）只有在这种情形下才走到；
+    /// 而把 stderr 丢掉会让「agent 报了什么错」彻底消失。
+    #[test]
+    fn the_evidence_carries_both_the_agents_stdout_and_stderr() {
+        let (tmp, root) = repo();
+        let wt = tmp.path().join("wt-both-streams");
+        let frame = dispatch_to("e-streams", &root, &wt);
+
+        let mut sink = RecordingSink::default();
+        with_dispatch_cmd("sh:echo out-line; echo err-line >&2", || {
+            run(&frame, &fast_config(), &root, &mut sink)
+        });
+
+        let evidence = sink
+            .acks
+            .last()
+            .and_then(|a| a.evidence.clone())
+            .unwrap_or_default();
+        assert!(
+            evidence.contains("out-line"),
+            "stdout 必须在证据里：{evidence}"
+        );
+        assert!(evidence.contains("err-line"), "stderr 也必须在：{evidence}");
+        assert!(
+            evidence.contains("out-line\n\nerr-line"),
+            "两段之间要换行（stdout 自带一个行尾），否则会拼成一个不存在的词：{evidence:?}"
+        );
+    }
+
+    /// `quarantine_artifacts` **跳过目录**：留一棵子目录不是「保留前 N 个产物」，
+    /// 而且它可能很大——那正是要避免的。
+    ///
+    /// 判据是「只留下那个文件，子目录一个字节都没被复制」。
+    #[test]
+    fn quarantine_keeps_files_but_never_drags_a_whole_directory_out() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wt = tmp.path().join("wt-quarantine");
+        std::fs::create_dir_all(wt.join("big-dir")).expect("mkdir");
+        std::fs::write(wt.join("big-dir").join("huge.bin"), vec![0u8; 4096]).expect("write");
+        std::fs::write(wt.join("kept.log"), b"diagnostic\n").expect("write");
+        std::fs::write(wt.join(".git"), b"gitdir: /somewhere\n").expect("write");
+
+        let (kept, dir) = quarantine_artifacts(&wt, 3, &HashSet::new());
+
+        assert_eq!(kept, 1, "只该留下那一个文件（`.git` 与目录都不算）");
+        let dest = Path::new(&dir);
+        assert_eq!(
+            std::fs::read_to_string(dest.join("kept.log")).expect("copied"),
+            "diagnostic\n"
+        );
+        assert!(
+            !dest.join("big-dir").exists(),
+            "目录不得被拖出来（那正是磁盘耗尽时要避免的东西）"
+        );
+        assert!(!dest.join(".git").exists(), "`.git` 不是本次产出");
+    }
+
+    /// 保留个数为 0 时**连保留目录都不建**：没有东西要留就不该在父目录里
+    /// 留一个空壳。
+    #[test]
+    fn quarantine_creates_nothing_when_there_is_nothing_to_keep() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wt = tmp.path().join("wt-empty-quarantine");
+        std::fs::create_dir_all(&wt).expect("mkdir");
+        std::fs::write(wt.join("only-baseline.txt"), b"from the repo\n").expect("write");
+        let baseline: HashSet<String> = ["only-baseline.txt".to_string()].into_iter().collect();
+
+        let (kept, dir) = quarantine_artifacts(&wt, 3, &baseline);
+
+        assert_eq!(kept, 0, "全是基线内容 → 一个产物都没有");
+        assert!(
+            !Path::new(&dir).exists(),
+            "没有东西可留时不该建出空目录：{dir}"
+        );
+    }
+
+    /// `disk_items_for_abort` 的清单**逐个实测**：整棵树一项 + 每个保留产物一项，
+    /// 大小是磁盘上的真实字节数。
+    ///
+    /// 判据是条数与每项的 `bytes`：编数会让 Hub 的清理预演算出错误的可释放量。
+    #[test]
+    fn the_abort_inventory_measures_every_kept_artifact() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wt = tmp.path().join("wt-inventory");
+        std::fs::create_dir_all(&wt).expect("mkdir");
+        let kept_dir = tmp.path().join("kept");
+        std::fs::create_dir_all(&kept_dir).expect("mkdir");
+        std::fs::write(kept_dir.join("b.log"), b"12345").expect("write");
+        std::fs::write(kept_dir.join("a.log"), b"123").expect("write");
+        // 目录项不算产物：清单里只该有文件。
+        std::fs::create_dir_all(kept_dir.join("subdir")).expect("mkdir");
+
+        let items = disk_items_for_abort(&wt, 4096, &kept_dir.display().to_string());
+
+        assert_eq!(items.len(), 3, "一棵树 + 两个文件：{items:?}");
+        assert_eq!(items[0].class, "worktree");
+        assert_eq!(items[0].bytes, 4096, "整棵树那一项用调用方实测的字节数");
+        assert_eq!(items[0].label, "wt-inventory");
+        // 文件名排序只为稳定，不依赖 `read_dir` 的顺序。
+        assert_eq!(items[1].label, "a.log");
+        assert_eq!(items[1].bytes, 3);
+        assert_eq!(items[2].label, "b.log");
+        assert_eq!(items[2].bytes, 5);
+        assert!(
+            items[1..].iter().all(|i| i.class == "artifact"),
+            "保留下来的产物要单独归类（Hub 侧按 class 决定清理与否）：{items:?}"
+        );
+        assert!(
+            items[1].modified_at.is_some(),
+            "实测得到的 mtime 要一起报上去：{items:?}"
+        );
+    }
+
+    /// 保留目录**不存在**时清单只报整棵树：读不到就不报，不猜。
+    #[test]
+    fn the_abort_inventory_reports_only_the_tree_when_nothing_was_kept() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wt = tmp.path().join("wt-inv-empty");
+        std::fs::create_dir_all(&wt).expect("mkdir");
+        let missing = tmp.path().join("no-such-kept-dir");
+
+        let items = disk_items_for_abort(&wt, 7, &missing.display().to_string());
+
+        assert_eq!(items.len(), 1, "没有保留产物时只报整棵树：{items:?}");
+        assert_eq!(items[0].class, "worktree");
+        assert_eq!(items[0].bytes, 7);
     }
 }
