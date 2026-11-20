@@ -14,6 +14,18 @@ once on 2026-11-05.
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-11-20
+
+> 里程碑：任务闭环补全——建完任务绑定设备后，任务会自动被派到合格设备上执行并把结果回报给 Hub。
+> Milestone: task loop completion — after a task is created and a device is bound, the task is automatically dispatched to an eligible device, executed, and reported back to the Hub.
+
+### Added
+
+- **任务会自动开始执行**：新建任务并绑定设备后，Hub 自动挑一台合格设备派下去，设备执行完把结果回报，任务状态随之推进（排队中 → 执行中 → 待验收）。 / **Tasks now start executing on their own**: after creating a task and binding a device, the Hub picks an eligible device, dispatches the work, and the device reports the result back so the task advances (queued → running → review).
+- **派不出时会说清原因**：没有合格设备时任务保持待办，并写明是哪一层不合格（没有绑定设备 / 设备上没有需要的 agent / 内存或磁盘不够 / 代码拿不到等）。 / **Undispatched tasks now say why**: when no device qualifies the task stays pending with the exact failing layer named (no bound device, missing agent, insufficient RAM or disk, code unavailable, and so on).
+- **失败会自动换一台设备重试**：环境坏了、磁盘满了、任务本身失败时换设备重来；agent 崩了优先换 agent；需求变更或任务被拒则不再重试。 / **Failures now retry on a different device**: broken environments, exhausted disks and failed tasks move to another machine; agent crashes switch agents first; superseded or rejected tasks are not retried.
+- **磁盘写满时列出清理方案**（只演不做）：执行中超过磁盘预算会被提前中止，并给出「准备删什么、各占多大、清理后释放多少」，等你确认后才真正删除。 / **Disk exhaustion now comes with a cleanup preview** (plan only, nothing deleted): an execution that exceeds its disk budget is aborted early with a "what would be removed, how large, how much freed" list, and nothing is deleted until you confirm.
+
 ## [0.8.1] - 2026-11-19
 
 > 里程碑：页面与原型对齐——以实际实现为标准的视觉层重做，判据从「与原型逐字相同」改为「实现自洽 + 无障碍达标」。
