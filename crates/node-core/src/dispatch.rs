@@ -1640,12 +1640,28 @@ mod tests {
 
     /// 接收端已经 drop 时 `ChannelSink` **丢掉这一帧而不是把执行判失败**。
     ///
-    /// 判据是「不 panic 且发送端仍然可用」：`Drop` 掉接收端之后再发一条，
-    /// 第二条同样被丢掉——若实现里写成 `send(..).expect(..)`，这条会 panic。
+    /// 「不 panic」不构成判据（`send` 失败被 `let _ =` 吞掉时也不会 panic），
+    /// 所以分两半验：**控制组**——接收端还在时，帧必须真的送到（否则这个 sink
+    /// 根本没在工作，下面的对照组就毫无意义）；**实验组**——接收端 drop 后，
+    /// 通道确实已断（`send` 返回 `Err`），而 sink 对调用者仍表现为可继续发送。
+    ///
+    /// 两半合起来才排除了「sink 其实什么都不发」这种假通过。
     #[test]
     fn the_channel_sink_drops_frames_whose_receiver_is_gone() {
+        // 控制组：接收端存活 → 帧必须真的到。
         let (tx, rx) = std::sync::mpsc::channel();
+        let mut live = ChannelSink(tx.clone());
+        live.emit(ack("e-live", DispatchStage::Running, None, None, None));
+        let got = rx.try_recv().expect("接收端还在时帧必须送到");
+        assert_eq!(got.execution_id, "e-live", "送到的必须是刚发的那一帧");
+
+        // 实验组：接收端 drop → 通道已断，但 emit 不 panic 且可以继续调。
         drop(rx);
+        assert!(
+            tx.send(ack("e-gone", DispatchStage::Running, None, None, None))
+                .is_err(),
+            "接收端已 drop，通道必须已断（否则下面的对照组测的不是断链路径）"
+        );
         let mut sink = ChannelSink(tx);
         sink.emit(ack("e-gone", DispatchStage::Running, None, None, None));
         sink.emit(ack("e-gone", DispatchStage::Succeeded, None, None, None));
