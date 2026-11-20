@@ -445,27 +445,23 @@ impl<'a> Scheduler<'a> {
             .map(|b| b.device_id.clone());
 
         // ---- ② `pick` 的候选源：`DifferentDevice` 时排除刚失败的那台 ----
-        let pairs: Vec<(String, Binding)> = match plan {
+        //
+        // 四种结论只差**一个谓词**（留不留上一台），所以先求谓词再用既有的
+        // [`binding_pairs`] 投影——不把同一个 `(device_id, binding)` 投影抄四遍。
+        let keep: fn(Option<&String>, Option<&String>) -> bool = match plan {
             // 换 agent：候选只有上一次那台设备（`device_id` 不变）。
-            RetryPlan::DifferentAgent => bindings
-                .iter()
-                .filter(|b| Some(&b.device_id) == failed_device.as_ref())
-                .map(|b| (b.device_id.clone(), b.clone()))
-                .collect(),
+            RetryPlan::DifferentAgent | RetryPlan::SameDevice => |want, got| want == got,
             // 换设备：**排除**刚失败的那台（否则「换一台」在同一台上再跑一次）。
-            RetryPlan::DifferentDevice => bindings
-                .iter()
-                .filter(|b| Some(&b.device_id) != failed_device.as_ref())
-                .map(|b| (b.device_id.clone(), b.clone()))
-                .collect(),
-            // 同设备重来 / 不重试：前者只留那台，后者不留（下面直接返回）。
-            RetryPlan::SameDevice => bindings
-                .iter()
-                .filter(|b| Some(&b.device_id) == failed_device.as_ref())
-                .map(|b| (b.device_id.clone(), b.clone()))
-                .collect(),
-            RetryPlan::NoRetry => Vec::new(),
+            RetryPlan::DifferentDevice => |want, got| want != got,
+            // 不重试：不留任何候选（下面直接返回，这里只为形状完整）。
+            RetryPlan::NoRetry => |_, _| false,
         };
+        let candidates: Vec<Binding> = bindings
+            .iter()
+            .filter(|b| keep(failed_device.as_ref(), Some(&b.device_id)))
+            .cloned()
+            .collect();
+        let pairs = binding_pairs(&candidates);
         if plan == RetryPlan::NoRetry {
             self.record(
                 &task,
