@@ -2450,6 +2450,127 @@ mod tests {
         (state, dir)
     }
 
+    // ---- 测试夹具：日志字段与内存连接 ----
+
+    /// 一个只收日志、不打印的 `tracing` 订阅者。
+    /// 单线程 runtime 里它跨 `.await` 一直有效；`rebuild_interest_cache` 是必要的，
+    /// 因为这些 callsite 在之前的用例里已经缓存了 `never`。
+    ///
+    /// 与 `routes::stream` 的同名夹具同一个理由：**字段行不是无条件执行的**，
+    /// 没有 subscriber 时 dispatch 判否就短路，`node_id = %...` 这类表达式
+    /// 根本不会被求值。本组用例断言的是「那个分支真的被走到了」，日志字段的
+    /// 求值只是它的可观测面——不能靠它，但缺了它覆盖面就有假洞。
+    fn info_subscriber() -> tracing::subscriber::DefaultGuard {
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(std::io::sink)
+            .finish();
+        let guard = tracing::subscriber::set_default(sub);
+        tracing::callsite::rebuild_interest_cache();
+        guard
+    }
+
+    /// 内存版「已握手的连接」：出站队列 + 注册表 + 一条 `device.status: online`。
+    ///
+    /// `handle_socket` 在握手成功后依次做的几件事（`register` → `insert` →
+    /// 推 `online`）在这里照做，让 `cleanup` 看到的前置与生产一致。差别只有
+    /// 一件：不 `spawn` 写协程——本组用例是**直接调 `cleanup`**，
+    /// 没有 socket 可写。
+    fn live_connection(state: &AppState, node_id: &str, conn_id: &str, gen: u64) -> Authenticated {
+        let (_control, _data) = state.outbound().register(conn_id);
+        state.connections().insert(
+            node_id.to_string(),
+            ConnHandle {
+                conn_id: conn_id.to_string(),
+                gen,
+            },
+        );
+        state.streams().device_status(node_id, "online");
+        Authenticated {
+            node_id: node_id.to_string(),
+            gen,
+            protocol_version: 1,
+            heartbeat_interval_ms: state.heartbeat_interval_ms(),
+        }
+    }
+
+    /// 在本线程装一个 `tracing` 订阅者，把**每条事件连同字段**收进内存。
+    ///
+    /// 与只写到 `sink` 的订阅者不同，这个夹具能让断言落在「那句话说的是
+    /// 什么」上：本组用例里有一批分支的唯一可观测结果就是一条日志
+    /// （顶替帧投不出去、轨迹写不进库、绑定表读不出来……）。
+    /// 断言「它没 panic」不算断言；断言「这条事件带着 `node_id = n_a`
+    /// 记下来了」才算。
+    ///
+    /// 用 `MakeWriter` + `Arc<Mutex<Vec<u8>>>` 而不是 `tracing_subscriber` 的
+    /// 测试层：本 crate 的 dev-dependencies 里没有 `tracing-subscriber` 的
+    /// `registry` 特性，而 `fmt` 输出的每一行都以「字段键值对 + 消息」结尾，
+    /// 足够断言。
+    #[derive(Clone, Default)]
+    struct CapturedLog(std::sync::Arc<parking_lot::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+        type Writer = CapturedLog;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// 装上 [`CapturedLog`] 并返回 `(守卫, 读文本的句柄)`。
+    ///
+    /// 守卫必须活到断言结束（`set_default` 在本线程生效）。
+    fn captured_log() -> (tracing::subscriber::DefaultGuard, CapturedLog) {
+        let sink = CapturedLog::default();
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(sink.clone())
+            .finish();
+        let guard = tracing::subscriber::set_default(sub);
+        tracing::callsite::rebuild_interest_cache();
+        (guard, sink)
+    }
+
+    impl CapturedLog {
+        /// 收到的日志文本，**已剥掉 ANSI 转义**。
+        ///
+        /// `fmt` 默认给字段加彩色，于是 `removed=false` 在字节里长成
+        /// `removed\x1b[0m\x1b[2m=\x1b[0mfalse`——直接 `contains("removed=false")`
+        /// 会一直失败，而失败原因看起来像「这句日志没记」。剥掉之后断言
+        /// 面对的才是「说了什么」，而不是「终端怎么上色」。
+        fn text(&self) -> String {
+            let raw = String::from_utf8_lossy(&self.0.lock()).to_string();
+            let mut out = String::with_capacity(raw.len());
+            let mut chars = raw.chars();
+            while let Some(c) = chars.next() {
+                if c == '\u{1b}' {
+                    // CSI：`ESC` `[` 参数（0x20–0x3F）中间（0x20–0x2F）
+                    // 终止字节（0x40–0x7E）。先吃掉 `[`，再按参数字节跳过，
+                    // 否则 `[` 自己就撞上终止区间，后面的 `2m` 会被漏出来。
+                    if matches!(chars.next(), Some('[')) {
+                        for c in chars.by_ref() {
+                            if ('@'..='~').contains(&c) {
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        }
+    }
+
     // ---- 读侧限流、出站队列与落库失败 ----
 
     /// **单帧超硬上限**：立刻断连，并回 `err{code:"frame_too_large"}`。
@@ -2736,5 +2857,1080 @@ mod tests {
         assert_eq!(f.msg_type, types::DISCONNECT);
         assert_eq!(f.c["reason"], "superseded");
         assert_eq!(f.c["gen"], 2);
+    }
+
+    // ---- 顶替的留痕行：三种投递结局各求值一次字段 ----
+
+    /// ③ 正常投递那一档：帧真的到了，**且日志把「谁顶了谁」记下来了**。
+    ///
+    /// 帧与日志缺一不可：帧送达而不留痕，运维在事故现场看不到顶替链；
+    /// 留痕而不送达，设备根本不知道要走（gen 兜底还要等它下次重连）。
+    #[test]
+    fn the_supersede_notice_records_both_connection_ids() {
+        let (_guard, log) = captured_log();
+        let (state, _d) = stream_state();
+        let old = hub_core::connections::ConnHandle {
+            conn_id: "c-old".into(),
+            gen: 3,
+        };
+        let (mut control, _data) = state.outbound().register(&old.conn_id);
+
+        supersede(&state, &old, 9, "c-new", "n_a");
+
+        let f = control.try_recv().expect("控制面必须收到顶替帧");
+        assert_eq!(f.msg_type, types::DISCONNECT);
+        assert_eq!(
+            f.c["gen"], 9,
+            "帧里带的必须是**新**连接的代次，旧连接据此知道自己落后了"
+        );
+        let text = log.text();
+        assert!(
+            text.contains("superseding the older connection"),
+            "这一档必须留痕：{text}"
+        );
+        assert!(
+            text.contains("c-old") && text.contains("c-new"),
+            "留痕必须两条 conn_id 都在（谁被顶、谁接管）：{text}"
+        );
+        assert!(text.contains("n_a"), "留痕必须带 node_id：{text}");
+    }
+
+    /// ① 表里没它（`Ok(false)`）与 ② 队列已满（`QueueFull`）两档：
+    /// **各自记下自己的那句**，且都不冒充送达。
+    ///
+    /// 「没 panic」不算断言。这两档唯一的可观测结果就是日志，所以断言落在
+    /// 日志文本上——同时用「队列里还是原来那 8 帧」证明没有帧被挤掉。
+    #[test]
+    fn an_undeliverable_supersede_notice_says_why_it_could_not_be_sent() {
+        let (_guard, log) = captured_log();
+        let (state, _d) = stream_state();
+
+        // ① 表里没这条连接：`Ok(false)`。
+        let ghost = hub_core::connections::ConnHandle {
+            conn_id: "c-gone".into(),
+            gen: 1,
+        };
+        supersede(&state, &ghost, 2, "c-new", "n_a");
+        let text = log.text();
+        assert!(
+            text.contains("the displaced connection is already gone"),
+            "表里没它时要记的是「它已经走了」，不是「顶替成功」：{text}"
+        );
+        assert!(text.contains("c-gone"), "留痕必须指出是哪条连接：{text}");
+
+        // ② 在表里但控制面 8 格全满：`QueueFull`。
+        let stuck = hub_core::connections::ConnHandle {
+            conn_id: "c-stuck".into(),
+            gen: 1,
+        };
+        let (mut control, _data) = state.outbound().register(&stuck.conn_id);
+        for _ in 0..crate::conns::CONTROL_QUEUE {
+            state
+                .outbound()
+                .send(
+                    &stuck.conn_id,
+                    flood_frame(&hub_core::limits::LimitError::Flood),
+                )
+                .expect("前置：塞满 8 格");
+        }
+        supersede(&state, &stuck, 2, "c-new-2", "n_a");
+        let text = log.text();
+        assert!(
+            text.contains("cannot deliver the superseded frame"),
+            "队列满时留下的话必须点明「gen 兜底得接住它」：{text}"
+        );
+        assert!(text.contains("c-stuck"), "留痕必须指出是哪条连接：{text}");
+
+        let mut n = 0;
+        while control.try_recv().is_ok() {
+            n += 1;
+        }
+        assert_eq!(
+            n,
+            crate::conns::CONTROL_QUEUE,
+            "顶替帧投不进去时也不许挤掉任何一格：队里仍该是原来那 8 帧"
+        );
+    }
+
+    // ---- `cleanup`：断开处理的三种前置 ----
+
+    /// 正常断开：**摘表、推 offline、两本账都记着「清了几条」**。
+    ///
+    /// `channels` 与 `bindings` 各清各的账本，`cleanup` 里那两条 debug 只在
+    /// 「确实清掉了东西」时才记。这里先真的往两个账本里各放一条，再断开——
+    /// 于是断言可以落在「清干净了」而不只是「跑过了」。
+    #[tokio::test]
+    async fn a_disconnect_drops_the_channels_and_the_page_bindings() {
+        let (_guard, log) = captured_log();
+        let (state, _d) = stream_state();
+        let auth = live_connection(&state, "n_a", "c1", 7);
+
+        // 两本账各放一条：一个通道（协议账本）与一个页面归属。
+        state
+            .channels()
+            .write()
+            .registry("n_a")
+            .open(
+                "ch-1",
+                "terminal",
+                protocol::channel::CREDIT_START,
+                Instant::now(),
+            )
+            .expect("开一条通道");
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", true),
+        );
+
+        cleanup(&state, &Ok(auth), "c1", Instant::now()).await;
+
+        assert!(
+            state.connections().get("n_a").is_none(),
+            "当前连接断开后必须摘表"
+        );
+        assert!(
+            state.bindings().get("ch-1").is_none(),
+            "页面归属必须一并清掉：留着的绑定指向一条没有设备的通道"
+        );
+        let events = state.streams().replay_since(Some(0));
+        assert_eq!(
+            events.last().map(|e| e.name),
+            Some("device.status"),
+            "断开必须推一条 device.status：{events:?}"
+        );
+        assert!(
+            events.last().unwrap().data.contains("\"offline\""),
+            "推的必须是 offline：{}",
+            events.last().unwrap().data
+        );
+        let text = log.text();
+        assert!(
+            text.contains("dropped channel records on disconnect"),
+            "两本账各清各的，清了通道就要留痕：{text}"
+        );
+        assert!(
+            text.contains("dropped browser channel bindings on disconnect"),
+            "页面归属那条也要留痕：{text}"
+        );
+        assert!(
+            text.contains("ws disconnected"),
+            "断开本身必须有收尾日志（含 elapsed_ms，用来回答「连接活了多久」）：{text}"
+        );
+    }
+
+    /// 被顶替的连接自己也会走到断开处理，但它**不是当前连接**：
+    /// 不许把新连接的状态改掉（标准⑥ 的落点）。
+    ///
+    /// 这条与上一条的差别只有一个：注册表里那条的 `conn_id` 不是它。
+    /// 于是 `remove_if_current` 返回 `false`，`device.status` **一条都不许推**。
+    #[tokio::test]
+    async fn a_superseded_connection_must_not_mark_the_device_offline() {
+        let (_guard, log) = captured_log();
+        let (state, _d) = stream_state();
+        // 表里活着的是 c-new；走到断开处理的是已经被顶掉的 c-old。
+        let _new = live_connection(&state, "n_a", "c-new", 9);
+        let stale = Authenticated {
+            node_id: "n_a".to_string(),
+            gen: 8,
+            protocol_version: 1,
+            heartbeat_interval_ms: state.heartbeat_interval_ms(),
+        };
+        let before = state.streams().replay_since(Some(0)).len();
+
+        cleanup(&state, &Ok(stale), "c-old", Instant::now()).await;
+
+        assert_eq!(
+            state.connections().get("n_a").map(|h| h.conn_id),
+            Some("c-new".to_string()),
+            "旧连接的断开处理不许把新连接从表里摘掉"
+        );
+        assert_eq!(
+            state.streams().replay_since(Some(0)).len(),
+            before,
+            "被顶替的旧连接不许再推一条 device.status"
+        );
+        // `removed = false` 是这条用例的全部要点：日志里必须能看出「没摘到表」，
+        // 否则运维分不清「正常断开」与「被顶掉之后才断」。
+        assert!(
+            log.text().contains("removed=false"),
+            "被顶替的那条必须记成 removed=false：{}",
+            log.text()
+        );
+    }
+
+    /// 握手失败的连接同样要收尾：`Err` 臂只记一条 disconnect 日志，
+    /// 且**不碰注册表与事件总线**（它从没登记过）。
+    #[tokio::test]
+    async fn a_failed_handshake_is_logged_without_touching_the_registry() {
+        let (_guard, log) = captured_log();
+        let (state, _d) = stream_state();
+        let before = state.streams().replay_since(Some(0)).len();
+
+        cleanup(
+            &state,
+            &Err("handshake timeout".to_string()),
+            "c1",
+            Instant::now(),
+        )
+        .await;
+
+        assert!(
+            state.connections().get("n_a").is_none(),
+            "握手没过的连接本来就不该在表里"
+        );
+        assert_eq!(
+            state.streams().replay_since(Some(0)).len(),
+            before,
+            "握手失败不是「设备掉线」，不该推 device.status"
+        );
+        let text = log.text();
+        assert!(
+            text.contains("handshake timeout"),
+            "失败原因必须原样进日志（它是排查协议不一致的唯一线索）：{text}"
+        );
+        assert!(
+            text.contains("ws disconnected"),
+            "握手失败的连接同样要有收尾日志：{text}"
+        );
+    }
+
+    // ---- 读侧限流的日志字段与慢读重试 ----
+
+    /// 单帧超硬上限那一档的**字段行**（`conn_id` / `node_id` / `bytes`）
+    /// 被求值，且应答帧里的 `err` 是 `frame_too_large`。
+    #[tokio::test]
+    async fn the_oversized_frame_notice_names_the_connection_and_the_size() {
+        let _log = info_subscriber();
+        let (state, _d) = stream_state();
+        let (mut control, _data) = state.outbound().register("c1");
+        let mut limiter = hub_core::limits::ReadLimiter::new();
+        let mut over_since = None;
+        let bytes = protocol::frame::MAX_FRAME_BYTES + 1;
+
+        let reason = admit_read(&state, "c1", "n_a", &mut limiter, &mut over_since, bytes)
+            .await
+            .expect_err("超硬上限必须断开");
+        assert_eq!(reason, "frame over the hard limit");
+        let f = control.try_recv().expect("控制面必须收到一帧");
+        let e: protocol::message::ErrPayload = f.payload().expect("parsable err payload");
+        assert_eq!(e.code, protocol::message::ErrorCode::FrameTooLarge);
+    }
+
+    /// 持续超限那一档的**字段行**（`conn_id` / `node_id`）被求值。
+    #[tokio::test]
+    async fn the_sustained_flood_notice_names_the_connection() {
+        let _log = info_subscriber();
+        let (state, _d) = stream_state();
+        let (mut control, _data) = state.outbound().register("c1");
+        let mut limiter = hub_core::limits::ReadLimiter::new();
+        let chunk = protocol::frame::MAX_FRAME_BYTES;
+        for _ in 0..4 {
+            limiter.try_consume(chunk).expect("前置：填满突发额度");
+        }
+        let mut over_since =
+            Some(Instant::now() - hub_core::limits::FLOOD_SUSTAINED - Duration::from_secs(1));
+
+        let reason = admit_read(&state, "c1", "n_a", &mut limiter, &mut over_since, chunk)
+            .await
+            .expect_err("持续超限必须断开");
+        assert_eq!(reason, "sustained read limit exceeded");
+        let f = control.try_recv().expect("控制面必须收到一帧");
+        let e: protocol::message::ErrPayload = f.payload().expect("parsable err payload");
+        assert_eq!(e.code, protocol::message::ErrorCode::Flood);
+    }
+
+    /// **超限但还没到 30s** → 慢读一档之后放行，连接不断。
+    ///
+    /// 这一档是「`cat` 一个大文件就断」与「输出多的命令一律失败」之间的全部
+    /// 差别：立刻断是错的。断言落在三件事上：结果是 `Ok`（没断）、真的等过
+    /// 一档慢读（`SLOW_READ_PAUSE_MS`）、控制面上一条 `err` 都没有。
+    ///
+    /// 触发方式是**把桶抽到只剩小半格**：读一帧 1 MiB（单帧没超上限，只是
+    /// 余额不够），于是走的正是「慢读一档」这条臂——那就是「`cat` 一个大
+    /// 文件」的形状。抽走的四帧是**前置**，断言只看第五帧的结果。
+    ///
+    /// 第五帧用 1 MiB 而不是 1 字节：`refill` 按微秒折回的令牌只有几十字节，
+    /// 只够放行「1 字节」这种帧，1 MiB 的帧无论折回多少都还是不够。
+    #[tokio::test]
+    async fn a_burst_over_the_limit_is_slowed_down_instead_of_cut_off() {
+        let (state, _d) = stream_state();
+        let (mut control, _data) = state.outbound().register("c1");
+        let mut limiter = hub_core::limits::ReadLimiter::new();
+        let mut over_since = None;
+        // **抽干之后立刻**读下一帧：中间不许有任何时间推进，否则 `refill`
+        // 按微秒折回来的令牌就够放行 1 字节，「余额不足」这个前提当场消失。
+        for _ in 0..4 {
+            limiter
+                .try_consume(protocol::frame::MAX_FRAME_BYTES)
+                .expect("前置：抽干突发额度");
+        }
+
+        let started = Instant::now();
+        admit_read(
+            &state,
+            "c1",
+            "n_a",
+            &mut limiter,
+            &mut over_since,
+            protocol::frame::MAX_FRAME_BYTES,
+        )
+        .await
+        .expect("单次超限只慢读，不许断开");
+
+        assert!(
+            started.elapsed() >= Duration::from_millis(SLOW_READ_PAUSE_MS),
+            "必须真的等过那一档慢读：{:?}",
+            started.elapsed()
+        );
+        assert!(
+            control.try_recv().is_err(),
+            "慢读不是断开，不许往控制面塞任何 err 帧"
+        );
+    }
+
+    // ---- 心跳与在线重试 ----
+
+    /// 载荷解不开的心跳**只丢这一帧**：连接不断、上报不写、也不落库。
+    ///
+    /// 与「心跳落库失败」不是一回事：那一条说的是库坏了，这一条说的是帧坏了。
+    /// 断连是更糟的选择——一台设备的其它通道会跟着一起断。
+    #[test]
+    fn a_malformed_heartbeat_is_dropped_without_touching_the_report() {
+        let _log = info_subscriber();
+        let (state, _d) = stream_state();
+        let auth = Authenticated {
+            node_id: "n_a".to_string(),
+            gen: 1,
+            protocol_version: 1,
+            heartbeat_interval_ms: state.heartbeat_interval_ms(),
+        };
+        // `node_version` 是必填字符串：给一个数字就解不出来。
+        let frame = Frame::push(types::HEARTBEAT, 0, serde_json::json!({"node_version": 3}));
+
+        on_heartbeat(&state, "c1", &auth, &frame);
+
+        assert!(
+            state.reports().get("n_a").is_none(),
+            "解不开的心跳不许当成一次上报记下来"
+        );
+    }
+
+    /// 心跳**真的把上报写进内存**（路由读的就是它）。
+    ///
+    /// `retry_routes_for` 的短路与否取决于绑定表，与内存上报无关——所以
+    /// 这条只钉内存那一半：一条合法心跳之后 `reports()` 里必须有这台设备，
+    /// 且 `node_version` 是设备报的那个值。
+    #[test]
+    fn a_heartbeat_records_the_report_the_router_reads() {
+        let (state, _d) = stream_state();
+        let auth = Authenticated {
+            node_id: "n_a".to_string(),
+            gen: 1,
+            protocol_version: 1,
+            heartbeat_interval_ms: state.heartbeat_interval_ms(),
+        };
+        let frame = Frame::push(
+            types::HEARTBEAT,
+            0,
+            serde_json::json!({"node_version": "0.8.3"}),
+        );
+
+        assert!(state.reports().get("n_a").is_none(), "前置：还没上报过");
+        on_heartbeat(&state, "c1", &auth, &frame);
+
+        let report = state.reports().get("n_a").expect("心跳必须落进内存上报");
+        assert_eq!(report.node_version, "0.8.3");
+    }
+
+    /// 绑定表读不出来时**不路由**（`retry_routes_for` 的 `Err` 臂）。
+    ///
+    /// 心跳本身不能因此失败：读库错误只记一条 warn 就返回。断言落在
+    /// 「心跳那条路照旧走完」上——先记一条上报，再让绑定表消失，
+    /// 最后确认上报还读得到（说明 `on_heartbeat` 没有被这次读失败打断）。
+    #[test]
+    fn an_unreadable_binding_table_keeps_the_heartbeat_alive() {
+        let _log = info_subscriber();
+        let (state, _d) = stream_state();
+        let auth = Authenticated {
+            node_id: "n_a".to_string(),
+            gen: 1,
+            protocol_version: 1,
+            heartbeat_interval_ms: state.heartbeat_interval_ms(),
+        };
+        let frame = Frame::push(
+            types::HEARTBEAT,
+            0,
+            serde_json::json!({"node_version": "0.8.3"}),
+        );
+        crate::test_support::break_table(&state, "binding");
+
+        on_heartbeat(&state, "c1", &auth, &frame);
+
+        assert!(
+            state.reports().get("n_a").is_some(),
+            "绑定表坏了不是「设备掉线」：上报仍要记下，读循环仍要继续"
+        );
+    }
+
+    /// 有绑定、但项目里**没有待派任务** → 短路返回，不去跑一轮空路由。
+    ///
+    /// 这是心跳热路径上最重要的一条：每 15s 一次、绝大多数时候无事可做。
+    /// 断言落在「既没派出去东西、也没有多出执行」上。
+    #[test]
+    fn a_heartbeat_without_pending_tasks_dispatches_nothing() {
+        let (state, _d) = stream_state();
+        let project = hub_storage::project::ProjectRepo::new(state.pool().clone())
+            .create(
+                hub_storage::project::NewProject {
+                    name: "app".into(),
+                    shape: hub_storage::project::ProjectShape::Central,
+                    theme_color: None,
+                    upstream_url: None,
+                },
+                "unix:1700000000",
+            )
+            .unwrap();
+        hub_storage::BindingRepo::new(state.pool().clone())
+            .upsert(
+                &project.id,
+                "n_a",
+                hub_storage::BindingSpec {
+                    fixed_dir: "/srv/af/worktrees".into(),
+                    disk_quota_bytes: None,
+                    cleanup_policy: hub_storage::CleanupPolicy::Balanced,
+                },
+                "unix:1700000000",
+            )
+            .unwrap();
+
+        assert_eq!(
+            state.scheduler().route_binding_tasks("n_a").len(),
+            0,
+            "没有 pending 任务时一轮路由不该产出任何结果"
+        );
+        retry_routes_for(&state, "n_a");
+        assert!(
+            hub_storage::execution::ExecutionRepo::new(state.pool().clone())
+                .list_for_task("does-not-exist")
+                .unwrap()
+                .is_empty(),
+            "前置：确实没有执行被建出来"
+        );
+    }
+
+    // ---- 通道与轨迹的日志字段 ----
+
+    /// 开通道就失败那一档的**字段行**（`node_id` / `channel_id`）被求值：
+    /// 绑定确实被摘掉，页面也确实收到了那条错误。
+    #[test]
+    fn the_refused_open_records_the_binding_it_dropped() {
+        let _log = info_subscriber();
+        let (state, _d) = stream_state();
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", false),
+        );
+
+        publish_channel_error(
+            &state,
+            "n_a",
+            &Frame::push(
+                types::CHANNEL_ERROR,
+                1,
+                serde_json::json!({
+                    "channel_id": "ch-1",
+                    "code": "internal",
+                    "reason": "workspace root is not available",
+                }),
+            ),
+        );
+
+        assert!(
+            state.bindings().get("ch-1").is_none(),
+            "开通道就失败的绑定必须摘掉：留着会让 5s 超时把真实原因盖掉"
+        );
+        let events = state.streams().replay_since(Some(0));
+        assert_eq!(events.len(), 1, "错误仍要推给页面");
+        assert!(
+            events[0].data.contains("workspace root is not available"),
+            "页面拿到的必须是设备给的那句原因：{}",
+            events[0].data
+        );
+    }
+
+    /// `ready` 帧把 ACP 会话 id 回填进会话行（成功与「会话已被删」两档）。
+    ///
+    /// 成功那档断言**库里的列真的变了**；失败那档断言**什么都没变**且
+    /// 通道还能用——回填失败不是 Hub 的问题，不该升级成错误。
+    #[test]
+    fn a_ready_frame_backfills_the_acp_session_id_or_leaves_it_alone() {
+        let _log = info_subscriber();
+        let (state, _d) = stream_state();
+        let kp = identity::KeyPair::generate();
+        let node_id = state
+            .registry()
+            .enroll(
+                &kp.public_key_bytes(),
+                hub_storage::repo::NewDevice {
+                    id: String::new(),
+                    name: "pi".into(),
+                    key_fingerprint: String::new(),
+                    os: "linux".into(),
+                    arch: "aarch64".into(),
+                    hostname: "h".into(),
+                    node_version: "0.9.0".into(),
+                },
+            )
+            .expect("登记一台设备")
+            .node_id()
+            .to_string();
+        // 会话与绑定都用真 node_id：`session` 的外键指向 `device`。
+        let sessions = hub_storage::SessionRepo::new(state.pool().clone());
+        let opened = sessions
+            .create(
+                &node_id,
+                "/srv/af/worktrees/s-1",
+                Some("opencode"),
+                "unix:1700000000",
+                None,
+                hub_storage::BaseRevStatus::Ok,
+            )
+            .expect("建一条会话");
+        // 绑定必须指向这条**真建出来**的会话：`persist_trajectory` 回填的是
+        // 绑定里的 `session_id`，随便编一个就会走「会话不存在」那一档。
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding_for_session(&node_id, &opened.id, "admin"),
+        );
+
+        persist_trajectory(
+            &state,
+            &node_id,
+            "ch-1",
+            &serde_json::json!({"type": "ready", "sessionId": "ses_abc"}),
+        );
+
+        assert_eq!(
+            sessions
+                .find(&opened.id)
+                .unwrap()
+                .expect("会话行")
+                .acp_session_id
+                .as_deref(),
+            Some("ses_abc"),
+            "ready 帧是唯一带 ACP 会话 id 的帧，不回填的话重连就换了一条新会话"
+        );
+
+        // 失败那档：绑定指向一个已经不存在的会话（通道开着的时候会话被删了）。
+        state.bindings().bind(
+            "ch-2",
+            crate::routes::stream::test_binding_for_session(&node_id, "s-gone", "admin"),
+        );
+        persist_trajectory(
+            &state,
+            &node_id,
+            "ch-2",
+            &serde_json::json!({"type": "ready", "sessionId": "ses_other"}),
+        );
+        assert!(
+            sessions.find("s-gone").unwrap().is_none(),
+            "前置：那条会话确实不存在"
+        );
+        assert!(
+            state.bindings().get("ch-2").is_some(),
+            "回填失败不是 Hub 的问题：通道照旧可用"
+        );
+    }
+
+    /// 轨迹三种帧各自 `append` 失败时的留痕（`batch` / `turn_start` /
+    /// `turn_end`），且失败之后**下一条别的帧仍然写得进去**。
+    ///
+    /// 上一个同类用例只断言「读回来是 Err」；这一条把表换回来，再写一条，
+    /// 证明失败的那次没有把连接或仓储搞成永久坏状态。
+    #[test]
+    fn a_failed_trajectory_append_leaves_the_repo_usable() {
+        let _log = info_subscriber();
+        let (state, _d) = stream_state();
+        state.bindings().bind(
+            "ch-1",
+            crate::routes::stream::test_binding("n_a", "admin", true),
+        );
+        crate::test_support::break_table(&state, "trajectory_event");
+
+        for payload in [
+            serde_json::json!({"type": "batch", "events": [{"seq": 1, "sessionUpdate": "x"}]}),
+            serde_json::json!({"type": "turn_start", "seq": 2}),
+            serde_json::json!({"type": "turn_end", "seq": 3, "stopReason": "end_turn"}),
+        ] {
+            persist_trajectory(&state, "n_a", "ch-1", &payload);
+        }
+        assert!(
+            state.trajectory().list("s_1", 0, 100).is_err(),
+            "前提：表确实坏了"
+        );
+
+        state
+            .pool()
+            .get()
+            .unwrap()
+            .execute_batch("ALTER TABLE trajectory_event_moved RENAME TO trajectory_event")
+            .unwrap();
+        persist_trajectory(
+            &state,
+            "n_a",
+            "ch-1",
+            &serde_json::json!({"type": "batch", "events": [{"seq": 4, "sessionUpdate": "y"}]}),
+        );
+        let rows = state.trajectory().list("s_1", 0, 100).unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "三次失败之后仓储仍要可用，且坏掉的那三条一条都不该留：{rows:?}"
+        );
+        assert_eq!(rows[0].seq, 4);
+    }
+
+    /// 数据面打满那一档的**字段行**（`conn_id`）：告警帧进控制面，数据面不多一帧。
+    #[test]
+    fn the_data_queue_overflow_names_the_connection_it_dropped_for() {
+        let _log = info_subscriber();
+        let (state, _d) = stream_state();
+        let (mut control, data) = state.outbound().register("c1");
+        let payload = flood_frame(&hub_core::limits::LimitError::Flood);
+        for _ in 0..crate::conns::DATA_QUEUE {
+            state
+                .outbound()
+                .send_data("c1", payload.clone())
+                .expect("前置：塞满 256 格");
+        }
+
+        queue_data(
+            &state,
+            "c1",
+            payload.clone(),
+            flood_frame(&hub_core::limits::LimitError::Flood),
+        );
+
+        let f = control.try_recv().expect("控制面必须收到 flood 告警");
+        assert_eq!(f.msg_type, types::ERR);
+        let e: protocol::message::ErrPayload = f.payload().expect("parsable err payload");
+        assert_eq!(e.code, protocol::message::ErrorCode::Flood);
+        assert_eq!(
+            data.len(),
+            crate::conns::DATA_QUEUE,
+            "打满之后这一帧不许覆盖掉队里任何一帧"
+        );
+    }
+
+    // ---- 老节点只报名字的 agent 清单 ----
+
+    /// 兼容形状：`capabilities.agents` 里混着**纯字符串**与对象时两种都要认，
+    /// 且纯字符串那档的 `available` 必须是保守的 `false`（门禁宁严勿松）。
+    ///
+    /// 只认对象会让升级窗口里的老设备整张 agent 列表静默变空——门禁随即开始
+    /// 拦，而日志里什么都没说。所以这里把两种形状放在同一份清单里。
+    #[test]
+    fn a_legacy_agent_report_is_parsed_alongside_the_object_form() {
+        let legacy = parse_agent_report(&serde_json::json!("opencode")).expect("旧形态必须认");
+        assert_eq!(legacy.0, "opencode");
+        assert_eq!(legacy.1, "opencode", "没有 name 时用 id 兜底");
+        assert!(!legacy.3, "只说名字不构成「可用」的证据");
+        assert!(legacy.2.is_none(), "旧形态没有 version");
+        assert!(legacy.4.is_none(), "旧形态没有 error");
+
+        let modern = parse_agent_report(&serde_json::json!({
+            "id": "codex",
+            "name": "Codex",
+            "version": "1.2.3",
+            "available": true,
+        }))
+        .expect("对象形态必须认");
+        assert_eq!(modern.0, "codex");
+        assert_eq!(modern.1, "Codex");
+        assert_eq!(modern.2.as_deref(), Some("1.2.3"));
+        assert!(modern.3, "设备明说可用就是可用");
+
+        // 没有 `id` 的对象与根本不是 agent 的值一律不认（不编一行假数据）。
+        assert!(parse_agent_report(&serde_json::json!({"name": "x"})).is_none());
+        assert!(parse_agent_report(&serde_json::json!(42)).is_none());
+    }
+
+    // ---- `on_dispatch_ack`：解不开的形状、不该重派的方案、真的重派 ----
+
+    /// 绑定目录。**必须是绝对路径**：`hub_core::schedule` 的「拿得到代码」
+    /// 那一层用 `fixed_dir.starts_with('/')` 判定，相对路径会让「有合格设备」
+    /// 这个前提悄悄不成立。
+    const ACK_FIXED_DIR: &str = "/srv/af/worktrees";
+
+    /// 一台「条件全都满足」的在线上报（与 `dispatch_ack_flow` 同口径）：
+    /// 有 git、有 opencode、磁盘充裕。`on_dispatch_ack` 的**重派**要过
+    /// `pick` 的三层过滤，缺一条这里就会退化成「没派出去」，断言随之失真。
+    fn online_report(state: &AppState, node_id: &str, free_disk_mb: u64) {
+        state.reports().record(
+            node_id,
+            hub_core::reports::Report {
+                node_version: "0.9.0".to_string(),
+                capabilities: serde_json::json!({
+                    "connectors": ["git"],
+                    "agents": [
+                        {"id": "opencode", "name": "opencode", "version": "1.0.0", "available": true},
+                        {"id": "codex", "name": "codex", "version": "1.0.0", "available": true},
+                    ],
+                }),
+                resources: serde_json::json!({"disk": {"workspace_free_mb": free_disk_mb}}),
+                workspace_roots: Vec::new(),
+                at: Instant::now(),
+            },
+        );
+        // 光有上报还不够：派帧要真的进得了控制面队列，否则 `route_task` 会
+        // 返回 `PushFailure::NotConnected`，「已经派出去」这个前提就不成立
+        // （重派路径的判断全部建立在它上面）。
+        let conn_id = format!("conn-{node_id}");
+        let (_rx, _data) = state.outbound().register(&conn_id);
+        state
+            .connections()
+            .insert(node_id.to_string(), ConnHandle { conn_id, gen: 1 });
+        // 接收端必须活到这里交给调用方；丢弃 `_rx` 会让队列立刻变成「已关」，
+        // 于是推送照样失败。用 `std::mem::forget` 把接收端留住（本组用例都
+        // 是短命的临时 state，泄漏一条 channel 无语义影响）。
+        std::mem::forget(_rx);
+        std::mem::forget(_data);
+    }
+
+    /// 建项目 → 绑设备 → 建任务，返回 `(project_id, binding_id, task)`。
+    ///
+    /// 三步都是真仓储调用：`on_dispatch_ack` 的重派路径会去读 `binding` 与
+    /// `project`，用假的 id 只会走到「读不到」那一档，测不出重派。
+    fn a_bound_task(
+        state: &AppState,
+        node_id: &str,
+        title: &str,
+    ) -> (String, String, hub_storage::task::TaskView) {
+        let project = hub_storage::project::ProjectRepo::new(state.pool().clone())
+            .create(
+                hub_storage::project::NewProject {
+                    name: title.to_string(),
+                    shape: hub_storage::project::ProjectShape::Central,
+                    theme_color: None,
+                    upstream_url: None,
+                },
+                "unix:1700000000",
+            )
+            .unwrap();
+        let binding = hub_storage::BindingRepo::new(state.pool().clone())
+            .upsert(
+                &project.id,
+                node_id,
+                hub_storage::BindingSpec {
+                    fixed_dir: ACK_FIXED_DIR.to_string(),
+                    disk_quota_bytes: None,
+                    cleanup_policy: hub_storage::CleanupPolicy::Balanced,
+                },
+                "unix:1700000000",
+            )
+            .unwrap();
+        let task = state
+            .tasks()
+            .create(
+                hub_storage::task::NewTask::new(
+                    &project.id,
+                    title,
+                    hub_storage::task::DoneWhen {
+                        criteria: None,
+                        description: Some("跑通即可".to_string()),
+                    },
+                ),
+                "unix:1700000000",
+            )
+            .unwrap();
+        (project.id, binding.id, task)
+    }
+
+    /// 派一次任务，返回 `execution_id`（断言「真的派出去了」）。
+    fn dispatch_once(state: &AppState, task: &hub_storage::task::TaskView) -> String {
+        let (outcome, push) = state.scheduler().route_task(task);
+        assert_eq!(push, None, "帧必须真的进了控制面队列：{outcome:?}");
+        match outcome {
+            crate::scheduler::RouteOutcome::Dispatched { execution_id, .. } => execution_id,
+            other => panic!("必须派出去，实际 {other:?}"),
+        }
+    }
+
+    /// 一条 `failed` stage 的回执。`kind = None` 用来测「按 stage 推倒
+    /// `baseline_mismatch`」那一档。
+    fn ack_frame(
+        execution_id: &str,
+        stage: protocol::message::DispatchStage,
+        kind: Option<&str>,
+    ) -> Frame {
+        Frame::push(
+            types::TASK_DISPATCH_ACK,
+            0,
+            serde_json::to_value(protocol::message::TaskDispatchAck {
+                execution_id: execution_id.to_string(),
+                stage,
+                reason: kind.map(|k| format!("{k} happened")),
+                evidence: Some("exit code 1".to_string()),
+                failure_kind: kind.map(str::to_string),
+                items: None,
+            })
+            .expect("回执必须可序列化"),
+        )
+    }
+
+    /// 解不开的回执**只丢这一帧**：不落库、不崩、也不断连。
+    ///
+    /// 与「回执被拒」不是一回事：那说的是形状对、状态不合法。这一条说的是
+    /// 连 `execution_id` 都读不出来。断言落在「日志里点明了这一帧、且执行表
+    /// 里没有任何新行」上——断连是更糟的选择（会拖垮同一条连接上的通道）。
+    #[test]
+    fn a_malformed_dispatch_ack_is_dropped_without_touching_a_row() {
+        let (_guard, log) = captured_log();
+        let (state, _d) = stream_state();
+        let before = state
+            .executions()
+            .list_for_task("does-not-exist")
+            .unwrap()
+            .len();
+
+        // `stage` 是必填的枚举：给一个闭集外的字符串就解不出来。
+        let frame = Frame::push(
+            types::TASK_DISPATCH_ACK,
+            0,
+            serde_json::json!({"execution_id": "e_1", "stage": "not-a-stage"}),
+        );
+        on_dispatch_ack(&state, "n_a", &frame);
+
+        assert!(
+            log.text().contains("dropping malformed task_dispatch_ack"),
+            "解不开的回执必须留痕：{}",
+            log.text()
+        );
+        assert_eq!(
+            state
+                .executions()
+                .list_for_task("does-not-exist")
+                .unwrap()
+                .len(),
+            before,
+            "解不开的回执不许改任何一行"
+        );
+    }
+
+    /// `is_applied() == false` 的回执**不触发重派**：`accepted` 只留痕，
+    /// 任务仍停在 `queued`。
+    ///
+    /// 这条钉的是 `if !outcome.is_applied() { return; }` 那道闸：没有它，
+    /// 一条「我接单了」的回执会走进重派分支，把同一个任务再派一次。
+    #[test]
+    fn an_accepted_ack_does_not_dispatch_a_second_execution() {
+        let (state, _d) = stream_state();
+        online_report(&state, "n_a", 100_000);
+        let (_p, _b, task) = a_bound_task(&state, "n_a", "accepted-only");
+        let execution_id = dispatch_once(&state, &task);
+        let executions_after_first = state.executions().list_for_task(&task.id).unwrap().len();
+
+        on_dispatch_ack(
+            &state,
+            "n_a",
+            &ack_frame(
+                &execution_id,
+                protocol::message::DispatchStage::Accepted,
+                None,
+            ),
+        );
+
+        assert_eq!(
+            state.executions().list_for_task(&task.id).unwrap().len(),
+            executions_after_first,
+            "只留痕的回执不许再多出一条执行"
+        );
+        assert_eq!(
+            state.tasks().get(&task.id).unwrap().unwrap().state,
+            hub_storage::task::TaskState::Queued,
+            "accepted 不改任务状态"
+        );
+    }
+
+    /// `baseline_mismatch` **不带 `failure_kind`** 时按 stage 推出失败形态，
+    /// 结论是 `SameDevice` → **不自动重派**（同设备重新 fetch 是设备侧的动作）。
+    ///
+    /// 这条覆盖 `None if stage == BaselineMismatch` 那一臂与随后
+    /// 「plan 不是 DifferentDevice / DifferentAgent 就返回」那道闸。
+    #[test]
+    fn a_baseline_mismatch_without_a_kind_is_not_redispatched() {
+        let (state, _d) = stream_state();
+        online_report(&state, "n_a", 100_000);
+        let (_p, _b, task) = a_bound_task(&state, "n_a", "baseline");
+        let execution_id = dispatch_once(&state, &task);
+        // 先把任务推到 running：failed 这条边只从 running 出发。
+        state
+            .tasks()
+            .set_state(
+                &task.id,
+                hub_storage::task::TaskState::Running,
+                "unix:1700000010",
+            )
+            .unwrap();
+        let n_exec = state.executions().list_for_task(&task.id).unwrap().len();
+
+        on_dispatch_ack(
+            &state,
+            "n_a",
+            &ack_frame(
+                &execution_id,
+                protocol::message::DispatchStage::BaselineMismatch,
+                None,
+            ),
+        );
+
+        assert_eq!(
+            state
+                .executions()
+                .get(&execution_id)
+                .unwrap()
+                .expect("执行行")
+                .state,
+            hub_storage::execution::ExecutionState::Failed,
+            "baseline_mismatch 必须把执行标成 failed"
+        );
+        assert_eq!(
+            state.executions().list_for_task(&task.id).unwrap().len(),
+            n_exec,
+            "SameDevice 方案不自动重派：不许凭空多出一条执行"
+        );
+    }
+
+    /// `agent_error` → `DifferentAgent` → **真的重派一次**（换 agent、同设备），
+    /// 且日志把「这次重试」记下来了。
+    ///
+    /// 这是整条 ack 链上唯一会「再派出去」的分支，所以断言落在两个硬事实上：
+    /// 执行表里多出一行、且任务重新回到被派出去的起点（不再是 failed）。
+    #[test]
+    fn an_agent_error_ack_redispatches_the_task_on_another_agent() {
+        let (_guard, log) = captured_log();
+        let (state, _d) = stream_state();
+        online_report(&state, "n_a", 100_000);
+        let (_p, _b, task) = a_bound_task(&state, "n_a", "agent-error");
+        let execution_id = dispatch_once(&state, &task);
+        state
+            .tasks()
+            .set_state(
+                &task.id,
+                hub_storage::task::TaskState::Running,
+                "unix:1700000010",
+            )
+            .unwrap();
+        let n_exec = state.executions().list_for_task(&task.id).unwrap().len();
+
+        on_dispatch_ack(
+            &state,
+            "n_a",
+            &ack_frame(
+                &execution_id,
+                protocol::message::DispatchStage::Failed,
+                Some("agent_error"),
+            ),
+        );
+
+        let after = state.executions().list_for_task(&task.id).unwrap().len();
+        assert!(
+            after > n_exec,
+            "DifferentAgent 必须真的再派一次（执行行要变多）：前 {n_exec} 后 {after}"
+        );
+        assert!(
+            log.text().contains("retried the task after a failure ack"),
+            "重派必须留痕（运维要能回答「为什么又跑了一遍」）：{}",
+            log.text()
+        );
+        assert!(
+            log.text().contains("different_agent"),
+            "留痕里必须写出方案名：{}",
+            log.text()
+        );
+    }
+
+    /// `rejected` → `NoRetry` → **不重派**：换机器没用，重派只会白跑。
+    ///
+    /// 与上一条共用同一条失败边，差别只有 `failure_kind`——于是这一对用例
+    /// 正好把「按方案分支」这件事钉死：同一个 stage，方案一变行为就变。
+    #[test]
+    fn a_rejected_failure_kind_is_never_retried() {
+        let (state, _d) = stream_state();
+        online_report(&state, "n_a", 100_000);
+        let (_p, _b, task) = a_bound_task(&state, "n_a", "rejected");
+        let execution_id = dispatch_once(&state, &task);
+        state
+            .tasks()
+            .set_state(
+                &task.id,
+                hub_storage::task::TaskState::Running,
+                "unix:1700000010",
+            )
+            .unwrap();
+        let n_exec = state.executions().list_for_task(&task.id).unwrap().len();
+
+        on_dispatch_ack(
+            &state,
+            "n_a",
+            &ack_frame(
+                &execution_id,
+                protocol::message::DispatchStage::Failed,
+                Some("rejected"),
+            ),
+        );
+
+        assert_eq!(
+            state.executions().list_for_task(&task.id).unwrap().len(),
+            n_exec,
+            "NoRetry 方案下不许重派：执行行数不许变"
+        );
+    }
+
+    /// 闭集外的 `failure_kind` → 回执被拒（`is_applied() == false`）→ 不重派。
+    ///
+    /// 这条同时压住两处：`raw.parse::<FailureKind>().ok()` 的 `None` 一臂，
+    /// 以及它前面「脏值不落库」的约束——库里不会出现一个读不出来的形态。
+    #[test]
+    fn an_unknown_failure_kind_is_rejected_and_never_redispatched() {
+        let (state, _d) = stream_state();
+        online_report(&state, "n_a", 100_000);
+        let (_p, _b, task) = a_bound_task(&state, "n_a", "unknown-kind");
+        let execution_id = dispatch_once(&state, &task);
+        state
+            .tasks()
+            .set_state(
+                &task.id,
+                hub_storage::task::TaskState::Running,
+                "unix:1700000010",
+            )
+            .unwrap();
+        let n_exec = state.executions().list_for_task(&task.id).unwrap().len();
+
+        on_dispatch_ack(
+            &state,
+            "n_a",
+            &ack_frame(
+                &execution_id,
+                protocol::message::DispatchStage::Failed,
+                Some("not-a-real-kind"),
+            ),
+        );
+
+        assert_eq!(
+            state.executions().list_for_task(&task.id).unwrap().len(),
+            n_exec,
+            "闭集外的失败形态不许触发重派"
+        );
+        let row = state
+            .executions()
+            .get(&execution_id)
+            .unwrap()
+            .expect("执行行");
+        assert!(
+            row.failure_kind.is_none(),
+            "闭集外的形态不许落库，实际 {:?}",
+            row.failure_kind
+        );
     }
 }
