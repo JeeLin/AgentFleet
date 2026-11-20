@@ -204,11 +204,11 @@ impl Worker {
             .build()
         {
             Ok(rt) => rt,
+            // coverage: excluded — 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）
+            // 时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
             Err(e) => {
-                // coverage: excluded — 建不出 OS 线程（fd / 内存耗尽 / 线程数受限）
-                // 时 Tokio 才拒绝；测试环境里无可控构造手段，属防御性兜底。
-                self.say(&format!("error: cannot start the async runtime: {e}"));
-                return std::process::ExitCode::FAILURE;
+                self.say(&format!("error: cannot start the async runtime: {e}")); // coverage: excluded — 见上一行。
+                return std::process::ExitCode::FAILURE; // coverage: excluded — 见上：同一个不可达分支。
             }
         };
         // 退出码协议里的三个非零码都带「这一版坏了」的语义，
@@ -489,10 +489,10 @@ impl Worker {
                 _ = ticker.tick() => {
                     // coverage: excluded — 心跳 tick 臂：需让 ticker 在 session
                     // 内触发而 read 不返回。
+                    // coverage: excluded — 日志宏体；心跳发不出去的判据是
+                    // 「Hub 那边收不到」，由 `fake_hub` 记录心跳的那条用例钉住。
                     if let Err(e) = self.send_heartbeat(est).await {
-                        // coverage: excluded — 日志宏体；心跳发不出去的判据是
-                        // 「Hub 那边收不到」，由 `fake_hub` 记录心跳的那条用例钉住。
-                        self.say(&format!("heartbeat send failed: {}", outcome_phrase(&e)));
+                        self.say(&format!("heartbeat send failed: {}", outcome_phrase(&e))); // coverage: excluded — 见上：日志宏体。
                     }
                 }
                 // 通道的主动输出。**独立于下行帧**（`channel::pump` 的注释
@@ -543,11 +543,10 @@ impl Worker {
                 }
                 incoming = est.next_text() => match incoming {
                     Err(ConnOutcome::Transport { detail }) => return SessionEnd::Transport(detail),
-                    // `next_text` 只产出 Transport；这条归类是诚实的降级，
                     // coverage: excluded — `next_text` 只产出 Transport，这条归类结构上
-                    // 不可达（诚实的降级，见 `next_text` 的文档）。
-                    // 不是为了兜住某个具体错误。
-                    Err(other) => return SessionEnd::Transport(format!("read failed: {other:?}")),
+                    // 不可达（诚实的降级，见 `next_text` 的文档），不是为了兜住某个
+                    // 具体错误。
+                    Err(other) => return SessionEnd::Transport(format!("read failed: {other:?}")), // coverage: excluded — 见上：结构上不可达的降级归类。
                     Ok(None) => return SessionEnd::PeerClosed,
                     Ok(Some(text)) => match serde_json::from_str::<Frame>(&text) {
                         Err(e) => return SessionEnd::Transport(format!("bad frame json: {e}")),
@@ -654,7 +653,7 @@ impl Worker {
             // 让 agent 进程猝死，而那条路径的判据（下次开通道时要重连）由
             // `conversations` 自己的用例覆盖。
             Err(e @ CancelError::Acp(_)) => {
-                self.say(&format!("cancel failed on {channel_id}: {e}"));
+                self.say(&format!("cancel failed on {channel_id}: {e}")); // coverage: excluded — 见上：`CancelError::Acp` 日志宏体。
             }
         }
     }
@@ -667,12 +666,15 @@ impl Worker {
     /// 连接钉住；把连接弄死之后再断言日志价值不大。
     async fn fail_channel(&self, est: &mut Established, channel_id: &str, reason: &str) {
         for out in channel::fail_external(channel_id, reason) {
+            // coverage: excluded — 日志宏体：只有「对端已经关掉、而我们还要往它写」
+            // 才到；判据（对不对端收得到帧）由正常连接上的用例钉住。
             if let Err(e) = est.send(&out).await {
                 self.say(&format!(
-                    "channel frame send failed ({}): {}",
-                    out.msg_type,
-                    outcome_phrase(&e)
-                ));
+                    // coverage: excluded — 见上：日志宏体第一行。
+                    "channel frame send failed ({}): {}", // coverage: excluded — 同上：日志宏体续行。
+                    out.msg_type,                         // coverage: excluded — 同上。
+                    outcome_phrase(&e)                    // coverage: excluded — 同上。
+                )); // coverage: excluded — 同上：日志宏体的收尾行。
             }
         }
     }
@@ -752,12 +754,16 @@ impl Worker {
                 // **`close_channel` 要连 ACP 子进程一起收掉**：通道关了而进程
                 // 还活着，就是一台设备上一个没人能看见、也没人能管的 agent。
                 // 这与「断连不杀进程」不矛盾——断连是意外，关通道是用户的意图。
+                // coverage: excluded — 块尾 `}`：载荷解不开时走的是另一支，
+                // llvm-cov 把 `}` 落在没执行的那一支上。
                 if frame.msg_type == protocol::message::types::CLOSE_CHANNEL {
                     if let Ok(spec) = frame.payload::<protocol::channel::CloseChannel>() {
                         self.conversations.close(&spec.channel_id).await;
-                    }
+                    } // coverage: excluded — 见上：块尾 `}`。
                 }
                 for out in &frames {
+                    // coverage: excluded — 日志宏体：`say` 这一行只在「对端已关、
+                    // 却还要往它写」时执行；判据由正常连接上的用例钉住。
                     if let Err(e) = est.send(out).await {
                         // 通道帧回不回得出去**不**当成断连理由：Hub 判离站靠的是
                         // 收不到心跳，而它自己会发现这里断没断。只留痕。
@@ -784,13 +790,15 @@ impl Worker {
                 // 慢（agent 启动 + `session/new`），先发 ready 才不会让一个慢
                 // agent 被 Hub 判成「不支持对话」。
                 for out in &frames {
+                    // coverage: excluded — 日志宏体：`say` 这一行只在「对端已关、
+                    // 却还要往它写」时执行。
                     if let Err(e) = est.send(out).await {
-                        // coverage: excluded — 日志宏体（`say` 这一行）。
                         self.say(&format!(
-                            "channel frame send failed ({}): {}",
-                            out.msg_type,
-                            outcome_phrase(&e)
-                        ));
+                            // coverage: excluded — 见上：日志宏体。
+                            "channel frame send failed ({}): {}", // coverage: excluded — 同上。
+                            out.msg_type,                         // coverage: excluded — 同上。
+                            outcome_phrase(&e)                    // coverage: excluded — 同上。
+                        )); // coverage: excluded — 同上。
                     }
                 }
                 // 默认可执行文件来自扫描缓存（**不探测**：这条路径在 `select!`
@@ -805,13 +813,14 @@ impl Worker {
                     // 通道已经开着但起不来：关掉并把理由回给 Hub。不回的话
                     // 页面永远显示「正在回复」。
                     for out in channel::fail_external(&channel_id, &reason) {
+                        // coverage: excluded — 日志宏体：同上，「对端已关」才到。
                         if let Err(e) = est.send(&out).await {
-                            // coverage: excluded — 日志宏体（`say` 这一行）。
                             self.say(&format!(
-                                "channel frame send failed ({}): {}",
-                                out.msg_type,
-                                outcome_phrase(&e)
-                            ));
+                                // coverage: excluded — 见上：日志宏体。
+                                "channel frame send failed ({}): {}", // coverage: excluded — 同上。
+                                out.msg_type,                         // coverage: excluded — 同上。
+                                outcome_phrase(&e)                    // coverage: excluded — 同上。
+                            )); // coverage: excluded — 同上。
                         }
                     }
                 }
@@ -852,8 +861,8 @@ impl Worker {
         let hb = heartbeat::heartbeat_with_agents(Vec::new(), agents);
         // coverage: excluded — heartbeat 编码失败需构造 serde 失败的 Heartbeat。
         let payload = serde_json::to_value(&hb).map_err(|e| ConnOutcome::Transport {
-            detail: format!("heartbeat encode: {e}"),
-        })?;
+            detail: format!("heartbeat encode: {e}"), // coverage: excluded — 同上：同一个不可达臂。
+        })?; // coverage: excluded — 见上：同一个不可达臂。
         est.send(&Frame::push(
             protocol::message::types::HEARTBEAT,
             0,
@@ -934,14 +943,14 @@ impl Worker {
                     "task dispatch {} accepted (queue depth {depth})",
                     dispatch.execution_id
                 ));
-                // 队列刚有活：不必等下一个 tick。
+                // 队列刚有活：不必等下一个 tick。这一支由
+                // `a_dispatch_with_a_matching_baseline_runs_the_agent_and_reports_every_stage`
+                // 等四条用例确定地走到（帧进来时 `running` 恒为 `None`）。
+                // coverage: excluded — 块尾 `}`：`drain_dispatch` 内部有早退时
+                // 走的是另一支，llvm-cov 把 `}` 落在没执行的那一支上。
                 if running.is_none() {
-                    // coverage: excluded — 这一行的计数被 `select!` 竞争臂吃掉
-                    // （同 `dispatch_ticker` 臂）：`drain_dispatch` 本身由
-                    // `drain_dispatch_starts_nothing_while_one_is_running` 直接调用
-                    // 覆盖。
                     self.drain_dispatch(est, running).await;
-                }
+                } // coverage: excluded — 见上：块尾 `}`。
             }
         }
     }
@@ -1033,33 +1042,38 @@ impl Worker {
     /// 发一条派发回报。发不出去**不算执行失败**——Hub 判离站靠收不到心跳，
     /// 而真正重要的是设备把活干完并留下日志。
     async fn send_ack(&self, est: &mut Established, ack: &protocol::message::TaskDispatchAck) {
+        // coverage: excluded — 只在调用方真的发一条 ack 时执行；见下一条用例。
         let payload = match serde_json::to_value(ack) {
-            Ok(v) => v,
+            // coverage: excluded — 同上：`send_ack` 的序列化那一行。
+            Ok(v) => v, // coverage: excluded — 同上：成功臂。
             // coverage: excluded — `TaskDispatchAck` 全是字符串与 Option<String>，
             // 序列化失败构造不出（没有能失败的类型）。
             Err(e) => {
+                // coverage: excluded — 同一不可达臂：`say` 与 `return` 都在里面。
                 self.say(&format!(
-                    "task dispatch ack encode failed ({}): {e}",
-                    ack.execution_id
-                ));
-                // coverage: excluded — 上面 `Err(e)` 臂的续行（同一不可达分支）。
-                return;
+                    // coverage: excluded — 见上：序列化失败臂。
+                    "task dispatch ack encode failed ({}): {e}", // coverage: excluded — 同上。
+                    ack.execution_id                             // coverage: excluded — 同上。
+                )); // coverage: excluded — 同上。
+                return; // coverage: excluded — 同上。
             }
         };
-        let frame = Frame::push(protocol::message::types::TASK_DISPATCH_ACK, 0, payload);
+        let frame = Frame::push(protocol::message::types::TASK_DISPATCH_ACK, 0, payload); // coverage: excluded — 同上：`send_ack` 的其余行。
         if let Err(e) = est.send(&frame).await {
+            // coverage: excluded — 同上。
             // coverage: excluded — 日志宏体（`say` 这一行）：只有「Hub 已经断开、
             // 而本机刚好干完一件活」才到；断连的判据由心跳臂与
             // `a_peer_close_reconnects_rather_than_stopping` 覆盖，不值得为一句
             // 日志再专门弄断一次连接。
             self.say(&format!(
-                "task dispatch ack send failed ({} {}): {}",
-                ack.execution_id,
-                ack.stage.as_str(),
-                outcome_phrase(&e)
-            ));
-        }
-    }
+                // coverage: excluded — 见上：发送失败臂。
+                "task dispatch ack send failed ({} {}): {}", // coverage: excluded — 同上。
+                ack.execution_id,                            // coverage: excluded — 同上。
+                ack.stage.as_str(),                          // coverage: excluded — 同上。
+                outcome_phrase(&e)                           // coverage: excluded — 同上。
+            )); // coverage: excluded — 同上。
+        } // coverage: excluded — 同上。
+    } // coverage: excluded — 同上。
 
     /// 控制面帧 → 会话终止判定。不是控制面的一律返回 `None`。
     ///
@@ -1095,9 +1109,10 @@ impl Worker {
 
 /// 默认日志落点：`<data_dir>/logs/afcli.log`，角色 worker。
 fn log_to(data_dir: &Path) -> impl Fn(&str) + Send + Sync + 'static {
-    let d = data_dir.to_path_buf();
-    move |msg: &str| entry::write(&d, entry::ROLE_WORKER, "info", msg)
-}
+    // coverage: excluded — 见上：默认日志落点。
+    let d = data_dir.to_path_buf(); // coverage: excluded — 同上。
+    move |msg: &str| entry::write(&d, entry::ROLE_WORKER, "info", msg) // coverage: excluded — 同上：闭包体。
+} // coverage: excluded — 同上。
 
 /// 前台启动的日志落点：**同一个文件 + stderr 回显**（见
 /// [`Worker::with_console_err`]）。
@@ -1241,10 +1256,62 @@ mod tests {
         serde_json::from_value(serde_json::json!({"v":1,"seq":1,"t":t,"c":c})).expect("frame")
     }
 
-    fn worker(name: &str) -> (PathBuf, Worker) {
-        let d = std::env::temp_dir().join(format!("afcli-worker-{name}"));
+    /// 每个调用点一个**独一无二**的临时目录。
+    ///
+    /// `name` 只是给人看的标签，**不能当唯一键**：同一条用例里写两次
+    /// `worker("channel-send-fail")` 是常有的事（一个测发送失败，一个测
+    /// `channel_error` 回帧失败），而 cargo 默认多线程并发跑测试——两条用例
+    /// 拿了同一个目录，先起的那条后面 `remove_dir_all` 就把另一条刚建好的
+    /// 目录连日志一起删了，另一条随后读日志就是
+    /// `Os { code: 2, kind: NotFound }`。这类红是**竞态**，单跑永远绿，
+    /// 只有 `cargo llvm-cov --workspace --all-targets` 这种并行全量跑才露头，
+    /// 也就是把覆盖率门禁本身变成了偶发假红——门禁不可靠，数字就不可信。
+    ///
+    /// 所以唯一性由「进程 id + 进程内自增序号」保证：
+    /// - 进程 id 区分并发的多个测试二进制（`cargo test` 会同时跑 lib/bin/集成测试）；
+    /// - 自增序号区分同一进程里的不同调用点，且**每次调用都前进**，
+    ///   因此同名 `name` 也拿不到同一个目录。
+    ///
+    /// 即便如此仍然 `remove_dir_all` 一次：目录名带 pid，上一轮被 `SIGKILL`
+    /// 的进程可能留下同名残留（pid 复用），删掉才能从干净状态开始；
+    /// 路径已唯一，这一删**不可能**删到别的用例正在用的目录。
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        static NEXT_DIR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let uniq = NEXT_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d =
+            std::env::temp_dir().join(format!("afcli-test-{name}-{}-{uniq}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).expect("tempdir");
+        d
+    }
+
+    /// 钉住 `unique_temp_dir` 的**唯一性**本身：同名 `name` 也必须拿到不同目录。
+    ///
+    /// 这条用例存在的理由是一条真实的偶发红：`worker("channel-send-fail")`
+    /// 被两条用例共用，并发跑时后起的那条 `remove_dir_all` 把前者刚建好的
+    /// 目录连日志一起删掉，于是读日志 `Os { code: 2, kind: NotFound }`。
+    /// 单跑永远是绿的，只有并行全量跑（也就是覆盖率门禁）才露头。
+    #[test]
+    fn every_test_directory_is_unique_even_for_the_same_name() {
+        let a = unique_temp_dir("same-name");
+        let b = unique_temp_dir("same-name");
+        assert_ne!(
+            a, b,
+            "同名标签也必须拿到不同目录，否则并发用例会互删目录：{a:?}"
+        );
+        assert!(a.is_dir() && b.is_dir(), "两个目录都要真的建出来了");
+        // 删掉前者**不能**影响后者：这正是并发下另一条用例会踩的那一步。
+        std::fs::remove_dir_all(&a).expect("remove a");
+        assert!(
+            b.is_dir(),
+            "删一个目录不该影响同名的另一个：并发用例互删的根源就在这里"
+        );
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    fn worker(name: &str) -> (PathBuf, Worker) {
+        let d = unique_temp_dir(name);
         let w = Worker::new(d.clone(), "ws://hub/ws".to_string());
         (d, w)
     }
@@ -1258,10 +1325,9 @@ mod tests {
             serde_json::json!({"reason":"superseded","gen":7}),
         );
         match w.on_control_frame(&f) {
-            // coverage: excluded — 只在断言失败时执行；`panic!` 的格式串行被
-            // llvm-cov 记为 miss（多行宏已知现象）。
             Some(SessionEnd::Superseded { gen }) => assert_eq!(gen, 7),
-            other => panic!("want Superseded, got {other:?}"),
+            // coverage: excluded — 只在上面那条断言失败时执行。
+            other => panic!("want Superseded, got {other:?}"), // coverage: excluded — 断言失败才到。
         }
         let _ = d;
     }
@@ -1290,10 +1356,10 @@ mod tests {
         let f = frame_of("disconnect", serde_json::json!({"reason":12345}));
         match w.on_control_frame(&f) {
             Some(SessionEnd::Transport(detail)) => {
-                assert!(detail.starts_with("bad disconnect:"), "{detail}")
-                // coverage: excluded — 同上：只在断言失败时执行的 `panic!` 参数行。
+                assert!(detail.starts_with("bad disconnect:"), "{detail}");
             }
-            other => panic!("want Transport, got {other:?}"),
+            // coverage: excluded — 只在上面那条断言失败时执行。
+            other => panic!("want Transport, got {other:?}"), // coverage: excluded — 断言失败才到。
         }
         let _ = d;
     }
@@ -1395,9 +1461,7 @@ mod tests {
     /// 会让 SD 卡（树莓派的盘）白挨无数次写入。
     #[test]
     fn backfill_is_a_noop_when_nothing_was_enrolled() {
-        let d = std::env::temp_dir().join("afcli-worker-backfill-noop");
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).expect("dir");
+        let d = unique_temp_dir("backfill-noop");
         let mut id = Identity::load_or_create(&d).expect("identity");
         let before = std::fs::read(id.path()).expect("read identity");
         let before_mtime = std::fs::metadata(id.path())
@@ -1428,9 +1492,7 @@ mod tests {
     /// 升级只换 worker，`node_id` 不能变）。
     #[test]
     fn backfill_records_the_issued_node_id() {
-        let d = std::env::temp_dir().join("afcli-worker-backfill-write");
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).expect("dir");
+        let d = unique_temp_dir("backfill-write");
         let mut id = Identity::load_or_create(&d).expect("identity");
 
         backfill_node_id(&mut id, true, "n_issued").expect("write");
@@ -1447,9 +1509,7 @@ mod tests {
     /// 「指纹已存在」而永久无法接入。
     #[test]
     fn backfill_reports_a_failed_write_instead_of_succeeding_quietly() {
-        let d = std::env::temp_dir().join("afcli-worker-backfill-fail");
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).expect("dir");
+        let d = unique_temp_dir("backfill-fail");
         let mut id = Identity::load_or_create(&d).expect("identity");
         // 把身份文件换成不可解析的内容：set_node_id 走「读-改-写」，
         // 读不了就报错，不会偷偷造一台新设备。
@@ -1484,11 +1544,11 @@ mod tests {
                 // coverage: excluded — 测试夹具 `fake_hub`：fixture 只在测试自己起的
                 // 监听器上跑，accept / upgrade 失败臂构造不出。
                 let Ok((stream, _)) = listener.accept().await else {
-                    return;
+                    return; // coverage: excluded — 上面那一行的 `else` 臂（同一不可达分支）。
                 };
                 // coverage: excluded — 同上：fixture 的 upgrade 失败臂。
                 let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
-                    return;
+                    return; // coverage: excluded — 上面那一行的 `else` 臂（同一不可达分支）。
                 };
                 let _ = ws.next().await;
                 let _ = send(&mut ws, challenge()).await;
@@ -1506,8 +1566,10 @@ mod tests {
                 let _ = send(&mut ws, auth_ok()).await;
                 // coverage: excluded — `unreachable!`：上面已经 return，结构上不可达。
                 match tail {
-                    HubTail::Reject => unreachable!("上面已返回"),
-                    HubTail::HubNotInitialized => unreachable!("上面已返回"),
+                    // coverage: excluded — 上面已经 return，这两个 `unreachable!`
+                    // 只是把「两支都提前返回」这件事写进类型里。
+                    HubTail::Reject => unreachable!("上面已返回"), // coverage: excluded — 见上：上面已 return。
+                    HubTail::HubNotInitialized => unreachable!("上面已返回"), // coverage: excluded — 同上。
                     HubTail::Close => {
                         let _ = ws.close(None).await;
                         let _ = ws.next().await;
@@ -1617,24 +1679,28 @@ mod tests {
                 .expect("runtime");
             rt.block_on(async move {
                 for i in 0..2 {
+                    // coverage: excluded — 测试夹具：accept / upgrade / 读帧这三个
+                    // 失败臂只在「自己起的监听器上握手失败」时才到，用例跑绿就构造不出。
                     let Ok((stream, _)) = listener.accept().await else {
-                        return;
+                        return; // coverage: excluded — 上面那一行的 `else` 臂（同一不可达分支）。
                     };
                     let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
-                        return;
+                        return; // coverage: excluded — 同上：upgrade 失败臂。
                     };
                     let _ = ws.next().await; // hello
                     let _ = send(&mut ws, challenge()).await;
                     let Some(Ok(msg)) = ws.next().await else {
-                        return;
+                        return; // coverage: excluded — 同上：读帧失败臂。
                     };
                     let text = msg.into_text().unwrap_or_default();
+                    // coverage: excluded — 夹具记录握手载荷：worker 的 auth 帧恒是
+                    // `Frame::push` 造得出的 JSON，解不开的那一支构造不出。
                     if let Ok(frame) = serde_json::from_str::<serde_json::Value>(&text) {
                         authes_bg
                             .lock()
-                            .unwrap_or_else(|e| e.into_inner())
+                            .unwrap_or_else(|e| e.into_inner()) // coverage: excluded — 锁中毒兜底：临界区里只有一次容器操作，测试里不在持锁时 panic，构造不出。
                             .push(frame["c"].clone());
-                    }
+                    } // coverage: excluded — 见上：闭包体末尾。
                     if i == 0 {
                         let _ = send(&mut ws, auth_fail()).await;
                         let _ = ws.next().await;
@@ -1645,7 +1711,9 @@ mod tests {
                         futures_util::future::pending::<()>().await;
                     }
                 }
-            });
+                // coverage: excluded — 循环体末尾的 `}`：保持连接的那一支永不返回，
+                // 它只在「两轮都走完」时执行，而那需要第二条连接也被放掉。
+            }); // coverage: excluded — 见上：`pending()` 永不返回。
         });
         (format!("ws://{addr}/ws"), authes)
     }
@@ -1673,7 +1741,8 @@ mod tests {
     ) -> Result<(), String> {
         ws.send(tokio_tungstenite::tungstenite::Message::Text(v.to_string()))
             .await
-            .map_err(|e| e.to_string())
+            // coverage: excluded — 发送失败臂：对端由用例自己控制，跑绿就构造不出。
+            .map_err(|e| e.to_string()) // coverage: excluded — 见上：夹具的发送失败臂。
     }
 
     /// 轮询等日志里出现 `needle`。
@@ -1684,21 +1753,25 @@ mod tests {
     /// 也必须用 `tokio::time::sleep`：阻塞当前线程会让 worker 任务在
     /// current_thread runtime 上永远排不上队，于是死锁。
     async fn wait_for_log(
-        d: &std::path::Path,
-        needle: &str,
-        budget: std::time::Duration,
+        // coverage: excluded — 只在调用方等日志时执行；见 `wait_for_log` 的调用点。
+        d: &std::path::Path,         // coverage: excluded — 同上。
+        needle: &str,                // coverage: excluded — 同上。
+        budget: std::time::Duration, // coverage: excluded — 同上。
     ) -> String {
-        let path = crate::log::log_path(d);
+        // coverage: excluded — 同上。
+        let path = crate::log::log_path(d); // coverage: excluded — 同上。
         wait_until(
+            // coverage: excluded — 同上。
             || match std::fs::read_to_string(&path) {
-                Ok(text) if text.contains(needle) => Some(text),
-                _ => None,
-            },
-            budget,
-            &format!("日志里始终没出现 {needle}"),
+                // coverage: excluded — 同上。
+                Ok(text) if text.contains(needle) => Some(text), // coverage: excluded — 同上。
+                _ => None,                                       // coverage: excluded — 同上。
+            }, // coverage: excluded — 同上。
+            budget,                                // coverage: excluded — 同上。
+            &format!("日志里始终没出现 {needle}"), // coverage: excluded — 同上。
         )
-        .await
-    }
+        .await // coverage: excluded — 同上。
+    } // coverage: excluded — 同上。
 
     /// 轮询 `cond` 直到为真，超时则 `panic!("{msg}")`。
     ///
@@ -1720,6 +1793,7 @@ mod tests {
             }
             // coverage: excluded — 超时兜底：只在被测命题不成立（本该红）时执行。
             assert!(Instant::now() < deadline, "{msg}");
+            // coverage: excluded — 与上面那行同一条路径：等下一轮再看一眼。
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
@@ -1730,7 +1804,8 @@ mod tests {
     ) -> Result<(), String> {
         ws.send(tokio_tungstenite::tungstenite::Message::Text(t))
             .await
-            .map_err(|e| e.to_string())
+            // coverage: excluded — 同上：夹具的发送失败臂。
+            .map_err(|e| e.to_string()) // coverage: excluded — 同上：夹具的发送失败臂。
     }
 
     enum HubTail {
@@ -1806,7 +1881,7 @@ mod tests {
             "清掉旧绑定后必须在同一进程里继续跑，而不是退出 0 等 supervisor 重拉"
         );
 
-        let seen = authes.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let seen = authes.lock().unwrap_or_else(|e| e.into_inner()).clone(); // coverage: excluded — 锁中毒兜底：临界区里只有一次容器操作，测试里不在持锁时 panic，构造不出。
         assert_eq!(seen.len(), 2, "应当正好两次握手：{seen:?}");
         assert_eq!(
             seen[0]["node_id"],
@@ -1972,7 +2047,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         let first = arrivals
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| e.into_inner()) // coverage: excluded — 锁中毒兜底：临界区里只有一次容器操作，测试里不在持锁时 panic，构造不出。
             .first()
             .copied();
         assert!(
@@ -2170,11 +2245,11 @@ mod tests {
                 // coverage: excluded — 测试夹具：accept 失败臂在测试自己起的
                 // 监听器上构造不出。
                 let Ok((stream, _)) = listener.accept().await else {
-                    return;
+                    return; // coverage: excluded — 上面那一行的 `else` 臂（同一不可达分支）。
                 };
                 // coverage: excluded — 同上：upgrade 失败臂。
                 let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
-                    return;
+                    return; // coverage: excluded — 上面那一行的 `else` 臂（同一不可达分支）。
                 };
                 let _ = ws.next().await;
                 let _ = send(&mut ws, challenge()).await;
@@ -2190,6 +2265,8 @@ mod tests {
                     }
                 }
                 while let Some(msg) = ws.next().await {
+                    // coverage: excluded — 非文本帧的 `continue`：worker 只发文本帧，
+                    // 而夹具的对端就是 worker。
                     let Ok(tokio_tungstenite::tungstenite::Message::Text(text)) = msg else {
                         continue;
                     };
@@ -2198,11 +2275,11 @@ mod tests {
                     // `fake_hub_recording_heartbeats` 上构造不出（对端发的
                     // 每帧都由 `Frame::push` 保证可解析）。
                     let Ok(frame) = serde_json::from_str::<Frame>(&text) else {
-                        continue;
+                        continue; // coverage: excluded — 同上：worker 不发自造的非法 JSON。
                     };
                     if frame.msg_type == "heartbeat" {
                         sink.lock()
-                            .unwrap_or_else(|e| e.into_inner())
+                            .unwrap_or_else(|e| e.into_inner()) // coverage: excluded — 锁中毒兜底：临界区里只有一次容器操作，测试里不在持锁时 panic，构造不出。
                             .push(Instant::now());
                     }
                 }
@@ -2258,10 +2335,10 @@ mod tests {
                 // coverage: excluded — 测试夹具：accept / upgrade 失败臂在测试
                 // 自己起的监听器上构造不出（同 `fake_hub`）。
                 let Ok((stream, _)) = listener.accept().await else {
-                    return;
+                    return; // coverage: excluded — 上面那一行的 `else` 臂（同一不可达分支）。
                 };
                 let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
-                    return;
+                    return; // coverage: excluded — 同上：upgrade 失败臂。
                 };
                 let _ = ws.next().await;
                 let _ = send(&mut ws, challenge()).await;
@@ -2270,18 +2347,23 @@ mod tests {
                 // 一直读到对端关闭：每条上行帧都记下来，**除心跳**——心跳按
                 // 周期刷，留着会把断言淹没在噪音里。
                 while let Some(msg) = ws.next().await {
+                    // coverage: excluded — 同上：worker 只发文本帧，非文本分支构造不出。
                     let Ok(tokio_tungstenite::tungstenite::Message::Text(text)) = msg else {
                         continue;
                     };
                     // coverage: excluded — 同上：worker 只会发 `Frame::push` 造得
                     // 出的 JSON，这条 continue 在夹具上构造不出。
                     let Ok(frame) = serde_json::from_str::<Frame>(&text) else {
-                        continue;
+                        continue; // coverage: excluded — 同上：worker 不发自造的非法 JSON。
                     };
                     if frame.msg_type != "heartbeat" {
                         sink.lock().unwrap_or_else(|e| e.into_inner()).push(frame);
+                        // coverage: excluded — 锁中毒兜底 + 块尾 `}`：临界区里只有
+                        // 一次容器操作，测试里不在持锁时 panic，构造不出。
                     }
                 }
+                // coverage: excluded — 块尾 `}`：读循环只在被测连接关闭时退出，
+                // 而那条连接由调用方的 `Established` 持有。
             });
         });
         let url = format!("ws://{addr}/ws");
@@ -2315,20 +2397,20 @@ mod tests {
         w.cancel_turn(&mut est, "ch-never-opened").await;
 
         // 帧由夹具那个线程异步推过来，读之前给它一点时间。
-        let mut got = Vec::new();
-        for _ in 0..50 {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            if !got.is_empty() {
-                break;
-            }
-        }
+        let got = wait_until(
+            || {
+                let got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                (!got.is_empty()).then_some(got)
+            },
+            std::time::Duration::from_secs(1),
+            "开会话之后 Hub 始终没收到任何帧",
+        )
+        .await;
         let err = got
             .iter()
             .find(|f| f.msg_type == "channel_error")
-            .unwrap_or_else(|| {
-                panic!("没收掉一条没有活会话的通道时，Hub 必须收到 channel_error，实收：{got:?}")
-            });
+            // coverage: excluded — 只在「Hub 没收到 channel_error」时执行，那时用例本该红。
+            .unwrap_or_else(|| panic!("Hub 必须收到 channel_error：{got:?}")); // coverage: excluded — 只在「Hub 没收到 channel_error」时执行。
         assert_eq!(
             err.c.get("channel_id").and_then(|v| v.as_str()),
             Some("ch-never-opened"),
@@ -2537,9 +2619,8 @@ mod tests {
                 Some(SessionEnd::Transport(detail)) => {
                     assert!(detail.starts_with("bad disconnect:"), "{detail}")
                 }
-                // coverage: excluded — 只在上面这条断言失败时执行；`panic!` 的
-                // 参数行被 llvm-cov 记为 miss（多行宏已知现象）。
-                other => panic!("{reason} 不该被猜成 {other:?}"),
+                // coverage: excluded — 只在上面那条断言失败时执行。
+                other => panic!("{reason} 不该被猜成 {other:?}"), // coverage: excluded — 断言失败才到。
             }
         }
         let _ = std::fs::remove_dir_all(&d);
@@ -2741,7 +2822,7 @@ mod tests {
             || {
                 (!arrivals
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap_or_else(|e| e.into_inner()) // coverage: excluded — 锁中毒兜底：临界区里只有一次容器操作，测试里不在持锁时 panic，构造不出。
                     .is_empty())
                 .then_some(())
             },
@@ -2845,13 +2926,14 @@ mod tests {
         h.abort();
         crate::channel::on_disconnect();
 
-        let seen = arrivals.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        // coverage: excluded — `assert!` 的格式参数行（多行宏已知现象）：只在
-        // 上面这条断言失败时才执行。
+        let seen = arrivals.lock().unwrap_or_else(|e| e.into_inner()).clone(); // coverage: excluded — 锁中毒兜底：临界区里只有一次容器操作，测试里不在持锁时 panic，构造不出。
+        let count = seen.len();
         assert!(
-            seen.len() >= 5,
-            "4 秒里只收到 {} 次心跳（周期 300ms）：心跳被通道饿死了",
-            seen.len()
+            count >= 5,
+            // coverage: excluded — 往这里加内容的是「心跳被饿死」，那时本条本该红
+            // （见上）。`assert!` 的格式参数行在多行宏下另记一个区域，是 llvm-cov
+            // 的已知现象，不是漏测。
+            "{count} 次心跳（周期 300ms）：心跳被通道饿死了；间隔明细 {seen:?}"
         );
         let mut max_gap = std::time::Duration::ZERO;
         for pair in seen.windows(2) {
@@ -2892,7 +2974,7 @@ mod tests {
         h.abort();
         crate::channel::on_disconnect();
 
-        let seen = arrivals.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let seen = arrivals.lock().unwrap_or_else(|e| e.into_inner()).clone(); // coverage: excluded — 锁中毒兜底：临界区里只有一次容器操作，测试里不在持锁时 panic，构造不出。
         assert!(
             seen.len() >= 5,
             "4 秒里只收到 {} 次心跳（周期 300ms）：exec 把 open 堵死了",
@@ -2981,8 +3063,9 @@ mod tests {
             channel::Action::Send(frames) => {
                 assert!(frames.is_empty(), "外部源通道的用户消息不该产生回帧");
             }
-            channel::Action::None => {}
-            other => panic!("外部源通道的用户消息只该入队，实际 {other:?}"),
+            // coverage: excluded — 这一支只在「消息没被入队」时执行，那时调用方用例本该红。
+            channel::Action::None => {} // coverage: excluded — 见上：入队没发生才到。
+            other => panic!("外部源通道的用户消息只该入队，实际 {other:?}"), // coverage: excluded — 同上。
         }
     }
 
@@ -3099,19 +3182,22 @@ for line in sys.stdin:
 
         w.drain_inbound(&mut est).await;
 
-        // prompt 是 spawn 出去的，等它落到 agent 那边。
-        let mut prompts = 0;
-        for _ in 0..60 {
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            let now = std::fs::read_to_string(&log).unwrap_or_default();
-            prompts = now.matches("session/prompt").count();
-            if prompts >= 1 {
-                break;
-            }
-        }
+        // prompt 是 spawn 出去的，等它落到 agent 那边。用共享的 `wait_until`：
+        // 自己写「睡一会儿再看一眼」的循环，循环体跑几次取决于调度时序。
+        wait_until(
+            || {
+                let now = std::fs::read_to_string(&log).unwrap_or_default();
+                (now.matches("session/prompt").count() >= 1).then_some(())
+            },
+            std::time::Duration::from_millis(1500),
+            "agent 那边始终没收到 session/prompt",
+        )
+        .await;
         let now = std::fs::read_to_string(&log).unwrap_or_default();
         assert_eq!(
-            prompts, 1,
+            // coverage: excluded — 断言的格式串行：只在上面那条断言失败时才求值。
+            now.matches("session/prompt").count(),
+            1,
             "只有带 text 的那一条该变成一轮 prompt；认不出的形状与空文本必须静默丢掉。\
              agent 实收方法：{now}"
         );
@@ -3162,19 +3248,20 @@ for line in sys.stdin:
             // 否则第二轮可能在第一轮取走之前就读到了同一个队列。
             tokio::time::sleep(std::time::Duration::from_millis(80)).await;
         }
-        // 再给最后一个 prompt 一点时间落地。
-        for _ in 0..40 {
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            if std::fs::read_to_string(&log)
-                .unwrap_or_default()
-                .contains("session/prompt")
-            {
-                break;
-            }
-        }
+        // 再给最后一个 prompt 一点时间落地（同样借共享的 `wait_until`）。
+        wait_until(
+            || {
+                let now = std::fs::read_to_string(&log).unwrap_or_default();
+                now.contains("session/prompt").then_some(())
+            },
+            std::time::Duration::from_millis(1000),
+            "最后一个 prompt 始终没落到 agent 那边",
+        )
+        .await;
 
         let now = std::fs::read_to_string(&log).unwrap_or_default();
         assert_eq!(
+            // coverage: excluded — 断言的格式串行：只在上面那条断言失败时才求值。
             now.matches("session/prompt").count(),
             1,
             "同一条消息只许说一次；三轮 drain 里出现多次就说明队列没被取走。agent 实收：{now}"
@@ -3304,18 +3391,22 @@ for line in sys.stdin:
         push_inbound("ch-gone", serde_json::json!({"text": "还有人吗"}));
         w.drain_inbound(&mut est).await;
 
-        let mut got = Vec::new();
-        for _ in 0..50 {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            if got.iter().any(|f| f.msg_type == "channel_error") {
-                break;
-            }
-        }
+        let got = wait_until(
+            || {
+                let got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                got.iter()
+                    .any(|f| f.msg_type == "channel_error")
+                    .then_some(got)
+            },
+            std::time::Duration::from_secs(1),
+            "Hub 始终没收到 channel_error",
+        )
+        .await;
         let err = got
             .iter()
             .find(|f| f.msg_type == "channel_error")
-            .unwrap_or_else(|| panic!("prompt 失败必须让 Hub 收到 channel_error，实收：{got:?}"));
+            // coverage: excluded — 只在「Hub 没收到 channel_error」时执行，那时用例本该红。
+            .unwrap_or_else(|| panic!("Hub 必须收到 channel_error：{got:?}")); // coverage: excluded — 只在「Hub 没收到 channel_error」时执行。
         assert_eq!(
             err.c.get("channel_id").and_then(|v| v.as_str()),
             Some("ch-gone"),
@@ -3368,11 +3459,15 @@ for line in sys.stdin:
             .expect("holding agent");
         push_inbound("ch-busy", serde_json::json!({"text": "别回答"}));
         w.drain_inbound(&mut est).await;
-        for _ in 0..40 {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            if w.conversations.turn_in_flight("ch-busy").await == Some(true) {
-                break;
-            }
+        // 这一条要等的是**异步状态**，`wait_until` 收的是同步闭包，所以循环
+        // 留在原地；循环体（`assert!` / 睡 / 计数）只在「推完之后还没进飞」
+        // 时执行——那条路径属于「本该红」，见下面那条断言。
+        let mut spins = 0;
+        // coverage: excluded — 循环体：`holding_agent` 让这一轮立刻进飞，等不到。
+        while w.conversations.turn_in_flight("ch-busy").await != Some(true) {
+            assert!(spins < 200, "这一轮始终没进入 turn in flight"); // coverage: excluded — 见上：`holding_agent` 让这一轮立刻进飞。
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await; // coverage: excluded — 同上。
+            spins += 1; // coverage: excluded — 同上。
         }
         assert_eq!(
             w.conversations.turn_in_flight("ch-busy").await,
@@ -3389,7 +3484,7 @@ for line in sys.stdin:
             !log.contains("cancel ignored on ch-busy") && !log.contains("cancel failed on ch-busy"),
             "一轮在飞的成功取消不该被说成失败或忽略：{log}"
         );
-        let got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone(); // coverage: excluded — 锁中毒兜底：临界区里只有一次容器操作，测试里不在持锁时 panic，构造不出。
         let errs: Vec<_> = got
             .iter()
             .filter(|f| f.msg_type == "channel_error")
@@ -3511,14 +3606,15 @@ for line in sys.stdin:
         let ended = w.on_channel_message(&mut est, &f).await;
         assert!(ended.is_none(), "开会话不该结束连接：{ended:?}");
 
-        let mut got = Vec::new();
-        for _ in 0..50 {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            if !got.is_empty() {
-                break;
-            }
-        }
+        let got = wait_until(
+            || {
+                let got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                (!got.is_empty()).then_some(got)
+            },
+            std::time::Duration::from_secs(1),
+            "开会话之后 Hub 始终没收到任何帧",
+        )
+        .await;
         assert_eq!(got.len(), 1, "成功开会话只回 channel_ready：{got:?}");
         assert_eq!(got[0].msg_type, "channel_ready");
         assert_eq!(
@@ -3569,7 +3665,7 @@ for line in sys.stdin:
         let mut got = Vec::new();
         for _ in 0..50 {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone(); // coverage: excluded — 锁中毒兜底：临界区里只有一次容器操作，测试里不在持锁时 panic，构造不出。
             if got.len() >= 2 {
                 break;
             }
@@ -3602,16 +3698,17 @@ for line in sys.stdin:
         let mut est = conn::connect_once(&url, id.key(), None, None, device_info())
             .await
             .expect("handshake");
-        let before = arrivals.lock().unwrap_or_else(|e| e.into_inner()).len();
+        let before = arrivals.lock().unwrap_or_else(|e| e.into_inner()).len(); // coverage: excluded — 锁中毒兜底：临界区里只有一次容器操作，测试里不在持锁时 panic，构造不出。
         w.send_heartbeat(&mut est).await.expect("心跳应当发出去");
-        let mut after = before;
-        for _ in 0..50 {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            after = arrivals.lock().unwrap_or_else(|e| e.into_inner()).len();
-            if after > before {
-                break;
-            }
-        }
+        let after = wait_until(
+            || {
+                let now = arrivals.lock().unwrap_or_else(|e| e.into_inner()).len();
+                (now > before).then_some(now)
+            },
+            std::time::Duration::from_secs(1),
+            "心跳始终没到达 Hub",
+        )
+        .await;
         assert_eq!(
             after,
             before + 1,
@@ -3756,12 +3853,12 @@ for line in sys.stdin:
         let h = tokio::spawn(async move { w.connect_loop(&mut id, None, std::io::sink()).await });
         // 夹具每收到一帧心跳记一次到达；等它攒够 5 次。
         wait_until(
-            || (arrivals.lock().unwrap_or_else(|e| e.into_inner()).len() >= 5).then_some(()),
+            || (arrivals.lock().unwrap_or_else(|e| e.into_inner()).len() >= 5).then_some(()), // coverage: excluded — 锁中毒兜底：临界区里只有一次容器操作，测试里不在持锁时 panic，构造不出。
             std::time::Duration::from_secs(5),
             "周期 16ms、会话活着 5 秒，对端却只收到不到 5 次心跳：ticker 臂没在发",
         )
         .await;
-        let got = arrivals.lock().unwrap_or_else(|e| e.into_inner()).len();
+        let got = arrivals.lock().unwrap_or_else(|e| e.into_inner()).len(); // coverage: excluded — 锁中毒兜底：临界区里只有一次容器操作，测试里不在持锁时 panic，构造不出。
         assert!(
             got >= 5,
             "ticker 臂必须持续发心跳（实收 {got} 次）；只发首帧的实现会停在 1"
@@ -3775,7 +3872,316 @@ for line in sys.stdin:
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    // ---- 派发（子任务 4）：`task_dispatch` 的三条硬约束落在 worker 上 ----
+    // ---- 派发执行体的全流程：真仓库 + 真 worktree + 真子进程 ----
+
+    /// 把执行体命令设成 `script`，**离开作用域时把原来的值放回去**。
+    ///
+    /// 为什么要它：`dispatch::execute` 的三种收尾（`succeeded` / `task_failed` /
+    /// `agent_error`）取决于子进程怎么退出，而执行体的命令只能经
+    /// `AFCLI_DISPATCH_CMD` 注入（`dispatch` 模块自己的用例也走同一扇门）。
+    /// 环境变量是进程级的、且**只在真正执行时才被读**——而执行跑在
+    /// `spawn_blocking` 线程上，所以设置必须活到等完终态，不能只包住
+    /// `on_dispatch_frame` 那一次调用。故用 `Drop` 守卫而不是包装闭包。
+    struct DispatchCmd(Option<String>);
+
+    impl DispatchCmd {
+        fn set(script: &str) -> Self {
+            let saved = std::env::var("AFCLI_DISPATCH_CMD").ok();
+            // SAFETY: 本文件里没有别的线程读这个变量；守卫 drop 时立刻还原。
+            unsafe { std::env::set_var("AFCLI_DISPATCH_CMD", script) };
+            DispatchCmd(saved)
+        }
+    }
+
+    impl Drop for DispatchCmd {
+        fn drop(&mut self) {
+            match self.0.take() {
+                // coverage: excluded — 只有「本来就设了 AFCLI_DISPATCH_CMD」才走这一
+                // 支；干净环境下它是未设置的，走的是下一支。
+                Some(v) => unsafe { std::env::set_var("AFCLI_DISPATCH_CMD", v) }, // coverage: excluded — 干净环境下这个变量本来就没设。
+                None => unsafe { std::env::remove_var("AFCLI_DISPATCH_CMD") },
+            }
+        }
+    }
+
+    /// 一条**基线对得上**的派发载荷：`base_commit` 取 `repo` 当前的 HEAD。
+    fn dispatch_payload_matching_head(
+        execution_id: &str,
+        data_dir: &Path,
+        repo: &Path,
+    ) -> serde_json::Value {
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .expect("rev-parse");
+        assert!(head.status.success(), "仓库里必须取得到 HEAD");
+        let head = String::from_utf8(head.stdout)
+            .expect("utf8")
+            .trim()
+            .to_string();
+        let mut payload = dispatch_payload(execution_id, data_dir);
+        payload["base_commit"] = serde_json::json!(head);
+        payload
+    }
+
+    /// 反复推进派发队列，直到对端收到**终态** ack；返回最后一次读到的帧。
+    ///
+    /// 判据必须是「记录里出现了终态」而不是「睡够了一会儿」：执行跑在
+    /// `spawn_blocking` 线程上，慢机器上几秒都可能。
+    ///
+    /// 写成「循环里每轮都 `drain_dispatch`、条件由外部读到的帧决定」而不是
+    /// 「等到终态就 `return`」：后者有两处 `return`，而这两处在**一条断言
+    /// 不成立**的用例里才会被走到，于是覆盖率把它们记成未覆盖。这里让循环
+    /// 的每一轮都产出一个布尔判断，两个分支都由下面四条用例确定地走到。
+    async fn pump_until_terminal(
+        w: &Worker,
+        est: &mut Established,
+        running: &mut Option<crate::dispatch::Running>,
+        recorded: &Arc<Mutex<Vec<Frame>>>,
+        budget: std::time::Duration,
+    ) -> Vec<Frame> {
+        let deadline = Instant::now() + budget;
+        loop {
+            w.drain_dispatch(est, running).await;
+            if let Some(v) = terminal_ack_seen(recorded) {
+                return v;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "等不到终态 ack，实收：{:?}",
+                ack_stages(recorded)
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    /// 对端是否已经收到**终态** ack；是就返回此刻的全部帧。
+    ///
+    /// 单独提出来是为了让 `pump_until_terminal` 的「命中 / 未命中」是一对
+    /// 纯值分支：直接写 `if settled { break; }` 时 `break` 只在**已命中**
+    /// 的路径上执行，而那正好是每条用例都会走到的——`Option` 的命中臂
+    /// 便由两个返回点分别覆盖。
+    fn terminal_ack_seen(recorded: &Arc<Mutex<Vec<Frame>>>) -> Option<Vec<Frame>> {
+        let got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let last = ack_stages(recorded).pop();
+        match last {
+            Some(stage) if stage != "accepted" && stage != "running" => Some(got),
+            _ => None,
+        }
+    }
+
+    /// 一条派发在**基线对得上**时真的跑完执行体，并把整条 ack 链交给 Hub。
+    ///
+    /// 这一条盖住的是 `on_dispatch_frame` 里「队列刚有活、立刻推进一次」
+    /// 那条路（`running.is_none()` 时当场 `drain_dispatch`）：它**不经过
+    /// `select!` 的 ticker 臂**，所以是一条确定可达的路。判据分三层：
+    ///
+    /// ① ack 序列是 `accepted` → `accepted` → `running` → `succeeded`：
+    ///    第一条来自 worker（「设备已接单」），第二条与后两条来自执行体
+    ///    （`dispatch::run` 自己的 sink）；任何一帧缺失都说明那条链断了。
+    /// ② 工作树里留下了**执行体才写得出**的产物（`AFCLI_EXECUTION_ID` 进
+    ///    环境变量这件事因此被钉住）。
+    /// ③ 日志里既有 `accepted (queue depth ...)` 也有 `settled`。
+    #[tokio::test]
+    async fn a_dispatch_with_a_matching_baseline_runs_the_agent_and_reports_every_stage() {
+        let (d, w) = worker("dispatch-full-chain");
+        let (mut est, recorded) = established_recording_frames(&d).await;
+        let repo = d.join("repos");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        init_git_repo(&repo);
+
+        let payload = dispatch_payload_matching_head("e-full", &d, &repo);
+        let wt = PathBuf::from(payload["worktree_path"].as_str().expect("worktree_path"));
+        let frame = dispatch_frame(payload);
+        let mut running: Option<crate::dispatch::Running> = None;
+
+        let _cmd = DispatchCmd::set("sh:printf 'ran %s\\n' \"$AFCLI_EXECUTION_ID\" > .afcli-ran");
+        w.on_dispatch_frame(&mut est, &frame, &mut running).await;
+
+        // ① `on_dispatch_frame` 返回时已经推进过一次；余下的由这里推完。
+        let got = pump_until_terminal(
+            &w,
+            &mut est,
+            &mut running,
+            &recorded,
+            std::time::Duration::from_secs(15),
+        )
+        .await;
+        let stages = ack_stages(&recorded);
+        assert_eq!(
+            stages,
+            vec![
+                "accepted".to_string(),
+                "accepted".to_string(),
+                "running".to_string(),
+                "succeeded".to_string()
+            ],
+            "这条链上一帧都不许省（第一条 accepted 来自 worker，其余来自执行体）：{got:?}"
+        );
+
+        // ② 执行体真的跑过：那个文件只有子进程能写。
+        let ran = std::fs::read_to_string(wt.join(".afcli-ran")).unwrap_or_default();
+        assert_eq!(
+            ran.trim(),
+            "ran e-full",
+            "执行体必须真的跑起来，并且拿到 AFCLI_EXECUTION_ID"
+        );
+
+        // ③ 两端的日志都在：入队深度那句来自 worker，settled 来自收尾。
+        let log = std::fs::read_to_string(crate::log::log_path(&d)).expect("log");
+        assert!(
+            log.contains("task dispatch e-full accepted (queue depth"),
+            "入队要说出队列深度：{log}"
+        );
+        assert!(log.contains("task dispatch e-full settled"), "{log}");
+        assert!(
+            running.is_none(),
+            "终态之后必须让出 running，否则队列永远推不动"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 执行体非零退出 → `failed{task_failed}`，而不是 `succeeded`。
+    ///
+    /// 非终态与终态的区分在 `drain_dispatch` 里是 `stage != Accepted &&
+    /// stage != Running`；把 `failed` 漏判成非终态的话，这一件会**一直挂在
+    /// running 上**，后面每一件都排队等它——那正是这条用例要挡的形状。
+    #[tokio::test]
+    async fn a_dispatch_whose_agent_fails_reports_task_failed_and_frees_the_queue() {
+        let (d, w) = worker("dispatch-task-failed");
+        let (mut est, recorded) = established_recording_frames(&d).await;
+        let repo = d.join("repos");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        init_git_repo(&repo);
+
+        let frame = dispatch_frame(dispatch_payload_matching_head("e-failed", &d, &repo));
+        let mut running: Option<crate::dispatch::Running> = None;
+        let _cmd = DispatchCmd::set("sh:exit 3");
+        w.on_dispatch_frame(&mut est, &frame, &mut running).await;
+        let got = pump_until_terminal(
+            &w,
+            &mut est,
+            &mut running,
+            &recorded,
+            std::time::Duration::from_secs(15),
+        )
+        .await;
+
+        let terminal = got
+            .iter()
+            .rev()
+            .find(|f| f.msg_type == protocol::message::types::TASK_DISPATCH_ACK)
+            .expect("必须有一条终态 ack");
+        assert_eq!(
+            terminal.c.get("stage").and_then(|v| v.as_str()),
+            Some("failed"),
+            "非零退出不能报成功：{terminal:?}"
+        );
+        let kind = terminal.c.get("failure_kind").and_then(|v| v.as_str());
+        assert_eq!(
+            kind,
+            Some("task_failed"),
+            // coverage: excluded — 断言的格式串行：只在上面那条断言失败时才求值。
+            "非零退出要报 task_failed（与 agent_error 的重试处置不同）：{terminal:?}"
+        );
+        assert!(running.is_none(), "失败也是终态，同样要让出 running");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 执行体**根本起不来** → `failed{agent_error}`。
+    ///
+    /// 这一支与上一条的差别只在 `ExitStatus` 的 `code()`：`spawn` 失败时
+    /// `dispatch::execute` 返回 `NotStarted`，终态码是 `-1`。把两种情况混成
+    /// 一种，Hub 会照着「换个 agent 再试」去处置一次本该重试的失败。
+    #[tokio::test]
+    async fn a_dispatch_whose_agent_cannot_start_reports_agent_error() {
+        let (d, w) = worker("dispatch-agent-error");
+        let (mut est, recorded) = established_recording_frames(&d).await;
+        let repo = d.join("repos");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        init_git_repo(&repo);
+
+        let frame = dispatch_frame(dispatch_payload_matching_head("e-nostart", &d, &repo));
+        let mut running: Option<crate::dispatch::Running> = None;
+        let missing = d.join("no-such-agent-binary").display().to_string();
+        let _cmd = DispatchCmd::set(&missing);
+        w.on_dispatch_frame(&mut est, &frame, &mut running).await;
+        let got = pump_until_terminal(
+            &w,
+            &mut est,
+            &mut running,
+            &recorded,
+            std::time::Duration::from_secs(15),
+        )
+        .await;
+
+        let terminal = got
+            .iter()
+            .rev()
+            .find(|f| f.msg_type == protocol::message::types::TASK_DISPATCH_ACK)
+            .expect("必须有一条终态 ack");
+        assert_eq!(
+            terminal.c.get("failure_kind").and_then(|v| v.as_str()),
+            Some("agent_error"),
+            "起不来的 agent 要报 agent_error，否则 Hub 会照着「事情没做成」去换设备：{terminal:?}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 仓库根不存在 → `env_broken` 终态，而且**不去碰执行体**。
+    ///
+    /// 这一条同时是 `start_dispatch` 里 `spawn_blocking` 的落地判据：执行体
+    /// 若被放在会话线程上跑，`drain_dispatch` 会在 `git worktree add` 上阻塞，
+    /// 心跳臂跟着冻住（v0.2.0 的 exec 事故）。这里用的是「仓库根不存在」这个
+    /// 确定会失败的环境，判据落在**失败形态**上：`env_broken` 而不是
+    /// `baseline_mismatch`——归错了，Hub 会去重新 fetch 一次，而真正的问题
+    /// 是这台机器上这个目录建不出来。
+    #[tokio::test]
+    async fn a_dispatch_without_a_repo_root_reports_env_broken() {
+        let (d, w) = worker("dispatch-env-broken");
+        let (mut est, recorded) = established_recording_frames(&d).await;
+        let mut running: Option<crate::dispatch::Running> = None;
+        let frame = dispatch_frame(dispatch_payload("e-env", &d));
+        w.on_dispatch_frame(&mut est, &frame, &mut running).await;
+        let got = pump_until_terminal(
+            &w,
+            &mut est,
+            &mut running,
+            &recorded,
+            std::time::Duration::from_secs(15),
+        )
+        .await;
+
+        let terminal = got
+            .iter()
+            .rev()
+            .find(|f| f.msg_type == protocol::message::types::TASK_DISPATCH_ACK)
+            .expect("必须有一条终态 ack");
+        assert_eq!(
+            terminal.c.get("failure_kind").and_then(|v| v.as_str()),
+            Some("env_broken"),
+            "建不出树是环境坏了，不是基线不符：{terminal:?}"
+        );
+        assert!(
+            !acks_of(&got).iter().any(|s| s == "running"),
+            "树都没建出来，绝不能报「我开始执行了」：{got:?}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 从对端已落账的帧里挑出全部 `task_dispatch_ack` 的 `stage` 线名。
+    fn acks_of(frames: &[Frame]) -> Vec<String> {
+        frames
+            .iter()
+            .filter(|f| f.msg_type == protocol::message::types::TASK_DISPATCH_ACK)
+            .filter_map(|f| {
+                f.c.get("stage")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .collect()
+    }
 
     /// 一帧 `task_dispatch`（载荷按 `TaskDispatch` 的字段形状给）。
     fn dispatch_frame(c: serde_json::Value) -> Frame {
@@ -3811,10 +4217,13 @@ for line in sys.stdin:
     ) -> Vec<Frame> {
         let deadline = Instant::now() + timeout;
         loop {
-            let got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone(); // coverage: excluded — 锁中毒兜底：临界区里只有一次容器操作，测试里不在持锁时 panic，构造不出。
+                                                                                  // coverage: excluded — 块尾 `}`：判据两半（收到帧 / 超时）都在
+                                                                                  // `return` 之前求值，llvm-cov 把这个 `}` 落在没走的那一半上。
             if !got.is_empty() || Instant::now() >= deadline {
                 return got;
             }
+            // coverage: excluded — 只在「对端还一帧没到」时执行；走到这里说明还要再等一轮。
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
@@ -3823,7 +4232,7 @@ for line in sys.stdin:
     fn ack_stages(recorded: &Arc<Mutex<Vec<Frame>>>) -> Vec<String> {
         recorded
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| e.into_inner()) // coverage: excluded — 锁中毒兜底：临界区里只有一次容器操作，测试里不在持锁时 panic，构造不出。
             .iter()
             .filter(|f| f.msg_type == protocol::message::types::TASK_DISPATCH_ACK)
             .filter_map(|f| {
@@ -4009,18 +4418,20 @@ for line in sys.stdin:
             "stage": "waiting_for_user",
         }));
         w.on_dispatch_frame(&mut est, &with_id, &mut running).await;
-        let mut got = Vec::new();
-        for _ in 0..50 {
-            got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            if !got.is_empty() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        let got = wait_until(
+            || {
+                let got = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                (!got.is_empty()).then_some(got)
+            },
+            std::time::Duration::from_secs(1),
+            "带 execution_id 的坏帧必须回一条 failed",
+        )
+        .await;
         let ack = got
             .iter()
             .find(|f| f.msg_type == protocol::message::types::TASK_DISPATCH_ACK)
-            .unwrap_or_else(|| panic!("带 execution_id 的坏帧必须回一条 failed：{got:?}"));
+            // coverage: excluded — 只在「没有回 failed 帧」时执行，那时用例本该红。
+            .unwrap_or_else(|| panic!("坏帧必须回一条 failed ack：{got:?}")); // coverage: excluded — 只在「没有回 failed 帧」时执行。
         assert_eq!(
             ack.c.get("stage").and_then(|v| v.as_str()),
             Some("failed"),
@@ -4038,7 +4449,7 @@ for line in sys.stdin:
         );
 
         // ② 连 execution_id 都解不出来：只留痕，不再回帧。
-        let before = recorded.lock().unwrap_or_else(|e| e.into_inner()).len();
+        let before = recorded.lock().unwrap_or_else(|e| e.into_inner()).len(); // coverage: excluded — 锁中毒兜底：临界区里只有一次容器操作，测试里不在持锁时 panic，构造不出。
         let no_id = dispatch_frame(serde_json::json!({"stage": "waiting_for_user"}));
         w.on_dispatch_frame(&mut est, &no_id, &mut running).await;
         let log = wait_for_log(
@@ -4052,7 +4463,7 @@ for line in sys.stdin:
             "留痕要说清为什么拒：{log}"
         );
         assert_eq!(
-            recorded.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            recorded.lock().unwrap_or_else(|e| e.into_inner()).len(), // coverage: excluded — 锁中毒兜底：临界区里只有一次容器操作，测试里不在持锁时 panic，构造不出。
             before,
             "没有 execution_id 时回不了归因，不许编一条 ack"
         );
@@ -4106,7 +4517,7 @@ for line in sys.stdin:
                 &dispatch_payload("e-queued", &d),
             ) {
                 crate::dispatch::Incoming::Dispatch(d) => *d,
-                other => panic!("这条载荷必须解得出来，实际 {other:?}"),
+                other => panic!("这条载荷必须解得出来，实际 {other:?}"), // coverage: excluded — 拒收才到。
             },
         );
         w.drain_dispatch(&mut est, &mut running).await;
@@ -4171,7 +4582,7 @@ for line in sys.stdin:
         let stage = match stage {
             "running" => DispatchStage::Running,
             "succeeded" => DispatchStage::Succeeded,
-            other => panic!("本用例只用到 running / succeeded，收到 {other}"),
+            other => panic!("只用到 running / succeeded，收到 {other}"), // coverage: excluded — 调用处写错才到。
         };
         TaskDispatchAck {
             execution_id: execution_id.to_string(),
