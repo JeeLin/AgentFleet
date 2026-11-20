@@ -982,14 +982,14 @@ async fn write_loop(
             biased;
             frame = control.recv(), if control_open => match frame {
                 Some(frame) => {
-                    // coverage: excluded — 见函数上的标注（:864）：写失败需对端
+                    // coverage: excluded — 见 `write_loop` 上的标注：写失败需对端
                     // 在读循环中途消失，端到端测试构造不出确定的发送失败。
                     if let Err(reason) = send_frame(&mut sink, frame).await {
                         tracing::info!(reason = %reason, "ws writer ended on a control frame");
                         return;
                     }
                 }
-                // coverage: excluded — 见函数上的标注（:864）：收端关闭要在连接
+                // coverage: excluded — 见 `write_loop` 上的标注：收端关闭要在连接
                 // 被回收、队列的发送端全被 drop 后才出现，测试里构造不出。
                 None => control_open = false,
             },

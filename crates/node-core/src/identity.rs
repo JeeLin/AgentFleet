@@ -350,8 +350,8 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), IdentityError> {
             // 目录 fsync 失败不影响数据已落盘的事实，这里**不**用 `let _ =`
             // （workspace lint deny 了 let_underscore_must_use）：显式丢弃返回值。
             drop(d.sync_all());
-            // coverage: excluded — 见 :298：内层 `if let Ok(d)` 的 else 不可达，
-            // 这里是它的收尾行。
+            // coverage: excluded — 见上一段「`Some(dir)` 恒成立」的说明：
+            // 内层 `if let Ok(d)` 的 else 不可达，这里是它的收尾行。
         }
     }
     Ok(())
